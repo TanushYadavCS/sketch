@@ -590,11 +590,14 @@ describe("handleSendMessageToUser", () => {
       },
     );
 
-    expect(sendDm).toHaveBeenCalledWith({
-      userId: "user-bob",
-      platform: "whatsapp",
-      message: "Need your latest update.",
-    });
+    expect(sendDm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "user-bob",
+        platform: "whatsapp",
+        message: "Need your latest update.",
+        template: expect.objectContaining({ key: "whatsapp.proactive_update" }),
+      }),
+    );
     expect(createInboxMessage).toHaveBeenCalledWith({
       senderUserId: "user-alice",
       recipientUserId: "user-bob",

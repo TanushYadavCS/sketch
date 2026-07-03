@@ -231,7 +231,9 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       connectorType: ConnectorType;
       authType: string;
       credentials: string;
+      credentialSource?: "local" | "canvas";
       scopeConfig?: string;
+      syncStatus?: SyncStatus;
       createdBy: string;
       credentialHint?: string | null;
     }) {
@@ -243,7 +245,9 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           connector_type: data.connectorType,
           auth_type: data.authType,
           credentials: encodeSecretField(data.credentials, encryptionKey),
+          credential_source: data.credentialSource ?? "local",
           scope_config: data.scopeConfig ?? "{}",
+          ...(data.syncStatus ? { sync_status: data.syncStatus } : {}),
           created_by: data.createdBy,
           credential_hint: data.credentialHint ?? null,
         })
@@ -265,6 +269,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         errorMessage: string | null;
         browseCache: string | null;
         credentialHint: string | null;
+        credentialSource: "local" | "canvas";
       }>,
     ) {
       const values: Record<string, unknown> = {};
@@ -276,6 +281,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       if (data.errorMessage !== undefined) values.error_message = data.errorMessage;
       if (data.browseCache !== undefined) values.browse_cache = data.browseCache;
       if (data.credentialHint !== undefined) values.credential_hint = data.credentialHint;
+      if (data.credentialSource !== undefined) values.credential_source = data.credentialSource;
 
       if (Object.keys(values).length > 0) {
         values.updated_at = new Date().toISOString();

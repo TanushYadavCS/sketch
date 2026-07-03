@@ -1,7 +1,6 @@
 /**
  * Agents — the prebuilt agent catalog (experimental). `/agents` lists the catalog
- * (roster); `/agents/$agentKey` reads and tunes one agent. The Daily Brief is v1's
- * only agent; `/home` stays its flagship surface.
+ * (roster); `/agents/$agentKey` reads output history and tunes one agent.
  */
 import { AgentDetail } from "@/components/agents/agent-detail";
 import { AgentRoster } from "@/components/agents/agent-roster";

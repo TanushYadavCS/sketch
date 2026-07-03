@@ -24,7 +24,7 @@ async function indexNames(db: Kysely<DB>, tableName: string): Promise<string[]> 
   return result.rows.map((row) => row.indexname);
 }
 
-describe("125-trunk-name-embeddings migration", () => {
+describe("128-trunk-name-embeddings migration", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {

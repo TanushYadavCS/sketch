@@ -97,6 +97,7 @@ export interface ConnectorConfigsTable {
   connector_type: string;
   auth_type: string;
   credentials: string;
+  credential_source: Generated<string>;
   scope_config: Generated<string>;
 
   sync_status: Generated<string>;
@@ -584,6 +585,37 @@ export interface AgentOutputDeliveriesTable {
   updated_at: Generated<string>;
 }
 
+export interface WhatsAppProviderEventsTable {
+  id: string;
+  provider: string;
+  dedupe_key: string;
+  provider_message_id: string | null;
+  provider_conversation_id: string | null;
+  event_family: string;
+  event_type: string | null;
+  status: string | null;
+  failure_code: string | null;
+  failure_detail: string | null;
+  provider_timestamp: string | null;
+  raw_payload_json: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface WhatsAppTemplateMappingsTable {
+  id: string;
+  provider: string;
+  logical_key: string;
+  provider_template_name: string;
+  language: Generated<string>;
+  status: Generated<string>;
+  category: string | null;
+  parameter_map_json: string | null;
+  last_synced_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface AgentUserConfigsTable {
   agent_key: string;
   user_id: string;
@@ -1029,6 +1061,8 @@ export interface DB {
   agent_outputs: AgentOutputsTable;
   agent_output_items: AgentOutputItemsTable;
   agent_output_deliveries: AgentOutputDeliveriesTable;
+  whatsapp_provider_events: WhatsAppProviderEventsTable;
+  whatsapp_template_mappings: WhatsAppTemplateMappingsTable;
   agent_user_configs: AgentUserConfigsTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;

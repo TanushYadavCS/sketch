@@ -5,11 +5,20 @@
  */
 import { ConnectIntegrationDialog } from "@/components/connect-integration-dialog";
 import { IntegrationIcon } from "@/components/connect-integration-dialog";
+import {
+  isNativeCanvasAppConnection,
+  isOwnedOrPersonalAppConnection,
+} from "@/components/connections/connection-status";
 import { ConnectorLogo } from "@/components/connector-logos";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
 import { INTEGRATIONS, type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
+import {
+  type IntegrationConnection,
+  PERSONAL_CANVAS_CONNECTOR_MAPPINGS,
+  personalCanvasConnectorTypeFromAppId,
+} from "@sketch/shared";
 
 // These are single org-wide credential rows. Per-user connectors are handled in
 // Browse all with one account row per visible user-owned connector.
@@ -54,6 +63,13 @@ function connectorAccountHint(connector: ConnectorConfig): string | null {
   return null;
 }
 
+function connectorNeedsScopeSetup(def: IntegrationDefinition, connector: ConnectorConfig | null): boolean {
+  if (!connector || connector.syncStatus !== "paused" || def.scopeType === "none") return false;
+  if (!def.scopeConfigKey) return false;
+  const value = connector.scopeConfig?.[def.scopeConfigKey];
+  return Array.isArray(value) && value.length === 0;
+}
+
 function sortConnectorsForDisplay(connectors: ConnectorConfig[]): ConnectorConfig[] {
   return [...connectors].sort((a, b) => {
     if (a.canManage === true && b.canManage !== true) return -1;
@@ -66,6 +82,29 @@ function connectorAdoptionSummary(connectedMemberCount: number, teamMemberCount:
   const denominator = Math.max(teamMemberCount, connectedMemberCount);
   const memberLabel = denominator === 1 ? "member" : "members";
   return `${connectedMemberCount.toLocaleString()} of ${denominator.toLocaleString()} ${memberLabel} connected`;
+}
+
+const PERSONAL_CANVAS_CONNECTOR_TYPES = new Set<IntegrationType>(
+  PERSONAL_CANVAS_CONNECTOR_MAPPINGS.map((mapping) => mapping.connectorType as IntegrationType),
+);
+
+function canResolveNativeCanvasConnection(definition: IntegrationDefinition | null): boolean {
+  return !!definition && definition.perUserAuth && PERSONAL_CANVAS_CONNECTOR_TYPES.has(definition.type);
+}
+
+function nativeCanvasConnectionForIntegration(
+  definition: IntegrationDefinition,
+  connections: IntegrationConnection[],
+): IntegrationConnection | null {
+  return (
+    connections.find(
+      (connection) =>
+        connection.status === "active" &&
+        isNativeCanvasAppConnection(connection) &&
+        isOwnedOrPersonalAppConnection(connection) &&
+        personalCanvasConnectorTypeFromAppId(connection.appId) === definition.type,
+    ) ?? null
+  );
 }
 import {
   ArrowSquareOutIcon,
@@ -136,6 +175,7 @@ export function ConnectorPicker({
 }) {
   const [connectingIntegration, setConnectingIntegration] = useState<IntegrationDefinition | null>(null);
   const [showBrowseAll, setShowBrowseAll] = useState(false);
+  const [canvasConnectionPolling, setCanvasConnectionPolling] = useState(false);
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
 
@@ -159,8 +199,36 @@ export function ConnectorPicker({
   };
 
   const effectiveConnectingIntegration = forcedConnectIntegration ?? connectingIntegration;
+  const shouldResolveNativeCanvasConnection = canResolveNativeCanvasConnection(effectiveConnectingIntegration);
+  const integrationProvidersQuery = useQuery({
+    queryKey: ["mcp-servers"],
+    queryFn: () => api.mcpServers.list(),
+    enabled: shouldResolveNativeCanvasConnection,
+  });
+  const canvasProvider = integrationProvidersQuery.data?.find((server) => server.type === "canvas") ?? null;
+  const canvasConnectionsQuery = useQuery({
+    queryKey: ["connections", canvasProvider?.id],
+    queryFn: () => api.mcpServers.listConnections(canvasProvider?.id ?? ""),
+    enabled: shouldResolveNativeCanvasConnection && !!canvasProvider,
+    refetchInterval: canvasConnectionPolling ? 2000 : false,
+  });
+  const nativeCanvasConnection =
+    effectiveConnectingIntegration && canvasConnectionsQuery.data
+      ? nativeCanvasConnectionForIntegration(effectiveConnectingIntegration, canvasConnectionsQuery.data)
+      : null;
+  const canvasConnectionLookupPending =
+    shouldResolveNativeCanvasConnection &&
+    (integrationProvidersQuery.isLoading ||
+      (!!canvasProvider && canvasConnectionsQuery.isLoading) ||
+      (canvasConnectionPolling && !nativeCanvasConnection));
+
+  useEffect(() => {
+    if (nativeCanvasConnection) setCanvasConnectionPolling(false);
+  }, [nativeCanvasConnection]);
+
   const handleConnectDialogClose = (open: boolean) => {
     if (!open) {
+      setCanvasConnectionPolling(false);
       if (forcedConnectIntegration && onForcedConnectDone) {
         onForcedConnectDone();
       } else {
@@ -264,6 +332,14 @@ export function ConnectorPicker({
         open={!!effectiveConnectingIntegration}
         onOpenChange={handleConnectDialogClose}
         onConnected={handleConnected}
+        preferCanvasCredentialSource={!!nativeCanvasConnection}
+        canvasConnectionReady={!!nativeCanvasConnection}
+        canvasAccountId={nativeCanvasConnection?.id ?? null}
+        canvasConnectionLookupPending={canvasConnectionLookupPending}
+        onCanvasConnectionStarted={() => {
+          setCanvasConnectionPolling(true);
+          void canvasConnectionsQuery.refetch();
+        }}
       />
     </>
   );
@@ -330,6 +406,8 @@ export function SyncStatusDot({ status }: { status: string }) {
       return <CircleNotchIcon size={10} className="animate-spin text-primary" />;
     case "error":
       return <WarningCircleIcon size={10} className="text-destructive" weight="fill" />;
+    case "paused":
+      return <WarningCircleIcon size={10} className="text-amber-500" weight="fill" />;
     default:
       return null;
   }
@@ -612,6 +690,7 @@ function ConnectorRow({
   const canSync = connector?.canSync === true;
   const canConnect = definition.perUserAuth || isAdmin;
   const onlyOtherPerUserConnectors = definition.perUserAuth && isConnected && !canManage;
+  const needsScopeSetup = connectorNeedsScopeSetup(definition, connector);
   const connectedAccounts = definition.perUserAuth ? sortConnectorsForDisplay(visibleConnectors) : [];
   const showConnectedAccounts = accountsExpanded && connectedAccounts.length > 0;
   const adoptionSummary = definition.perUserAuth
@@ -648,7 +727,9 @@ function ConnectorRow({
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium">{definition.name}</p>
             <p className="text-xs text-muted-foreground">
-              {definition.perUserAuth ? (
+              {needsScopeSetup ? (
+                <>Setup needed: choose {definition.scopeLabel}.</>
+              ) : definition.perUserAuth ? (
                 definition.description
               ) : isSyncing && myProgress ? (
                 <>
@@ -658,7 +739,9 @@ function ConnectorRow({
                 </>
               ) : isConnected ? (
                 <>
-                  {connector.fileCount != null && `${connector.fileCount.toLocaleString()} ${definition.itemNoun}`}
+                  {connector.fileCount != null
+                    ? `${connector.fileCount.toLocaleString()} ${definition.itemNoun}`
+                    : "Connected"}
                   {connector.lastSyncedAt && ` · Synced ${formatRelativeTime(connector.lastSyncedAt)}`}
                 </>
               ) : (
@@ -688,22 +771,29 @@ function ConnectorRow({
                 Connect mine
               </Button>
             )}
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 whitespace-nowrap text-xs"
-              aria-controls={definition.perUserAuth ? accountListId : undefined}
-              aria-expanded={definition.perUserAuth ? accountsExpanded : undefined}
-              onClick={() => {
-                if (definition.perUserAuth) {
-                  setAccountsExpanded((expanded) => !expanded);
-                  return;
-                }
-                onManage(connector);
-              }}
-            >
-              {definition.perUserAuth ? "Manage" : canManage ? "Manage" : "View"}
-            </Button>
+            {needsScopeSetup && canManage && (
+              <Button size="sm" className="h-7 whitespace-nowrap text-xs" onClick={() => onManage(connector)}>
+                Finish setup
+              </Button>
+            )}
+            {(!needsScopeSetup || !canManage) && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 whitespace-nowrap text-xs"
+                aria-controls={definition.perUserAuth ? accountListId : undefined}
+                aria-expanded={definition.perUserAuth ? accountsExpanded : undefined}
+                onClick={() => {
+                  if (definition.perUserAuth) {
+                    setAccountsExpanded((expanded) => !expanded);
+                    return;
+                  }
+                  onManage(connector);
+                }}
+              >
+                {definition.perUserAuth ? "Manage" : canManage ? "Manage" : "View"}
+              </Button>
+            )}
           </div>
         ) : canConnect ? (
           <div className="flex items-center justify-end gap-2 self-end sm:self-auto sm:shrink-0">
@@ -732,7 +822,14 @@ function ConnectorRow({
           {connectedAccounts.map((account) => {
             const label = connectorOwnerLabel(account);
             const hint = connectorAccountHint(account);
-            const actionLabel = account.canManage === true ? "Manage" : "View";
+            const accountNeedsScopeSetup = connectorNeedsScopeSetup(definition, account);
+            const accountFileCountLabel =
+              account.fileCount != null ? `${account.fileCount.toLocaleString()} ${definition.itemNoun}` : null;
+            const actionLabel = accountNeedsScopeSetup
+              ? "Finish setup"
+              : account.canManage === true
+                ? "Manage"
+                : "View";
             return (
               <div
                 key={account.id}
@@ -744,9 +841,9 @@ function ConnectorRow({
                   {hint && <span className="min-w-0 flex-1 truncate text-muted-foreground">{hint}</span>}
                 </div>
                 <div className="flex min-w-0 items-center justify-between gap-2 sm:shrink-0 sm:justify-end">
-                  {account.fileCount != null && (
+                  {(accountNeedsScopeSetup || accountFileCountLabel) && (
                     <span className="min-w-0 truncate text-muted-foreground sm:whitespace-nowrap">
-                      {account.fileCount.toLocaleString()} {definition.itemNoun}
+                      {accountNeedsScopeSetup ? `Choose ${definition.scopeLabel}` : accountFileCountLabel}
                     </span>
                   )}
                   <Button

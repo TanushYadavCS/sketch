@@ -114,17 +114,20 @@ import * as m111 from "./migrations/111-settings-embedding-provider";
 import * as m112 from "./migrations/112-agent-output-structured-payload";
 import * as m113 from "./migrations/113-indexed-file-all-day-flag";
 import * as m114 from "./migrations/114-agent-output-deliveries";
-import * as m115 from "./migrations/115-tasks";
-import * as m116 from "./migrations/116-tasks-owner";
-import * as m117 from "./migrations/117-sub-entities";
-import * as m118 from "./migrations/118-tasks-assignee-name";
-import * as m119 from "./migrations/119-milestone-series-and-value-signature";
-import * as m120 from "./migrations/120-work-cycles";
-import * as m121 from "./migrations/121-work-cycles-connector";
-import * as m122 from "./migrations/122-work-cycles-connector-key";
-import * as m123 from "./migrations/123-container-name-qualification";
-import * as m124 from "./migrations/124-entity-provenance-tier";
-import * as m125 from "./migrations/125-trunk-name-embeddings";
+import * as m115 from "./migrations/115-whatsapp-template-mappings-and-provider-events";
+import * as m116 from "./migrations/116-connector-credential-source";
+import * as m117 from "./migrations/117-conversation-message-window-index";
+import * as m118 from "./migrations/118-tasks";
+import * as m119 from "./migrations/119-tasks-owner";
+import * as m120 from "./migrations/120-sub-entities";
+import * as m121 from "./migrations/121-tasks-assignee-name";
+import * as m122 from "./migrations/122-milestone-series-and-value-signature";
+import * as m123 from "./migrations/123-work-cycles";
+import * as m124 from "./migrations/124-work-cycles-connector";
+import * as m125 from "./migrations/125-work-cycles-connector-key";
+import * as m126 from "./migrations/126-container-name-qualification";
+import * as m127 from "./migrations/127-entity-provenance-tier";
+import * as m128 from "./migrations/128-trunk-name-embeddings";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -243,17 +246,20 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "112-agent-output-structured-payload": m112,
           "113-indexed-file-all-day-flag": m113,
           "114-agent-output-deliveries": m114,
-          "115-tasks": m115,
-          "116-tasks-owner": m116,
-          "117-sub-entities": m117,
-          "118-tasks-assignee-name": m118,
-          "119-milestone-series-and-value-signature": m119,
-          "120-work-cycles": m120,
-          "121-work-cycles-connector": m121,
-          "122-work-cycles-connector-key": m122,
-          "123-container-name-qualification": m123,
-          "124-entity-provenance-tier": m124,
-          "125-trunk-name-embeddings": m125,
+          "115-whatsapp-template-mappings-and-provider-events": m115,
+          "116-connector-credential-source": m116,
+          "117-conversation-message-window-index": m117,
+          "118-tasks": m118,
+          "119-tasks-owner": m119,
+          "120-sub-entities": m120,
+          "121-tasks-assignee-name": m121,
+          "122-milestone-series-and-value-signature": m122,
+          "123-work-cycles": m123,
+          "124-work-cycles-connector": m124,
+          "125-work-cycles-connector-key": m125,
+          "126-container-name-qualification": m126,
+          "127-entity-provenance-tier": m127,
+          "128-trunk-name-embeddings": m128,
         };
       },
     },

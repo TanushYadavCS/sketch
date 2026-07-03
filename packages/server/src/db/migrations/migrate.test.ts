@@ -13,7 +13,7 @@ import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 import { up as applyScheduledTaskBuilderRevisions } from "./107-scheduled-task-builder-revisions";
 
-const EXPECTED_MIGRATION_COUNT = 121;
+const EXPECTED_MIGRATION_COUNT = 124;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -167,17 +167,20 @@ describe("runMigrations — full sequence", () => {
     expect(names[107]).toBe("112-agent-output-structured-payload");
     expect(names[108]).toBe("113-indexed-file-all-day-flag");
     expect(names[109]).toBe("114-agent-output-deliveries");
-    expect(names[110]).toBe("115-tasks");
-    expect(names[111]).toBe("116-tasks-owner");
-    expect(names[112]).toBe("117-sub-entities");
-    expect(names[113]).toBe("118-tasks-assignee-name");
-    expect(names[114]).toBe("119-milestone-series-and-value-signature");
-    expect(names[115]).toBe("120-work-cycles");
-    expect(names[116]).toBe("121-work-cycles-connector");
-    expect(names[117]).toBe("122-work-cycles-connector-key");
-    expect(names[118]).toBe("123-container-name-qualification");
-    expect(names[119]).toBe("124-entity-provenance-tier");
-    expect(names[120]).toBe("125-trunk-name-embeddings");
+    expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
+    expect(names[111]).toBe("116-connector-credential-source");
+    expect(names[112]).toBe("117-conversation-message-window-index");
+    expect(names[113]).toBe("118-tasks");
+    expect(names[114]).toBe("119-tasks-owner");
+    expect(names[115]).toBe("120-sub-entities");
+    expect(names[116]).toBe("121-tasks-assignee-name");
+    expect(names[117]).toBe("122-milestone-series-and-value-signature");
+    expect(names[118]).toBe("123-work-cycles");
+    expect(names[119]).toBe("124-work-cycles-connector");
+    expect(names[120]).toBe("125-work-cycles-connector-key");
+    expect(names[121]).toBe("126-container-name-qualification");
+    expect(names[122]).toBe("127-entity-provenance-tier");
+    expect(names[123]).toBe("128-trunk-name-embeddings");
   });
 
   it("creates the task assignee_name column", async () => {
@@ -491,6 +494,11 @@ describe("runMigrations — full sequence", () => {
       PRAGMA table_info(indexed_files)
     `.execute(db);
     expect(columns.rows.map((row) => row.name)).toContain("rollup_group_id");
+
+    const connectorColumns = await sql<{ name: string }>`
+      PRAGMA table_info(connector_configs)
+    `.execute(db);
+    expect(connectorColumns.rows.map((row) => row.name)).toContain("credential_source");
   });
 
   it("creates CRM object summaries table", async () => {
@@ -663,6 +671,17 @@ describe("runMigrations — full sequence", () => {
       SELECT name FROM sqlite_master WHERE type='table' AND name='agent_output_deliveries'
     `.execute(db);
     expect(result.rows).toHaveLength(1);
+  });
+
+  it("creates WhatsApp provider event and template mapping tables", async () => {
+    await runMigrations(db, { quiet: true });
+
+    for (const table of ["whatsapp_provider_events", "whatsapp_template_mappings"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
   });
 
   it("running migrations twice is idempotent (only applies each migration once)", async () => {

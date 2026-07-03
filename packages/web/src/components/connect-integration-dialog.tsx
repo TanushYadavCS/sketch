@@ -11,8 +11,18 @@
  * Other integrations connect immediately after credential validation.
  */
 import { ConnectorLogo } from "@/components/connector-logos";
-import { ScopeCount, ScopeGroup, ScopeItem, ScopeList, ScopeSelectAll, ScopeSubItem } from "@/components/scope-picker";
-import { api } from "@/lib/api";
+import {
+  GenericScopePicker,
+  ScopeCount,
+  ScopeGroup,
+  ScopeItem,
+  ScopeList,
+  ScopeSelectAll,
+  ScopeSubItem,
+  buildScopeFromSelection,
+  computeSelectedFromScope,
+} from "@/components/scope-picker";
+import { type BrowseResult, api } from "@/lib/api";
 import type { IntegrationDefinition } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
 import {
@@ -61,11 +71,18 @@ interface ClickUpWorkspace {
   spaces: Array<{ id: string; name: string; private: boolean }>;
 }
 
+type BrowseResultWithScope = BrowseResult & { scopeConfig?: Record<string, unknown> };
+
 interface ConnectIntegrationDialogProps {
   integration: IntegrationDefinition | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConnected: () => void;
+  preferCanvasCredentialSource?: boolean;
+  canvasConnectionReady?: boolean;
+  canvasAccountId?: string | null;
+  canvasConnectionLookupPending?: boolean;
+  onCanvasConnectionStarted?: () => void;
 }
 
 export function ConnectIntegrationDialog({
@@ -73,6 +90,11 @@ export function ConnectIntegrationDialog({
   open,
   onOpenChange,
   onConnected,
+  preferCanvasCredentialSource = false,
+  canvasConnectionReady = false,
+  canvasAccountId = null,
+  canvasConnectionLookupPending = false,
+  onCanvasConnectionStarted,
 }: ConnectIntegrationDialogProps) {
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
@@ -81,9 +103,10 @@ export function ConnectIntegrationDialog({
   const [region, setRegion] = useState<string>("com");
 
   // OAuth state
-  const [step, setStep] = useState<"credentials" | "drives" | "notion-pages" | "clickup-workspaces" | "oauth-config">(
-    "credentials",
-  );
+  const [step, setStep] = useState<
+    "credentials" | "drives" | "notion-pages" | "clickup-workspaces" | "generic-scope" | "oauth-config"
+  >("credentials");
+  const [manualOAuthConfigOpen, setManualOAuthConfigOpen] = useState(false);
   const [sharedDrives, setSharedDrives] = useState<SharedDrive[]>([]);
   const [selectedDriveIds, setSelectedDriveIds] = useState<Set<string>>(new Set());
   const [rootFolders, setRootFolders] = useState<SharedDrive[]>([]);
@@ -100,13 +123,47 @@ export function ConnectIntegrationDialog({
   const [notionBrowseId, setNotionBrowseId] = useState<string | null>(null);
   const [notionPagesScanned, setNotionPagesScanned] = useState(0);
   const [notionScanDone, setNotionScanDone] = useState(false);
+  const [managedConnectorId, setManagedConnectorId] = useState<string | null>(null);
+  const [canvasPopupOpened, setCanvasPopupOpened] = useState(false);
+  const [autoCanvasImportStarted, setAutoCanvasImportStarted] = useState(false);
+  const [genericBrowseData, setGenericBrowseData] = useState<BrowseResult | null>(null);
+  const [selectedGenericIds, setSelectedGenericIds] = useState<Set<string>>(new Set());
 
   const isOAuthRedirect = integration?.oauthRedirect === true;
   const isZoho = integration?.type === "zoho_crm";
   const isMicrosoft = integration?.type === "outlook" || integration?.type === "teams";
+  const canvasSupported =
+    integration?.type === "google_drive" ||
+    integration?.type === "google_calendar" ||
+    integration?.type === "gmail" ||
+    integration?.type === "outlook" ||
+    integration?.type === "teams" ||
+    integration?.type === "fireflies" ||
+    integration?.type === "clickup" ||
+    integration?.type === "notion" ||
+    integration?.type === "linear";
   const oauthProviderName = isMicrosoft ? "Microsoft" : "Google";
   const oauthCredentialConsoleLabel = isMicrosoft ? "Microsoft Entra" : "Google Cloud Console";
   const oauthCallbackPath = isMicrosoft ? "/api/oauth/microsoft/callback" : "/api/oauth/google/callback";
+
+  const credentialSource = useQuery({
+    queryKey: ["connector-credential-source"],
+    queryFn: () => api.integrations.credentialSource(),
+    enabled: open,
+  });
+  const isCanvasMode = credentialSource.data?.mode === "canvas" && canvasSupported;
+  const useCanvasCredentialFlow =
+    canvasSupported && (isCanvasMode || preferCanvasCredentialSource || canvasConnectionLookupPending);
+  const canvasCredentialImportConfigured = credentialSource.data?.canvasCredentialImportConfigured !== false;
+  const canvasConnectionCanImport = canvasConnectionReady;
+  const shouldAutoImportCanvasCredential = canvasConnectionReady && useCanvasCredentialFlow;
+  const waitingForCanvasConnectionLookup =
+    useCanvasCredentialFlow && canvasConnectionLookupPending && !canvasConnectionReady && !canvasPopupOpened;
+  const waitingForCanvasConnectionCompletion = useCanvasCredentialFlow && canvasPopupOpened && !canvasConnectionReady;
+
+  useEffect(() => {
+    if (!open) setAutoCanvasImportStarted(false);
+  }, [open]);
 
   // Notion browse polling — updates root pages list in real-time as scan progresses
   useEffect(() => {
@@ -147,7 +204,7 @@ export function ConnectIntegrationDialog({
     queryKey: [isZoho ? "zoho-oauth-status" : isMicrosoft ? "microsoft-oauth-status" : "google-oauth-status"],
     queryFn: () =>
       isZoho ? api.zohoOAuth.status() : isMicrosoft ? api.microsoftOAuth.status() : api.googleOAuth.status(),
-    enabled: open && isOAuthRedirect,
+    enabled: open && isOAuthRedirect && !useCanvasCredentialFlow && !canvasConnectionLookupPending,
   });
 
   const isOAuthConfigured = oauthStatus.data?.configured === true;
@@ -161,12 +218,43 @@ export function ConnectIntegrationDialog({
 
   // For OAuth redirect: start with oauth-config step if client setup is required and missing.
   useEffect(() => {
+    if (open && useCanvasCredentialFlow) {
+      setStep("credentials");
+      setManualOAuthConfigOpen(false);
+      return;
+    }
     if (open && isOAuthRedirect) {
       if (oauthStatus.isSuccess) {
+        if (manualOAuthConfigOpen) {
+          setStep("oauth-config");
+          return;
+        }
         setStep(needsClientSetup && !isOAuthConfigured ? "oauth-config" : "credentials");
       }
     }
-  }, [open, isOAuthRedirect, oauthStatus.isSuccess, isOAuthConfigured, needsClientSetup]);
+  }, [
+    open,
+    useCanvasCredentialFlow,
+    isOAuthRedirect,
+    oauthStatus.isSuccess,
+    isOAuthConfigured,
+    needsClientSetup,
+    manualOAuthConfigOpen,
+  ]);
+
+  useEffect(() => {
+    if (!open || step !== "oauth-config" || !oauthStatus.isSuccess || !isOAuthConfigured) return;
+    setFieldValues((prev) => {
+      const next = { ...prev };
+      const tenant =
+        oauthStatus.data && "tenant" in oauthStatus.data && typeof oauthStatus.data.tenant === "string"
+          ? oauthStatus.data.tenant
+          : null;
+      if (!next.client_id && oauthStatus.data?.clientId) next.client_id = oauthStatus.data.clientId;
+      if (!next.tenant && isMicrosoft && tenant) next.tenant = tenant;
+      return next;
+    });
+  }, [open, step, oauthStatus.isSuccess, oauthStatus.data, isMicrosoft, isOAuthConfigured]);
 
   /** Save provider OAuth client_id + client_secret. */
   const configureOAuthMutation = useMutation({
@@ -186,6 +274,7 @@ export function ConnectIntegrationDialog({
     onSuccess: () => {
       toast.success(`${oauthProviderName} OAuth configured.`);
       oauthStatus.refetch();
+      setManualOAuthConfigOpen(false);
       setStep("credentials");
     },
     onError: (error: Error) => {
@@ -197,6 +286,9 @@ export function ConnectIntegrationDialog({
   const validateMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
+      if (useCanvasCredentialFlow && managedConnectorId) {
+        return api.integrations.updateScope(managedConnectorId, { rootPages: Array.from(selectedNotionPageIds) });
+      }
       const credentials = buildCredentials();
 
       // ClickUp: browse workspaces and spaces, show picker
@@ -245,6 +337,9 @@ export function ConnectIntegrationDialog({
   const connectWithNotionPagesMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
+      if (useCanvasCredentialFlow && managedConnectorId) {
+        return api.integrations.updateScope(managedConnectorId, { rootPages: Array.from(selectedNotionPageIds) });
+      }
       const credentials = buildCredentials();
       const scopeConfig = { rootPages: Array.from(selectedNotionPageIds) };
       return api.integrations.connect({
@@ -268,11 +363,40 @@ export function ConnectIntegrationDialog({
   const connectWithClickUpMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
-      const credentials = buildCredentials();
       const scopeConfig = {
         workspaces: Array.from(selectedWorkspaceIds),
         spaces: Array.from(selectedSpaceIds),
       };
+      if (useCanvasCredentialFlow && managedConnectorId) {
+        return api.integrations.updateScope(managedConnectorId, scopeConfig);
+      }
+      const credentials = buildCredentials();
+      return api.integrations.connect({
+        connectorType: integration.type,
+        authType: integration.authType,
+        credentials,
+        scopeConfig,
+      });
+    },
+    onSuccess: () => {
+      toast.success(`${integration?.name} connected successfully.`);
+      resetAndClose();
+      onConnected();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to connect.");
+    },
+  });
+
+  const connectWithGenericScopeMutation = useMutation({
+    mutationFn: async () => {
+      if (!integration || !genericBrowseData) throw new Error("No scope selection available");
+      const scopeConfig = buildScopeFromSelection(genericBrowseData, selectedGenericIds, integration.scopeConfigKey);
+      if (useCanvasCredentialFlow) {
+        if (!managedConnectorId) throw new Error("No managed connector selected");
+        return api.integrations.updateScope(managedConnectorId, scopeConfig);
+      }
+      const credentials = buildCredentials();
       return api.integrations.connect({
         connectorType: integration.type,
         authType: integration.authType,
@@ -294,11 +418,14 @@ export function ConnectIntegrationDialog({
   const connectWithDrivesMutation = useMutation({
     mutationFn: async () => {
       if (!integration) throw new Error("No integration selected");
-      const credentials = buildCredentials();
       const scopeConfig =
         sharedDrives.length > 0
           ? { sharedDrives: Array.from(selectedDriveIds) }
           : { folders: Array.from(selectedFolderIds) };
+      if (useCanvasCredentialFlow && managedConnectorId) {
+        return api.integrations.updateScope(managedConnectorId, scopeConfig);
+      }
+      const credentials = buildCredentials();
       return api.integrations.connect({
         connectorType: integration.type,
         authType: integration.authType,
@@ -339,8 +466,130 @@ export function ConnectIntegrationDialog({
     setNotionBrowseId(null);
     setNotionPagesScanned(0);
     setNotionScanDone(false);
+    setManagedConnectorId(null);
+    setCanvasPopupOpened(false);
+    setManualOAuthConfigOpen(false);
+    setGenericBrowseData(null);
+    setSelectedGenericIds(new Set());
     onOpenChange(false);
   };
+
+  const canvasConnectMutation = useMutation({
+    mutationFn: async () => {
+      if (!integration) throw new Error("No integration selected");
+      const result = await api.integrations.canvasConnect({
+        connectorType: integration.type,
+        callbackUrl: window.location.href,
+      });
+      const popup = window.open(result.redirectUrl, "canvas-connect", "width=640,height=760");
+      if (!popup || popup.closed) {
+        throw new Error("Popup blocked. Allow popups for this site, then try again.");
+      }
+      setCanvasPopupOpened(true);
+      onCanvasConnectionStarted?.();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to start account connection.");
+    },
+  });
+
+  const canvasImportMutation = useMutation({
+    mutationFn: async () => {
+      if (!integration) throw new Error("No integration selected");
+      return api.integrations.canvasImport({
+        connectorType: integration.type,
+        ...(canvasAccountId ? { accountId: canvasAccountId } : {}),
+      });
+    },
+    onSuccess: async ({ connector }) => {
+      if (!integration) return;
+      setManagedConnectorId(connector.id);
+
+      if (integration.type === "google_drive") {
+        const result = await api.integrations.browseGoogleDriveExisting(connector.id);
+        setSharedDrives(result.sharedDrives);
+        setRootFolders(result.rootFolders);
+        setSelectedDriveIds(new Set(result.sharedDrives.filter((d) => d.selected).map((d) => d.id)));
+        setSelectedFolderIds(new Set(result.rootFolders.filter((f) => f.selected).map((f) => f.id)));
+        setStep("drives");
+        return;
+      }
+
+      if (integration.type === "clickup") {
+        const result = await api.integrations.browseClickUpExisting(connector.id);
+        setClickUpWorkspaces(result.workspaces);
+        setSelectedWorkspaceIds(new Set(result.workspaces.filter((w) => w.selected).map((w) => w.id)));
+        setSelectedSpaceIds(
+          new Set(result.workspaces.flatMap((w) => w.spaces.filter((s) => s.selected).map((s) => s.id))),
+        );
+        setStep("clickup-workspaces");
+        return;
+      }
+
+      if (integration.type === "notion") {
+        const result = await api.integrations.browseNotionExisting(connector.id);
+        setNotionRootPages(result.rootPages.map((p) => ({ id: p.id, title: p.title, url: p.url })));
+        setSelectedNotionPageIds(new Set(result.rootPages.filter((p) => p.selected).map((p) => p.id)));
+        setNotionScanDone(true);
+        setStep("notion-pages");
+        return;
+      }
+
+      if (integration.scopeType === "flat") {
+        const result = await api.integrations.browseExisting(connector.id);
+        if (result.type === "flat") {
+          const scopedResult = result as BrowseResultWithScope;
+          setGenericBrowseData(result);
+          setSelectedGenericIds(
+            computeSelectedFromScope(scopedResult, scopedResult.scopeConfig ?? {}, integration.scopeConfigKey),
+          );
+          setStep("generic-scope");
+          return;
+        }
+      }
+
+      toast.success(`${integration.name} connected successfully.`);
+      resetAndClose();
+      onConnected();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to set up the connected account.");
+    },
+  });
+
+  useEffect(() => {
+    if (!open || !shouldAutoImportCanvasCredential || autoCanvasImportStarted || canvasImportMutation.isPending) return;
+    if (!credentialSource.isSuccess) return;
+    if (
+      !canvasConnectionCanImport ||
+      credentialSource.data?.canvasConfigured === false ||
+      !canvasCredentialImportConfigured
+    ) {
+      return;
+    }
+
+    setAutoCanvasImportStarted(true);
+    canvasImportMutation.mutate();
+  }, [
+    open,
+    shouldAutoImportCanvasCredential,
+    autoCanvasImportStarted,
+    canvasImportMutation,
+    credentialSource.isSuccess,
+    credentialSource.data?.canvasConfigured,
+    canvasConnectionCanImport,
+    canvasCredentialImportConfigured,
+  ]);
+
+  const autoCanvasImportErrorMessage = credentialSource.isError
+    ? "Sketch could not check the connected-account setup."
+    : credentialSource.data?.canvasConfigured === false
+      ? "The connected-account provider is not configured."
+      : !canvasCredentialImportConfigured
+        ? "Connected-account import is not configured for this workspace."
+        : canvasImportMutation.isError
+          ? "Sketch could not set up the connected account."
+          : null;
 
   const handleFieldChange = (key: string, value: string) => {
     setFieldValues((prev) => ({ ...prev, [key]: value }));
@@ -398,6 +647,9 @@ export function ConnectIntegrationDialog({
     connectWithDrivesMutation.isPending ||
     connectWithNotionPagesMutation.isPending ||
     connectWithClickUpMutation.isPending ||
+    connectWithGenericScopeMutation.isPending ||
+    canvasConnectMutation.isPending ||
+    canvasImportMutation.isPending ||
     configureOAuthMutation.isPending;
 
   if (!integration) return null;
@@ -509,6 +761,127 @@ export function ConnectIntegrationDialog({
               </Button>
             </DialogFooter>
           </>
+        ) : step === "credentials" && useCanvasCredentialFlow && shouldAutoImportCanvasCredential ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Add {integration.name} to Sketch
+              </DialogTitle>
+              <DialogDescription>Sketch is using the account you already connected.</DialogDescription>
+            </DialogHeader>
+
+            <div className="flex flex-col items-center gap-3 py-8 text-center">
+              {autoCanvasImportErrorMessage ? (
+                <>
+                  <p className="text-sm font-medium">Could not add {integration.name}</p>
+                  <p className="max-w-sm text-sm text-muted-foreground">{autoCanvasImportErrorMessage}</p>
+                </>
+              ) : (
+                <>
+                  <SpinnerGapIcon size={22} className="animate-spin text-muted-foreground" />
+                  <p className="text-sm text-muted-foreground">Setting up Sketch sync...</p>
+                </>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={resetAndClose}>
+                Close
+              </Button>
+              {(credentialSource.isError || canvasImportMutation.isError) && (
+                <Button
+                  onClick={() => {
+                    canvasImportMutation.reset();
+                    setAutoCanvasImportStarted(false);
+                    if (credentialSource.isError) void credentialSource.refetch();
+                  }}
+                >
+                  Try again
+                </Button>
+              )}
+            </DialogFooter>
+          </>
+        ) : step === "credentials" && useCanvasCredentialFlow ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Connect {integration.name}
+              </DialogTitle>
+              <DialogDescription>
+                {waitingForCanvasConnectionLookup
+                  ? "Checking for an account you already connected."
+                  : waitingForCanvasConnectionCompletion
+                    ? "Finish signing in in the popup. Sketch will continue automatically."
+                    : canvasConnectionReady
+                      ? "Sketch will use the account you already connected, then let you choose what to sync."
+                      : "Connect your account, then choose what Sketch should sync."}
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="flex flex-col gap-3 py-4">
+              {waitingForCanvasConnectionLookup || waitingForCanvasConnectionCompletion ? (
+                <div className="flex items-center justify-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
+                  <SpinnerGapIcon size={16} className="animate-spin" />
+                  {waitingForCanvasConnectionCompletion
+                    ? "Waiting for sign-in to finish..."
+                    : "Checking connected accounts..."}
+                </div>
+              ) : (
+                <>
+                  {!canvasConnectionReady && (
+                    <Button
+                      size="lg"
+                      className="w-full"
+                      onClick={() => canvasConnectMutation.mutate()}
+                      disabled={isPending || credentialSource.data?.canvasConfigured === false}
+                    >
+                      {canvasConnectMutation.isPending ? (
+                        <>
+                          <SpinnerGapIcon size={14} className="animate-spin" />
+                          Opening account connection...
+                        </>
+                      ) : (
+                        "Connect account"
+                      )}
+                    </Button>
+                  )}
+                  {canvasConnectionCanImport && (
+                    <Button
+                      variant={canvasConnectionReady ? "default" : "outline"}
+                      className="w-full"
+                      onClick={() => canvasImportMutation.mutate()}
+                      disabled={
+                        isPending ||
+                        credentialSource.data?.canvasConfigured === false ||
+                        !canvasCredentialImportConfigured
+                      }
+                    >
+                      {canvasImportMutation.isPending ? (
+                        <>
+                          <SpinnerGapIcon size={14} className="animate-spin" />
+                          Setting up...
+                        </>
+                      ) : (
+                        "Set up Sketch sync"
+                      )}
+                    </Button>
+                  )}
+                </>
+              )}
+              {credentialSource.data?.canvasConfigured === false && (
+                <p className="text-center text-xs text-muted-foreground">
+                  The connected-account provider is not configured.
+                </p>
+              )}
+              {!canvasCredentialImportConfigured && credentialSource.data?.canvasConfigured !== false && (
+                <p className="text-center text-xs text-muted-foreground">
+                  Connected-account import is not configured for this workspace.
+                </p>
+              )}
+            </div>
+          </>
         ) : step === "credentials" && isOAuthRedirect && isZoho ? (
           /* OAuth redirect (Zoho): data-center picker + connect button */
           <>
@@ -611,7 +984,10 @@ export function ConnectIntegrationDialog({
               <div className="flex justify-end">
                 <button
                   type="button"
-                  onClick={() => setStep("oauth-config")}
+                  onClick={() => {
+                    setManualOAuthConfigOpen(true);
+                    setStep("oauth-config");
+                  }}
                   className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
                 >
                   Reconfigure OAuth
@@ -647,7 +1023,10 @@ export function ConnectIntegrationDialog({
               <div className="flex justify-end">
                 <button
                   type="button"
-                  onClick={() => setStep("oauth-config")}
+                  onClick={() => {
+                    setManualOAuthConfigOpen(true);
+                    setStep("oauth-config");
+                  }}
                   className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
                 >
                   Reconfigure OAuth
@@ -726,6 +1105,55 @@ export function ConnectIntegrationDialog({
                   </>
                 ) : (
                   "Connect"
+                )}
+              </Button>
+            </DialogFooter>
+          </>
+        ) : step === "generic-scope" && genericBrowseData ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2.5">
+                <IntegrationIcon color={integration.color} name={integration.name} type={integration.type} />
+                Select {integration.scopeItemNoun ?? integration.scopeLabel}
+              </DialogTitle>
+              <DialogDescription>Choose what to sync. You can change this later.</DialogDescription>
+            </DialogHeader>
+
+            <GenericScopePicker
+              data={genericBrowseData}
+              selectedIds={selectedGenericIds}
+              onToggle={(id) => {
+                setSelectedGenericIds((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  return next;
+                });
+              }}
+              disabled={connectWithGenericScopeMutation.isPending}
+              noun={integration.scopeItemNoun ?? "items"}
+            />
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setStep("credentials")}
+                disabled={connectWithGenericScopeMutation.isPending}
+              >
+                <ArrowLeftIcon size={14} />
+                Back
+              </Button>
+              <Button
+                onClick={() => connectWithGenericScopeMutation.mutate()}
+                disabled={connectWithGenericScopeMutation.isPending || selectedGenericIds.size === 0}
+              >
+                {connectWithGenericScopeMutation.isPending ? (
+                  <>
+                    <SpinnerGapIcon size={14} className="animate-spin" />
+                    Connecting...
+                  </>
+                ) : (
+                  `Connect ${selectedGenericIds.size} ${integration.scopeItemNoun ?? "items"}`
                 )}
               </Button>
             </DialogFooter>

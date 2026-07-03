@@ -2,6 +2,41 @@
 
 All notable changes to this project are documented here.
 
+## [0.41.2] -- 2026-07-03
+
+- Fix(OpenRouter): request JSON mode for enrichment JSON calls and require providers to honor structured-output parameters, preventing prose responses from breaking smart entity extraction.
+
+## [0.41.1] -- 2026-07-03
+
+- Fix(Wati): send an explicit `User-Agent` header on all Wati API requests. Cloudflare in front of Wati's v3 API rejects requests without one (HTTP 403 error 1010), which blocked template sends before Wati received them.
+
+## [0.41.0] -- 2026-07-03
+
+- Managed WhatsApp: add `WHATSAPP_DM_PROVIDER=managed`, a DM provider for managed tenants that receives normalized inbound events from the sketch-platform shared-number gateway (`/api/system/whatsapp/managed/events`) and sends outbound text and template messages through the platform outbound API with a tenant-scoped token. Groups stay on Baileys; self-hosted Wati/Baileys behavior is unchanged.
+- Security: system API bearer auth now uses a timing-safe comparison.
+
+## [0.40.2] -- 2026-07-02
+
+- Fix(Wati): send template-message variables with Wati v3's `custom_params` recipient field so approved WhatsApp templates can deliver for proactive DM workflows.
+
+## [0.40.1] -- 2026-07-02
+
+- Fix(Wati): send template-message recipients with Wati v3's `phone_number` field so approved WhatsApp templates can deliver for proactive DM workflows.
+
+## [0.40.0] -- 2026-07-02
+
+- Connector credentials: add local-vs-Canvas credential source support so open-source Sketch keeps local credential storage while managed tenants can resolve supported connector credentials from Canvas.
+- Canvas-managed OAuth: add encrypted Canvas credential envelope handling, access-token minting, and remint-on-expiry support for Google Drive and Microsoft connector sync paths.
+- Managed connector migration: reconcile eligible local OAuth connector configs into Canvas-owned placeholders, pause unsafe rows, and scrub local OAuth identity tokens when Canvas is the credential source.
+- Managed UX: add Canvas-backed connect/import/suggestion APIs and UI flows so users can connect supported integrations through Canvas while Sketch continues to run connector sync.
+
+## [0.39.0] -- 2026-07-02
+
+- WhatsApp/Wati hardening: move Wati webhooks onto an explicit QueueManager fast-ack path, classify status callbacks away from agent execution, dedupe inbound provider retries, and persist provider event metadata without logging message content.
+- WhatsApp delivery coherence: route direct sends, agent replies, scheduler/workflow outputs, onboarding/magic-link/introduction sends, sendDm, quoted replies, and media capture through the provider runtime while preserving Baileys group behavior.
+- WhatsApp templates: add provider-specific logical template mappings, Wati template list/sync/send support, and clear failures for proactive WhatsApp DMs when an approved mapping is missing.
+- Connectors: add Otter transcript sync support, connector registration, UI metadata, and a local check script for self-hosted verification.
+
 ## [0.38.1] -- 2026-06-30
 
 - Fix(Wati): acknowledge authenticated Wati webhooks immediately after JSON parsing, then process the provider event asynchronously so inbound callbacks do not wait on the agent pipeline.

@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestPgDb } from "../../test-utils";
 import type { DB } from "../schema";
-import { up as qualifyContainerNames } from "./123-container-name-qualification";
+import { up as qualifyContainerNames } from "./126-container-name-qualification";
 
 const NOW = "2026-06-23T00:00:00.000Z";
 
@@ -79,7 +79,7 @@ async function insertProjectFixture(
     .execute();
 }
 
-describe("123-container-name-qualification", () => {
+describe("126-container-name-qualification", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {

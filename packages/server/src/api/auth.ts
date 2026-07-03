@@ -24,7 +24,7 @@ import type { DB } from "../db/schema";
 import { resolveBaseUrl } from "./shared";
 
 export type MagicLinkSender = (opts: {
-  user: Pick<VerifiedUser, "email" | "slack_user_id" | "whatsapp_number">;
+  user: Pick<VerifiedUser, "id" | "name" | "email" | "slack_user_id" | "whatsapp_number">;
   magicLinkUrl: string;
   botName: string;
 }) => Promise<string[]>;

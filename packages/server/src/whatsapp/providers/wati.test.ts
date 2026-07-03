@@ -2,14 +2,20 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createWhatsAppProviderEventRepository } from "../../db/repositories/whatsapp-provider-events";
+import { createWhatsAppTemplateMappingRepository } from "../../db/repositories/whatsapp-template-mappings";
 import { createTestLogger } from "../../test-utils";
+import { createTestDb } from "../../test-utils";
 import { type WhatsAppInboundMessage, whatsappDeliveryTargetFromTarget } from "../provider";
+import { WHATSAPP_TEMPLATE_KEYS } from "../templates";
 import {
   createWatiWhatsAppProvider,
   normalizeWatiPhoneNumber,
   parseWatiDeliveryStatusEvent,
   parseWatiWebhookEvent,
 } from "./wati";
+
+const WATI_USER_AGENT = "Sketch/1.0 (+https://getsketch.ai)";
 
 function documentedMessagePayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -118,9 +124,9 @@ describe("Wati webhook parsing", () => {
       parseWatiWebhookEvent(documentedMessagePayload({ channelPhoneNumber: null }), {
         channelPhoneNumber: "+15551234567",
       }),
-    ).toEqual({
-      kind: "ignored",
-      reason: "channel_mismatch",
+    ).toMatchObject({
+      kind: "message",
+      message: { providerMessageId: "wamid.inbound" },
     });
   });
 
@@ -144,6 +150,18 @@ describe("Wati webhook parsing", () => {
         failureCode: null,
         failureDetail: null,
         providerTimestamp: "2025-11-27T10:14:13.000Z",
+      },
+    });
+  });
+
+  it("treats documented messageReceived events as inbound user messages", () => {
+    const parsed = parseWatiWebhookEvent(documentedMessagePayload({ eventType: "messageReceived" }));
+
+    expect(parsed).toMatchObject({
+      kind: "message",
+      message: {
+        providerMessageId: "wamid.inbound",
+        senderPhoneE164: "+8618719149214",
       },
     });
   });
@@ -237,6 +255,7 @@ describe("Wati outbound provider", () => {
     expect(init.headers).toEqual({
       Authorization: "Bearer wati-token",
       "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": WATI_USER_AGENT,
     });
     expect(init.body).toBeInstanceOf(URLSearchParams);
     expect((init.body as URLSearchParams).get("messageText")).toBe("hello");
@@ -286,7 +305,7 @@ describe("Wati outbound provider", () => {
     const [url, init] = firstFetchCall(requestFetch);
     expect(url.toString()).toBe("https://tenant.wati.io/api/v1/sendSessionFile/15551234567");
     expect(init.method).toBe("POST");
-    expect(init.headers).toEqual({ Authorization: "Bearer wati-token" });
+    expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT });
     expect(init.body).toBeInstanceOf(FormData);
     expect((init.body as FormData).get("target")).toBeNull();
   });
@@ -320,9 +339,33 @@ describe("Wati outbound provider", () => {
     const [url, init] = firstFetchCall(requestFetch);
     expect(url.toString()).toBe("https://live-mt-server.wati.io/api/ext/v3/conversations/messages/file");
     expect(init.method).toBe("POST");
-    expect(init.headers).toEqual({ Authorization: "Bearer wati-token" });
+    expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT });
     expect(init.body).toBeInstanceOf(FormData);
     expect((init.body as FormData).get("target")).toBe("17435002445:15551234567");
+  });
+
+  it("lists Wati templates with the configured User-Agent", async () => {
+    const requestFetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          messageTemplates: [{ elementName: "daily_brief", language: { code: "en_US" }, status: "APPROVED" }],
+        }),
+      );
+    });
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+
+    const templates = await provider.listTemplates();
+
+    const [url, init] = firstFetchCall(requestFetch);
+    expect(url.toString()).toBe("https://tenant.wati.io/api/ext/v3/messageTemplates?page_number=1&page_size=100");
+    expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT });
+    expect(templates).toEqual([expect.objectContaining({ providerTemplateName: "daily_brief" })]);
   });
 
   it("downloads Wati media into the workspace attachment directory", async () => {
@@ -358,15 +401,16 @@ describe("Wati outbound provider", () => {
         }),
       ]);
       expect(await readFile(attachments?.[0]?.localPath ?? "", "utf8")).toBe("image-bytes");
-      const [url] = firstFetchCall(requestFetch);
+      const [url, init] = firstFetchCall(requestFetch);
       expect(url.pathname).toBe("/api/ext/v3/conversations/messages/file/wati-internal-id");
+      expect(init.headers).toEqual({ Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT });
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
     }
   });
 
   it("retries Wati media download with the WhatsApp message id after an internal id miss", async () => {
-    const requestFetch = vi.fn(async (url: URL) => {
+    const requestFetch = vi.fn(async (url: URL, _init?: RequestInit) => {
       if (url.pathname.endsWith("/wati-internal-id")) {
         return new Response("missing", { status: 404 });
       }
@@ -402,6 +446,10 @@ describe("Wati outbound provider", () => {
         "/api/ext/v3/conversations/messages/file/wati-internal-id",
         "/api/ext/v3/conversations/messages/file/wamid.media",
       ]);
+      expect(requestFetch.mock.calls.map(([, init]) => (init as RequestInit).headers)).toEqual([
+        { Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT },
+        { Authorization: "Bearer wati-token", "User-Agent": WATI_USER_AGENT },
+      ]);
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
     }
@@ -429,5 +477,394 @@ describe("Wati outbound provider", () => {
       { kind: "message", providerMessageId: "wamid.one", senderPhoneE164: "+8618719149214" },
       expect.objectContaining({ kind: "delivery_status" }),
     ]);
+  });
+
+  it("records duplicate Wati status callbacks once without invoking inbound handlers", async () => {
+    const db = await createTestDb();
+    try {
+      const providerEvents = createWhatsAppProviderEventRepository(db);
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        providerEvents,
+        fetch: vi.fn() as unknown as typeof fetch,
+      });
+      const handler = vi.fn();
+      provider.inboundProvider.onMessage(handler);
+
+      const payload = {
+        eventType: "sentMessageREAD_v2",
+        statusString: "Read",
+        localMessageId: "local-1",
+        whatsappMessageId: "wamid.status",
+        timestamp: "1764238453",
+      };
+
+      await provider.handleWebhook([payload, payload]);
+
+      expect(handler).not.toHaveBeenCalled();
+      const rows = await db.selectFrom("whatsapp_provider_events").selectAll().execute();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        provider: "wati",
+        provider_message_id: "local-1",
+        event_family: "read",
+        status: "Read",
+      });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("records status callbacks that omit channel when a Wati channel is configured", async () => {
+    const db = await createTestDb();
+    try {
+      const providerEvents = createWhatsAppProviderEventRepository(db);
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        channelPhoneNumber: "+17435002445",
+        logger: createTestLogger(),
+        providerEvents,
+        fetch: vi.fn() as unknown as typeof fetch,
+      });
+      const handler = vi.fn();
+      provider.inboundProvider.onMessage(handler);
+
+      const results = await provider.handleWebhook({
+        eventType: "sentMessageREAD_v2",
+        statusString: "Read",
+        localMessageId: "local-1",
+        whatsappMessageId: "wamid.status",
+        timestamp: "1764238453",
+      });
+
+      expect(results).toEqual([expect.objectContaining({ kind: "delivery_status" })]);
+      expect(handler).not.toHaveBeenCalled();
+      const rows = await db.selectFrom("whatsapp_provider_events").selectAll().execute();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        provider: "wati",
+        provider_message_id: "local-1",
+        event_family: "read",
+        status: "Read",
+      });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("ignores status callbacks from other configured Wati channels", async () => {
+    const db = await createTestDb();
+    try {
+      const providerEvents = createWhatsAppProviderEventRepository(db);
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        channelPhoneNumber: "+17435002445",
+        logger: createTestLogger(),
+        providerEvents,
+        fetch: vi.fn() as unknown as typeof fetch,
+      });
+      const handler = vi.fn();
+      provider.inboundProvider.onMessage(handler);
+
+      const results = await provider.handleWebhook({
+        eventType: "sentMessageREAD_v2",
+        statusString: "Read",
+        localMessageId: "local-1",
+        whatsappMessageId: "wamid.status",
+        timestamp: "1764238453",
+        channelPhoneNumber: "+15551234567",
+      });
+
+      expect(results).toEqual([{ kind: "ignored", reason: "channel_mismatch" }]);
+      expect(handler).not.toHaveBeenCalled();
+      await expect(db.selectFrom("whatsapp_provider_events").selectAll().execute()).resolves.toEqual([]);
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("fails template sends clearly when no approved logical mapping exists", async () => {
+    const db = await createTestDb();
+    try {
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        templateMappings: createWhatsAppTemplateMappingRepository(db),
+        fetch: vi.fn() as unknown as typeof fetch,
+      });
+
+      await expect(
+        provider.dmProvider.sendTemplate?.(
+          { kind: "dm", phoneE164: "+15551234567" },
+          {
+            key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+            params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+            fallbackText: "magic link",
+          },
+        ),
+      ).rejects.toThrow("No approved WhatsApp template mapping configured for whatsapp.magic_link");
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("sends logical template mappings through the Wati template endpoint", async () => {
+    const db = await createTestDb();
+    try {
+      const templateMappings = createWhatsAppTemplateMappingRepository(db);
+      await templateMappings.upsertMapping({
+        provider: "wati",
+        logicalKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
+        providerTemplateName: "sketch_magic_link",
+        language: "en_US",
+        status: "approved",
+        parameterMap: {
+          name: "recipientName",
+          bot: "botName",
+          link: "magicLinkUrl",
+        },
+      });
+      const requestFetch = vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            result: true,
+            recipients: [{ local_message_id: "local-template-1", phone_number: "15551234567" }],
+          }),
+        );
+      });
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        templateMappings,
+        fetch: requestFetch as typeof fetch,
+      });
+
+      const sent = await provider.dmProvider.sendTemplate?.(
+        { kind: "dm", phoneE164: "+15551234567" },
+        {
+          key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+          params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+          fallbackText: "magic link",
+        },
+      );
+
+      const [url, init] = firstFetchCall(requestFetch);
+      expect(url.toString()).toBe("https://tenant.wati.io/api/ext/v3/messageTemplates/send");
+      expect(init.headers).toEqual({
+        Authorization: "Bearer wati-token",
+        "Content-Type": "application/json",
+        "User-Agent": WATI_USER_AGENT,
+      });
+      expect(JSON.parse(init.body as string)).toMatchObject({
+        channel: null,
+        template_name: "sketch_magic_link",
+        recipients: [
+          {
+            phone_number: "15551234567",
+            custom_params: [
+              { name: "name", value: "Alice" },
+              { name: "bot", value: "Sketch" },
+              { name: "link", value: "https://sketch.test/magic" },
+            ],
+          },
+        ],
+      });
+      expect(sent).toMatchObject({
+        providerMessageId: "local-template-1",
+        providerConversationId: "dm:+15551234567",
+      });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("includes the configured Wati channel in template sends", async () => {
+    const db = await createTestDb();
+    try {
+      const templateMappings = createWhatsAppTemplateMappingRepository(db);
+      await templateMappings.upsertMapping({
+        provider: "wati",
+        logicalKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
+        providerTemplateName: "sketch_magic_link",
+        language: "en_US",
+        status: "approved",
+      });
+      const requestFetch = vi.fn(async () => {
+        return new Response(JSON.stringify({ recipients: [{ localMessageId: "local-template-1" }] }));
+      });
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        channelPhoneNumber: "+17435002445",
+        logger: createTestLogger(),
+        templateMappings,
+        fetch: requestFetch as typeof fetch,
+      });
+
+      await provider.dmProvider.sendTemplate?.(
+        { kind: "dm", phoneE164: "+15551234567" },
+        {
+          key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+          params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+        },
+      );
+
+      const [, init] = firstFetchCall(requestFetch);
+      expect(JSON.parse(init.body as string)).toMatchObject({
+        channel: "17435002445",
+      });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("surfaces Wati template recipient failures returned with HTTP 200", async () => {
+    const db = await createTestDb();
+    try {
+      const templateMappings = createWhatsAppTemplateMappingRepository(db);
+      await templateMappings.upsertMapping({
+        provider: "wati",
+        logicalKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
+        providerTemplateName: "sketch_magic_link",
+        language: "en_US",
+        status: "approved",
+      });
+      const requestFetch = vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            result: true,
+            error: null,
+            recipients: [
+              {
+                isValidWhatsAppNumber: false,
+                errors: ["invalid recipient"],
+              },
+            ],
+          }),
+        );
+      });
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        templateMappings,
+        fetch: requestFetch as typeof fetch,
+      });
+
+      await expect(
+        provider.dmProvider.sendTemplate?.(
+          { kind: "dm", phoneE164: "+15551234567" },
+          {
+            key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+            params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+          },
+        ),
+      ).rejects.toThrow("Wati template send failed: invalid WhatsApp recipient");
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("does not mark Wati template sends successful without a provider message id", async () => {
+    const db = await createTestDb();
+    try {
+      const templateMappings = createWhatsAppTemplateMappingRepository(db);
+      await templateMappings.upsertMapping({
+        provider: "wati",
+        logicalKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
+        providerTemplateName: "sketch_magic_link",
+        language: "en_US",
+        status: "approved",
+      });
+      const requestFetch = vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            result: true,
+            error: null,
+            recipients: [{ isValidWhatsAppNumber: true, errors: [] }],
+          }),
+        );
+      });
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        templateMappings,
+        fetch: requestFetch as typeof fetch,
+      });
+
+      await expect(
+        provider.dmProvider.sendTemplate?.(
+          { kind: "dm", phoneE164: "+15551234567" },
+          {
+            key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+            params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+          },
+        ),
+      ).rejects.toThrow("Wati template send failed: missing provider message id");
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("defaults template mapping lookup to the default language", async () => {
+    const db = await createTestDb();
+    try {
+      const templateMappings = createWhatsAppTemplateMappingRepository(db);
+      await templateMappings.upsertMapping({
+        provider: "wati",
+        logicalKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
+        providerTemplateName: "sketch_magic_link_en",
+        language: "en_US",
+        status: "approved",
+      });
+      await templateMappings.upsertMapping({
+        provider: "wati",
+        logicalKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
+        providerTemplateName: "sketch_magic_link_hi",
+        language: "hi_IN",
+        status: "approved",
+      });
+      const requestFetch = vi.fn(async () => {
+        return new Response(JSON.stringify({ recipients: [{ localMessageId: "local-template-1" }] }));
+      });
+      const provider = createWatiWhatsAppProvider({
+        apiEndpoint: "https://tenant.wati.io",
+        accessToken: "wati-token",
+        webhookToken: "webhook-token",
+        logger: createTestLogger(),
+        templateMappings,
+        fetch: requestFetch as typeof fetch,
+      });
+
+      await provider.dmProvider.sendTemplate?.(
+        { kind: "dm", phoneE164: "+15551234567" },
+        {
+          key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+          params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+        },
+      );
+
+      const [, init] = firstFetchCall(requestFetch);
+      expect(JSON.parse(init.body as string)).toMatchObject({
+        template_name: "sketch_magic_link_en",
+      });
+    } finally {
+      await db.destroy();
+    }
   });
 });

@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 121;
+const EXPECTED_MIGRATION_COUNT = 124;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -143,17 +143,20 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[107]).toBe("112-agent-output-structured-payload");
     expect(names[108]).toBe("113-indexed-file-all-day-flag");
     expect(names[109]).toBe("114-agent-output-deliveries");
-    expect(names[110]).toBe("115-tasks");
-    expect(names[111]).toBe("116-tasks-owner");
-    expect(names[112]).toBe("117-sub-entities");
-    expect(names[113]).toBe("118-tasks-assignee-name");
-    expect(names[114]).toBe("119-milestone-series-and-value-signature");
-    expect(names[115]).toBe("120-work-cycles");
-    expect(names[116]).toBe("121-work-cycles-connector");
-    expect(names[117]).toBe("122-work-cycles-connector-key");
-    expect(names[118]).toBe("123-container-name-qualification");
-    expect(names[119]).toBe("124-entity-provenance-tier");
-    expect(names[120]).toBe("125-trunk-name-embeddings");
+    expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
+    expect(names[111]).toBe("116-connector-credential-source");
+    expect(names[112]).toBe("117-conversation-message-window-index");
+    expect(names[113]).toBe("118-tasks");
+    expect(names[114]).toBe("119-tasks-owner");
+    expect(names[115]).toBe("120-sub-entities");
+    expect(names[116]).toBe("121-tasks-assignee-name");
+    expect(names[117]).toBe("122-milestone-series-and-value-signature");
+    expect(names[118]).toBe("123-work-cycles");
+    expect(names[119]).toBe("124-work-cycles-connector");
+    expect(names[120]).toBe("125-work-cycles-connector-key");
+    expect(names[121]).toBe("126-container-name-qualification");
+    expect(names[122]).toBe("127-entity-provenance-tier");
+    expect(names[123]).toBe("128-trunk-name-embeddings");
   });
 
   it("creates the task assignee_name column", async () => {
@@ -591,6 +594,15 @@ describe("runMigrations on Postgres — full sequence", () => {
         AND column_name = 'rollup_group_id'
     `.execute(db);
     expect(columns.rows).toHaveLength(1);
+
+    const connectorColumns = await sql<{ column_name: string }>`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'connector_configs'
+        AND column_name = 'credential_source'
+    `.execute(db);
+    expect(connectorColumns.rows).toHaveLength(1);
   });
 
   it("creates CRM object summaries table", async () => {
@@ -737,6 +749,16 @@ describe("runMigrations on Postgres — full sequence", () => {
         WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
       `.execute(db);
       expect(result.rows).toHaveLength(0);
+    }
+  });
+
+  it("creates WhatsApp provider event and template mapping tables", async () => {
+    for (const table of ["whatsapp_provider_events", "whatsapp_template_mappings"]) {
+      const result = await sql<{ table_name: string }>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
     }
   });
 

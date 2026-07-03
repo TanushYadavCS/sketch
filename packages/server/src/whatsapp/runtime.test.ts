@@ -41,6 +41,11 @@ function createDmProvider(id: string): WhatsAppDmProvider {
       providerConversationId: providerConversationId(target),
       providerTimestamp: null,
     })),
+    sendTemplate: vi.fn(async (target) => ({
+      providerMessageId: `${id}-template-sent`,
+      providerConversationId: providerConversationId(target),
+      providerTimestamp: null,
+    })),
   };
 }
 
@@ -164,5 +169,45 @@ describe("createWhatsAppRuntime", () => {
     expect(handler).toHaveBeenNthCalledWith(1, expect.objectContaining({ kind: "group", providerId: "baileys" }));
     expect(handler).toHaveBeenNthCalledWith(2, expect.objectContaining({ kind: "dm", providerId: "wati" }));
     expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "dm", providerId: "baileys" }));
+  });
+
+  it("uses provider templates for configured DM providers without affecting Baileys groups", async () => {
+    const dmProvider = createDmProvider("wati");
+    const groupProvider = createGroupProvider("baileys");
+    const runtime = createWhatsAppRuntime({
+      dmProviderId: "wati",
+      groupProviderId: "baileys",
+      dmProviders: [dmProvider],
+      groupProviders: [groupProvider],
+      inboundProviders: [],
+      logger: createTestLogger(),
+    });
+
+    await runtime.sendTemplate({ kind: "dm", phoneE164: "+111" }, { key: "whatsapp.magic_link", params: {} });
+    await runtime.sendText({ kind: "group", groupId: "group@g.us" }, "group");
+
+    expect(dmProvider.sendTemplate).toHaveBeenCalledOnce();
+    expect(groupProvider.sendText).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to text templates for providers without official template support", async () => {
+    const dmProvider = createDmProvider("baileys");
+    dmProvider.sendTemplate = undefined;
+    dmProvider.capabilities.templates = false;
+    const runtime = createWhatsAppRuntime({
+      dmProviderId: "baileys",
+      groupProviderId: "none",
+      dmProviders: [dmProvider],
+      groupProviders: [],
+      inboundProviders: [],
+      logger: createTestLogger(),
+    });
+
+    await runtime.sendTemplate(
+      { kind: "dm", phoneE164: "+111" },
+      { key: "whatsapp.magic_link", params: {}, fallbackText: "fallback" },
+    );
+
+    expect(dmProvider.sendText).toHaveBeenCalledWith({ kind: "dm", phoneE164: "+111" }, "fallback");
   });
 });

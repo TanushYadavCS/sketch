@@ -601,11 +601,14 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
 
     validateCredentials: validateTeamsCredentials,
 
-    async *sync({ credentials, scopeConfig, cursor, logger, ownerEmail, onSourceItemRemoved }) {
+    async *sync({ credentials, accessTokenProvider, scopeConfig, cursor, logger, ownerEmail, onSourceItemRemoved }) {
       assertOAuth(credentials);
-      const valid = await ensureValidMicrosoftToken(credentials, { scope: TEAMS_MICROSOFT_SCOPE });
+      const valid = accessTokenProvider
+        ? credentials
+        : await ensureValidMicrosoftToken(credentials, { scope: TEAMS_MICROSOFT_SCOPE });
       const graph = createMicrosoftGraphClient(valid, {
         scope: TEAMS_MICROSOFT_SCOPE,
+        accessTokenProvider,
         sleep: options.sleep,
         retryBaseMs: options.retryBaseMs,
       });

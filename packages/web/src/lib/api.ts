@@ -793,6 +793,7 @@ export interface ConnectorConfig {
   id: string;
   connectorType: string;
   authType: string;
+  credentialSource?: "local" | "canvas";
   scopeConfig: Record<string, unknown>;
   hierarchyLevels?: HierarchyLevel[] | null;
 
@@ -1089,6 +1090,26 @@ export interface AgentDeliveryConfig {
   targetType: "channel" | "dm" | "group";
   targetId: string;
   label: string | null;
+  mentions?: AgentDeliveryMention[];
+}
+
+export interface AgentDeliveryMention {
+  platform: "slack" | "whatsapp";
+  targetId: string;
+  label: string | null;
+}
+
+export interface AgentSourceConfig {
+  platform: "slack" | "whatsapp";
+  targetType: "channel" | "group";
+  targetId: string;
+  label: string | null;
+}
+
+export interface AgentSourceConfigMeta {
+  maxSources: number;
+  supportsSlackChannels: boolean;
+  supportsWhatsAppGroups: boolean;
 }
 
 export interface AgentConfig {
@@ -1104,6 +1125,8 @@ export interface AgentConfig {
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  sourceConfig: AgentSourceConfigMeta | null;
+  sources: AgentSourceConfig[];
   sections: AgentSectionConfig[];
 }
 
@@ -1120,6 +1143,7 @@ export interface AgentOutputItem {
   actionLabel: string | null;
   actionPrompt: string | null;
   sourceUrl: string | null;
+  structuredPayload: Record<string, unknown> | null;
   knowledgeRefs: DailyBriefKnowledgeRefs;
   sortOrder: number;
 }
@@ -1156,6 +1180,12 @@ export interface AgentConfigPatch {
   sections?: Record<string, boolean>;
   focus?: string | null;
   delivery?: AgentDeliveryConfig | null;
+  sources?: AgentSourceConfig[];
+}
+
+export interface AgentOutputsResponse {
+  outputs: AgentOutput[];
+  nextCursor: string | null;
 }
 
 export type WebChatMessagePart =
@@ -1273,6 +1303,13 @@ export const api = {
         `/api/agents/${agentKey}/runs`,
         { method: "POST", body: JSON.stringify({}) },
       );
+    },
+    outputs(agentKey: string, opts?: { limit?: number; cursor?: string | null }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.cursor) params.set("cursor", opts.cursor);
+      const qs = params.toString();
+      return request<AgentOutputsResponse>(`/api/agents/${agentKey}/outputs${qs ? `?${qs}` : ""}`);
     },
   },
   webChat: {
@@ -1538,6 +1575,41 @@ export const api = {
       scopeConfig?: Record<string, unknown>;
     }) {
       return request<{ connector: { id: string; connectorType: string; syncStatus: string } }>("/api/connectors", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    credentialSource() {
+      return request<{
+        mode: "local" | "canvas";
+        canvasConfigured: boolean;
+        canvasCredentialImportConfigured: boolean;
+        publicKeyId: string | null;
+      }>("/api/connectors/credential-source");
+    },
+    canvasSuggestion(appId: string, accountId?: string | null, source?: string | null) {
+      const params = new URLSearchParams({ appId });
+      if (accountId) params.set("accountId", accountId);
+      if (source) params.set("source", source);
+      return request<{ suggestion: { connectorType: string; appId: string; accountId?: string } | null }>(
+        `/api/connectors/canvas/suggestions?${params.toString()}`,
+      );
+    },
+    canvasConnect(data: { connectorType: string; callbackUrl: string }) {
+      return request<{ redirectUrl: string }>("/api/connectors/canvas/connect", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    canvasImport(data: { connectorType: string; accountId?: string; scopeConfig?: Record<string, unknown> }) {
+      return request<{
+        connector: {
+          id: string;
+          connectorType: string;
+          syncStatus: string;
+          alreadyConnected?: boolean;
+        };
+      }>("/api/connectors/canvas/import", {
         method: "POST",
         body: JSON.stringify(data),
       });

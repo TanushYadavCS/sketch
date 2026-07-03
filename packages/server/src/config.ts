@@ -66,6 +66,8 @@ export const configSchema = z.object({
   WATI_ACCESS_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   WATI_WEBHOOK_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   WATI_CHANNEL_PHONE_NUMBER: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  MANAGED_WHATSAPP_PLATFORM_URL: z.preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
+  MANAGED_WHATSAPP_TENANT_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
   // Security
   ENCRYPTION_KEY: z.string().optional(),
@@ -79,6 +81,10 @@ export const configSchema = z.object({
   // Managed mode
   MANAGED_URL: z.string().optional(),
   MANAGED_AUTH_SECRET: z.string().optional(),
+  CONNECTOR_CREDENTIAL_SOURCE: z.enum(["local", "canvas"]).default("local"),
+  CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  CANVAS_CREDENTIAL_PRIVATE_KEY_PATH: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  CANVAS_CREDENTIAL_PUBLIC_KEY_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
   // Zoho CRM OAuth
   ZOHO_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
@@ -176,6 +182,16 @@ export function validateConfig(config: Config): void {
     }
     if (!config.WATI_WEBHOOK_TOKEN) {
       console.error("WHATSAPP_DM_PROVIDER=wati requires WATI_WEBHOOK_TOKEN");
+      process.exit(1);
+    }
+  }
+  if (config.WHATSAPP_DM_PROVIDER === "managed") {
+    if (!config.MANAGED_WHATSAPP_PLATFORM_URL) {
+      console.error("WHATSAPP_DM_PROVIDER=managed requires MANAGED_WHATSAPP_PLATFORM_URL");
+      process.exit(1);
+    }
+    if (!config.MANAGED_WHATSAPP_TENANT_TOKEN) {
+      console.error("WHATSAPP_DM_PROVIDER=managed requires MANAGED_WHATSAPP_TENANT_TOKEN");
       process.exit(1);
     }
   }

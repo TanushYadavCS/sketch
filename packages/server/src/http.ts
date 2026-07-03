@@ -56,6 +56,7 @@ import { createInboxMessagesRepository } from "./db/repositories/inbox-messages"
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createProviderIdentityRepository } from "./db/repositories/provider-identities";
 import { createSettingsRepository } from "./db/repositories/settings";
+import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
 
 import type { McpServerConfig, RunAgentParams, RunAgentResult } from "./agent/runner";
 import { agentRoutes, dailyBriefRoutes } from "./agents/routes";
@@ -79,13 +80,17 @@ import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
 import type { WhatsAppBot } from "./whatsapp/bot";
 import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
+import type { ManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import type { WatiWhatsAppProvider } from "./whatsapp/providers/wati";
 import type { WhatsAppRuntime } from "./whatsapp/runtime";
+import { buildMagicLinkTemplate } from "./whatsapp/templates";
+import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
 
 interface AppDeps {
   whatsapp?: WhatsAppBot;
   whatsappRuntime?: WhatsAppRuntime;
   watiWebhook?: WatiWhatsAppProvider;
+  managedWhatsapp?: ManagedWhatsAppProvider;
   getSlack?: () => SlackBot | null;
   logger?: Logger;
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
@@ -101,7 +106,12 @@ interface AppDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: QueueManager;
-  sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
+  sendDm?: (params: {
+    userId: string;
+    platform: string;
+    message: string;
+    template?: WhatsAppTemplateRequest;
+  }) => Promise<{
     channelId: string;
     messageRef: string;
   }>;
@@ -118,6 +128,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const channels = createChannelRepository(db);
   const whatsappGroups = createWhatsAppGroupRepository(db);
   const conversations = createConversationRepository(db);
+  const whatsappTemplateMappings = createWhatsAppTemplateMappingRepository(db);
   const inboxMessages = createInboxMessagesRepository(db);
   const connectors = createConnectorRepository(db, config.ENCRYPTION_KEY);
   const entityRepo = createEntityRepository(db);
@@ -197,8 +208,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     });
   }
 
-  if (deps?.watiWebhook) {
-    app.route("/whatsapp/wati", watiWebhookRoutes(deps.watiWebhook, logger));
+  if (deps?.watiWebhook && deps.queueManager) {
+    app.route("/whatsapp/wati", watiWebhookRoutes(deps.watiWebhook, deps.queueManager, logger));
   }
 
   app.use(
@@ -259,13 +270,35 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       }
     }
 
-    if (deps?.whatsappRuntime && user.whatsapp_number) {
+    if (deps?.sendDm && user.whatsapp_number) {
       try {
-        const channelId = phoneE164ToWhatsAppJid(user.whatsapp_number);
         const text = `Here's your sign-in link for ${botName}:\n${magicLinkUrl}\n\nThis link expires in 15 minutes and can only be used once.`;
-        await deps.whatsappRuntime.sendText(
-          { kind: "dm", phoneE164: user.whatsapp_number, providerConversationId: channelId },
-          text,
+        await deps.sendDm({
+          userId: user.id,
+          platform: "whatsapp",
+          message: text,
+          template: buildMagicLinkTemplate({
+            recipientName: user.name,
+            botName,
+            magicLinkUrl,
+            fallbackText: text,
+          }),
+        });
+        channels.push("whatsapp");
+      } catch (err) {
+        logger.warn({ err }, "Failed to send magic link via WhatsApp");
+      }
+    } else if (deps?.whatsappRuntime && user.whatsapp_number) {
+      try {
+        const text = `Here's your sign-in link for ${botName}:\n${magicLinkUrl}\n\nThis link expires in 15 minutes and can only be used once.`;
+        await deps.whatsappRuntime.sendTemplate(
+          { kind: "dm", phoneE164: user.whatsapp_number },
+          buildMagicLinkTemplate({
+            recipientName: user.name,
+            botName,
+            magicLinkUrl,
+            fallbackText: text,
+          }),
         );
         channels.push("whatsapp");
       } catch (err) {
@@ -395,6 +428,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     "/api/channels",
     channelRoutes({
       whatsapp: deps?.whatsapp,
+      watiProvider: deps?.watiWebhook,
+      whatsappTemplateMappings,
       getSlack: deps?.getSlack,
       whatsappGroups,
       onSlackDisconnect: deps?.onSlackDisconnect,
@@ -479,6 +514,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
             }
           : undefined,
         sendDm: deps?.sendDm,
+        managedWhatsappInbound: deps?.managedWhatsapp,
         whatsappStatus: whatsapp
           ? () => ({
               connected: whatsapp.isConnected,

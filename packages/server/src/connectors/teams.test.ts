@@ -9,6 +9,10 @@ import { createTeamsConnector } from "./teams";
 import type { OAuthCredentials, SyncedItem } from "./types";
 
 const logger = createTestLogger();
+const TEAMS_EVENT_START = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+const TEAMS_EVENT_END = new Date(TEAMS_EVENT_START.getTime() + 60 * 60 * 1000);
+const TEAMS_EVENT_MODIFIED = new Date(TEAMS_EVENT_END.getTime() + 5 * 60 * 1000);
+const TEAMS_TRANSCRIPT_CREATED = new Date(TEAMS_EVENT_START.getTime() + 45 * 60 * 1000);
 
 describe("Teams connector", () => {
   let db: Kysely<DB> | null = null;
@@ -59,7 +63,7 @@ describe("Teams connector", () => {
       fileName: "Acme kickoff",
       fileType: "meeting_transcript",
       contentCategory: "document",
-      sourceCreatedAt: "2026-06-01T10:00:00.000Z",
+      sourceCreatedAt: TEAMS_EVENT_START.toISOString(),
     });
     expect(items[0].content).toContain("Jane Doe: Confirmed the launch plan.");
     expect(items[0].attendees).toEqual([
@@ -219,7 +223,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 60 },
+        scopeConfig: { initialDays: 3650 },
         cursor: null,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -291,7 +295,7 @@ describe("Teams connector", () => {
     const items = await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 60 },
+        scopeConfig: { initialDays: 3650 },
         cursor,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -309,7 +313,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 60 },
+        scopeConfig: { initialDays: 3650 },
         cursor: null,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -328,7 +332,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 60 },
+        scopeConfig: { initialDays: 3650 },
         cursor,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -349,7 +353,7 @@ describe("Teams connector", () => {
       connectorType: "teams",
       authType: "oauth",
       credentials: JSON.stringify(validCredentials()),
-      scopeConfig: JSON.stringify({ initialDays: 60 }),
+      scopeConfig: JSON.stringify({ initialDays: 3650 }),
       createdBy: "owner",
     });
     mockTeamsGraph();
@@ -414,7 +418,7 @@ describe("Teams connector", () => {
       connectorType: "teams",
       authType: "oauth",
       credentials: JSON.stringify(validCredentials()),
-      scopeConfig: JSON.stringify({ initialDays: 60 }),
+      scopeConfig: JSON.stringify({ initialDays: 3650 }),
       createdBy: "owner",
     });
     mockTeamsGraph();
@@ -534,7 +538,9 @@ function mockTeamsGraph() {
     }
 
     if (url.pathname === "/v1.0/me/onlineMeetings/meeting-good/transcripts") {
-      return jsonResponse({ value: [{ id: "transcript-good", createdDateTime: "2026-06-01T10:45:00Z" }] });
+      return jsonResponse({
+        value: [{ id: "transcript-good", createdDateTime: TEAMS_TRANSCRIPT_CREATED.toISOString() }],
+      });
     }
 
     if (url.pathname === "/v1.0/me/onlineMeetings/meeting-good/recordings") {
@@ -601,9 +607,9 @@ function teamsEvent(id: string, subject: string, joinUrl: string) {
     onlineMeeting: { joinUrl },
     organizer: { emailAddress: { name: "Owner User", address: "owner@canvasx.ai" } },
     attendees: [{ emailAddress: { name: "Jane Doe", address: "jane@example.com" } }],
-    start: { dateTime: "2026-06-01T10:00:00Z", timeZone: "UTC" },
-    end: { dateTime: "2026-06-01T11:00:00Z", timeZone: "UTC" },
-    lastModifiedDateTime: "2026-06-01T11:05:00Z",
+    start: { dateTime: TEAMS_EVENT_START.toISOString(), timeZone: "UTC" },
+    end: { dateTime: TEAMS_EVENT_END.toISOString(), timeZone: "UTC" },
+    lastModifiedDateTime: TEAMS_EVENT_MODIFIED.toISOString(),
   };
 }
 

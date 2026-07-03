@@ -7,16 +7,20 @@ import type { Config } from "../config";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { type ScheduledTaskRow, createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
+import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
+import { createWorkflowDeliveryCapture } from "../scheduler/delivery-capture";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
-import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
+import { buildProactiveUpdateTemplate } from "../whatsapp/templates";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { executeAutomation } from "../workflows/runtime";
 
@@ -206,11 +210,31 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
     throw new WorkflowApiError("NOT_CONNECTED", "WhatsApp is not connected");
   }
   const delivery: Record<string, unknown> = { mode: "target", platform: "whatsapp", target: resolved.targetId };
+  const capture = deps.whatsappRuntime
+    ? createWorkflowDeliveryCapture({
+        conversations: createConversationRepository(deps.db),
+        settingsRepo: createSettingsRepository(deps.db),
+        logger: deps.logger,
+      })
+    : null;
   return {
     delivery,
     sendMessage: async (text: string) => {
       if (deps.whatsappRuntime) {
-        await deps.whatsappRuntime.sendText(whatsappTargetFromDeliveryTarget(resolved.targetId), text);
+        const target = whatsappTargetFromDeliveryTarget(resolved.targetId);
+        const sent =
+          target.kind === "dm"
+            ? await deps.whatsappRuntime.sendTemplate(target, buildProactiveUpdateTemplate({ messageSummary: text }))
+            : await deps.whatsappRuntime.sendText(target, text);
+        if (sent?.providerMessageId) {
+          delivery.messageRef = sent.providerMessageId;
+          await capture?.captureWhatsApp({
+            deliveryTarget: target.kind === "dm" ? whatsappDeliveryTargetFromTarget(target) : resolved.targetId,
+            messageRef: sent.providerMessageId,
+            providerTimestamp: sent.providerTimestamp,
+            text,
+          });
+        }
       } else {
         await deps.whatsapp?.sendText(resolved.targetId, text);
       }

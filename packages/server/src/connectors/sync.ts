@@ -20,6 +20,7 @@ import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
+import { resolveConnectorCredentials } from "./credential-providers";
 import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
 import {
@@ -42,13 +43,7 @@ import { getSyncIdentityForItem, syncIdentityKey } from "./sync-identity";
 import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
 import { buildSyncNameResolver } from "./sync-name-resolution";
 import { reconcileConnectorSync, removeConnectorSourceItems } from "./sync-reconcile";
-import {
-  extractErrorMessage,
-  parseCredentials,
-  runWithConcurrency,
-  serializeCredentials,
-  truncateErrorMessage,
-} from "./sync-utils";
+import { extractErrorMessage, runWithConcurrency, serializeCredentials, truncateErrorMessage } from "./sync-utils";
 import type { ConnectorCredentials, ConnectorType, SyncResult } from "./types";
 
 // ── Sync progress tracking (in-memory, ephemeral) ──────────────────────────
@@ -125,6 +120,9 @@ export async function runConnectorSync(
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
       | "ENCRYPTION_KEY"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
+      | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
       | "OUTLOOK_INITIAL_LOOKBACK_DAYS"
       | "OUTLOOK_MAX_INFLIGHT"
       | "TEAMS_INITIAL_LOOKBACK_DAYS"
@@ -157,13 +155,8 @@ export async function runConnectorSync(
     throw new Error(`Connector config not found: ${connectorConfigId}`);
   }
 
-  const connector = getConnector(config.connector_type as ConnectorType);
-  let credentials = await resolveConnectorCredentialsForSync({
-    db,
-    connectorType: config.connector_type as ConnectorType,
-    credentials: parseCredentials(config.credentials),
-    appConfig,
-  });
+  const connectorType = config.connector_type as ConnectorType;
+  const connector = getConnector(connectorType);
   const storedScopeConfig = JSON.parse(config.scope_config) as Record<string, unknown>;
   const scopeConfig =
     config.connector_type === "outlook"
@@ -199,7 +192,21 @@ export async function runConnectorSync(
   activeSyncs.set(config.id, progress);
 
   try {
-    if (credentials.type === "oauth" && connector.refreshTokens) {
+    const resolvedCredentials = await resolveConnectorCredentials({
+      db,
+      config,
+      appConfig: appConfig ?? {},
+      ownerEmail,
+      logger: syncLogger,
+    });
+    let credentials = await resolveConnectorCredentialsForSync({
+      db,
+      connectorType,
+      credentials: resolvedCredentials.credentials,
+      appConfig,
+    });
+
+    if (resolvedCredentials.credentialSource === "local" && credentials.type === "oauth" && connector.refreshTokens) {
       const refreshed = await connector.refreshTokens(credentials);
       if (refreshed) {
         credentials = refreshed;
@@ -224,7 +231,6 @@ export async function runConnectorSync(
     const dirtyCrmRollupGroupIds = new Set<string>();
     let syncReconciled = false;
 
-    const connectorType = config.connector_type as ConnectorType;
     const existingHashes = await loadExistingContentHashes(db, connectorType, config.id);
     const resolveNameToEmail = await buildSyncNameResolver(db);
     const syncRunId = randomUUID();
@@ -245,6 +251,7 @@ export async function runConnectorSync(
     for await (const item of connector.sync({
       connectorConfigId: config.id,
       credentials,
+      accessTokenProvider: resolvedCredentials.accessTokenProvider,
       scopeConfig,
       cursor: config.sync_cursor,
       logger: syncLogger,
@@ -406,6 +413,7 @@ export async function runConnectorSync(
 
     result.newCursor = await connector.getCursor({
       credentials,
+      accessTokenProvider: resolvedCredentials.accessTokenProvider,
       scopeConfig,
       currentCursor: config.sync_cursor,
       logger: syncLogger,
@@ -509,6 +517,9 @@ export interface SyncSchedulerDeps {
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
+      | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
       | "OUTLOOK_INITIAL_LOOKBACK_DAYS"
       | "OUTLOOK_MAX_INFLIGHT"
       | "TEAMS_INITIAL_LOOKBACK_DAYS"

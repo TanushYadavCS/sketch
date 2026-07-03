@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import { agentRoutes } from "./routes";
-import { AgentDeliveryTargetError, type AgentRunService } from "./service";
+import { AgentDeliveryTargetError, type AgentRunService, AgentSourceTargetError } from "./service";
 
 function createRoutesTestApp(service: AgentRunService) {
   const app = new Hono();
@@ -18,10 +18,13 @@ function createService(overrides: Record<string, unknown> = {}) {
   return {
     resolveUserId: vi.fn(async () => "user-1"),
     resolveDeliveryConfigForUser: vi.fn(async (_userId, delivery) => delivery),
+    listDefinitions: vi.fn(() => [{ key: "daily-brief" }]),
+    listOutputsForUser: vi.fn(async () => ({ outputs: [], nextCursor: null })),
     updateConfigForUser: vi.fn(async () => ({ agentKey: "daily-brief", delivery: null })),
     ...overrides,
   } as unknown as AgentRunService & {
     resolveDeliveryConfigForUser: ReturnType<typeof vi.fn>;
+    listOutputsForUser: ReturnType<typeof vi.fn>;
     updateConfigForUser: ReturnType<typeof vi.fn>;
   };
 }
@@ -34,6 +37,7 @@ describe("agentRoutes", () => {
       targetType: "dm" as const,
       targetId: "U_SELF",
       label: "Agent User <user@example.com>",
+      mentions: [{ platform: "slack" as const, targetId: "U_OWNER", label: "Owner" }],
     };
     const service = createService({
       resolveDeliveryConfigForUser: vi.fn(async () => resolved),
@@ -51,6 +55,7 @@ describe("agentRoutes", () => {
           targetType: "dm",
           targetId: "U_SELF",
           label: "Spoofed",
+          mentions: [{ platform: "slack", targetId: "U_OWNER", label: "Spoofed Owner" }],
         },
       }),
     });
@@ -61,6 +66,38 @@ describe("agentRoutes", () => {
       "user-1",
       expect.objectContaining({ delivery: resolved }),
     );
+    expect(service.resolveDeliveryConfigForUser).toHaveBeenCalledWith(
+      "user-1",
+      expect.objectContaining({
+        mentions: [{ platform: "slack", targetId: "U_OWNER", label: "Spoofed Owner" }],
+      }),
+    );
+  });
+
+  it("rejects delivery mentions for the wrong platform", async () => {
+    const service = createService();
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request("/api/agents/daily-brief/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        delivery: {
+          enabled: true,
+          platform: "slack",
+          targetType: "channel",
+          targetId: "C_DAILY",
+          label: "#daily",
+          mentions: [{ platform: "whatsapp", targetId: "+15551234567", label: "Ada" }],
+        },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR", message: "delivery mention platform must match delivery.platform" },
+    });
+    expect(service.updateConfigForUser).not.toHaveBeenCalled();
   });
 
   it("rejects unauthorized delivery config before saving it", async () => {
@@ -90,5 +127,48 @@ describe("agentRoutes", () => {
     });
     expect(res.status).toBe(400);
     expect(service.updateConfigForUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects unauthorized source config before saving it", async () => {
+    const service = createService({
+      updateConfigForUser: vi.fn(async () => {
+        throw new AgentSourceTargetError("Slack channel is not available for this user");
+      }),
+    });
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request("/api/agents/daily-brief/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [
+          {
+            platform: "slack",
+            targetType: "channel",
+            targetId: "C_PRIVATE",
+            label: "#private",
+          },
+        ],
+      }),
+    });
+
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR", message: "Slack channel is not available for this user" },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("lists completed outputs for an agent", async () => {
+    const service = createService({
+      listDefinitions: vi.fn(() => [{ key: "daily-brief" }]),
+      listOutputsForUser: vi.fn(async () => ({ outputs: [{ id: "out-1" }], nextCursor: "out-1" })),
+    });
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request("/api/agents/daily-brief/outputs?limit=10&cursor=old");
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ outputs: [{ id: "out-1" }], nextCursor: "out-1" });
+    expect(service.listOutputsForUser).toHaveBeenCalledWith("daily-brief", "user-1", { limit: 10, cursor: "old" });
   });
 });

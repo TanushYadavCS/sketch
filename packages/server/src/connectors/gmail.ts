@@ -5,7 +5,13 @@ import { shouldSuppressEmail } from "./email";
 import { updateReciprocitySet } from "./email";
 import { ensureValidToken } from "./google-drive";
 import { runWithConcurrency } from "./sync-utils";
-import type { Connector, ConnectorCredentials, OAuthCredentials, SuppressedEmailRecord } from "./types";
+import type {
+  AccessTokenProvider,
+  Connector,
+  ConnectorCredentials,
+  OAuthCredentials,
+  SuppressedEmailRecord,
+} from "./types";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -16,6 +22,8 @@ const DEFAULT_MAX_MESSAGES = 500;
 const DEFAULT_RECIPROCITY_DAYS = 365;
 const DEFAULT_MAX_RECIPROCITY_SENT = 250;
 const MESSAGE_FETCH_CONCURRENCY = 12;
+
+type GmailTokenSource = string | AccessTokenProvider;
 
 interface GmailMessageRef {
   id: string;
@@ -107,9 +115,10 @@ function withReciprocity<T extends GmailCursor>(cursor: T, reciprocity: Readonly
 
 async function gmailRequest(
   path: string,
-  accessToken: string,
+  accessToken: GmailTokenSource,
   opts?: { params?: Record<string, string | string[]> },
   attempt = 1,
+  tokenRefreshed = false,
 ): Promise<unknown> {
   const url = new URL(`${GMAIL_API}${path}`);
   for (const [key, value] of Object.entries(opts?.params ?? {})) {
@@ -124,14 +133,16 @@ async function gmailRequest(
 
   let response: Response;
   try {
+    const token =
+      typeof accessToken === "string" ? accessToken : (await accessToken({ forceRefresh: tokenRefreshed })).accessToken;
     response = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
     if (attempt < MAX_RETRIES) {
       await new Promise((resolve) => setTimeout(resolve, RETRY_BASE_MS * 2 ** (attempt - 1)));
-      return gmailRequest(path, accessToken, opts, attempt + 1);
+      return gmailRequest(path, accessToken, opts, attempt + 1, tokenRefreshed);
     }
     throw err;
   }
@@ -141,12 +152,15 @@ async function gmailRequest(
       const retryAfter = response.headers.get("Retry-After");
       const waitMs = retryAfter ? Number.parseInt(retryAfter, 10) * 1000 : RETRY_BASE_MS * 2 ** (attempt - 1);
       await new Promise((resolve) => setTimeout(resolve, waitMs));
-      return gmailRequest(path, accessToken, opts, attempt + 1);
+      return gmailRequest(path, accessToken, opts, attempt + 1, tokenRefreshed);
     }
   }
 
   if (!response.ok) {
     const body = await response.text();
+    if (response.status === 401 && typeof accessToken !== "string" && !tokenRefreshed) {
+      return gmailRequest(path, accessToken, opts, attempt, true);
+    }
     throw new Error(`Gmail API ${path} failed (${response.status}): ${body}`);
   }
 
@@ -240,7 +254,7 @@ export function toNormalizedEmail(message: GmailMessage, ownerEmail: string | nu
 }
 
 async function listMessageRefs(
-  accessToken: string,
+  accessToken: GmailTokenSource,
   params: Record<string, string>,
   maxMessages: number,
 ): Promise<{ refs: GmailMessageRef[]; nextPageToken?: string }> {
@@ -261,7 +275,7 @@ async function listMessageRefs(
 }
 
 async function getMessage(
-  accessToken: string,
+  accessToken: GmailTokenSource,
   id: string,
   opts: { format?: "full" | "metadata"; metadataHeaders?: string[] } = {},
 ): Promise<GmailMessage> {
@@ -275,7 +289,7 @@ async function getMessage(
 }
 
 async function getNormalizedMessages(
-  accessToken: string,
+  accessToken: GmailTokenSource,
   refs: GmailMessageRef[],
   ownerEmail: string | null,
   logger: Logger,
@@ -302,13 +316,13 @@ async function getNormalizedMessages(
   return messages.filter((message): message is NormalizedEmail => Boolean(message));
 }
 
-async function getProfileHistoryId(accessToken: string): Promise<string | null> {
+async function getProfileHistoryId(accessToken: GmailTokenSource): Promise<string | null> {
   const profile = (await gmailRequest("/users/me/profile", accessToken)) as { historyId?: string };
   return profile.historyId ?? null;
 }
 
 async function loadRecentSentMessages(
-  accessToken: string,
+  accessToken: GmailTokenSource,
   ownerEmail: string | null,
   scopeConfig: Record<string, unknown>,
   logger: Logger,
@@ -364,7 +378,7 @@ async function* emitFilteredEmails(
 
 async function* syncFullMailbox(
   connectorConfigId: string,
-  accessToken: string,
+  accessToken: GmailTokenSource,
   scopeConfig: Record<string, unknown>,
   ownerEmail: string | null,
   logger: Logger,
@@ -405,7 +419,7 @@ async function* syncFullMailbox(
   yield* emitFilteredEmails(connectorConfigId, emails, reciprocity, onEmailSuppressed);
 }
 
-async function listHistoryMessageRefs(accessToken: string, historyId: string): Promise<GmailMessageRef[]> {
+async function listHistoryMessageRefs(accessToken: GmailTokenSource, historyId: string): Promise<GmailMessageRef[]> {
   const refs: GmailMessageRef[] = [];
   const seen = new Set<string>();
   let pageToken: string | undefined;
@@ -431,7 +445,7 @@ async function listHistoryMessageRefs(accessToken: string, historyId: string): P
 
 async function* syncIncrementalMailbox(
   connectorConfigId: string,
-  accessToken: string,
+  accessToken: GmailTokenSource,
   cursor: GmailCursor,
   scopeConfig: Record<string, unknown>,
   ownerEmail: string | null,
@@ -487,16 +501,17 @@ export function createGmailConnector(): Connector {
       logger,
       ownerEmail,
       onEmailSuppressed,
+      accessTokenProvider,
     }) {
       assertOAuth(credentials);
-      const valid = await ensureValidToken(credentials);
+      const accessToken = accessTokenProvider ?? (await ensureValidToken(credentials)).access_token;
       const parsedCursor = parseCursor(cursor);
       nextCursor = null;
 
       if (parsedCursor?.mode === "list") {
         yield* syncFullMailbox(
           connectorConfigId,
-          valid.access_token,
+          accessToken,
           scopeConfig,
           ownerEmail ?? null,
           logger,
@@ -511,7 +526,7 @@ export function createGmailConnector(): Connector {
         return;
       }
 
-      const startHistoryId = (await getProfileHistoryId(valid.access_token)) ?? parsedCursor?.historyId;
+      const startHistoryId = (await getProfileHistoryId(accessToken)) ?? parsedCursor?.historyId;
       if (!startHistoryId) {
         throw new Error("Gmail profile did not include historyId");
       }
@@ -519,7 +534,7 @@ export function createGmailConnector(): Connector {
       if (parsedCursor) {
         const reciprocity = yield* syncIncrementalMailbox(
           connectorConfigId,
-          valid.access_token,
+          accessToken,
           parsedCursor,
           scopeConfig,
           ownerEmail ?? null,
@@ -536,7 +551,7 @@ export function createGmailConnector(): Connector {
       } else {
         yield* syncFullMailbox(
           connectorConfigId,
-          valid.access_token,
+          accessToken,
           scopeConfig,
           ownerEmail ?? null,
           logger,
@@ -551,11 +566,11 @@ export function createGmailConnector(): Connector {
       }
     },
 
-    async getCursor({ credentials }) {
+    async getCursor({ credentials, accessTokenProvider }) {
       assertOAuth(credentials);
       if (nextCursor) return serializeCursor(nextCursor);
-      const valid = await ensureValidToken(credentials);
-      const historyId = await getProfileHistoryId(valid.access_token);
+      const accessToken = accessTokenProvider ?? (await ensureValidToken(credentials)).access_token;
+      const historyId = await getProfileHistoryId(accessToken);
       return historyId ? serializeCursor({ mode: "history", historyId }) : null;
     },
 
