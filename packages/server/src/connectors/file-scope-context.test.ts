@@ -712,12 +712,7 @@ describe("file-scope-context", () => {
       confidenceScore: 1,
     });
 
-    const known = await buildFileScopedKnownEntities(
-      { db, now: () => now, experimentalFlag: true },
-      promptFile,
-      [],
-      "",
-    );
+    const known = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, [], "");
 
     const initiatives = known
       .filter((entry) => entry.type === "project" || entry.type === "product")
@@ -741,12 +736,7 @@ describe("file-scope-context", () => {
     await seedMention(db, { entityId: "person-recall", fileId: evidenceFile });
     await seedMention(db, { entityId: "project-recall", fileId: evidenceFile });
 
-    const known = await buildFileScopedKnownEntities(
-      { db, now: () => now, experimentalFlag: true },
-      promptFile,
-      [],
-      "",
-    );
+    const known = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, [], "");
 
     expect(known.find((entry) => entry.name === "Recall Project")).toMatchObject({
       name: "Recall Project",
@@ -803,7 +793,7 @@ describe("file-scope-context", () => {
     await seedMention(db, { entityId: "project-injected-baseline-0", fileId: injectedSeenFile });
 
     const known = await buildFileScopedKnownEntities(
-      { db, now: () => now, experimentalFlag: true },
+      { db, now: () => now },
       promptFile,
       [
         { id: "project-injected-baseline-0", name: "Injected Baseline Project 0", type: "project", hotness: 100 },
