@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [0.41.0] -- 2026-07-03
+
+- Managed WhatsApp: add `WHATSAPP_DM_PROVIDER=managed`, a DM provider for managed tenants that receives normalized inbound events from the sketch-platform shared-number gateway (`/api/system/whatsapp/managed/events`) and sends outbound text and template messages through the platform outbound API with a tenant-scoped token. Groups stay on Baileys; self-hosted Wati/Baileys behavior is unchanged.
+- Security: system API bearer auth now uses a timing-safe comparison.
+
 ## [0.40.2] -- 2026-07-02
 
 - Fix(Wati): send template-message variables with Wati v3's `custom_params` recipient field so approved WhatsApp templates can deliver for proactive DM workflows.
