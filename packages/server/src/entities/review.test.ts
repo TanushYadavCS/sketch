@@ -1192,7 +1192,10 @@ describe("entity-review routes — child tasks preview", () => {
         label: "Other Space",
       })
       .execute();
-    await db.insertInto("access_scope_members").values({ access_scope_id: "scope-other", email: OTHER_EMAIL }).execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({ access_scope_id: "scope-other", email: OTHER_EMAIL })
+      .execute();
     await seedChildTask("task-visible", "team-2", "SKE-3: Visible");
     await seedChildTask("task-hidden", "team-2", "SKE-4: Hidden", {
       configId: "config-other",
