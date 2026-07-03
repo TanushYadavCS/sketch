@@ -72,6 +72,18 @@ describe("configSchema", () => {
       }
     });
 
+    it("treats blank managed WhatsApp settings as absent", () => {
+      const result = configSchema.safeParse({
+        MANAGED_WHATSAPP_PLATFORM_URL: "",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.MANAGED_WHATSAPP_PLATFORM_URL).toBeUndefined();
+        expect(result.data.MANAGED_WHATSAPP_TENANT_TOKEN).toBeUndefined();
+      }
+    });
+
     it("parses vision analysis environment settings", () => {
       const result = configSchema.safeParse({
         VISION_ENABLED: "true",
@@ -207,6 +219,11 @@ describe("configSchema", () => {
 
     it("rejects invalid Wati endpoint URLs", () => {
       const result = configSchema.safeParse({ WATI_API_ENDPOINT: "not-a-url" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects invalid managed WhatsApp platform URLs", () => {
+      const result = configSchema.safeParse({ MANAGED_WHATSAPP_PLATFORM_URL: "not-a-url" });
       expect(result.success).toBe(false);
     });
   });

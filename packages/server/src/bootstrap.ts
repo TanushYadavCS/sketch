@@ -258,6 +258,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
           platformUrl: config.MANAGED_WHATSAPP_PLATFORM_URL ?? "",
           tenantToken: config.MANAGED_WHATSAPP_TENANT_TOKEN ?? "",
           logger,
+          templateMappings: whatsappTemplateMappingsRepo,
         })
       : null;
   const whatsappRuntime = createWhatsAppRuntime({
