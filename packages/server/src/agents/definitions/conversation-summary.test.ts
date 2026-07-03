@@ -139,7 +139,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
     ]);
   });
 
-  it("uses the last completed summary generation as the next window start", async () => {
+  it("uses the previous summary window end as the next window start", async () => {
     const conversationId = await seedConversation(db);
     await db
       .insertInto("agent_outputs")
@@ -152,7 +152,13 @@ describe("buildConversationSummaryRuntimeContext", () => {
         status: "completed",
         trigger_type: "scheduled",
         agent_version: "test",
-        generated_at: "2026-07-01T12:00:00.000Z",
+        generated_at: "2026-07-01T12:05:00.000Z",
+        raw_payload_json: JSON.stringify({
+          summaryWindow: {
+            start: "2026-07-01T11:00:00.000Z",
+            end: "2026-07-01T12:00:00.000Z",
+          },
+        }),
       })
       .execute();
     await seedMessage(db, conversationId, {
@@ -161,8 +167,13 @@ describe("buildConversationSummaryRuntimeContext", () => {
       receivedAt: "2026-07-01T11:00:00.000Z",
     });
     await seedMessage(db, conversationId, {
+      id: "m-during-completion",
+      text: "arrived while the prior summary was still writing",
+      receivedAt: "2026-07-01T12:03:00.000Z",
+    });
+    await seedMessage(db, conversationId, {
       id: "m-after",
-      text: "new unblocker",
+      text: "later unblocker",
       receivedAt: "2026-07-01T12:30:00.000Z",
     });
 
@@ -190,8 +201,11 @@ describe("buildConversationSummaryRuntimeContext", () => {
     });
     expect(context.summarySources).toEqual([
       expect.objectContaining({
-        messageCount: 1,
-        messages: [expect.objectContaining({ text: "new unblocker" })],
+        messageCount: 2,
+        messages: [
+          expect.objectContaining({ text: "arrived while the prior summary was still writing" }),
+          expect.objectContaining({ text: "later unblocker" }),
+        ],
       }),
     ]);
   });

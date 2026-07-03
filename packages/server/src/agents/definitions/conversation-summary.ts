@@ -31,8 +31,13 @@ type ConversationRow = {
 type LatestOutputRow = {
   id: string;
   generated_at: string | null;
+  raw_payload_json: string | null;
   updated_at: string;
 };
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
 
 function sourceKind(source: AgentSourceConfig): "channel" | "group" {
   return source.platform === "slack" ? "channel" : "group";
@@ -52,13 +57,37 @@ function fallbackWindowStart(now: Date): string {
 async function findLatestCompletedOutput(db: Kysely<DB>, userId: string): Promise<LatestOutputRow | undefined> {
   return db
     .selectFrom("agent_outputs")
-    .select(["id", "generated_at", "updated_at"])
+    .select(["id", "generated_at", "raw_payload_json", "updated_at"])
     .where("agent_key", "=", CONVERSATION_SUMMARY_AGENT_KEY)
     .where("user_id", "=", userId)
     .where("status", "=", "completed")
     .orderBy("generated_at", "desc")
     .orderBy("id", "desc")
     .executeTakeFirst();
+}
+
+function summaryWindowEndFromRawPayload(rawPayloadJson: string | null): string | null {
+  if (!rawPayloadJson) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawPayloadJson);
+  } catch {
+    return null;
+  }
+
+  const payloadRecord = asRecord(payload);
+  const summaryWindow = asRecord(payloadRecord?.summaryWindow);
+  const end = summaryWindow?.end;
+  return typeof end === "string" && end.trim().length > 0 ? end : null;
+}
+
+function previousOutputWatermark(previousOutput: LatestOutputRow | undefined, now: Date): string {
+  if (!previousOutput) return fallbackWindowStart(now);
+  return (
+    summaryWindowEndFromRawPayload(previousOutput.raw_payload_json) ??
+    previousOutput.generated_at ??
+    previousOutput.updated_at
+  );
 }
 
 async function findConversation(db: Kysely<DB>, source: AgentSourceConfig): Promise<ConversationRow | undefined> {
@@ -100,7 +129,7 @@ export async function buildConversationSummaryRuntimeContext(
   const sources = params.agentConfig?.sources ?? [];
   const previousOutput = await findLatestCompletedOutput(params.db, params.user.id);
   const windowEnd = params.now.toISOString();
-  const windowStart = previousOutput?.generated_at ?? previousOutput?.updated_at ?? fallbackWindowStart(params.now);
+  const windowStart = previousOutputWatermark(previousOutput, params.now);
   const conversations = createConversationRepository(params.db);
 
   const summarySources = await Promise.all(

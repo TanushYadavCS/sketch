@@ -164,6 +164,24 @@ function withMentions(mentions: AgentDeliveryMention[]): Pick<AgentDeliveryConfi
   return mentions.length > 0 ? { mentions } : {};
 }
 
+function isSummaryWindow(value: unknown): value is Record<string, unknown> {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    typeof (value as Record<string, unknown>).start === "string" &&
+    typeof (value as Record<string, unknown>).end === "string"
+  );
+}
+
+function rawPayloadWithRunMetadata(
+  rawPayload: WriteAgentOutputPayload,
+  runtimeContext: Record<string, unknown>,
+): WriteAgentOutputPayload | (WriteAgentOutputPayload & { summaryWindow: Record<string, unknown> }) {
+  const summaryWindow = runtimeContext.summaryWindow;
+  return isSummaryWindow(summaryWindow) ? { ...rawPayload, summaryWindow } : rawPayload;
+}
+
 function localDateInTimezone(now: Date, timezone: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: timezone,
@@ -608,6 +626,33 @@ export class AgentRunService {
     };
   }
 
+  private async resolveSourcesForRun(
+    def: AgentDefinition,
+    userId: string,
+    sources: AgentSourceConfig[],
+  ): Promise<AgentSourceConfig[]> {
+    if (!def.sourceConfig) return [];
+
+    const resolved: AgentSourceConfig[] = [];
+    const seen = new Set<string>();
+    for (const source of sources) {
+      try {
+        const normalized = await this.resolveSourceConfigForUser(userId, source, def.sourceConfig);
+        const key = `${normalized.platform}:${normalized.targetType}:${normalized.targetId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        resolved.push(normalized);
+      } catch (err) {
+        this.deps.logger.warn(
+          { err, agentKey: def.key, userId, platform: source.platform, targetType: source.targetType },
+          "Agent: dropping inaccessible source for generation",
+        );
+      }
+    }
+
+    return resolved;
+  }
+
   private toApiOutput(
     def: AgentDefinition,
     value: Awaited<ReturnType<ReturnType<typeof createAgentOutputRepository>["findLatestCompleted"]>>,
@@ -808,6 +853,7 @@ export class AgentRunService {
 
     let saved = false;
     const config = await this.resolveConfig(def, user.id);
+    const sources = await this.resolveSourcesForRun(def, user.id, config.sources);
     const enabledSections = def.sections.filter((s) => config.enabledSections[s.key]).map((s) => s.key);
 
     try {
@@ -835,7 +881,7 @@ export class AgentRunService {
                 maxItemsPerSection: config.maxItemsPerSection,
                 focus: config.focus,
                 delivery: config.delivery,
-                sources: config.sources,
+                sources,
               },
             })
           : Promise.resolve({}),
@@ -850,7 +896,7 @@ export class AgentRunService {
         sections: enabledSections,
         maxItemsPerSection: config.maxItemsPerSection,
         focus: config.focus,
-        sources: config.sources,
+        sources,
         sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious.output),
         previousDayOutput: this.formatOutputForContext(previousDay.output),
         ...definitionContext,
@@ -975,7 +1021,7 @@ export class AgentRunService {
         await this.repo.completeOutput({
           outputId: params.outputId,
           masthead: payload.masthead,
-          rawPayload: payload.rawPayload,
+          rawPayload: rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext),
           items,
         });
         params.onSaved();
