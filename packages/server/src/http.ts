@@ -79,6 +79,7 @@ import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
 import type { WhatsAppBot } from "./whatsapp/bot";
 import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
+import type { ManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import type { WatiWhatsAppProvider } from "./whatsapp/providers/wati";
 import type { WhatsAppRuntime } from "./whatsapp/runtime";
 import { buildMagicLinkTemplate } from "./whatsapp/templates";
@@ -88,6 +89,7 @@ interface AppDeps {
   whatsapp?: WhatsAppBot;
   whatsappRuntime?: WhatsAppRuntime;
   watiWebhook?: WatiWhatsAppProvider;
+  managedWhatsapp?: ManagedWhatsAppProvider;
   getSlack?: () => SlackBot | null;
   logger?: Logger;
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
@@ -511,6 +513,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
             }
           : undefined,
         sendDm: deps?.sendDm,
+        managedWhatsappInbound: deps?.managedWhatsapp,
         whatsappStatus: whatsapp
           ? () => ({
               connected: whatsapp.isConnected,

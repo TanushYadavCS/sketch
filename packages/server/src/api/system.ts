@@ -12,6 +12,7 @@ import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import { upsertSlackIdentity } from "../slack/upsert-identity";
+import type { ManagedWhatsAppProvider } from "../whatsapp/providers/managed";
 import { buildIntroductionTemplate } from "../whatsapp/templates";
 import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { upsertWhatsAppIdentity } from "../whatsapp/upsert-identity";
@@ -44,6 +45,7 @@ interface SystemDeps {
     message: string;
     template?: WhatsAppTemplateRequest;
   }) => Promise<{ channelId: string; messageRef: string }>;
+  managedWhatsappInbound?: Pick<ManagedWhatsAppProvider, "handleInboundEvent">;
   whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
   startWhatsAppPairing?: Function;
@@ -497,6 +499,20 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
         409,
       );
     }
+  });
+
+  routes.post("/whatsapp/managed/events", async (c) => {
+    if (!deps.managedWhatsappInbound) {
+      return c.json({ error: { code: "UNAVAILABLE", message: "Managed WhatsApp provider is not configured" } }, 503);
+    }
+
+    const body = await c.req.json().catch(() => undefined);
+    if (body === undefined) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "Invalid JSON body" } }, 400);
+    }
+
+    await deps.managedWhatsappInbound.handleInboundEvent(body);
+    return c.json({ ok: true });
   });
 
   routes.get("/whatsapp", (c) => {

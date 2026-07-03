@@ -59,6 +59,7 @@ import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
 import { whatsappDeliveryTargetFromTarget } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
+import { WHATSAPP_MANAGED_PROVIDER_ID, createManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
 import { createWhatsAppRuntime } from "./whatsapp/runtime";
 import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
@@ -251,12 +252,28 @@ export async function createServer(config: Config, options?: CreateServerOptions
           templateMappings: whatsappTemplateMappingsRepo,
         })
       : null;
+  const managedWhatsApp =
+    config.WHATSAPP_DM_PROVIDER === WHATSAPP_MANAGED_PROVIDER_ID
+      ? createManagedWhatsAppProvider({
+          platformUrl: config.MANAGED_WHATSAPP_PLATFORM_URL ?? "",
+          tenantToken: config.MANAGED_WHATSAPP_TENANT_TOKEN ?? "",
+          logger,
+        })
+      : null;
   const whatsappRuntime = createWhatsAppRuntime({
     dmProviderId: config.WHATSAPP_DM_PROVIDER,
     groupProviderId: config.WHATSAPP_GROUP_PROVIDER,
-    dmProviders: [baileysWhatsApp.dmProvider, ...(watiWhatsApp ? [watiWhatsApp.dmProvider] : [])],
+    dmProviders: [
+      baileysWhatsApp.dmProvider,
+      ...(watiWhatsApp ? [watiWhatsApp.dmProvider] : []),
+      ...(managedWhatsApp ? [managedWhatsApp.dmProvider] : []),
+    ],
     groupProviders: [baileysWhatsApp.groupProvider],
-    inboundProviders: [baileysWhatsApp.inboundProvider, ...(watiWhatsApp ? [watiWhatsApp.inboundProvider] : [])],
+    inboundProviders: [
+      baileysWhatsApp.inboundProvider,
+      ...(watiWhatsApp ? [watiWhatsApp.inboundProvider] : []),
+      ...(managedWhatsApp ? [managedWhatsApp.inboundProvider] : []),
+    ],
     logger,
   });
 
@@ -477,6 +494,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     whatsapp,
     whatsappRuntime,
     watiWebhook: watiWhatsApp ?? undefined,
+    managedWhatsapp: managedWhatsApp ?? undefined,
     getSlack: () => slack,
     scheduler,
     runAgent: trackedRunAgent,
