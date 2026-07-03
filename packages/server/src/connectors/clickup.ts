@@ -744,10 +744,12 @@ export function createClickUpConnector(): Connector {
           spaces: ClickUpSpace[];
         };
 
+        let syncedAnyAllowedSpace = false;
         for (const space of spacesRes.spaces) {
           if (allowedSpaces.length > 0 && !allowedSpaces.includes(space.id)) {
             continue;
           }
+          syncedAnyAllowedSpace = true;
 
           // Seed space as entity with workspace context
           if (!experimentalFlag && onEntitySeed) {
@@ -956,8 +958,20 @@ export function createClickUpConnector(): Connector {
           }
         }
 
-        // Sync ClickUp Docs at workspace level
-        yield* fetchDocsFromWorkspace(team.id, token, logger, workspaceScope, cursor ?? undefined);
+        // Sync ClickUp Docs at workspace level.
+        // Docs are fetched per-workspace with no space-level filter, so they would leak
+        // across workspaces the user never selected. When workspaces are explicitly scoped,
+        // this team already passed the workspace filter above. When only spaces are selected
+        // (workspaces empty), sync docs only if this workspace contains a selected space;
+        // otherwise a workspace reachable by the token but never opted into would still have
+        // its docs ingested. With neither workspaces nor spaces selected, the connection is
+        // unscoped and every workspace's docs sync (unchanged behavior).
+        const workspaceInDocScope =
+          allowedWorkspaces.includes(team.id) ||
+          (allowedWorkspaces.length === 0 && (allowedSpaces.length === 0 || syncedAnyAllowedSpace));
+        if (workspaceInDocScope) {
+          yield* fetchDocsFromWorkspace(team.id, token, logger, workspaceScope, cursor ?? undefined);
+        }
       }
 
       // Seed assignees collected during task traversal as person entities
