@@ -1,5 +1,6 @@
 export const WHATSAPP_TEMPLATE_KEYS = {
   proactiveUpdate: "whatsapp.proactive_update",
+  taskNudge: "whatsapp.task_nudge",
   magicLink: "whatsapp.magic_link",
   introduction: "whatsapp.introduction",
 } as const;
@@ -30,6 +31,20 @@ export function buildProactiveUpdateTemplate(params: {
       messageSummary: params.messageSummary,
     },
     fallbackText: params.fallbackText ?? params.messageSummary,
+    language: params.language,
+  };
+}
+
+export function buildTaskNudgeTemplate(params: {
+  recipientName?: string | null;
+  language?: string;
+}): WhatsAppTemplateRequest {
+  return {
+    key: WHATSAPP_TEMPLATE_KEYS.taskNudge,
+    params: {
+      recipientName: params.recipientName ?? "there",
+    },
+    fallbackText: "Sketch just finished running one of your scheduled tasks. Reply to see the details.",
     language: params.language,
   };
 }

@@ -53,9 +53,14 @@ function createTestSystemApp(
       platform: "slack" | "whatsapp";
       message: string;
       template?: unknown;
+      senderUserId?: string;
+      storeInInbox?: boolean;
+      inboxKind?: string;
+      inboxMetadata?: Record<string, unknown> | null;
     }) => Promise<{
       channelId: string;
       messageRef: string;
+      inboxMessageId?: string;
     }>;
     whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
     startWhatsAppPairing?: ReturnType<typeof vi.fn>;

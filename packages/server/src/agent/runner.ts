@@ -206,9 +206,14 @@ export interface RunAgentParams {
     platform: string;
     message: string;
     template?: WhatsAppTemplateRequest;
+    senderUserId?: string;
+    storeInInbox?: boolean;
+    inboxKind?: string;
+    inboxMetadata?: Record<string, unknown> | null;
   }) => Promise<{
     channelId: string;
     messageRef: string;
+    inboxMessageId?: string;
   }>;
   channelContext?: {
     channelName: string;

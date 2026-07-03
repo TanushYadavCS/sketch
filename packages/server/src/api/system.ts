@@ -45,7 +45,11 @@ interface SystemDeps {
     platform: "slack" | "whatsapp";
     message: string;
     template?: WhatsAppTemplateRequest;
-  }) => Promise<{ channelId: string; messageRef: string }>;
+    senderUserId?: string;
+    storeInInbox?: boolean;
+    inboxKind?: string;
+    inboxMetadata?: Record<string, unknown> | null;
+  }) => Promise<{ channelId: string; messageRef: string; inboxMessageId?: string }>;
   managedWhatsappInbound?: Pick<ManagedWhatsAppProvider, "handleInboundEvent">;
   whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests

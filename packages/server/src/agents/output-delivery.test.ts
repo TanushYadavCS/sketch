@@ -12,6 +12,7 @@ function createMockWhatsApp(overrides: Partial<WhatsAppRuntime> = {}): WhatsAppR
   return {
     isConnected: false,
     onMessage: vi.fn(),
+    getCapabilities: vi.fn(() => ({ templates: true })),
     sendText: vi.fn(),
     sendTemplate: vi.fn(),
     sendFile: vi.fn(),
@@ -77,6 +78,8 @@ describe("createAgentOutputDeliveryService", () => {
       },
       output: {
         id: "output-delivery",
+        userId: "user-delivery",
+        agentKey: dailyBriefDefinition.key,
         outputDate: "2026-06-26",
         masthead: { title: "Daily Brief", summary: "Start here." },
         sections: {
@@ -142,6 +145,8 @@ describe("createAgentOutputDeliveryService", () => {
       },
       output: {
         id: "output-delivery",
+        userId: "user-delivery",
+        agentKey: dailyBriefDefinition.key,
         outputDate: "2026-06-26",
         masthead: { title: "Daily Brief", summary: "x".repeat(8500) },
         sections: {},
@@ -167,11 +172,11 @@ describe("createAgentOutputDeliveryService", () => {
     expect(captured.every((row) => row.text.length <= 4000)).toBe(true);
   });
 
-  it("sends WhatsApp DM deliveries through logical templates", async () => {
+  it("parks WhatsApp DM deliveries and sends a task nudge when no session window is open", async () => {
     const whatsapp = createMockWhatsApp({
       isConnected: true,
       sendTemplate: vi.fn(async () => ({
-        providerMessageId: "wa-template-1",
+        providerMessageId: "wa-nudge-1",
         providerConversationId: "dm:+15551234567",
         providerTimestamp: "2024-06-04T07:20:00.000Z",
       })),
@@ -195,6 +200,8 @@ describe("createAgentOutputDeliveryService", () => {
       },
       output: {
         id: "output-delivery",
+        userId: "user-delivery",
+        agentKey: dailyBriefDefinition.key,
         outputDate: "2026-06-26",
         masthead: { title: "Daily Brief", summary: "Start here." },
         sections: {},
@@ -205,18 +212,23 @@ describe("createAgentOutputDeliveryService", () => {
     expect(whatsapp.sendTemplate).toHaveBeenCalledWith(
       { kind: "dm", phoneE164: "+15551234567" },
       expect.objectContaining({
-        key: "whatsapp.proactive_update",
-        params: expect.objectContaining({
-          recipientName: "Alice",
-          messageSummary: expect.stringContaining("Daily Brief"),
-        }),
+        key: "whatsapp.task_nudge",
+        params: { recipientName: "Alice" },
       }),
     );
-    const captured = await db
-      .selectFrom("conversation_messages")
-      .select(["provider_message_id", "text"])
-      .executeTakeFirstOrThrow();
-    expect(captured.provider_message_id).toBe("wa-template-1");
+    const inbox = await db.selectFrom("inbox_messages").selectAll().executeTakeFirstOrThrow();
+    expect(inbox).toMatchObject({
+      recipient_user_id: "user-delivery",
+      sender_user_id: "user-delivery",
+      kind: "workflow_output",
+      platform: "whatsapp",
+    });
+    expect(inbox.message).toContain("Daily Brief");
+    const captured = await db.selectFrom("conversation_messages").selectAll().execute();
+    expect(captured).toHaveLength(0);
+    const attempt = await db.selectFrom("agent_output_deliveries").selectAll().executeTakeFirstOrThrow();
+    expect(attempt.status).toBe("sent");
+    expect(attempt.message_refs_json).toBe(JSON.stringify(["wa-nudge-1"]));
   });
 
   it("records a failed attempt when the target platform is unavailable", async () => {
@@ -241,6 +253,8 @@ describe("createAgentOutputDeliveryService", () => {
         },
         output: {
           id: "output-delivery",
+          userId: "user-delivery",
+          agentKey: dailyBriefDefinition.key,
           outputDate: "2026-06-26",
           masthead: null,
           sections: {},

@@ -81,6 +81,7 @@ function buildMockSlack() {
 
 function buildMockWhatsApp(connected = true) {
   return {
+    getCapabilities: vi.fn().mockReturnValue({ templates: true }),
     sendText: vi.fn().mockResolvedValue({
       providerMessageId: "wa-message-1",
       providerConversationId: "5511999999999@s.whatsapp.net",
@@ -157,6 +158,7 @@ function buildDeps(
     },
     inboxMessagesRepo: {
       create: vi.fn().mockResolvedValue({ id: "inbox-1" }),
+      hasPendingForRecipientByKind: vi.fn().mockResolvedValue(false),
     },
     sendDm: vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" }),
     _mockRunAgent: mockRunAgent,
@@ -850,7 +852,7 @@ describe("executeTask() delivery routing", () => {
     );
   });
 
-  it("WhatsApp DM: sendMessage calls sendTemplate", async () => {
+  it("WhatsApp DM: sendMessage parks output and sends a task nudge when no session window is open", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -874,33 +876,22 @@ describe("executeTask() delivery routing", () => {
         providerConversationId: "5511999999999@s.whatsapp.net",
       },
       expect.objectContaining({
-        key: "whatsapp.proactive_update",
-        params: expect.objectContaining({ messageSummary: "WhatsApp message" }),
+        key: "whatsapp.task_nudge",
+        params: expect.objectContaining({ recipientName: "there" }),
+      }),
+    );
+    expect(deps.inboxMessagesRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipientUserId: "U_USER1",
+        senderUserId: "U_USER1",
+        message: "WhatsApp message",
+        kind: "workflow_output",
+        resolutionMode: "auto_consume",
       }),
     );
 
-    const captured = await db
-      .selectFrom("conversation_messages")
-      .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
-      .select([
-        "conversations.platform",
-        "conversations.kind",
-        "conversations.provider_conversation_id",
-        "conversation_messages.provider_message_id",
-        "conversation_messages.sender_jid",
-        "conversation_messages.is_bot",
-        "conversation_messages.text",
-      ])
-      .executeTakeFirstOrThrow();
-    expect(captured).toMatchObject({
-      platform: "whatsapp",
-      kind: "dm",
-      provider_conversation_id: "dm:+5511999999999",
-      provider_message_id: "wa-template-1",
-      sender_jid: "bot",
-      is_bot: 1,
-      text: "WhatsApp message",
-    });
+    const captured = await db.selectFrom("conversation_messages").selectAll().execute();
+    expect(captured).toHaveLength(0);
   });
 
   it("WhatsApp group: sendMessage captures the delivered bot message", async () => {

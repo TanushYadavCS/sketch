@@ -12,6 +12,7 @@ import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import type { SlackBot } from "../slack/bot";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import type { WhatsAppRuntime } from "../whatsapp/runtime";
 
 const API_KEY = "sk_live_test_key";
 
@@ -501,6 +502,57 @@ describe("workflow invoke API", () => {
     });
   });
 
+  it("parks WhatsApp DM target output and sends a task nudge", async () => {
+    const { requester } = await seedTenant(db);
+    const task = await createWorkflow(db, { createdBy: requester.id, deliveryTarget: "dm:+15551234567" });
+    await db
+      .updateTable("scheduled_tasks")
+      .set({ platform: "whatsapp", context_type: "dm" })
+      .where("id", "=", task.id)
+      .execute();
+    const whatsappRuntime = {
+      isConnected: true,
+      getCapabilities: vi.fn(() => ({ templates: true })),
+      sendText: vi.fn(),
+      sendTemplate: vi.fn().mockResolvedValue({
+        providerMessageId: "wa-nudge-1",
+        providerConversationId: "dm:+15551234567",
+        providerTimestamp: "2026-07-03T10:00:00.000Z",
+      }),
+    } as unknown as WhatsAppRuntime;
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      whatsappRuntime,
+    });
+
+    const res = await app.request(`/api/workflows/${task.id}/runs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({ requesterUserId: requester.id, deliveryMode: "target" }),
+    });
+
+    expect(res.status).toBe(200);
+    const completed = sseData(await readSse(res), "completed");
+    expect(whatsappRuntime.sendText).not.toHaveBeenCalled();
+    expect(whatsappRuntime.sendTemplate).toHaveBeenCalledWith(
+      { kind: "dm", phoneE164: "+15551234567" },
+      expect.objectContaining({ key: "whatsapp.task_nudge" }),
+    );
+    const inbox = await db.selectFrom("inbox_messages").selectAll().executeTakeFirstOrThrow();
+    expect(inbox).toMatchObject({
+      recipient_user_id: requester.id,
+      sender_user_id: requester.id,
+      kind: "workflow_output",
+      platform: "whatsapp",
+    });
+    expect(inbox.message).toBe("workflow result");
+    expect(completed.delivery).toMatchObject({
+      mode: "target",
+      platform: "whatsapp",
+      target: "dm:+15551234567",
+      messageRef: "wa-nudge-1",
+    });
+  });
   it("delivers final output to a Slack user DM target", async () => {
     const { requester } = await seedTenant(db);
     const task = await createWorkflow(db, {

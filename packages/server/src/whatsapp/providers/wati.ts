@@ -19,6 +19,7 @@ import {
   type WhatsAppTarget,
   canonicalDmConversationId,
 } from "../provider";
+import { mapTemplateParams } from "../template-params";
 import type { WhatsAppTemplateParamValue, WhatsAppTemplateRequest } from "../templates";
 
 export const WHATSAPP_WATI_PROVIDER_ID = "wati";
@@ -493,16 +494,10 @@ function providerTemplateParameters(
   parameterMap: Record<string, string> | null,
   params: Record<string, WhatsAppTemplateParamValue>,
 ): Array<{ name: string; value: string }> {
-  const entries = parameterMap ? Object.entries(parameterMap) : Object.keys(params).map((key) => [key, key]);
-  return entries.map(([providerName, logicalName]) => ({
+  return mapTemplateParams(parameterMap, params).map(([providerName, value]) => ({
     name: providerName,
-    value: stringifyTemplateParam(params[logicalName]),
+    value,
   }));
-}
-
-function stringifyTemplateParam(value: WhatsAppTemplateParamValue): string {
-  if (value == null) return "";
-  return String(value);
 }
 
 function buildBroadcastName(key: string): string {

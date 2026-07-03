@@ -1,6 +1,5 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
-import { buildProactiveUpdateTemplate } from "../../whatsapp/templates";
 import type { SelectableUser, SketchMcpDeps, ToolResult } from "./types";
 
 function detectPlatform(recipient: SelectableUser): "slack" | "whatsapp" | null {
@@ -53,22 +52,22 @@ async function deliverMessageToUser(
     return { status: "failed", error: `${recipient.name} has no connected channel (Slack or WhatsApp).`, recipient };
   }
 
-  const { channelId, messageRef } = await deps.sendDm({
+  const delivery = await deps.sendDm({
     userId: params.recipientUserId,
     platform,
     message: params.message,
     ...(platform === "whatsapp"
       ? {
-          template: buildProactiveUpdateTemplate({
-            recipientName: recipient.name,
-            messageSummary: params.message,
-          }),
+          senderUserId: deps.currentUserId,
+          storeInInbox: params.storeInInbox !== false,
+          inboxKind: "note",
         }
       : {}),
   });
+  const { channelId, messageRef } = delivery;
 
-  let inboxMessageId: string | undefined;
-  if (params.storeInInbox !== false) {
+  let inboxMessageId: string | undefined = delivery.inboxMessageId;
+  if (params.storeInInbox !== false && !inboxMessageId) {
     if (!deps.inboxMessagesRepo) {
       return { status: "failed", error: "Inbox storage is not available in this context.", recipient };
     }
