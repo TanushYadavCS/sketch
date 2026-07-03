@@ -675,10 +675,22 @@ export function createClickUpConnector(): Connector {
       };
 
       for (const team of teamsRes.teams) {
-        // Workspace filter: skip workspaces not in scope
         if (allowedWorkspaces.length > 0 && !allowedWorkspaces.includes(team.id)) {
           continue;
         }
+
+        const spacesRes = (await clickupRequest(`/team/${team.id}/space`, token, logger)) as {
+          spaces: ClickUpSpace[];
+        };
+        const workspaceContainsAllowedSpace = spacesRes.spaces.some((space) => allowedSpaces.includes(space.id));
+        const workspaceInScope =
+          (allowedWorkspaces.length === 0 && allowedSpaces.length === 0) ||
+          allowedWorkspaces.includes(team.id) ||
+          (allowedWorkspaces.length === 0 && allowedSpaces.length > 0 && workspaceContainsAllowedSpace);
+        if (!workspaceInScope) {
+          continue;
+        }
+
         const workspaceName = team.name.trim();
         const workspaceEmails = extractMemberEmails(team.members);
         logger.info(
@@ -738,10 +750,6 @@ export function createClickUpConnector(): Connector {
           providerScopeId: team.id,
           label: workspaceName,
           memberEmails: workspaceEmails,
-        };
-
-        const spacesRes = (await clickupRequest(`/team/${team.id}/space`, token, logger)) as {
-          spaces: ClickUpSpace[];
         };
 
         let syncedAnyAllowedSpace = false;
