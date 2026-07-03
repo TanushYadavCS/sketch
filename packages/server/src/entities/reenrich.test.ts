@@ -118,7 +118,7 @@ describe("entity re-enrich", () => {
     await db.destroy();
   });
 
-  it("tombstones only LLM facts and preserves connector mentions", async () => {
+  it("tombstones LLM facts and clears stale deterministic mentions while preserving connector mentions", async () => {
     await seedEntity(db, "person-1", "Alice");
     await seedLlmExtractedFact(db, "Alice");
     await seedLlmRelationFact(db);
