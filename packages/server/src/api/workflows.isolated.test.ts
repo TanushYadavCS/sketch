@@ -5,6 +5,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
@@ -12,6 +13,7 @@ import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import type { SlackBot } from "../slack/bot";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import { WHATSAPP_TEXT_LIMIT } from "../whatsapp/chunking";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 
 const API_KEY = "sk_live_test_key";
@@ -553,6 +555,80 @@ describe("workflow invoke API", () => {
       messageRef: "wa-nudge-1",
     });
   });
+
+  it("chunks in-window WhatsApp DM target output and reports one last-chunk ref", async () => {
+    const { requester } = await seedTenant(db);
+    const task = await createWorkflow(db, { createdBy: requester.id, deliveryTarget: "dm:+15551234567" });
+    await db
+      .updateTable("scheduled_tasks")
+      .set({ platform: "whatsapp", context_type: "dm" })
+      .where("id", "=", task.id)
+      .execute();
+    const conversations = createConversationRepository(db);
+    const conversation = await conversations.getOrCreate(
+      { platform: "whatsapp", kind: "dm", providerConversationId: "dm:+15551234567" },
+      "Requester",
+    );
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "wa-inbound-1",
+      senderJid: "+15551234567",
+      senderName: "Requester",
+      senderUserId: requester.id,
+      isBot: false,
+      addressedToSketch: true,
+      text: "latest inbound",
+      providerTimestamp: new Date(Date.now() - 1_000).toISOString(),
+      receivedAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    const longOutput = `${"a".repeat(WHATSAPP_TEXT_LIMIT)} ${"b".repeat(24)}`;
+    mockLightResult(longOutput);
+    const sendText = vi.fn(async (_target: unknown, _text: string) => ({
+      providerMessageId: `wa-session-${sendText.mock.calls.length}`,
+      providerConversationId: "dm:+15551234567",
+      providerTimestamp: "2026-07-03T10:00:00.000Z",
+    }));
+    const whatsappRuntime = {
+      isConnected: true,
+      getCapabilities: vi.fn(() => ({ templates: true })),
+      sendText,
+      sendTemplate: vi.fn(),
+    } as unknown as WhatsAppRuntime;
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      whatsappRuntime,
+    });
+
+    const res = await app.request(`/api/workflows/${task.id}/runs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({ requesterUserId: requester.id, deliveryMode: "target" }),
+    });
+
+    expect(res.status).toBe(200);
+    const completed = sseData(await readSse(res), "completed");
+    expect(sendText).toHaveBeenCalledTimes(2);
+    expect(sendText).toHaveBeenNthCalledWith(
+      1,
+      { kind: "dm", phoneE164: "+15551234567" },
+      "a".repeat(WHATSAPP_TEXT_LIMIT),
+    );
+    expect(sendText).toHaveBeenNthCalledWith(2, { kind: "dm", phoneE164: "+15551234567" }, "b".repeat(24));
+    expect(completed.delivery).toMatchObject({
+      mode: "target",
+      platform: "whatsapp",
+      target: "dm:+15551234567",
+      messageRef: "wa-session-2",
+    });
+    const captured = await db
+      .selectFrom("conversation_messages")
+      .select(["provider_message_id", "is_bot", "text"])
+      .where("is_bot", "=", 1)
+      .execute();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({ provider_message_id: "wa-session-2", is_bot: 1, text: longOutput });
+  });
+
   it("delivers final output to a Slack user DM target", async () => {
     const { requester } = await seedTenant(db);
     const task = await createWorkflow(db, {

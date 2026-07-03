@@ -90,15 +90,22 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
         recipientPhoneE164: target.phoneE164,
         inboxMetadata: { source: "agent_output", outputId: output.id, agentKey: output.agentKey },
       });
-      const messageRef = result.sent?.providerMessageId;
-      if (result.mode === "text" && messageRef) {
-        await capture.captureWhatsApp({
-          deliveryTarget: whatsappDeliveryTargetFromTarget(target),
-          messageRef,
-          providerTimestamp: result.sent?.providerTimestamp ?? null,
-          text,
-        });
+      if (result.mode === "text") {
+        const refs: string[] = [];
+        for (const textSend of result.textSends) {
+          const messageRef = textSend.sent?.providerMessageId;
+          if (!messageRef) continue;
+          refs.push(messageRef);
+          await capture.captureWhatsApp({
+            deliveryTarget: whatsappDeliveryTargetFromTarget(target),
+            messageRef,
+            providerTimestamp: textSend.sent?.providerTimestamp ?? null,
+            text: textSend.text,
+          });
+        }
+        return refs;
       }
+      const messageRef = result.sent?.providerMessageId;
       return [messageRef ?? result.inboxMessageId].filter((ref): ref is string => Boolean(ref));
     }
 

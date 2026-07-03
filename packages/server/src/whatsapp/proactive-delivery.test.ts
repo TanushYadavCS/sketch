@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { WHATSAPP_TEXT_LIMIT } from "./chunking";
 import { type DeliverProactiveDmParams, deliverProactiveDm } from "./proactive-delivery";
 import type { WhatsAppCapabilities, WhatsAppSendResult, WhatsAppTarget } from "./provider";
 import { WHATSAPP_TEMPLATE_KEYS } from "./templates";
@@ -93,8 +94,42 @@ describe("deliverProactiveDm", () => {
       ...deps,
     });
 
-    expect(result).toEqual({ mode: "text", sent: sentText });
+    expect(result).toEqual({ mode: "text", sent: sentText, textSends: [{ text, sent: sentText }] });
     expect(deps.whatsapp.sendText).toHaveBeenCalledWith(target, text);
+    expect(deps.inboxMessages.create).not.toHaveBeenCalled();
+    expect(deps.whatsapp.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("chunks in-window session text sequentially", async () => {
+    const firstSent = { ...sentText, providerMessageId: "text-1" };
+    const secondSent = { ...sentText, providerMessageId: "text-2" };
+    const sendText = vi.fn().mockResolvedValueOnce(firstSent).mockResolvedValueOnce(secondSent);
+    const deps = buildDeps({
+      lastInbound: { receivedAt: "2026-07-03T09:00:00.000Z", providerTimestamp: null },
+      sendText,
+    });
+    const text = `${"a".repeat(WHATSAPP_TEXT_LIMIT)} ${"b".repeat(24)}`;
+
+    const result = await deliverProactiveDm({
+      target,
+      recipientUserId: "user-1",
+      senderUserId: "user-1",
+      text,
+      now: new Date("2026-07-03T10:00:00.000Z"),
+      ...deps,
+    });
+
+    expect(sendText).toHaveBeenCalledTimes(2);
+    expect(sendText).toHaveBeenNthCalledWith(1, target, "a".repeat(WHATSAPP_TEXT_LIMIT));
+    expect(sendText).toHaveBeenNthCalledWith(2, target, "b".repeat(24));
+    expect(result).toEqual({
+      mode: "text",
+      sent: secondSent,
+      textSends: [
+        { text: "a".repeat(WHATSAPP_TEXT_LIMIT), sent: firstSent },
+        { text: "b".repeat(24), sent: secondSent },
+      ],
+    });
     expect(deps.inboxMessages.create).not.toHaveBeenCalled();
     expect(deps.whatsapp.sendTemplate).not.toHaveBeenCalled();
   });

@@ -1,6 +1,7 @@
 import type { createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { Logger } from "../logger";
+import { WHATSAPP_TEXT_LIMIT, chunkText } from "./chunking";
 import type { WhatsAppSendResult, WhatsAppTarget } from "./provider";
 import type { WhatsAppRuntime } from "./runtime";
 import { buildTaskNudgeTemplate } from "./templates";
@@ -12,9 +13,15 @@ const FALLBACK_PROVIDER_CODES = new Set(["contact_not_found", "window_expired"])
 
 export type ProactiveDeliveryMode = "text" | "nudge" | "parked";
 
+export interface ProactiveDeliveryTextSend {
+  text: string;
+  sent: WhatsAppSendResult | null;
+}
+
 export interface ProactiveDeliveryResult {
   mode: ProactiveDeliveryMode;
   sent: WhatsAppSendResult | null;
+  textSends: ProactiveDeliveryTextSend[];
   inboxMessageId?: string | undefined;
 }
 
@@ -36,13 +43,13 @@ export interface DeliverProactiveDmParams {
 
 export async function deliverProactiveDm(params: DeliverProactiveDmParams): Promise<ProactiveDeliveryResult> {
   if (params.target.kind === "group") {
-    const sent = await params.whatsapp.sendText(params.target, params.text);
-    return { mode: "text", sent };
+    const textSends = await sendTextChunks(params);
+    return { mode: "text", sent: lastSent(textSends), textSends };
   }
 
   if (!params.whatsapp.getCapabilities(params.target).templates) {
-    const sent = await params.whatsapp.sendText(params.target, params.text);
-    return { mode: "text", sent };
+    const textSends = await sendTextChunks(params);
+    return { mode: "text", sent: lastSent(textSends), textSends };
   }
 
   const lastInbound = await params.conversations.findLatestInboundWhatsAppDmFromRecipient({
@@ -52,8 +59,8 @@ export async function deliverProactiveDm(params: DeliverProactiveDmParams): Prom
 
   if (lastInbound && isInsideCustomerServiceWindow(lastInbound, params.now ?? new Date())) {
     try {
-      const sent = await params.whatsapp.sendText(params.target, params.text);
-      return { mode: "text", sent };
+      const textSends = await sendTextChunks(params);
+      return { mode: "text", sent: lastSent(textSends), textSends };
     } catch (err) {
       if (!shouldParkAfterTextError(err)) throw err;
       return parkThenNudge(params);
@@ -90,14 +97,33 @@ async function parkThenNudge(params: DeliverProactiveDmParams): Promise<Proactiv
       },
       "WhatsApp proactive delivery parked without duplicate nudge",
     );
-    return { mode: "parked", sent: null, inboxMessageId: inboxMessage.id };
+    return { mode: "parked", sent: null, textSends: [], inboxMessageId: inboxMessage.id };
   }
 
   const sent = await params.whatsapp.sendTemplate(
     params.target,
     buildTaskNudgeTemplate({ recipientName: params.recipientName }),
   );
-  return { mode: "nudge", sent, inboxMessageId: inboxMessage.id };
+  return { mode: "nudge", sent, textSends: [], inboxMessageId: inboxMessage.id };
+}
+
+async function sendTextChunks(
+  params: Pick<DeliverProactiveDmParams, "target" | "text" | "whatsapp">,
+): Promise<ProactiveDeliveryTextSend[]> {
+  const textSends: ProactiveDeliveryTextSend[] = [];
+  for (const chunk of chunkText(params.text, WHATSAPP_TEXT_LIMIT)) {
+    const sent = await params.whatsapp.sendText(params.target, chunk);
+    textSends.push({ text: chunk, sent });
+  }
+  return textSends;
+}
+
+function lastSent(textSends: ProactiveDeliveryTextSend[]): WhatsAppSendResult | null {
+  for (let index = textSends.length - 1; index >= 0; index--) {
+    const sent = textSends[index]?.sent;
+    if (sent) return sent;
+  }
+  return null;
 }
 
 function isInsideCustomerServiceWindow(
