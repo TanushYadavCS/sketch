@@ -718,14 +718,6 @@ export function createClickUpConnector(): Connector {
           });
         }
 
-        // Workspace membership alone is not an engagement signal, so members are
-        // NOT seeded as person entities here — a shared workspace's full roster
-        // would otherwise mint hundreds of isolated "phantom" people (zero
-        // mentions, zero edges). People come from task assignees (seeded below,
-        // after traversal) and from text mentions. Member emails still feed the
-        // access scope for doc/space visibility.
-
-        // Workspace-level access scope (used for docs and public spaces)
         const workspaceScope: SyncedItem["accessScope"] = {
           scopeType: "workspace",
           providerScopeId: team.id,
@@ -740,8 +732,6 @@ export function createClickUpConnector(): Connector {
           }
           syncedAnyAllowedSpace = true;
 
-          // Build access scope for this space.
-          // Private spaces use space members; public spaces use all workspace members.
           let spaceScope: SyncedItem["accessScope"];
           if (space.private && space.members) {
             const memberEmails = extractMemberEmails(space.members);
@@ -936,14 +926,6 @@ export function createClickUpConnector(): Connector {
           }
         }
 
-        // Sync ClickUp Docs at workspace level.
-        // Docs are fetched per-workspace with no space-level filter, so they would leak
-        // across workspaces the user never selected. When workspaces are explicitly scoped,
-        // this team already passed the workspace filter above. When only spaces are selected
-        // (workspaces empty), sync docs only if this workspace contains a selected space;
-        // otherwise a workspace reachable by the token but never opted into would still have
-        // its docs ingested. With neither workspaces nor spaces selected, the connection is
-        // unscoped and every workspace's docs sync (unchanged behavior).
         const workspaceInDocScope =
           allowedWorkspaces.includes(team.id) ||
           (allowedWorkspaces.length === 0 && (allowedSpaces.length === 0 || syncedAnyAllowedSpace));
