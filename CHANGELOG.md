@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.41.2] -- 2026-07-03
+
+- Fix(OpenRouter): request JSON mode for enrichment JSON calls and require providers to honor structured-output parameters, preventing prose responses from breaking smart entity extraction.
+
 ## [0.41.1] -- 2026-07-03
 
 - Fix(Wati): send an explicit `User-Agent` header on all Wati API requests. Cloudflare in front of Wati's v3 API rejects requests without one (HTTP 403 error 1010), which blocked template sends before Wati received them.
