@@ -236,6 +236,76 @@ describe("findById()", () => {
   });
 });
 
+describe("listPendingForRecipientByKind()", () => {
+  it("orders unresolved and unconsumed rows by created_at then id", async () => {
+    await db
+      .insertInto("inbox_messages")
+      .values([
+        {
+          id: "row-b",
+          sender_user_id: senderUserId,
+          recipient_user_id: recipientUserId,
+          message: "Second by id",
+          kind: "workflow_output",
+          platform: "whatsapp",
+          created_at: "2026-07-03T10:00:00.000Z",
+        },
+        {
+          id: "row-a",
+          sender_user_id: senderUserId,
+          recipient_user_id: recipientUserId,
+          message: "First by id",
+          kind: "workflow_output",
+          platform: "whatsapp",
+          created_at: "2026-07-03T10:00:00.000Z",
+        },
+        {
+          id: "row-old",
+          sender_user_id: senderUserId,
+          recipient_user_id: recipientUserId,
+          message: "First by time",
+          kind: "workflow_output",
+          platform: "whatsapp",
+          created_at: "2026-07-03T09:00:00.000Z",
+        },
+        {
+          id: "row-consumed",
+          sender_user_id: senderUserId,
+          recipient_user_id: recipientUserId,
+          message: "Consumed",
+          kind: "workflow_output",
+          platform: "whatsapp",
+          created_at: "2026-07-03T10:02:00.000Z",
+          consumed_at: "2026-07-03T10:10:00.000Z",
+        },
+        {
+          id: "row-resolved",
+          sender_user_id: senderUserId,
+          recipient_user_id: recipientUserId,
+          message: "Resolved",
+          kind: "workflow_output",
+          platform: "whatsapp",
+          created_at: "2026-07-03T10:03:00.000Z",
+          resolved_at: "2026-07-03T10:11:00.000Z",
+        },
+        {
+          id: "row-other-kind",
+          sender_user_id: senderUserId,
+          recipient_user_id: recipientUserId,
+          message: "Other kind",
+          kind: "note",
+          platform: "whatsapp",
+          created_at: "2026-07-03T10:04:00.000Z",
+        },
+      ])
+      .execute();
+
+    const rows = await repo.listPendingForRecipientByKind(recipientUserId, "workflow_output");
+
+    expect(rows.map((row) => row.id)).toEqual(["row-old", "row-a", "row-b"]);
+  });
+});
+
 describe("updateWorkflow()", () => {
   it("merges metadata into an explicit workflow row", async () => {
     const workflow = await repo.create({

@@ -12,6 +12,7 @@ import {
   type WhatsAppTarget,
   canonicalDmConversationId,
 } from "../provider";
+import { mapTemplateParams } from "../template-params";
 import type { WhatsAppTemplateParamValue, WhatsAppTemplateRequest } from "../templates";
 
 export const WHATSAPP_MANAGED_PROVIDER_ID = "managed";
@@ -91,6 +92,20 @@ export class InvalidManagedWhatsAppInboundEventError extends Error {
   constructor(readonly issues: z.ZodIssue[]) {
     super("Invalid managed WhatsApp inbound event");
     this.name = "InvalidManagedWhatsAppInboundEventError";
+  }
+}
+
+export class ManagedWhatsAppRequestError extends Error {
+  readonly status: number;
+  readonly providerCode?: string;
+  readonly providerInfo?: string;
+
+  constructor(message: string, params: { status: number; providerCode?: string | null; providerInfo?: string | null }) {
+    super(message);
+    this.name = "ManagedWhatsAppRequestError";
+    this.status = params.status;
+    if (params.providerCode) this.providerCode = params.providerCode;
+    if (params.providerInfo) this.providerInfo = params.providerInfo;
   }
 }
 
@@ -264,8 +279,7 @@ async function fetchManagedJson(requestFetch: typeof fetch, url: string, init: R
   const text = await response.text().catch(() => "");
 
   if (!response.ok) {
-    const snippet = boundedResponseSnippet(text);
-    throw new Error(`Managed WhatsApp request failed: HTTP ${response.status}${snippet ? `: ${snippet}` : ""}`);
+    throw managedRequestError(response.status, text);
   }
 
   if (!text) return null;
@@ -292,15 +306,30 @@ function providerTemplateParamRecord(
   parameterMap: Record<string, string> | null,
   params: Record<string, WhatsAppTemplateParamValue>,
 ): Record<string, string> {
-  const entries = parameterMap ? Object.entries(parameterMap) : Object.keys(params).map((key) => [key, key]);
-  return Object.fromEntries(
-    entries.map(([providerName, logicalName]) => [providerName, stringifyTemplateParam(params[logicalName])]),
+  return Object.fromEntries(mapTemplateParams(parameterMap, params));
+}
+
+function managedRequestError(status: number, text: string): ManagedWhatsAppRequestError {
+  const parsed = parseJsonObject(text);
+  const error = parsed && isRecord(parsed.error) ? parsed.error : null;
+  const providerMessage = optionalString(error?.message);
+  const providerCode = optionalString(error?.providerCode);
+  const providerInfo = optionalString(error?.providerInfo);
+  const snippet = boundedResponseSnippet(providerMessage ?? text);
+  return new ManagedWhatsAppRequestError(
+    `Managed WhatsApp request failed: HTTP ${status}${snippet ? `: ${snippet}` : ""}`,
+    { status, providerCode, providerInfo },
   );
 }
 
-function stringifyTemplateParam(value: WhatsAppTemplateParamValue): string {
-  if (value == null) return "";
-  return String(value);
+function parseJsonObject(text: string): Record<string, unknown> | null {
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function boundedResponseSnippet(text: string): string {

@@ -1,6 +1,7 @@
 import type { Logger } from "../logger";
 import {
   WHATSAPP_NONE_PROVIDER_ID,
+  type WhatsAppCapabilities,
   type WhatsAppDmProvider,
   type WhatsAppDmProviderId,
   type WhatsAppGroupMetadata,
@@ -18,6 +19,7 @@ import type { WhatsAppTemplateRequest } from "./templates";
 export interface WhatsAppRuntime {
   isConnected: boolean;
   onMessage(handler: WhatsAppMessageHandler): void;
+  getCapabilities(target: WhatsAppTarget): WhatsAppCapabilities;
   sendText(target: WhatsAppTarget, text: string, options?: WhatsAppSendOptions): Promise<WhatsAppSendResult | null>;
   sendTemplate(target: WhatsAppTarget, template: WhatsAppTemplateRequest): Promise<WhatsAppSendResult | null>;
   sendFile(target: WhatsAppTarget, filePath: string, mimeType: string, fileName: string): Promise<void>;
@@ -90,6 +92,10 @@ export function createWhatsAppRuntime(config: WhatsAppRuntimeConfig): WhatsAppRu
           await handler(message);
         });
       }
+    },
+
+    getCapabilities(target) {
+      return resolveProviderForTarget(target).capabilities;
     },
 
     async sendText(target, text, options) {

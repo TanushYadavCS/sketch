@@ -37,6 +37,64 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       }
     });
 
+    it("finds the latest non-bot inbound WhatsApp DM for a recipient", async () => {
+      const repo = createConversationRepository(db);
+      await db.insertInto("users").values({ id: "user-window", name: "Window User" }).execute();
+      const dm = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "dm:+15551234567",
+      });
+      const group = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "group",
+        providerConversationId: "group@g.us",
+      });
+
+      await repo.insertMessage({
+        conversationId: dm.id,
+        providerMessageId: "user-match",
+        senderJid: "legacy-sender",
+        senderName: "Alice",
+        senderUserId: "user-window",
+        text: "user match",
+        receivedAt: "2026-07-03T08:00:00.000Z",
+      });
+      await repo.insertMessage({
+        conversationId: dm.id,
+        providerMessageId: "phone-match",
+        senderJid: "15551234567@s.whatsapp.net",
+        senderName: "Alice",
+        text: "phone match",
+        receivedAt: "2026-07-03T09:00:00.000Z",
+      });
+      await repo.insertMessage({
+        conversationId: dm.id,
+        providerMessageId: "bot-latest",
+        senderJid: "bot",
+        senderName: "Sketch",
+        isBot: true,
+        text: "bot",
+        receivedAt: "2026-07-03T10:00:00.000Z",
+      });
+      await repo.insertMessage({
+        conversationId: group.id,
+        providerMessageId: "group-latest",
+        senderJid: "15551234567@s.whatsapp.net",
+        senderName: "Alice",
+        text: "group",
+        receivedAt: "2026-07-03T11:00:00.000Z",
+      });
+
+      const withPhone = await repo.findLatestInboundWhatsAppDmFromRecipient({
+        recipientUserId: "user-window",
+        phoneE164: "+15551234567",
+      });
+      const byUserOnly = await repo.findLatestInboundWhatsAppDmFromRecipient({ recipientUserId: "user-window" });
+
+      expect(withPhone?.providerMessageId).toBe("phone-match");
+      expect(byUserOnly?.providerMessageId).toBe("user-match");
+    });
     it("deduplicates provider messages by conversation, provider id, sender, and bot side", async () => {
       const repo = createConversationRepository(db);
       const conversation = await repo.getOrCreate({

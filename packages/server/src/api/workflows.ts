@@ -18,9 +18,9 @@ import type { Logger } from "../logger";
 import { createWorkflowDeliveryCapture } from "../scheduler/delivery-capture";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import { deliverProactiveDm } from "../whatsapp/proactive-delivery";
 import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
-import { buildProactiveUpdateTemplate } from "../whatsapp/templates";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { executeAutomation } from "../workflows/runtime";
 
@@ -210,9 +210,10 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
     throw new WorkflowApiError("NOT_CONNECTED", "WhatsApp is not connected");
   }
   const delivery: Record<string, unknown> = { mode: "target", platform: "whatsapp", target: resolved.targetId };
+  const conversations = createConversationRepository(deps.db);
   const capture = deps.whatsappRuntime
     ? createWorkflowDeliveryCapture({
-        conversations: createConversationRepository(deps.db),
+        conversations,
         settingsRepo: createSettingsRepository(deps.db),
         logger: deps.logger,
       })
@@ -222,16 +223,17 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
     sendMessage: async (text: string) => {
       if (deps.whatsappRuntime) {
         const target = whatsappTargetFromDeliveryTarget(resolved.targetId);
-        const sent =
+        const result =
           target.kind === "dm"
-            ? await deps.whatsappRuntime.sendTemplate(target, buildProactiveUpdateTemplate({ messageSummary: text }))
-            : await deps.whatsappRuntime.sendText(target, text);
-        if (sent?.providerMessageId) {
-          delivery.messageRef = sent.providerMessageId;
+            ? await deliverWorkflowWhatsAppDm(task, target, text, deps, conversations)
+            : { mode: "text" as const, sent: await deps.whatsappRuntime.sendText(target, text) };
+        const messageRef = result.sent?.providerMessageId;
+        if (messageRef) delivery.messageRef = messageRef;
+        if (messageRef && result.mode === "text") {
           await capture?.captureWhatsApp({
             deliveryTarget: target.kind === "dm" ? whatsappDeliveryTargetFromTarget(target) : resolved.targetId,
-            messageRef: sent.providerMessageId,
-            providerTimestamp: sent.providerTimestamp,
+            messageRef,
+            providerTimestamp: result.sent?.providerTimestamp ?? null,
             text,
           });
         }
@@ -242,6 +244,34 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
   };
 }
 
+async function deliverWorkflowWhatsAppDm(
+  task: ScheduledTaskRow,
+  target: ReturnType<typeof whatsappTargetFromDeliveryTarget>,
+  text: string,
+  deps: WorkflowRouteDeps,
+  conversations: ReturnType<typeof createConversationRepository>,
+) {
+  if (target.kind !== "dm") throw new Error("Expected WhatsApp DM target");
+  if (!task.created_by)
+    throw new WorkflowApiError("INVALID_STATE", "Workflow creator is required for WhatsApp DM delivery");
+  if (!deps.inboxMessagesRepo)
+    throw new WorkflowApiError("INVALID_STATE", "Inbox storage is required for WhatsApp DM delivery");
+  if (!deps.whatsappRuntime) throw new WorkflowApiError("NOT_CONNECTED", "WhatsApp is not connected");
+  const recipient = await deps.users.findById(task.created_by);
+  return deliverProactiveDm({
+    target,
+    recipientUserId: task.created_by,
+    senderUserId: task.created_by,
+    text,
+    whatsapp: deps.whatsappRuntime,
+    conversations,
+    inboxMessages: deps.inboxMessagesRepo,
+    logger: deps.logger,
+    recipientName: recipient?.name,
+    recipientPhoneE164: recipient?.whatsapp_number ?? target.phoneE164,
+    inboxMetadata: { source: "workflow", taskId: task.id },
+  });
+}
 function finalOutputSummary(value: unknown): string | null {
   if (value == null) return null;
   return typeof value === "string" ? value.slice(0, 200) : JSON.stringify(value).slice(0, 200);

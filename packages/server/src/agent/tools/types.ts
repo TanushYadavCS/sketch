@@ -116,9 +116,14 @@ export interface SketchMcpDeps {
     platform: string;
     message: string;
     template?: WhatsAppTemplateRequest;
+    senderUserId?: string;
+    storeInInbox?: boolean;
+    inboxKind?: string;
+    inboxMetadata?: Record<string, unknown> | null;
   }) => Promise<{
     channelId: string;
     messageRef: string;
+    inboxMessageId?: string;
   }>;
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;

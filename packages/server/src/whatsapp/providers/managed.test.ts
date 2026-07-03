@@ -4,7 +4,11 @@ import { createWhatsAppTemplateMappingRepository } from "../../db/repositories/w
 import { createTestDb, createTestLogger } from "../../test-utils";
 import type { WhatsAppInboundMessage } from "../provider";
 import { WHATSAPP_TEMPLATE_KEYS } from "../templates";
-import { InvalidManagedWhatsAppInboundEventError, createManagedWhatsAppProvider } from "./managed";
+import {
+  InvalidManagedWhatsAppInboundEventError,
+  ManagedWhatsAppRequestError,
+  createManagedWhatsAppProvider,
+} from "./managed";
 
 function inboundPayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -106,6 +110,75 @@ describe("managed WhatsApp provider", () => {
     );
   });
 
+  it("exposes providerCode from structured platform failures", async () => {
+    const requestFetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "SEND_FAILED",
+              message: "Window expired",
+              providerCode: "window_expired",
+              providerInfo: "wati detail",
+            },
+          }),
+          { status: 502 },
+        ),
+    );
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+
+    await expect(
+      provider.dmProvider.sendText({ kind: "dm", phoneE164: "+15551234567" }, "hello"),
+    ).rejects.toMatchObject({
+      status: 502,
+      providerCode: "window_expired",
+      providerInfo: "wati detail",
+    });
+  });
+
+  it("tolerates structured platform failures without providerCode", async () => {
+    const requestFetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: { code: "SEND_FAILED", message: "Provider rejected" } }), { status: 502 }),
+    );
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+
+    try {
+      await provider.dmProvider.sendText({ kind: "dm", phoneE164: "+15551234567" }, "hello");
+      throw new Error("expected send to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ManagedWhatsAppRequestError);
+      expect((error as ManagedWhatsAppRequestError).providerCode).toBeUndefined();
+      expect((error as ManagedWhatsAppRequestError).message).toContain("Provider rejected");
+    }
+  });
+
+  it("tolerates malformed JSON platform failures", async () => {
+    const requestFetch = vi.fn(async () => new Response("{not-json", { status: 502 }));
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+
+    await expect(
+      provider.dmProvider.sendText({ kind: "dm", phoneE164: "+15551234567" }, "hello"),
+    ).rejects.toMatchObject({
+      status: 502,
+      providerCode: undefined,
+    });
+  });
   it("includes a bounded platform error response snippet in outbound failures", async () => {
     const requestFetch = vi.fn(async () => new Response(`platform failed ${"x".repeat(800)}`, { status: 502 }));
     const provider = createManagedWhatsAppProvider({
