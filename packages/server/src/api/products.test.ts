@@ -13,6 +13,7 @@ import { createTestConfig, createTestDb, createTestLogger } from "../test-utils"
 
 const PASSWORD = "testpassword123";
 const ADMIN_EMAIL = "admin@test.com";
+const MEMBER_EMAIL = "member@test.com";
 const CONNECTOR_ID = "connector-1";
 const PRODUCT_BIRTH_GATE_TYPES: Set<ProposeEntityType> = new Set(["project", "product", "team"]);
 const PRODUCT_LIVE_TYPES: Set<ProposeEntityType> = new Set(["product"]);
@@ -28,17 +29,24 @@ async function seedAdmin(db: Kysely<DB>): Promise<{ id: string }> {
     passwordHash: await hashPassword(PASSWORD),
     authRole: "admin",
   });
+  await users.create({
+    name: "member",
+    email: MEMBER_EMAIL,
+    emailVerified: true,
+    passwordHash: await hashPassword(PASSWORD),
+    authRole: "member",
+  });
   await settings.update({ onboardingCompletedAt: new Date().toISOString() });
   const admin = await users.findByEmail(ADMIN_EMAIL);
   if (!admin) throw new Error("admin missing");
   return { id: admin.id };
 }
 
-async function login(app: ReturnType<typeof createApp>): Promise<string> {
+async function login(app: ReturnType<typeof createApp>, email = ADMIN_EMAIL): Promise<string> {
   const res = await app.request("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: ADMIN_EMAIL, password: PASSWORD }),
+    body: JSON.stringify({ email, password: PASSWORD }),
   });
   return res.headers.get("set-cookie") ?? "";
 }
@@ -120,6 +128,7 @@ describe("declared products API", () => {
   let db: Kysely<DB>;
   let app: ReturnType<typeof createApp>;
   let cookie: string;
+  let memberCookie: string;
   let adminId: string;
 
   beforeEach(async () => {
@@ -128,10 +137,22 @@ describe("declared products API", () => {
     adminId = admin.id;
     app = createApp(db, createTestConfig({}), { logger: createTestLogger() });
     cookie = await login(app);
+    memberCookie = await login(app, MEMBER_EMAIL);
   });
 
   afterEach(async () => {
     await db.destroy();
+  });
+
+  it("rejects product declarations from non-admin members", async () => {
+    const res = await app.request("/api/products", {
+      method: "POST",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Canvas Copilot" }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(await countProducts(db)).toBe(0);
   });
 
   it("declares a new product immediately as a single declared entity", async () => {

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { z } from "zod";
+import { denyIfNotAdmin } from "./auth-helpers";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 
@@ -24,6 +25,9 @@ export function productRoutes(db: Kysely<DB>) {
   const repo = createEntityRepository(db);
 
   routes.post("/", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const parsed = declareProductBodySchema.safeParse(await c.req.json());
     if (!parsed.success) {
       return c.json({ error: { code: "BAD_REQUEST", message: "name is required" } }, 400);
