@@ -6,6 +6,7 @@ interface CommitmentBackfillDb {
   indexed_file_facts: {
     id: string;
     source: string;
+    fact_type: string;
     raw: string | null;
     created_by_user_id: string | null;
     deleted_at: string | null;
