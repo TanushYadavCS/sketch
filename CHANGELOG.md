@@ -6,6 +6,13 @@ All notable changes to this project are documented here.
 
 - Fix(OpenRouter): request JSON mode for enrichment JSON calls and require providers to honor structured-output parameters, preventing prose responses from breaking smart entity extraction.
 
+## [0.42.0] -- 2026-07-03
+
+- WhatsApp proactive delivery is now session-first: reminders, workflow outputs, and agent deliveries send full multi-line content as a normal message when the user was active in the last 23 hours. Outside that window the output is parked in the user's inbox and a short approved nudge template is sent instead; the agent delivers the parked output on the user's next reply, and multiple pending outputs produce a single nudge.
+- Explicit template sends (magic links, onboarding introductions) are unchanged and always use their dedicated templates.
+- Managed WhatsApp errors from the platform now carry a provider code (contact not found, window expired) used to trigger the inbox fallback.
+- Template parameters are defensively sanitized to single-line values.
+
 ## [0.41.1] -- 2026-07-03
 
 - Fix(Wati): send an explicit `User-Agent` header on all Wati API requests. Cloudflare in front of Wati's v3 API rejects requests without one (HTTP 403 error 1010), which blocked template sends before Wati received them.
