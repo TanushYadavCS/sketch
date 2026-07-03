@@ -354,10 +354,7 @@ async function promoteBriefTaskEvidence(db: Kysely<DB>, taskId: string, refs: Ag
 }
 
 function visibleTaskQuery(db: Kysely<DB>, viewer: FileViewer, viewerUserId?: string | null) {
-  let query = db
-    .selectFrom("tasks")
-    .selectAll("tasks")
-    .where("tasks.valid_to", "is", null);
+  let query = db.selectFrom("tasks").selectAll("tasks").where("tasks.valid_to", "is", null);
 
   if (!viewer.isAdmin) {
     query = query.where((eb) =>
