@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { whatsappNumberSchema } from "@sketch/shared";
 /**
  * System API routes — internal management endpoints authenticated by bearer token.
@@ -12,6 +12,8 @@ import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import { upsertSlackIdentity } from "../slack/upsert-identity";
+import { InvalidManagedWhatsAppInboundEventError } from "../whatsapp/providers/managed";
+import type { ManagedWhatsAppProvider } from "../whatsapp/providers/managed";
 import { buildIntroductionTemplate } from "../whatsapp/templates";
 import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { upsertWhatsAppIdentity } from "../whatsapp/upsert-identity";
@@ -44,6 +46,7 @@ interface SystemDeps {
     message: string;
     template?: WhatsAppTemplateRequest;
   }) => Promise<{ channelId: string; messageRef: string }>;
+  managedWhatsappInbound?: Pick<ManagedWhatsAppProvider, "handleInboundEvent">;
   whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
   startWhatsAppPairing?: Function;
@@ -143,6 +146,13 @@ function generateSketchApiKey(): string {
   return `sk_live_${randomBytes(32).toString("base64url")}`;
 }
 
+function isValidSystemAuthorization(auth: string | undefined, systemSecret: string): boolean {
+  if (!auth) return false;
+  const actualBytes = Buffer.from(auth);
+  const expectedBytes = Buffer.from(`Bearer ${systemSecret}`);
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
+}
+
 function buildOpeningIntroMessage(botName: string): string {
   return `I've added your team to ${botName}. Who should I introduce myself to first? Reply with names or @mentions.`;
 }
@@ -219,7 +229,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
 
   routes.use("/*", async (c, next) => {
     const auth = c.req.header("Authorization");
-    if (!auth || auth !== `Bearer ${deps.systemSecret}`) {
+    if (!isValidSystemAuthorization(auth, deps.systemSecret)) {
       return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid system secret" } }, 401);
     }
     return next();
@@ -497,6 +507,27 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
         409,
       );
     }
+  });
+
+  routes.post("/whatsapp/managed/events", async (c) => {
+    if (!deps.managedWhatsappInbound) {
+      return c.json({ error: { code: "UNAVAILABLE", message: "Managed WhatsApp provider is not configured" } }, 503);
+    }
+
+    const body = await c.req.json().catch(() => undefined);
+    if (body === undefined) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "Invalid JSON body" } }, 400);
+    }
+
+    try {
+      await deps.managedWhatsappInbound.handleInboundEvent(body);
+    } catch (error) {
+      if (error instanceof InvalidManagedWhatsAppInboundEventError) {
+        return c.json({ error: { code: "BAD_REQUEST", message: "Invalid managed WhatsApp event" } }, 400);
+      }
+      throw error;
+    }
+    return c.json({ ok: true });
   });
 
   routes.get("/whatsapp", (c) => {

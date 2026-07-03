@@ -57,6 +57,33 @@ describe("configSchema", () => {
       }
     });
 
+    it("parses managed WhatsApp provider configuration", () => {
+      const result = configSchema.safeParse({
+        WHATSAPP_DM_PROVIDER: "managed",
+        WHATSAPP_GROUP_PROVIDER: "baileys",
+        MANAGED_WHATSAPP_PLATFORM_URL: "https://app.getsketch.ai",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.WHATSAPP_DM_PROVIDER).toBe("managed");
+        expect(result.data.MANAGED_WHATSAPP_PLATFORM_URL).toBe("https://app.getsketch.ai");
+        expect(result.data.MANAGED_WHATSAPP_TENANT_TOKEN).toBe("tenant-token");
+      }
+    });
+
+    it("treats blank managed WhatsApp settings as absent", () => {
+      const result = configSchema.safeParse({
+        MANAGED_WHATSAPP_PLATFORM_URL: "",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.MANAGED_WHATSAPP_PLATFORM_URL).toBeUndefined();
+        expect(result.data.MANAGED_WHATSAPP_TENANT_TOKEN).toBeUndefined();
+      }
+    });
+
     it("parses vision analysis environment settings", () => {
       const result = configSchema.safeParse({
         VISION_ENABLED: "true",
@@ -192,6 +219,11 @@ describe("configSchema", () => {
 
     it("rejects invalid Wati endpoint URLs", () => {
       const result = configSchema.safeParse({ WATI_API_ENDPOINT: "not-a-url" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects invalid managed WhatsApp platform URLs", () => {
+      const result = configSchema.safeParse({ MANAGED_WHATSAPP_PLATFORM_URL: "not-a-url" });
       expect(result.success).toBe(false);
     });
   });
@@ -389,6 +421,39 @@ describe("validateConfig", () => {
         WATI_API_ENDPOINT: "https://tenant.wati.io",
         WATI_ACCESS_TOKEN: "access-token",
         WATI_WEBHOOK_TOKEN: "webhook-token",
+      });
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("managed WhatsApp validation", () => {
+    it("exits when managed WhatsApp is configured without a platform URL", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "managed",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("exits when managed WhatsApp is configured without a tenant token", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "managed",
+        MANAGED_WHATSAPP_PLATFORM_URL: "https://app.getsketch.ai",
+      });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("accepts complete managed WhatsApp configuration", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "managed",
+        MANAGED_WHATSAPP_PLATFORM_URL: "https://app.getsketch.ai",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
       });
       validateConfig(config);
       expect(exitSpy).not.toHaveBeenCalled();
