@@ -95,7 +95,7 @@ describe("ClickUp workspace effective scope", () => {
     vi.restoreAllMocks();
   });
 
-  it("does not seed reachable workspace members or entities when only another workspace's space is selected", async () => {
+  it("does not seed workspace members as people, and does not reach another workspace when only one space is selected", async () => {
     const fetchSpy = mockClickUpFetch();
     const { entitySeeds, personSeeds, items } = await collectClickUpSync({
       workspaces: [],
@@ -103,26 +103,17 @@ describe("ClickUp workspace effective scope", () => {
     });
 
     expect(items).toEqual([]);
-    expect(personSeeds).toEqual([
-      expect.objectContaining({
-        sourceId: "user:1",
-        name: "Alice A",
-        email: "alice@workspace-a.example",
-      }),
-    ]);
-    expect(entitySeeds.filter((seed) => seed.sourceType === "clickup_workspace").map((seed) => seed.sourceId)).toEqual([
-      "workspace-a",
-    ]);
-    expect(entitySeeds.filter((seed) => seed.sourceType === "clickup_space").map((seed) => seed.sourceId)).toEqual([
-      "space-a",
-    ]);
+    // Bare workspace membership is not an engagement signal — no phantom people.
+    expect(personSeeds).toEqual([]);
+    expect(entitySeeds.filter((seed) => seed.sourceType === "clickup_workspace")).toEqual([]);
+    expect(entitySeeds.filter((seed) => seed.sourceType === "clickup_space")).toEqual([]);
 
     const paths = pathsFrom(fetchSpy);
     expect(paths).not.toEqual(expect.arrayContaining(["/api/v2/space/space-b/folder"]));
     expect(paths).not.toEqual(expect.arrayContaining(["/api/v3/workspaces/workspace-b/docs"]));
   });
 
-  it("keeps unscoped sync seeding every reachable workspace", async () => {
+  it("processes every reachable workspace when unscoped, still without seeding members as people", async () => {
     const fetchSpy = mockClickUpFetch();
     const { entitySeeds, personSeeds, items } = await collectClickUpSync({
       workspaces: [],
@@ -130,19 +121,11 @@ describe("ClickUp workspace effective scope", () => {
     });
 
     expect(items).toEqual([]);
-    expect(personSeeds.map((seed) => seed.sourceId).sort()).toEqual(["user:1", "user:2"]);
-    expect(
-      entitySeeds
-        .filter((seed) => seed.sourceType === "clickup_workspace")
-        .map((seed) => seed.sourceId)
-        .sort(),
-    ).toEqual(["workspace-a", "workspace-b"]);
-    expect(
-      entitySeeds
-        .filter((seed) => seed.sourceType === "clickup_space")
-        .map((seed) => seed.sourceId)
-        .sort(),
-    ).toEqual(["space-a", "space-b"]);
+    // No tasks in these fixtures → no assignees → no people, even though both
+    // workspaces are fully processed (proven by the fetch paths below).
+    expect(personSeeds).toEqual([]);
+    expect(entitySeeds.filter((seed) => seed.sourceType === "clickup_workspace")).toEqual([]);
+    expect(entitySeeds.filter((seed) => seed.sourceType === "clickup_space")).toEqual([]);
 
     expect(pathsFrom(fetchSpy)).toEqual(
       expect.arrayContaining([
@@ -152,5 +135,48 @@ describe("ClickUp workspace effective scope", () => {
         "/api/v3/workspaces/workspace-b/docs",
       ]),
     );
+  });
+
+  it("seeds task assignees as people (engagement signal), keyed by assignee username", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/api/v2/team") {
+        return jsonResponse({
+          teams: [{ id: "workspace-a", name: "Workspace A", members: teams[0].members }],
+        });
+      }
+      if (path === "/api/v2/team/workspace-a/space") {
+        return jsonResponse({ spaces: [{ id: "space-a", name: "Space A" }] });
+      }
+      if (path === "/api/v2/space/space-a/folder") return jsonResponse({ folders: [] });
+      if (path === "/api/v2/space/space-a/list") {
+        return jsonResponse({ lists: [{ id: "list-a", name: "List A" }] });
+      }
+      if (path === "/api/v2/list/list-a/task") {
+        return jsonResponse({
+          tasks: [
+            {
+              id: "task-1",
+              name: "Do the thing",
+              status: { status: "open", type: "open" },
+              assignees: [{ id: 1, username: "Alice A", email: "alice@workspace-a.example" }],
+              tags: [],
+              url: "https://app.clickup.com/t/task-1",
+              list: { id: "list-a", name: "List A" },
+              space: { id: "space-a" },
+              date_updated: "1700000000000",
+            },
+          ],
+        });
+      }
+      if (path === "/api/v3/workspaces/workspace-a/docs") return jsonResponse({ docs: [] });
+      return new Response(JSON.stringify({ error: `unexpected path ${path}` }), { status: 404 });
+    });
+
+    const { personSeeds } = await collectClickUpSync({ workspaces: [], spaces: [] });
+
+    // The assignee is seeded (engagement), keyed by username — not by user:<id>.
+    expect(personSeeds).toEqual([expect.objectContaining({ sourceId: "assignee:Alice A", name: "Alice A" })]);
+    expect(personSeeds.every((seed) => !seed.sourceId.startsWith("user:"))).toBe(true);
   });
 });

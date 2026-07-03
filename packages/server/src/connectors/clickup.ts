@@ -718,31 +718,12 @@ export function createClickUpConnector(): Connector {
           });
         }
 
-        // Seed workspace as top-level entity
-        if (!experimentalFlag && onEntitySeed) {
-          await onEntitySeed({
-            name: workspaceName,
-            sourceType: "clickup_workspace",
-            source: "clickup",
-            sourceId: team.id,
-            metadata: { memberCount: workspaceEmails.length },
-          });
-        }
-
-        // Seed workspace members as person entities
-        if (onPersonSeed) {
-          for (const member of team.members) {
-            if (member.user.username) {
-              await onPersonSeed({
-                name: member.user.username,
-                email: member.user.email,
-                subtype: "internal",
-                source: "clickup",
-                sourceId: `user:${member.user.id}`,
-              });
-            }
-          }
-        }
+        // Workspace membership alone is not an engagement signal, so members are
+        // NOT seeded as person entities here — a shared workspace's full roster
+        // would otherwise mint hundreds of isolated "phantom" people (zero
+        // mentions, zero edges). People come from task assignees (seeded below,
+        // after traversal) and from text mentions. Member emails still feed the
+        // access scope for doc/space visibility.
 
         // Workspace-level access scope (used for docs and public spaces)
         const workspaceScope: SyncedItem["accessScope"] = {
@@ -758,17 +739,6 @@ export function createClickUpConnector(): Connector {
             continue;
           }
           syncedAnyAllowedSpace = true;
-
-          // Seed space as entity with workspace context
-          if (!experimentalFlag && onEntitySeed) {
-            await onEntitySeed({
-              name: space.name,
-              sourceType: "clickup_space",
-              source: "clickup",
-              sourceId: space.id,
-              metadata: { private: space.private, workspaceName, workspaceId: team.id },
-            });
-          }
 
           // Build access scope for this space.
           // Private spaces use space members; public spaces use all workspace members.
