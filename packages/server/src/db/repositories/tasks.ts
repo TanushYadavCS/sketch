@@ -168,19 +168,22 @@ export function createTaskRepository(db: Kysely<DB>) {
 }
 
 function visibleTaskQuery(db: Kysely<DB>, viewer: FileViewer) {
-  return db
+  const query = db
     .selectFrom("tasks")
     .selectAll("tasks")
-    .where("tasks.valid_to", "is", null)
-    .where((eb) =>
-      eb.exists(sql<boolean>`(
+    .where("tasks.valid_to", "is", null);
+
+  if (viewer.isAdmin) return query;
+
+  return query.where((eb) =>
+    eb.exists(sql<boolean>`(
         SELECT 1 FROM task_evidence
         INNER JOIN indexed_files ON indexed_files.id = task_evidence.ref_id
         WHERE task_evidence.task_id = tasks.id
           AND task_evidence.kind = 'file'
           AND ${fileVisibilityPredicate(viewer)}
       )`),
-    );
+  );
 }
 
 async function findLiveProjectForTask(db: Kysely<DB>, parentSourceRef: string | null, parentName: string | null) {

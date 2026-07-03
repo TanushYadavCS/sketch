@@ -6,6 +6,15 @@ import type { DB } from "../../db/schema";
 import { getContentViewer } from "../auth-helpers";
 
 const TASK_STATUSES = new Set(["open", "in_progress", "done", "dropped"]);
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT = 200;
+
+function parseTaskLimit(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_LIMIT;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return DEFAULT_LIMIT;
+  return Math.min(parsed, MAX_LIMIT);
+}
 
 export function createTaskRoutes(db: Kysely<DB>) {
   const routes = new Hono();
@@ -20,7 +29,7 @@ export function createTaskRoutes(db: Kysely<DB>) {
     if (status && !TASK_STATUSES.has(status)) {
       return c.json({ error: { code: "BAD_REQUEST", message: "Invalid status" } }, 400);
     }
-    const limit = Math.min(Number(c.req.query("limit")) || 100, 200);
+    const limit = parseTaskLimit(c.req.query("limit"));
     const tasks = await taskRepo.listTasksByParent(entity.id, {
       viewer,
       status: status as TaskStatus | undefined,
