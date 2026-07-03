@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type { IndexedFileFactRaw, LlmTaskCandidate, LlmTaskFactRaw } from "../../connectors/types";
 import type { DB } from "../schema";
+import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 
 export type IndexedFileFactType =
   | "attendee"
@@ -881,14 +882,18 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
       source: string;
       parentSourceId: string;
       limit: number;
+      viewer?: FileViewer;
     }): Promise<{ tasks: ChildTask[]; total: number }> {
-      const base = db
+      let base = db
         .selectFrom("indexed_file_facts as f")
         .innerJoin("indexed_files as i", "i.id", "f.indexed_file_id")
         .where("f.fact_type", "=", "parent_entity")
         .where("f.source", "=", opts.source)
         .where("f.subject_source_id", "=", opts.parentSourceId)
         .where("f.deleted_at", "is", null);
+      if (opts.viewer && !opts.viewer.isAdmin) {
+        base = base.where(fileVisibilityPredicate(opts.viewer, "i"));
+      }
 
       const countRow = await base
         .select((eb) => eb.fn.count("f.indexed_file_id").distinct().as("c"))

@@ -30,7 +30,7 @@
  */
 import { type Context, Hono } from "hono";
 import type { Kysely } from "kysely";
-import { isAdmin } from "../api/auth-helpers";
+import { getContentViewer, isAdmin } from "../api/auth-helpers";
 import type { Config } from "../config";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo, readReviewFreezeMs } from "../db/repositories/entity-review";
@@ -421,6 +421,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { config: Pick<Config, 
         source: baseRow.seed_source,
         parentSourceId: baseRow.seed_source_id,
         limit: 50,
+        viewer: getContentViewer(c),
       });
       return c.json({ row: enrichedRow, evidence: enrichedEvidence, childTasks: tasks, childTaskCount: total });
     }
