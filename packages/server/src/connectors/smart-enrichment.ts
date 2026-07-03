@@ -7,7 +7,7 @@
  * 3. Generate grounded file summaries (using matched entity definitions as context)
  * 4. Extract and append new facts to entity definitions
  *
- * Falls back to deterministic enrichment when Gemini is unavailable.
+ * When Gemini is unavailable, callers skip AI extraction and mark summaries accordingly.
  */
 import { createHash, randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";

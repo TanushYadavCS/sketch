@@ -422,7 +422,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
   /**
    * POST /api/entities/resets
    * Delete entities by category, optionally clearing related fact flags and
-   * rebuilding the entity graph via materialize+deterministic linking.
+   * rebuilding the entity graph via materialize and relationship sweeps.
    *
    * Body: {
    *   categories: ("manual" | "connectors" | "ai")[],

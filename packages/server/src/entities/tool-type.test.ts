@@ -5,7 +5,6 @@ import { handleSearch, handleSearchEntities } from "../agent/tools/search";
 import { UploadCollector } from "../agent/tools/types";
 import { connectorRoutes } from "../api/connectors";
 import { createEntityProfileRoutes } from "../api/entities/profile-routes";
-import { linkEntitiesByDeterministicMatch } from "../connectors/enrichment";
 import type { GeminiGenerator } from "../connectors/gemini-generate";
 import { matchEntities, smartEnrichFile } from "../connectors/smart-enrichment";
 import { createConnectorRepository } from "../db/repositories/connectors";
@@ -258,7 +257,7 @@ describe("tool entity type", () => {
     ).toHaveLength(0);
   });
 
-  it("excludes tools from default search, API, graph, deterministic linking, file detail, and matching", async () => {
+  it("excludes tools from default search, API, graph, file detail, and matching", async () => {
     await seedFile(db, "file-tool-hidden", "Slack and Project Apollo are in this document.");
     await seedEntity(db, "entity-tool-slack", "Slack", "tool");
     await seedEntity(db, "entity-project-apollo", "Project Apollo", "project");
@@ -290,15 +289,6 @@ describe("tool entity type", () => {
     const graphRes = await entityApp.request("/graph");
     const graphBody = (await graphRes.json()) as { nodes: Array<{ name: string }> };
     expect(graphBody.nodes.map((node) => node.name)).not.toContain("Slack");
-
-    await linkEntitiesByDeterministicMatch(db, createTestLogger());
-    const deterministicToolMentions = await db
-      .selectFrom("entity_mentions")
-      .select("id")
-      .where("entity_id", "=", "entity-tool-slack")
-      .where("source", "=", "deterministic_substring")
-      .execute();
-    expect(deterministicToolMentions).toHaveLength(0);
 
     const connectorApp = adminApp(connectorRoutes(createConnectorRepository(db), db, createTestLogger()));
     const fileRes = await connectorApp.request("/files/file-tool-hidden/content");

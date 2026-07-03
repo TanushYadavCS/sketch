@@ -490,7 +490,7 @@ describe("recreateEntityGraph", () => {
     await db.destroy();
   });
 
-  it("runs the full reset → fact materialization → deterministic linking chain idempotently", async () => {
+  it("runs the full reset → fact materialization → sweep chain idempotently", async () => {
     const first = await recreateEntityGraph({
       db,
       logger: createTestLogger(),
@@ -500,7 +500,7 @@ describe("recreateEntityGraph", () => {
 
     expect(first.replay.factsRead).toBe(5);
 
-    // Snapshot the deterministic tuples (entity name, file id, relation, source)
+    // Snapshot the mention tuples (entity name, file id, relation, source)
     // so we can assert stability across recreate runs without depending on
     // entity IDs (which churn — that's an explicit out-of-scope guarantee).
     const snapshot = async () => {
