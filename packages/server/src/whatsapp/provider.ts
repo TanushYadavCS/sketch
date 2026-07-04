@@ -62,9 +62,18 @@ export type WhatsAppInboundMessage = WhatsAppDmInboundMessage | WhatsAppGroupInb
 
 export type WhatsAppMessageHandler = (message: WhatsAppInboundMessage) => Promise<void>;
 
+export interface WhatsAppHistorySyncResult {
+  persisted: number;
+  skippedOld: number;
+  skippedDup: number;
+}
+
+export type WhatsAppHistoryMessagesHandler = (messages: WhatsAppInboundMessage[]) => Promise<WhatsAppHistorySyncResult>;
+
 export interface WhatsAppInboundProvider {
   id: string;
   onMessage: (handler: WhatsAppMessageHandler) => void;
+  onHistoryMessages?: (handler: WhatsAppHistoryMessagesHandler) => void;
 }
 
 export interface WhatsAppSendResult {

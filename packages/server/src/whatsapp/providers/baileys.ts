@@ -147,6 +147,9 @@ export function createBaileysWhatsAppProviders(whatsapp: WhatsAppBot, logger: Lo
       onMessage(handler) {
         whatsapp.onMessage((message) => handler(normalizeBaileysInboundMessage(message)));
       },
+      onHistoryMessages(handler) {
+        whatsapp.onHistoryMessages((messages) => handler(messages.map(normalizeBaileysInboundMessage)));
+      },
     },
   };
 }
