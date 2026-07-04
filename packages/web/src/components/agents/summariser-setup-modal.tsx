@@ -1,8 +1,8 @@
 /**
- * First-time setup for a new summariser, as a short multi-step wizard: choose
- * inputs, then delivery, then schedule + content. Creating the first summariser
- * also switches the agent on. Editing an existing summariser happens on its own
- * config page, not here.
+ * First-time setup for a new summariser, as a short four-step wizard: choose
+ * inputs, then delivery, then schedule, then content (sections + focus).
+ * Creating the first summariser also switches the agent on. Editing an existing
+ * summariser happens on its own config page, not here.
  */
 import { ProgressIndicator } from "@/components/onboarding/progress-indicator";
 import { type AgentConfig, api } from "@/lib/api";
@@ -33,7 +33,8 @@ import {
 const STEPS = [
   { title: "Inputs", hint: "Pick the conversations to summarise." },
   { title: "Delivery", hint: "Choose where the summary goes." },
-  { title: "Schedule & content", hint: "Set when it runs and what it includes." },
+  { title: "Schedule", hint: "Set when it runs and how much it includes." },
+  { title: "Content", hint: "Choose the sections and any focus." },
 ];
 
 export function SummariserSetupModal({
@@ -59,7 +60,7 @@ export function SummariserSetupModal({
       <DialogContent className="flex max-h-[85vh] flex-col gap-0 overflow-hidden sm:max-w-[520px]">
         <DialogHeader>
           <DialogTitle>New summariser</DialogTitle>
-          <DialogDescription>Set up a new summariser in three quick steps.</DialogDescription>
+          <DialogDescription>Set up a new summariser in four quick steps.</DialogDescription>
         </DialogHeader>
         {agent ? (
           <SetupBody agentKey={agentKey} agent={agent} onClose={onClose} onCreated={onCreated} />
@@ -111,7 +112,7 @@ function SetupBody({
     !(controller.destKind === "self" && controller.sources.length !== 1) &&
     !(controller.destKind === "member" && (!controller.memberUserId || controller.hasWhatsApp)) &&
     !(controller.destKind === "channel" && !controller.channelTarget);
-  const canAdvance = step === 0 ? inputsValid : step === 1 ? deliveryValid : controller.isValid;
+  const canAdvance = step === 0 ? inputsValid : step === 1 ? deliveryValid : step === 2 ? true : controller.isValid;
   const isLast = step === STEPS.length - 1;
 
   return (
@@ -124,18 +125,24 @@ function SetupBody({
           onStepClick={(n) => setStep(n - 1)}
         />
       </div>
-      <p className="px-1 text-[12px] text-muted-foreground">{STEPS[step].hint}</p>
-      <div className="flex-1 overflow-y-auto px-1 py-4">
+      <div className="mt-3 px-1">
+        <h2 className="text-[15px] font-semibold text-foreground">{STEPS[step].title}</h2>
+        <p className="mt-0.5 text-[12.5px] text-muted-foreground">{STEPS[step].hint}</p>
+      </div>
+      <div className="mt-2 h-[340px] overflow-y-auto px-1 py-3">
         {step === 0 ? (
           <SourcesField agent={agent} controller={controller} />
         ) : step === 1 ? (
           <DestinationField agent={agent} agentKey={agentKey} controller={controller} />
-        ) : (
+        ) : step === 2 ? (
           <div className="space-y-6">
             <ScheduleField controller={controller} />
+            <VolumeField agent={agent} controller={controller} />
+          </div>
+        ) : (
+          <div className="space-y-6">
             <SectionsField agent={agent} controller={controller} />
             <FocusField controller={controller} />
-            <VolumeField agent={agent} controller={controller} />
           </div>
         )}
       </div>
