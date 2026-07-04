@@ -1,7 +1,6 @@
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
-import { createWhatsAppTemplateMappingRepository } from "../../db/repositories/whatsapp-template-mappings";
-import { createTestDb, createTestLogger } from "../../test-utils";
+import { createTestLogger } from "../../test-utils";
 import type { WhatsAppInboundMessage } from "../provider";
 import { WHATSAPP_TEMPLATE_KEYS } from "../templates";
 import {
@@ -200,109 +199,110 @@ describe("managed WhatsApp provider", () => {
     }
   });
 
-  it("sends mapped logical templates through the platform template API", async () => {
-    const db = await createTestDb();
-    try {
-      const templateMappings = createWhatsAppTemplateMappingRepository(db);
-      await templateMappings.upsertMapping({
-        provider: "managed",
-        logicalKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
-        providerTemplateName: "sketch_magic_link",
-        language: "en_US",
-        status: "approved",
-        parameterMap: {
-          name: "recipientName",
-          bot: "botName",
-          link: "magicLinkUrl",
-          missing: "missingValue",
-        },
-      });
-      const requestFetch = vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify({
-              ok: true,
-              message: {
-                providerMessageId: "wamid.template",
-                providerConversationId: "conversation-1",
-                providerTimestamp: "2026-07-02T10:02:00.000Z",
-              },
-            }),
-          ),
-      );
-      const provider = createManagedWhatsAppProvider({
-        platformUrl: "https://app.getsketch.ai",
-        tenantToken: "tenant-token",
-        logger: createTestLogger(),
-        templateMappings,
-        fetch: requestFetch as typeof fetch,
-      });
+  it("sends logical template keys through the platform template API", async () => {
+    const requestFetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            ok: true,
+            message: {
+              providerMessageId: "wamid.template",
+              providerConversationId: "conversation-1",
+              providerTimestamp: "2026-07-02T10:02:00.000Z",
+            },
+          }),
+        ),
+    );
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
 
-      expect(provider.dmProvider.capabilities.templates).toBe(true);
-      expect(provider.dmProvider.capabilities.templateProvisioning).toBe("manual");
-      const sent = await provider.dmProvider.sendTemplate?.(
-        { kind: "dm", phoneE164: "+15551234567", providerConversationId: "conversation-1" },
-        {
-          key: WHATSAPP_TEMPLATE_KEYS.magicLink,
-          params: {
-            recipientName: "Alice",
-            botName: "Sketch",
-            magicLinkUrl: "https://sketch.test/magic",
-            missingValue: null,
-          },
-        },
-      );
-
-      expect(sent).toMatchObject({
-        providerMessageId: "wamid.template",
-        providerConversationId: "conversation-1",
-        providerTimestamp: "2026-07-02T10:02:00.000Z",
-      });
-      const [url, init] = requestFetch.mock.calls[0] as unknown as [string, RequestInit];
-      expect(url).toBe("https://app.getsketch.ai/api/whatsapp/outbound/templates");
-      expect(init.headers).toMatchObject({
-        Authorization: "Bearer tenant-token",
-        "Content-Type": "application/json",
-      });
-      expect(init.signal).toBeInstanceOf(AbortSignal);
-      expect(JSON.parse(init.body as string)).toEqual({
-        to: "+15551234567",
-        templateName: "sketch_magic_link",
+    expect(provider.dmProvider.capabilities.templates).toBe(true);
+    expect(provider.dmProvider.capabilities.templateProvisioning).toBe("manual");
+    const sent = await provider.dmProvider.sendTemplate?.(
+      { kind: "dm", phoneE164: "+15551234567", providerConversationId: "conversation-1" },
+      {
+        key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+        language: "hi_IN",
         params: {
-          name: "Alice",
-          bot: "Sketch",
-          link: "https://sketch.test/magic",
-          missing: "",
+          recipientName: "Alice\nExample",
+          botName: "Sketch\tBot",
+          magicLinkUrl: "https://sketch.test/magic",
+          missingValue: null,
         },
-        providerConversationId: "conversation-1",
-      });
-    } finally {
-      await db.destroy();
-    }
+      },
+    );
+
+    expect(sent).toMatchObject({
+      providerMessageId: "wamid.template",
+      providerConversationId: "conversation-1",
+      providerTimestamp: "2026-07-02T10:02:00.000Z",
+    });
+    const [url, init] = requestFetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://app.getsketch.ai/api/whatsapp/outbound/templates");
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer tenant-token",
+      "Content-Type": "application/json",
+    });
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    const payload = JSON.parse(init.body as string);
+    expect(payload).not.toHaveProperty("templateName");
+    expect(payload).toEqual({
+      to: "+15551234567",
+      templateKey: WHATSAPP_TEMPLATE_KEYS.magicLink,
+      language: "hi_IN",
+      params: {
+        recipientName: "Alice Example",
+        botName: "Sketch Bot",
+        magicLinkUrl: "https://sketch.test/magic",
+        missingValue: "",
+      },
+      providerConversationId: "conversation-1",
+    });
   });
 
-  it("fails template sends clearly when no approved managed mapping exists", async () => {
-    const db = await createTestDb();
-    try {
-      const provider = createManagedWhatsAppProvider({
-        platformUrl: "https://app.getsketch.ai",
-        tenantToken: "tenant-token",
-        logger: createTestLogger(),
-        templateMappings: createWhatsAppTemplateMappingRepository(db),
-        fetch: vi.fn() as unknown as typeof fetch,
-      });
-
-      await expect(
-        provider.dmProvider.sendTemplate?.(
-          { kind: "dm", phoneE164: "+15551234567" },
-          {
-            key: WHATSAPP_TEMPLATE_KEYS.magicLink,
-            params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
-          },
+  it("surfaces template_not_found platform failures from template sends", async () => {
+    const requestFetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "SEND_FAILED",
+              message: "Template mapping not found",
+              providerCode: "template_not_found",
+              providerInfo: "provider rejected template",
+            },
+          }),
+          { status: 502 },
         ),
-      ).rejects.toThrow("No approved WhatsApp template mapping configured for whatsapp.magic_link");
-    } finally {
-      await db.destroy();
+    );
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+
+    try {
+      await provider.dmProvider.sendTemplate?.(
+        { kind: "dm", phoneE164: "+15551234567" },
+        {
+          key: WHATSAPP_TEMPLATE_KEYS.magicLink,
+          params: { recipientName: "Alice", botName: "Sketch", magicLinkUrl: "https://sketch.test/magic" },
+        },
+      );
+      throw new Error("expected send to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ManagedWhatsAppRequestError);
+      expect(error).toMatchObject({
+        status: 502,
+        providerCode: "template_not_found",
+        providerInfo: "provider rejected template",
+      });
+      expect((error as Error).message).toContain("template_not_found");
     }
   });
 

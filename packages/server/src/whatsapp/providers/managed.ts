@@ -1,5 +1,4 @@
 import { z } from "zod";
-import type { createWhatsAppTemplateMappingRepository } from "../../db/repositories/whatsapp-template-mappings";
 import type { Logger } from "../../logger";
 import {
   type WhatsAppCapabilities,
@@ -12,7 +11,7 @@ import {
   type WhatsAppTarget,
   canonicalDmConversationId,
 } from "../provider";
-import { mapTemplateParams } from "../template-params";
+import { sanitizeTemplateParamValue } from "../template-params";
 import type { WhatsAppTemplateParamValue, WhatsAppTemplateRequest } from "../templates";
 
 export const WHATSAPP_MANAGED_PROVIDER_ID = "managed";
@@ -80,7 +79,6 @@ export interface ManagedWhatsAppConfig {
   platformUrl: string;
   tenantToken: string;
   logger: Logger;
-  templateMappings?: ReturnType<typeof createWhatsAppTemplateMappingRepository>;
   fetch?: typeof fetch;
 }
 
@@ -151,16 +149,6 @@ export function createManagedWhatsAppProvider(config: ManagedWhatsAppConfig): Ma
   ): Promise<WhatsAppSendResult | null> => {
     if (target.kind !== "dm") throw new Error("Managed WhatsApp cannot send group messages");
     assertValidE164Target(target.phoneE164, config.logger);
-    if (!config.templateMappings) throw new Error("WhatsApp template mappings are not configured");
-
-    const mapping = await config.templateMappings.findApprovedMapping(
-      WHATSAPP_MANAGED_PROVIDER_ID,
-      template.key,
-      template.language,
-    );
-    if (!mapping) {
-      throw new Error(`No approved WhatsApp template mapping configured for ${template.key}`);
-    }
 
     const body = await fetchManagedJson(requestFetch, `${platformUrl}/api/whatsapp/outbound/templates`, {
       method: "POST",
@@ -170,8 +158,9 @@ export function createManagedWhatsAppProvider(config: ManagedWhatsAppConfig): Ma
       },
       body: JSON.stringify({
         to: target.phoneE164,
-        templateName: mapping.provider_template_name,
-        params: providerTemplateParamRecord(mapping.parameterMap, template.params),
+        templateKey: template.key,
+        language: template.language,
+        params: logicalTemplateParamRecord(template.params),
         providerConversationId: target.providerConversationId,
       }),
     });
@@ -302,11 +291,8 @@ function inboundMessageText(text: string | undefined, mediaType: string | undefi
   return text ?? "";
 }
 
-function providerTemplateParamRecord(
-  parameterMap: Record<string, string> | null,
-  params: Record<string, WhatsAppTemplateParamValue>,
-): Record<string, string> {
-  return Object.fromEntries(mapTemplateParams(parameterMap, params));
+function logicalTemplateParamRecord(params: Record<string, WhatsAppTemplateParamValue>): Record<string, string> {
+  return Object.fromEntries(Object.entries(params).map(([key, value]) => [key, sanitizeTemplateParamValue(value)]));
 }
 
 function managedRequestError(status: number, text: string): ManagedWhatsAppRequestError {
@@ -315,7 +301,8 @@ function managedRequestError(status: number, text: string): ManagedWhatsAppReque
   const providerMessage = optionalString(error?.message);
   const providerCode = optionalString(error?.providerCode);
   const providerInfo = optionalString(error?.providerInfo);
-  const snippet = boundedResponseSnippet(providerMessage ?? text);
+  const detail = providerCode ? `${providerCode}${providerMessage ? `: ${providerMessage}` : ""}` : providerMessage;
+  const snippet = boundedResponseSnippet(detail ?? text);
   return new ManagedWhatsAppRequestError(
     `Managed WhatsApp request failed: HTTP ${status}${snippet ? `: ${snippet}` : ""}`,
     { status, providerCode, providerInfo },
