@@ -688,37 +688,27 @@ export function ScheduleField({ controller }: { controller: RouteDraftController
       )}
 
       {frequency === "every_n_hours" && (
-        <div className="mt-3 space-y-3">
-          <div>
+        <div className="mt-3 flex items-end gap-3">
+          <div className="flex flex-col gap-1.5">
             <span className={LABEL}>Every</span>
-            <div className="mt-2">
-              <Select
-                value={String(intervalHours)}
-                onValueChange={(value) => controller.setIntervalHours(Number(value))}
-              >
-                <SelectTrigger aria-label="Interval" className="w-40">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {INTERVAL_OPTIONS.map((option) => (
-                    <SelectItem key={option} value={String(option)}>
-                      {option === 1 ? "1 hour" : `${option} hours`}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <Select value={String(intervalHours)} onValueChange={(value) => controller.setIntervalHours(Number(value))}>
+              <SelectTrigger aria-label="Interval" className="w-28">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {INTERVAL_OPTIONS.map((option) => (
+                  <SelectItem key={option} value={String(option)}>
+                    {option === 1 ? "1 hour" : `${option} hours`}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-          <div>
-            <span className={LABEL}>Minutes past the hour</span>
-            <div className="mt-2 flex items-center gap-2">
-              <NumberField label="Minute" min={0} max={59} value={minute} onChange={controller.setMinute} />
-              <span className="mt-5 text-[12.5px] text-muted-foreground">
-                Runs at :{String(minute).padStart(2, "0")} every{" "}
-                {intervalHours === 1 ? "hour" : `${intervalHours} hours`}, from midnight
-              </span>
-            </div>
-          </div>
+          <NumberField label="At minute" min={0} max={59} value={minute} onChange={controller.setMinute} />
+          <span className="mb-2.5 text-[12.5px] text-muted-foreground">
+            Runs at :{String(minute).padStart(2, "0")} every {intervalHours === 1 ? "hour" : `${intervalHours} hours`},
+            from midnight
+          </span>
         </div>
       )}
     </div>
