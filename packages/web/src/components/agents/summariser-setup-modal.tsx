@@ -4,6 +4,7 @@
  * also switches the agent on. Editing an existing summariser happens on its own
  * config page, not here.
  */
+import { ProgressIndicator } from "@/components/onboarding/progress-indicator";
 import { type AgentConfig, api } from "@/lib/api";
 import { Button } from "@sketch/ui/components/button";
 import {
@@ -14,7 +15,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@sketch/ui/components/dialog";
-import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -83,8 +83,14 @@ function SetupBody({
   onCreated: () => void;
 }) {
   const [step, setStep] = useState(0);
+  const [maxStep, setMaxStep] = useState(0);
   const controller = useRouteDraft(agent, null);
   const { lookup } = useSourceOptions(agent);
+
+  const goToStep = (next: number) => {
+    setStep(next);
+    setMaxStep((prev) => Math.max(prev, next));
+  };
 
   const create = useMutation({
     mutationFn: () => {
@@ -109,8 +115,15 @@ function SetupBody({
 
   return (
     <>
-      <Stepper step={step} />
-      <p className="px-1 pt-3 text-[12px] text-muted-foreground">{STEPS[step].hint}</p>
+      <div className="pt-3">
+        <ProgressIndicator
+          currentStep={step + 1}
+          maxStepReached={maxStep + 1}
+          steps={STEPS.map((s, i) => ({ number: i + 1, label: s.title }))}
+          onStepClick={(n) => setStep(n - 1)}
+        />
+      </div>
+      <p className="px-1 text-[12px] text-muted-foreground">{STEPS[step].hint}</p>
       <div className="flex-1 overflow-y-auto px-1 py-4">
         {step === 0 ? (
           <SourcesField agent={agent} controller={controller} />
@@ -134,38 +147,11 @@ function SetupBody({
             Create summariser
           </Button>
         ) : (
-          <Button size="sm" disabled={!canAdvance} onClick={() => setStep(step + 1)}>
+          <Button size="sm" disabled={!canAdvance} onClick={() => goToStep(step + 1)}>
             Next
           </Button>
         )}
       </DialogFooter>
     </>
-  );
-}
-
-function Stepper({ step }: { step: number }) {
-  return (
-    <div className="flex items-center gap-2 px-1 pt-1">
-      {STEPS.map((s, i) => (
-        <div key={s.title} className="flex items-center gap-2">
-          <span
-            className={cn(
-              "flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-medium transition-colors",
-              i < step
-                ? "bg-emerald-500 text-white"
-                : i === step
-                  ? "bg-foreground text-background"
-                  : "bg-muted text-muted-foreground",
-            )}
-          >
-            {i + 1}
-          </span>
-          <span className={cn("text-[11.5px]", i === step ? "font-medium text-foreground" : "text-muted-foreground")}>
-            {s.title}
-          </span>
-          {i < STEPS.length - 1 ? <span className="h-px w-4 bg-border" /> : null}
-        </div>
-      ))}
-    </div>
   );
 }
