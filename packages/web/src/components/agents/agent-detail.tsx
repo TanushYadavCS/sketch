@@ -7,15 +7,16 @@ import {
   type AgentConfig,
   type AgentDeliveryConfig,
   type AgentDeliveryMention,
-  type AgentDeliveryModel,
   type AgentDetailResponse,
   type AgentOutput,
   type AgentOutputsResponse,
+  type AgentRoute,
   type AgentSourceConfig,
   api,
 } from "@/lib/api";
 import {
   ArrowLeftIcon,
+  CaretDownIcon,
   CheckCircleIcon,
   HashIcon,
   PencilSimpleIcon,
@@ -43,7 +44,7 @@ import { toast } from "sonner";
 type Tab = "outputs" | "config";
 type EditField = "schedule" | "focus" | "volume" | "delivery" | "sources" | "routing" | null;
 
-type PerSourceRoute = "self" | "off";
+type RouteDestKind = "self" | "off";
 
 function detailKey(agentKey: string) {
   return ["agents", "detail", agentKey];
@@ -69,39 +70,63 @@ function deliverySummary(delivery: AgentDeliveryConfig | null): string {
 }
 
 /**
- * Reads the per-source route for a source from the delivery model. A source
- * summarizes on its own and either posts back to itself ("self") or stays
- * web-only ("off"). A legacy combined model is shown as "self" in this
- * per-source view; saving migrates it to explicit per-source routes.
+ * A default route for a newly added source: summarize on its own, post back to
+ * the source, inheriting the agent-level focus/sections/volume/schedule (all
+ * null = inherit). The id is the source key — stable and unique per source in
+ * the single-source (Arc 2) model.
  */
-function routeForSource(model: AgentDeliveryModel, source: AgentSourceConfig): PerSourceRoute {
-  if (model.mode !== "per_source") return "self";
-  return model.perSource[sourceKey(source)]?.kind === "self" ? "self" : "off";
+function makeRoute(source: AgentSourceConfig): AgentRoute {
+  return {
+    id: sourceKey(source),
+    sources: [sourceKey(source)] as AgentRoute["sources"],
+    focus: null,
+    sections: null,
+    maxItemsPerSection: null,
+    schedule: null,
+    destination: { kind: "self" },
+    enabled: true,
+  };
 }
 
-function buildDeliveryModel(routes: Record<string, PerSourceRoute>, sources: AgentSourceConfig[]): AgentDeliveryModel {
-  const perSource: Record<string, { kind: PerSourceRoute }> = {};
-  for (const source of sources) {
-    const key = sourceKey(source);
-    perSource[key] = { kind: routes[key] ?? "self" };
-  }
-  return { mode: "per_source", defaultRoute: "off", perSource, combined: null };
+function isRouteCustomized(route: AgentRoute): boolean {
+  return (
+    route.focus !== null || route.sections !== null || route.maxItemsPerSection !== null || route.schedule !== null
+  );
 }
 
 function routingSummary(agent: AgentConfig): string {
-  if (agent.sources.length === 0) return "No sources selected";
-  const posted = agent.sources.filter((source) => routeForSource(agent.deliveryModel, source) === "self").length;
-  const webOnly = agent.sources.length - posted;
-  const parts = [`${agent.sources.length} ${agent.sources.length === 1 ? "source" : "sources"}`];
-  if (posted > 0) parts.push(`${posted} post back`);
+  const routes = agent.routes;
+  if (routes.length === 0) return "No sources selected";
+  const postBack = routes.filter((route) => route.destination.kind === "self").length;
+  const dm = routes.filter((route) => route.destination.kind === "member").length;
+  const webOnly = routes.filter((route) => route.destination.kind === "off").length;
+  const parts = [`${routes.length} ${routes.length === 1 ? "source" : "sources"}`];
+  if (postBack > 0) parts.push(`${postBack} post back`);
+  if (dm > 0) parts.push(`${dm} DM`);
   if (webOnly > 0) parts.push(`${webOnly} web only`);
+  if (routes.some(isRouteCustomized)) parts.push("customized");
   return parts.join(" · ");
 }
 
-function initRoutes(model: AgentDeliveryModel, sources: AgentSourceConfig[]): Record<string, PerSourceRoute> {
-  const out: Record<string, PerSourceRoute> = {};
-  for (const source of sources) out[sourceKey(source)] = routeForSource(model, source);
-  return out;
+/** One-line summary of a route's overrides for the collapsed card. */
+function describeRoute(route: AgentRoute, agent: AgentConfig): string {
+  const parts: string[] = [];
+  if (route.sections) {
+    const on = agent.sections.filter((section) => route.sections?.[section.key] ?? section.enabled);
+    parts.push(
+      on.length === agent.sections.length ? "All sections" : on.map((s) => s.title).join(", ") || "No sections",
+    );
+  }
+  if (route.schedule) parts.push(formatTime(route.schedule.hour, route.schedule.minute));
+  if (route.maxItemsPerSection !== null) parts.push(`up to ${route.maxItemsPerSection}`);
+  if (route.focus) parts.push(`focus: ${route.focus}`);
+  return parts.length === 0 ? "Default settings" : parts.join(" · ");
+}
+
+function destinationLabel(destination: AgentRoute["destination"], sourceLabel: string): string {
+  if (destination.kind === "self") return `Post back to ${sourceLabel}`;
+  if (destination.kind === "member") return "DM a member";
+  return "Web only";
 }
 
 export function AgentDetail({ agentKey }: { agentKey: string }) {
@@ -509,7 +534,7 @@ const EDIT_META: Record<Exclude<EditField, null>, { title: string; hint: string 
   sources: { title: "Sources", hint: "Shared conversations this agent summarizes." },
   routing: {
     title: "Sources & delivery",
-    hint: "Each source is summarized on its own. Choose where its digest goes.",
+    hint: "Each source is its own summary. Open one to tune its focus, sections, schedule, and where it goes.",
   },
   volume: { title: "Volume", hint: "How many items each section can hold." },
   delivery: { title: "Deliver to", hint: "Where completed outputs are sent after generation finishes." },
@@ -533,9 +558,7 @@ function EditDrawer({
   const [minute, setMinute] = useState(agent.scheduleMinute);
   const [focus, setFocus] = useState(agent.focus ?? "");
   const [sources, setSources] = useState<AgentSourceConfig[]>(agent.sources);
-  const [routes, setRoutes] = useState<Record<string, PerSourceRoute>>(() =>
-    initRoutes(agent.deliveryModel, agent.sources),
-  );
+  const [routes, setRoutes] = useState<AgentRoute[]>(agent.routes);
   const [volume, setVolume] = useState(agent.maxItemsPerSection);
   const [delivery, setDelivery] = useState<AgentDeliveryConfig | null>(agent.delivery);
 
@@ -545,7 +568,7 @@ function EditDrawer({
       setMinute(agent.scheduleMinute);
       setFocus(agent.focus ?? "");
       setSources(agent.sources);
-      setRoutes(initRoutes(agent.deliveryModel, agent.sources));
+      setRoutes(agent.routes);
       setVolume(agent.maxItemsPerSection);
       setDelivery(agent.delivery);
     }
@@ -555,7 +578,7 @@ function EditDrawer({
     agent.scheduleMinute,
     agent.focus,
     agent.sources,
-    agent.deliveryModel,
+    agent.routes,
     agent.maxItemsPerSection,
     agent.delivery,
   ]);
@@ -566,8 +589,7 @@ function EditDrawer({
         return api.agents.updateConfig(agentKey, { scheduleHour: hour, scheduleMinute: minute });
       if (field === "focus") return api.agents.updateConfig(agentKey, { focus: focus.trim() ? focus.trim() : null });
       if (field === "sources") return api.agents.updateConfig(agentKey, { sources });
-      if (field === "routing")
-        return api.agents.updateConfig(agentKey, { sources, deliveryModel: buildDeliveryModel(routes, sources) });
+      if (field === "routing") return api.agents.updateConfig(agentKey, { sources, routes });
       if (field === "volume") return api.agents.updateConfig(agentKey, { maxItemsPerSection: volume });
       if (field === "delivery") return api.agents.updateConfig(agentKey, { delivery });
       return Promise.resolve({ agent });
@@ -622,13 +644,12 @@ function EditDrawer({
           ) : field === "sources" && agent.sourceConfig ? (
             <SourceEditor agent={agent} value={sources} onChange={setSources} />
           ) : field === "routing" && agent.sourceConfig ? (
-            <SourcesDeliveryEditor
+            <RoutesEditor
               agent={agent}
-              sources={sources}
               routes={routes}
-              onChange={(nextSources, nextRoutes) => {
-                setSources(nextSources);
+              onChange={(nextRoutes, nextSources) => {
                 setRoutes(nextRoutes);
+                setSources(nextSources);
               }}
             />
           ) : field === "delivery" ? (
@@ -791,40 +812,25 @@ function SourceEditor({
   );
 }
 
-function SourcesDeliveryEditor({
+/**
+ * Routes editor (Arc 2). Each selected source is one route — an independent
+ * digest that can override the agent's focus, sections, volume, and schedule
+ * and choose where its summary is delivered (post back to the source or stay
+ * web-only). Sources and routes are kept in lockstep (one route per source).
+ */
+function RoutesEditor({
   agent,
-  sources,
   routes,
   onChange,
 }: {
   agent: AgentConfig;
-  sources: AgentSourceConfig[];
-  routes: Record<string, PerSourceRoute>;
-  onChange: (sources: AgentSourceConfig[], routes: Record<string, PerSourceRoute>) => void;
+  routes: AgentRoute[];
+  onChange: (routes: AgentRoute[], sources: AgentSourceConfig[]) => void;
 }) {
   const slackChannels = useQuery({ queryKey: ["slack-channels"], queryFn: () => api.channels.listSlack() });
   const whatsappGroups = useQuery({ queryKey: ["whatsapp-groups"], queryFn: () => api.channels.listWhatsAppGroups() });
-  const selected = new Set(sources.map(sourceKey));
+  const [expanded, setExpanded] = useState<string | null>(null);
   const maxSources = agent.sourceConfig?.maxSources ?? 0;
-
-  const toggle = (source: AgentSourceConfig) => {
-    const key = sourceKey(source);
-    if (selected.has(key)) {
-      const nextRoutes = { ...routes };
-      delete nextRoutes[key];
-      onChange(
-        sources.filter((item) => sourceKey(item) !== key),
-        nextRoutes,
-      );
-      return;
-    }
-    if (sources.length >= maxSources) return;
-    onChange([...sources, source], { ...routes, [key]: "self" });
-  };
-
-  const setRoute = (source: AgentSourceConfig, route: PerSourceRoute) => {
-    onChange(sources, { ...routes, [sourceKey(source)]: route });
-  };
 
   const slackOptions = (slackChannels.data?.channels ?? [])
     .filter((channel) => channel.isMember)
@@ -845,58 +851,58 @@ function SourcesDeliveryEditor({
     }),
   );
 
+  const sourceByKey = new Map<string, AgentSourceConfig>();
+  for (const source of [...agent.sources, ...slackOptions, ...whatsappOptions])
+    sourceByKey.set(sourceKey(source), source);
+
+  const routedKeys = new Set<string>(routes.map((route) => route.sources[0]));
+
+  const emit = (next: AgentRoute[]) => {
+    const sources = next
+      .map((route) => sourceByKey.get(route.sources[0]))
+      .filter((source): source is AgentSourceConfig => Boolean(source));
+    onChange(next, sources);
+  };
+
+  const toggleSource = (source: AgentSourceConfig) => {
+    const key = sourceKey(source);
+    if (routedKeys.has(key)) {
+      emit(routes.filter((route) => route.sources[0] !== key));
+      return;
+    }
+    if (routes.length >= maxSources) return;
+    setExpanded(key);
+    emit([...routes, makeRoute(source)]);
+  };
+
+  const updateRoute = (id: string, patch: Partial<AgentRoute>) => {
+    emit(routes.map((route) => (route.id === id ? { ...route, ...patch } : route)));
+  };
+
   return (
     <div className="space-y-5">
       <div>
-        <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">Selected</span>
-        {sources.length === 0 ? (
+        <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">Routes</span>
+        {routes.length === 0 ? (
           <p className="mt-2 rounded-lg border-[0.5px] border-dashed border-border px-3 py-3 text-[12px] text-muted-foreground">
-            Add a source below. Each source is summarized on its own.
+            Add a source below. Each source becomes its own summary, delivered on its own.
           </p>
         ) : (
           <div className="mt-2 flex flex-col gap-2">
-            {sources.map((source) => {
-              const route = routes[sourceKey(source)] ?? "self";
+            {routes.map((route) => {
+              const source = sourceByKey.get(route.sources[0]) ?? null;
               return (
-                <div key={sourceKey(source)} className="rounded-lg border-[0.5px] border-border px-3 py-2.5">
-                  <div className="flex items-center gap-2">
-                    <span className="shrink-0">
-                      {source.platform === "slack" ? (
-                        <HashIcon size={14} aria-hidden />
-                      ) : (
-                        <UsersThreeIcon size={14} aria-hidden />
-                      )}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
-                      {source.label ?? source.targetId}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => toggle(source)}
-                      aria-label={`Remove ${source.label ?? source.targetId}`}
-                      className="shrink-0 text-muted-foreground/50 transition-colors hover:text-foreground"
-                    >
-                      <XIcon size={13} weight="bold" aria-hidden />
-                    </button>
-                  </div>
-                  <div className="mt-2 grid grid-cols-2 gap-1 rounded-lg border-[0.5px] border-border bg-muted/25 p-1">
-                    {(["self", "off"] as const).map((option) => (
-                      <button
-                        key={option}
-                        type="button"
-                        onClick={() => setRoute(source, option)}
-                        className={cn(
-                          "rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors",
-                          route === option
-                            ? "bg-background text-foreground shadow-sm"
-                            : "text-muted-foreground hover:text-foreground",
-                        )}
-                      >
-                        {option === "self" ? "Post back" : "Web only"}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <RouteCard
+                  key={route.id}
+                  agent={agent}
+                  route={route}
+                  source={source}
+                  label={source?.label ?? route.sources[0]}
+                  open={expanded === route.id}
+                  onToggleOpen={() => setExpanded(expanded === route.id ? null : route.id)}
+                  onChange={(patch) => updateRoute(route.id, patch)}
+                  onRemove={() => emit(routes.filter((item) => item.id !== route.id))}
+                />
               );
             })}
           </div>
@@ -908,9 +914,9 @@ function SourcesDeliveryEditor({
           title="Add Slack channels"
           loading={slackChannels.isLoading}
           empty="No Slack channels available."
-          selected={selected}
+          selected={routedKeys}
           options={slackOptions}
-          onToggle={toggle}
+          onToggle={toggleSource}
         />
       ) : null}
       {agent.sourceConfig?.supportsWhatsAppGroups ? (
@@ -918,15 +924,233 @@ function SourcesDeliveryEditor({
           title="Add WhatsApp groups"
           loading={whatsappGroups.isLoading}
           empty="No WhatsApp groups available."
-          selected={selected}
+          selected={routedKeys}
           options={whatsappOptions}
-          onToggle={toggle}
+          onToggle={toggleSource}
         />
       ) : null}
       <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">
-        {sources.length} selected{maxSources > 0 ? ` · limit ${maxSources}` : ""} · post back = to the source · web only
-        = not posted
+        {routes.length} {routes.length === 1 ? "source" : "sources"}
+        {maxSources > 0 ? ` · limit ${maxSources}` : ""} · open a source to tune its focus, sections, schedule, and
+        delivery
       </p>
+    </div>
+  );
+}
+
+function RouteField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">{label}</span>
+      <div className="mt-1.5">{children}</div>
+    </div>
+  );
+}
+
+const SEGMENT_BASE = "rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors";
+const SEGMENT_WRAP = "grid grid-cols-2 gap-1 rounded-lg border-[0.5px] border-border bg-muted/25 p-1";
+function segmentClass(active: boolean): string {
+  return cn(
+    SEGMENT_BASE,
+    active ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+  );
+}
+
+function RouteCard({
+  agent,
+  route,
+  source,
+  label,
+  open,
+  onToggleOpen,
+  onChange,
+  onRemove,
+}: {
+  agent: AgentConfig;
+  route: AgentRoute;
+  source: AgentSourceConfig | null;
+  label: string;
+  open: boolean;
+  onToggleOpen: () => void;
+  onChange: (patch: Partial<AgentRoute>) => void;
+  onRemove: () => void;
+}) {
+  const destKind: RouteDestKind = route.destination.kind === "self" ? "self" : "off";
+  const customSchedule = route.schedule !== null;
+
+  const toggleSection = (key: string, checked: boolean) => {
+    const next: Record<string, boolean> = {};
+    for (const section of agent.sections) next[section.key] = route.sections?.[section.key] ?? section.enabled;
+    next[key] = checked;
+    onChange({ sections: next });
+  };
+
+  return (
+    <div className={cn("rounded-lg border-[0.5px] border-border", !route.enabled && "opacity-60")}>
+      <div className="flex items-center gap-2 px-3 py-2.5">
+        <span className="shrink-0">
+          {source?.platform === "slack" ? <HashIcon size={14} aria-hidden /> : <UsersThreeIcon size={14} aria-hidden />}
+        </span>
+        <button type="button" onClick={onToggleOpen} className="min-w-0 flex-1 text-left">
+          <span className="block truncate text-[12.5px] font-medium text-foreground">{label}</span>
+          <span className="block truncate text-[11px] text-muted-foreground">
+            {destinationLabel(route.destination, label)}
+            {route.enabled ? "" : " · paused"} · {describeRoute(route, agent)}
+          </span>
+        </button>
+        <CaretDownIcon
+          size={13}
+          weight="bold"
+          aria-hidden
+          className={cn("shrink-0 text-muted-foreground/50 transition-transform", open && "rotate-180")}
+        />
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label={`Remove ${label}`}
+          className="shrink-0 text-muted-foreground/50 transition-colors hover:text-foreground"
+        >
+          <XIcon size={13} weight="bold" aria-hidden />
+        </button>
+      </div>
+
+      {open ? (
+        <div className="space-y-4 border-t border-border/60 px-3 py-3.5">
+          <RouteField label="Deliver to">
+            <div className={SEGMENT_WRAP}>
+              <button
+                type="button"
+                onClick={() => onChange({ destination: { kind: "self" } })}
+                className={segmentClass(destKind === "self")}
+              >
+                Post back
+              </button>
+              <button
+                type="button"
+                onClick={() => onChange({ destination: { kind: "off" } })}
+                className={segmentClass(destKind === "off")}
+              >
+                Web only
+              </button>
+            </div>
+          </RouteField>
+
+          <RouteField label="Runs on">
+            <div className={SEGMENT_WRAP}>
+              <button
+                type="button"
+                onClick={() => onChange({ schedule: null })}
+                className={segmentClass(!customSchedule)}
+              >
+                Default ({formatTime(agent.scheduleHour, agent.scheduleMinute)})
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  onChange({ schedule: route.schedule ?? { hour: agent.scheduleHour, minute: agent.scheduleMinute } })
+                }
+                className={segmentClass(customSchedule)}
+              >
+                Custom time
+              </button>
+            </div>
+            {route.schedule ? (
+              <div className="mt-2 flex items-center gap-2">
+                <NumberField
+                  label="Hour"
+                  min={0}
+                  max={23}
+                  value={route.schedule.hour}
+                  onChange={(hour) => onChange({ schedule: { hour, minute: route.schedule?.minute ?? 0 } })}
+                />
+                <span className="mt-5 text-muted-foreground">:</span>
+                <NumberField
+                  label="Minute"
+                  min={0}
+                  max={59}
+                  value={route.schedule.minute}
+                  onChange={(minute) => onChange({ schedule: { hour: route.schedule?.hour ?? 0, minute } })}
+                />
+                <span className="mt-5 ml-2 text-[12.5px] text-muted-foreground">
+                  {formatTime(route.schedule.hour, route.schedule.minute)}
+                </span>
+              </div>
+            ) : null}
+          </RouteField>
+
+          <RouteField label="Sections">
+            <div className="flex flex-col gap-1.5">
+              {agent.sections.map((section) => {
+                const checked = route.sections?.[section.key] ?? section.enabled;
+                return (
+                  <label
+                    key={section.key}
+                    className="flex cursor-pointer items-center gap-2 text-[12.5px] text-foreground/90"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => toggleSection(section.key, e.target.checked)}
+                      className="h-3.5 w-3.5 accent-foreground"
+                    />
+                    {section.title}
+                  </label>
+                );
+              })}
+            </div>
+            {route.sections !== null ? (
+              <button
+                type="button"
+                onClick={() => onChange({ sections: null })}
+                className="mt-2 text-[11px] text-muted-foreground/70 underline-offset-2 hover:text-foreground hover:underline"
+              >
+                Reset to default sections
+              </button>
+            ) : null}
+          </RouteField>
+
+          <RouteField label="Focus">
+            <textarea
+              rows={2}
+              value={route.focus ?? ""}
+              onChange={(e) => onChange({ focus: e.target.value.length ? e.target.value : null })}
+              placeholder="e.g. anything blocking delivery for this group"
+              className="w-full resize-none rounded-lg border-[0.5px] border-border bg-background px-3 py-2 text-[12.5px] leading-relaxed text-foreground/90 placeholder:text-muted-foreground/60 focus:border-foreground/30 focus:outline-none"
+            />
+          </RouteField>
+
+          <RouteField label="Volume">
+            <div className="flex items-end gap-3">
+              <NumberField
+                label="Items per section"
+                min={agent.itemsPerSectionRange.min}
+                max={agent.itemsPerSectionRange.max}
+                value={route.maxItemsPerSection ?? agent.maxItemsPerSection}
+                onChange={(value) => onChange({ maxItemsPerSection: value })}
+              />
+              {route.maxItemsPerSection !== null ? (
+                <button
+                  type="button"
+                  onClick={() => onChange({ maxItemsPerSection: null })}
+                  className="mb-2 text-[11px] text-muted-foreground/70 underline-offset-2 hover:text-foreground hover:underline"
+                >
+                  Reset to default
+                </button>
+              ) : null}
+            </div>
+          </RouteField>
+
+          <div className="flex items-center gap-3 border-t border-border/50 pt-3">
+            <span className="flex-1 text-[12.5px] font-medium text-foreground">Active</span>
+            <Switch
+              checked={route.enabled}
+              onCheckedChange={(checked) => onChange({ enabled: checked })}
+              aria-label={`${label} active`}
+              className="data-[state=checked]:bg-emerald-500"
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
