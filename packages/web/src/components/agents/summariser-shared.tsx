@@ -13,7 +13,7 @@ import {
   type AgentSourceKey,
   api,
 } from "@/lib/api";
-import { CheckCircleIcon, HashIcon, MagnifyingGlassIcon, UserIcon, UsersThreeIcon } from "@phosphor-icons/react";
+import { CheckCircleIcon, HashIcon, MagnifyingGlassIcon, UserIcon, UsersThreeIcon, XIcon } from "@phosphor-icons/react";
 import { Switch } from "@sketch/ui/components/switch";
 import { cn } from "@sketch/ui/lib/utils";
 import { useQuery } from "@tanstack/react-query";
@@ -372,79 +372,139 @@ export function DestinationField({
   );
 }
 
-/** Single-select picker over every Slack channel and WhatsApp group the workspace can post to. */
+/**
+ * Search-and-add single-select over the Slack channels and WhatsApp groups
+ * Sketch can post to. The chosen target shows as a chip you can clear; the
+ * search filters both platforms, each kept as its own always-visible section so
+ * an empty WhatsApp list reads as "no groups yet" rather than silently missing.
+ */
 function ChannelDestinationPicker({ agent, controller }: { agent: AgentConfig; controller: RouteDraftController }) {
   const { slackLoading, whatsappLoading, slackOptions, whatsappOptions } = useSourceOptions(agent);
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
-
-  const options = [...slackOptions, ...whatsappOptions];
-  const filtered = q ? options.filter((o) => (o.label ?? o.targetId).toLowerCase().includes(q)) : options;
-  const loading = slackLoading || whatsappLoading;
-  const selectedId = controller.channelTarget?.targetId ?? "";
-  const showSearch = options.length > 6;
+  const match = (o: AgentSourceConfig) => !q || (o.label ?? o.targetId).toLowerCase().includes(q);
+  const selected = controller.channelTarget;
+  const selectedId = selected?.targetId ?? "";
 
   return (
-    <div className="mt-3">
-      <div className="rounded-lg border-[0.5px] border-border p-1">
-        {loading ? (
-          <p className="px-2 py-2 text-[12px] text-muted-foreground">Loading channels…</p>
-        ) : options.length === 0 ? (
-          <p className="px-2 py-2 text-[12px] text-muted-foreground">No channels or groups available.</p>
-        ) : (
-          <>
-            {showSearch ? (
-              <div className="relative mb-1">
-                <MagnifyingGlassIcon
-                  size={13}
-                  aria-hidden
-                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-                />
-                <input
-                  type="text"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search channels & groups…"
-                  className="w-full rounded-md border-[0.5px] border-border bg-background py-1.5 pl-7 pr-2 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-foreground/30 focus:outline-none"
-                />
-              </div>
-            ) : null}
-            <div className="flex max-h-56 flex-col overflow-y-auto">
-              {filtered.length === 0 ? (
-                <p className="px-2 py-2 text-[12px] text-muted-foreground">No matches.</p>
-              ) : (
-                filtered.map((option) => {
-                  const active = selectedId === option.targetId;
-                  return (
-                    <button
-                      key={sourceKey(option)}
-                      type="button"
-                      onClick={() => controller.setChannelTarget(option)}
-                      className={cn(
-                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors",
-                        active ? "bg-emerald-500/10 text-foreground" : "text-muted-foreground hover:bg-muted/60",
-                      )}
-                    >
-                      <span className="shrink-0">
-                        {option.platform === "slack" ? (
-                          <HashIcon size={14} aria-hidden />
-                        ) : (
-                          <UsersThreeIcon size={14} aria-hidden />
-                        )}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate">{option.label ?? option.targetId}</span>
-                      {active ? <CheckCircleIcon size={13} weight="fill" aria-hidden /> : null}
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </>
-        )}
+    <div className="mt-3 space-y-2">
+      {selected ? (
+        <div className="flex items-center gap-2 rounded-lg border-[0.5px] border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-[12.5px] text-foreground">
+          {selected.platform === "slack" ? (
+            <HashIcon size={14} aria-hidden />
+          ) : (
+            <UsersThreeIcon size={14} aria-hidden />
+          )}
+          <span className="min-w-0 flex-1 truncate">{selected.label ?? selected.targetId}</span>
+          <button
+            type="button"
+            onClick={() => controller.setChannelTarget(null)}
+            aria-label="Clear channel"
+            className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <XIcon size={13} aria-hidden />
+          </button>
+        </div>
+      ) : null}
+
+      <div className="relative">
+        <MagnifyingGlassIcon
+          size={13}
+          aria-hidden
+          className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+        />
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search channels & groups…"
+          className="w-full rounded-md border-[0.5px] border-border bg-background py-1.5 pl-7 pr-2 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-foreground/30 focus:outline-none"
+        />
       </div>
-      <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground/70">
-        The summary posts here, to any channel or group Sketch can reach — independent of the inputs above.
+
+      <div className="max-h-56 space-y-3 overflow-y-auto rounded-lg border-[0.5px] border-border p-2">
+        <ChannelDestGroup
+          title="Slack channels"
+          loading={slackLoading}
+          total={slackOptions.length}
+          options={slackOptions.filter(match)}
+          selectedId={selectedId}
+          onSelect={controller.setChannelTarget}
+          empty="The bot isn't in any Slack channels yet."
+        />
+        <ChannelDestGroup
+          title="WhatsApp groups"
+          loading={whatsappLoading}
+          total={whatsappOptions.length}
+          options={whatsappOptions.filter(match)}
+          selectedId={selectedId}
+          onSelect={controller.setChannelTarget}
+          empty="The bot isn't in any WhatsApp groups yet — add it to a group and reload."
+        />
+      </div>
+
+      <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+        Posts to any channel or group Sketch can reach — independent of the inputs above.
       </p>
+    </div>
+  );
+}
+
+/** One platform's rows inside the channel picker, always shown so an empty list carries its own explanation. */
+function ChannelDestGroup({
+  title,
+  loading,
+  total,
+  options,
+  selectedId,
+  onSelect,
+  empty,
+}: {
+  title: string;
+  loading: boolean;
+  total: number;
+  options: AgentSourceConfig[];
+  selectedId: string;
+  onSelect: (option: AgentSourceConfig) => void;
+  empty: string;
+}) {
+  return (
+    <div>
+      <span className={LABEL}>{title}</span>
+      {loading ? (
+        <p className="px-1 py-1.5 text-[12px] text-muted-foreground">Loading…</p>
+      ) : total === 0 ? (
+        <p className="px-1 py-1.5 text-[11.5px] leading-relaxed text-muted-foreground">{empty}</p>
+      ) : options.length === 0 ? (
+        <p className="px-1 py-1.5 text-[11.5px] text-muted-foreground">No matches.</p>
+      ) : (
+        <div className="mt-1 flex flex-col">
+          {options.map((option) => {
+            const active = selectedId === option.targetId;
+            return (
+              <button
+                key={sourceKey(option)}
+                type="button"
+                onClick={() => onSelect(option)}
+                className={cn(
+                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors",
+                  active ? "bg-emerald-500/10 text-foreground" : "text-muted-foreground hover:bg-muted/60",
+                )}
+              >
+                <span className="shrink-0">
+                  {option.platform === "slack" ? (
+                    <HashIcon size={14} aria-hidden />
+                  ) : (
+                    <UsersThreeIcon size={14} aria-hidden />
+                  )}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{option.label ?? option.targetId}</span>
+                {active ? <CheckCircleIcon size={13} weight="fill" aria-hidden /> : null}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
