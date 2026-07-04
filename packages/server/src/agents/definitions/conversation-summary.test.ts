@@ -122,6 +122,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
         delivery: null,
         sources: [source()],
         sourceKey: "slack:channel:C_SUMMARY",
+        deliveryPlatform: "whatsapp",
       },
     });
 
@@ -130,6 +131,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
       start: "2026-06-30T18:00:00.000Z",
       end: "2026-07-01T18:00:00.000Z",
     });
+    expect(context.deliveryPlatform).toBe("whatsapp");
     expect(context.summarySources).toEqual([
       expect.objectContaining({
         label: "#summary-room",
