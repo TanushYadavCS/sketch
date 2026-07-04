@@ -68,7 +68,14 @@ describe("agentRoutes", () => {
         }),
       }),
     );
-    expect(service.resolveDeliveryConfigForUser).not.toHaveBeenCalled();
+    expect(service.resolveDeliveryConfigForUser).toHaveBeenCalledWith(
+      "user-1",
+      expect.objectContaining({
+        platform: "slack",
+        targetType: "dm",
+        targetId: "U_SELF",
+      }),
+    );
   });
 
   it("rejects delivery mentions for the wrong platform", async () => {
@@ -99,7 +106,7 @@ describe("agentRoutes", () => {
 
   it("returns service validation errors for unauthorized delivery config", async () => {
     const service = createService({
-      updateConfigForUser: vi.fn(async () => {
+      resolveDeliveryConfigForUser: vi.fn(async () => {
         throw new AgentDeliveryTargetError("Slack DM delivery must target the current user");
       }),
     });
@@ -123,7 +130,40 @@ describe("agentRoutes", () => {
       error: { code: "VALIDATION_ERROR", message: "Slack DM delivery must target the current user" },
     });
     expect(res.status).toBe(400);
-    expect(service.updateConfigForUser).toHaveBeenCalled();
+    expect(service.updateConfigForUser).not.toHaveBeenCalled();
+  });
+
+  it("validates combined delivery model targets before saving config", async () => {
+    const service = createService({
+      resolveDeliveryConfigForUser: vi.fn(async () => {
+        throw new AgentDeliveryTargetError("Slack channel is not available for delivery");
+      }),
+    });
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        deliveryModel: {
+          mode: "combined",
+          combined: {
+            enabled: true,
+            platform: "slack",
+            targetType: "channel",
+            targetId: "C_PRIVATE",
+            label: "#private",
+            ackNonDm: true,
+          },
+        },
+      }),
+    });
+
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR", message: "Slack channel is not available for delivery" },
+    });
+    expect(res.status).toBe(400);
+    expect(service.updateConfigForUser).not.toHaveBeenCalled();
   });
 
   it("returns service validation errors for unauthorized source config", async () => {

@@ -290,6 +290,17 @@ function parseConfigPatch(body: Record<string, unknown>) {
   return patch;
 }
 
+async function validateDeliveryTargets(
+  service: AgentRunService,
+  userId: string,
+  patch: ReturnType<typeof parseConfigPatch>,
+) {
+  if (patch.delivery !== undefined) await service.resolveDeliveryConfigForUser(userId, patch.delivery);
+  if (patch.deliveryModel?.mode === "combined") {
+    await service.resolveDeliveryConfigForUser(userId, patch.deliveryModel.combined);
+  }
+}
+
 export function agentRoutes(service: AgentRunService) {
   const routes = new Hono();
 
@@ -324,6 +335,7 @@ export function agentRoutes(service: AgentRunService) {
     let agent: Awaited<ReturnType<AgentRunService["updateConfigForUser"]>>;
     try {
       patch = parseConfigPatch(body);
+      await validateDeliveryTargets(service, userId, patch);
       agent = await service.updateConfigForUser(agentKey, userId, patch);
     } catch (err) {
       if (
