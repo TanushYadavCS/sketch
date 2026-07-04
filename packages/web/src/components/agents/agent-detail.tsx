@@ -7,6 +7,7 @@ import {
   type AgentConfig,
   type AgentDeliveryConfig,
   type AgentDeliveryMention,
+  type AgentDeliveryModel,
   type AgentDetailResponse,
   type AgentOutput,
   type AgentOutputsResponse,
@@ -22,6 +23,7 @@ import {
   UserIcon,
   UsersThreeIcon,
   WhatsappLogoIcon,
+  XIcon,
 } from "@phosphor-icons/react";
 import {
   Sheet,
@@ -39,7 +41,9 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 type Tab = "outputs" | "config";
-type EditField = "schedule" | "focus" | "volume" | "delivery" | "sources" | null;
+type EditField = "schedule" | "focus" | "volume" | "delivery" | "sources" | "routing" | null;
+
+type PerSourceRoute = "self" | "off";
 
 function detailKey(agentKey: string) {
   return ["agents", "detail", agentKey];
@@ -62,6 +66,42 @@ function deliverySummary(delivery: AgentDeliveryConfig | null): string {
     return `Slack ${delivery.label ?? delivery.targetId}${tagged}`;
   if (delivery.platform === "slack") return `Slack DM ${delivery.label ?? delivery.targetId}${tagged}`;
   return `WhatsApp ${delivery.label ?? delivery.targetId}${tagged}`;
+}
+
+/**
+ * Reads the per-source route for a source from the delivery model. A source
+ * summarizes on its own and either posts back to itself ("self") or stays
+ * web-only ("off"). A legacy combined model is shown as "self" in this
+ * per-source view; saving migrates it to explicit per-source routes.
+ */
+function routeForSource(model: AgentDeliveryModel, source: AgentSourceConfig): PerSourceRoute {
+  if (model.mode !== "per_source") return "self";
+  return model.perSource[sourceKey(source)]?.kind === "self" ? "self" : "off";
+}
+
+function buildDeliveryModel(routes: Record<string, PerSourceRoute>, sources: AgentSourceConfig[]): AgentDeliveryModel {
+  const perSource: Record<string, { kind: PerSourceRoute }> = {};
+  for (const source of sources) {
+    const key = sourceKey(source);
+    perSource[key] = { kind: routes[key] ?? "self" };
+  }
+  return { mode: "per_source", defaultRoute: "off", perSource, combined: null };
+}
+
+function routingSummary(agent: AgentConfig): string {
+  if (agent.sources.length === 0) return "No sources selected";
+  const posted = agent.sources.filter((source) => routeForSource(agent.deliveryModel, source) === "self").length;
+  const webOnly = agent.sources.length - posted;
+  const parts = [`${agent.sources.length} ${agent.sources.length === 1 ? "source" : "sources"}`];
+  if (posted > 0) parts.push(`${posted} post back`);
+  if (webOnly > 0) parts.push(`${webOnly} web only`);
+  return parts.join(" · ");
+}
+
+function initRoutes(model: AgentDeliveryModel, sources: AgentSourceConfig[]): Record<string, PerSourceRoute> {
+  const out: Record<string, PerSourceRoute> = {};
+  for (const source of sources) out[sourceKey(source)] = routeForSource(model, source);
+  return out;
 }
 
 export function AgentDetail({ agentKey }: { agentKey: string }) {
@@ -248,11 +288,11 @@ function OutputsTab({
                     : "text-muted-foreground hover:bg-muted/50",
                 )}
               >
-                <span className="block text-[12.5px] font-medium">
-                  {formatDate(output.generatedAt ?? output.outputDate)}
+                <span className="block truncate text-[12.5px] font-medium">
+                  {output.sourceLabel ?? "Summary"}
                 </span>
                 <span className="mt-0.5 block truncate font-mono text-[10px] uppercase tracking-[0.08em]">
-                  {output.outputDate}
+                  {formatDate(output.generatedAt ?? output.outputDate)}
                 </span>
               </button>
             ))}
@@ -358,20 +398,18 @@ function ConfigTab({
           </p>
         </Row>
         {agent.sourceConfig ? (
-          <Row label="Sources" onEdit={() => onEdit("sources")}>
-            <p className="line-clamp-2 text-[12.5px] leading-relaxed text-foreground/85">
-              {agent.sources.length > 0
-                ? agent.sources.map((source) => source.label ?? source.targetId).join(", ")
-                : "No sources selected"}
-            </p>
+          <Row label="Sources & delivery" onEdit={() => onEdit("routing")}>
+            <p className="line-clamp-2 text-[12.5px] leading-relaxed text-foreground/85">{routingSummary(agent)}</p>
           </Row>
         ) : null}
         <Row label="Volume" onEdit={() => onEdit("volume")}>
           <p className="text-[12.5px] text-foreground/85">Up to {agent.maxItemsPerSection} items per section</p>
         </Row>
-        <Row label="Deliver to" onEdit={() => onEdit("delivery")}>
-          <p className="text-[12.5px] text-foreground/85">{deliverySummary(agent.delivery)}</p>
-        </Row>
+        {agent.sourceConfig ? null : (
+          <Row label="Deliver to" onEdit={() => onEdit("delivery")}>
+            <p className="text-[12.5px] text-foreground/85">{deliverySummary(agent.delivery)}</p>
+          </Row>
+        )}
       </div>
 
       <div className="mb-3 mt-7 flex items-baseline justify-between border-b border-border/60 pb-2">
@@ -471,6 +509,10 @@ const EDIT_META: Record<Exclude<EditField, null>, { title: string; hint: string 
   schedule: { title: "Runs on", hint: "When the agent runs each day, in your timezone." },
   focus: { title: "Focus", hint: "Plain-language emphasis. Added as a hint — it never overrides what the agent does." },
   sources: { title: "Sources", hint: "Shared conversations this agent summarizes." },
+  routing: {
+    title: "Sources & delivery",
+    hint: "Each source is summarized on its own. Choose where its digest goes.",
+  },
   volume: { title: "Volume", hint: "How many items each section can hold." },
   delivery: { title: "Deliver to", hint: "Where completed outputs are sent after generation finishes." },
 };
@@ -493,6 +535,9 @@ function EditDrawer({
   const [minute, setMinute] = useState(agent.scheduleMinute);
   const [focus, setFocus] = useState(agent.focus ?? "");
   const [sources, setSources] = useState<AgentSourceConfig[]>(agent.sources);
+  const [routes, setRoutes] = useState<Record<string, PerSourceRoute>>(() =>
+    initRoutes(agent.deliveryModel, agent.sources),
+  );
   const [volume, setVolume] = useState(agent.maxItemsPerSection);
   const [delivery, setDelivery] = useState<AgentDeliveryConfig | null>(agent.delivery);
 
@@ -502,6 +547,7 @@ function EditDrawer({
       setMinute(agent.scheduleMinute);
       setFocus(agent.focus ?? "");
       setSources(agent.sources);
+      setRoutes(initRoutes(agent.deliveryModel, agent.sources));
       setVolume(agent.maxItemsPerSection);
       setDelivery(agent.delivery);
     }
@@ -511,6 +557,7 @@ function EditDrawer({
     agent.scheduleMinute,
     agent.focus,
     agent.sources,
+    agent.deliveryModel,
     agent.maxItemsPerSection,
     agent.delivery,
   ]);
@@ -521,6 +568,8 @@ function EditDrawer({
         return api.agents.updateConfig(agentKey, { scheduleHour: hour, scheduleMinute: minute });
       if (field === "focus") return api.agents.updateConfig(agentKey, { focus: focus.trim() ? focus.trim() : null });
       if (field === "sources") return api.agents.updateConfig(agentKey, { sources });
+      if (field === "routing")
+        return api.agents.updateConfig(agentKey, { sources, deliveryModel: buildDeliveryModel(routes, sources) });
       if (field === "volume") return api.agents.updateConfig(agentKey, { maxItemsPerSection: volume });
       if (field === "delivery") return api.agents.updateConfig(agentKey, { delivery });
       return Promise.resolve({ agent });
@@ -574,6 +623,16 @@ function EditDrawer({
             />
           ) : field === "sources" && agent.sourceConfig ? (
             <SourceEditor agent={agent} value={sources} onChange={setSources} />
+          ) : field === "routing" && agent.sourceConfig ? (
+            <SourcesDeliveryEditor
+              agent={agent}
+              sources={sources}
+              routes={routes}
+              onChange={(nextSources, nextRoutes) => {
+                setSources(nextSources);
+                setRoutes(nextRoutes);
+              }}
+            />
           ) : field === "delivery" ? (
             <DeliveryEditor value={delivery} sources={agent.sources} onChange={setDelivery} />
           ) : null}
@@ -730,6 +789,146 @@ function SourceEditor({
         />
       ) : null}
       <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">{countSummary}</p>
+    </div>
+  );
+}
+
+function SourcesDeliveryEditor({
+  agent,
+  sources,
+  routes,
+  onChange,
+}: {
+  agent: AgentConfig;
+  sources: AgentSourceConfig[];
+  routes: Record<string, PerSourceRoute>;
+  onChange: (sources: AgentSourceConfig[], routes: Record<string, PerSourceRoute>) => void;
+}) {
+  const slackChannels = useQuery({ queryKey: ["slack-channels"], queryFn: () => api.channels.listSlack() });
+  const whatsappGroups = useQuery({ queryKey: ["whatsapp-groups"], queryFn: () => api.channels.listWhatsAppGroups() });
+  const selected = new Set(sources.map(sourceKey));
+  const maxSources = agent.sourceConfig?.maxSources ?? 0;
+
+  const toggle = (source: AgentSourceConfig) => {
+    const key = sourceKey(source);
+    if (selected.has(key)) {
+      const nextRoutes = { ...routes };
+      delete nextRoutes[key];
+      onChange(
+        sources.filter((item) => sourceKey(item) !== key),
+        nextRoutes,
+      );
+      return;
+    }
+    if (sources.length >= maxSources) return;
+    onChange([...sources, source], { ...routes, [key]: "self" });
+  };
+
+  const setRoute = (source: AgentSourceConfig, route: PerSourceRoute) => {
+    onChange(sources, { ...routes, [sourceKey(source)]: route });
+  };
+
+  const slackOptions = (slackChannels.data?.channels ?? [])
+    .filter((channel) => channel.isMember)
+    .map(
+      (channel): AgentSourceConfig => ({
+        platform: "slack",
+        targetType: "channel",
+        targetId: channel.id,
+        label: `#${channel.name}`,
+      }),
+    );
+  const whatsappOptions = (whatsappGroups.data?.groups ?? []).map(
+    (group): AgentSourceConfig => ({
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: group.jid,
+      label: group.name,
+    }),
+  );
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">Selected</span>
+        {sources.length === 0 ? (
+          <p className="mt-2 rounded-lg border-[0.5px] border-dashed border-border px-3 py-3 text-[12px] text-muted-foreground">
+            Add a source below. Each source is summarized on its own.
+          </p>
+        ) : (
+          <div className="mt-2 flex flex-col gap-2">
+            {sources.map((source) => {
+              const route = routes[sourceKey(source)] ?? "self";
+              return (
+                <div key={sourceKey(source)} className="rounded-lg border-[0.5px] border-border px-3 py-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="shrink-0">
+                      {source.platform === "slack" ? (
+                        <HashIcon size={14} aria-hidden />
+                      ) : (
+                        <UsersThreeIcon size={14} aria-hidden />
+                      )}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
+                      {source.label ?? source.targetId}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => toggle(source)}
+                      aria-label={`Remove ${source.label ?? source.targetId}`}
+                      className="shrink-0 text-muted-foreground/50 transition-colors hover:text-foreground"
+                    >
+                      <XIcon size={13} weight="bold" aria-hidden />
+                    </button>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-1 rounded-lg border-[0.5px] border-border bg-muted/25 p-1">
+                    {(["self", "off"] as const).map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        onClick={() => setRoute(source, option)}
+                        className={cn(
+                          "rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors",
+                          route === option
+                            ? "bg-background text-foreground shadow-sm"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {option === "self" ? "Post back" : "Web only"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {agent.sourceConfig?.supportsSlackChannels ? (
+        <SourceGroup
+          title="Add Slack channels"
+          loading={slackChannels.isLoading}
+          empty="No Slack channels available."
+          selected={selected}
+          options={slackOptions}
+          onToggle={toggle}
+        />
+      ) : null}
+      {agent.sourceConfig?.supportsWhatsAppGroups ? (
+        <SourceGroup
+          title="Add WhatsApp groups"
+          loading={whatsappGroups.isLoading}
+          empty="No WhatsApp groups available."
+          selected={selected}
+          options={whatsappOptions}
+          onToggle={toggle}
+        />
+      ) : null}
+      <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">
+        {sources.length} selected{maxSources > 0 ? ` · limit ${maxSources}` : ""} · post back = to the source · web only
+        = not posted
+      </p>
     </div>
   );
 }
