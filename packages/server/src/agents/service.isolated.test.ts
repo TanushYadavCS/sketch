@@ -22,6 +22,15 @@ import { AgentRunService, type AgentRunServiceDeps } from "./service";
 const NOW = new Date("2026-06-15T08:05:00.000Z");
 const OUTPUT_DATE = "2026-06-15";
 
+function emptySummaryPayload(summary = "Summary") {
+  return {
+    outputDate: OUTPUT_DATE,
+    timezone: "UTC",
+    masthead: { title: "Summarizer", summary },
+    items: [],
+  };
+}
+
 function createPausedQueueManager(tasks: Array<() => Promise<void>>): QueueManager {
   return {
     getQueue: () => ({
@@ -1232,7 +1241,7 @@ describe("AgentRunService", () => {
         outputDate: OUTPUT_DATE,
         timezone: "UTC",
         masthead: { title: "Summarizer", summary: "Summary" },
-        rawPayload: {},
+        rawPayload: emptySummaryPayload(),
         items: [],
       });
       return successfulRunResult();
@@ -1398,7 +1407,7 @@ describe("AgentRunService", () => {
           outputDate: OUTPUT_DATE,
           timezone: "UTC",
           masthead: { title: "Summarizer", summary: "Summary" },
-          rawPayload: {},
+          rawPayload: emptySummaryPayload(),
           items: [],
         });
         return successfulRunResult();
