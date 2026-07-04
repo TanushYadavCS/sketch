@@ -277,6 +277,34 @@ describe("Wati outbound provider", () => {
     });
   });
 
+  it("throws when Wati session text responses report body-level failure", async () => {
+    const requestFetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          result: false,
+          error: "session message rejected",
+        }),
+      );
+    });
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://live-mt-server.wati.io/tenant-1/",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+
+    try {
+      await provider.dmProvider.sendText({ kind: "dm", phoneE164: "+15551234567" }, "hello");
+      throw new Error("expected send to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe("Wati message send failed: provider rejected request");
+      expect((error as Error).message).not.toContain("hello");
+      expect((error as Error).message).not.toContain("+15551234567");
+    }
+  });
+
   it("sends files through the v1 session file endpoint when no channel is configured", async () => {
     const requestFetch = vi.fn(async () => new Response(JSON.stringify({ ok: true, result: "success" })));
     const provider = createWatiWhatsAppProvider({
