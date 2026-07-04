@@ -1035,6 +1035,9 @@ export interface AgentSummary {
   enabled: boolean;
   scheduleHour: number;
   scheduleMinute: number;
+  sourceConfig: AgentSourceConfigMeta | null;
+  sources: AgentSourceConfig[];
+  routes: AgentRoute[];
 }
 
 export interface AgentSectionConfig {

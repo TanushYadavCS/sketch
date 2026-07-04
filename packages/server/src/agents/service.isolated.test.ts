@@ -825,6 +825,39 @@ describe("AgentRunService", () => {
     expect(reread?.delivery?.targetId).toBe("C_DAILY");
   });
 
+  it("includes source config, sources, and routes on agent summaries", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    const source = slackSource("C_A", "alpha");
+    const route = sourceRoute(source, {
+      focus: "Alpha customers",
+      sections: { highlights: true, decisions: false },
+      maxItemsPerSection: 2,
+      schedule: { hour: 10, minute: 15 },
+    });
+    const service = createService(db, [], allowSlackDelivery([{ id: "C_A", name: "alpha" }]));
+
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      sources: [source],
+      routes: [route],
+    });
+
+    const summaries = await service.listForUser(user.id);
+    const dailyBrief = summaries.find((summary) => summary.key === DAILY_BRIEF_AGENT_KEY);
+    const conversationSummary = summaries.find((summary) => summary.key === CONVERSATION_SUMMARY_AGENT_KEY);
+
+    expect(dailyBrief).toMatchObject({
+      sourceConfig: null,
+      sources: [],
+      routes: [],
+    });
+    expect(conversationSummary).toMatchObject({
+      sourceConfig: conversationSummaryDefinition.sourceConfig,
+      sources: [source],
+      routes: [route],
+    });
+  });
+
   it("normalizes delivery models with defaultRoute and full-key legacy matching", async () => {
     const users = createUserRepository(db);
     const slackDelivery = allowSlackDelivery([

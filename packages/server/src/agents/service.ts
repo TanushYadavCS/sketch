@@ -149,6 +149,9 @@ export interface AgentSummaryView {
   enabled: boolean;
   scheduleHour: number;
   scheduleMinute: number;
+  sourceConfig: AgentSourceConfigDef | null;
+  sources: AgentSourceConfig[];
+  routes: AgentRoute[];
 }
 
 export class AgentDeliveryTargetError extends Error {}
@@ -654,6 +657,9 @@ export class AgentRunService {
         enabled: config.enabled,
         scheduleHour: config.scheduleHour,
         scheduleMinute: config.scheduleMinute,
+        sourceConfig: def.sourceConfig ?? null,
+        sources: config.sources,
+        routes: config.configuredRoutes,
       });
     }
     return result;
