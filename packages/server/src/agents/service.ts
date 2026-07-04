@@ -331,9 +331,23 @@ function normalizeRouteDestination(value: unknown): AgentRouteDestination | null
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
   if (raw.kind === "self" || raw.kind === "off") return { kind: raw.kind };
-  if (raw.kind !== "member" || raw.platform !== "slack") return null;
-  const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
-  return memberUserId ? { kind: "member", platform: "slack", memberUserId } : null;
+  if (raw.kind === "member") {
+    if (raw.platform !== "slack") return null;
+    const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
+    return memberUserId ? { kind: "member", platform: "slack", memberUserId } : null;
+  }
+  if (raw.kind === "channel") {
+    const targetId = typeof raw.targetId === "string" ? raw.targetId.trim() : "";
+    if (!targetId) return null;
+    const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : null;
+    if (raw.platform === "slack" && raw.targetType === "channel") {
+      return { kind: "channel", platform: "slack", targetType: "channel", targetId, label };
+    }
+    if (raw.platform === "whatsapp" && raw.targetType === "group") {
+      return { kind: "channel", platform: "whatsapp", targetType: "group", targetId, label };
+    }
+  }
+  return null;
 }
 
 function normalizeRouteSchedule(value: unknown): AgentRoute["schedule"] {
@@ -841,6 +855,15 @@ export class AgentRunService {
           throw new AgentDeliveryTargetError("Member route destination must include a Slack member");
         }
         destination = { kind: "member", platform: "slack", memberUserId };
+      }
+      if (route.destination.kind === "channel") {
+        const normalized = normalizeRouteDestination(route.destination);
+        if (!normalized || normalized.kind !== "channel") {
+          throw new AgentDeliveryTargetError(
+            "Channel route destination must include a valid Slack channel or WhatsApp group",
+          );
+        }
+        destination = normalized;
       }
       for (const sourceKey of sources) {
         if (!sourceKeys.has(sourceKey)) {
@@ -1642,6 +1665,9 @@ export class AgentRunService {
     if (route.destination.kind === "member") {
       return this.resolveMemberRouteDelivery(route.destination, resolvedSources);
     }
+    if (route.destination.kind === "channel") {
+      return this.resolveChannelRouteDelivery(route.destination);
+    }
     if (resolvedSources.length !== 1) {
       throw new AgentDeliveryTargetError("Combined routes cannot use self destination");
     }
@@ -1676,6 +1702,45 @@ export class AgentRunService {
       targetType: "dm",
       targetId: member.slack_user_id,
       label: member.name,
+    };
+  }
+
+  private async resolveChannelRouteDelivery(
+    destination: Extract<AgentRouteDestination, { kind: "channel" }>,
+  ): Promise<AgentDeliveryConfig> {
+    if (destination.platform === "slack") {
+      const slack = this.deps.getSlack?.() ?? null;
+      if (!slack) throw new AgentDeliveryTargetError("Slack is not connected");
+
+      const channel = (await slack.listChannels()).find((candidate) => candidate.id === destination.targetId);
+      if (!channel?.isMember) {
+        throw new AgentDeliveryTargetError("Slack channel is not available for delivery");
+      }
+      return {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: channel.id,
+        label: `#${channel.name}`,
+      };
+    }
+
+    const group = await this.deps.db
+      .selectFrom("whatsapp_groups")
+      .select(["jid", "name"])
+      .where("jid", "=", destination.targetId)
+      .executeTakeFirst();
+    if (!group) throw new AgentDeliveryTargetError("WhatsApp group is not available for delivery");
+
+    const whatsapp = this.deps.getWhatsApp?.() ?? null;
+    if (!whatsapp) throw new AgentDeliveryTargetError("WhatsApp is not connected");
+
+    return {
+      enabled: true,
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: group.jid,
+      label: group.name ?? destination.label ?? null,
     };
   }
 

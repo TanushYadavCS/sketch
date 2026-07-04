@@ -319,7 +319,28 @@ function parseRouteDestination(value: unknown): AgentRouteDestination {
     if (!memberUserId) throw new ConfigPatchError("route.destination.memberUserId is required");
     return { kind: "member", platform: "slack", memberUserId };
   }
-  throw new ConfigPatchError("route.destination.kind must be self, off, or member");
+  if (raw.kind === "channel") {
+    if (raw.platform === "slack") {
+      if (raw.targetType !== "channel") {
+        throw new ConfigPatchError("Slack route destination targetType must be channel");
+      }
+      const targetId = typeof raw.targetId === "string" ? raw.targetId.trim() : "";
+      if (!targetId) throw new ConfigPatchError("route.destination.targetId is required");
+      const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : null;
+      return { kind: "channel", platform: "slack", targetType: "channel", targetId, label };
+    }
+    if (raw.platform === "whatsapp") {
+      if (raw.targetType !== "group") {
+        throw new ConfigPatchError("WhatsApp route destination targetType must be group");
+      }
+      const targetId = typeof raw.targetId === "string" ? raw.targetId.trim() : "";
+      if (!targetId) throw new ConfigPatchError("route.destination.targetId is required");
+      const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : null;
+      return { kind: "channel", platform: "whatsapp", targetType: "group", targetId, label };
+    }
+    throw new ConfigPatchError("route.destination.platform must be slack or whatsapp");
+  }
+  throw new ConfigPatchError("route.destination.kind must be self, off, member, or channel");
 }
 
 function parseRoutes(value: unknown, def: AgentDefinition): AgentRoute[] | undefined {
