@@ -13,8 +13,9 @@ import {
   type AgentSourceKey,
   api,
 } from "@/lib/api";
-import { CheckCircleIcon, HashIcon, MagnifyingGlassIcon, UserIcon, UsersThreeIcon, XIcon } from "@phosphor-icons/react";
+import { CheckCircleIcon, HashIcon, MagnifyingGlassIcon, UserIcon, UsersThreeIcon } from "@phosphor-icons/react";
 import { Switch } from "@sketch/ui/components/switch";
+import { TabButton } from "@sketch/ui/components/tab-button";
 import { cn } from "@sketch/ui/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -244,31 +245,19 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
 const LABEL = "font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70";
 
 export function SourcesField({ agent, controller }: { agent: AgentConfig; controller: RouteDraftController }) {
-  const { slackLoading, whatsappLoading, slackOptions, whatsappOptions } = useSourceOptions(agent);
   const selected = new Set<string>(controller.sources);
   const maxSources = agent.sourceConfig?.maxSources ?? 0;
+  const atMax = maxSources > 0 && controller.sources.length >= maxSources;
   return (
-    <div className="space-y-4">
-      {agent.sourceConfig?.supportsSlackChannels ? (
-        <SourceGroup
-          title="Slack channels"
-          loading={slackLoading}
-          empty="No Slack channels available."
-          selected={selected}
-          options={slackOptions}
-          onToggle={controller.toggleSource}
-        />
-      ) : null}
-      {agent.sourceConfig?.supportsWhatsAppGroups ? (
-        <SourceGroup
-          title="WhatsApp groups"
-          loading={whatsappLoading}
-          empty="No WhatsApp groups available."
-          selected={selected}
-          options={whatsappOptions}
-          onToggle={controller.toggleSource}
-        />
-      ) : null}
+    <div className="space-y-2">
+      <ChannelPickerList
+        agent={agent}
+        selected={selected}
+        onToggle={controller.toggleSource}
+        showSlack={agent.sourceConfig?.supportsSlackChannels ?? false}
+        showWhatsapp={agent.sourceConfig?.supportsWhatsAppGroups ?? false}
+        isDisabled={atMax ? () => true : undefined}
+      />
       <p className={LABEL}>
         {controller.sources.length} selected
         {maxSources > 0 ? ` · limit ${maxSources}` : ""}
@@ -287,126 +276,100 @@ export function DestinationField({
   agentKey: string;
   controller: RouteDraftController;
 }) {
-  const { destKind, memberUserId, combined, hasWhatsApp } = controller;
+  const { destKind, memberUserId, hasWhatsApp } = controller;
+  const activeTab: "groups" | "dm" = destKind === "member" ? "dm" : "groups";
+  const dmAvailable = (agent.sourceConfig?.supportsSlackChannels ?? false) && !hasWhatsApp;
+
   const memberQuery = useQuery({
     queryKey: ["route-members", agentKey, controller.sources],
     queryFn: () => api.agents.routeMembers(agentKey, controller.sources),
-    enabled: destKind === "member" && controller.sources.length > 0 && !hasWhatsApp,
+    enabled: activeTab === "dm" && controller.sources.length > 0 && dmAvailable,
   });
 
-  const destOptions: Array<{
-    value: AgentRouteDestination["kind"];
-    label: string;
-    caption: string;
-    disabled: boolean;
-    hint?: string;
-  }> = [
-    {
-      value: "self",
-      label: "Post back",
-      caption: "To the source",
-      disabled: combined,
-      hint: combined ? "single input only" : undefined,
-    },
-    { value: "channel", label: "Another channel", caption: "Slack or WhatsApp", disabled: false },
-    {
-      value: "member",
-      label: "DM a member",
-      caption: "Direct message",
-      disabled: !agent.sourceConfig?.supportsSlackChannels || hasWhatsApp,
-      hint: hasWhatsApp ? "Slack only" : undefined,
-    },
-  ];
+  const channelSelected = controller.channelTarget
+    ? new Set<string>([sourceKey(controller.channelTarget)])
+    : new Set<string>();
+
+  const toggleChannel = (option: AgentSourceConfig) => {
+    const same = controller.channelTarget != null && sourceKey(controller.channelTarget) === sourceKey(option);
+    controller.setChannelTarget(same ? null : option);
+    if (!same) controller.setDestKind("channel");
+  };
 
   return (
     <div>
-      <span className={LABEL}>Delivers to</span>
-      <div className="mt-2 grid grid-cols-3 gap-2">
-        {destOptions.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            disabled={option.disabled}
-            onClick={() => controller.setDestKind(option.value)}
-            className={cn(
-              "flex flex-col items-start gap-0.5 rounded-xl border-[0.5px] px-3 py-2.5 text-left transition-colors",
-              destKind === option.value
-                ? "border-foreground/30 bg-card shadow-sm"
-                : "border-border bg-card/40 hover:bg-card",
-              option.disabled && "cursor-not-allowed opacity-40 hover:bg-card/40",
-            )}
-          >
-            <span className="text-[12.5px] font-medium text-foreground">{option.label}</span>
-            <span className="text-[10.5px] text-muted-foreground">{option.hint ?? option.caption}</span>
-          </button>
-        ))}
+      <div className="flex items-center gap-6 border-b border-border">
+        <TabButton
+          label="Groups"
+          isActive={activeTab === "groups"}
+          onClick={() => {
+            if (destKind === "member") controller.setDestKind("channel");
+          }}
+        />
+        <TabButton label="DM" isActive={activeTab === "dm"} onClick={() => controller.setDestKind("member")} />
       </div>
 
-      {destKind === "channel" ? <ChannelDestinationPicker agent={agent} controller={controller} /> : null}
-
-      {destKind === "member" ? (
+      {activeTab === "groups" ? (
         <div className="mt-3">
-          {hasWhatsApp ? (
-            <p className="px-1 py-2 text-[12px] text-muted-foreground">
-              Member DM works with Slack sources only. Remove the WhatsApp source to pick a member.
-            </p>
-          ) : (
-            <TargetList
-              loading={memberQuery.isLoading}
-              empty="No member is in every selected source."
-              selectedId={memberUserId ?? ""}
-              options={(memberQuery.data?.members ?? []).map((member) => ({
-                id: member.userId,
-                label: member.name,
-                icon: <UserIcon size={14} aria-hidden />,
-              }))}
-              onSelect={(id) => controller.setMemberUserId(id)}
-            />
-          )}
+          <ChannelPickerList agent={agent} selected={channelSelected} onToggle={toggleChannel} />
+          <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/70">
+            Posts to any channel or group Sketch can reach — independent of the inputs above.
+          </p>
+        </div>
+      ) : !dmAvailable ? (
+        <p className="mt-3 px-1 py-2 text-[12px] text-muted-foreground">
+          Member DM works with Slack sources only. Remove the WhatsApp source to DM a member.
+        </p>
+      ) : (
+        <div className="mt-3">
+          <TargetList
+            loading={memberQuery.isLoading}
+            empty="No member is in every selected source."
+            selectedId={memberUserId ?? ""}
+            options={(memberQuery.data?.members ?? []).map((member) => ({
+              id: member.userId,
+              label: member.name,
+              icon: <UserIcon size={14} aria-hidden />,
+            }))}
+            onSelect={(id) => controller.setMemberUserId(id)}
+          />
           <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground/70">
             Only members of every selected source appear — the summary can never reach someone outside the inputs.
           </p>
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
 
 /**
- * Search-and-add single-select over the Slack channels and WhatsApp groups
- * Sketch can post to. The chosen target shows as a chip you can clear; the
- * search filters both platforms, each kept as its own always-visible section so
- * an empty WhatsApp list reads as "no groups yet" rather than silently missing.
+ * Shared search-and-add list over the Slack channels and WhatsApp groups Sketch
+ * can reach, split into a section per source. Used for both the multi-select
+ * inputs and the single-select delivery target — the caller owns the selection
+ * set (keyed by sourceKey) and the toggle handler.
  */
-function ChannelDestinationPicker({ agent, controller }: { agent: AgentConfig; controller: RouteDraftController }) {
+export function ChannelPickerList({
+  agent,
+  selected,
+  onToggle,
+  showSlack = true,
+  showWhatsapp = true,
+  isDisabled,
+}: {
+  agent: AgentConfig;
+  selected: Set<string>;
+  onToggle: (option: AgentSourceConfig) => void;
+  showSlack?: boolean;
+  showWhatsapp?: boolean;
+  isDisabled?: (option: AgentSourceConfig) => boolean;
+}) {
   const { slackLoading, whatsappLoading, slackOptions, whatsappOptions } = useSourceOptions(agent);
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
   const match = (o: AgentSourceConfig) => !q || (o.label ?? o.targetId).toLowerCase().includes(q);
-  const selected = controller.channelTarget;
-  const selectedId = selected?.targetId ?? "";
 
   return (
-    <div className="mt-3 space-y-2">
-      {selected ? (
-        <div className="flex items-center gap-2 rounded-lg border-[0.5px] border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-[12.5px] text-foreground">
-          {selected.platform === "slack" ? (
-            <HashIcon size={14} aria-hidden />
-          ) : (
-            <UsersThreeIcon size={14} aria-hidden />
-          )}
-          <span className="min-w-0 flex-1 truncate">{selected.label ?? selected.targetId}</span>
-          <button
-            type="button"
-            onClick={() => controller.setChannelTarget(null)}
-            aria-label="Clear channel"
-            className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <XIcon size={13} aria-hidden />
-          </button>
-        </div>
-      ) : null}
-
+    <div className="space-y-2">
       <div className="relative">
         <MagnifyingGlassIcon
           size={13}
@@ -423,49 +386,53 @@ function ChannelDestinationPicker({ agent, controller }: { agent: AgentConfig; c
       </div>
 
       <div className="max-h-56 space-y-3 overflow-y-auto rounded-lg border-[0.5px] border-border p-2">
-        <ChannelDestGroup
-          title="Slack channels"
-          loading={slackLoading}
-          total={slackOptions.length}
-          options={slackOptions.filter(match)}
-          selectedId={selectedId}
-          onSelect={controller.setChannelTarget}
-          empty="The bot isn't in any Slack channels yet."
-        />
-        <ChannelDestGroup
-          title="WhatsApp groups"
-          loading={whatsappLoading}
-          total={whatsappOptions.length}
-          options={whatsappOptions.filter(match)}
-          selectedId={selectedId}
-          onSelect={controller.setChannelTarget}
-          empty="The bot isn't in any WhatsApp groups yet — add it to a group and reload."
-        />
+        {showSlack ? (
+          <ChannelSection
+            title="Slack channels"
+            loading={slackLoading}
+            total={slackOptions.length}
+            options={slackOptions.filter(match)}
+            selected={selected}
+            onToggle={onToggle}
+            isDisabled={isDisabled}
+            empty="The bot isn't in any Slack channels yet."
+          />
+        ) : null}
+        {showWhatsapp ? (
+          <ChannelSection
+            title="WhatsApp groups"
+            loading={whatsappLoading}
+            total={whatsappOptions.length}
+            options={whatsappOptions.filter(match)}
+            selected={selected}
+            onToggle={onToggle}
+            isDisabled={isDisabled}
+            empty="The bot isn't in any WhatsApp groups yet — add it to a group and reload."
+          />
+        ) : null}
       </div>
-
-      <p className="text-[11px] leading-relaxed text-muted-foreground/70">
-        Posts to any channel or group Sketch can reach — independent of the inputs above.
-      </p>
     </div>
   );
 }
 
 /** One platform's rows inside the channel picker, always shown so an empty list carries its own explanation. */
-function ChannelDestGroup({
+function ChannelSection({
   title,
   loading,
   total,
   options,
-  selectedId,
-  onSelect,
+  selected,
+  onToggle,
+  isDisabled,
   empty,
 }: {
   title: string;
   loading: boolean;
   total: number;
   options: AgentSourceConfig[];
-  selectedId: string;
-  onSelect: (option: AgentSourceConfig) => void;
+  selected: Set<string>;
+  onToggle: (option: AgentSourceConfig) => void;
+  isDisabled?: (option: AgentSourceConfig) => boolean;
   empty: string;
 }) {
   return (
@@ -480,15 +447,19 @@ function ChannelDestGroup({
       ) : (
         <div className="mt-1 flex flex-col">
           {options.map((option) => {
-            const active = selectedId === option.targetId;
+            const key = sourceKey(option);
+            const active = selected.has(key);
+            const disabled = !active && (isDisabled?.(option) ?? false);
             return (
               <button
-                key={sourceKey(option)}
+                key={key}
                 type="button"
-                onClick={() => onSelect(option)}
+                disabled={disabled}
+                onClick={() => onToggle(option)}
                 className={cn(
                   "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors",
                   active ? "bg-emerald-500/10 text-foreground" : "text-muted-foreground hover:bg-muted/60",
+                  disabled && "cursor-not-allowed opacity-40 hover:bg-transparent",
                 )}
               >
                 <span className="shrink-0">
@@ -579,89 +550,6 @@ export function VolumeField({ agent, controller }: { agent: AgentConfig; control
           value={controller.volume}
           onChange={controller.setVolume}
         />
-      </div>
-    </div>
-  );
-}
-
-export function SourceGroup({
-  title,
-  loading,
-  empty,
-  selected,
-  options,
-  onToggle,
-}: {
-  title: string;
-  loading: boolean;
-  empty: string;
-  selected: Set<string>;
-  options: AgentSourceConfig[];
-  onToggle: (source: AgentSourceConfig) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const q = query.trim().toLowerCase();
-  const filtered = q ? options.filter((o) => (o.label ?? o.targetId).toLowerCase().includes(q)) : options;
-  const showSearch = options.length > 6;
-
-  return (
-    <div>
-      <span className={LABEL}>{title}</span>
-      <div className="mt-2 rounded-lg border-[0.5px] border-border p-1">
-        {loading ? (
-          <p className="px-2 py-2 text-[12px] text-muted-foreground">Loading...</p>
-        ) : options.length === 0 ? (
-          <p className="px-2 py-2 text-[12px] text-muted-foreground">{empty}</p>
-        ) : (
-          <>
-            {showSearch ? (
-              <div className="relative mb-1">
-                <MagnifyingGlassIcon
-                  size={13}
-                  aria-hidden
-                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-                />
-                <input
-                  type="text"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder={`Search ${title.toLowerCase()}…`}
-                  className="w-full rounded-md border-[0.5px] border-border bg-background py-1.5 pl-7 pr-2 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-foreground/30 focus:outline-none"
-                />
-              </div>
-            ) : null}
-            <div className="flex max-h-56 flex-col overflow-y-auto">
-              {filtered.length === 0 ? (
-                <p className="px-2 py-2 text-[12px] text-muted-foreground">No matches.</p>
-              ) : (
-                filtered.map((source) => {
-                  const active = selected.has(sourceKey(source));
-                  return (
-                    <button
-                      key={sourceKey(source)}
-                      type="button"
-                      onClick={() => onToggle(source)}
-                      className={cn(
-                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors",
-                        active ? "bg-emerald-500/10 text-foreground" : "text-muted-foreground hover:bg-muted/60",
-                      )}
-                    >
-                      <span className="shrink-0">
-                        {source.platform === "slack" ? (
-                          <HashIcon size={14} aria-hidden />
-                        ) : (
-                          <UsersThreeIcon size={14} aria-hidden />
-                        )}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate">{source.label ?? source.targetId}</span>
-                      {active ? <CheckCircleIcon size={13} weight="fill" aria-hidden /> : null}
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </>
-        )}
       </div>
     </div>
   );
