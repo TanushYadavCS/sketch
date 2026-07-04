@@ -76,6 +76,7 @@ export interface RequestAgentGenerationParams {
   triggerType: AgentOutputTriggerType;
   skipIfCompleted?: boolean;
   scopeKeys?: string[];
+  routeIds?: string[];
 }
 
 export interface ResolvedAgentConfig {
@@ -123,6 +124,11 @@ export interface AgentRouteMember {
   userId: string;
   name: string;
   slackUserId: string;
+}
+
+export interface AgentWhatsAppDmMember {
+  userId: string;
+  name: string;
 }
 
 export interface AgentOutputApi {
@@ -332,9 +338,9 @@ function normalizeRouteDestination(value: unknown): AgentRouteDestination | null
   const raw = value as Record<string, unknown>;
   if (raw.kind === "self" || raw.kind === "off") return { kind: raw.kind };
   if (raw.kind === "member") {
-    if (raw.platform !== "slack") return null;
+    if (raw.platform !== "slack" && raw.platform !== "whatsapp") return null;
     const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
-    return memberUserId ? { kind: "member", platform: "slack", memberUserId } : null;
+    return memberUserId ? { kind: "member", platform: raw.platform, memberUserId } : null;
   }
   if (raw.kind === "channel") {
     const targetId = typeof raw.targetId === "string" ? raw.targetId.trim() : "";
@@ -851,10 +857,10 @@ export class AgentRunService {
       if (route.destination.kind === "member") {
         const raw = route.destination as Record<string, unknown>;
         const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
-        if (raw.platform !== "slack" || !memberUserId) {
-          throw new AgentDeliveryTargetError("Member route destination must include a Slack member");
+        if ((raw.platform !== "slack" && raw.platform !== "whatsapp") || !memberUserId) {
+          throw new AgentDeliveryTargetError("Member route destination must include a Slack or WhatsApp member");
         }
-        destination = { kind: "member", platform: "slack", memberUserId };
+        destination = { kind: "member", platform: raw.platform, memberUserId };
       }
       if (route.destination.kind === "channel") {
         const normalized = normalizeRouteDestination(route.destination);
@@ -1017,6 +1023,15 @@ export class AgentRunService {
       if (eligible) members.push({ userId: user.id, name: user.name, slackUserId: user.slack_user_id });
     }
 
+    return members;
+  }
+
+  async listWhatsAppDmMembers(): Promise<AgentWhatsAppDmMember[]> {
+    const members: AgentWhatsAppDmMember[] = [];
+    for (const user of await this.deps.users.list()) {
+      if (user.type === "agent" || !user.whatsapp_number) continue;
+      members.push({ userId: user.id, name: user.name });
+    }
     return members;
   }
 
@@ -1328,9 +1343,14 @@ export class AgentRunService {
     const now = new Date();
     const scopes = await this.resolveExpectedScopesForUser(def, user, config);
     const scopeKeys = params.scopeKeys ? new Set(params.scopeKeys) : null;
+    const routeIds = params.routeIds ? new Set(params.routeIds) : null;
     const rows: AgentOutputRow[] = [];
 
-    for (const scope of scopeKeys ? scopes.filter((candidate) => scopeKeys.has(candidate.sourceKey)) : scopes) {
+    for (const scope of scopes.filter((candidate) => {
+      if (scopeKeys && !scopeKeys.has(candidate.sourceKey)) return false;
+      if (routeIds && (!candidate.route || !routeIds.has(candidate.route.id))) return false;
+      return true;
+    })) {
       let recoveredStaleRunning = false;
       const existingRunning = await this.repo.findRunning(def.key, user.id, outputDate, scope.sourceKey);
       if (existingRunning) {
@@ -1682,6 +1702,21 @@ export class AgentRunService {
     resolvedSources: AgentSourceConfig[],
   ): Promise<AgentDeliveryConfig> {
     const member = await this.deps.users.findById(destination.memberUserId);
+
+    if (destination.platform === "whatsapp") {
+      if (!member?.whatsapp_number) {
+        throw new AgentDeliveryTargetError("Recipient has no WhatsApp number");
+      }
+      return {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "dm",
+        targetId: member.whatsapp_number,
+        label: member.name,
+        recipientUserId: member.id,
+      };
+    }
+
     if (!member?.slack_user_id) {
       throw new AgentDeliveryTargetError("Recipient is not available for Slack delivery");
     }

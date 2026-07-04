@@ -57,6 +57,7 @@ export interface AgentDeliveryConfig {
   targetType: AgentDeliveryTargetType;
   targetId: string;
   label: string | null;
+  recipientUserId?: string;
   mentions?: AgentDeliveryMention[];
 }
 
@@ -95,7 +96,7 @@ export type AgentRouteId = string;
 export type AgentRouteDestination =
   | { kind: "self" }
   | { kind: "off" }
-  | { kind: "member"; platform: "slack"; memberUserId: string }
+  | { kind: "member"; platform: "slack" | "whatsapp"; memberUserId: string }
   | { kind: "channel"; platform: "slack"; targetType: "channel"; targetId: string; label: string | null }
   | { kind: "channel"; platform: "whatsapp"; targetType: "group"; targetId: string; label: string | null };
 

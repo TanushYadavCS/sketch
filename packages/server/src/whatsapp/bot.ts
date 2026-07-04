@@ -40,6 +40,7 @@ const RECONNECT_MAX_MS = 30_000;
 const RECONNECT_FACTOR = 1.8;
 const RECONNECT_JITTER = 0.25;
 const GROUP_META_TTL_MS = 5 * 60_000;
+const GROUP_SYNC_THROTTLE_MS = 5 * 60_000;
 
 /** Cached WA version — fetched once from GitHub, reused for all subsequent connections. */
 let cachedVersion: WAVersion | null = null;
@@ -110,6 +111,8 @@ export class WhatsAppBot {
   private stopping = false;
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private lastMessageAt = 0;
+  private lastGroupSyncAt = 0;
+  private lastGroupSyncSocketGeneration = 0;
   private authState: Awaited<ReturnType<typeof createDbAuthState>> | null = null;
   private composingTimers = new Map<
     string,
@@ -193,6 +196,7 @@ export class WhatsAppBot {
           this.reconnectAttempt = 0;
           this.registerMessageHandler();
           this.startWatchdog();
+          void this.syncAllGroups();
           await callbacks.onConnected(this.phoneNumber ?? "unknown");
           resolve();
         }
@@ -394,6 +398,60 @@ export class WhatsAppBot {
     return meta?.subject ?? "Unknown Group";
   }
 
+  async syncAllGroups(opts: { force?: boolean } = {}): Promise<number> {
+    const socket = this.sock;
+    const store = this.groupMetadataStore;
+    if (!socket || !store) return 0;
+
+    const now = Date.now();
+    const socketGeneration = this.activeSocketGeneration;
+    if (
+      !opts.force &&
+      this.lastGroupSyncSocketGeneration === socketGeneration &&
+      this.lastGroupSyncAt > 0 &&
+      now - this.lastGroupSyncAt < GROUP_SYNC_THROTTLE_MS
+    ) {
+      return 0;
+    }
+
+    this.lastGroupSyncAt = now;
+    this.lastGroupSyncSocketGeneration = socketGeneration;
+    let syncedCount = 0;
+
+    try {
+      const groups = await socket.groupFetchAllParticipating();
+      if (socketGeneration !== this.activeSocketGeneration || socket !== this.sock) {
+        if (this.lastGroupSyncAt === now && this.lastGroupSyncSocketGeneration === socketGeneration) {
+          this.lastGroupSyncAt = 0;
+          this.lastGroupSyncSocketGeneration = 0;
+        }
+        return 0;
+      }
+
+      for (const [jid, meta] of Object.entries(groups)) {
+        this.groupMetaCache.set(jid, { meta, expires: Date.now() + GROUP_META_TTL_MS });
+        await store.upsert({
+          jid,
+          name: meta.subject ?? "Unknown Group",
+          description: meta.desc ?? null,
+          updated_at: new Date().toISOString(),
+        });
+        syncedCount += 1;
+      }
+
+      return syncedCount;
+    } catch (err) {
+      if (socketGeneration !== this.activeSocketGeneration || socket !== this.sock) {
+        if (this.lastGroupSyncAt === now && this.lastGroupSyncSocketGeneration === socketGeneration) {
+          this.lastGroupSyncAt = 0;
+          this.lastGroupSyncSocketGeneration = 0;
+        }
+      }
+      this.logger.warn({ err, syncedCount }, "Failed to sync WhatsApp groups");
+      return syncedCount;
+    }
+  }
+
   async resolveJidToPhone(jid: string): Promise<string | null> {
     if (jid.endsWith("@lid")) return this.resolveLidToPhone(jid);
     if (jid.endsWith("@s.whatsapp.net")) return jidToPhoneNumber(jid);
@@ -454,6 +512,7 @@ export class WhatsAppBot {
         this.clearReconnectTimer();
         this.logger.info({ socketGeneration }, "WhatsApp connected");
         this.reconnectAttempt = 0;
+        void this.syncAllGroups();
       }
 
       if (connection === "close") {

@@ -1094,7 +1094,7 @@ export type AgentDeliveryModel =
 export type AgentRouteDestination =
   | { kind: "self" }
   | { kind: "off" }
-  | { kind: "member"; platform: "slack"; memberUserId: string }
+  | { kind: "member"; platform: "slack" | "whatsapp"; memberUserId: string }
   | { kind: "channel"; platform: "slack"; targetType: "channel"; targetId: string; label: string | null }
   | { kind: "channel"; platform: "whatsapp"; targetType: "group"; targetId: string; label: string | null };
 
@@ -1317,11 +1317,19 @@ export const api = {
         body: JSON.stringify({ sources }),
       });
     },
-    run(agentKey: string) {
+    whatsappDmMembers(agentKey: string) {
+      return request<{ members: Array<{ userId: string; name: string }> }>(
+        `/api/agents/${agentKey}/route-members/whatsapp`,
+      );
+    },
+    run(agentKey: string, opts?: { routeId?: string }) {
       return request<{
         generation: { id: string; sourceKey: string; status: string; outputDate: string } | null;
         generations: Array<{ id: string; sourceKey: string; status: string; outputDate: string }>;
-      }>(`/api/agents/${agentKey}/runs`, { method: "POST", body: JSON.stringify({}) });
+      }>(`/api/agents/${agentKey}/runs`, {
+        method: "POST",
+        body: JSON.stringify(opts?.routeId ? { routeId: opts.routeId } : {}),
+      });
     },
     outputs(agentKey: string, opts?: { limit?: number; cursor?: string | null }) {
       const params = new URLSearchParams();

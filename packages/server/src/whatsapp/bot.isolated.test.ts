@@ -1,4 +1,4 @@
-import type { proto } from "@whiskeysockets/baileys";
+import type { GroupMetadata, proto } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
@@ -573,6 +573,130 @@ describe("WhatsAppBot group metadata persistence", () => {
     await expect(
       db.selectFrom("whatsapp_groups").selectAll().where("jid", "=", "group@g.us").executeTakeFirst(),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("WhatsAppBot syncAllGroups", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await db.destroy();
+  });
+
+  function metadata(id: string, subject: string, desc?: string): GroupMetadata {
+    return {
+      id,
+      owner: undefined,
+      subject,
+      desc,
+      participants: [],
+    };
+  }
+
+  function attachGroupSyncSocket(bot: WhatsAppBot, groups: Record<string, GroupMetadata>) {
+    const groupFetchAllParticipating = vi.fn().mockResolvedValue(groups);
+    (bot as unknown as { sock: { groupFetchAllParticipating: typeof groupFetchAllParticipating } }).sock = {
+      groupFetchAllParticipating,
+    };
+    return groupFetchAllParticipating;
+  }
+
+  it("upserts every fetched group while preserving agent bindings", async () => {
+    const repo = createWhatsAppGroupRepository(db);
+    const bot = new WhatsAppBot({
+      db,
+      logger: createTestLogger(),
+      groupMetadataStore: repo,
+    });
+
+    await db.insertInto("users").values({ id: "agent-1", name: "Agent One" }).execute();
+    await repo.upsert({
+      jid: "existing@g.us",
+      name: "Old Group",
+      description: "Old desc",
+      updated_at: "2026-03-13T10:00:00.000Z",
+    });
+    await db
+      .updateTable("whatsapp_groups")
+      .set({ agent_user_id: "agent-1" })
+      .where("jid", "=", "existing@g.us")
+      .execute();
+
+    attachGroupSyncSocket(bot, {
+      "existing@g.us": metadata("existing@g.us", "Renamed Group", "New desc"),
+      "new@g.us": metadata("new@g.us", "New Group"),
+    });
+
+    await expect(bot.syncAllGroups()).resolves.toBe(2);
+
+    const existing = await db
+      .selectFrom("whatsapp_groups")
+      .selectAll()
+      .where("jid", "=", "existing@g.us")
+      .executeTakeFirstOrThrow();
+    const inserted = await db
+      .selectFrom("whatsapp_groups")
+      .selectAll()
+      .where("jid", "=", "new@g.us")
+      .executeTakeFirstOrThrow();
+
+    expect(existing.name).toBe("Renamed Group");
+    expect(existing.description).toBe("New desc");
+    expect(existing.agent_user_id).toBe("agent-1");
+    expect(inserted.name).toBe("New Group");
+    expect(inserted.description).toBeNull();
+    await expect(bot.getGroupMetadata("new@g.us")).resolves.toMatchObject({ subject: "New Group" });
+  });
+
+  it("returns the synced count so far and warns when the socket fetch fails", async () => {
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const bot = new WhatsAppBot({
+      db,
+      logger,
+      groupMetadataStore: createWhatsAppGroupRepository(db),
+    });
+    const groupFetchAllParticipating = vi.fn().mockRejectedValue(new Error("socket unavailable"));
+    (bot as unknown as { sock: { groupFetchAllParticipating: typeof groupFetchAllParticipating } }).sock = {
+      groupFetchAllParticipating,
+    };
+
+    await expect(bot.syncAllGroups()).resolves.toBe(0);
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), syncedCount: 0 }),
+      "Failed to sync WhatsApp groups",
+    );
+  });
+
+  it("throttles repeated syncs and allows forced refreshes", async () => {
+    const dateSpy = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const bot = new WhatsAppBot({
+      db,
+      logger: createTestLogger(),
+      groupMetadataStore: createWhatsAppGroupRepository(db),
+    });
+    const groupFetchAllParticipating = attachGroupSyncSocket(bot, {
+      "team@g.us": metadata("team@g.us", "Team"),
+    });
+
+    await expect(bot.syncAllGroups()).resolves.toBe(1);
+    await expect(bot.syncAllGroups()).resolves.toBe(0);
+    (bot as unknown as { activeSocketGeneration: number }).activeSocketGeneration = 2;
+    const nextGenerationFetch = attachGroupSyncSocket(bot, {
+      "next-team@g.us": metadata("next-team@g.us", "Next Team"),
+    });
+    await expect(bot.syncAllGroups()).resolves.toBe(1);
+    await expect(bot.syncAllGroups({ force: true })).resolves.toBe(1);
+
+    expect(groupFetchAllParticipating).toHaveBeenCalledTimes(1);
+    expect(nextGenerationFetch).toHaveBeenCalledTimes(2);
+    dateSpy.mockRestore();
   });
 });
 

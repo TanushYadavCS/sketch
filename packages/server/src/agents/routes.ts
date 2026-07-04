@@ -314,10 +314,12 @@ function parseRouteDestination(value: unknown): AgentRouteDestination {
   const raw = value as Record<string, unknown>;
   if (raw.kind === "self" || raw.kind === "off") return { kind: raw.kind };
   if (raw.kind === "member") {
-    if (raw.platform !== "slack") throw new ConfigPatchError("route.destination.platform must be slack");
+    if (raw.platform !== "slack" && raw.platform !== "whatsapp") {
+      throw new ConfigPatchError("route.destination.platform must be slack or whatsapp");
+    }
     const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
     if (!memberUserId) throw new ConfigPatchError("route.destination.memberUserId is required");
-    return { kind: "member", platform: "slack", memberUserId };
+    return { kind: "member", platform: raw.platform, memberUserId };
   }
   if (raw.kind === "channel") {
     if (raw.platform === "slack") {
@@ -370,7 +372,11 @@ function parseRoutes(value: unknown, def: AgentDefinition): AgentRoute[] | undef
     if (sources.length > 1 && destination.kind === "self") {
       throw new ConfigPatchError("Combined routes cannot use self destination");
     }
-    if (destination.kind === "member" && sources.some((source) => source.startsWith("whatsapp:"))) {
+    if (
+      destination.kind === "member" &&
+      destination.platform === "slack" &&
+      sources.some((source) => source.startsWith("whatsapp:"))
+    ) {
       throw new ConfigPatchError("Member route destinations support Slack sources only");
     }
     const maxItemsPerSection =
@@ -544,6 +550,15 @@ export function agentRoutes(service: AgentRunService) {
     }
   });
 
+  routes.get("/:agentKey/route-members/whatsapp", async (c) => {
+    const userId = await getCurrentUserId(c, service);
+    if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
+    const agentKey = c.req.param("agentKey");
+    const def = getAgentDefinition(agentKey);
+    if (!def) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
+    return c.json({ members: await service.listWhatsAppDmMembers() });
+  });
+
   routes.get("/:agentKey/outputs", async (c) => {
     const userId = await getCurrentUserId(c, service);
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
@@ -576,7 +591,19 @@ export function agentRoutes(service: AgentRunService) {
     if (!service.listDefinitions().some((def) => def.key === agentKey)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
     }
-    const rows = await service.requestGenerationForUser({ agentKey, userId, triggerType: "manual" });
+    const body = (await c.req.json().catch(() => null)) as unknown;
+    const rawRouteId =
+      body && typeof body === "object" && !Array.isArray(body) ? (body as { routeId?: unknown }).routeId : undefined;
+    const routeId = typeof rawRouteId === "string" && rawRouteId.trim() ? rawRouteId.trim() : undefined;
+    const rows = await service.requestGenerationForUser({
+      agentKey,
+      userId,
+      triggerType: "manual",
+      ...(routeId ? { routeIds: [routeId] } : {}),
+    });
+    if (routeId && rows.length === 0) {
+      return c.json({ error: { code: "NOT_FOUND", message: "Route not found" } }, 404);
+    }
     const generations = rows.map(toGenerationShape);
     return c.json({ generation: generations[0] ?? null, generations }, 202);
   });

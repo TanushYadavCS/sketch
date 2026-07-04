@@ -41,6 +41,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { EmptyCard, OutputView, RunButton, formatOutputDate } from "./agent-outputs-view";
 import { SummariserSetupModal } from "./summariser-setup-modal";
 import { InputIcon, deliversLabel, routeInput } from "./summariser-shared";
 
@@ -223,7 +224,7 @@ function OutputsTab({
       <div className="mb-4 flex items-center justify-between">
         <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
           {selectedOutput
-            ? `Generated ${formatDate(selectedOutput.generatedAt ?? selectedOutput.outputDate)}`
+            ? `Generated ${formatOutputDate(selectedOutput.generatedAt ?? selectedOutput.outputDate)}`
             : "No output yet"}
         </span>
         <RunButton running={running} pending={runPending} onRun={onRun} />
@@ -252,7 +253,7 @@ function OutputsTab({
               >
                 <span className="block truncate text-[12.5px] font-medium">{output.sourceLabel ?? "Summary"}</span>
                 <span className="mt-0.5 block truncate font-mono text-[10px] uppercase tracking-[0.08em]">
-                  {formatDate(output.generatedAt ?? output.outputDate)}
+                  {formatOutputDate(output.generatedAt ?? output.outputDate)}
                 </span>
               </button>
             ))}
@@ -261,72 +262,6 @@ function OutputsTab({
         </div>
       )}
     </div>
-  );
-}
-
-function OutputView({ output, sectionTitles }: { output: AgentOutput; sectionTitles: Record<string, string> }) {
-  const sectionEntries = Object.entries(output.sections).filter(([, items]) => items.length > 0);
-  return (
-    <div className="flex flex-col gap-6">
-      {output.masthead ? (
-        <div className="rounded-xl border-[0.5px] border-border bg-gradient-to-b from-muted/50 to-card px-4 py-3.5">
-          <p className="text-[14px] font-semibold text-foreground">{output.masthead.title}</p>
-          <p className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">{output.masthead.summary}</p>
-        </div>
-      ) : null}
-      {sectionEntries.length === 0 ? (
-        <EmptyCard>No items in this run.</EmptyCard>
-      ) : (
-        sectionEntries.map(([sectionKey, items]) => (
-          <div key={sectionKey}>
-            <div className="mb-2 border-b border-border/60 pb-2">
-              <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-                {sectionTitles[sectionKey] ?? sectionKey}
-              </span>
-            </div>
-            <div className="flex flex-col gap-2">
-              {items.map((item) => (
-                <div key={item.id} className="rounded-xl border-[0.5px] border-border bg-card px-4 py-3">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span className="text-[13px] font-medium text-foreground">{item.title}</span>
-                    {item.label ? (
-                      <span className="rounded-full bg-muted/60 px-1.5 py-[1px] font-mono text-[8.5px] uppercase tracking-[0.06em] text-muted-foreground">
-                        {item.label.replaceAll("_", " ")}
-                      </span>
-                    ) : null}
-                    {item.displayRef ? (
-                      <span className="font-mono text-[10px] text-muted-foreground/70">{item.displayRef}</span>
-                    ) : null}
-                  </div>
-                  <p className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">{item.summary}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))
-      )}
-    </div>
-  );
-}
-
-function RunButton({ running, pending, onRun }: { running: boolean; pending: boolean; onRun: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onRun}
-      disabled={running || pending}
-      className="inline-flex items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[12px] font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
-    >
-      {running ? "Running…" : "Run now"}
-    </button>
-  );
-}
-
-function EmptyCard({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="rounded-xl border border-dashed border-border py-10 text-center text-[12.5px] text-muted-foreground">
-      {children}
-    </p>
   );
 }
 
@@ -1181,10 +1116,4 @@ function MentionList({
       })}
     </div>
   );
-}
-
-function formatDate(value: string): string {
-  const parsed = new Date(value.length === 10 ? `${value}T00:00:00` : value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
