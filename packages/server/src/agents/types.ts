@@ -65,6 +65,8 @@ export interface AgentRuntimeContextParams {
     delivery: AgentDeliveryConfig | null;
     sources: AgentSourceConfig[];
     sourceKey: string;
+    firstRunLookbackHours?: number;
+    floorWindowToPeriod?: boolean;
   };
 }
 

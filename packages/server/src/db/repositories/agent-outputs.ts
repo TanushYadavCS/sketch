@@ -62,6 +62,15 @@ export interface AgentDeliveryConfig {
 }
 
 export type AgentSourceKey = `${AgentSourcePlatform}:${AgentSourceTargetType}:${string}`;
+export type AgentRouteFrequency = "daily" | "weekly" | "every_n_hours";
+
+export interface AgentRouteSchedule {
+  frequency: AgentRouteFrequency;
+  hour: number;
+  minute: number;
+  daysOfWeek?: number[];
+  intervalHours?: number;
+}
 
 export interface AgentCombinedDeliveryConfig extends AgentDeliveryConfig {
   ackNonDm?: true;
@@ -106,7 +115,7 @@ export interface AgentRoute {
   focus: string | null;
   sections: Record<string, boolean> | null;
   maxItemsPerSection: number | null;
-  schedule: { hour: number; minute: number } | null;
+  schedule: AgentRouteSchedule | null;
   destination: AgentRouteDestination;
   enabled: boolean;
 }
@@ -281,6 +290,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
       agentVersion: string;
       userId: string;
       outputDate: string;
+      periodKey?: string;
       sourceKey?: string;
       sourceLabel?: string | null;
       timezone: string;
@@ -293,6 +303,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         agent_key: params.agentKey,
         user_id: params.userId,
         output_date: params.outputDate,
+        period_key: params.periodKey ?? params.outputDate,
         source_key: sourceKey,
         source_label: params.sourceLabel ?? null,
         timezone: params.timezone,
@@ -311,7 +322,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
           .selectAll()
           .where("agent_key", "=", params.agentKey)
           .where("user_id", "=", params.userId)
-          .where("output_date", "=", params.outputDate)
+          .where("period_key", "=", params.periodKey ?? params.outputDate)
           .where("source_key", "=", sourceKey)
           .where("status", "=", "running")
           .executeTakeFirst();
@@ -336,7 +347,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
     async findRunning(
       agentKey: string,
       userId: string,
-      outputDate: string,
+      periodKey: string,
       sourceKey = "",
     ): Promise<AgentOutputRow | undefined> {
       return db
@@ -344,7 +355,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .selectAll()
         .where("agent_key", "=", agentKey)
         .where("user_id", "=", userId)
-        .where("output_date", "=", outputDate)
+        .where("period_key", "=", periodKey)
         .where("source_key", "=", sourceKey)
         .where("status", "=", "running")
         .orderBy("created_at", "desc")
@@ -370,7 +381,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
     async findLatestAny(
       agentKey: string,
       userId: string,
-      outputDate: string,
+      periodKey: string,
       sourceKey = "",
     ): Promise<AgentOutputRow | undefined> {
       return db
@@ -378,7 +389,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .selectAll()
         .where("agent_key", "=", agentKey)
         .where("user_id", "=", userId)
-        .where("output_date", "=", outputDate)
+        .where("period_key", "=", periodKey)
         .where("source_key", "=", sourceKey)
         .orderBy("created_at", "desc")
         .orderBy("id", "desc")
@@ -389,7 +400,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
       agentKey: string,
       userId: string,
       sourceKey: string,
-      outputDate?: string,
+      periodKey?: string,
     ): Promise<AgentOutputWithItems | null> {
       let query = db
         .selectFrom("agent_outputs")
@@ -398,7 +409,37 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .where("user_id", "=", userId)
         .where("source_key", "=", sourceKey)
         .where("status", "=", "completed");
-      if (outputDate) query = query.where("output_date", "=", outputDate);
+      if (periodKey) query = query.where("period_key", "=", periodKey);
+      const output = await query.orderBy("generated_at", "desc").orderBy("id", "desc").executeTakeFirst();
+      if (!output) return null;
+      const items = await db
+        .selectFrom("agent_output_items")
+        .selectAll()
+        .where("agent_output_id", "=", output.id)
+        .orderBy("section_key", "asc")
+        .orderBy("sort_order", "asc")
+        .execute();
+      return {
+        output,
+        masthead: parseJson<AgentMasthead>(output.masthead_json),
+        items: items.map(withRefs),
+      };
+    },
+
+    async findLatestCompletedForScopeOnDate(
+      agentKey: string,
+      userId: string,
+      sourceKey: string,
+      outputDate: string,
+    ): Promise<AgentOutputWithItems | null> {
+      const query = db
+        .selectFrom("agent_outputs")
+        .selectAll()
+        .where("agent_key", "=", agentKey)
+        .where("user_id", "=", userId)
+        .where("source_key", "=", sourceKey)
+        .where("output_date", "=", outputDate)
+        .where("status", "=", "completed");
       const output = await query.orderBy("generated_at", "desc").orderBy("id", "desc").executeTakeFirst();
       if (!output) return null;
       const items = await db

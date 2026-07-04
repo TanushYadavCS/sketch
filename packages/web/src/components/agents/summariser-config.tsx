@@ -30,9 +30,9 @@ import {
   SourcesField,
   VolumeField,
   deliversLabel,
-  formatTime,
   routeInput,
   saveRoutes,
+  scheduleSummary,
   useRouteDraft,
   useSourceOptions,
 } from "./summariser-shared";
@@ -75,7 +75,7 @@ type RouteField = "sources" | "schedule" | "focus" | "volume" | "delivery" | nul
 
 const FIELD_META: Record<Exclude<RouteField, null>, { title: string; hint: string }> = {
   sources: { title: "Input", hint: "The conversations this summariser reads. Two or more combine into one summary." },
-  schedule: { title: "Runs on", hint: "When this summariser runs each day, in your timezone." },
+  schedule: { title: "Runs on", hint: "How often this summariser runs, in your timezone." },
   focus: {
     title: "Focus",
     hint: "Plain-language emphasis for this summariser. A hint — it never overrides the sections.",
@@ -282,10 +282,7 @@ function ConfigContent({
           </span>
         </Row>
         <Row label="Runs on" onEdit={() => onEdit("schedule")}>
-          <p className="text-[12.5px] text-foreground/85">
-            Every day at{" "}
-            {formatTime(route.schedule?.hour ?? agent.scheduleHour, route.schedule?.minute ?? agent.scheduleMinute)}
-          </p>
+          <p className="text-[12.5px] text-foreground/85">{scheduleSummary(route, agent)}</p>
         </Row>
         <Row label="Focus" onEdit={() => onEdit("focus")}>
           <p className="line-clamp-2 text-[12.5px] leading-relaxed text-foreground/85">

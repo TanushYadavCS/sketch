@@ -8,6 +8,7 @@ import type {
   AgentPerSourceDelivery,
   AgentRoute,
   AgentRouteDestination,
+  AgentRouteFrequency,
   AgentSourceConfig,
   AgentSourceKey,
 } from "../db/repositories/agent-outputs";
@@ -114,6 +115,9 @@ export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>) {
 }
 
 class ConfigPatchError extends Error {}
+
+const ROUTE_FREQUENCIES = new Set<AgentRouteFrequency>(["daily", "weekly", "every_n_hours"]);
+const ROUTE_INTERVAL_HOURS = new Set([1, 2, 3, 4, 6, 8, 12]);
 
 function parseDeliveryMentions(value: unknown, deliveryPlatform: AgentDeliveryPlatform): AgentDeliveryMention[] {
   if (value === undefined) return [];
@@ -304,7 +308,29 @@ function parseRouteSchedule(value: unknown): AgentRoute["schedule"] {
   if (!Number.isInteger(raw.minute) || Number(raw.minute) < 0 || Number(raw.minute) > 59) {
     throw new ConfigPatchError("route.schedule.minute must be an integer from 0 to 59");
   }
-  return { hour: Number(raw.hour), minute: Number(raw.minute) };
+  const frequency = raw.frequency === undefined ? "daily" : raw.frequency;
+  if (!ROUTE_FREQUENCIES.has(frequency as AgentRouteFrequency)) {
+    throw new ConfigPatchError("route.schedule.frequency must be daily, weekly, or every_n_hours");
+  }
+  const base = { frequency: frequency as AgentRouteFrequency, hour: Number(raw.hour), minute: Number(raw.minute) };
+  if (base.frequency === "daily") return base;
+  if (base.frequency === "weekly") {
+    if (!Array.isArray(raw.daysOfWeek)) {
+      throw new ConfigPatchError("route.schedule.daysOfWeek must be a non-empty array for weekly schedules");
+    }
+    const daysOfWeek = [...new Set(raw.daysOfWeek)];
+    if (
+      daysOfWeek.length === 0 ||
+      daysOfWeek.some((day) => !Number.isInteger(day) || Number(day) < 0 || Number(day) > 6)
+    ) {
+      throw new ConfigPatchError("route.schedule.daysOfWeek values must be integers from 0 to 6");
+    }
+    return { ...base, daysOfWeek: daysOfWeek.map(Number) };
+  }
+  if (!Number.isInteger(raw.intervalHours) || !ROUTE_INTERVAL_HOURS.has(Number(raw.intervalHours))) {
+    throw new ConfigPatchError("route.schedule.intervalHours must be one of 1, 2, 3, 4, 6, 8, or 12");
+  }
+  return { ...base, intervalHours: Number(raw.intervalHours) };
 }
 
 function parseRouteDestination(value: unknown): AgentRouteDestination {
