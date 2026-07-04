@@ -19,6 +19,8 @@ import {
   type AgentPerSourceDelivery,
   type AgentRoute,
   type AgentRouteDestination,
+  type AgentRouteFrequency,
+  type AgentRouteSchedule,
   type AgentSourceConfig,
   type AgentSourceKey,
   type AgentUserPrefs,
@@ -39,6 +41,17 @@ import type { AgentApiItem, AgentDefinition, AgentSourceConfigDef } from "./type
 
 const RUNNING_STALE_AFTER_MS = 30 * 60 * 1000;
 const SCHEDULED_FAILURE_SUPPRESS_AFTER_MS = 60 * 60 * 1000;
+const ROUTE_FREQUENCIES = new Set<AgentRouteFrequency>(["daily", "weekly", "every_n_hours"]);
+const ROUTE_INTERVAL_HOURS = new Set([1, 2, 3, 4, 6, 8, 12]);
+const WEEKDAY_INDEX = new Map([
+  ["Sun", 0],
+  ["Mon", 1],
+  ["Tue", 2],
+  ["Wed", 3],
+  ["Thu", 4],
+  ["Fri", 5],
+  ["Sat", 6],
+]);
 
 type UserRow = Selectable<UsersTable>;
 
@@ -73,10 +86,17 @@ export interface RequestAgentGenerationParams {
   agentKey: string;
   userId: string;
   outputDate?: string;
+  periodKey?: string;
   triggerType: AgentOutputTriggerType;
   skipIfCompleted?: boolean;
   scopeKeys?: string[];
   routeIds?: string[];
+}
+
+export interface AgentDueGenerationGroup {
+  outputDate: string;
+  periodKey: string;
+  scopeKeys: string[];
 }
 
 export interface ResolvedAgentConfig {
@@ -359,14 +379,33 @@ function normalizeRouteDestination(value: unknown): AgentRouteDestination | null
 function normalizeRouteSchedule(value: unknown): AgentRoute["schedule"] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
-  return Number.isInteger(raw.hour) &&
-    Number.isInteger(raw.minute) &&
-    Number(raw.hour) >= 0 &&
-    Number(raw.hour) <= 23 &&
-    Number(raw.minute) >= 0 &&
-    Number(raw.minute) <= 59
-    ? { hour: Number(raw.hour), minute: Number(raw.minute) }
-    : null;
+  if (
+    !Number.isInteger(raw.hour) ||
+    !Number.isInteger(raw.minute) ||
+    Number(raw.hour) < 0 ||
+    Number(raw.hour) > 23 ||
+    Number(raw.minute) < 0 ||
+    Number(raw.minute) > 59
+  ) {
+    return null;
+  }
+  const frequency = raw.frequency === undefined ? "daily" : raw.frequency;
+  if (!ROUTE_FREQUENCIES.has(frequency as AgentRouteFrequency)) return null;
+  const base = { frequency: frequency as AgentRouteFrequency, hour: Number(raw.hour), minute: Number(raw.minute) };
+  if (base.frequency === "daily") return base;
+  if (base.frequency === "weekly") {
+    if (!Array.isArray(raw.daysOfWeek)) return null;
+    const daysOfWeek = [...new Set(raw.daysOfWeek)];
+    if (
+      daysOfWeek.length === 0 ||
+      daysOfWeek.some((day) => !Number.isInteger(day) || Number(day) < 0 || Number(day) > 6)
+    ) {
+      return null;
+    }
+    return { ...base, daysOfWeek: daysOfWeek.map(Number) };
+  }
+  if (!Number.isInteger(raw.intervalHours) || !ROUTE_INTERVAL_HOURS.has(Number(raw.intervalHours))) return null;
+  return { ...base, intervalHours: Number(raw.intervalHours) };
 }
 
 function normalizeRouteSections(value: unknown): Record<string, boolean> | null {
@@ -564,6 +603,73 @@ function localDateInTimezone(now: Date, timezone: string): string {
   const month = parts.find((part) => part.type === "month")?.value ?? "01";
   const day = parts.find((part) => part.type === "day")?.value ?? "01";
   return `${year}-${month}-${day}`;
+}
+
+function localSchedulePartsInTimezone(
+  now: Date,
+  timezone: string,
+): {
+  date: string;
+  dayOfWeek: number;
+  hour: number;
+  minute: number;
+} {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  const weekday = parts.find((part) => part.type === "weekday")?.value ?? "Sun";
+  return {
+    date: `${year}-${month}-${day}`,
+    dayOfWeek: WEEKDAY_INDEX.get(weekday) ?? 0,
+    hour: Number(parts.find((part) => part.type === "hour")?.value ?? "0"),
+    minute: Number(parts.find((part) => part.type === "minute")?.value ?? "0"),
+  };
+}
+
+/**
+ * Returns the scheduler de-dup bucket when a route is due in the user's local
+ * timezone. Completed output history remains append-only; this key coalesces the
+ * common single-process scheduled path per route scope and period.
+ */
+export function computeDuePeriodKey(
+  schedule: AgentRouteSchedule | ({ hour: number; minute: number } & Partial<AgentRouteSchedule>),
+  now: Date,
+  timezone: string,
+): string | null {
+  const local = localSchedulePartsInTimezone(now, timezone);
+  const frequency = schedule.frequency ?? "daily";
+  if (frequency === "daily") {
+    return local.hour === schedule.hour && local.minute >= schedule.minute ? local.date : null;
+  }
+  if (frequency === "weekly") {
+    return local.hour === schedule.hour &&
+      local.minute >= schedule.minute &&
+      Array.isArray(schedule.daysOfWeek) &&
+      schedule.daysOfWeek.includes(local.dayOfWeek)
+      ? local.date
+      : null;
+  }
+  const intervalHours = schedule.intervalHours ?? 0;
+  if (!ROUTE_INTERVAL_HOURS.has(intervalHours)) return null;
+  return local.hour % intervalHours === 0 && local.minute >= schedule.minute
+    ? `${local.date}T${String(local.hour).padStart(2, "0")}`
+    : null;
+}
+
+function firstRunLookbackHoursForSchedule(schedule: AgentRouteSchedule | null | undefined): number {
+  if (!schedule || schedule.frequency === "daily") return 24;
+  if (schedule.frequency === "weekly") return 168;
+  return schedule.intervalHours ?? 24;
 }
 
 function addDays(date: string, days: number): string {
@@ -882,17 +988,8 @@ export class AgentRunService {
       for (const sectionKey of Object.keys(route.sections ?? {})) {
         if (!sectionKeys.has(sectionKey)) throw new AgentSourceTargetError(`Unknown route section: ${sectionKey}`);
       }
-      if (
-        route.schedule &&
-        (!Number.isInteger(route.schedule.hour) ||
-          route.schedule.hour < 0 ||
-          route.schedule.hour > 23 ||
-          !Number.isInteger(route.schedule.minute) ||
-          route.schedule.minute < 0 ||
-          route.schedule.minute > 59)
-      ) {
-        throw new AgentSourceTargetError("Route schedule must be a valid hour and minute");
-      }
+      const schedule = normalizeRouteSchedule(route.schedule);
+      if (route.schedule && !schedule) throw new AgentSourceTargetError("Route schedule must be valid");
       const scopeKey = routeScopeKeyForSources(sources);
       if (seenScopeKeys.has(scopeKey)) {
         throw new AgentSourceTargetError("Routes must not duplicate the same output scope");
@@ -907,6 +1004,7 @@ export class AgentRunService {
         sections: route.sections ? { ...route.sections } : null,
         maxItemsPerSection:
           route.maxItemsPerSection === null ? null : Math.min(range.max, Math.max(range.min, route.maxItemsPerSection)),
+        schedule,
         destination,
         enabled: route.enabled !== false,
       };
@@ -1328,6 +1426,7 @@ export class AgentRunService {
     const config = await this.resolveConfig(def, user.id);
     const timezone = config.timezone || user.timezone || "UTC";
     const outputDate = params.outputDate || localDateInTimezone(new Date(), timezone);
+    const periodKey = params.periodKey ?? outputDate;
     const now = new Date();
     const scopes = await this.resolveExpectedScopesForUser(def, user, config);
     const scopeKeys = params.scopeKeys ? new Set(params.scopeKeys) : null;
@@ -1340,7 +1439,7 @@ export class AgentRunService {
       return true;
     })) {
       let recoveredStaleRunning = false;
-      const existingRunning = await this.repo.findRunning(def.key, user.id, outputDate, scope.sourceKey);
+      const existingRunning = await this.repo.findRunning(def.key, user.id, periodKey, scope.sourceKey);
       if (existingRunning) {
         if (!this.isRunningStale(existingRunning, now)) {
           rows.push(existingRunning);
@@ -1351,12 +1450,12 @@ export class AgentRunService {
       }
       if (
         params.skipIfCompleted &&
-        (await this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, outputDate))
+        (await this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, periodKey))
       ) {
         continue;
       }
       if (params.skipIfCompleted && params.triggerType === "scheduled" && !recoveredStaleRunning) {
-        const latest = await this.repo.findLatestAny(def.key, user.id, outputDate, scope.sourceKey);
+        const latest = await this.repo.findLatestAny(def.key, user.id, periodKey, scope.sourceKey);
         if (latest && this.isRecentScheduledFailure(latest, now)) {
           rows.push(latest);
           continue;
@@ -1367,6 +1466,7 @@ export class AgentRunService {
         agentVersion: def.version,
         userId: user.id,
         outputDate,
+        periodKey,
         sourceKey: scope.sourceKey,
         sourceLabel: scope.sourceLabel,
         timezone,
@@ -1388,39 +1488,38 @@ export class AgentRunService {
     def: AgentDefinition,
     user: UserRow,
     now = new Date(),
-  ): Promise<{ outputDate: string; scopeKeys: string[] } | null> {
+  ): Promise<AgentDueGenerationGroup[]> {
     const config = await this.resolveConfig(def, user.id);
-    if (def.sourceConfig && config.routes.length === 0) return null;
-    if (!config.enabled) return null;
+    if (def.sourceConfig && config.routes.length === 0) return [];
+    if (!config.enabled) return [];
     const timezone = config.timezone || user.timezone || "UTC";
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone,
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(now);
-    const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0");
-    const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
     const outputDate = localDateInTimezone(now, timezone);
     const scopes = await this.resolveExpectedScopesForUser(def, user, config);
-    if (scopes.length === 0) return null;
-    const dueScopeKeys: string[] = [];
+    if (scopes.length === 0) return [];
+    const dueByPeriodKey = new Map<string, AgentDueGenerationGroup>();
 
     for (const scope of scopes) {
-      const schedule = scope.route?.schedule ?? { hour: config.scheduleHour, minute: config.scheduleMinute };
-      if (hour !== schedule.hour || minute < schedule.minute) continue;
+      const schedule = scope.route?.schedule ?? {
+        frequency: "daily" as const,
+        hour: config.scheduleHour,
+        minute: config.scheduleMinute,
+      };
+      const periodKey = computeDuePeriodKey(schedule, now, timezone);
+      if (!periodKey) continue;
       const [running, completed] = await Promise.all([
-        this.repo.findRunning(def.key, user.id, outputDate, scope.sourceKey),
-        this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, outputDate),
+        this.repo.findRunning(def.key, user.id, periodKey, scope.sourceKey),
+        this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, periodKey),
       ]);
       if (completed) continue;
       if (running && !this.isRunningStale(running, now)) continue;
-      const latest = await this.repo.findLatestAny(def.key, user.id, outputDate, scope.sourceKey);
+      const latest = await this.repo.findLatestAny(def.key, user.id, periodKey, scope.sourceKey);
       if (latest && this.isRecentScheduledFailure(latest, now)) continue;
-      dueScopeKeys.push(scope.sourceKey);
+      const group = dueByPeriodKey.get(periodKey) ?? { outputDate, periodKey, scopeKeys: [] };
+      group.scopeKeys.push(scope.sourceKey);
+      dueByPeriodKey.set(periodKey, group);
     }
 
-    return dueScopeKeys.length > 0 ? { outputDate, scopeKeys: dueScopeKeys } : null;
+    return [...dueByPeriodKey.values()];
   }
 
   private isRunningStale(output: AgentOutputRow, now: Date): boolean {
@@ -1502,7 +1601,7 @@ export class AgentRunService {
     if (def.key === CONVERSATION_SUMMARY_AGENT_KEY && scope.kind === "source") return null;
     return this.toApiOutput(
       def,
-      await this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, outputDate),
+      await this.repo.findLatestCompletedForScopeOnDate(def.key, user.id, scope.sourceKey, outputDate),
     );
   }
 
@@ -1522,6 +1621,7 @@ export class AgentRunService {
     const routeSections = enabledSectionsForScope(def, config, scope.route);
     const routeMaxItemsPerSection = maxItemsPerSectionForScope(def, config, scope.route);
     const routeFocus = scope.route ? scope.route.focus : config.focus;
+    const firstRunLookbackHours = firstRunLookbackHoursForSchedule(scope.route?.schedule);
     const enabledSections = def.sections.filter((s) => routeSections[s.key]).map((s) => s.key);
 
     try {
@@ -1551,6 +1651,7 @@ export class AgentRunService {
                 delivery: config.delivery,
                 sources: scope.sources,
                 sourceKey: scope.sourceKey,
+                firstRunLookbackHours,
               },
             })
           : Promise.resolve({}),

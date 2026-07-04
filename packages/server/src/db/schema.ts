@@ -535,6 +535,7 @@ export interface AgentOutputsTable {
   agent_key: string;
   user_id: string;
   output_date: string;
+  period_key: Generated<string | null>;
   source_key: Generated<string>;
   source_label: string | null;
   timezone: string;

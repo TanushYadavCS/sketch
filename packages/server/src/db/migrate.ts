@@ -119,6 +119,7 @@ import * as m116 from "./migrations/116-connector-credential-source";
 import * as m117 from "./migrations/117-conversation-message-window-index";
 import * as m118 from "./migrations/118-whatsapp-window-keepalives";
 import * as m119 from "./migrations/119-agent-outputs-source-scope";
+import * as m120 from "./migrations/120-agent-output-period-key";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -242,6 +243,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "117-conversation-message-window-index": m117,
           "118-whatsapp-window-keepalives": m118,
           "119-agent-outputs-source-scope": m119,
+          "120-agent-output-period-key": m120,
         };
       },
     },

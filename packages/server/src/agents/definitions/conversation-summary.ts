@@ -51,8 +51,8 @@ function sourceLabel(source: AgentSourceConfig, conversation: ConversationRow | 
   return source.targetId;
 }
 
-function fallbackWindowStart(now: Date): string {
-  return new Date(now.getTime() - CONVERSATION_SUMMARY_FIRST_RUN_LOOKBACK_HOURS * 60 * 60 * 1000).toISOString();
+function fallbackWindowStart(now: Date, lookbackHours: number): string {
+  return new Date(now.getTime() - lookbackHours * 60 * 60 * 1000).toISOString();
 }
 
 async function findLatestCompletedOutput(
@@ -89,13 +89,24 @@ function summaryWindowEndFromRawPayload(rawPayloadJson: string | null): string |
   return typeof end === "string" && end.trim().length > 0 ? end : null;
 }
 
-function previousOutputWatermark(previousOutput: LatestOutputRow | undefined, now: Date): string {
-  if (!previousOutput) return fallbackWindowStart(now);
+function previousOutputWatermark(
+  previousOutput: LatestOutputRow | undefined,
+  now: Date,
+  firstRunLookbackHours: number,
+): string {
+  if (!previousOutput) return fallbackWindowStart(now, firstRunLookbackHours);
   return (
     summaryWindowEndFromRawPayload(previousOutput.raw_payload_json) ??
     previousOutput.generated_at ??
     previousOutput.updated_at
   );
+}
+
+function firstRunLookbackHours(params: AgentRuntimeContextParams): number {
+  const value = params.agentConfig?.firstRunLookbackHours;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : CONVERSATION_SUMMARY_FIRST_RUN_LOOKBACK_HOURS;
 }
 
 async function findConversation(db: Kysely<DB>, source: AgentSourceConfig): Promise<ConversationRow | undefined> {
@@ -141,7 +152,8 @@ export async function buildConversationSummaryRuntimeContext(
     params.agentConfig?.sourceKey ?? "",
   );
   const windowEnd = params.now.toISOString();
-  const windowStart = previousOutputWatermark(previousOutput, params.now);
+  const fallbackHours = firstRunLookbackHours(params);
+  const windowStart = previousOutputWatermark(previousOutput, params.now, fallbackHours);
   const conversations = createConversationRepository(params.db);
 
   const summarySources = await Promise.all(
@@ -171,11 +183,11 @@ export async function buildConversationSummaryRuntimeContext(
 
   return {
     summaryWindow: {
-      mode: previousOutput ? "since_last_successful_run" : "first_run_last_24h",
+      mode: previousOutput ? "since_last_successful_run" : `first_run_last_${fallbackHours}h`,
       start: windowStart,
       end: windowEnd,
       previousOutputId: previousOutput?.id ?? null,
-      firstRunFallbackHours: CONVERSATION_SUMMARY_FIRST_RUN_LOOKBACK_HOURS,
+      firstRunFallbackHours: fallbackHours,
     },
     summarySources,
   };
