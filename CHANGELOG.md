@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.43.0] -- 2026-07-04
+
+- WhatsApp 24h-window keep-alive: an hourly internal job pings users whose customer-service window is about to lapse (last inbound 21-23h ago) with a personalized session text prompting a reply, so proactive deliveries can keep arriving as full messages instead of template nudges. One ping per window cycle, aware of upcoming scheduled tasks, no-op on providers without window semantics (Baileys). Gated behind `WHATSAPP_WINDOW_KEEPALIVE_ENABLED` (default off).
+
 ## [0.42.1] -- 2026-07-04
 
 - Fix WhatsApp proactive delivery for scheduled tasks, workflows, and agent outputs on managed tenants whose delivery target was stored as a Wati conversation id: the sender now falls back to the recipient's registered phone number (preserving the provider conversation id), the target parser understands `wati:+<phone>` ids and no longer fabricates invalid phone numbers from opaque ids, and newly created tasks store durable `dm:+<phone>` targets.
