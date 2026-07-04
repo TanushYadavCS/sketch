@@ -11,15 +11,17 @@ import {
   type AgentOutput,
   type AgentOutputsResponse,
   type AgentRoute,
+  type AgentRouteDestination,
   type AgentSourceConfig,
+  type AgentSourceKey,
   api,
 } from "@/lib/api";
 import {
   ArrowLeftIcon,
-  CaretDownIcon,
   CheckCircleIcon,
   HashIcon,
   PencilSimpleIcon,
+  PlusIcon,
   SlackLogoIcon,
   UserIcon,
   UsersThreeIcon,
@@ -42,9 +44,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 type Tab = "outputs" | "config";
-type EditField = "schedule" | "focus" | "volume" | "delivery" | "sources" | "routing" | null;
-
-type RouteDestKind = "self" | "off";
+type EditField = "schedule" | "focus" | "volume" | "delivery" | "sources" | null;
 
 function detailKey(agentKey: string) {
   return ["agents", "detail", agentKey];
@@ -69,66 +69,6 @@ function deliverySummary(delivery: AgentDeliveryConfig | null): string {
   return `WhatsApp ${delivery.label ?? delivery.targetId}${tagged}`;
 }
 
-/**
- * A default route for a newly added source: summarize on its own, post back to
- * the source, inheriting the agent-level focus/sections/volume/schedule (all
- * null = inherit). The id is the source key — stable and unique per source in
- * the single-source (Arc 2) model.
- */
-function makeRoute(source: AgentSourceConfig): AgentRoute {
-  return {
-    id: sourceKey(source),
-    sources: [sourceKey(source)] as AgentRoute["sources"],
-    focus: null,
-    sections: null,
-    maxItemsPerSection: null,
-    schedule: null,
-    destination: { kind: "self" },
-    enabled: true,
-  };
-}
-
-function isRouteCustomized(route: AgentRoute): boolean {
-  return (
-    route.focus !== null || route.sections !== null || route.maxItemsPerSection !== null || route.schedule !== null
-  );
-}
-
-function routingSummary(agent: AgentConfig): string {
-  const routes = agent.routes;
-  if (routes.length === 0) return "No sources selected";
-  const postBack = routes.filter((route) => route.destination.kind === "self").length;
-  const dm = routes.filter((route) => route.destination.kind === "member").length;
-  const webOnly = routes.filter((route) => route.destination.kind === "off").length;
-  const parts = [`${routes.length} ${routes.length === 1 ? "source" : "sources"}`];
-  if (postBack > 0) parts.push(`${postBack} post back`);
-  if (dm > 0) parts.push(`${dm} DM`);
-  if (webOnly > 0) parts.push(`${webOnly} web only`);
-  if (routes.some(isRouteCustomized)) parts.push("customized");
-  return parts.join(" · ");
-}
-
-/** One-line summary of a route's overrides for the collapsed card. */
-function describeRoute(route: AgentRoute, agent: AgentConfig): string {
-  const parts: string[] = [];
-  if (route.sections) {
-    const on = agent.sections.filter((section) => route.sections?.[section.key] ?? section.enabled);
-    parts.push(
-      on.length === agent.sections.length ? "All sections" : on.map((s) => s.title).join(", ") || "No sections",
-    );
-  }
-  if (route.schedule) parts.push(formatTime(route.schedule.hour, route.schedule.minute));
-  if (route.maxItemsPerSection !== null) parts.push(`up to ${route.maxItemsPerSection}`);
-  if (route.focus) parts.push(`focus: ${route.focus}`);
-  return parts.length === 0 ? "Default settings" : parts.join(" · ");
-}
-
-function destinationLabel(destination: AgentRoute["destination"], sourceLabel: string): string {
-  if (destination.kind === "self") return `Post back to ${sourceLabel}`;
-  if (destination.kind === "member") return "DM a member";
-  return "Web only";
-}
-
 export function AgentDetail({ agentKey }: { agentKey: string }) {
   const queryClient = useQueryClient();
   const detailQuery = useQuery({
@@ -143,6 +83,7 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
   });
   const [tab, setTab] = useState<Tab>("outputs");
   const [editing, setEditing] = useState<EditField>(null);
+  const [editingSummariser, setEditingSummariser] = useState<{ route: AgentRoute | null } | null>(null);
   const [selectedOutputId, setSelectedOutputId] = useState<string | null>(null);
 
   const invalidate = () => {
@@ -228,7 +169,13 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
             runPending={runMutation.isPending}
           />
         ) : (
-          <ConfigTab agentKey={agentKey} agent={agent} onEdit={setEditing} onChanged={invalidate} />
+          <ConfigTab
+            agentKey={agentKey}
+            agent={agent}
+            onEdit={setEditing}
+            onEditSummariser={(route) => setEditingSummariser({ route })}
+            onChanged={invalidate}
+          />
         )}
       </div>
 
@@ -239,6 +186,15 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
         onClose={() => setEditing(null)}
         onSaved={invalidate}
       />
+      {editingSummariser ? (
+        <SummariserDrawer
+          agentKey={agentKey}
+          agent={agent}
+          editing={editingSummariser}
+          onClose={() => setEditingSummariser(null)}
+          onSaved={invalidate}
+        />
+      ) : null}
     </Shell>
   );
 }
@@ -397,13 +353,20 @@ function ConfigTab({
   agentKey,
   agent,
   onEdit,
+  onEditSummariser,
   onChanged,
 }: {
   agentKey: string;
   agent: AgentConfig;
   onEdit: (field: EditField) => void;
+  onEditSummariser: (route: AgentRoute | null) => void;
   onChanged: () => void;
 }) {
+  if (agent.sourceConfig) {
+    return (
+      <SummariserConfig agentKey={agentKey} agent={agent} onEditSummariser={onEditSummariser} onChanged={onChanged} />
+    );
+  }
   return (
     <>
       <div className="rounded-xl border-[0.5px] border-border bg-card px-4">
@@ -420,19 +383,12 @@ function ConfigTab({
             {agent.focus ? agent.focus : <span className="text-muted-foreground">None — add what to emphasize.</span>}
           </p>
         </Row>
-        {agent.sourceConfig ? (
-          <Row label="Sources & delivery" onEdit={() => onEdit("routing")}>
-            <p className="line-clamp-2 text-[12.5px] leading-relaxed text-foreground/85">{routingSummary(agent)}</p>
-          </Row>
-        ) : null}
         <Row label="Volume" onEdit={() => onEdit("volume")}>
           <p className="text-[12.5px] text-foreground/85">Up to {agent.maxItemsPerSection} items per section</p>
         </Row>
-        {agent.sourceConfig ? null : (
-          <Row label="Deliver to" onEdit={() => onEdit("delivery")}>
-            <p className="text-[12.5px] text-foreground/85">{deliverySummary(agent.delivery)}</p>
-          </Row>
-        )}
+        <Row label="Deliver to" onEdit={() => onEdit("delivery")}>
+          <p className="text-[12.5px] text-foreground/85">{deliverySummary(agent.delivery)}</p>
+        </Row>
       </div>
 
       <div className="mb-3 mt-7 flex items-baseline justify-between border-b border-border/60 pb-2">
@@ -452,6 +408,183 @@ function ConfigTab({
         ))}
       </div>
     </>
+  );
+}
+
+function routesToSources(routes: AgentRoute[], lookup: Map<string, AgentSourceConfig>): AgentSourceConfig[] {
+  const out: AgentSourceConfig[] = [];
+  const seen = new Set<string>();
+  for (const route of routes) {
+    for (const key of route.sources) {
+      if (seen.has(key)) continue;
+      const source = lookup.get(key);
+      if (source) {
+        seen.add(key);
+        out.push(source);
+      }
+    }
+  }
+  return out;
+}
+
+function deliversLabel(route: AgentRoute): string {
+  if (route.destination.kind === "self") return "Post back";
+  if (route.destination.kind === "member") return "Direct message";
+  return "Web only";
+}
+
+function sectionsLabel(route: AgentRoute, agent: AgentConfig): string {
+  const on = agent.sections.filter((section) => route.sections?.[section.key] ?? section.enabled);
+  if (on.length === agent.sections.length) return "All sections";
+  if (on.length === 0) return "No sections";
+  return on.map((section) => section.title).join(", ");
+}
+
+/**
+ * Summariser config surface for source-backed agents: a shared "what it does"
+ * plus a table of independent summarisers (routes). Each row maps input
+ * conversations to a delivery, schedule, and sections; editing opens the drawer.
+ */
+function SummariserConfig({
+  agentKey,
+  agent,
+  onEditSummariser,
+  onChanged,
+}: {
+  agentKey: string;
+  agent: AgentConfig;
+  onEditSummariser: (route: AgentRoute | null) => void;
+  onChanged: () => void;
+}) {
+  const lookup = new Map(agent.sources.map((source) => [sourceKey(source), source] as const));
+  const maxSources = agent.sourceConfig?.maxSources ?? 0;
+  const save = useMutation({
+    mutationFn: (routes: AgentRoute[]) =>
+      api.agents.updateConfig(agentKey, { sources: routesToSources(routes, lookup), routes }),
+    onSuccess: onChanged,
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to update"),
+  });
+
+  return (
+    <>
+      <div className="rounded-xl border-[0.5px] border-border bg-card px-4">
+        <Row label="What it does">
+          <p className="text-[12.5px] leading-relaxed text-foreground/85">{agent.description}</p>
+        </Row>
+      </div>
+
+      <div className="mb-3 mt-7 flex items-center justify-between border-b border-border/60 pb-2">
+        <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Summarisers</span>
+        <button
+          type="button"
+          onClick={() => onEditSummariser(null)}
+          className="inline-flex items-center gap-1.5 rounded-full border-[0.5px] border-border px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-muted/50"
+        >
+          <PlusIcon size={13} weight="bold" aria-hidden />
+          New summariser
+        </button>
+      </div>
+
+      {agent.routes.length === 0 ? (
+        <EmptyCard>No summarisers yet. Add one to start delivering digests.</EmptyCard>
+      ) : (
+        <div className="overflow-hidden rounded-xl border-[0.5px] border-border">
+          <div className="flex items-center gap-3 border-b-[0.5px] border-border bg-muted/20 px-4 py-2 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground/70">
+            <span className="flex-[2]">Input</span>
+            <span className="flex-[2]">Delivers to</span>
+            <span className="w-14">Runs</span>
+            <span className="hidden flex-[2] sm:block">Sections</span>
+            <span className="w-16 text-right">&nbsp;</span>
+          </div>
+          {agent.routes.map((route) => (
+            <SummariserRow
+              key={route.id}
+              agent={agent}
+              route={route}
+              lookup={lookup}
+              busy={save.isPending}
+              onEdit={() => onEditSummariser(route)}
+              onToggle={(enabled) => save.mutate(agent.routes.map((r) => (r.id === route.id ? { ...r, enabled } : r)))}
+              onRemove={() => save.mutate(agent.routes.filter((r) => r.id !== route.id))}
+            />
+          ))}
+        </div>
+      )}
+      <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">
+        {agent.routes.length} {agent.routes.length === 1 ? "summariser" : "summarisers"}
+        {maxSources > 0 ? ` · limit ${maxSources} inputs` : ""}
+      </p>
+    </>
+  );
+}
+
+function SummariserRow({
+  agent,
+  route,
+  lookup,
+  busy,
+  onEdit,
+  onToggle,
+  onRemove,
+}: {
+  agent: AgentConfig;
+  route: AgentRoute;
+  lookup: Map<string, AgentSourceConfig>;
+  busy: boolean;
+  onEdit: () => void;
+  onToggle: (enabled: boolean) => void;
+  onRemove: () => void;
+}) {
+  const first = lookup.get(route.sources[0]);
+  const inputLabel = first?.label ?? route.sources[0];
+  const combined = route.sources.length > 1;
+
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-3 border-b-[0.5px] border-border px-4 py-3 last:border-0",
+        !route.enabled && "opacity-55",
+      )}
+    >
+      <button type="button" onClick={onEdit} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+        <span className="flex min-w-0 flex-[2] items-center gap-1.5">
+          {first?.platform === "slack" ? (
+            <HashIcon size={14} aria-hidden className="shrink-0 text-muted-foreground" />
+          ) : (
+            <UsersThreeIcon size={14} aria-hidden className="shrink-0 text-muted-foreground" />
+          )}
+          <span className="truncate text-[12.5px] font-medium text-foreground">{inputLabel}</span>
+          {combined ? (
+            <span className="shrink-0 text-[11px] text-muted-foreground">+{route.sources.length - 1}</span>
+          ) : null}
+        </span>
+        <span className="flex-[2] truncate text-[12px] text-muted-foreground">{deliversLabel(route)}</span>
+        <span className="w-14 shrink-0 text-[12px] text-muted-foreground">
+          {formatTime(route.schedule?.hour ?? agent.scheduleHour, route.schedule?.minute ?? agent.scheduleMinute)}
+        </span>
+        <span className="hidden flex-[2] truncate text-[12px] text-muted-foreground sm:block">
+          {sectionsLabel(route, agent)}
+        </span>
+      </button>
+      <div className="flex w-16 shrink-0 items-center justify-end gap-2.5">
+        <Switch
+          checked={route.enabled}
+          disabled={busy}
+          onCheckedChange={onToggle}
+          aria-label={`${inputLabel} active`}
+          className="scale-90 data-[state=checked]:bg-emerald-500"
+        />
+        <button
+          type="button"
+          onClick={onRemove}
+          disabled={busy}
+          aria-label={`Remove ${inputLabel}`}
+          className="text-muted-foreground/50 transition-colors hover:text-foreground disabled:opacity-40"
+        >
+          <XIcon size={13} weight="bold" aria-hidden />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -532,10 +665,6 @@ const EDIT_META: Record<Exclude<EditField, null>, { title: string; hint: string 
   schedule: { title: "Runs on", hint: "When the agent runs each day, in your timezone." },
   focus: { title: "Focus", hint: "Plain-language emphasis. Added as a hint — it never overrides what the agent does." },
   sources: { title: "Sources", hint: "Shared conversations this agent summarizes." },
-  routing: {
-    title: "Sources & delivery",
-    hint: "Each source is its own summary. Open one to tune its focus, sections, schedule, and where it goes.",
-  },
   volume: { title: "Volume", hint: "How many items each section can hold." },
   delivery: { title: "Deliver to", hint: "Where completed outputs are sent after generation finishes." },
 };
@@ -558,7 +687,6 @@ function EditDrawer({
   const [minute, setMinute] = useState(agent.scheduleMinute);
   const [focus, setFocus] = useState(agent.focus ?? "");
   const [sources, setSources] = useState<AgentSourceConfig[]>(agent.sources);
-  const [routes, setRoutes] = useState<AgentRoute[]>(agent.routes);
   const [volume, setVolume] = useState(agent.maxItemsPerSection);
   const [delivery, setDelivery] = useState<AgentDeliveryConfig | null>(agent.delivery);
 
@@ -568,7 +696,6 @@ function EditDrawer({
       setMinute(agent.scheduleMinute);
       setFocus(agent.focus ?? "");
       setSources(agent.sources);
-      setRoutes(agent.routes);
       setVolume(agent.maxItemsPerSection);
       setDelivery(agent.delivery);
     }
@@ -578,7 +705,6 @@ function EditDrawer({
     agent.scheduleMinute,
     agent.focus,
     agent.sources,
-    agent.routes,
     agent.maxItemsPerSection,
     agent.delivery,
   ]);
@@ -589,7 +715,6 @@ function EditDrawer({
         return api.agents.updateConfig(agentKey, { scheduleHour: hour, scheduleMinute: minute });
       if (field === "focus") return api.agents.updateConfig(agentKey, { focus: focus.trim() ? focus.trim() : null });
       if (field === "sources") return api.agents.updateConfig(agentKey, { sources });
-      if (field === "routing") return api.agents.updateConfig(agentKey, { sources, routes });
       if (field === "volume") return api.agents.updateConfig(agentKey, { maxItemsPerSection: volume });
       if (field === "delivery") return api.agents.updateConfig(agentKey, { delivery });
       return Promise.resolve({ agent });
@@ -643,15 +768,6 @@ function EditDrawer({
             />
           ) : field === "sources" && agent.sourceConfig ? (
             <SourceEditor agent={agent} value={sources} onChange={setSources} />
-          ) : field === "routing" && agent.sourceConfig ? (
-            <RoutesEditor
-              agent={agent}
-              routes={routes}
-              onChange={(nextRoutes, nextSources) => {
-                setRoutes(nextRoutes);
-                setSources(nextSources);
-              }}
-            />
           ) : field === "delivery" ? (
             <DeliveryEditor value={delivery} sources={agent.sources} onChange={setDelivery} />
           ) : null}
@@ -813,24 +929,41 @@ function SourceEditor({
 }
 
 /**
- * Routes editor (Arc 2). Each selected source is one route — an independent
- * digest that can override the agent's focus, sections, volume, and schedule
- * and choose where its summary is delivered (post back to the source or stay
- * web-only). Sources and routes are kept in lockstep (one route per source).
+ * Editor drawer for a single summariser (route). Pick one or more input
+ * conversations, where the finished summary goes (post it back to a single
+ * source, keep it web-only, or DM a member who belongs to every source), and
+ * the schedule, sections, focus, and volume for that summariser alone. Each
+ * summariser is self-contained: it always stores explicit values, never
+ * inheriting the agent's defaults.
  */
-function RoutesEditor({
+function SummariserDrawer({
+  agentKey,
   agent,
-  routes,
-  onChange,
+  editing,
+  onClose,
+  onSaved,
 }: {
+  agentKey: string;
   agent: AgentConfig;
-  routes: AgentRoute[];
-  onChange: (routes: AgentRoute[], sources: AgentSourceConfig[]) => void;
+  editing: { route: AgentRoute | null };
+  onClose: () => void;
+  onSaved: () => void;
 }) {
   const slackChannels = useQuery({ queryKey: ["slack-channels"], queryFn: () => api.channels.listSlack() });
   const whatsappGroups = useQuery({ queryKey: ["whatsapp-groups"], queryFn: () => api.channels.listWhatsAppGroups() });
-  const [expanded, setExpanded] = useState<string | null>(null);
   const maxSources = agent.sourceConfig?.maxSources ?? 0;
+
+  const route = editing.route;
+  const [sources, setSources] = useState<AgentSourceKey[]>(route?.sources ?? []);
+  const [destKind, setDestKind] = useState<AgentRouteDestination["kind"]>(route?.destination.kind ?? "off");
+  const [memberUserId, setMemberUserId] = useState<string | null>(
+    route?.destination.kind === "member" ? route.destination.memberUserId : null,
+  );
+  const [hour, setHour] = useState(route?.schedule?.hour ?? agent.scheduleHour);
+  const [minute, setMinute] = useState(route?.schedule?.minute ?? agent.scheduleMinute);
+  const [sections, setSections] = useState<Record<string, boolean>>(defaultSections(agent, route));
+  const [focus, setFocus] = useState(route?.focus ?? "");
+  const [volume, setVolume] = useState(route?.maxItemsPerSection ?? agent.maxItemsPerSection);
 
   const slackOptions = (slackChannels.data?.channels ?? [])
     .filter((channel) => channel.isMember)
@@ -850,309 +983,251 @@ function RoutesEditor({
       label: group.name,
     }),
   );
+  const lookup = new Map<string, AgentSourceConfig>();
+  for (const source of [...agent.sources, ...slackOptions, ...whatsappOptions]) lookup.set(sourceKey(source), source);
 
-  const sourceByKey = new Map<string, AgentSourceConfig>();
-  for (const source of [...agent.sources, ...slackOptions, ...whatsappOptions])
-    sourceByKey.set(sourceKey(source), source);
+  const selectedKeys = new Set<string>(sources);
+  const combined = sources.length > 1;
+  const hasWhatsApp = sources.some((key) => key.startsWith("whatsapp:"));
 
-  const routedKeys = new Set<string>(routes.map((route) => route.sources[0]));
-
-  const emit = (next: AgentRoute[]) => {
-    const sources = next
-      .map((route) => sourceByKey.get(route.sources[0]))
-      .filter((source): source is AgentSourceConfig => Boolean(source));
-    onChange(next, sources);
-  };
+  useEffect(() => {
+    if (destKind === "self" && sources.length !== 1) setDestKind("off");
+  }, [destKind, sources.length]);
 
   const toggleSource = (source: AgentSourceConfig) => {
-    const key = sourceKey(source);
-    if (routedKeys.has(key)) {
-      emit(routes.filter((route) => route.sources[0] !== key));
+    const key = sourceKey(source) as AgentSourceKey;
+    if (selectedKeys.has(key)) {
+      setSources(sources.filter((item) => item !== key));
       return;
     }
-    if (routes.length >= maxSources) return;
-    setExpanded(key);
-    emit([...routes, makeRoute(source)]);
+    if (maxSources > 0 && sources.length >= maxSources) return;
+    setSources([...sources, key]);
   };
 
-  const updateRoute = (id: string, patch: Partial<AgentRoute>) => {
-    emit(routes.map((route) => (route.id === id ? { ...route, ...patch } : route)));
-  };
+  const memberQuery = useQuery({
+    queryKey: ["route-members", agentKey, sources],
+    queryFn: () => api.agents.routeMembers(agentKey, sources),
+    enabled: destKind === "member" && sources.length > 0 && !hasWhatsApp,
+  });
+
+  const save = useMutation({
+    mutationFn: () => {
+      const destination: AgentRouteDestination =
+        destKind === "self"
+          ? { kind: "self" }
+          : destKind === "member" && memberUserId
+            ? { kind: "member", platform: "slack", memberUserId }
+            : { kind: "off" };
+      const next: AgentRoute = {
+        id: route?.id ?? crypto.randomUUID(),
+        sources,
+        focus: focus.trim() ? focus.trim() : null,
+        sections,
+        maxItemsPerSection: volume,
+        schedule: { hour, minute },
+        destination,
+        enabled: route?.enabled ?? true,
+      };
+      const routes = route ? agent.routes.map((item) => (item.id === route.id ? next : item)) : [...agent.routes, next];
+      return api.agents.updateConfig(agentKey, { sources: routesToSources(routes, lookup), routes });
+    },
+    onSuccess: () => {
+      onSaved();
+      toast.success("Saved");
+      onClose();
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to save"),
+  });
+
+  const saveDisabled =
+    save.isPending ||
+    sources.length === 0 ||
+    (destKind === "self" && sources.length !== 1) ||
+    (destKind === "member" && (!memberUserId || hasWhatsApp));
+
+  const destOptions: Array<{ value: AgentRouteDestination["kind"]; label: string; disabled: boolean; hint?: string }> =
+    [
+      { value: "self", label: "Post back", disabled: combined, hint: combined ? "single input only" : undefined },
+      { value: "off", label: "Web only", disabled: false },
+      {
+        value: "member",
+        label: "DM a member",
+        disabled: !agent.sourceConfig?.supportsSlackChannels || hasWhatsApp,
+        hint: hasWhatsApp ? "Slack only" : undefined,
+      },
+    ];
 
   return (
-    <div className="space-y-5">
-      <div>
-        <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">Routes</span>
-        {routes.length === 0 ? (
-          <p className="mt-2 rounded-lg border-[0.5px] border-dashed border-border px-3 py-3 text-[12px] text-muted-foreground">
-            Add a source below. Each source becomes its own summary, delivered on its own.
-          </p>
-        ) : (
-          <div className="mt-2 flex flex-col gap-2">
-            {routes.map((route) => {
-              const source = sourceByKey.get(route.sources[0]) ?? null;
-              return (
-                <RouteCard
-                  key={route.id}
-                  agent={agent}
-                  route={route}
-                  source={source}
-                  label={source?.label ?? route.sources[0]}
-                  open={expanded === route.id}
-                  onToggleOpen={() => setExpanded(expanded === route.id ? null : route.id)}
-                  onChange={(patch) => updateRoute(route.id, patch)}
-                  onRemove={() => emit(routes.filter((item) => item.id !== route.id))}
-                />
-              );
-            })}
+    <Sheet open onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="flex w-full flex-col gap-0 overflow-y-auto sm:max-w-[480px]">
+        <SheetHeader>
+          <SheetTitle>{route ? "Edit summariser" : "New summariser"}</SheetTitle>
+          <SheetDescription>
+            Pick the conversations to summarise, where the summary goes, and when it runs.
+          </SheetDescription>
+        </SheetHeader>
+
+        <div className="flex-1 space-y-6 px-4 py-4">
+          <div className="space-y-4">
+            {agent.sourceConfig?.supportsSlackChannels ? (
+              <SourceGroup
+                title="Slack channels"
+                loading={slackChannels.isLoading}
+                empty="No Slack channels available."
+                selected={selectedKeys}
+                options={slackOptions}
+                onToggle={toggleSource}
+              />
+            ) : null}
+            {agent.sourceConfig?.supportsWhatsAppGroups ? (
+              <SourceGroup
+                title="WhatsApp groups"
+                loading={whatsappGroups.isLoading}
+                empty="No WhatsApp groups available."
+                selected={selectedKeys}
+                options={whatsappOptions}
+                onToggle={toggleSource}
+              />
+            ) : null}
+            <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">
+              {sources.length} selected
+              {maxSources > 0 ? ` · limit ${maxSources}` : ""}
+              {combined ? " · combined into one summary" : ""}
+            </p>
           </div>
-        )}
-      </div>
 
-      {agent.sourceConfig?.supportsSlackChannels ? (
-        <SourceGroup
-          title="Add Slack channels"
-          loading={slackChannels.isLoading}
-          empty="No Slack channels available."
-          selected={routedKeys}
-          options={slackOptions}
-          onToggle={toggleSource}
-        />
-      ) : null}
-      {agent.sourceConfig?.supportsWhatsAppGroups ? (
-        <SourceGroup
-          title="Add WhatsApp groups"
-          loading={whatsappGroups.isLoading}
-          empty="No WhatsApp groups available."
-          selected={routedKeys}
-          options={whatsappOptions}
-          onToggle={toggleSource}
-        />
-      ) : null}
-      <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">
-        {routes.length} {routes.length === 1 ? "source" : "sources"}
-        {maxSources > 0 ? ` · limit ${maxSources}` : ""} · open a source to tune its focus, sections, schedule, and
-        delivery
-      </p>
-    </div>
-  );
-}
-
-function RouteField({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">{label}</span>
-      <div className="mt-1.5">{children}</div>
-    </div>
-  );
-}
-
-const SEGMENT_BASE = "rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors";
-const SEGMENT_WRAP = "grid grid-cols-2 gap-1 rounded-lg border-[0.5px] border-border bg-muted/25 p-1";
-function segmentClass(active: boolean): string {
-  return cn(
-    SEGMENT_BASE,
-    active ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-  );
-}
-
-function RouteCard({
-  agent,
-  route,
-  source,
-  label,
-  open,
-  onToggleOpen,
-  onChange,
-  onRemove,
-}: {
-  agent: AgentConfig;
-  route: AgentRoute;
-  source: AgentSourceConfig | null;
-  label: string;
-  open: boolean;
-  onToggleOpen: () => void;
-  onChange: (patch: Partial<AgentRoute>) => void;
-  onRemove: () => void;
-}) {
-  const destKind: RouteDestKind = route.destination.kind === "self" ? "self" : "off";
-  const customSchedule = route.schedule !== null;
-
-  const toggleSection = (key: string, checked: boolean) => {
-    const next: Record<string, boolean> = {};
-    for (const section of agent.sections) next[section.key] = route.sections?.[section.key] ?? section.enabled;
-    next[key] = checked;
-    onChange({ sections: next });
-  };
-
-  return (
-    <div className={cn("rounded-lg border-[0.5px] border-border", !route.enabled && "opacity-60")}>
-      <div className="flex items-center gap-2 px-3 py-2.5">
-        <span className="shrink-0">
-          {source?.platform === "slack" ? <HashIcon size={14} aria-hidden /> : <UsersThreeIcon size={14} aria-hidden />}
-        </span>
-        <button type="button" onClick={onToggleOpen} className="min-w-0 flex-1 text-left">
-          <span className="block truncate text-[12.5px] font-medium text-foreground">{label}</span>
-          <span className="block truncate text-[11px] text-muted-foreground">
-            {destinationLabel(route.destination, label)}
-            {route.enabled ? "" : " · paused"} · {describeRoute(route, agent)}
-          </span>
-        </button>
-        <CaretDownIcon
-          size={13}
-          weight="bold"
-          aria-hidden
-          className={cn("shrink-0 text-muted-foreground/50 transition-transform", open && "rotate-180")}
-        />
-        <button
-          type="button"
-          onClick={onRemove}
-          aria-label={`Remove ${label}`}
-          className="shrink-0 text-muted-foreground/50 transition-colors hover:text-foreground"
-        >
-          <XIcon size={13} weight="bold" aria-hidden />
-        </button>
-      </div>
-
-      {open ? (
-        <div className="space-y-4 border-t border-border/60 px-3 py-3.5">
-          <RouteField label="Deliver to">
-            <div className={SEGMENT_WRAP}>
-              <button
-                type="button"
-                onClick={() => onChange({ destination: { kind: "self" } })}
-                className={segmentClass(destKind === "self")}
-              >
-                Post back
-              </button>
-              <button
-                type="button"
-                onClick={() => onChange({ destination: { kind: "off" } })}
-                className={segmentClass(destKind === "off")}
-              >
-                Web only
-              </button>
+          <div>
+            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">
+              Delivers to
+            </span>
+            <div className="mt-2 grid grid-cols-3 gap-1 rounded-lg border-[0.5px] border-border bg-muted/25 p-1">
+              {destOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  disabled={option.disabled}
+                  onClick={() => setDestKind(option.value)}
+                  className={cn(
+                    "flex flex-col items-center justify-center rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors",
+                    destKind === option.value
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
+                    option.disabled && "cursor-not-allowed opacity-40 hover:text-muted-foreground",
+                  )}
+                >
+                  {option.label}
+                  {option.hint ? <span className="text-[9px] text-muted-foreground/70">{option.hint}</span> : null}
+                </button>
+              ))}
             </div>
-          </RouteField>
-
-          <RouteField label="Runs on">
-            <div className={SEGMENT_WRAP}>
-              <button
-                type="button"
-                onClick={() => onChange({ schedule: null })}
-                className={segmentClass(!customSchedule)}
-              >
-                Default ({formatTime(agent.scheduleHour, agent.scheduleMinute)})
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  onChange({ schedule: route.schedule ?? { hour: agent.scheduleHour, minute: agent.scheduleMinute } })
-                }
-                className={segmentClass(customSchedule)}
-              >
-                Custom time
-              </button>
-            </div>
-            {route.schedule ? (
-              <div className="mt-2 flex items-center gap-2">
-                <NumberField
-                  label="Hour"
-                  min={0}
-                  max={23}
-                  value={route.schedule.hour}
-                  onChange={(hour) => onChange({ schedule: { hour, minute: route.schedule?.minute ?? 0 } })}
-                />
-                <span className="mt-5 text-muted-foreground">:</span>
-                <NumberField
-                  label="Minute"
-                  min={0}
-                  max={59}
-                  value={route.schedule.minute}
-                  onChange={(minute) => onChange({ schedule: { hour: route.schedule?.hour ?? 0, minute } })}
-                />
-                <span className="mt-5 ml-2 text-[12.5px] text-muted-foreground">
-                  {formatTime(route.schedule.hour, route.schedule.minute)}
-                </span>
+            {destKind === "member" ? (
+              <div className="mt-2">
+                {hasWhatsApp ? (
+                  <p className="px-1 py-2 text-[12px] text-muted-foreground">
+                    Member DM works with Slack sources only. Remove the WhatsApp source to pick a member.
+                  </p>
+                ) : (
+                  <TargetList
+                    loading={memberQuery.isLoading}
+                    empty="No member is in every selected source."
+                    selectedId={memberUserId ?? ""}
+                    options={(memberQuery.data?.members ?? []).map((member) => ({
+                      id: member.userId,
+                      label: member.name,
+                      icon: <UserIcon size={14} aria-hidden />,
+                    }))}
+                    onSelect={(id) => setMemberUserId(id)}
+                  />
+                )}
+                <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground/70">
+                  Only members of every selected source appear — the summary can never reach someone outside the inputs.
+                </p>
               </div>
             ) : null}
-          </RouteField>
+          </div>
 
-          <RouteField label="Sections">
-            <div className="flex flex-col gap-1.5">
-              {agent.sections.map((section) => {
-                const checked = route.sections?.[section.key] ?? section.enabled;
-                return (
-                  <label
-                    key={section.key}
-                    className="flex cursor-pointer items-center gap-2 text-[12.5px] text-foreground/90"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(e) => toggleSection(section.key, e.target.checked)}
-                      className="h-3.5 w-3.5 accent-foreground"
-                    />
-                    {section.title}
-                  </label>
-                );
-              })}
+          <div>
+            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">Runs on</span>
+            <div className="mt-2 flex items-center gap-2">
+              <NumberField label="Hour" min={0} max={23} value={hour} onChange={setHour} />
+              <span className="mt-5 text-muted-foreground">:</span>
+              <NumberField label="Minute" min={0} max={59} value={minute} onChange={setMinute} />
+              <span className="mt-5 ml-2 text-[12.5px] text-muted-foreground">{formatTime(hour, minute)}</span>
             </div>
-            {route.sections !== null ? (
-              <button
-                type="button"
-                onClick={() => onChange({ sections: null })}
-                className="mt-2 text-[11px] text-muted-foreground/70 underline-offset-2 hover:text-foreground hover:underline"
-              >
-                Reset to default sections
-              </button>
-            ) : null}
-          </RouteField>
+          </div>
 
-          <RouteField label="Focus">
+          <div>
+            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">Sections</span>
+            <div className="mt-2 flex flex-col gap-1.5">
+              {agent.sections.map((section) => (
+                <label
+                  key={section.key}
+                  className="flex cursor-pointer items-center gap-2 text-[12.5px] text-foreground/90"
+                >
+                  <input
+                    type="checkbox"
+                    checked={sections[section.key] ?? section.enabled}
+                    onChange={(e) => setSections({ ...sections, [section.key]: e.target.checked })}
+                    className="h-3.5 w-3.5 accent-foreground"
+                  />
+                  {section.title}
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">Focus</span>
             <textarea
               rows={2}
-              value={route.focus ?? ""}
-              onChange={(e) => onChange({ focus: e.target.value.length ? e.target.value : null })}
+              value={focus}
+              onChange={(e) => setFocus(e.target.value)}
               placeholder="e.g. anything blocking delivery for this group"
-              className="w-full resize-none rounded-lg border-[0.5px] border-border bg-background px-3 py-2 text-[12.5px] leading-relaxed text-foreground/90 placeholder:text-muted-foreground/60 focus:border-foreground/30 focus:outline-none"
+              className="mt-2 w-full resize-none rounded-lg border-[0.5px] border-border bg-background px-3 py-2 text-[12.5px] leading-relaxed text-foreground/90 placeholder:text-muted-foreground/60 focus:border-foreground/30 focus:outline-none"
             />
-          </RouteField>
+          </div>
 
-          <RouteField label="Volume">
-            <div className="flex items-end gap-3">
+          <div>
+            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">Volume</span>
+            <div className="mt-2">
               <NumberField
                 label="Items per section"
                 min={agent.itemsPerSectionRange.min}
                 max={agent.itemsPerSectionRange.max}
-                value={route.maxItemsPerSection ?? agent.maxItemsPerSection}
-                onChange={(value) => onChange({ maxItemsPerSection: value })}
+                value={volume}
+                onChange={setVolume}
               />
-              {route.maxItemsPerSection !== null ? (
-                <button
-                  type="button"
-                  onClick={() => onChange({ maxItemsPerSection: null })}
-                  className="mb-2 text-[11px] text-muted-foreground/70 underline-offset-2 hover:text-foreground hover:underline"
-                >
-                  Reset to default
-                </button>
-              ) : null}
             </div>
-          </RouteField>
-
-          <div className="flex items-center gap-3 border-t border-border/50 pt-3">
-            <span className="flex-1 text-[12.5px] font-medium text-foreground">Active</span>
-            <Switch
-              checked={route.enabled}
-              onCheckedChange={(checked) => onChange({ enabled: checked })}
-              aria-label={`${label} active`}
-              className="data-[state=checked]:bg-emerald-500"
-            />
           </div>
         </div>
-      ) : null}
-    </div>
+
+        <SheetFooter className="flex-row justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full border-[0.5px] border-border px-4 py-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => save.mutate()}
+            disabled={saveDisabled}
+            className="inline-flex items-center gap-1.5 rounded-full bg-foreground px-4 py-1.5 text-[12px] font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            <CheckCircleIcon size={13} weight="bold" aria-hidden />
+            Save
+          </button>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
+}
+
+function defaultSections(agent: AgentConfig, route: AgentRoute | null): Record<string, boolean> {
+  const record: Record<string, boolean> = {};
+  for (const section of agent.sections) record[section.key] = route?.sections?.[section.key] ?? section.enabled;
+  return record;
 }
 
 function SourceGroup({
