@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 113;
+const EXPECTED_MIGRATION_COUNT = 114;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -169,6 +169,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
     expect(names[111]).toBe("116-connector-credential-source");
     expect(names[112]).toBe("117-conversation-message-window-index");
+    expect(names[113]).toBe("118-whatsapp-window-keepalives");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -564,13 +565,15 @@ describe("runMigrations — incremental upgrade", () => {
         '114-agent-output-deliveries',
         '115-whatsapp-template-mappings-and-provider-events',
         '116-connector-credential-source',
-        '117-conversation-message-window-index'
+        '117-conversation-message-window-index',
+        '118-whatsapp-window-keepalives'
       )
     `.execute(db);
     await sql`DROP TABLE agent_output_deliveries`.execute(db);
     await sql`DROP TABLE whatsapp_template_mappings`.execute(db);
     await sql`DROP TABLE whatsapp_provider_events`.execute(db);
     await sql`DROP INDEX idx_conversation_messages_window`.execute(db);
+    await sql`DROP TABLE whatsapp_window_keepalives`.execute(db);
 
     await expect(runMigrations(db, { quiet: true })).resolves.not.toThrow();
 
@@ -587,7 +590,8 @@ describe("runMigrations — incremental upgrade", () => {
         '114-agent-output-deliveries',
         '115-whatsapp-template-mappings-and-provider-events',
         '116-connector-credential-source',
-        '117-conversation-message-window-index'
+        '117-conversation-message-window-index',
+        '118-whatsapp-window-keepalives'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -603,6 +607,7 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "115-whatsapp-template-mappings-and-provider-events" },
       { name: "116-connector-credential-source" },
       { name: "117-conversation-message-window-index" },
+      { name: "118-whatsapp-window-keepalives" },
     ]);
   });
 });

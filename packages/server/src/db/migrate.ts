@@ -117,6 +117,7 @@ import * as m114 from "./migrations/114-agent-output-deliveries";
 import * as m115 from "./migrations/115-whatsapp-template-mappings-and-provider-events";
 import * as m116 from "./migrations/116-connector-credential-source";
 import * as m117 from "./migrations/117-conversation-message-window-index";
+import * as m118 from "./migrations/118-whatsapp-window-keepalives";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -238,6 +239,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "115-whatsapp-template-mappings-and-provider-events": m115,
           "116-connector-credential-source": m116,
           "117-conversation-message-window-index": m117,
+          "118-whatsapp-window-keepalives": m118,
         };
       },
     },

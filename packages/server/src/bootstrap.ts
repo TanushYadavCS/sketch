@@ -64,6 +64,7 @@ import { WHATSAPP_MANAGED_PROVIDER_ID, createManagedWhatsAppProvider } from "./w
 import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
 import { createWhatsAppRuntime } from "./whatsapp/runtime";
 import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
+import { startWhatsAppWindowKeepAliveJob } from "./whatsapp/window-keepalive";
 
 export interface ServerHandle {
   config: Config;
@@ -448,6 +449,14 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
   const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
+  const whatsappWindowKeepAliveJob = config.WHATSAPP_WINDOW_KEEPALIVE_ENABLED
+    ? startWhatsAppWindowKeepAliveJob({
+        db,
+        logger,
+        whatsapp: whatsappRuntime,
+        settingsRepo,
+      })
+    : null;
   const agentOutputDelivery = createAgentOutputDeliveryService({
     db,
     logger,
@@ -587,6 +596,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger.info("Shutting down...");
     await telemetry.shutdown();
     await syncScheduler.stop();
+    whatsappWindowKeepAliveJob?.stop();
     agentScheduler.stop();
     scheduler.stop();
     if (slack) await slack.stop();
