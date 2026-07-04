@@ -1839,6 +1839,112 @@ describe("AgentRunService", () => {
     expect(tasks).toHaveLength(1);
   });
 
+  it("generates only the requested route scope when routeIds is provided", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    const sourceA = slackSource("C_A", "alpha");
+    const sourceB = slackSource("C_B", "beta");
+    const sourceC = slackSource("C_C", "gamma");
+    const combinedRoute: AgentRoute = {
+      id: "alpha-beta",
+      sources: ["slack:channel:C_A", "slack:channel:C_B"],
+      focus: null,
+      sections: null,
+      maxItemsPerSection: null,
+      schedule: null,
+      destination: { kind: "off" },
+      enabled: true,
+    };
+    const service = createService(db, tasks, {
+      ...allowSlackDelivery([
+        { id: "C_A", name: "alpha" },
+        { id: "C_B", name: "beta" },
+        { id: "C_C", name: "gamma" },
+      ]),
+    });
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      sources: [sourceA, sourceB, sourceC],
+      routes: [combinedRoute, sourceRoute(sourceC)],
+    });
+
+    const rows = await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+      routeIds: ["alpha-beta"],
+    });
+
+    const expectedScopeKey = scopeKeyForRoute(combinedRoute, [sourceA, sourceB]);
+    const outputs = await db
+      .selectFrom("agent_outputs")
+      .select(["source_key", "status"])
+      .where("agent_key", "=", CONVERSATION_SUMMARY_AGENT_KEY)
+      .where("user_id", "=", user.id)
+      .where("output_date", "=", OUTPUT_DATE)
+      .orderBy("source_key", "asc")
+      .execute();
+
+    expect(rows.map((row) => row.source_key)).toEqual([expectedScopeKey]);
+    expect(outputs).toEqual([{ source_key: expectedScopeKey, status: "running" }]);
+    expect(tasks).toHaveLength(1);
+  });
+
+  it("generates every route scope when routeIds is omitted", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    const sourceA = slackSource("C_A", "alpha");
+    const sourceB = slackSource("C_B", "beta");
+    const sourceC = slackSource("C_C", "gamma");
+    const combinedRoute: AgentRoute = {
+      id: "alpha-beta",
+      sources: ["slack:channel:C_A", "slack:channel:C_B"],
+      focus: null,
+      sections: null,
+      maxItemsPerSection: null,
+      schedule: null,
+      destination: { kind: "off" },
+      enabled: true,
+    };
+    const service = createService(db, tasks, {
+      ...allowSlackDelivery([
+        { id: "C_A", name: "alpha" },
+        { id: "C_B", name: "beta" },
+        { id: "C_C", name: "gamma" },
+      ]),
+    });
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      sources: [sourceA, sourceB, sourceC],
+      routes: [combinedRoute, sourceRoute(sourceC)],
+    });
+
+    const rows = await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+
+    const expectedScopeKeys = [scopeKeyForRoute(combinedRoute, [sourceA, sourceB]), "slack:channel:C_C"].sort();
+    const outputs = await db
+      .selectFrom("agent_outputs")
+      .select(["source_key", "status"])
+      .where("agent_key", "=", CONVERSATION_SUMMARY_AGENT_KEY)
+      .where("user_id", "=", user.id)
+      .where("output_date", "=", OUTPUT_DATE)
+      .orderBy("source_key", "asc")
+      .execute();
+
+    expect(rows.map((row) => row.source_key).sort()).toEqual(expectedScopeKeys);
+    expect(outputs.map((output) => output.source_key).sort()).toEqual(expectedScopeKeys);
+    expect(outputs.every((output) => output.status === "running")).toBe(true);
+    expect(tasks).toHaveLength(2);
+  });
+
   it("derives deterministic scope keys for source and combined routes", () => {
     const sourceA = slackSource("C_A", "alpha");
     const sourceB = slackSource("C_B", "beta");

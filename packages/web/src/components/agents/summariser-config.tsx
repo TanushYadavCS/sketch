@@ -15,11 +15,13 @@ import {
   SheetTitle,
 } from "@sketch/ui/components/sheet";
 import { Switch } from "@sketch/ui/components/switch";
-import { cn } from "@sketch/ui/lib/utils";
+import { TabButton } from "@sketch/ui/components/tab-button";
+import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { RunsPanel } from "./agent-outputs-view";
 import {
   DestinationField,
   FocusField,
@@ -35,6 +37,40 @@ import {
   useSourceOptions,
 } from "./summariser-shared";
 
+type Tab = "config" | "runs";
+
+/**
+ * Reproduce the server's scope key for a route so we can match this route's
+ * generated outputs. A route's `id` is a UUID and does NOT equal the output
+ * `sourceKey`: single-source routes key on the source itself, combined routes on
+ * `route:${sha256(sources.join("|")).slice(0, 12)}` (see scopeKeyForRoute /
+ * stableRouteHash on the server). Kept in sync with that hashing.
+ */
+function useRouteScopeKey(route: AgentRoute): string | null {
+  const single = route.sources.length === 1 ? (route.sources[0] ?? null) : null;
+  const joined = route.sources.join("|");
+  const [key, setKey] = useState<string | null>(single);
+  useEffect(() => {
+    if (route.sources.length === 1) {
+      setKey(route.sources[0] ?? null);
+      return;
+    }
+    let cancelled = false;
+    void crypto.subtle.digest("SHA-256", new TextEncoder().encode(joined)).then((buf) => {
+      if (cancelled) return;
+      const hex = Array.from(new Uint8Array(buf))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("")
+        .slice(0, 12);
+      setKey(`route:${hex}`);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [joined, route.sources]);
+  return key;
+}
+
 type RouteField = "sources" | "schedule" | "focus" | "volume" | "delivery" | null;
 
 const FIELD_META: Record<Exclude<RouteField, null>, { title: string; hint: string }> = {
@@ -49,14 +85,11 @@ const FIELD_META: Record<Exclude<RouteField, null>, { title: string; hint: strin
 };
 
 export function SummariserConfigPage({ agentKey, routeId }: { agentKey: string; routeId: string }) {
-  const queryClient = useQueryClient();
-  const detailQuery = useQuery({ queryKey: ["agents", "detail", agentKey], queryFn: () => api.agents.get(agentKey) });
-  const [editing, setEditing] = useState<RouteField>(null);
-
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ["agents", "detail", agentKey] });
-    void queryClient.invalidateQueries({ queryKey: ["agents", "list"] });
-  };
+  const detailQuery = useQuery({
+    queryKey: ["agents", "detail", agentKey],
+    queryFn: () => api.agents.get(agentKey),
+    refetchInterval: (query) => (query.state.data?.running ? 3000 : false),
+  });
 
   const agent = detailQuery.data?.agent ?? null;
   const route = agent?.routes.find((r) => r.id === routeId) ?? null;
@@ -72,53 +105,33 @@ export function SummariserConfigPage({ agentKey, routeId }: { agentKey: string; 
 
   return (
     <Shell>
-      <SummariserBody agentKey={agentKey} agent={agent} route={route} onEdit={setEditing} onChanged={invalidate} />
-      {editing ? (
-        <RouteFieldDrawer
-          key={editing}
-          field={editing}
-          agentKey={agentKey}
-          agent={agent}
-          route={route}
-          onClose={() => setEditing(null)}
-          onSaved={invalidate}
-        />
-      ) : null}
+      <SummariserContent agentKey={agentKey} agent={agent} route={route} running={detailQuery.data?.running ?? false} />
     </Shell>
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="mx-auto box-content max-w-4xl px-10 py-8">
-      <Link
-        to="/agents"
-        className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeftIcon size={13} weight="bold" aria-hidden />
-        Agents
-      </Link>
-      {children}
-    </div>
-  );
-}
-
-function SummariserBody({
+function SummariserContent({
   agentKey,
   agent,
   route,
-  onEdit,
-  onChanged,
+  running,
 }: {
   agentKey: string;
   agent: AgentConfig;
   route: AgentRoute;
-  onEdit: (field: RouteField) => void;
-  onChanged: () => void;
+  running: boolean;
 }) {
+  const queryClient = useQueryClient();
   const { lookup } = useSourceOptions(agent);
-  const input = routeInput(route, lookup);
+  const [editing, setEditing] = useState<RouteField>(null);
+  const [tab, setTab] = useState<Tab>("config");
 
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ["agents", "detail", agentKey] });
+    void queryClient.invalidateQueries({ queryKey: ["agents", "list"] });
+  };
+
+  const input = routeInput(route, lookup);
   const save = useMutation({
     mutationFn: (next: AgentRoute) =>
       saveRoutes(
@@ -126,7 +139,7 @@ function SummariserBody({
         agent.routes.map((r) => (r.id === route.id ? next : r)),
         lookup,
       ),
-    onSuccess: onChanged,
+    onSuccess: invalidate,
     onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to update"),
   });
 
@@ -157,7 +170,111 @@ function SummariserBody({
         </span>
       </header>
 
-      <div className="mt-6 rounded-xl border-[0.5px] border-border bg-card px-4">
+      <div className="mt-6 flex items-center gap-6 border-b border-border">
+        <TabButton label="Runs" isActive={tab === "runs"} onClick={() => setTab("runs")} />
+        <TabButton label="Config" isActive={tab === "config"} onClick={() => setTab("config")} />
+      </div>
+
+      <TabContentContainer className="pt-5">
+        {tab === "runs" ? (
+          <RunsTab agentKey={agentKey} agent={agent} route={route} running={running} />
+        ) : (
+          <ConfigContent agent={agent} route={route} input={input} save={save} onEdit={setEditing} />
+        )}
+      </TabContentContainer>
+
+      {editing ? (
+        <RouteFieldDrawer
+          key={editing}
+          field={editing}
+          agentKey={agentKey}
+          agent={agent}
+          route={route}
+          onClose={() => setEditing(null)}
+          onSaved={invalidate}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function RunsTab({
+  agentKey,
+  agent,
+  route,
+  running,
+}: {
+  agentKey: string;
+  agent: AgentConfig;
+  route: AgentRoute;
+  running: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const outputsQuery = useQuery({
+    queryKey: ["agents", "outputs", agentKey],
+    queryFn: () => api.agents.outputs(agentKey, { limit: 50 }),
+    refetchInterval: () => (running ? 3000 : false),
+  });
+  const runMutation = useMutation({
+    mutationFn: () => api.agents.run(agentKey, { routeId: route.id }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["agents", "detail", agentKey] });
+      void queryClient.invalidateQueries({ queryKey: ["agents", "outputs", agentKey] });
+      toast.success("Run started");
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to start run"),
+  });
+
+  const scopeKey = useRouteScopeKey(route);
+  const outputs = (outputsQuery.data?.outputs ?? []).filter(
+    (output) => scopeKey != null && output.sourceKey === scopeKey,
+  );
+  const sectionTitles = Object.fromEntries(agent.sections.map((section) => [section.key, section.title]));
+
+  return (
+    <RunsPanel
+      outputs={outputs}
+      loading={outputsQuery.isLoading}
+      running={running || runMutation.isPending}
+      runPending={runMutation.isPending}
+      onRun={() => runMutation.mutate()}
+      sectionTitles={sectionTitles}
+      emptyHint="Nothing yet. Run it now or wait for its next scheduled run."
+    />
+  );
+}
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mx-auto box-content max-w-4xl px-10 py-8">
+      <Link
+        to="/agents"
+        className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <ArrowLeftIcon size={13} weight="bold" aria-hidden />
+        Agents
+      </Link>
+      {children}
+    </div>
+  );
+}
+
+function ConfigContent({
+  agent,
+  route,
+  input,
+  save,
+  onEdit,
+}: {
+  agent: AgentConfig;
+  route: AgentRoute;
+  input: ReturnType<typeof routeInput>;
+  save: { mutate: (next: AgentRoute) => void; isPending: boolean };
+  onEdit: (field: RouteField) => void;
+}) {
+  return (
+    <>
+      <div className="rounded-xl border-[0.5px] border-border bg-card px-4">
         <Row label="Input" onEdit={() => onEdit("sources")}>
           <span className="flex items-center gap-1.5 text-[12.5px] text-foreground/85">
             {input.label}

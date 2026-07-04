@@ -76,6 +76,7 @@ export interface RequestAgentGenerationParams {
   triggerType: AgentOutputTriggerType;
   skipIfCompleted?: boolean;
   scopeKeys?: string[];
+  routeIds?: string[];
 }
 
 export interface ResolvedAgentConfig {
@@ -1328,9 +1329,14 @@ export class AgentRunService {
     const now = new Date();
     const scopes = await this.resolveExpectedScopesForUser(def, user, config);
     const scopeKeys = params.scopeKeys ? new Set(params.scopeKeys) : null;
+    const routeIds = params.routeIds ? new Set(params.routeIds) : null;
     const rows: AgentOutputRow[] = [];
 
-    for (const scope of scopeKeys ? scopes.filter((candidate) => scopeKeys.has(candidate.sourceKey)) : scopes) {
+    for (const scope of scopes.filter((candidate) => {
+      if (scopeKeys && !scopeKeys.has(candidate.sourceKey)) return false;
+      if (routeIds && (!candidate.route || !routeIds.has(candidate.route.id))) return false;
+      return true;
+    })) {
       let recoveredStaleRunning = false;
       const existingRunning = await this.repo.findRunning(def.key, user.id, outputDate, scope.sourceKey);
       if (existingRunning) {

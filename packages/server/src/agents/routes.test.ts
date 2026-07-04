@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
+import type { AgentRoute, AgentSourceConfig } from "../db/repositories/agent-outputs";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
@@ -35,6 +36,24 @@ function createService(overrides: Record<string, unknown> = {}) {
     listEligibleRouteMembers: ReturnType<typeof vi.fn>;
     requestGenerationForUser: ReturnType<typeof vi.fn>;
     updateConfigForUser: ReturnType<typeof vi.fn>;
+  };
+}
+
+function slackSource(id: string, name: string): AgentSourceConfig {
+  return { platform: "slack", targetType: "channel", targetId: id, label: `#${name}` };
+}
+
+function sourceRoute(source: AgentSourceConfig): AgentRoute {
+  const sourceKey = `${source.platform}:${source.targetType}:${source.targetId}` as AgentRoute["sources"][number];
+  return {
+    id: sourceKey,
+    sources: [sourceKey],
+    focus: null,
+    sections: null,
+    maxItemsPerSection: null,
+    schedule: null,
+    destination: { kind: "self" },
+    enabled: true,
   };
 }
 
@@ -589,6 +608,60 @@ describe("agentRoutes", () => {
         { id: "out-b", sourceKey: "slack:channel:C_B", status: "running", outputDate: "2026-07-04" },
       ],
     });
+  });
+
+  it("returns 404 for an unknown run routeId without creating generations", async () => {
+    const db = await createTestDb();
+    try {
+      const users = createUserRepository(db);
+      const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+      const sourceA = slackSource("C_A", "alpha");
+      const sourceB = slackSource("C_B", "beta");
+      const runAgent = vi.fn(async () => {
+        throw new Error("runAgent should not be called");
+      }) as unknown as AgentRunServiceDeps["runAgent"];
+      const service = new AgentRunService({
+        db,
+        config: createTestConfig(),
+        logger: createTestLogger(),
+        users,
+        settings: createSettingsRepository(db),
+        runAgent,
+        getSlack: () => ({
+          listChannels: vi.fn(async () => [
+            { id: "C_A", name: "alpha", type: "public_channel", isMember: true },
+            { id: "C_B", name: "beta", type: "public_channel", isMember: true },
+          ]),
+          isUserInChannel: vi.fn(async () => true),
+        }),
+      });
+      await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+        enabled: true,
+        sources: [sourceA, sourceB],
+        routes: [sourceRoute(sourceA), sourceRoute(sourceB)],
+      });
+      const app = createRoutesTestApp(service, user.id, user.email ?? undefined);
+
+      const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ routeId: "missing-route" }),
+      });
+
+      const outputs = await db
+        .selectFrom("agent_outputs")
+        .select("id")
+        .where("agent_key", "=", CONVERSATION_SUMMARY_AGENT_KEY)
+        .where("user_id", "=", user.id)
+        .execute();
+
+      expect(res.status).toBe(404);
+      await expect(res.json()).resolves.toEqual({ error: { code: "NOT_FOUND", message: "Route not found" } });
+      expect(outputs).toEqual([]);
+      expect(runAgent).not.toHaveBeenCalled();
+    } finally {
+      await db.destroy();
+    }
   });
 
   it("rejects combined delivery to a selected source through the public config route", async () => {
