@@ -84,6 +84,14 @@ export type WhatsAppMessage = WhatsAppDmMessage | WhatsAppGroupMessage;
 
 export type WhatsAppMessageHandler = (message: WhatsAppMessage) => Promise<void>;
 
+export interface WhatsAppHistoryBatchResult {
+  persisted: number;
+  skippedOld: number;
+  skippedDup: number;
+}
+
+export type WhatsAppHistoryMessagesHandler = (messages: WhatsAppGroupMessage[]) => Promise<WhatsAppHistoryBatchResult>;
+
 export interface PairingCallbacks {
   onQr: (qr: string) => Promise<void>;
   onConnected: (phoneNumber: string) => Promise<void>;
@@ -104,6 +112,7 @@ export class WhatsAppBot {
   private groupMetadataStore?: WhatsAppBotConfig["groupMetadataStore"];
   private sock: WASocket | null = null;
   private handler: WhatsAppMessageHandler | null = null;
+  private historyHandler: WhatsAppHistoryMessagesHandler | null = null;
   private recentlySent = new Set<string>();
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -128,6 +137,10 @@ export class WhatsAppBot {
 
   onMessage(handler: WhatsAppMessageHandler): void {
     this.handler = handler;
+  }
+
+  onHistoryMessages(handler: WhatsAppHistoryMessagesHandler): void {
+    this.historyHandler = handler;
   }
 
   /**
@@ -174,7 +187,7 @@ export class WhatsAppBot {
       },
       logger: this.logger as unknown as Parameters<typeof makeWASocket>[0]["logger"],
       printQRInTerminal: false,
-      syncFullHistory: false,
+      syncFullHistory: true,
       fireInitQueries: false,
       markOnlineOnConnect: false,
     });
@@ -195,6 +208,7 @@ export class WhatsAppBot {
           this.logger.info("WhatsApp connected after pairing");
           this.reconnectAttempt = 0;
           this.registerMessageHandler();
+          this.registerHistoryHandler();
           this.startWatchdog();
           void this.syncAllGroups();
           await callbacks.onConnected(this.phoneNumber ?? "unknown");
@@ -476,7 +490,7 @@ export class WhatsAppBot {
       },
       logger: this.logger as unknown as Parameters<typeof makeWASocket>[0]["logger"],
       printQRInTerminal: false,
-      syncFullHistory: false,
+      syncFullHistory: true,
       fireInitQueries: false,
       markOnlineOnConnect: false,
       cachedGroupMetadata: async (jid) => {
@@ -491,6 +505,7 @@ export class WhatsAppBot {
     socket.ev.on("creds.update", authState.saveCreds);
     this.registerConnectionHandler(socket, authState, socketGeneration);
     this.registerMessageHandler(socket, socketGeneration);
+    this.registerHistoryHandler(socket, socketGeneration);
     this.registerGroupEventHandlers(socket, socketGeneration);
     this.startWatchdog();
   }
@@ -541,6 +556,72 @@ export class WhatsAppBot {
           this.reconnectAttempt = nextAttempt;
         }
       }
+    });
+  }
+
+  private registerHistoryHandler(
+    socket: WASocket = this.sock as WASocket,
+    socketGeneration = this.activeSocketGeneration,
+  ): void {
+    socket.ev.on("messaging-history.set", async ({ messages }) => {
+      if (socketGeneration !== this.activeSocketGeneration || socket !== this.sock) {
+        return;
+      }
+
+      let skippedNontext = 0;
+      let skippedNonGroup = 0;
+      const groupMessages: WhatsAppGroupMessage[] = [];
+
+      for (const msg of messages) {
+        if (!msg.message) {
+          skippedNontext += 1;
+          continue;
+        }
+
+        const jid = msg.key.remoteJid;
+        if (!jid?.endsWith("@g.us")) {
+          skippedNonGroup += 1;
+          continue;
+        }
+
+        const messageType = getContentType(msg.message);
+        const text = extractText(msg);
+        const hasMedia = hasMediaContent(messageType);
+
+        if (!text && !hasMedia) {
+          skippedNontext += 1;
+          continue;
+        }
+
+        const groupMessage = await this.buildGroupMessage(msg, jid, text, messageType, hasMedia);
+        if (groupMessage) groupMessages.push(groupMessage);
+      }
+
+      let result: WhatsAppHistoryBatchResult = { persisted: 0, skippedOld: 0, skippedDup: 0 };
+      try {
+        if (groupMessages.length > 0 && this.historyHandler) {
+          result = await this.historyHandler(groupMessages);
+        }
+      } catch (err) {
+        this.logger.warn(
+          { err, total: messages.length, candidates: groupMessages.length, skippedNontext, skippedNonGroup },
+          "Failed to persist WhatsApp history batch",
+        );
+        return;
+      }
+
+      this.logger.info(
+        {
+          total: messages.length,
+          candidates: groupMessages.length,
+          persisted: result.persisted,
+          skippedOld: result.skippedOld,
+          skippedDup: result.skippedDup,
+          skippedNontext,
+          skippedNonGroup,
+        },
+        "WhatsApp history batch processed",
+      );
     });
   }
 
@@ -628,38 +709,53 @@ export class WhatsAppBot {
     messageType: string | undefined,
     hasMedia: boolean,
   ): Promise<void> {
-    const senderJid = msg.key?.participant;
-    if (!senderJid) return;
+    const groupMessage = await this.buildGroupMessage(msg, groupJid, text, messageType, hasMedia);
+    if (groupMessage && this.handler) {
+      this.lastMessageAt = Date.now();
+      await this.handler(groupMessage);
+    }
+  }
 
-    if (!msg.message) return;
+  /**
+   * Historical group sync keeps messages sent by the authenticated account
+   * because they are part of the group's context. If Baileys omits participant
+   * on those rows, the socket user id is the closest provider identity.
+   */
+  private async buildGroupMessage(
+    msg: proto.IWebMessageInfo,
+    groupJid: string,
+    text: string | null,
+    messageType: string | undefined,
+    hasMedia: boolean,
+  ): Promise<WhatsAppGroupMessage | null> {
+    const senderJid = msg.key?.participant ?? (msg.key?.fromMe ? this.sock?.user?.id : undefined);
+    if (!senderJid) return null;
+
+    if (!msg.message) return null;
     const contextInfo = extractContextInfo(msg.message);
     const isMentioned = this.isBotMentioned(contextInfo);
 
-    // Strip bot mention text from the message when explicitly mentioned
     let cleanText = text;
     if (cleanText && isMentioned && contextInfo?.mentionedJid?.length) {
       cleanText = stripBotMention(cleanText, this.sock?.user?.name);
     }
 
     const senderPhone = await this.resolveJidToPhone(senderJid);
+    const quotedMessage = extractQuotedMessage(contextInfo);
 
-    if (this.handler) {
-      const quotedMessage = extractQuotedMessage(contextInfo);
-      this.lastMessageAt = Date.now();
-      await this.handler({
-        type: "group",
-        text: cleanText ?? "",
-        jid: groupJid,
-        messageId: msg.key?.id ?? "",
-        pushName: msg.pushName ?? "Unknown",
-        rawMessage: msg,
-        mediaType: hasMedia ? (messageType ?? undefined) : undefined,
-        isMentioned,
-        senderJid,
-        senderPhone,
-        ...(quotedMessage ? { quotedMessage } : {}),
-      });
-    }
+    return {
+      type: "group",
+      text: cleanText ?? "",
+      jid: groupJid,
+      messageId: msg.key?.id ?? "",
+      pushName: msg.pushName ?? "Unknown",
+      rawMessage: msg,
+      mediaType: hasMedia ? (messageType ?? undefined) : undefined,
+      isMentioned,
+      senderJid,
+      senderPhone,
+      ...(quotedMessage ? { quotedMessage } : {}),
+    };
   }
 
   /**

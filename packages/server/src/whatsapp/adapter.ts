@@ -57,6 +57,7 @@ type ConversationRepository = ReturnType<typeof createConversationRepository>;
 
 const INLINE_BACKLOG_LIMIT = 10;
 const WHATSAPP_AGENT_ERROR_MESSAGE = "Something went wrong, try again.";
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
@@ -267,13 +268,15 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     senderName: string;
     senderUserId?: string | null;
     addressedToSketch: boolean;
+    receivedAt?: string;
+    skipControlMessages?: boolean;
   }) => {
     const conversation = await getOrCreateConversationForMessage(
       params.message,
       params.message.kind === "group" ? params.message.target.groupId : params.senderName,
     );
 
-    if (isConversationControlMessage(params.message.text)) {
+    if ((params.skipControlMessages ?? true) && isConversationControlMessage(params.message.text)) {
       return { conversation, captured: null, attachments: [] as Attachment[], inserted: false, omitted: true };
     }
 
@@ -290,6 +293,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       providerParentMessageId: params.message.quotedMessage?.providerMessageId ?? null,
       isThreadReply: Boolean(params.message.quotedMessage?.providerMessageId),
       providerTimestamp: params.message.providerTimestamp,
+      receivedAt: params.receivedAt,
     });
 
     return { conversation, captured: captured.row, attachments, inserted: captured.inserted, omitted: false };
@@ -351,6 +355,48 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
 
   const buildMissingQuotedContextMessage = () =>
     "I can see you're replying to a message, but I couldn't read the replied-to content. Please resend the issue text or quote a text message and I'll act on that.";
+
+  whatsapp.onHistoryMessages(async (messages) => {
+    const result = { persisted: 0, skippedOld: 0, skippedDup: 0 };
+    const cutoffMs = Date.now() - config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS;
+
+    for (const message of messages) {
+      if (message.kind !== "group") continue;
+
+      const receivedAt = message.providerTimestamp;
+      const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+      if (!receivedAt || !Number.isFinite(receivedAtMs) || receivedAtMs < cutoffMs) {
+        result.skippedOld += 1;
+        continue;
+      }
+
+      const groupJid = message.target.groupId;
+      const user = message.senderPhoneE164
+        ? await repos.users.findByWhatsappNumber(message.senderPhoneE164)
+        : undefined;
+      const existingGroup = await repos.whatsappGroups.getByJid(groupJid);
+      const boundAgent = existingGroup?.agent_user_id ? await repos.users.findById(existingGroup.agent_user_id) : null;
+      const workspaceDir = boundAgent
+        ? await ensureAgentSubWorkspace(config, boundAgent.id, `whatsappgroup-${groupJid}`)
+        : await ensureGroupWorkspace(config, groupJid);
+      const capture = await captureUserMessage({
+        message,
+        workspaceDir,
+        senderName: user?.name ?? message.senderName,
+        senderUserId: user?.id ?? null,
+        addressedToSketch: false,
+        receivedAt,
+        skipControlMessages: false,
+      });
+      if (capture.inserted) {
+        result.persisted += 1;
+      } else {
+        result.skippedDup += 1;
+      }
+    }
+
+    return result;
+  });
 
   whatsapp.onMessage(async (message) => {
     if (message.kind === "dm") {

@@ -35,6 +35,7 @@ function makeUser(overrides: Record<string, unknown> = {}) {
 
 function createMockWhatsApp(connected = true) {
   const handler = { fn: null as unknown };
+  const historyHandler = { fn: null as unknown };
   const targetId = (target: WhatsAppTarget | string) =>
     typeof target === "string"
       ? target
@@ -85,6 +86,9 @@ function createMockWhatsApp(connected = true) {
       onMessage: vi.fn().mockImplementation((fn) => {
         handler.fn = fn;
       }),
+      onHistoryMessages: vi.fn().mockImplementation((fn) => {
+        historyHandler.fn = fn;
+      }),
       sendText,
       editText: vi.fn(),
       sendFile,
@@ -114,6 +118,11 @@ function createMockWhatsApp(connected = true) {
     },
     getHandler: () => async (msg: unknown) => {
       await (handler.fn as (message: WhatsAppInboundMessage) => Promise<void>)(normalizeInboundTestMessage(msg));
+    },
+    getHistoryHandler: () => async (messages: unknown[]) => {
+      return (historyHandler.fn as (messages: WhatsAppInboundMessage[]) => Promise<unknown>)(
+        messages.map(normalizeInboundTestMessage),
+      );
     },
   };
 }
@@ -1286,6 +1295,87 @@ describe("whatsapp/adapter", () => {
         expect.objectContaining({ text: "random chat", addressedToSketch: false }),
       );
       expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
+    it("persists recent group history with provider received_at and dedupes reruns", async () => {
+      const deps = makeDeps();
+      const insertMessage = vi.mocked(deps.repos.conversations.insertMessage);
+      const originalInsert = insertMessage.getMockImplementation();
+      if (!originalInsert) throw new Error("expected insertMessage mock");
+
+      const persistedRows: Array<{ providerMessageId: string; receivedAt: string; addressedToSketch: boolean }> = [];
+      const persistedByKey = new Map<string, (typeof persistedRows)[number]>();
+      insertMessage.mockImplementation(async (data) => {
+        const dedupeKey = [
+          data.conversationId,
+          data.providerMessageId,
+          data.senderJid ?? "",
+          data.isBot ? "bot" : "user",
+        ].join(":");
+        const existing = persistedByKey.get(dedupeKey);
+        if (existing) return { row: existing as never, inserted: false };
+
+        const result = await originalInsert(data);
+        const row = result.row as (typeof persistedRows)[number];
+        persistedRows.push(row);
+        persistedByKey.set(dedupeKey, row);
+        return result;
+      });
+
+      const recentTimestamp = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const oldTimestamp = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+      const batch: WhatsAppInboundMessage[] = [
+        {
+          kind: "group",
+          providerId: "baileys",
+          providerMessageId: "history-recent",
+          providerConversationId: "group@g.us",
+          canonicalConversationId: "group:group@g.us",
+          providerTimestamp: recentTimestamp,
+          senderName: "Bob",
+          senderProviderId: "5555@s.whatsapp.net",
+          senderPhoneE164: "+5555",
+          target: { kind: "group", groupId: "group@g.us" },
+          text: "recent context",
+          isMentioned: false,
+        },
+        {
+          kind: "group",
+          providerId: "baileys",
+          providerMessageId: "history-old",
+          providerConversationId: "group@g.us",
+          canonicalConversationId: "group:group@g.us",
+          providerTimestamp: oldTimestamp,
+          senderName: "Carol",
+          senderProviderId: "6666@s.whatsapp.net",
+          senderPhoneE164: "+6666",
+          target: { kind: "group", groupId: "group@g.us" },
+          text: "old context",
+          isMentioned: false,
+        },
+      ];
+
+      const { mock, getHistoryHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const historyHandler = getHistoryHandler();
+
+      await expect(historyHandler(batch)).resolves.toEqual({ persisted: 1, skippedOld: 1, skippedDup: 0 });
+      await expect(historyHandler(batch)).resolves.toEqual({ persisted: 0, skippedOld: 1, skippedDup: 1 });
+
+      expect(persistedRows).toHaveLength(1);
+      expect(persistedRows[0]).toEqual(
+        expect.objectContaining({
+          providerMessageId: "history-recent",
+          receivedAt: recentTimestamp,
+          addressedToSketch: false,
+        }),
+      );
+      expect(deps.repos.conversations.getOrCreate).toHaveBeenCalledWith(
+        { platform: "whatsapp", kind: "group", providerConversationId: "group@g.us" },
+        "group@g.us",
+      );
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mock.sendText).not.toHaveBeenCalled();
     });
 
     it("uses user name from DB when available for stored passive group messages", async () => {

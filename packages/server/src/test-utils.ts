@@ -162,6 +162,7 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     SLACK_THREAD_HISTORY_LIMIT: 50,
     WHATSAPP_DM_PROVIDER: "baileys",
     WHATSAPP_GROUP_PROVIDER: "baileys",
+    WHATSAPP_HISTORY_LOOKBACK_DAYS: 30,
     WHATSAPP_WINDOW_KEEPALIVE_ENABLED: false,
     MAX_CONCURRENT_AGENT_RUNS: 4,
     MAX_FILE_SIZE_MB: 20,
