@@ -20,8 +20,8 @@ export function AgentRoster() {
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <header className="mb-6">
-        <h1 className="text-[22px] font-semibold tracking-tight text-foreground">Agents</h1>
-        <p className="mt-1 text-[13.5px] text-muted-foreground">
+        <h1 className="text-[22px] font-medium text-foreground">Agents</h1>
+        <p className="mt-1 text-[13px] text-muted-foreground">
           Prebuilt agents that run in the background on their own. Switch on what you need and tune it to your taste.
         </p>
       </header>

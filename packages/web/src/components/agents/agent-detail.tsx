@@ -28,6 +28,7 @@ import {
   WhatsappLogoIcon,
   XIcon,
 } from "@phosphor-icons/react";
+import { Badge } from "@sketch/ui/components/badge";
 import {
   Sheet,
   SheetContent,
@@ -37,6 +38,8 @@ import {
   SheetTitle,
 } from "@sketch/ui/components/sheet";
 import { Switch } from "@sketch/ui/components/switch";
+import { TabButton } from "@sketch/ui/components/tab-button";
+import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
@@ -131,7 +134,7 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
     <Shell>
       <header className="mt-5 flex items-start gap-4">
         <div className="min-w-0 flex-1">
-          <h1 className="text-[19px] font-semibold text-foreground">{agent.title}</h1>
+          <h1 className="text-[22px] font-medium text-foreground">{agent.title}</h1>
           <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">{agent.tagline}</p>
         </div>
         <span className="flex shrink-0 items-center gap-2 text-[12px] font-medium text-muted-foreground">
@@ -146,16 +149,12 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
         </span>
       </header>
 
-      <div className="mt-6 flex items-center gap-1 border-b border-border/60">
-        <TabButton active={tab === "outputs"} onClick={() => setTab("outputs")}>
-          Outputs
-        </TabButton>
-        <TabButton active={tab === "config"} onClick={() => setTab("config")}>
-          Config
-        </TabButton>
+      <div className="mt-6 flex items-center gap-6 border-b border-border">
+        <TabButton label="Outputs" isActive={tab === "outputs"} onClick={() => setTab("outputs")} />
+        <TabButton label="Config" isActive={tab === "config"} onClick={() => setTab("config")} />
       </div>
 
-      <div className="pt-5">
+      <TabContentContainer className="pt-5">
         {tab === "outputs" ? (
           <OutputsTab
             data={data}
@@ -177,7 +176,7 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
             onChanged={invalidate}
           />
         )}
-      </div>
+      </TabContentContainer>
 
       <EditDrawer
         field={editing}
@@ -466,55 +465,85 @@ function SummariserConfig({
   });
 
   return (
-    <>
-      <div className="rounded-xl border-[0.5px] border-border bg-card px-4">
-        <Row label="What it does">
-          <p className="text-[12.5px] leading-relaxed text-foreground/85">{agent.description}</p>
-        </Row>
+    <div className="space-y-6">
+      <div className="rounded-lg border-[0.5px] border-border bg-card p-4 dark:bg-[#111110]">
+        <p className="font-mono text-[10px] uppercase tracking-[0.07em] text-muted-foreground">What it does</p>
+        <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/85">{agent.description}</p>
       </div>
 
-      <div className="mb-3 mt-7 flex items-center justify-between border-b border-border/60 pb-2">
-        <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Summarisers</span>
-        <button
-          type="button"
-          onClick={() => onEditSummariser(null)}
-          className="inline-flex items-center gap-1.5 rounded-full border-[0.5px] border-border px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-muted/50"
-        >
-          <PlusIcon size={13} weight="bold" aria-hidden />
-          New summariser
-        </button>
-      </div>
-
-      {agent.routes.length === 0 ? (
-        <EmptyCard>No summarisers yet. Add one to start delivering digests.</EmptyCard>
-      ) : (
-        <div className="overflow-hidden rounded-xl border-[0.5px] border-border">
-          <div className="flex items-center gap-3 border-b-[0.5px] border-border bg-muted/20 px-4 py-2 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground/70">
-            <span className="flex-[2]">Input</span>
-            <span className="flex-[2]">Delivers to</span>
-            <span className="w-14">Runs</span>
-            <span className="hidden flex-[2] sm:block">Sections</span>
-            <span className="w-16 text-right">&nbsp;</span>
+      <div className="overflow-hidden rounded-lg border-[0.5px] border-border bg-card">
+        <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+          <div className="flex items-baseline gap-2">
+            <span className="font-mono text-[11px] uppercase tracking-[0.07em] text-muted-foreground">Summarisers</span>
+            <span className="font-mono text-[10px] text-muted-foreground/60">
+              {agent.routes.length}
+              {maxSources > 0 ? ` · limit ${maxSources} inputs` : ""}
+            </span>
           </div>
-          {agent.routes.map((route) => (
-            <SummariserRow
-              key={route.id}
-              agent={agent}
-              route={route}
-              lookup={lookup}
-              busy={save.isPending}
-              onEdit={() => onEditSummariser(route)}
-              onToggle={(enabled) => save.mutate(agent.routes.map((r) => (r.id === route.id ? { ...r, enabled } : r)))}
-              onRemove={() => save.mutate(agent.routes.filter((r) => r.id !== route.id))}
-            />
-          ))}
+          <button
+            type="button"
+            onClick={() => onEditSummariser(null)}
+            className="inline-flex items-center gap-1.5 rounded-md border-[0.5px] border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent dark:bg-[#111110] dark:hover:bg-[#1C1C1A]"
+          >
+            <PlusIcon size={12} weight="bold" aria-hidden />
+            New summariser
+          </button>
         </div>
-      )}
-      <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">
-        {agent.routes.length} {agent.routes.length === 1 ? "summariser" : "summarisers"}
-        {maxSources > 0 ? ` · limit ${maxSources} inputs` : ""}
-      </p>
-    </>
+
+        <table className="w-full text-[13px]">
+          <colgroup>
+            <col />
+            <col className="w-[150px]" />
+            <col className="w-[92px]" />
+            <col className="w-[170px]" />
+            <col className="w-[96px]" />
+          </colgroup>
+          <thead>
+            <tr className="border-b border-border text-left">
+              <th className="px-4 py-2.5 font-mono text-[10px] font-normal uppercase tracking-[0.05em] text-muted-foreground">
+                Input
+              </th>
+              <th className="px-4 py-2.5 font-mono text-[10px] font-normal uppercase tracking-[0.05em] text-muted-foreground">
+                Delivers to
+              </th>
+              <th className="px-4 py-2.5 font-mono text-[10px] font-normal uppercase tracking-[0.05em] text-muted-foreground">
+                Runs
+              </th>
+              <th className="px-4 py-2.5 font-mono text-[10px] font-normal uppercase tracking-[0.05em] text-muted-foreground">
+                Sections
+              </th>
+              <th className="px-4 py-2.5 text-right font-mono text-[10px] font-normal uppercase tracking-[0.05em] text-muted-foreground">
+                &nbsp;
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {agent.routes.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="px-4 py-12 text-center text-[13px] text-muted-foreground">
+                  No summarisers yet. Add one to start delivering digests.
+                </td>
+              </tr>
+            ) : (
+              agent.routes.map((route) => (
+                <SummariserRow
+                  key={route.id}
+                  agent={agent}
+                  route={route}
+                  lookup={lookup}
+                  busy={save.isPending}
+                  onEdit={() => onEditSummariser(route)}
+                  onToggle={(enabled) =>
+                    save.mutate(agent.routes.map((r) => (r.id === route.id ? { ...r, enabled } : r)))
+                  }
+                  onRemove={() => save.mutate(agent.routes.filter((r) => r.id !== route.id))}
+                />
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -540,51 +569,63 @@ function SummariserRow({
   const combined = route.sources.length > 1;
 
   return (
-    <div
+    <tr
       className={cn(
-        "flex items-center gap-3 border-b-[0.5px] border-border px-4 py-3 last:border-0",
+        "border-b border-border transition-colors last:border-b-0 hover:bg-secondary/50 dark:hover:bg-muted/30",
         !route.enabled && "opacity-55",
       )}
     >
-      <button type="button" onClick={onEdit} className="flex min-w-0 flex-1 items-center gap-3 text-left">
-        <span className="flex min-w-0 flex-[2] items-center gap-1.5">
+      <td className="px-4 py-2.5">
+        <button type="button" onClick={onEdit} className="flex max-w-full items-center gap-2 text-left">
           {first?.platform === "slack" ? (
             <HashIcon size={14} aria-hidden className="shrink-0 text-muted-foreground" />
           ) : (
             <UsersThreeIcon size={14} aria-hidden className="shrink-0 text-muted-foreground" />
           )}
-          <span className="truncate text-[12.5px] font-medium text-foreground">{inputLabel}</span>
+          <span className="truncate font-medium text-foreground">{inputLabel}</span>
           {combined ? (
-            <span className="shrink-0 text-[11px] text-muted-foreground">+{route.sources.length - 1}</span>
+            <Badge variant="secondary" className="shrink-0 rounded-[4px] px-1.5 py-0 text-[9px]">
+              +{route.sources.length - 1}
+            </Badge>
           ) : null}
-        </span>
-        <span className="flex-[2] truncate text-[12px] text-muted-foreground">{deliversLabel(route)}</span>
-        <span className="w-14 shrink-0 text-[12px] text-muted-foreground">
-          {formatTime(route.schedule?.hour ?? agent.scheduleHour, route.schedule?.minute ?? agent.scheduleMinute)}
-        </span>
-        <span className="hidden flex-[2] truncate text-[12px] text-muted-foreground sm:block">
-          {sectionsLabel(route, agent)}
-        </span>
-      </button>
-      <div className="flex w-16 shrink-0 items-center justify-end gap-2.5">
-        <Switch
-          checked={route.enabled}
-          disabled={busy}
-          onCheckedChange={onToggle}
-          aria-label={`${inputLabel} active`}
-          className="scale-90 data-[state=checked]:bg-emerald-500"
-        />
-        <button
-          type="button"
-          onClick={onRemove}
-          disabled={busy}
-          aria-label={`Remove ${inputLabel}`}
-          className="text-muted-foreground/50 transition-colors hover:text-foreground disabled:opacity-40"
-        >
-          <XIcon size={13} weight="bold" aria-hidden />
+          {!route.enabled ? (
+            <Badge
+              variant="secondary"
+              className="shrink-0 rounded-[4px] bg-muted px-1.5 py-0 text-[9px] text-muted-foreground"
+            >
+              Paused
+            </Badge>
+          ) : null}
         </button>
-      </div>
-    </div>
+      </td>
+      <td className="px-4 py-2.5 text-muted-foreground">{deliversLabel(route)}</td>
+      <td className="px-4 py-2.5 tabular-nums text-muted-foreground">
+        {formatTime(route.schedule?.hour ?? agent.scheduleHour, route.schedule?.minute ?? agent.scheduleMinute)}
+      </td>
+      <td className="px-4 py-2.5 text-muted-foreground">
+        <span className="block truncate">{sectionsLabel(route, agent)}</span>
+      </td>
+      <td className="px-4 py-2.5">
+        <div className="flex items-center justify-end gap-2.5">
+          <Switch
+            checked={route.enabled}
+            disabled={busy}
+            onCheckedChange={onToggle}
+            aria-label={`${inputLabel} active`}
+            className="scale-90 data-[state=checked]:bg-emerald-500"
+          />
+          <button
+            type="button"
+            onClick={onRemove}
+            disabled={busy}
+            aria-label={`Remove ${inputLabel}`}
+            className="text-muted-foreground/50 transition-colors hover:text-foreground disabled:opacity-40"
+          >
+            <XIcon size={13} weight="bold" aria-hidden />
+          </button>
+        </div>
+      </td>
+    </tr>
   );
 }
 
@@ -642,21 +683,6 @@ function Row({ label, children, onEdit }: { label: string; children: React.React
   return (
     <button type="button" onClick={onEdit} className={className}>
       {inner}
-    </button>
-  );
-}
-
-function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors",
-        active ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
-      )}
-    >
-      {children}
     </button>
   );
 }
