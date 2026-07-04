@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.42.1] -- 2026-07-04
+
+- Fix WhatsApp proactive delivery for scheduled tasks, workflows, and agent outputs on managed tenants whose delivery target was stored as a Wati conversation id: the sender now falls back to the recipient's registered phone number (preserving the provider conversation id), the target parser understands `wati:+<phone>` ids and no longer fabricates invalid phone numbers from opaque ids, and newly created tasks store durable `dm:+<phone>` targets.
+
 ## [0.42.0] -- 2026-07-03
 
 - WhatsApp proactive delivery is now session-first: reminders, workflow outputs, and agent deliveries send full multi-line content as a normal message when the user was active in the last 23 hours. Outside that window the output is parked in the user's inbox and a short approved nudge template is sent instead; the agent delivers the parked output on the user's next reply, and multiple pending outputs produce a single nudge.
