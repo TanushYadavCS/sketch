@@ -679,6 +679,50 @@ describe("AgentRunService", () => {
     expect(userMessage).toContain('"hotFallbackEntities": []');
   });
 
+  it("passes saved non-route Daily Brief section and volume preferences into the runtime message", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const contexts: Record<string, Record<string, unknown>> = {};
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      const runtimeContext = runtimeContextFromUserMessage(params.userMessage);
+      contexts[String(runtimeContext.outputId)] = runtimeContext;
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Daily Brief", summary: "Summary" },
+        rawPayload: {
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Daily Brief", summary: "Summary" },
+          items: [],
+        },
+        items: [],
+      });
+      return successfulRunResult();
+    });
+    const service = createService(db, tasks, { runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"] });
+
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, user.id, {
+      sections: { customer_updates: false, active_projects: false },
+      maxItemsPerSection: 2,
+      focus: "  Prioritize urgent work  ",
+    });
+    const [row] = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    await tasks[0]();
+
+    expect(contexts[row.id].sections).toEqual(["meetings", "todos"]);
+    expect(contexts[row.id].maxItemsPerSection).toBe(2);
+    expect(contexts[row.id].focus).toBe("Prioritize urgent work");
+  });
+
   it("suppresses recent failed scheduled attempts during the schedule window", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
@@ -1645,11 +1689,48 @@ describe("AgentRunService", () => {
       destination: { kind: "off" },
       enabled: true,
     };
+    const reversed: AgentRoute = { ...combined, sources: ["slack:channel:C_B", "slack:channel:C_A"] };
 
     expect(scopeKeyForRoute(single, [sourceA])).toBe("slack:channel:C_A");
-    expect(scopeKeyForRoute(combined, [sourceA, sourceB])).toBe(scopeKeyForRoute(combined, [sourceA, sourceB]));
-    expect(scopeKeyForRoute(combined, [sourceB, sourceA])).toBe(scopeKeyForRoute(combined, [sourceA, sourceB]));
+    expect(scopeKeyForRoute(reversed, [sourceB, sourceA])).toBe(scopeKeyForRoute(combined, [sourceA, sourceB]));
     expect(scopeKeyForRoute(combined, [sourceA, sourceB])).toMatch(/^route:[a-f0-9]{12}$/);
+  });
+
+  it("rejects duplicate combined routes regardless of source order", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const sourceA = slackSource("C_A", "alpha");
+    const sourceB = slackSource("C_B", "beta");
+    const user = await users.create({ name: "Agent User", email: "agent@example.com", slackUserId: "U_AGENT" });
+    const service = createService(
+      db,
+      tasks,
+      allowSlackDelivery([
+        { id: "C_A", name: "alpha" },
+        { id: "C_B", name: "beta" },
+      ]),
+    );
+
+    await expect(
+      service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+        enabled: true,
+        sources: [sourceA, sourceB],
+        routes: [
+          {
+            ...sourceRoute(sourceA),
+            id: "alpha-beta",
+            sources: ["slack:channel:C_A", "slack:channel:C_B"],
+            destination: { kind: "off" },
+          },
+          {
+            ...sourceRoute(sourceB),
+            id: "beta-alpha",
+            sources: ["slack:channel:C_B", "slack:channel:C_A"],
+            destination: { kind: "off" },
+          },
+        ],
+      }),
+    ).rejects.toThrow("Routes must not duplicate the same output scope");
   });
 
   it("synthesizes legacy deliveryModel-only configs into equivalent routes", async () => {

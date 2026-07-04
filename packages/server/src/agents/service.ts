@@ -182,14 +182,22 @@ function stableRouteHash(parts: readonly string[]): string {
   return createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 12);
 }
 
-function routeIdForSources(sources: readonly AgentSourceKey[]): string {
+function canonicalRouteSources(sources: readonly AgentSourceKey[]): AgentSourceKey[] {
+  return [...sources].sort();
+}
+
+function routeScopeKeyForSources(sources: readonly AgentSourceKey[]): string {
   if (sources.length === 1) return sources[0];
-  return `route:${stableRouteHash(sources)}`;
+  return `route:${stableRouteHash(canonicalRouteSources(sources))}`;
+}
+
+function routeIdForSources(sources: readonly AgentSourceKey[]): string {
+  return routeScopeKeyForSources(sources);
 }
 
 export function scopeKeyForRoute(route: Pick<AgentRoute, "sources">, resolvedSources: AgentSourceConfig[]): string {
   if (route.sources.length === 1) return sourceKeyForTarget(resolvedSources[0] ?? parseSourceKey(route.sources[0]));
-  return `route:${stableRouteHash(route.sources)}`;
+  return routeScopeKeyForSources(route.sources);
 }
 
 export function labelForRoute(route: Pick<AgentRoute, "sources">, resolvedSources: AgentSourceConfig[]): string | null {
@@ -444,8 +452,24 @@ function enabledSectionsForRoute(def: AgentDefinition, route: AgentRoute | undef
   return sections;
 }
 
+function enabledSectionsForScope(
+  def: AgentDefinition,
+  config: Pick<ResolvedAgentConfig, "enabledSections">,
+  route: AgentRoute | undefined,
+): Record<string, boolean> {
+  return route ? enabledSectionsForRoute(def, route) : config.enabledSections;
+}
+
 function maxItemsPerSectionForRoute(def: AgentDefinition, route: AgentRoute | undefined): number {
   return route?.maxItemsPerSection ?? def.defaults.maxItemsPerSection;
+}
+
+function maxItemsPerSectionForScope(
+  def: AgentDefinition,
+  config: Pick<ResolvedAgentConfig, "maxItemsPerSection">,
+  route: AgentRoute | undefined,
+): number {
+  return route ? maxItemsPerSectionForRoute(def, route) : config.maxItemsPerSection;
 }
 
 function whatsappNumberToJid(whatsappNumber: string): string {
@@ -831,7 +855,7 @@ export class AgentRunService {
       ) {
         throw new AgentSourceTargetError("Route schedule must be a valid hour and minute");
       }
-      const scopeKey = sources.length === 1 ? sources[0] : `route:${stableRouteHash(sources)}`;
+      const scopeKey = routeScopeKeyForSources(sources);
       if (seenScopeKeys.has(scopeKey)) {
         throw new AgentSourceTargetError("Routes must not duplicate the same output scope");
       }
@@ -1455,8 +1479,8 @@ export class AgentRunService {
       await this.repo.markFailed(outputId, "Generation route was removed.");
       return;
     }
-    const routeSections = enabledSectionsForRoute(def, scope.route);
-    const routeMaxItemsPerSection = maxItemsPerSectionForRoute(def, scope.route);
+    const routeSections = enabledSectionsForScope(def, config, scope.route);
+    const routeMaxItemsPerSection = maxItemsPerSectionForScope(def, config, scope.route);
     const routeFocus = scope.route ? scope.route.focus : config.focus;
     const enabledSections = def.sections.filter((s) => routeSections[s.key]).map((s) => s.key);
 
