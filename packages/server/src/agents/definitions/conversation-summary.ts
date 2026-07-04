@@ -1,8 +1,9 @@
 import type { Kysely } from "kysely";
-import type {
-  AgentOutputItemInput,
-  AgentSourceConfig,
-  AgentStructuredPayload,
+import {
+  type AgentOutputItemInput,
+  type AgentSourceConfig,
+  type AgentStructuredPayload,
+  createAgentOutputRepository,
 } from "../../db/repositories/agent-outputs";
 import { type StoredConversationMessage, createConversationRepository } from "../../db/repositories/conversations";
 import type { DB } from "../../db/schema";
@@ -54,16 +55,23 @@ function fallbackWindowStart(now: Date): string {
   return new Date(now.getTime() - CONVERSATION_SUMMARY_FIRST_RUN_LOOKBACK_HOURS * 60 * 60 * 1000).toISOString();
 }
 
-async function findLatestCompletedOutput(db: Kysely<DB>, userId: string): Promise<LatestOutputRow | undefined> {
-  return db
-    .selectFrom("agent_outputs")
-    .select(["id", "generated_at", "raw_payload_json", "updated_at"])
-    .where("agent_key", "=", CONVERSATION_SUMMARY_AGENT_KEY)
-    .where("user_id", "=", userId)
-    .where("status", "=", "completed")
-    .orderBy("generated_at", "desc")
-    .orderBy("id", "desc")
-    .executeTakeFirst();
+async function findLatestCompletedOutput(
+  db: Kysely<DB>,
+  userId: string,
+  sourceKey: string,
+): Promise<LatestOutputRow | undefined> {
+  const latest = await createAgentOutputRepository(db).findLatestCompletedForScope(
+    CONVERSATION_SUMMARY_AGENT_KEY,
+    userId,
+    sourceKey,
+  );
+  if (!latest) return undefined;
+  return {
+    id: latest.output.id,
+    generated_at: latest.output.generated_at,
+    raw_payload_json: latest.output.raw_payload_json,
+    updated_at: latest.output.updated_at,
+  };
 }
 
 function summaryWindowEndFromRawPayload(rawPayloadJson: string | null): string | null {
@@ -127,7 +135,11 @@ export async function buildConversationSummaryRuntimeContext(
   params: AgentRuntimeContextParams,
 ): Promise<Record<string, unknown>> {
   const sources = params.agentConfig?.sources ?? [];
-  const previousOutput = await findLatestCompletedOutput(params.db, params.user.id);
+  const previousOutput = await findLatestCompletedOutput(
+    params.db,
+    params.user.id,
+    params.agentConfig?.sourceKey ?? "",
+  );
   const windowEnd = params.now.toISOString();
   const windowStart = previousOutputWatermark(previousOutput, params.now);
   const conversations = createConversationRepository(params.db);

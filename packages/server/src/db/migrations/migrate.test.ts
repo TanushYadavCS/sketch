@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 114;
+const EXPECTED_MIGRATION_COUNT = 115;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -170,6 +170,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[111]).toBe("116-connector-credential-source");
     expect(names[112]).toBe("117-conversation-message-window-index");
     expect(names[113]).toBe("118-whatsapp-window-keepalives");
+    expect(names[114]).toBe("119-agent-outputs-source-scope");
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -566,7 +567,8 @@ describe("runMigrations — incremental upgrade", () => {
         '115-whatsapp-template-mappings-and-provider-events',
         '116-connector-credential-source',
         '117-conversation-message-window-index',
-        '118-whatsapp-window-keepalives'
+        '118-whatsapp-window-keepalives',
+        '119-agent-outputs-source-scope'
       )
     `.execute(db);
     await sql`DROP TABLE agent_output_deliveries`.execute(db);
@@ -591,7 +593,8 @@ describe("runMigrations — incremental upgrade", () => {
         '115-whatsapp-template-mappings-and-provider-events',
         '116-connector-credential-source',
         '117-conversation-message-window-index',
-        '118-whatsapp-window-keepalives'
+        '118-whatsapp-window-keepalives',
+        '119-agent-outputs-source-scope'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -608,6 +611,7 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "116-connector-credential-source" },
       { name: "117-conversation-message-window-index" },
       { name: "118-whatsapp-window-keepalives" },
+      { name: "119-agent-outputs-source-scope" },
     ]);
   });
 });

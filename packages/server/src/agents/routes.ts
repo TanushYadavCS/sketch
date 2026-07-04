@@ -3,7 +3,9 @@ import type { Kysely } from "kysely";
 import type {
   AgentDeliveryConfig,
   AgentDeliveryMention,
+  AgentDeliveryModel,
   AgentDeliveryPlatform,
+  AgentPerSourceDelivery,
   AgentSourceConfig,
 } from "../db/repositories/agent-outputs";
 import type { DB } from "../db/schema";
@@ -38,6 +40,10 @@ function toBriefShape(output: AgentOutputApi | null) {
       active_projects: output.sections.active_projects ?? [],
     },
   };
+}
+
+function toGenerationShape(row: { id: string; status: string; output_date: string; source_key: string }) {
+  return { id: row.id, sourceKey: row.source_key, status: row.status, outputDate: row.output_date };
 }
 
 /**
@@ -89,12 +95,13 @@ export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>) {
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
     const body = (await c.req.json().catch(() => ({}))) as { briefDate?: unknown };
     const outputDate = typeof body.briefDate === "string" && body.briefDate.trim() ? body.briefDate.trim() : undefined;
-    const row = await service.requestGenerationForUser({
+    const rows = await service.requestGenerationForUser({
       agentKey: DAILY_BRIEF_AGENT_KEY,
       userId,
       outputDate,
       triggerType: "manual",
     });
+    const row = rows[0] ?? null;
     return c.json({ generation: row ? { id: row.id, status: row.status, briefDate: row.output_date } : null }, 202);
   });
 
@@ -167,6 +174,54 @@ function parseDeliveryConfig(value: unknown): AgentDeliveryConfig | null | undef
   };
 }
 
+function parseRequiredDeliveryConfig(value: unknown, path: string): AgentDeliveryConfig {
+  const parsed = parseDeliveryConfig(value);
+  if (!parsed) throw new ConfigPatchError(`${path} must be an enabled delivery object`);
+  return parsed;
+}
+
+function parsePerSourceDelivery(value: unknown): AgentPerSourceDelivery {
+  if (!value || typeof value !== "object")
+    throw new ConfigPatchError("deliveryModel.perSource route must be an object");
+  const raw = value as Record<string, unknown>;
+  if (raw.kind === "self" || raw.kind === "off") return { kind: raw.kind };
+  throw new ConfigPatchError("deliveryModel.perSource route kind must be self or off");
+}
+
+function parseDeliveryModel(value: unknown): AgentDeliveryModel | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ConfigPatchError("deliveryModel must be an object");
+  }
+  const raw = value as Record<string, unknown>;
+  if (raw.mode === "combined") {
+    const combined = parseRequiredDeliveryConfig(raw.combined, "deliveryModel.combined");
+    const ackNonDm = (raw.combined as Record<string, unknown>).ackNonDm;
+    if (ackNonDm !== undefined && ackNonDm !== true) {
+      throw new ConfigPatchError("deliveryModel.combined.ackNonDm must be true when present");
+    }
+    return {
+      mode: "combined",
+      combined: {
+        ...combined,
+        ...(ackNonDm === true ? { ackNonDm: true as const } : {}),
+      },
+    };
+  }
+
+  if (raw.mode !== "per_source") throw new ConfigPatchError("deliveryModel.mode must be per_source or combined");
+  const defaultRoute = raw.defaultRoute === "self" ? "self" : raw.defaultRoute === "off" ? "off" : null;
+  if (!defaultRoute) throw new ConfigPatchError("deliveryModel.defaultRoute must be self or off");
+  if (!raw.perSource || typeof raw.perSource !== "object" || Array.isArray(raw.perSource)) {
+    throw new ConfigPatchError("deliveryModel.perSource must be an object");
+  }
+  const perSource: Record<string, AgentPerSourceDelivery> = {};
+  for (const [key, route] of Object.entries(raw.perSource as Record<string, unknown>)) {
+    perSource[key] = parsePerSourceDelivery(route);
+  }
+  return { mode: "per_source", defaultRoute, perSource, combined: null };
+}
+
 function parseSourceConfigs(value: unknown): AgentSourceConfig[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) throw new ConfigPatchError("sources must be an array");
@@ -203,6 +258,7 @@ function parseConfigPatch(body: Record<string, unknown>) {
     sections?: Record<string, boolean>;
     focus?: string | null;
     delivery?: AgentDeliveryConfig | null;
+    deliveryModel?: AgentDeliveryModel;
     sources?: AgentSourceConfig[];
   } = {};
   if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
@@ -227,6 +283,8 @@ function parseConfigPatch(body: Record<string, unknown>) {
   }
   const delivery = parseDeliveryConfig(body.delivery);
   if (delivery !== undefined) patch.delivery = delivery;
+  const deliveryModel = parseDeliveryModel(body.deliveryModel);
+  if (deliveryModel !== undefined) patch.deliveryModel = deliveryModel;
   const sources = parseSourceConfigs(body.sources);
   if (sources !== undefined) patch.sources = sources;
   return patch;
@@ -266,9 +324,6 @@ export function agentRoutes(service: AgentRunService) {
     let agent: Awaited<ReturnType<AgentRunService["updateConfigForUser"]>>;
     try {
       patch = parseConfigPatch(body);
-      if (patch.delivery !== undefined) {
-        patch.delivery = await service.resolveDeliveryConfigForUser(userId, patch.delivery);
-      }
       agent = await service.updateConfigForUser(agentKey, userId, patch);
     } catch (err) {
       if (
@@ -316,8 +371,9 @@ export function agentRoutes(service: AgentRunService) {
     if (!service.listDefinitions().some((def) => def.key === agentKey)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
     }
-    const row = await service.requestGenerationForUser({ agentKey, userId, triggerType: "manual" });
-    return c.json({ generation: row ? { id: row.id, status: row.status, outputDate: row.output_date } : null }, 202);
+    const rows = await service.requestGenerationForUser({ agentKey, userId, triggerType: "manual" });
+    const generations = rows.map(toGenerationShape);
+    return c.json({ generation: generations[0] ?? null, generations }, 202);
   });
 
   return routes;

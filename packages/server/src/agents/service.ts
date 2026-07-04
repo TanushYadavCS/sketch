@@ -7,12 +7,15 @@ import type { AgentOutputWriter, WriteAgentOutputPayload } from "../agent/tools/
 import { ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
 import {
+  type AgentCombinedDeliveryConfig,
   type AgentDeliveryConfig,
   type AgentDeliveryMention,
+  type AgentDeliveryModel,
   type AgentMasthead,
   type AgentOutputItemInput,
   type AgentOutputRow,
   type AgentOutputTriggerType,
+  type AgentPerSourceDelivery,
   type AgentSourceConfig,
   type AgentUserPrefs,
   createAgentOutputRepository,
@@ -25,6 +28,7 @@ import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
 import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { getAgentDefinition, listAgentDefinitions, requireAgentDefinition } from "./registry";
 import type { AgentApiItem, AgentDefinition, AgentSourceConfigDef } from "./types";
@@ -33,6 +37,12 @@ const RUNNING_STALE_AFTER_MS = 30 * 60 * 1000;
 const SCHEDULED_FAILURE_SUPPRESS_AFTER_MS = 60 * 60 * 1000;
 
 type UserRow = Selectable<UsersTable>;
+
+export type AgentGenerationScope =
+  | { kind: "combined"; sourceKey: ""; sourceLabel: null }
+  | { kind: "source"; source: AgentSourceConfig; sourceKey: string; sourceLabel: string | null };
+
+type AgentExpectedScope = AgentGenerationScope & { sources: AgentSourceConfig[] };
 
 export interface AgentRunServiceDeps {
   db: Kysely<DB>;
@@ -70,6 +80,7 @@ export interface ResolvedAgentConfig {
   enabledSections: Record<string, boolean>;
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  deliveryModel: AgentDeliveryModel;
   sources: AgentSourceConfig[];
 }
 
@@ -92,6 +103,7 @@ export interface AgentConfigView {
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  deliveryModel: AgentDeliveryModel;
   sourceConfig: AgentSourceConfigDef | null;
   sources: AgentSourceConfig[];
   sections: AgentSectionView[];
@@ -104,6 +116,8 @@ export interface AgentOutputApi {
   outputDate: string;
   timezone: string;
   status: string;
+  sourceKey: string;
+  sourceLabel: string | null;
   generatedAt: string | null;
   masthead: AgentMasthead | null;
   sections: Record<string, AgentApiItem[]>;
@@ -123,6 +137,141 @@ export interface AgentSummaryView {
 
 export class AgentDeliveryTargetError extends Error {}
 export class AgentSourceTargetError extends Error {}
+
+function sourceKeyForTarget(target: Pick<AgentSourceConfig, "platform" | "targetType" | "targetId">): string {
+  return `${target.platform}:${target.targetType}:${target.targetId}`;
+}
+
+function deliveryKeyForTarget(target: Pick<AgentDeliveryConfig, "platform" | "targetType" | "targetId">): string {
+  return `${target.platform}:${target.targetType}:${target.targetId}`;
+}
+
+function isDmDelivery(delivery: AgentDeliveryConfig): boolean {
+  return delivery.targetType === "dm";
+}
+
+function sourceAsDelivery(source: AgentSourceConfig): AgentDeliveryConfig {
+  return {
+    enabled: true,
+    platform: source.platform,
+    targetType: source.targetType,
+    targetId: source.targetId,
+    label: source.label,
+  };
+}
+
+function routeFromDefault(defaultRoute: "self" | "off"): AgentPerSourceDelivery {
+  return defaultRoute === "self" ? { kind: "self" } : { kind: "off" };
+}
+
+function normalizePerSourceDelivery(value: unknown, defaultRoute: "self" | "off"): AgentPerSourceDelivery {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const kind = (value as Record<string, unknown>).kind;
+    if (kind === "self" || kind === "off") return { kind };
+  }
+  return routeFromDefault(defaultRoute);
+}
+
+function looksLikeDeliveryConfig(value: unknown): value is AgentDeliveryConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  return (
+    raw.enabled === true &&
+    (raw.platform === "slack" || raw.platform === "whatsapp") &&
+    (raw.targetType === "channel" || raw.targetType === "dm" || raw.targetType === "group") &&
+    typeof raw.targetId === "string" &&
+    raw.targetId.length > 0
+  );
+}
+
+function normalizeDeliveryModelFromValue(value: unknown, sources: AgentSourceConfig[]): AgentDeliveryModel | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.mode === "combined" && looksLikeDeliveryConfig(raw.combined)) {
+    const combined = raw.combined as AgentCombinedDeliveryConfig;
+    return {
+      mode: "combined",
+      combined: {
+        ...combined,
+        ...(combined.ackNonDm === true ? { ackNonDm: true as const } : {}),
+      },
+    };
+  }
+
+  if (raw.mode !== "per_source") return null;
+  const defaultRoute = raw.defaultRoute === "self" ? "self" : "off";
+  const rawPerSource =
+    raw.perSource && typeof raw.perSource === "object" && !Array.isArray(raw.perSource)
+      ? (raw.perSource as Record<string, unknown>)
+      : {};
+  const perSource: Record<string, AgentPerSourceDelivery> = {};
+  for (const source of sources) {
+    const key = sourceKeyForTarget(source);
+    perSource[key] = normalizePerSourceDelivery(rawPerSource[key], defaultRoute);
+  }
+  return { mode: "per_source", defaultRoute, perSource, combined: null };
+}
+
+function normalizeLegacyDeliveryModel(
+  delivery: AgentDeliveryConfig | null | undefined,
+  sources: AgentSourceConfig[],
+): AgentDeliveryModel {
+  const offModel = (): AgentDeliveryModel => ({
+    mode: "per_source",
+    defaultRoute: "off",
+    perSource: Object.fromEntries(sources.map((source) => [sourceKeyForTarget(source), { kind: "off" as const }])),
+    combined: null,
+  });
+  if (!delivery) return offModel();
+
+  const matchingSource = sources.find((source) => sourceKeyForTarget(source) === deliveryKeyForTarget(delivery));
+  if (matchingSource) {
+    return {
+      mode: "per_source",
+      defaultRoute: "off",
+      perSource: Object.fromEntries(
+        sources.map((source) => [
+          sourceKeyForTarget(source),
+          { kind: sourceKeyForTarget(source) === sourceKeyForTarget(matchingSource) ? "self" : "off" },
+        ]),
+      ) as Record<string, AgentPerSourceDelivery>,
+      combined: null,
+    };
+  }
+
+  return {
+    mode: "combined",
+    combined: {
+      ...delivery,
+      ...(!isDmDelivery(delivery) ? { ackNonDm: true as const } : {}),
+    },
+  };
+}
+
+function reconcileDeliveryModel(model: AgentDeliveryModel, sources: AgentSourceConfig[]): AgentDeliveryModel {
+  if (model.mode === "combined") return model;
+  const perSource: Record<string, AgentPerSourceDelivery> = {};
+  for (const source of sources) {
+    const key = sourceKeyForTarget(source);
+    perSource[key] = normalizePerSourceDelivery(model.perSource[key], model.defaultRoute);
+  }
+  return { ...model, perSource, combined: null };
+}
+
+function projectLegacyDelivery(model: AgentDeliveryModel, sources: AgentSourceConfig[]): AgentDeliveryConfig | null {
+  if (model.mode === "combined") {
+    const { ackNonDm: _ackNonDm, ...delivery } = model.combined;
+    return delivery;
+  }
+
+  const selfSources = sources.filter((source) => model.perSource[sourceKeyForTarget(source)]?.kind === "self");
+  return selfSources.length === 1 ? sourceAsDelivery(selfSources[0]) : null;
+}
+
+function perSourceDeliveryFor(model: AgentDeliveryModel, sourceKey: string): AgentPerSourceDelivery | null {
+  if (model.mode !== "per_source") return null;
+  return normalizePerSourceDelivery(model.perSource[sourceKey], model.defaultRoute);
+}
 
 function whatsappNumberToJid(whatsappNumber: string): string {
   return `${normalizeWhatsappNumber(whatsappNumber)}@s.whatsapp.net`;
@@ -263,6 +412,10 @@ export class AgentRunService {
     for (const section of def.sections) {
       enabledSections[section.key] = prefs.sections?.[section.key] ?? section.enabledByDefault;
     }
+    const sources = prefs.sources ?? [];
+    const deliveryModel =
+      normalizeDeliveryModelFromValue(prefs.deliveryModel, sources) ??
+      normalizeLegacyDeliveryModel(prefs.delivery ?? null, sources);
     return {
       enabled: raw.exists ? raw.enabled : def.defaults.enabled,
       scheduleHour: raw.scheduleHour ?? def.defaults.scheduleHour,
@@ -271,8 +424,9 @@ export class AgentRunService {
       maxItemsPerSection: raw.maxItemsPerSection ?? def.defaults.maxItemsPerSection,
       enabledSections,
       focus: prefs.focus ?? null,
-      delivery: prefs.delivery ?? null,
-      sources: prefs.sources ?? [],
+      delivery: projectLegacyDelivery(deliveryModel, sources),
+      deliveryModel,
+      sources,
     };
   }
 
@@ -316,6 +470,7 @@ export class AgentRunService {
       itemsPerSectionRange: def.itemsPerSectionRange,
       focus: config.focus,
       delivery: config.delivery,
+      deliveryModel: config.deliveryModel,
       sourceConfig: def.sourceConfig ?? null,
       sources: config.sources,
       sections: def.sections.map((section) => ({
@@ -337,6 +492,7 @@ export class AgentRunService {
       sections?: Record<string, boolean>;
       focus?: string | null;
       delivery?: AgentDeliveryConfig | null;
+      deliveryModel?: AgentDeliveryModel;
       sources?: AgentSourceConfig[];
     },
   ): Promise<AgentConfigView | null> {
@@ -355,6 +511,7 @@ export class AgentRunService {
       patch.sections !== undefined ||
       patch.focus !== undefined ||
       patch.delivery !== undefined ||
+      patch.deliveryModel !== undefined ||
       patch.sources !== undefined
     ) {
       const sections: Record<string, boolean> = { ...current.enabledSections };
@@ -364,12 +521,19 @@ export class AgentRunService {
         }
       }
       const focus = patch.focus !== undefined ? (patch.focus?.trim() ? patch.focus.trim() : null) : current.focus;
-      const delivery = patch.delivery !== undefined ? patch.delivery : current.delivery;
       const sources =
         patch.sources !== undefined
           ? await this.resolveSourceConfigsForUser(def, userId, patch.sources)
           : current.sources;
-      prefs = { sections, focus, delivery, sources };
+      const deliveryModel = this.resolveDeliveryModelForUser(
+        sources,
+        patch.deliveryModel !== undefined
+          ? patch.deliveryModel
+          : patch.delivery !== undefined
+            ? normalizeLegacyDeliveryModel(patch.delivery, sources)
+            : reconcileDeliveryModel(current.deliveryModel, sources),
+      );
+      prefs = { sections, focus, delivery: projectLegacyDelivery(deliveryModel, sources), deliveryModel, sources };
     }
 
     await this.repo.upsertConfig(
@@ -390,6 +554,24 @@ export class AgentRunService {
       },
     );
     return this.getConfigView(agentKey, userId);
+  }
+
+  private resolveDeliveryModelForUser(
+    sources: AgentSourceConfig[],
+    deliveryModel: AgentDeliveryModel,
+  ): AgentDeliveryModel {
+    const reconciled = reconcileDeliveryModel(deliveryModel, sources);
+    if (reconciled.mode === "per_source") return reconciled;
+
+    const deliveryKey = deliveryKeyForTarget(reconciled.combined);
+    if (sources.some((source) => sourceKeyForTarget(source) === deliveryKey)) {
+      throw new AgentDeliveryTargetError("Combined delivery cannot target one of the selected sources");
+    }
+    if (!isDmDelivery(reconciled.combined) && reconciled.combined.ackNonDm !== true) {
+      throw new AgentDeliveryTargetError("Non-DM combined delivery requires acknowledgement");
+    }
+
+    return reconciled;
   }
 
   async resolveDeliveryConfigForUser(
@@ -655,7 +837,7 @@ export class AgentRunService {
 
   private toApiOutput(
     def: AgentDefinition,
-    value: Awaited<ReturnType<ReturnType<typeof createAgentOutputRepository>["findLatestCompleted"]>>,
+    value: Awaited<ReturnType<ReturnType<typeof createAgentOutputRepository>["findLatestCompletedForScope"]>>,
   ): AgentOutputApi | null {
     if (!value) return null;
     const sections = emptySections(def);
@@ -670,6 +852,8 @@ export class AgentRunService {
       outputDate: value.output.output_date,
       timezone: value.output.timezone,
       status: value.output.status,
+      sourceKey: value.output.source_key,
+      sourceLabel: value.output.source_label,
       generatedAt: value.output.generated_at,
       masthead: value.masthead,
       sections,
@@ -695,8 +879,8 @@ export class AgentRunService {
     const date = outputDate || localDateInTimezone(new Date(), timezone);
     const now = new Date();
     const [completed, running] = await Promise.all([
-      this.repo.findLatestCompleted(def.key, user.id, date),
-      this.repo.findRunning(def.key, user.id, date),
+      this.repo.findLatestCompletedAcrossScopes(def.key, user.id, date),
+      this.repo.findRunningAcrossScopes(def.key, user.id, date),
     ]);
     return {
       output: this.toApiOutput(def, completed),
@@ -728,7 +912,30 @@ export class AgentRunService {
     };
   }
 
-  async requestGenerationForUser(params: RequestAgentGenerationParams): Promise<AgentOutputRow | null> {
+  private async resolveExpectedScopesForUser(
+    def: AgentDefinition,
+    user: UserRow,
+    config: ResolvedAgentConfig,
+  ): Promise<AgentExpectedScope[]> {
+    if (!def.sourceConfig) {
+      return [{ kind: "combined", sourceKey: "", sourceLabel: null, sources: [] }];
+    }
+
+    const sources = await this.resolveSourcesForRun(def, user.id, config.sources);
+    if (config.deliveryModel.mode === "combined") {
+      return [{ kind: "combined", sourceKey: "", sourceLabel: null, sources }];
+    }
+
+    return sources.map((source) => ({
+      kind: "source",
+      source,
+      sourceKey: sourceKeyForTarget(source),
+      sourceLabel: source.label,
+      sources: [source],
+    }));
+  }
+
+  async requestGenerationForUser(params: RequestAgentGenerationParams): Promise<AgentOutputRow[]> {
     const def = requireAgentDefinition(params.agentKey);
     const user = await this.deps.users.findById(params.userId);
     if (!user) throw new Error("User not found");
@@ -736,31 +943,48 @@ export class AgentRunService {
     const timezone = config.timezone || user.timezone || "UTC";
     const outputDate = params.outputDate || localDateInTimezone(new Date(), timezone);
     const now = new Date();
+    const scopes = await this.resolveExpectedScopesForUser(def, user, config);
+    const rows: AgentOutputRow[] = [];
 
-    let recoveredStaleRunning = false;
-    const existingRunning = await this.repo.findRunning(def.key, user.id, outputDate);
-    if (existingRunning) {
-      if (!this.isRunningStale(existingRunning, now)) return existingRunning;
-      recoveredStaleRunning = true;
-      await this.repo.markFailed(existingRunning.id, "Generation expired after being left running.");
+    for (const scope of scopes) {
+      let recoveredStaleRunning = false;
+      const existingRunning = await this.repo.findRunning(def.key, user.id, outputDate, scope.sourceKey);
+      if (existingRunning) {
+        if (!this.isRunningStale(existingRunning, now)) {
+          rows.push(existingRunning);
+          continue;
+        }
+        recoveredStaleRunning = true;
+        await this.repo.markFailed(existingRunning.id, "Generation expired after being left running.");
+      }
+      if (
+        params.skipIfCompleted &&
+        (await this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, outputDate))
+      ) {
+        continue;
+      }
+      if (params.skipIfCompleted && params.triggerType === "scheduled" && !recoveredStaleRunning) {
+        const latest = await this.repo.findLatestAny(def.key, user.id, outputDate, scope.sourceKey);
+        if (latest && this.isRecentScheduledFailure(latest, now)) {
+          rows.push(latest);
+          continue;
+        }
+      }
+      const result = await this.repo.createRunning({
+        agentKey: def.key,
+        agentVersion: def.version,
+        userId: user.id,
+        outputDate,
+        sourceKey: scope.sourceKey,
+        sourceLabel: scope.sourceLabel,
+        timezone,
+        triggerType: params.triggerType,
+      });
+      if (result.created) this.enqueueRun(def.key, result.row.id, user.id);
+      rows.push(result.row);
     }
-    if (params.skipIfCompleted && (await this.repo.findLatestCompleted(def.key, user.id, outputDate))) {
-      return null;
-    }
-    if (params.skipIfCompleted && params.triggerType === "scheduled" && !recoveredStaleRunning) {
-      const latest = await this.repo.findLatestAny(def.key, user.id, outputDate);
-      if (latest && this.isRecentScheduledFailure(latest, now)) return latest;
-    }
-    const result = await this.repo.createRunning({
-      agentKey: def.key,
-      agentVersion: def.version,
-      userId: user.id,
-      outputDate,
-      timezone,
-      triggerType: params.triggerType,
-    });
-    if (result.created) this.enqueueRun(def.key, result.row.id, user.id);
-    return result.row;
+
+    return rows;
   }
 
   async listSchedulableUsers(): Promise<UserRow[]> {
@@ -787,15 +1011,22 @@ export class AgentRunService {
     const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
     if (hour !== config.scheduleHour || minute < config.scheduleMinute) return null;
     const outputDate = localDateInTimezone(now, timezone);
-    const [running, completed] = await Promise.all([
-      this.repo.findRunning(def.key, user.id, outputDate),
-      this.repo.findLatestCompleted(def.key, user.id, outputDate),
-    ]);
-    if (running && !this.isRunningStale(running, now)) return null;
-    if (completed) return null;
-    const latest = await this.repo.findLatestAny(def.key, user.id, outputDate);
-    if (latest && this.isRecentScheduledFailure(latest, now)) return null;
-    return { outputDate };
+    const scopes = await this.resolveExpectedScopesForUser(def, user, config);
+    if (scopes.length === 0) return null;
+
+    for (const scope of scopes) {
+      const [running, completed] = await Promise.all([
+        this.repo.findRunning(def.key, user.id, outputDate, scope.sourceKey),
+        this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, outputDate),
+      ]);
+      if (completed) continue;
+      if (running && !this.isRunningStale(running, now)) continue;
+      const latest = await this.repo.findLatestAny(def.key, user.id, outputDate, scope.sourceKey);
+      if (latest && this.isRecentScheduledFailure(latest, now)) continue;
+      return { outputDate };
+    }
+
+    return null;
   }
 
   private isRunningStale(output: AgentOutputRow, now: Date): boolean {
@@ -845,6 +1076,45 @@ export class AgentRunService {
     };
   }
 
+  private async resolveScopeForOutput(
+    def: AgentDefinition,
+    user: UserRow,
+    config: ResolvedAgentConfig,
+    output: AgentOutputRow,
+  ): Promise<AgentExpectedScope | null> {
+    if (!def.sourceConfig) {
+      return { kind: "combined", sourceKey: "", sourceLabel: null, sources: [] };
+    }
+
+    const sources = await this.resolveSourcesForRun(def, user.id, config.sources);
+    if (output.source_key === "") {
+      return { kind: "combined", sourceKey: "", sourceLabel: null, sources };
+    }
+
+    const source = sources.find((candidate) => sourceKeyForTarget(candidate) === output.source_key);
+    if (!source) return null;
+    return {
+      kind: "source",
+      source,
+      sourceKey: output.source_key,
+      sourceLabel: output.source_label ?? source.label,
+      sources: [source],
+    };
+  }
+
+  private async getPreviousOutputForContext(
+    def: AgentDefinition,
+    user: UserRow,
+    outputDate: string,
+    scope: AgentGenerationScope,
+  ): Promise<AgentOutputApi | null> {
+    if (def.key === CONVERSATION_SUMMARY_AGENT_KEY && scope.kind === "source") return null;
+    return this.toApiOutput(
+      def,
+      await this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, outputDate),
+    );
+  }
+
   private async generateExistingOutput(agentKey: string, outputId: string, userId: string): Promise<void> {
     const def = requireAgentDefinition(agentKey);
     const output = await this.repo.findById(def.key, outputId);
@@ -853,7 +1123,11 @@ export class AgentRunService {
 
     let saved = false;
     const config = await this.resolveConfig(def, user.id);
-    const sources = await this.resolveSourcesForRun(def, user.id, config.sources);
+    const scope = await this.resolveScopeForOutput(def, user, config, output);
+    if (!scope) {
+      await this.repo.markFailed(outputId, "Generation source is no longer available.");
+      return;
+    }
     const enabledSections = def.sections.filter((s) => config.enabledSections[s.key]).map((s) => s.key);
 
     try {
@@ -865,8 +1139,8 @@ export class AgentRunService {
           ? undefined
           : await this.deps.users.getAllEmailsForUser(user.id);
       const [sameDayPrevious, previousDay, definitionContext] = await Promise.all([
-        this.getLatestForUser(def.key, user.id, output.output_date),
-        this.getLatestForUser(def.key, user.id, addDays(output.output_date, -1)),
+        this.getPreviousOutputForContext(def, user, output.output_date, scope),
+        this.getPreviousOutputForContext(def, user, addDays(output.output_date, -1), scope),
         def.buildRuntimeContext
           ? def.buildRuntimeContext({
               db: this.deps.db,
@@ -881,7 +1155,8 @@ export class AgentRunService {
                 maxItemsPerSection: config.maxItemsPerSection,
                 focus: config.focus,
                 delivery: config.delivery,
-                sources,
+                sources: scope.sources,
+                sourceKey: scope.sourceKey,
               },
             })
           : Promise.resolve({}),
@@ -896,9 +1171,9 @@ export class AgentRunService {
         sections: enabledSections,
         maxItemsPerSection: config.maxItemsPerSection,
         focus: config.focus,
-        sources,
-        sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious.output),
-        previousDayOutput: this.formatOutputForContext(previousDay.output),
+        sources: scope.sources,
+        sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious),
+        previousDayOutput: this.formatOutputForContext(previousDay),
         ...definitionContext,
       };
       const writer = this.createWriter(def, {
@@ -972,7 +1247,13 @@ export class AgentRunService {
   private async deliverCompletedOutput(def: AgentDefinition, outputId: string, userId: string): Promise<void> {
     if (!this.deps.outputDelivery) return;
     try {
-      const configuredDelivery = (await this.resolveConfig(def, userId)).delivery;
+      const output = await this.repo.findById(def.key, outputId);
+      const user = await this.deps.users.findById(userId);
+      if (!output || !user) return;
+      const config = await this.resolveConfig(def, userId);
+      const scope = await this.resolveScopeForOutput(def, user, config, output);
+      if (!scope) return;
+      const configuredDelivery = this.deliveryForScope(config.deliveryModel, scope);
       if (!configuredDelivery) return;
       const delivery = await this.resolveDeliveryConfigForUser(userId, configuredDelivery);
       if (!delivery) return;
@@ -982,6 +1263,21 @@ export class AgentRunService {
     } catch (err) {
       this.deps.logger.warn({ err, agentKey: def.key, outputId, userId }, "Agent: output delivery failed");
     }
+  }
+
+  private deliveryForScope(deliveryModel: AgentDeliveryModel, scope: AgentExpectedScope): AgentDeliveryConfig | null {
+    if (scope.kind === "combined") {
+      if (deliveryModel.mode !== "combined") return null;
+      if (!isDmDelivery(deliveryModel.combined) && deliveryModel.combined.ackNonDm !== true) return null;
+      const deliveryKey = deliveryKeyForTarget(deliveryModel.combined);
+      if (scope.sources.some((source) => sourceKeyForTarget(source) === deliveryKey)) return null;
+      return deliveryModel.combined;
+    }
+
+    const route = perSourceDeliveryFor(deliveryModel, scope.sourceKey);
+    if (!route || route.kind === "off") return null;
+    if (route.kind === "target") return null;
+    return sourceAsDelivery(scope.source);
   }
 
   private createWriter(
