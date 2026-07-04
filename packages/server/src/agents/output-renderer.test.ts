@@ -72,7 +72,7 @@ describe("renderAgentOutputForDelivery", () => {
     expect(text).toContain("  Source: https://linear.app/sketch-ai/issue/SKE-235/example");
   });
 
-  it("clips busy sections for delivery while preserving the web output", () => {
+  it("clips the masthead but delivers every item without pointing users to the web", () => {
     const text = renderAgentOutputForDelivery({
       title: "Daily Brief",
       sections,
@@ -81,7 +81,13 @@ describe("renderAgentOutputForDelivery", () => {
         outputDate: "2026-06-26",
         masthead: { title: "Daily Brief", summary: "Long ".repeat(150) },
         sections: {
-          todos: [item({ id: "1" }), item({ id: "2" }), item({ id: "3" }), item({ id: "4" }), item({ id: "5" })],
+          todos: [
+            item({ id: "1", title: "Item one" }),
+            item({ id: "2", title: "Item two" }),
+            item({ id: "3", title: "Item three" }),
+            item({ id: "4", title: "Item four" }),
+            item({ id: "5", title: "Item five" }),
+          ],
           customer_updates: [],
         },
       },
@@ -89,7 +95,9 @@ describe("renderAgentOutputForDelivery", () => {
 
     expect(text).toContain("Long");
     expect(text).toContain("...");
-    expect(text).toContain("_+1 more in Sketch_");
+    expect(text).toContain("Item one");
+    expect(text).toContain("Item five");
+    expect(text).not.toContain("more in Sketch");
   });
 
   it("drops the per-item source when it repeats the run's single source, but keeps a differing one", () => {

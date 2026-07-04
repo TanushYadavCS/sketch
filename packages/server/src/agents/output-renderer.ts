@@ -11,7 +11,6 @@ export interface RenderableAgentOutput {
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const DELIVERY_MAX_ITEMS_PER_SECTION = 4;
 const MASTHEAD_SUMMARY_LIMIT = 420;
 const ITEM_TITLE_LIMIT = 96;
 const ITEM_SUMMARY_LIMIT = 260;
@@ -120,12 +119,8 @@ export function renderAgentOutputForDelivery(params: {
     const items = params.output.sections[section.key] ?? [];
     if (items.length === 0) continue;
     lines.push("", `*${section.title}*`);
-    for (const item of items.slice(0, DELIVERY_MAX_ITEMS_PER_SECTION)) {
+    for (const item of items) {
       lines.push(formatItem(item, params.platform, params.output.sourceLabel));
-    }
-    const hidden = items.length - DELIVERY_MAX_ITEMS_PER_SECTION;
-    if (hidden > 0) {
-      lines.push(`_+${hidden} more in Sketch_`);
     }
   }
 
