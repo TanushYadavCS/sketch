@@ -67,6 +67,7 @@ export interface AgentRuntimeContextParams {
     sourceKey: string;
     firstRunLookbackHours?: number;
     floorWindowToPeriod?: boolean;
+    deliveryPlatform?: "slack" | "whatsapp" | null;
   };
 }
 

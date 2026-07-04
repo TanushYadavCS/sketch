@@ -672,6 +672,13 @@ function firstRunLookbackHoursForSchedule(schedule: AgentRouteSchedule | null | 
   return schedule.intervalHours ?? 24;
 }
 
+/** The platform a route delivers to, so the agent can tailor its prose; null for self/web-only routes. */
+function deliveryPlatformForRoute(route: AgentRoute | null | undefined): "slack" | "whatsapp" | null {
+  const destination = route?.destination;
+  if (destination && (destination.kind === "channel" || destination.kind === "member")) return destination.platform;
+  return null;
+}
+
 function addDays(date: string, days: number): string {
   const parsed = new Date(`${date}T00:00:00.000Z`);
   parsed.setUTCDate(parsed.getUTCDate() + days);
@@ -1653,6 +1660,7 @@ export class AgentRunService {
                 sourceKey: scope.sourceKey,
                 firstRunLookbackHours,
                 floorWindowToPeriod: output.trigger_type === "manual",
+                deliveryPlatform: deliveryPlatformForRoute(scope.route),
               },
             })
           : Promise.resolve({}),
