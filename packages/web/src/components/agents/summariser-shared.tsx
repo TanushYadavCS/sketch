@@ -15,6 +15,7 @@ import {
   api,
 } from "@/lib/api";
 import { CheckCircleIcon, MagnifyingGlassIcon, SlackLogoIcon, UserIcon, WhatsappLogoIcon } from "@phosphor-icons/react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Switch } from "@sketch/ui/components/switch";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { cn } from "@sketch/ui/lib/utils";
@@ -644,7 +645,7 @@ export function ScheduleField({ controller }: { controller: RouteDraftController
           options={[
             { value: "daily", label: "Daily" },
             { value: "weekly", label: "Weekly" },
-            { value: "every_n_hours", label: "Every N hours" },
+            { value: "every_n_hours", label: "Hourly" },
           ]}
         />
       </div>
@@ -690,15 +691,22 @@ export function ScheduleField({ controller }: { controller: RouteDraftController
         <div className="mt-3 space-y-3">
           <div>
             <span className={LABEL}>Every</span>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {INTERVAL_OPTIONS.map((option) => (
-                <ScheduleChip
-                  key={option}
-                  label={option === 1 ? "1 hr" : `${option} hrs`}
-                  isActive={intervalHours === option}
-                  onClick={() => controller.setIntervalHours(option)}
-                />
-              ))}
+            <div className="mt-2">
+              <Select
+                value={String(intervalHours)}
+                onValueChange={(value) => controller.setIntervalHours(Number(value))}
+              >
+                <SelectTrigger aria-label="Interval" className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {INTERVAL_OPTIONS.map((option) => (
+                    <SelectItem key={option} value={String(option)}>
+                      {option === 1 ? "1 hour" : `${option} hours`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div>
