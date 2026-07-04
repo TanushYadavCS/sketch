@@ -15,6 +15,7 @@ import {
 } from "@/lib/api";
 import { CheckCircleIcon, HashIcon, MagnifyingGlassIcon, UserIcon, UsersThreeIcon } from "@phosphor-icons/react";
 import { Switch } from "@sketch/ui/components/switch";
+import { TabButton } from "@sketch/ui/components/tab-button";
 import { cn } from "@sketch/ui/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -151,7 +152,7 @@ export interface RouteDraftController {
 export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): RouteDraftController {
   const maxSources = agent.sourceConfig?.maxSources ?? 0;
   const [sources, setSources] = useState<AgentSourceKey[]>(route?.sources ?? []);
-  const [destKind, setDestKind] = useState<AgentRouteDestination["kind"]>(route?.destination.kind ?? "self");
+  const [destKind, setDestKind] = useState<AgentRouteDestination["kind"]>(route?.destination.kind ?? "channel");
   const [memberUserId, setMemberUserId] = useState<string | null>(
     route?.destination.kind === "member" ? route.destination.memberUserId : null,
   );
@@ -266,24 +267,6 @@ export function SourcesField({ agent, controller }: { agent: AgentConfig; contro
   );
 }
 
-/** Pill-style delivery tab, matching the Team Adoption filter tabs on the usage page. */
-function DeliveryTab({ label, isActive, onClick }: { label: string; isActive: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "rounded-md px-2.5 py-1 text-xs transition-colors",
-        isActive
-          ? "bg-accent font-medium text-foreground dark:bg-[#1C1C1A]"
-          : "text-muted-foreground hover:text-foreground",
-      )}
-    >
-      {label}
-    </button>
-  );
-}
-
 export function DestinationField({
   agent,
   agentKey,
@@ -315,15 +298,15 @@ export function DestinationField({
 
   return (
     <div>
-      <div className="inline-flex rounded-lg border-[0.5px] border-border bg-card p-0.5 dark:bg-[#111110]">
-        <DeliveryTab
+      <div className="flex items-center gap-6 border-b border-border">
+        <TabButton
           label="Groups"
           isActive={activeTab === "groups"}
           onClick={() => {
             if (destKind === "member") controller.setDestKind("channel");
           }}
         />
-        <DeliveryTab label="DM" isActive={activeTab === "dm"} onClick={() => controller.setDestKind("member")} />
+        <TabButton label="DM" isActive={activeTab === "dm"} onClick={() => controller.setDestKind("member")} />
       </div>
 
       {activeTab === "groups" ? (
@@ -567,6 +550,89 @@ export function VolumeField({ agent, controller }: { agent: AgentConfig; control
           value={controller.volume}
           onChange={controller.setVolume}
         />
+      </div>
+    </div>
+  );
+}
+
+export function SourceGroup({
+  title,
+  loading,
+  empty,
+  selected,
+  options,
+  onToggle,
+}: {
+  title: string;
+  loading: boolean;
+  empty: string;
+  selected: Set<string>;
+  options: AgentSourceConfig[];
+  onToggle: (source: AgentSourceConfig) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const filtered = q ? options.filter((o) => (o.label ?? o.targetId).toLowerCase().includes(q)) : options;
+  const showSearch = options.length > 6;
+
+  return (
+    <div>
+      <span className={LABEL}>{title}</span>
+      <div className="mt-2 rounded-lg border-[0.5px] border-border p-1">
+        {loading ? (
+          <p className="px-2 py-2 text-[12px] text-muted-foreground">Loading...</p>
+        ) : options.length === 0 ? (
+          <p className="px-2 py-2 text-[12px] text-muted-foreground">{empty}</p>
+        ) : (
+          <>
+            {showSearch ? (
+              <div className="relative mb-1">
+                <MagnifyingGlassIcon
+                  size={13}
+                  aria-hidden
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+                />
+                <input
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={`Search ${title.toLowerCase()}…`}
+                  className="w-full rounded-md border-[0.5px] border-border bg-background py-1.5 pl-7 pr-2 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-foreground/30 focus:outline-none"
+                />
+              </div>
+            ) : null}
+            <div className="flex max-h-56 flex-col overflow-y-auto">
+              {filtered.length === 0 ? (
+                <p className="px-2 py-2 text-[12px] text-muted-foreground">No matches.</p>
+              ) : (
+                filtered.map((source) => {
+                  const active = selected.has(sourceKey(source));
+                  return (
+                    <button
+                      key={sourceKey(source)}
+                      type="button"
+                      onClick={() => onToggle(source)}
+                      className={cn(
+                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors",
+                        active ? "bg-emerald-500/10 text-foreground" : "text-muted-foreground hover:bg-muted/60",
+                      )}
+                    >
+                      <span className="shrink-0">
+                        {source.platform === "slack" ? (
+                          <HashIcon size={14} aria-hidden />
+                        ) : (
+                          <UsersThreeIcon size={14} aria-hidden />
+                        )}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">{source.label ?? source.targetId}</span>
+                      {active ? <CheckCircleIcon size={13} weight="fill" aria-hidden /> : null}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
