@@ -245,6 +245,113 @@ describe("agentRoutes", () => {
     );
   });
 
+  it("parses Slack channel route destinations and rejects invalid channel targets", async () => {
+    const service = createService({
+      updateConfigForUser: vi.fn(async () => ({ agentKey: CONVERSATION_SUMMARY_AGENT_KEY, routes: [] })),
+    });
+    const app = createRoutesTestApp(service);
+    const configUrl = `/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`;
+    const route = {
+      id: "alpha-channel-route",
+      sources: ["slack:channel:C_ALPHA"],
+      focus: null,
+      sections: null,
+      maxItemsPerSection: null,
+      schedule: null,
+      enabled: true,
+    };
+
+    const valid = await app.request(configUrl, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [{ platform: "slack", targetType: "channel", targetId: "C_ALPHA", label: "#alpha" }],
+        routes: [
+          {
+            ...route,
+            destination: {
+              kind: "channel",
+              platform: "slack",
+              targetType: "channel",
+              targetId: "  C_DEST  ",
+              label: "  Leadership  ",
+            },
+          },
+        ],
+      }),
+    });
+
+    expect(valid.status).toBe(200);
+    expect(service.updateConfigForUser).toHaveBeenCalledWith(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      "user-1",
+      expect.objectContaining({
+        routes: [
+          expect.objectContaining({
+            destination: {
+              kind: "channel",
+              platform: "slack",
+              targetType: "channel",
+              targetId: "C_DEST",
+              label: "Leadership",
+            },
+          }),
+        ],
+      }),
+    );
+
+    const wrongTargetType = await app.request(configUrl, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [{ platform: "slack", targetType: "channel", targetId: "C_ALPHA", label: "#alpha" }],
+        routes: [
+          {
+            ...route,
+            destination: {
+              kind: "channel",
+              platform: "slack",
+              targetType: "group",
+              targetId: "C_DEST",
+              label: null,
+            },
+          },
+        ],
+      }),
+    });
+
+    expect(wrongTargetType.status).toBe(400);
+    await expect(wrongTargetType.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR", message: "Slack route destination targetType must be channel" },
+    });
+
+    const emptyTargetId = await app.request(configUrl, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [{ platform: "slack", targetType: "channel", targetId: "C_ALPHA", label: "#alpha" }],
+        routes: [
+          {
+            ...route,
+            destination: {
+              kind: "channel",
+              platform: "slack",
+              targetType: "channel",
+              targetId: "  ",
+              label: null,
+            },
+          },
+        ],
+      }),
+    });
+
+    expect(emptyTargetId.status).toBe(400);
+    await expect(emptyTargetId.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR", message: "route.destination.targetId is required" },
+    });
+    expect(service.updateConfigForUser).toHaveBeenCalledTimes(1);
+  });
+
   it("passes multi-source routes and Slack member destinations to the service for saving", async () => {
     const service = createService({
       updateConfigForUser: vi.fn(async () => ({ agentKey: CONVERSATION_SUMMARY_AGENT_KEY, routes: [] })),
@@ -284,6 +391,63 @@ describe("agentRoutes", () => {
             id: "combined-route",
             sources: ["slack:channel:C_ALPHA", "slack:channel:C_BETA"],
             destination: { kind: "member", platform: "slack", memberUserId: "member-1" },
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("passes multi-source routes with channel destinations to the service for saving", async () => {
+    const service = createService({
+      updateConfigForUser: vi.fn(async () => ({ agentKey: CONVERSATION_SUMMARY_AGENT_KEY, routes: [] })),
+    });
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [
+          { platform: "slack", targetType: "channel", targetId: "C_ALPHA", label: "#alpha" },
+          { platform: "slack", targetType: "channel", targetId: "C_BETA", label: "#beta" },
+        ],
+        routes: [
+          {
+            id: "combined-channel-route",
+            sources: ["slack:channel:C_ALPHA", "slack:channel:C_BETA"],
+            focus: null,
+            sections: null,
+            maxItemsPerSection: null,
+            schedule: null,
+            destination: {
+              kind: "channel",
+              platform: "slack",
+              targetType: "channel",
+              targetId: "C_DEST",
+              label: "#leadership",
+            },
+            enabled: true,
+          },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(service.updateConfigForUser).toHaveBeenCalledWith(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      "user-1",
+      expect.objectContaining({
+        routes: [
+          expect.objectContaining({
+            id: "combined-channel-route",
+            sources: ["slack:channel:C_ALPHA", "slack:channel:C_BETA"],
+            destination: {
+              kind: "channel",
+              platform: "slack",
+              targetType: "channel",
+              targetId: "C_DEST",
+              label: "#leadership",
+            },
           }),
         ],
       }),

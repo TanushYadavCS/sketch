@@ -1035,6 +1035,9 @@ export interface AgentSummary {
   enabled: boolean;
   scheduleHour: number;
   scheduleMinute: number;
+  sourceConfig: AgentSourceConfigMeta | null;
+  sources: AgentSourceConfig[];
+  routes: AgentRoute[];
 }
 
 export interface AgentSectionConfig {
@@ -1091,7 +1094,9 @@ export type AgentDeliveryModel =
 export type AgentRouteDestination =
   | { kind: "self" }
   | { kind: "off" }
-  | { kind: "member"; platform: "slack"; memberUserId: string };
+  | { kind: "member"; platform: "slack"; memberUserId: string }
+  | { kind: "channel"; platform: "slack"; targetType: "channel"; targetId: string; label: string | null }
+  | { kind: "channel"; platform: "whatsapp"; targetType: "group"; targetId: string; label: string | null };
 
 export interface AgentRoute {
   id: string;

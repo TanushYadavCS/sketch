@@ -1,5 +1,5 @@
 import { createRouter } from "@tanstack/react-router";
-import { agentDetailRoute, agentsRoute } from "./routes/agents";
+import { agentDetailRoute, agentsRoute, summariserConfigRoute } from "./routes/agents";
 import { automationBuilderRoute } from "./routes/automation-builder";
 import { channelsRoute } from "./routes/channels";
 import { chatIndexRoute, chatRoute } from "./routes/chat";
@@ -27,6 +27,7 @@ const routeTree = rootRoute.addChildren([
     homeRoute,
     agentsRoute,
     agentDetailRoute,
+    summariserConfigRoute,
     chatIndexRoute,
     chatRoute,
     channelsRoute,
