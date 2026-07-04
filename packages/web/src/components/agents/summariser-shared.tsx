@@ -13,7 +13,7 @@ import {
   type AgentSourceKey,
   api,
 } from "@/lib/api";
-import { CheckCircleIcon, HashIcon, MagnifyingGlassIcon, UserIcon, UsersThreeIcon } from "@phosphor-icons/react";
+import { CheckCircleIcon, MagnifyingGlassIcon, SlackLogoIcon, UserIcon, WhatsappLogoIcon } from "@phosphor-icons/react";
 import { Switch } from "@sketch/ui/components/switch";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { cn } from "@sketch/ui/lib/utils";
@@ -487,9 +487,9 @@ function ChannelSection({
               >
                 <span className="shrink-0">
                   {option.platform === "slack" ? (
-                    <HashIcon size={14} aria-hidden />
+                    <SlackLogoIcon size={14} aria-hidden />
                   ) : (
-                    <UsersThreeIcon size={14} aria-hidden />
+                    <WhatsappLogoIcon size={14} aria-hidden />
                   )}
                 </span>
                 <span className="min-w-0 flex-1 truncate">{option.label ?? option.targetId}</span>
@@ -642,9 +642,9 @@ export function SourceGroup({
                     >
                       <span className="shrink-0">
                         {source.platform === "slack" ? (
-                          <HashIcon size={14} aria-hidden />
+                          <SlackLogoIcon size={14} aria-hidden />
                         ) : (
-                          <UsersThreeIcon size={14} aria-hidden />
+                          <WhatsappLogoIcon size={14} aria-hidden />
                         )}
                       </span>
                       <span className="min-w-0 flex-1 truncate">{source.label ?? source.targetId}</span>
@@ -739,6 +739,6 @@ export function saveRoutes(agentKey: string, routes: AgentRoute[], lookup: Map<s
 
 export function InputIcon({ platform }: { platform: "slack" | "whatsapp" | null }) {
   if (platform === "whatsapp")
-    return <UsersThreeIcon size={14} aria-hidden className="shrink-0 text-muted-foreground" />;
-  return <HashIcon size={14} aria-hidden className="shrink-0 text-muted-foreground" />;
+    return <WhatsappLogoIcon size={14} aria-hidden className="shrink-0 text-muted-foreground" />;
+  return <SlackLogoIcon size={14} aria-hidden className="shrink-0 text-muted-foreground" />;
 }
