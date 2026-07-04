@@ -1845,6 +1845,7 @@ describe("AgentRunService", () => {
           targetType: "dm",
           targetId: "+15551112222",
           label: "WhatsApp Recipient",
+          recipientUserId: member.id,
         },
       }),
     );

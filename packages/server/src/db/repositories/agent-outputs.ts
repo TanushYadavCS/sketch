@@ -57,6 +57,7 @@ export interface AgentDeliveryConfig {
   targetType: AgentDeliveryTargetType;
   targetId: string;
   label: string | null;
+  recipientUserId?: string;
   mentions?: AgentDeliveryMention[];
 }
 

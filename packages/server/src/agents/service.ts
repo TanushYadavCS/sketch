@@ -1713,6 +1713,7 @@ export class AgentRunService {
         targetType: "dm",
         targetId: member.whatsapp_number,
         label: member.name,
+        recipientUserId: member.id,
       };
     }
 

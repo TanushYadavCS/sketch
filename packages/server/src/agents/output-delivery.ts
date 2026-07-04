@@ -83,11 +83,12 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
     const target = whatsappTargetFromDeliveryTarget(delivery.targetId);
 
     if (target.kind === "dm") {
-      const recipient = await users.findById(output.userId);
+      const recipientUserId = delivery.recipientUserId ?? output.userId;
+      const recipient = await users.findById(recipientUserId);
       try {
         const result = await deliverProactiveDm({
           target,
-          recipientUserId: output.userId,
+          recipientUserId,
           senderUserId: output.userId,
           text,
           whatsapp: deps.whatsapp,

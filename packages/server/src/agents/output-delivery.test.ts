@@ -248,6 +248,63 @@ describe("createAgentOutputDeliveryService", () => {
     expect(attempt.message_refs_json).toBe(JSON.stringify(["wa-nudge-1"]));
   });
 
+  it("parks WhatsApp teammate DM deliveries for the teammate recipient", async () => {
+    await db
+      .insertInto("users")
+      .values({ id: "user-teammate", name: "Teammate", whatsapp_number: "+15557654321" })
+      .execute();
+    const whatsapp = createMockWhatsApp({
+      isConnected: true,
+      sendTemplate: vi.fn(async () => ({
+        providerMessageId: "wa-teammate-nudge-1",
+        providerConversationId: "dm:+15557654321",
+        providerTimestamp: "2024-06-04T07:20:00.000Z",
+      })),
+    });
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => null,
+      whatsapp,
+      settingsRepo: createSettingsRepository(db),
+    });
+
+    await service.deliver({
+      definition: dailyBriefDefinition,
+      delivery: {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "dm",
+        targetId: "dm:+15557654321",
+        label: "Teammate",
+        recipientUserId: "user-teammate",
+      },
+      output: {
+        id: "output-delivery",
+        userId: "user-delivery",
+        agentKey: dailyBriefDefinition.key,
+        outputDate: "2026-06-26",
+        masthead: { title: "Daily Brief", summary: "Start here." },
+        sections: {},
+      },
+    });
+
+    expect(whatsapp.sendTemplate).toHaveBeenCalledWith(
+      { kind: "dm", phoneE164: "+15557654321" },
+      expect.objectContaining({
+        key: "whatsapp.task_nudge",
+        params: { recipientName: "Teammate" },
+      }),
+    );
+    const inbox = await db.selectFrom("inbox_messages").selectAll().executeTakeFirstOrThrow();
+    expect(inbox).toMatchObject({
+      recipient_user_id: "user-teammate",
+      sender_user_id: "user-delivery",
+      kind: "workflow_output",
+      platform: "whatsapp",
+    });
+  });
+
   it("uses the recipient phone when a WhatsApp DM delivery target is an opaque Wati conversation id", async () => {
     await db.updateTable("users").set({ whatsapp_number: "+15551234567" }).where("id", "=", "user-delivery").execute();
     const sendText = vi.fn(async (target: unknown) => ({
