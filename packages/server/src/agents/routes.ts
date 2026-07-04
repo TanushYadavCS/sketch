@@ -6,11 +6,16 @@ import type {
   AgentDeliveryModel,
   AgentDeliveryPlatform,
   AgentPerSourceDelivery,
+  AgentRoute,
+  AgentRouteDestination,
   AgentSourceConfig,
+  AgentSourceKey,
 } from "../db/repositories/agent-outputs";
 import type { DB } from "../db/schema";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
+import { getAgentDefinition } from "./registry";
 import { AgentDeliveryTargetError, type AgentOutputApi, type AgentRunService, AgentSourceTargetError } from "./service";
+import type { AgentDefinition } from "./types";
 
 async function getCurrentUserId(c: { get: (key: "sub" | "email") => string | undefined }, service: AgentRunService) {
   const sub = c.get("sub");
@@ -249,7 +254,150 @@ function parseSourceConfigs(value: unknown): AgentSourceConfig[] | undefined {
   });
 }
 
-function parseConfigPatch(body: Record<string, unknown>) {
+function sourceKeyForConfig(source: AgentSourceConfig): AgentSourceKey {
+  return `${source.platform}:${source.targetType}:${source.targetId}`;
+}
+
+function parseRouteSourceKey(value: unknown): AgentSourceKey {
+  if (typeof value !== "string" || !value.trim()) throw new ConfigPatchError("route source must be a source key");
+  const [platform, targetType, ...targetParts] = value.trim().split(":");
+  const targetId = targetParts.join(":");
+  if ((platform !== "slack" && platform !== "whatsapp") || !targetId) {
+    throw new ConfigPatchError("route source must be a valid source key");
+  }
+  if (targetType !== "channel" && targetType !== "group") {
+    throw new ConfigPatchError("route source must be a valid source key");
+  }
+  if (platform === "slack" && targetType !== "channel") {
+    throw new ConfigPatchError("Slack route sources must be channels");
+  }
+  if (platform === "whatsapp" && targetType !== "group") {
+    throw new ConfigPatchError("WhatsApp route sources must be groups");
+  }
+  return `${platform}:${targetType}:${targetId}`;
+}
+
+function parseRouteSections(value: unknown, def: AgentDefinition): Record<string, boolean> | null {
+  if (value === null || value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ConfigPatchError("route.sections must be an object or null");
+  }
+  const knownSections = new Set(def.sections.map((section) => section.key));
+  const sections: Record<string, boolean> = {};
+  for (const [key, enabled] of Object.entries(value as Record<string, unknown>)) {
+    if (!knownSections.has(key)) throw new ConfigPatchError(`Unknown route section: ${key}`);
+    if (typeof enabled !== "boolean") throw new ConfigPatchError("route section values must be booleans");
+    sections[key] = enabled;
+  }
+  return sections;
+}
+
+function parseRouteSchedule(value: unknown): AgentRoute["schedule"] {
+  if (value === null || value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ConfigPatchError("route.schedule must be an object or null");
+  }
+  const raw = value as Record<string, unknown>;
+  if (!Number.isInteger(raw.hour) || Number(raw.hour) < 0 || Number(raw.hour) > 23) {
+    throw new ConfigPatchError("route.schedule.hour must be an integer from 0 to 23");
+  }
+  if (!Number.isInteger(raw.minute) || Number(raw.minute) < 0 || Number(raw.minute) > 59) {
+    throw new ConfigPatchError("route.schedule.minute must be an integer from 0 to 59");
+  }
+  return { hour: Number(raw.hour), minute: Number(raw.minute) };
+}
+
+function parseRouteDestination(value: unknown): AgentRouteDestination {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ConfigPatchError("route.destination must be an object");
+  }
+  const raw = value as Record<string, unknown>;
+  if (raw.kind === "self" || raw.kind === "off") return { kind: raw.kind };
+  if (raw.kind === "member") {
+    if (raw.platform !== "slack") throw new ConfigPatchError("route.destination.platform must be slack");
+    const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
+    if (!memberUserId) throw new ConfigPatchError("route.destination.memberUserId is required");
+    return { kind: "member", platform: "slack", memberUserId };
+  }
+  throw new ConfigPatchError("route.destination.kind must be self, off, or member");
+}
+
+function parseRoutes(value: unknown, def: AgentDefinition): AgentRoute[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new ConfigPatchError("routes must be an array");
+  const routes: AgentRoute[] = [];
+  const seenIds = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new ConfigPatchError("route must be an object");
+    }
+    const raw = entry as Record<string, unknown>;
+    const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : "";
+    if (!id) throw new ConfigPatchError("route.id is required");
+    if (seenIds.has(id)) throw new ConfigPatchError("route.id values must be unique");
+    seenIds.add(id);
+    if (!Array.isArray(raw.sources)) throw new ConfigPatchError("route.sources must be an array");
+    const sources: AgentSourceKey[] = [];
+    const seenSources = new Set<string>();
+    for (const source of raw.sources.map(parseRouteSourceKey)) {
+      if (seenSources.has(source)) continue;
+      seenSources.add(source);
+      sources.push(source);
+    }
+    if (sources.length === 0) throw new ConfigPatchError("route.sources must include at least one source");
+    const destination = parseRouteDestination(raw.destination);
+    if (sources.length > 1 && destination.kind === "self") {
+      throw new ConfigPatchError("Combined routes cannot use self destination");
+    }
+    if (destination.kind === "member" && sources.some((source) => source.startsWith("whatsapp:"))) {
+      throw new ConfigPatchError("Member route destinations support Slack sources only");
+    }
+    const maxItemsPerSection =
+      raw.maxItemsPerSection === null || raw.maxItemsPerSection === undefined
+        ? null
+        : Number.isInteger(raw.maxItemsPerSection)
+          ? Number(raw.maxItemsPerSection)
+          : null;
+    if (raw.maxItemsPerSection !== null && raw.maxItemsPerSection !== undefined && maxItemsPerSection === null) {
+      throw new ConfigPatchError("route.maxItemsPerSection must be an integer or null");
+    }
+    routes.push({
+      id,
+      sources,
+      focus: typeof raw.focus === "string" && raw.focus.trim() ? raw.focus.trim() : null,
+      sections: parseRouteSections(raw.sections, def),
+      maxItemsPerSection,
+      schedule: parseRouteSchedule(raw.schedule),
+      destination,
+      enabled: raw.enabled !== false,
+    });
+  }
+  return routes;
+}
+
+function parseRouteMemberSources(value: unknown): AgentSourceKey[] {
+  if (!Array.isArray(value)) throw new ConfigPatchError("sources must be an array");
+  const sources: AgentSourceKey[] = [];
+  const seen = new Set<string>();
+  for (const source of value.map(parseRouteSourceKey)) {
+    if (seen.has(source)) continue;
+    seen.add(source);
+    sources.push(source);
+  }
+  return sources;
+}
+
+function assertRoutesReferenceSources(routes: AgentRoute[] | undefined, sources: AgentSourceConfig[] | undefined) {
+  if (!routes || !sources) return;
+  const sourceKeys = new Set(sources.map(sourceKeyForConfig));
+  for (const route of routes) {
+    for (const sourceKey of route.sources) {
+      if (!sourceKeys.has(sourceKey)) throw new ConfigPatchError("Route source must be one of the selected sources");
+    }
+  }
+}
+
+function parseConfigPatch(body: Record<string, unknown>, def: AgentDefinition) {
   const patch: {
     enabled?: boolean;
     scheduleHour?: number;
@@ -260,6 +408,7 @@ function parseConfigPatch(body: Record<string, unknown>) {
     delivery?: AgentDeliveryConfig | null;
     deliveryModel?: AgentDeliveryModel;
     sources?: AgentSourceConfig[];
+    routes?: AgentRoute[];
   } = {};
   if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
   if (typeof body.scheduleHour === "number" && Number.isInteger(body.scheduleHour)) {
@@ -287,6 +436,9 @@ function parseConfigPatch(body: Record<string, unknown>) {
   if (deliveryModel !== undefined) patch.deliveryModel = deliveryModel;
   const sources = parseSourceConfigs(body.sources);
   if (sources !== undefined) patch.sources = sources;
+  const routes = parseRoutes(body.routes, def);
+  assertRoutesReferenceSources(routes, sources);
+  if (routes !== undefined) patch.routes = routes;
   return patch;
 }
 
@@ -330,11 +482,13 @@ export function agentRoutes(service: AgentRunService) {
     const userId = await getCurrentUserId(c, service);
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
     const agentKey = c.req.param("agentKey");
+    const def = getAgentDefinition(agentKey);
+    if (!def) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     let patch: ReturnType<typeof parseConfigPatch>;
     let agent: Awaited<ReturnType<AgentRunService["updateConfigForUser"]>>;
     try {
-      patch = parseConfigPatch(body);
+      patch = parseConfigPatch(body, def);
       await validateDeliveryTargets(service, userId, patch);
       agent = await service.updateConfigForUser(agentKey, userId, patch);
     } catch (err) {
@@ -349,6 +503,24 @@ export function agentRoutes(service: AgentRunService) {
     }
     if (!agent) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
     return c.json({ agent });
+  });
+
+  routes.post("/:agentKey/route-members", async (c) => {
+    const userId = await getCurrentUserId(c, service);
+    if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
+    const agentKey = c.req.param("agentKey");
+    const def = getAgentDefinition(agentKey);
+    if (!def) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    try {
+      const sources = parseRouteMemberSources(body.sources);
+      return c.json({ members: await service.listEligibleRouteMembers(userId, sources) });
+    } catch (err) {
+      if (err instanceof ConfigPatchError) {
+        return c.json({ error: { code: "VALIDATION_ERROR", message: err.message } }, 400);
+      }
+      throw err;
+    }
   });
 
   routes.get("/:agentKey/outputs", async (c) => {

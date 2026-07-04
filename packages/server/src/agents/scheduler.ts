@@ -55,6 +55,7 @@ export class AgentScheduler {
               outputDate: due.outputDate,
               triggerType: "scheduled",
               skipIfCompleted: true,
+              scopeKeys: due.scopeKeys,
             });
             for (const generation of generations) {
               this.deps.logger.debug(

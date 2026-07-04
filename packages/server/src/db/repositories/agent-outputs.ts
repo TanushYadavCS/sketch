@@ -90,6 +90,24 @@ export interface AgentSourceConfig {
   label: string | null;
 }
 
+export type AgentRouteId = string;
+
+export type AgentRouteDestination =
+  | { kind: "self" }
+  | { kind: "off" }
+  | { kind: "member"; platform: "slack"; memberUserId: string };
+
+export interface AgentRoute {
+  id: AgentRouteId;
+  sources: AgentSourceKey[];
+  focus: string | null;
+  sections: Record<string, boolean> | null;
+  maxItemsPerSection: number | null;
+  schedule: { hour: number; minute: number } | null;
+  destination: AgentRouteDestination;
+  enabled: boolean;
+}
+
 /**
  * Per-user reconfiguration of a prebuilt agent. `prefs` carries the additive,
  * structured preferences (section toggles + plain-language focus); agent behavior
@@ -101,6 +119,7 @@ export interface AgentUserPrefs {
   delivery?: AgentDeliveryConfig | null;
   deliveryModel?: AgentDeliveryModel;
   sources?: AgentSourceConfig[];
+  routes?: AgentRoute[];
 }
 
 export interface AgentUserConfig {
@@ -568,6 +587,15 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .set({ status: "failed", error_message: message, updated_at: new Date().toISOString() })
         .where("id", "=", outputId)
         .where("status", "=", "running")
+        .execute();
+    },
+
+    async markDeliveryFailed(outputId: string, message: string): Promise<void> {
+      await db
+        .updateTable("agent_outputs")
+        .set({ status: "failed", error_message: message, updated_at: new Date().toISOString() })
+        .where("id", "=", outputId)
+        .where("status", "=", "completed")
         .execute();
     },
 
