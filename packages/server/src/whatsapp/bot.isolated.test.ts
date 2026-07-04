@@ -806,6 +806,91 @@ describe("WhatsAppBot handleGroupMessage LID resolution", () => {
   });
 });
 
+describe("WhatsAppBot history sync", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("persists group history when Baileys puts sender on the top-level participant field", async () => {
+    const handlers = new Map<string, (payload: { messages: proto.IWebMessageInfo[] }) => Promise<void>>();
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      debug: vi.fn(),
+      error: vi.fn(),
+    } as unknown as ReturnType<typeof createTestLogger>;
+    const bot = new WhatsAppBot({ db, logger });
+    const mockSock = {
+      user: { id: "99999@s.whatsapp.net", name: "Sketch", lid: undefined },
+      ev: {
+        on: (event: string, handler: (payload: { messages: proto.IWebMessageInfo[] }) => Promise<void>) => {
+          handlers.set(event, handler);
+        },
+      },
+    };
+    const captured: unknown[][] = [];
+
+    (bot as unknown as { sock: typeof mockSock }).sock = mockSock;
+    bot.onHistoryMessages(async (messages) => {
+      captured.push(messages);
+      return { persisted: messages.length, skippedOld: 0, skippedDup: 0 };
+    });
+    (bot as unknown as { registerHistoryHandler: () => void }).registerHistoryHandler();
+
+    await handlers.get("messaging-history.set")?.({
+      messages: [
+        {
+          key: {
+            remoteJid: "group-1@g.us",
+            fromMe: false,
+            id: "history-001",
+          },
+          participant: "14155238886@s.whatsapp.net",
+          message: { conversation: "history context" },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+          pushName: "History Sender",
+        } as proto.IWebMessageInfo,
+        {
+          key: {
+            remoteJid: "group-1@g.us",
+            fromMe: false,
+            id: "history-002",
+          },
+          message: { conversation: "missing sender" },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+          pushName: "Unknown",
+        } as proto.IWebMessageInfo,
+      ],
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toHaveLength(1);
+    expect(captured[0][0]).toEqual(
+      expect.objectContaining({
+        type: "group",
+        senderJid: "14155238886@s.whatsapp.net",
+        senderPhone: "+14155238886",
+        text: "history context",
+      }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        total: 2,
+        candidates: 1,
+        persisted: 1,
+        skippedNoSender: 1,
+      }),
+      "WhatsApp history batch processed",
+    );
+  });
+});
+
 describe("extractContextInfo", () => {
   it("returns contextInfo from extendedTextMessage", () => {
     const msg: proto.IMessage = {

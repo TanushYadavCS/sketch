@@ -570,6 +570,7 @@ export class WhatsAppBot {
 
       let skippedNontext = 0;
       let skippedNonGroup = 0;
+      let skippedNoSender = 0;
       const groupMessages: WhatsAppGroupMessage[] = [];
 
       for (const msg of messages) {
@@ -594,7 +595,11 @@ export class WhatsAppBot {
         }
 
         const groupMessage = await this.buildGroupMessage(msg, jid, text, messageType, hasMedia);
-        if (groupMessage) groupMessages.push(groupMessage);
+        if (groupMessage) {
+          groupMessages.push(groupMessage);
+        } else {
+          skippedNoSender += 1;
+        }
       }
 
       let result: WhatsAppHistoryBatchResult = { persisted: 0, skippedOld: 0, skippedDup: 0 };
@@ -604,7 +609,14 @@ export class WhatsAppBot {
         }
       } catch (err) {
         this.logger.warn(
-          { err, total: messages.length, candidates: groupMessages.length, skippedNontext, skippedNonGroup },
+          {
+            err,
+            total: messages.length,
+            candidates: groupMessages.length,
+            skippedNontext,
+            skippedNonGroup,
+            skippedNoSender,
+          },
           "Failed to persist WhatsApp history batch",
         );
         return;
@@ -619,6 +631,7 @@ export class WhatsAppBot {
           skippedDup: result.skippedDup,
           skippedNontext,
           skippedNonGroup,
+          skippedNoSender,
         },
         "WhatsApp history batch processed",
       );
@@ -728,7 +741,7 @@ export class WhatsAppBot {
     messageType: string | undefined,
     hasMedia: boolean,
   ): Promise<WhatsAppGroupMessage | null> {
-    const senderJid = msg.key?.participant ?? (msg.key?.fromMe ? this.sock?.user?.id : undefined);
+    const senderJid = this.resolveGroupSenderJid(msg);
     if (!senderJid) return null;
 
     if (!msg.message) return null;
@@ -756,6 +769,11 @@ export class WhatsAppBot {
       senderPhone,
       ...(quotedMessage ? { quotedMessage } : {}),
     };
+  }
+
+  private resolveGroupSenderJid(msg: proto.IWebMessageInfo): string | null {
+    const senderJid = msg.key?.participant ?? msg.participant ?? (msg.key?.fromMe ? this.sock?.user?.id : undefined);
+    return senderJid ? jidNormalizedUser(senderJid) : null;
   }
 
   /**

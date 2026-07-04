@@ -359,12 +359,33 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
   whatsapp.onHistoryMessages(async (messages) => {
     const result = { persisted: 0, skippedOld: 0, skippedDup: 0 };
     const cutoffMs = Date.now() - config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS;
+    let candidateCount = 0;
+    let candidateBeforeCutoff = 0;
+    let candidateAtOrAfterCutoff = 0;
+    let candidateMissingTimestamp = 0;
+    let minProviderTimestampMs: number | null = null;
+    let maxProviderTimestampMs: number | null = null;
 
     for (const message of messages) {
       if (message.kind !== "group") continue;
 
+      candidateCount += 1;
       const receivedAt = message.providerTimestamp;
       const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+      if (receivedAt && Number.isFinite(receivedAtMs)) {
+        minProviderTimestampMs =
+          minProviderTimestampMs === null ? receivedAtMs : Math.min(minProviderTimestampMs, receivedAtMs);
+        maxProviderTimestampMs =
+          maxProviderTimestampMs === null ? receivedAtMs : Math.max(maxProviderTimestampMs, receivedAtMs);
+        if (receivedAtMs < cutoffMs) {
+          candidateBeforeCutoff += 1;
+        } else {
+          candidateAtOrAfterCutoff += 1;
+        }
+      } else {
+        candidateMissingTimestamp += 1;
+      }
+
       if (!receivedAt || !Number.isFinite(receivedAtMs) || receivedAtMs < cutoffMs) {
         result.skippedOld += 1;
         continue;
@@ -394,6 +415,20 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         result.skippedDup += 1;
       }
     }
+
+    logger.info(
+      {
+        total: messages.length,
+        candidates: candidateCount,
+        cutoff: new Date(cutoffMs).toISOString(),
+        minProviderTimestamp: minProviderTimestampMs === null ? null : new Date(minProviderTimestampMs).toISOString(),
+        maxProviderTimestamp: maxProviderTimestampMs === null ? null : new Date(maxProviderTimestampMs).toISOString(),
+        candidateBeforeCutoff,
+        candidateAtOrAfterCutoff,
+        candidateMissingTimestamp,
+      },
+      "WhatsApp history candidate timestamp diagnostics",
+    );
 
     return result;
   });
