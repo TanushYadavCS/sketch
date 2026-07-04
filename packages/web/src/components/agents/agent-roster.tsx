@@ -126,15 +126,6 @@ function SummariserGroup({ agent }: { agent: AgentSummary }) {
   const [modalOpen, setModalOpen] = useState(false);
   const lookup = new Map<string, AgentSourceConfig>(agent.sources.map((source) => [sourceKey(source), source]));
 
-  const toggleAgent = useMutation({
-    mutationFn: (enabled: boolean) => api.agents.updateConfig(agent.key, { enabled }),
-    onSuccess: (_data, enabled) => {
-      invalidate(agent.key);
-      toast.success(`${agent.title} ${enabled ? "switched on" : "switched off"}`);
-    },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Failed to update agent"),
-  });
-
   const toggleRoute = useMutation({
     mutationFn: (next: AgentRoute) =>
       api.agents.updateConfig(agent.key, { routes: agent.routes.map((r) => (r.id === next.id ? next : r)) }),
@@ -143,8 +134,8 @@ function SummariserGroup({ agent }: { agent: AgentSummary }) {
   });
 
   return (
-    <div className="rounded-xl">
-      <div className="group flex items-center gap-3 rounded-xl px-4 py-3.5 transition-colors hover:bg-muted/40">
+    <div>
+      <div className="flex items-center gap-3 px-4 py-2.5">
         <Link to="/agents/$agentKey" params={{ agentKey: agent.key }} className="min-w-0 flex-1">
           <span className="text-[14px] font-medium text-foreground">{agent.title}</span>
           <p className="mt-0.5 text-[12.5px] text-muted-foreground">{agent.tagline}</p>
@@ -152,24 +143,17 @@ function SummariserGroup({ agent }: { agent: AgentSummary }) {
         <button
           type="button"
           onClick={() => setModalOpen(true)}
-          className="inline-flex items-center gap-1.5 rounded-md border-[0.5px] border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent dark:bg-[#111110] dark:hover:bg-[#1C1C1A]"
+          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
         >
           <PlusIcon size={12} weight="bold" aria-hidden />
-          New summariser
+          New
         </button>
-        <Switch
-          checked={agent.enabled}
-          disabled={toggleAgent.isPending}
-          onCheckedChange={(checked) => toggleAgent.mutate(checked)}
-          aria-label={`${agent.title} on`}
-          className="data-[state=checked]:bg-emerald-500"
-        />
       </div>
 
-      <div className="ml-6 flex flex-col gap-0.5 border-l border-border/60 pb-1 pl-3">
+      <div className="ml-4 flex flex-col">
         {agent.routes.length === 0 ? (
-          <p className="px-3 py-2.5 text-[12px] text-muted-foreground">
-            No summarisers yet. Add one to start delivering digests.
+          <p className="px-4 py-2 text-[12px] text-muted-foreground/80">
+            No summarisers yet — add one to start delivering digests.
           </p>
         ) : (
           agent.routes.map((route) => {
@@ -178,7 +162,7 @@ function SummariserGroup({ agent }: { agent: AgentSummary }) {
               <div
                 key={route.id}
                 className={cn(
-                  "group/sub flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors hover:bg-muted/40",
+                  "group/sub flex items-center gap-3 rounded-lg px-4 py-2 transition-colors hover:bg-muted/40",
                   !route.enabled && "opacity-55",
                 )}
               >
@@ -188,7 +172,7 @@ function SummariserGroup({ agent }: { agent: AgentSummary }) {
                   className="flex min-w-0 flex-1 items-center gap-2"
                 >
                   <InputIcon platform={input.platform} />
-                  <span className="truncate text-[12.5px] font-medium text-foreground">{input.label}</span>
+                  <span className="truncate text-[12.5px] text-foreground">{input.label}</span>
                   {input.extra > 0 ? (
                     <span className="shrink-0 text-[11px] text-muted-foreground">+{input.extra}</span>
                   ) : null}
@@ -201,17 +185,11 @@ function SummariserGroup({ agent }: { agent: AgentSummary }) {
                   aria-label={`${input.label} on`}
                   className="scale-90 data-[state=checked]:bg-emerald-500"
                 />
-                <Link
-                  to="/agents/$agentKey/summarisers/$routeId"
-                  params={{ agentKey: agent.key, routeId: route.id }}
-                  aria-label={`Open ${input.label}`}
-                >
-                  <CaretRightIcon
-                    size={13}
-                    aria-hidden
-                    className="shrink-0 text-muted-foreground/30 group-hover/sub:text-muted-foreground"
-                  />
-                </Link>
+                <CaretRightIcon
+                  size={13}
+                  aria-hidden
+                  className="shrink-0 text-muted-foreground/20 transition-colors group-hover/sub:text-muted-foreground/60"
+                />
               </div>
             );
           })
