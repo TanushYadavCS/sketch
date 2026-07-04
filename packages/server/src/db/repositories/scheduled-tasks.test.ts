@@ -185,6 +185,41 @@ describe("listActive()", () => {
   });
 });
 
+describe("countActiveForUserWithin()", () => {
+  it("counts only active tasks for the user with a next run inside the window", async () => {
+    await repo.add({
+      ...baseTask,
+      id: "inside-window",
+      created_by: "user-1",
+      next_run_at: "2026-07-05T10:00:00.000Z",
+    });
+    await repo.add({
+      ...baseTask,
+      id: "outside-window",
+      created_by: "user-1",
+      next_run_at: "2026-07-06T15:00:00.000Z",
+    });
+    await repo.add({
+      ...baseTask,
+      id: "other-user",
+      created_by: "user-2",
+      next_run_at: "2026-07-05T10:00:00.000Z",
+    });
+    await repo.add({
+      ...baseTask,
+      id: "paused",
+      created_by: "user-1",
+      status: "paused",
+      next_run_at: "2026-07-05T10:00:00.000Z",
+    });
+    await repo.add({ ...baseTask, id: "missing-next-run", created_by: "user-1", next_run_at: null });
+
+    await expect(
+      repo.countActiveForUserWithin("user-1", "2026-07-05T09:00:00.000Z", "2026-07-05T11:00:00.000Z"),
+    ).resolves.toBe(1);
+  });
+});
+
 describe("update()", () => {
   it("modifies specified fields and returns the updated row", async () => {
     const created = await repo.add(baseTask);

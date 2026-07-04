@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 113;
+const EXPECTED_MIGRATION_COUNT = 114;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -146,6 +146,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
     expect(names[111]).toBe("116-connector-credential-source");
     expect(names[112]).toBe("117-conversation-message-window-index");
+    expect(names[113]).toBe("118-whatsapp-window-keepalives");
   });
 
   it("running migrations twice is idempotent", async () => {
