@@ -9,6 +9,7 @@ import {
   type AgentConfig,
   type AgentRoute,
   type AgentRouteDestination,
+  type AgentRouteFrequency,
   type AgentSourceConfig,
   type AgentSourceKey,
   api,
@@ -28,6 +29,34 @@ export function formatTime(hour: number, minute: number): string {
   const period = hour < 12 ? "AM" : "PM";
   const h12 = hour % 12 === 0 ? 12 : hour % 12;
   return `${h12}:${String(minute).padStart(2, "0")} ${period}`;
+}
+
+const SHORT_DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function formatDaysOfWeek(days: number[]): string {
+  const set = new Set(days);
+  if (set.size === 7) return "Every day";
+  if (set.size === 5 && [1, 2, 3, 4, 5].every((day) => set.has(day))) return "Weekdays";
+  if (set.size === 2 && set.has(0) && set.has(6)) return "Weekends";
+  return [...set]
+    .sort((a, b) => a - b)
+    .map((day) => SHORT_DAY_NAMES[day])
+    .join(", ");
+}
+
+/** Human-readable summary of a route's schedule, frequency-aware, for read-only rows. */
+export function scheduleSummary(route: AgentRoute, agent: AgentConfig): string {
+  const schedule = route.schedule;
+  const hour = schedule?.hour ?? agent.scheduleHour;
+  const minute = schedule?.minute ?? agent.scheduleMinute;
+  if (schedule?.frequency === "weekly" && schedule.daysOfWeek?.length) {
+    return `${formatDaysOfWeek(schedule.daysOfWeek)} at ${formatTime(hour, minute)}`;
+  }
+  if (schedule?.frequency === "every_n_hours" && schedule.intervalHours) {
+    const unit = schedule.intervalHours === 1 ? "hour" : `${schedule.intervalHours} hours`;
+    return `Every ${unit} at :${String(minute).padStart(2, "0")}`;
+  }
+  return `Every day at ${formatTime(hour, minute)}`;
 }
 
 export function deliversLabel(route: AgentRoute): string {
@@ -128,8 +157,11 @@ export interface RouteDraftController {
   destKind: AgentRouteDestination["kind"];
   memberUserId: string | null;
   channelTarget: AgentSourceConfig | null;
+  frequency: AgentRouteFrequency;
   hour: number;
   minute: number;
+  daysOfWeek: number[];
+  intervalHours: number;
   sections: Record<string, boolean>;
   focus: string;
   volume: number;
@@ -140,8 +172,11 @@ export interface RouteDraftController {
   setDestKind: (kind: AgentRouteDestination["kind"]) => void;
   setMemberUserId: (id: string | null) => void;
   setChannelTarget: (target: AgentSourceConfig | null) => void;
+  setFrequency: (v: AgentRouteFrequency) => void;
   setHour: (v: number) => void;
   setMinute: (v: number) => void;
+  toggleDayOfWeek: (day: number) => void;
+  setIntervalHours: (v: number) => void;
   setSection: (key: string, on: boolean) => void;
   setFocus: (v: string) => void;
   setVolume: (v: number) => void;
@@ -166,8 +201,11 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
         }
       : null,
   );
+  const [frequency, setFrequency] = useState<AgentRouteFrequency>(route?.schedule?.frequency ?? "daily");
   const [hour, setHour] = useState(route?.schedule?.hour ?? agent.scheduleHour);
   const [minute, setMinute] = useState(route?.schedule?.minute ?? agent.scheduleMinute);
+  const [daysOfWeek, setDaysOfWeek] = useState<number[]>(route?.schedule?.daysOfWeek ?? [1]);
+  const [intervalHours, setIntervalHours] = useState(route?.schedule?.intervalHours ?? 4);
   const [sections, setSections] = useState<Record<string, boolean>>(defaultSections(agent, route));
   const [focus, setFocus] = useState(route?.focus ?? "");
   const [volume, setVolume] = useState(route?.maxItemsPerSection ?? agent.maxItemsPerSection);
@@ -189,11 +227,16 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
     setSources([...sources, key]);
   };
 
+  const toggleDayOfWeek = (day: number) => {
+    setDaysOfWeek((prev) => (prev.includes(day) ? prev.filter((item) => item !== day) : [...prev, day].sort()));
+  };
+
   const isValid =
     sources.length > 0 &&
     !(destKind === "self" && sources.length !== 1) &&
     !(destKind === "member" && !memberUserId) &&
-    !(destKind === "channel" && !channelTarget);
+    !(destKind === "channel" && !channelTarget) &&
+    !(frequency === "weekly" && daysOfWeek.length === 0);
 
   const build = (base: AgentRoute | null): AgentRoute => {
     const destination: AgentRouteDestination =
@@ -210,7 +253,12 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
       focus: focus.trim() ? focus.trim() : null,
       sections,
       maxItemsPerSection: volume,
-      schedule: { hour, minute },
+      schedule:
+        frequency === "weekly"
+          ? { frequency, hour, minute, daysOfWeek }
+          : frequency === "every_n_hours"
+            ? { frequency, hour, minute, intervalHours }
+            : { frequency, hour, minute },
       destination,
       enabled: base?.enabled ?? true,
     };
@@ -221,8 +269,11 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
     destKind,
     memberUserId,
     channelTarget,
+    frequency,
     hour,
     minute,
+    daysOfWeek,
+    intervalHours,
     sections,
     focus,
     volume,
@@ -233,8 +284,11 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
     setDestKind,
     setMemberUserId,
     setChannelTarget,
+    setFrequency,
     setHour,
     setMinute,
+    toggleDayOfWeek,
+    setIntervalHours,
     setSection: (key, on) => setSections((prev) => ({ ...prev, [key]: on })),
     setFocus,
     setVolume,
@@ -503,18 +557,130 @@ function ChannelSection({
   );
 }
 
+const DAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"];
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const INTERVAL_OPTIONS = [1, 2, 3, 4, 6, 8, 12];
+
+function ScheduleChip({
+  label,
+  title,
+  isActive,
+  onClick,
+}: {
+  label: string;
+  title?: string;
+  isActive: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      className={cn(
+        "flex h-8 min-w-8 items-center justify-center rounded-lg border-[0.5px] px-2.5 text-[12.5px] font-medium transition-colors",
+        isActive
+          ? "border-foreground/20 bg-foreground text-background"
+          : "border-border bg-background text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+function AnchorTime({ controller }: { controller: RouteDraftController }) {
+  return (
+    <div className="flex items-center gap-2">
+      <NumberField label="Hour" min={0} max={23} value={controller.hour} onChange={controller.setHour} />
+      <span className="mt-5 text-muted-foreground">:</span>
+      <NumberField label="Minute" min={0} max={59} value={controller.minute} onChange={controller.setMinute} />
+      <span className="mt-5 ml-2 text-[12.5px] text-muted-foreground">
+        {formatTime(controller.hour, controller.minute)}
+      </span>
+    </div>
+  );
+}
+
 export function ScheduleField({ controller }: { controller: RouteDraftController }) {
+  const { frequency, intervalHours, minute } = controller;
   return (
     <div>
-      <span className={LABEL}>Runs on</span>
-      <div className="mt-2 flex items-center gap-2">
-        <NumberField label="Hour" min={0} max={23} value={controller.hour} onChange={controller.setHour} />
-        <span className="mt-5 text-muted-foreground">:</span>
-        <NumberField label="Minute" min={0} max={59} value={controller.minute} onChange={controller.setMinute} />
-        <span className="mt-5 ml-2 text-[12.5px] text-muted-foreground">
-          {formatTime(controller.hour, controller.minute)}
-        </span>
+      <span className={LABEL}>Frequency</span>
+      <div className="mt-2 flex items-center gap-6 border-b border-border">
+        <TabButton label="Daily" isActive={frequency === "daily"} onClick={() => controller.setFrequency("daily")} />
+        <TabButton label="Weekly" isActive={frequency === "weekly"} onClick={() => controller.setFrequency("weekly")} />
+        <TabButton
+          label="Every N hours"
+          isActive={frequency === "every_n_hours"}
+          onClick={() => controller.setFrequency("every_n_hours")}
+        />
       </div>
+
+      {frequency === "daily" && (
+        <div className="mt-3">
+          <span className={LABEL}>Runs at</span>
+          <div className="mt-2">
+            <AnchorTime controller={controller} />
+          </div>
+        </div>
+      )}
+
+      {frequency === "weekly" && (
+        <div className="mt-3 space-y-3">
+          <div>
+            <span className={LABEL}>On days</span>
+            <div className="mt-2 flex gap-1.5">
+              {DAY_LABELS.map((label, index) => (
+                <ScheduleChip
+                  key={DAY_NAMES[index]}
+                  label={label}
+                  title={DAY_NAMES[index]}
+                  isActive={controller.daysOfWeek.includes(index)}
+                  onClick={() => controller.toggleDayOfWeek(index)}
+                />
+              ))}
+            </div>
+            {controller.daysOfWeek.length === 0 && (
+              <p className="mt-1.5 text-[11px] text-amber-600">Pick at least one day.</p>
+            )}
+          </div>
+          <div>
+            <span className={LABEL}>Runs at</span>
+            <div className="mt-2">
+              <AnchorTime controller={controller} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {frequency === "every_n_hours" && (
+        <div className="mt-3 space-y-3">
+          <div>
+            <span className={LABEL}>Every</span>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {INTERVAL_OPTIONS.map((option) => (
+                <ScheduleChip
+                  key={option}
+                  label={option === 1 ? "1 hr" : `${option} hrs`}
+                  isActive={intervalHours === option}
+                  onClick={() => controller.setIntervalHours(option)}
+                />
+              ))}
+            </div>
+          </div>
+          <div>
+            <span className={LABEL}>Minutes past the hour</span>
+            <div className="mt-2 flex items-center gap-2">
+              <NumberField label="Minute" min={0} max={59} value={minute} onChange={controller.setMinute} />
+              <span className="mt-5 text-[12.5px] text-muted-foreground">
+                Runs at :{String(minute).padStart(2, "0")} every{" "}
+                {intervalHours === 1 ? "hour" : `${intervalHours} hours`}, from midnight
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

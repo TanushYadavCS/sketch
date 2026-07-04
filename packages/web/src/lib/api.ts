@@ -1098,13 +1098,23 @@ export type AgentRouteDestination =
   | { kind: "channel"; platform: "slack"; targetType: "channel"; targetId: string; label: string | null }
   | { kind: "channel"; platform: "whatsapp"; targetType: "group"; targetId: string; label: string | null };
 
+export type AgentRouteFrequency = "daily" | "weekly" | "every_n_hours";
+
+export interface AgentRouteSchedule {
+  frequency: AgentRouteFrequency;
+  hour: number;
+  minute: number;
+  daysOfWeek?: number[];
+  intervalHours?: number;
+}
+
 export interface AgentRoute {
   id: string;
   sources: AgentSourceKey[];
   focus: string | null;
   sections: Record<string, boolean> | null;
   maxItemsPerSection: number | null;
-  schedule: { hour: number; minute: number } | null;
+  schedule: AgentRouteSchedule | null;
   destination: AgentRouteDestination;
   enabled: boolean;
 }
