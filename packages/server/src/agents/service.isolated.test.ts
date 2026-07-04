@@ -145,6 +145,10 @@ function slackSource(id: string, name: string): AgentSourceConfig {
   return { platform: "slack", targetType: "channel", targetId: id, label: `#${name}` };
 }
 
+function whatsappSource(jid: string, name: string): AgentSourceConfig {
+  return { platform: "whatsapp", targetType: "group", targetId: jid, label: name };
+}
+
 function perSourceSelfModel(): AgentDeliveryModel {
   return { mode: "per_source", defaultRoute: "self", perSource: {}, combined: null };
 }
@@ -1755,6 +1759,126 @@ describe("AgentRunService", () => {
     expect(output).toEqual({
       status: "failed",
       error_message: "Recipient is not a member of every source",
+    });
+  });
+
+  it("delivers WhatsApp member routes by phone number without Slack membership checks", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Agent User",
+      email: "user@example.com",
+      whatsappNumber: "+15550000000",
+    });
+    const member = await users.create({
+      name: "WhatsApp Recipient",
+      email: "recipient@example.com",
+      whatsappNumber: "+15551112222",
+    });
+    const noNumber = await users.create({ name: "No Number", email: "no-number@example.com" });
+    const groupJid = "120363000000001@g.us";
+    const source = whatsappSource(groupJid, "Leads");
+    await createWhatsAppGroupRepository(db).upsert({
+      jid: groupJid,
+      name: "Leads",
+      description: null,
+      updated_at: "2026-06-27T00:00:00.000Z",
+    });
+    const getGroupMetadata = vi.fn(
+      async () =>
+        ({
+          subject: "Leads",
+          participants: [{ id: "15550000000@s.whatsapp.net" }],
+        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+    );
+    const isUserInChannel = vi.fn(async () => {
+      throw new Error("Slack membership should not be checked");
+    });
+    const listChannels = vi.fn(async () => []);
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Summarizer", summary: "Summary" },
+        rawPayload: {
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Summarizer", summary: "Summary" },
+          items: [],
+        },
+        items: [],
+      });
+      return successfulRunResult();
+    });
+    const outputDelivery = { deliver: vi.fn(async () => {}) } satisfies AgentOutputDeliveryPublisher;
+    const service = createService(db, tasks, {
+      runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      outputDelivery,
+      getSlack: () => ({ listChannels, isUserInChannel }),
+      getWhatsApp: () => ({ getGroupMetadata }),
+    });
+
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      sources: [source],
+      routes: [
+        sourceRoute(source, {
+          destination: { kind: "member", platform: "whatsapp", memberUserId: member.id },
+        }),
+      ],
+    });
+    const deliveredRows = await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    for (const task of tasks) await task();
+
+    expect(deliveredRows).toHaveLength(1);
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: {
+          enabled: true,
+          platform: "whatsapp",
+          targetType: "dm",
+          targetId: "+15551112222",
+          label: "WhatsApp Recipient",
+        },
+      }),
+    );
+    expect(isUserInChannel).not.toHaveBeenCalled();
+
+    tasks.length = 0;
+    outputDelivery.deliver.mockClear();
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      sources: [source],
+      routes: [
+        sourceRoute(source, {
+          destination: { kind: "member", platform: "whatsapp", memberUserId: noNumber.id },
+        }),
+      ],
+    });
+    const failedRows = await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    for (const task of tasks) await task();
+
+    expect(outputDelivery.deliver).not.toHaveBeenCalled();
+    expect(isUserInChannel).not.toHaveBeenCalled();
+    const failedOutput = await db
+      .selectFrom("agent_outputs")
+      .select(["status", "error_message"])
+      .where("id", "=", failedRows[0].id)
+      .executeTakeFirstOrThrow();
+    expect(failedOutput).toEqual({
+      status: "failed",
+      error_message: "Recipient has no WhatsApp number",
     });
   });
 

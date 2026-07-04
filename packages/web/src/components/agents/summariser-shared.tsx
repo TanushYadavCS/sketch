@@ -192,7 +192,7 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
   const isValid =
     sources.length > 0 &&
     !(destKind === "self" && sources.length !== 1) &&
-    !(destKind === "member" && (!memberUserId || hasWhatsApp)) &&
+    !(destKind === "member" && !memberUserId) &&
     !(destKind === "channel" && !channelTarget);
 
   const build = (base: AgentRoute | null): AgentRoute => {
@@ -200,7 +200,7 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
       destKind === "self"
         ? { kind: "self" }
         : destKind === "member" && memberUserId
-          ? { kind: "member", platform: "slack", memberUserId }
+          ? { kind: "member", platform: hasWhatsApp ? "whatsapp" : "slack", memberUserId }
           : destKind === "channel" && channelTarget
             ? channelDestination(channelTarget)
             : { kind: "off" };
@@ -278,12 +278,18 @@ export function DestinationField({
 }) {
   const { destKind, memberUserId, hasWhatsApp } = controller;
   const activeTab: "groups" | "dm" = destKind === "member" ? "dm" : "groups";
-  const dmAvailable = (agent.sourceConfig?.supportsSlackChannels ?? false) && !hasWhatsApp;
+  const dmPlatform: "slack" | "whatsapp" = hasWhatsApp ? "whatsapp" : "slack";
+  const slackDmSupported = agent.sourceConfig?.supportsSlackChannels ?? false;
 
-  const memberQuery = useQuery({
+  const slackMemberQuery = useQuery({
     queryKey: ["route-members", agentKey, controller.sources],
     queryFn: () => api.agents.routeMembers(agentKey, controller.sources),
-    enabled: activeTab === "dm" && controller.sources.length > 0 && dmAvailable,
+    enabled: activeTab === "dm" && dmPlatform === "slack" && slackDmSupported && controller.sources.length > 0,
+  });
+  const whatsappMemberQuery = useQuery({
+    queryKey: ["whatsapp-dm-members", agentKey],
+    queryFn: () => api.agents.whatsappDmMembers(agentKey),
+    enabled: activeTab === "dm" && dmPlatform === "whatsapp",
   });
 
   const channelSelected = controller.channelTarget
@@ -316,17 +322,34 @@ export function DestinationField({
             Posts to any channel or group Sketch can reach — independent of the inputs above.
           </p>
         </div>
-      ) : !dmAvailable ? (
+      ) : dmPlatform === "whatsapp" ? (
+        <div className="mt-3">
+          <TargetList
+            loading={whatsappMemberQuery.isLoading}
+            empty="No teammate has a WhatsApp number yet. Add one on their profile and reload."
+            selectedId={memberUserId ?? ""}
+            options={(whatsappMemberQuery.data?.members ?? []).map((member) => ({
+              id: member.userId,
+              label: member.name,
+              icon: <UserIcon size={14} aria-hidden />,
+            }))}
+            onSelect={(id) => controller.setMemberUserId(id)}
+          />
+          <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground/70">
+            DMs any teammate who has a WhatsApp number — independent of the inputs above.
+          </p>
+        </div>
+      ) : !slackDmSupported ? (
         <p className="mt-3 px-1 py-2 text-[12px] text-muted-foreground">
-          Member DM works with Slack sources only. Remove the WhatsApp source to DM a member.
+          Member DM isn't available for this summariser.
         </p>
       ) : (
         <div className="mt-3">
           <TargetList
-            loading={memberQuery.isLoading}
+            loading={slackMemberQuery.isLoading}
             empty="No member is in every selected source."
             selectedId={memberUserId ?? ""}
-            options={(memberQuery.data?.members ?? []).map((member) => ({
+            options={(slackMemberQuery.data?.members ?? []).map((member) => ({
               id: member.userId,
               label: member.name,
               icon: <UserIcon size={14} aria-hidden />,

@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentRoute, AgentSourceConfig } from "../db/repositories/agent-outputs";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
+import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import type { WhatsAppBot } from "../whatsapp/bot";
 import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
 import { agentRoutes } from "./routes";
@@ -27,6 +29,7 @@ function createService(overrides: Record<string, unknown> = {}) {
     listDefinitions: vi.fn(() => [{ key: "daily-brief" }]),
     listOutputsForUser: vi.fn(async () => ({ outputs: [], nextCursor: null })),
     listEligibleRouteMembers: vi.fn(async () => []),
+    listWhatsAppDmMembers: vi.fn(async () => []),
     requestGenerationForUser: vi.fn(async () => []),
     updateConfigForUser: vi.fn(async () => ({ agentKey: "daily-brief", delivery: null })),
     ...overrides,
@@ -34,6 +37,7 @@ function createService(overrides: Record<string, unknown> = {}) {
     resolveDeliveryConfigForUser: ReturnType<typeof vi.fn>;
     listOutputsForUser: ReturnType<typeof vi.fn>;
     listEligibleRouteMembers: ReturnType<typeof vi.fn>;
+    listWhatsAppDmMembers: ReturnType<typeof vi.fn>;
     requestGenerationForUser: ReturnType<typeof vi.fn>;
     updateConfigForUser: ReturnType<typeof vi.fn>;
   };
@@ -507,35 +511,92 @@ describe("agentRoutes", () => {
     expect(service.updateConfigForUser).not.toHaveBeenCalled();
   });
 
-  it("rejects member route destinations with WhatsApp sources", async () => {
-    const service = createService();
-    const app = createRoutesTestApp(service);
+  it("round-trips WhatsApp member route destinations through the public config route", async () => {
+    const db = await createTestDb();
+    try {
+      const users = createUserRepository(db);
+      const user = await users.create({
+        name: "Agent User",
+        email: "user@example.com",
+        whatsappNumber: "+15550000000",
+      });
+      const member = await users.create({
+        name: "WhatsApp Recipient",
+        email: "recipient@example.com",
+        whatsappNumber: "+15551112222",
+      });
+      const groupJid = "120363000000001@g.us";
+      await createWhatsAppGroupRepository(db).upsert({
+        jid: groupJid,
+        name: "Leads",
+        description: null,
+        updated_at: "2026-06-27T00:00:00.000Z",
+      });
+      const getGroupMetadata = vi.fn(
+        async () =>
+          ({
+            subject: "Leads",
+            participants: [{ id: "15550000000@s.whatsapp.net" }],
+          }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+      );
+      const service = new AgentRunService({
+        db,
+        config: createTestConfig(),
+        logger: createTestLogger(),
+        users,
+        settings: createSettingsRepository(db),
+        runAgent: vi.fn(async () => {
+          throw new Error("runAgent should not be called");
+        }) as unknown as AgentRunServiceDeps["runAgent"],
+        getWhatsApp: () => ({ getGroupMetadata }),
+      });
+      const app = createRoutesTestApp(service, user.id, user.email ?? undefined);
 
-    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sources: [{ platform: "whatsapp", targetType: "group", targetId: "120363000000001@g.us", label: "Leads" }],
-        routes: [
-          {
-            id: "whatsapp-member-route",
-            sources: ["whatsapp:group:120363000000001@g.us"],
-            focus: null,
-            sections: null,
-            maxItemsPerSection: null,
-            schedule: null,
-            destination: { kind: "member", platform: "slack", memberUserId: "member-1" },
-            enabled: true,
-          },
-        ],
-      }),
-    });
+      const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sources: [{ platform: "whatsapp", targetType: "group", targetId: groupJid, label: "Spoofed" }],
+          routes: [
+            {
+              id: "whatsapp-member-route",
+              sources: [`whatsapp:group:${groupJid}`],
+              focus: null,
+              sections: null,
+              maxItemsPerSection: null,
+              schedule: null,
+              destination: { kind: "member", platform: "whatsapp", memberUserId: member.id },
+              enabled: true,
+            },
+          ],
+        }),
+      });
+      const reread = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}`);
 
-    expect(res.status).toBe(400);
-    await expect(res.json()).resolves.toMatchObject({
-      error: { code: "VALIDATION_ERROR", message: "Member route destinations support Slack sources only" },
-    });
-    expect(service.updateConfigForUser).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        agent: {
+          routes: [
+            expect.objectContaining({
+              sources: [`whatsapp:group:${groupJid}`],
+              destination: { kind: "member", platform: "whatsapp", memberUserId: member.id },
+            }),
+          ],
+        },
+      });
+      expect(reread.status).toBe(200);
+      await expect(reread.json()).resolves.toMatchObject({
+        agent: {
+          routes: [
+            expect.objectContaining({
+              destination: { kind: "member", platform: "whatsapp", memberUserId: member.id },
+            }),
+          ],
+        },
+      });
+    } finally {
+      await db.destroy();
+    }
   });
 
   it("lists route members through the agent route-members endpoint", async () => {
@@ -562,6 +623,46 @@ describe("agentRoutes", () => {
       "slack:channel:C_ALPHA",
       "slack:channel:C_BETA",
     ]);
+  });
+
+  it("lists WhatsApp DM members through the agent route-members endpoint", async () => {
+    const db = await createTestDb();
+    try {
+      const users = createUserRepository(db);
+      const user = await users.create({ name: "Agent User", email: "user@example.com" });
+      const teammate = await users.create({
+        name: "Numbered Teammate",
+        email: "teammate@example.com",
+        whatsappNumber: "+15551112222",
+      });
+      await users.create({ name: "No Number", email: "no-number@example.com" });
+      await users.create({
+        name: "Agent Account",
+        email: "agent@example.com",
+        whatsappNumber: "+15553334444",
+        type: "agent",
+      });
+      const service = new AgentRunService({
+        db,
+        config: createTestConfig(),
+        logger: createTestLogger(),
+        users,
+        settings: createSettingsRepository(db),
+        runAgent: vi.fn(async () => {
+          throw new Error("runAgent should not be called");
+        }) as unknown as AgentRunServiceDeps["runAgent"],
+      });
+      const app = createRoutesTestApp(service, user.id, user.email ?? undefined);
+
+      const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/route-members/whatsapp`);
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        members: [{ userId: teammate.id, name: "Numbered Teammate" }],
+      });
+    } finally {
+      await db.destroy();
+    }
   });
 
   it("lists completed outputs for an agent", async () => {
