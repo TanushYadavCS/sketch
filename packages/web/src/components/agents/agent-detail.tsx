@@ -288,9 +288,7 @@ function OutputsTab({
                     : "text-muted-foreground hover:bg-muted/50",
                 )}
               >
-                <span className="block truncate text-[12.5px] font-medium">
-                  {output.sourceLabel ?? "Summary"}
-                </span>
+                <span className="block truncate text-[12.5px] font-medium">{output.sourceLabel ?? "Summary"}</span>
                 <span className="mt-0.5 block truncate font-mono text-[10px] uppercase tracking-[0.08em]">
                   {formatDate(output.generatedAt ?? output.outputDate)}
                 </span>
