@@ -2,7 +2,12 @@ import type { createConversationRepository } from "../db/repositories/conversati
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { Logger } from "../logger";
 import { WHATSAPP_TEXT_LIMIT, chunkText } from "./chunking";
-import type { WhatsAppSendResult, WhatsAppTarget } from "./provider";
+import {
+  type WhatsAppSendResult,
+  type WhatsAppTarget,
+  isWhatsAppDmPhoneE164,
+  whatsappDeliveryTargetFromTarget,
+} from "./provider";
 import type { WhatsAppRuntime } from "./runtime";
 import { buildTaskNudgeTemplate } from "./templates";
 
@@ -21,17 +26,33 @@ export interface ProactiveDeliveryTextSend {
 export class ProactiveDeliveryTextSendError extends Error {
   readonly cause: unknown;
   readonly textSends: ProactiveDeliveryTextSend[];
+  readonly deliveryTarget: string;
 
-  constructor(cause: unknown, textSends: ProactiveDeliveryTextSend[]) {
+  constructor(cause: unknown, textSends: ProactiveDeliveryTextSend[], deliveryTarget: string) {
     super(cause instanceof Error ? cause.message : "WhatsApp text send failed");
     this.name = "ProactiveDeliveryTextSendError";
     this.cause = cause;
     this.textSends = textSends;
+    this.deliveryTarget = deliveryTarget;
+  }
+}
+
+export class ProactiveDeliveryInvalidTargetError extends Error {
+  readonly targetKind = "dm";
+  readonly reason = "invalid_e164";
+  readonly targetShape: string;
+
+  constructor(target: Extract<WhatsAppTarget, { kind: "dm" }>) {
+    const targetShape = invalidDmTargetShape(target);
+    super(`Invalid WhatsApp DM delivery target shape: ${targetShape}`);
+    this.name = "ProactiveDeliveryInvalidTargetError";
+    this.targetShape = targetShape;
   }
 }
 
 export interface ProactiveDeliveryResult {
   mode: ProactiveDeliveryMode;
+  deliveryTarget: string;
   sent: WhatsAppSendResult | null;
   textSends: ProactiveDeliveryTextSend[];
   inboxMessageId?: string | undefined;
@@ -54,32 +75,36 @@ export interface DeliverProactiveDmParams {
 }
 
 export async function deliverProactiveDm(params: DeliverProactiveDmParams): Promise<ProactiveDeliveryResult> {
-  if (params.target.kind === "group") {
-    const textSends = await sendTextChunks(params);
-    return { mode: "text", sent: lastSent(textSends), textSends };
+  const target = resolveProactiveDeliveryTarget(params.target, params.recipientPhoneE164);
+  const resolvedParams = { ...params, target };
+  const deliveryTarget = whatsappDeliveryTargetFromTarget(target);
+
+  if (target.kind === "group") {
+    const textSends = await sendTextChunks(resolvedParams);
+    return { mode: "text", deliveryTarget, sent: lastSent(textSends), textSends };
   }
 
-  if (!params.whatsapp.getCapabilities(params.target).templates) {
-    const textSends = await sendTextChunks(params);
-    return { mode: "text", sent: lastSent(textSends), textSends };
+  if (!params.whatsapp.getCapabilities(target).templates) {
+    const textSends = await sendTextChunks(resolvedParams);
+    return { mode: "text", deliveryTarget, sent: lastSent(textSends), textSends };
   }
 
   const lastInbound = await params.conversations.findLatestInboundWhatsAppDmFromRecipient({
     recipientUserId: params.recipientUserId,
-    phoneE164: params.recipientPhoneE164 ?? params.target.phoneE164,
+    phoneE164: target.phoneE164,
   });
 
   if (lastInbound && isInsideCustomerServiceWindow(lastInbound, params.now ?? new Date())) {
     try {
-      const textSends = await sendTextChunks(params);
-      return { mode: "text", sent: lastSent(textSends), textSends };
+      const textSends = await sendTextChunks(resolvedParams);
+      return { mode: "text", deliveryTarget, sent: lastSent(textSends), textSends };
     } catch (err) {
       if (!shouldParkAfterTextError(err)) throw err;
-      return parkThenNudge(params);
+      return parkThenNudge(resolvedParams);
     }
   }
 
-  return parkThenNudge(params);
+  return parkThenNudge(resolvedParams);
 }
 
 async function parkThenNudge(params: DeliverProactiveDmParams): Promise<ProactiveDeliveryResult> {
@@ -105,14 +130,26 @@ async function parkThenNudge(params: DeliverProactiveDmParams): Promise<Proactiv
       },
       "WhatsApp proactive delivery parked without duplicate nudge",
     );
-    return { mode: "parked", sent: null, textSends: [], inboxMessageId: inboxMessage.id };
+    return {
+      mode: "parked",
+      deliveryTarget: whatsappDeliveryTargetFromTarget(params.target),
+      sent: null,
+      textSends: [],
+      inboxMessageId: inboxMessage.id,
+    };
   }
 
   const sent = await params.whatsapp.sendTemplate(
     params.target,
     buildTaskNudgeTemplate({ recipientName: params.recipientName }),
   );
-  return { mode: "nudge", sent, textSends: [], inboxMessageId: inboxMessage.id };
+  return {
+    mode: "nudge",
+    deliveryTarget: whatsappDeliveryTargetFromTarget(params.target),
+    sent,
+    textSends: [],
+    inboxMessageId: inboxMessage.id,
+  };
 }
 
 /**
@@ -134,15 +171,46 @@ async function sendTextChunks(
   params: Pick<DeliverProactiveDmParams, "target" | "text" | "whatsapp">,
 ): Promise<ProactiveDeliveryTextSend[]> {
   const textSends: ProactiveDeliveryTextSend[] = [];
+  const deliveryTarget = whatsappDeliveryTargetFromTarget(params.target);
   for (const chunk of chunkText(params.text, WHATSAPP_TEXT_LIMIT)) {
     try {
       const sent = await params.whatsapp.sendText(params.target, chunk);
       textSends.push({ text: chunk, sent });
     } catch (cause) {
-      throw new ProactiveDeliveryTextSendError(cause, textSends);
+      throw new ProactiveDeliveryTextSendError(cause, textSends, deliveryTarget);
     }
   }
   return textSends;
+}
+
+function resolveProactiveDeliveryTarget(
+  target: WhatsAppTarget,
+  recipientPhoneE164: string | null | undefined,
+): WhatsAppTarget {
+  if (target.kind === "group") return target;
+  const targetPhone = validPhoneE164(target.phoneE164);
+  if (targetPhone) return targetPhone === target.phoneE164 ? target : { ...target, phoneE164: targetPhone };
+  const recipientPhone = validPhoneE164(recipientPhoneE164);
+  if (recipientPhone) return { ...target, phoneE164: recipientPhone };
+  throw new ProactiveDeliveryInvalidTargetError(target);
+}
+
+function validPhoneE164(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return isWhatsAppDmPhoneE164(trimmed) ? trimmed : null;
+}
+
+function invalidDmTargetShape(target: Extract<WhatsAppTarget, { kind: "dm" }>): string {
+  const providerConversationId = target.providerConversationId?.trim();
+  if (providerConversationId?.startsWith("wati:+")) return "wati_phone_fallback";
+  if (providerConversationId?.startsWith("wati:")) return "wati_provider_conversation";
+  if (providerConversationId?.endsWith("@s.whatsapp.net") || providerConversationId?.endsWith("@lid")) {
+    return "whatsapp_jid";
+  }
+  if (providerConversationId) return "provider_conversation_id";
+  if (target.phoneE164.startsWith("+")) return "bare_phone";
+  if (target.phoneE164) return "invalid_phone";
+  return "missing_phone";
 }
 
 function lastSent(textSends: ProactiveDeliveryTextSend[]): WhatsAppSendResult | null {

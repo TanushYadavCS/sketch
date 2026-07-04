@@ -34,7 +34,7 @@ import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import type { RecordWorkflowStep } from "../telemetry/agent-run-telemetry";
 import { deliverProactiveDm } from "../whatsapp/proactive-delivery";
-import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { type AutomationExecutionResult, executeAutomation } from "../workflows/runtime";
@@ -314,7 +314,7 @@ export class TaskScheduler {
       const messageRef = result.sent?.providerMessageId;
       if (!messageRef || result.mode !== "text") return;
       await this.deliveryCapture.captureWhatsApp({
-        deliveryTarget: target.kind === "dm" ? whatsappDeliveryTargetFromTarget(target) : delivery.targetId,
+        deliveryTarget: "deliveryTarget" in result ? result.deliveryTarget : delivery.targetId,
         messageRef,
         providerTimestamp: result.sent?.providerTimestamp ?? null,
         text,

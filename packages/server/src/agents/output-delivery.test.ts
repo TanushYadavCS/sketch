@@ -6,9 +6,24 @@ import type { DB } from "../db/schema";
 import type { SlackBot } from "../slack/bot";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { WHATSAPP_TEXT_LIMIT } from "../whatsapp/chunking";
+import type { WhatsAppCapabilities } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { dailyBriefDefinition } from "./definitions/daily-brief";
 import { createAgentOutputDeliveryService } from "./output-delivery";
+
+const textOnlyCapabilities: WhatsAppCapabilities = {
+  text: true,
+  media: false,
+  quotedReply: false,
+  templates: false,
+  templateProvisioning: "none",
+  interactive: false,
+  deliveryStatus: false,
+  typing: false,
+  reactions: false,
+  edit: false,
+  groups: false,
+};
 
 function createMockWhatsApp(overrides: Partial<WhatsAppRuntime> = {}): WhatsAppRuntime {
   return {
@@ -231,6 +246,56 @@ describe("createAgentOutputDeliveryService", () => {
     const attempt = await db.selectFrom("agent_output_deliveries").selectAll().executeTakeFirstOrThrow();
     expect(attempt.status).toBe("sent");
     expect(attempt.message_refs_json).toBe(JSON.stringify(["wa-nudge-1"]));
+  });
+
+  it("uses the recipient phone when a WhatsApp DM delivery target is an opaque Wati conversation id", async () => {
+    await db.updateTable("users").set({ whatsapp_number: "+15551234567" }).where("id", "=", "user-delivery").execute();
+    const sendText = vi.fn(async (target: unknown) => ({
+      providerMessageId: "wa-dm-opaque-1",
+      providerConversationId:
+        typeof target === "object" && target && "providerConversationId" in target
+          ? String(target.providerConversationId)
+          : "dm:+15551234567",
+      providerTimestamp: "2024-06-04T07:20:00.000Z",
+    }));
+    const whatsapp = createMockWhatsApp({
+      isConnected: true,
+      getCapabilities: vi.fn(() => textOnlyCapabilities),
+      sendText,
+    });
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => null,
+      whatsapp,
+      settingsRepo: createSettingsRepository(db),
+    });
+
+    await service.deliver({
+      definition: dailyBriefDefinition,
+      delivery: {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "dm",
+        targetId: "6a436a0b5a5429ba2f5d8153",
+        label: "Alice",
+      },
+      output: {
+        id: "output-delivery",
+        userId: "user-delivery",
+        agentKey: dailyBriefDefinition.key,
+        outputDate: "2026-06-26",
+        masthead: { title: "Daily Brief", summary: "Start here." },
+        sections: {},
+      },
+    });
+
+    expect(sendText).toHaveBeenCalledWith(
+      { kind: "dm", phoneE164: "+15551234567", providerConversationId: "6a436a0b5a5429ba2f5d8153" },
+      expect.stringContaining("Daily Brief"),
+    );
+    const conversation = await db.selectFrom("conversations").selectAll().executeTakeFirstOrThrow();
+    expect(conversation.provider_conversation_id).toBe("dm:+15551234567");
   });
 
   it("chunks in-window WhatsApp DM deliveries and captures each chunk", async () => {

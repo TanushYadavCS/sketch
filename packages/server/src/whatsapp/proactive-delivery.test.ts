@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WHATSAPP_TEXT_LIMIT } from "./chunking";
 import {
   type DeliverProactiveDmParams,
+  ProactiveDeliveryInvalidTargetError,
   ProactiveDeliveryTextSendError,
   deliverProactiveDm,
 } from "./proactive-delivery";
@@ -79,9 +80,69 @@ describe("deliverProactiveDm", () => {
     });
 
     expect(result.mode).toBe("text");
+    expect(result.deliveryTarget).toBe("dm:+15551234567");
     expect(deps.whatsapp.sendText).toHaveBeenCalledWith(target, text);
     expect(deps.conversations.findLatestInboundWhatsAppDmFromRecipient).not.toHaveBeenCalled();
     expect(deps.inboxMessages.create).not.toHaveBeenCalled();
+    expect(deps.whatsapp.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("substitutes the recipient phone for invalid managed provider targets", async () => {
+    const sendText = vi.fn().mockResolvedValue(sentText);
+    const deps = buildDeps({ capabilities: textOnlyCapabilities, sendText });
+    const providerTarget: WhatsAppTarget = {
+      kind: "dm",
+      phoneE164: "",
+      providerConversationId: "6a436a0b5a5429ba2f5d8153",
+    };
+
+    const result = await deliverProactiveDm({
+      target: providerTarget,
+      recipientUserId: "user-1",
+      senderUserId: "user-1",
+      recipientPhoneE164: "+919867673672",
+      text: "resolved output",
+      ...deps,
+    });
+
+    expect(result.mode).toBe("text");
+    expect(result.deliveryTarget).toBe("dm:+919867673672");
+    expect(sendText).toHaveBeenCalledWith(
+      { kind: "dm", phoneE164: "+919867673672", providerConversationId: "6a436a0b5a5429ba2f5d8153" },
+      "resolved output",
+    );
+  });
+
+  it("throws a typed failure when neither target nor recipient has a valid phone", async () => {
+    const sendText = vi.fn().mockResolvedValue(sentText);
+    const deps = buildDeps({ capabilities: textOnlyCapabilities, sendText });
+    const providerTarget: WhatsAppTarget = {
+      kind: "dm",
+      phoneE164: "",
+      providerConversationId: "6a436a0b5a5429ba2f5d8153",
+    };
+
+    let thrown: unknown;
+    try {
+      await deliverProactiveDm({
+        target: providerTarget,
+        recipientUserId: "user-1",
+        senderUserId: "user-1",
+        recipientPhoneE164: "not-a-phone",
+        text: "unresolved output",
+        ...deps,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(ProactiveDeliveryInvalidTargetError);
+    expect(thrown).toMatchObject({
+      targetKind: "dm",
+      reason: "invalid_e164",
+      targetShape: "provider_conversation_id",
+    });
+    expect(sendText).not.toHaveBeenCalled();
     expect(deps.whatsapp.sendTemplate).not.toHaveBeenCalled();
   });
 
@@ -98,7 +159,12 @@ describe("deliverProactiveDm", () => {
       ...deps,
     });
 
-    expect(result).toEqual({ mode: "text", sent: sentText, textSends: [{ text, sent: sentText }] });
+    expect(result).toEqual({
+      mode: "text",
+      deliveryTarget: "dm:+15551234567",
+      sent: sentText,
+      textSends: [{ text, sent: sentText }],
+    });
     expect(deps.whatsapp.sendText).toHaveBeenCalledWith(target, text);
     expect(deps.inboxMessages.create).not.toHaveBeenCalled();
     expect(deps.whatsapp.sendTemplate).not.toHaveBeenCalled();
@@ -128,6 +194,7 @@ describe("deliverProactiveDm", () => {
     expect(sendText).toHaveBeenNthCalledWith(2, target, "b".repeat(24));
     expect(result).toEqual({
       mode: "text",
+      deliveryTarget: "dm:+15551234567",
       sent: secondSent,
       textSends: [
         { text: "a".repeat(WHATSAPP_TEXT_LIMIT), sent: firstSent },
