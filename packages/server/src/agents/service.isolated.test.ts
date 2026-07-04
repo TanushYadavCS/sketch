@@ -1496,6 +1496,53 @@ describe("AgentRunService", () => {
     );
   });
 
+  it("reports the source platform for self-delivered WhatsApp summary routes", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const source = whatsappSource("120363000000001@g.us", "Leads");
+    await createWhatsAppGroupRepository(db).upsert({
+      jid: source.targetId,
+      name: "Leads",
+      description: null,
+      updated_at: "2026-06-27T00:00:00.000Z",
+    });
+    const contexts: Record<string, Record<string, unknown>> = {};
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      const runtimeContext = runtimeContextFromUserMessage(params.userMessage);
+      contexts[String(runtimeContext.outputId)] = runtimeContext;
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Summarizer", summary: "Summary" },
+        rawPayload: emptySummaryPayload(),
+        items: [],
+      });
+      return successfulRunResult();
+    });
+    const service = createService(db, tasks, {
+      runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      getWhatsApp: () => ({ getGroupMetadata: vi.fn() }),
+    });
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      sources: [source],
+      routes: [sourceRoute(source)],
+    });
+
+    const [row] = await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    if (!row) throw new Error("Expected a generated output row");
+    for (const task of tasks) await task();
+
+    expect(contexts[row.id].deliveryPlatform).toBe("whatsapp");
+  });
+
   it("generates one combined route output with isolated source context and member delivery", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);

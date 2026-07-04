@@ -672,10 +672,14 @@ function firstRunLookbackHoursForSchedule(schedule: AgentRouteSchedule | null | 
   return schedule.intervalHours ?? 24;
 }
 
-/** The platform a route delivers to, so the agent can tailor its prose; null for self/web-only routes. */
-function deliveryPlatformForRoute(route: AgentRoute | null | undefined): "slack" | "whatsapp" | null {
+/** The platform a route delivers to, so the agent can tailor its prose; null for off/web-only routes. */
+function deliveryPlatformForRoute(
+  route: AgentRoute | null | undefined,
+  resolvedSources: AgentSourceConfig[],
+): "slack" | "whatsapp" | null {
   const destination = route?.destination;
   if (destination && (destination.kind === "channel" || destination.kind === "member")) return destination.platform;
+  if (destination?.kind === "self" && resolvedSources.length === 1) return resolvedSources[0].platform;
   return null;
 }
 
@@ -1660,7 +1664,7 @@ export class AgentRunService {
                 sourceKey: scope.sourceKey,
                 firstRunLookbackHours,
                 floorWindowToPeriod: output.trigger_type === "manual",
-                deliveryPlatform: deliveryPlatformForRoute(scope.route),
+                deliveryPlatform: deliveryPlatformForRoute(scope.route, scope.sources),
               },
             })
           : Promise.resolve({}),
