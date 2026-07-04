@@ -55,6 +55,11 @@ function sanitizeSlackText(value: string): string {
     .replaceAll(">", ")");
 }
 
+/** Strips WhatsApp emphasis markers from a segment we are about to wrap in bold/italic, so stray markup can't break formatting. */
+function sanitizeWhatsAppInline(value: string): string {
+  return value.replaceAll("*", "").replaceAll("_", "").replaceAll("~", "").replaceAll("`", "");
+}
+
 function isSlackMentionTargetId(value: string): boolean {
   return /^[UW][A-Z0-9]+$/.test(value);
 }
@@ -73,16 +78,19 @@ function formatMention(mention: AgentDeliveryMention, platform: AgentDeliveryRen
 
 function formatItem(item: AgentApiItem, platform: AgentDeliveryRenderPlatform, runSourceLabel?: string | null): string {
   const titleText = clip(item.title, ITEM_TITLE_LIMIT);
-  const title = platform === "slack" ? slackLink(sanitizeSlackText(titleText), item.sourceUrl) : titleText;
+  const title =
+    platform === "slack" ? slackLink(sanitizeSlackText(titleText), item.sourceUrl) : sanitizeWhatsAppInline(titleText);
   const summaryText = clip(item.summary, ITEM_SUMMARY_LIMIT);
   const summary = platform === "slack" ? sanitizeSlackText(summaryText) : summaryText;
-  const headline = platform === "slack" ? `- *${title}* - ${summary}` : `- ${title} - ${summary}`;
+  const headline = `- *${title}* - ${summary}`;
   const perItemSource = item.displayRef && item.displayRef !== runSourceLabel ? item.displayRef : null;
   const metadata = [item.priority === "high" ? `${priorityLabel(item.priority)} priority` : null, perItemSource]
     .filter(Boolean)
     .join(" | ");
   const lines = [headline];
-  if (metadata) lines.push(platform === "slack" ? `  _${sanitizeSlackText(metadata)}_` : `  ${metadata}`);
+  if (metadata) {
+    lines.push(platform === "slack" ? `  _${sanitizeSlackText(metadata)}_` : `  _${sanitizeWhatsAppInline(metadata)}_`);
+  }
   if (platform === "whatsapp" && item.sourceUrl) lines.push(`  Source: ${item.sourceUrl}`);
   return lines.join("\n");
 }
@@ -95,7 +103,7 @@ export function renderAgentOutputForDelivery(params: {
   mentions?: readonly AgentDeliveryMention[];
 }): string {
   const header = `${params.title} | ${formatOutputDate(params.output.outputDate)}`;
-  const lines: string[] = [params.platform === "slack" ? `*${header}*` : header];
+  const lines: string[] = [`*${header}*`];
   const mentions = (params.mentions ?? []).flatMap((mention) => {
     const formatted = formatMention(mention, params.platform);
     return formatted ? [formatted] : [];
@@ -111,13 +119,13 @@ export function renderAgentOutputForDelivery(params: {
   for (const section of params.sections) {
     const items = params.output.sections[section.key] ?? [];
     if (items.length === 0) continue;
-    lines.push("", params.platform === "slack" ? `*${section.title}*` : section.title);
+    lines.push("", `*${section.title}*`);
     for (const item of items.slice(0, DELIVERY_MAX_ITEMS_PER_SECTION)) {
       lines.push(formatItem(item, params.platform, params.output.sourceLabel));
     }
     const hidden = items.length - DELIVERY_MAX_ITEMS_PER_SECTION;
     if (hidden > 0) {
-      lines.push(params.platform === "slack" ? `_+${hidden} more in Sketch_` : `+${hidden} more in Sketch`);
+      lines.push(`_+${hidden} more in Sketch_`);
     }
   }
 

@@ -64,11 +64,11 @@ describe("renderAgentOutputForDelivery", () => {
       },
     });
 
-    expect(text).toContain("Daily Brief | Jun 26");
+    expect(text).toContain("*Daily Brief | Jun 26*");
     expect(text).toContain("Cc: @AdaLovelace");
-    expect(text).toContain("To-dos");
-    expect(text).toContain("- Follow up with Acme - Acme asked for the launch timeline.");
-    expect(text).toContain("  High priority | SKE-235");
+    expect(text).toContain("*To-dos*");
+    expect(text).toContain("- *Follow up with Acme* - Acme asked for the launch timeline.");
+    expect(text).toContain("  _High priority | SKE-235_");
     expect(text).toContain("  Source: https://linear.app/sketch-ai/issue/SKE-235/example");
   });
 
@@ -112,7 +112,7 @@ describe("renderAgentOutputForDelivery", () => {
     });
 
     expect(text).not.toContain("Habuild ORG AI");
-    expect(text).toContain("  Ops Room");
+    expect(text).toContain("  _Ops Room_");
   });
 
   it("escapes Slack control characters outside configured mentions", () => {
