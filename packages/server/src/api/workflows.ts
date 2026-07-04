@@ -19,7 +19,7 @@ import { createWorkflowDeliveryCapture } from "../scheduler/delivery-capture";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
 import { deliverProactiveDm } from "../whatsapp/proactive-delivery";
-import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { executeAutomation } from "../workflows/runtime";
@@ -231,7 +231,7 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
         if (messageRef) delivery.messageRef = messageRef;
         if (messageRef && result.mode === "text") {
           await capture?.captureWhatsApp({
-            deliveryTarget: target.kind === "dm" ? whatsappDeliveryTargetFromTarget(target) : resolved.targetId,
+            deliveryTarget: "deliveryTarget" in result ? result.deliveryTarget : resolved.targetId,
             messageRef,
             providerTimestamp: result.sent?.providerTimestamp ?? null,
             text,

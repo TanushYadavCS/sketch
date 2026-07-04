@@ -4,6 +4,7 @@ import type { AgentDeliveryConfig } from "../db/repositories/agent-outputs";
 import { createConversationRepository } from "../db/repositories/conversations";
 import { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
+import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { chunkText } from "../formatting/chunking";
 import type { Logger } from "../logger";
@@ -15,11 +16,7 @@ import {
   ProactiveDeliveryTextSendError,
   deliverProactiveDm,
 } from "../whatsapp/proactive-delivery";
-import {
-  type WhatsAppTarget,
-  whatsappDeliveryTargetFromTarget,
-  whatsappTargetFromDeliveryTarget,
-} from "../whatsapp/provider";
+import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { isSlackDmChannelId, isSlackUserId } from "../workflows/delivery";
 import { type RenderableAgentOutput, renderAgentOutputForDelivery } from "./output-renderer";
@@ -49,6 +46,7 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
   const repo = createAgentOutputDeliveryRepository(deps.db);
   const conversations = createConversationRepository(deps.db);
   const inboxMessages = createInboxMessagesRepository(deps.db);
+  const users = createUserRepository(deps.db);
   const capture = createWorkflowDeliveryCapture({
     conversations,
     settingsRepo: deps.settingsRepo,
@@ -85,6 +83,7 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
     const target = whatsappTargetFromDeliveryTarget(delivery.targetId);
 
     if (target.kind === "dm") {
+      const recipient = await users.findById(output.userId);
       try {
         const result = await deliverProactiveDm({
           target,
@@ -96,17 +95,17 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
           inboxMessages,
           logger: deps.logger,
           recipientName: delivery.label,
-          recipientPhoneE164: target.phoneE164,
+          recipientPhoneE164: recipient?.whatsapp_number ?? target.phoneE164,
           inboxMetadata: { source: "agent_output", outputId: output.id, agentKey: output.agentKey },
         });
         if (result.mode === "text") {
-          return captureWhatsAppDmTextSends(target, result.textSends);
+          return captureWhatsAppDmTextSends(result.deliveryTarget, result.textSends);
         }
         const messageRef = result.sent?.providerMessageId;
         return [messageRef ?? result.inboxMessageId].filter((ref): ref is string => Boolean(ref));
       } catch (err) {
         if (err instanceof ProactiveDeliveryTextSendError) {
-          await captureWhatsAppDmTextSends(target, err.textSends);
+          await captureWhatsAppDmTextSends(err.deliveryTarget, err.textSends);
           throw err.cause ?? err;
         }
         throw err;
@@ -130,7 +129,7 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
   }
 
   async function captureWhatsAppDmTextSends(
-    target: WhatsAppTarget & { kind: "dm" },
+    deliveryTarget: string,
     textSends: ProactiveDeliveryTextSend[],
   ): Promise<string[]> {
     const refs: string[] = [];
@@ -139,7 +138,7 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
       if (!messageRef) continue;
       refs.push(messageRef);
       await capture.captureWhatsApp({
-        deliveryTarget: whatsappDeliveryTargetFromTarget(target),
+        deliveryTarget,
         messageRef,
         providerTimestamp: textSend.sent?.providerTimestamp ?? null,
         text: textSend.text,
