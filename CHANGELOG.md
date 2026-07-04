@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [0.44.0] -- 2026-07-04
+
+- Managed WhatsApp templates are now resolved at send time by the platform: the managed provider sends the logical template key and parameters, and the platform owns the logical-to-Wati mapping. Managed tenants no longer need template mapping rows seeded in their database. Unknown templates surface as a `template_not_found` provider error. Self-hosted direct-Wati template mapping is unchanged.
+- Wati session sends that return an HTTP 200 failure body (`result: false`) are now treated as errors instead of successes, so delivery fallbacks and keep-alive metrics see the real outcome.
+
 ## [0.43.0] -- 2026-07-04
 
 - WhatsApp 24h-window keep-alive: an hourly internal job pings users whose customer-service window is about to lapse (last inbound 21-23h ago) with a personalized session text prompting a reply, so proactive deliveries can keep arriving as full messages instead of template nudges. One ping per window cycle, aware of upcoming scheduled tasks, no-op on providers without window semantics (Baileys). Gated behind `WHATSAPP_WINDOW_KEEPALIVE_ENABLED` (default off).
