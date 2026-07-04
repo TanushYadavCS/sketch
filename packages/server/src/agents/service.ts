@@ -1164,19 +1164,7 @@ export class AgentRunService {
       .where("jid", "=", source.targetId)
       .executeTakeFirst();
     if (!group) throw new AgentSourceTargetError("WhatsApp group is not available as a source");
-    if (!user.whatsapp_number) throw new AgentSourceTargetError("WhatsApp sources are not available for this user");
-    const whatsapp = this.deps.getWhatsApp?.() ?? null;
-    if (!whatsapp) throw new AgentSourceTargetError("WhatsApp is not connected");
-    const groupMetadata = await whatsapp.getGroupMetadata(group.jid);
-    if (
-      !(await whatsappGroupHasParticipant(
-        groupMetadata,
-        user.whatsapp_number,
-        async (jid) => (await whatsapp.resolveJidToPhone?.(jid)) ?? null,
-      ))
-    ) {
-      throw new AgentSourceTargetError("WhatsApp group is not available for this user");
-    }
+    if (!this.deps.getWhatsApp?.()) throw new AgentSourceTargetError("WhatsApp is not connected");
     return {
       platform: "whatsapp",
       targetType: "group",

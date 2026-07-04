@@ -862,6 +862,83 @@ describe("AgentRunService", () => {
     });
   });
 
+  it("resolves WhatsApp group sources by bot-known group membership without requiring a user WhatsApp number", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const source = whatsappSource("120363000000001@g.us", "Spoofed");
+    await createWhatsAppGroupRepository(db).upsert({
+      jid: source.targetId,
+      name: "Leadership",
+      description: null,
+      updated_at: "2026-06-27T00:00:00.000Z",
+    });
+    const getGroupMetadata = vi.fn(
+      async () =>
+        ({
+          subject: "Leadership",
+          participants: [{ id: "86702773280883@lid" }],
+        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+    );
+    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+
+    const updated = await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      sources: [source],
+    });
+
+    expect(updated?.sources).toEqual([
+      {
+        platform: "whatsapp",
+        targetType: "group",
+        targetId: "120363000000001@g.us",
+        label: "Leadership",
+      },
+    ]);
+    expect(getGroupMetadata).not.toHaveBeenCalled();
+  });
+
+  it("rejects WhatsApp group sources that are not known to the bot", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const getGroupMetadata = vi.fn(
+      async () =>
+        ({
+          id: "120363000000404@g.us",
+          owner: "15550000000@s.whatsapp.net",
+          subject: "Unknown",
+          participants: [],
+        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+    );
+    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+
+    await expect(
+      service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+        sources: [whatsappSource("120363000000404@g.us", "Unknown")],
+      }),
+    ).rejects.toThrow("WhatsApp group is not available as a source");
+    expect(getGroupMetadata).not.toHaveBeenCalled();
+  });
+
+  it("keeps Slack source validation strict to current-user channel membership", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    const isUserInChannel = vi.fn(async () => false);
+    const service = createService(db, [], {
+      getSlack: () => ({
+        listChannels: vi.fn(async () => [
+          { id: "C_PRIVATE", name: "private-room", type: "private_channel", isMember: true },
+        ]),
+        isUserInChannel,
+      }),
+    });
+
+    await expect(
+      service.resolveSourceConfigsForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, [
+        slackSource("C_PRIVATE", "private-room"),
+      ]),
+    ).rejects.toThrow("Slack channel is not available for this user");
+    expect(isUserInChannel).toHaveBeenCalledWith("C_PRIVATE", "U_AGENT");
+  });
+
   it("normalizes delivery models with defaultRoute and full-key legacy matching", async () => {
     const users = createUserRepository(db);
     const slackDelivery = allowSlackDelivery([
