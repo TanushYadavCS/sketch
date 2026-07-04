@@ -92,6 +92,29 @@ describe("renderAgentOutputForDelivery", () => {
     expect(text).toContain("_+1 more in Sketch_");
   });
 
+  it("drops the per-item source when it repeats the run's single source, but keeps a differing one", () => {
+    const text = renderAgentOutputForDelivery({
+      title: "Summarizer",
+      sections,
+      platform: "whatsapp",
+      output: {
+        outputDate: "2026-06-26",
+        sourceLabel: "Habuild ORG AI",
+        masthead: { title: "Habuild ORG AI", summary: "Weekly recap." },
+        sections: {
+          todos: [
+            item({ id: "same", priority: "medium", displayRef: "Habuild ORG AI", sourceUrl: null }),
+            item({ id: "other", priority: "medium", displayRef: "Ops Room", sourceUrl: null }),
+          ],
+          customer_updates: [],
+        },
+      },
+    });
+
+    expect(text).not.toContain("Habuild ORG AI");
+    expect(text).toContain("  Ops Room");
+  });
+
   it("escapes Slack control characters outside configured mentions", () => {
     const text = renderAgentOutputForDelivery({
       title: "Daily Brief",

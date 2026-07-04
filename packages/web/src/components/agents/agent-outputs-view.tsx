@@ -9,9 +9,12 @@ import { cn } from "@sketch/ui/lib/utils";
 import { useEffect, useState } from "react";
 
 export function formatOutputDate(value: string): string {
-  const parsed = new Date(value.length === 10 ? `${value}T00:00:00` : value);
+  const hasTime = value.length > 10;
+  const parsed = new Date(hasTime ? value : `${value}T00:00:00`);
   if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const datePart = parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (!hasTime) return datePart;
+  return `${datePart}, ${parsed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
 }
 
 export function EmptyCard({ children }: { children: React.ReactNode }) {
@@ -60,12 +63,7 @@ export function OutputView({ output, sectionTitles }: { output: AgentOutput; sec
                 <div key={item.id} className="rounded-xl border-[0.5px] border-border bg-card px-4 py-3">
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span className="text-[13px] font-medium text-foreground">{item.title}</span>
-                    {item.label ? (
-                      <span className="rounded-full bg-muted/60 px-1.5 py-[1px] font-mono text-[8.5px] uppercase tracking-[0.06em] text-muted-foreground">
-                        {item.label.replaceAll("_", " ")}
-                      </span>
-                    ) : null}
-                    {item.displayRef ? (
+                    {item.displayRef && item.displayRef !== output.sourceLabel ? (
                       <span className="font-mono text-[10px] text-muted-foreground/70">{item.displayRef}</span>
                     ) : null}
                   </div>

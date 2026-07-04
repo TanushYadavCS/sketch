@@ -7,6 +7,7 @@ export interface RenderableAgentOutput {
   outputDate: string;
   masthead: AgentMasthead | null;
   sections: Record<string, AgentApiItem[]>;
+  sourceLabel?: string | null;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -70,13 +71,14 @@ function formatMention(mention: AgentDeliveryMention, platform: AgentDeliveryRen
   return display ? `@${display}` : null;
 }
 
-function formatItem(item: AgentApiItem, platform: AgentDeliveryRenderPlatform): string {
+function formatItem(item: AgentApiItem, platform: AgentDeliveryRenderPlatform, runSourceLabel?: string | null): string {
   const titleText = clip(item.title, ITEM_TITLE_LIMIT);
   const title = platform === "slack" ? slackLink(sanitizeSlackText(titleText), item.sourceUrl) : titleText;
   const summaryText = clip(item.summary, ITEM_SUMMARY_LIMIT);
   const summary = platform === "slack" ? sanitizeSlackText(summaryText) : summaryText;
   const headline = platform === "slack" ? `- *${title}* - ${summary}` : `- ${title} - ${summary}`;
-  const metadata = [item.priority === "high" ? `${priorityLabel(item.priority)} priority` : null, item.displayRef]
+  const perItemSource = item.displayRef && item.displayRef !== runSourceLabel ? item.displayRef : null;
+  const metadata = [item.priority === "high" ? `${priorityLabel(item.priority)} priority` : null, perItemSource]
     .filter(Boolean)
     .join(" | ");
   const lines = [headline];
@@ -111,7 +113,7 @@ export function renderAgentOutputForDelivery(params: {
     if (items.length === 0) continue;
     lines.push("", params.platform === "slack" ? `*${section.title}*` : section.title);
     for (const item of items.slice(0, DELIVERY_MAX_ITEMS_PER_SECTION)) {
-      lines.push(formatItem(item, params.platform));
+      lines.push(formatItem(item, params.platform, params.output.sourceLabel));
     }
     const hidden = items.length - DELIVERY_MAX_ITEMS_PER_SECTION;
     if (hidden > 0) {
