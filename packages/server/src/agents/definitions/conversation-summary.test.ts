@@ -121,6 +121,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
         focus: null,
         delivery: null,
         sources: [source()],
+        sourceKey: "slack:channel:C_SUMMARY",
       },
     });
 
@@ -148,6 +149,8 @@ describe("buildConversationSummaryRuntimeContext", () => {
         agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
         user_id: user.id,
         output_date: "2026-07-01",
+        source_key: "slack:channel:C_SUMMARY",
+        source_label: "#summary-room",
         timezone: "UTC",
         status: "completed",
         trigger_type: "scheduled",
@@ -191,6 +194,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
         focus: null,
         delivery: null,
         sources: [source()],
+        sourceKey: "slack:channel:C_SUMMARY",
       },
     });
 

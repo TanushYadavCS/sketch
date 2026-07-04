@@ -535,6 +535,8 @@ export interface AgentOutputsTable {
   agent_key: string;
   user_id: string;
   output_date: string;
+  source_key: Generated<string>;
+  source_label: string | null;
   timezone: string;
   status: string;
   trigger_type: string;

@@ -64,6 +64,7 @@ export interface AgentRuntimeContextParams {
     focus: string | null;
     delivery: AgentDeliveryConfig | null;
     sources: AgentSourceConfig[];
+    sourceKey: string;
   };
 }
 

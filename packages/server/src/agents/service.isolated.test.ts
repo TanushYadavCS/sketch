@@ -1,6 +1,12 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type AgentOutputItemInput, createAgentOutputRepository } from "../db/repositories/agent-outputs";
+import {
+  type AgentDeliveryModel,
+  type AgentOutputItemInput,
+  type AgentSourceConfig,
+  createAgentOutputRepository,
+} from "../db/repositories/agent-outputs";
+import { createConversationRepository } from "../db/repositories/conversations";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
@@ -8,13 +14,22 @@ import type { DB } from "../db/schema";
 import type { QueueManager } from "../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 import type { WhatsAppBot } from "../whatsapp/bot";
-import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
+import { CONVERSATION_SUMMARY_AGENT_KEY, conversationSummaryDefinition } from "./definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "./definitions/daily-brief";
 import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { AgentRunService, type AgentRunServiceDeps } from "./service";
 
 const NOW = new Date("2026-06-15T08:05:00.000Z");
 const OUTPUT_DATE = "2026-06-15";
+
+function emptySummaryPayload(summary = "Summary") {
+  return {
+    outputDate: OUTPUT_DATE,
+    timezone: "UTC",
+    masthead: { title: "Summarizer", summary },
+    items: [],
+  };
+}
 
 function createPausedQueueManager(tasks: Array<() => Promise<void>>): QueueManager {
   return {
@@ -125,11 +140,43 @@ function allowSlackDelivery(
   };
 }
 
+function slackSource(id: string, name: string): AgentSourceConfig {
+  return { platform: "slack", targetType: "channel", targetId: id, label: `#${name}` };
+}
+
+function perSourceSelfModel(): AgentDeliveryModel {
+  return { mode: "per_source", defaultRoute: "self", perSource: {}, combined: null };
+}
+
 function runtimeContextFromUserMessage(userMessage: string): Record<string, unknown> {
   const marker = "Runtime context:\n";
   const markerIndex = userMessage.indexOf(marker);
   if (markerIndex === -1) throw new Error("Runtime context marker missing");
   return JSON.parse(userMessage.slice(markerIndex + marker.length)) as Record<string, unknown>;
+}
+
+async function seedSlackConversationMessage(
+  db: Kysely<DB>,
+  source: AgentSourceConfig,
+  params: { messageId: string; text: string; receivedAt: string },
+): Promise<void> {
+  const conversations = createConversationRepository(db);
+  const conversation = await conversations.getOrCreate(
+    {
+      platform: source.platform,
+      kind: "channel",
+      providerConversationId: source.targetId,
+    },
+    source.label,
+  );
+  await conversations.insertMessage({
+    conversationId: conversation.id,
+    providerMessageId: params.messageId,
+    senderJid: "U_SENDER",
+    senderName: "Sender",
+    text: params.text,
+    receivedAt: params.receivedAt,
+  });
 }
 
 async function seedIndexedFile(
@@ -235,6 +282,40 @@ function briefItem(overrides: Partial<AgentOutputItemInput> = {}): AgentOutputIt
   };
 }
 
+function successfulRunResult() {
+  return {
+    messageSent: true,
+    sessionId: "agent-session",
+    costUsd: 0,
+    auxCostUsd: 0,
+    pendingUploads: [],
+    durationMs: 0,
+    durationApiMs: 0,
+    numTurns: 0,
+    stopReason: null,
+    errorSubtype: null,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    webSearchRequests: 0,
+    webFetchRequests: 0,
+    model: null,
+    isResumedSession: false,
+    totalAttachments: 0,
+    imageCount: 0,
+    nonImageCount: 0,
+    mimeTypes: [],
+    fileSizes: [],
+    promptMode: "text" as const,
+    toolCalls: [],
+    auxLlmCalls: [],
+    sdkCostUsd: 0,
+    rawUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    trace: { progressEvents: [], finalText: "Done" },
+  };
+}
+
 describe("AgentRunService", () => {
   let db: Kysely<DB>;
 
@@ -271,7 +352,7 @@ describe("AgentRunService", () => {
       .execute();
 
     const service = createService(db, tasks);
-    const replacement = await service.requestGenerationForUser({
+    const [replacement] = await service.requestGenerationForUser({
       agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
       outputDate: OUTPUT_DATE,
@@ -438,7 +519,7 @@ describe("AgentRunService", () => {
       }),
     );
 
-    const row = await service.requestGenerationForUser({
+    const [row] = await service.requestGenerationForUser({
       agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
       outputDate: OUTPUT_DATE,
@@ -465,7 +546,7 @@ describe("AgentRunService", () => {
       }),
     );
 
-    const row = await service.requestGenerationForUser({
+    const [row] = await service.requestGenerationForUser({
       agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
       outputDate: OUTPUT_DATE,
@@ -560,7 +641,7 @@ describe("AgentRunService", () => {
       queueManager: createPausedQueueManager(tasks),
     });
 
-    const row = await service.requestGenerationForUser({
+    const [row] = await service.requestGenerationForUser({
       agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
       outputDate: OUTPUT_DATE,
@@ -603,7 +684,7 @@ describe("AgentRunService", () => {
     const service = createService(db, tasks);
     const userRow = await users.findById(user.id);
     const shouldGenerate = await service.shouldGenerateForUser(dailyBriefDefinition, userRow ?? user, NOW);
-    const request = await service.requestGenerationForUser({
+    const [request] = await service.requestGenerationForUser({
       agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
       outputDate: OUTPUT_DATE,
@@ -679,6 +760,64 @@ describe("AgentRunService", () => {
 
     const reread = await service.getConfigView(DAILY_BRIEF_AGENT_KEY, user.id);
     expect(reread?.delivery?.targetId).toBe("C_DAILY");
+  });
+
+  it("normalizes delivery models with defaultRoute and full-key legacy matching", async () => {
+    const users = createUserRepository(db);
+    const slackDelivery = allowSlackDelivery([
+      { id: "C_A", name: "alpha" },
+      { id: "C_B", name: "beta" },
+      { id: "U_AGENT", name: "user-like-channel" },
+    ]);
+
+    const defaultRouteUser = await users.create({
+      name: "Default Route User",
+      email: "default-route@example.com",
+      slackUserId: "U_DEFAULT",
+    });
+    const defaultRouteService = createService(db, [], slackDelivery);
+    await defaultRouteService.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, defaultRouteUser.id, {
+      sources: [slackSource("C_A", "alpha")],
+      deliveryModel: perSourceSelfModel(),
+    });
+    const reconciled = await defaultRouteService.updateConfigForUser(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      defaultRouteUser.id,
+      {
+        sources: [slackSource("C_A", "alpha"), slackSource("C_B", "beta")],
+      },
+    );
+
+    expect(reconciled?.deliveryModel).toMatchObject({
+      mode: "per_source",
+      defaultRoute: "self",
+      perSource: {
+        "slack:channel:C_A": { kind: "self" },
+        "slack:channel:C_B": { kind: "self" },
+      },
+    });
+
+    const fullKeyUser = await users.create({
+      name: "Full Key User",
+      email: "full-key@example.com",
+      slackUserId: "U_AGENT",
+    });
+    const fullKeyService = createService(db, [], slackDelivery);
+    const fullKeyConfig = await fullKeyService.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, fullKeyUser.id, {
+      sources: [slackSource("U_AGENT", "user-like-channel")],
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "dm",
+        targetId: "U_AGENT",
+        label: "Self DM",
+      },
+    });
+
+    expect(fullKeyConfig?.deliveryModel).toMatchObject({
+      mode: "combined",
+      combined: { targetType: "dm", targetId: "U_AGENT" },
+    });
   });
 
   it("resolves delivery config to the current user's Slack DM", async () => {
@@ -1025,28 +1164,332 @@ describe("AgentRunService", () => {
     });
 
     currentUserInChannel = false;
-    const row = await service.requestGenerationForUser({
+    const rows = await service.requestGenerationForUser({
       agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
       userId: user.id,
       outputDate: OUTPUT_DATE,
       triggerType: "manual",
     });
-    if (!row) throw new Error("Expected a generated output row");
-    await tasks[0]();
 
-    const runtimeContext = runtimeContextFromUserMessage(runAgent.mock.calls[0][0].userMessage);
-    const completed = await db
-      .selectFrom("agent_outputs")
-      .select("raw_payload_json")
-      .where("id", "=", row.id)
-      .executeTakeFirstOrThrow();
-    const rawPayload = JSON.parse(completed.raw_payload_json ?? "{}") as Record<string, unknown>;
-
-    expect(runtimeContext.sources).toEqual([]);
-    expect(runtimeContext.summarySources).toEqual([]);
-    expect(JSON.stringify(runtimeContext)).not.toContain("C_PRIVATE");
-    expect(rawPayload.summaryWindow).toMatchObject({ end: NOW.toISOString() });
+    expect(rows).toEqual([]);
+    expect(tasks).toHaveLength(0);
+    expect(runAgent).not.toHaveBeenCalled();
     expect(isUserInChannel).toHaveBeenCalledWith("C_PRIVATE", "U_AGENT");
+  });
+
+  it("fans out per-source summaries with serialized context isolated to each source", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    const sourceA = slackSource("C_A", "alpha");
+    const sourceB = slackSource("C_B", "beta");
+    await seedSlackConversationMessage(db, sourceA, {
+      messageId: "a-1",
+      text: "Alpha launch decision",
+      receivedAt: "2026-06-15T07:00:00.000Z",
+    });
+    await seedSlackConversationMessage(db, sourceB, {
+      messageId: "b-1",
+      text: "Beta support risk",
+      receivedAt: "2026-06-15T07:05:00.000Z",
+    });
+    await db
+      .insertInto("agent_outputs")
+      .values({
+        id: "previous-beta",
+        agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+        user_id: user.id,
+        output_date: OUTPUT_DATE,
+        source_key: "slack:channel:C_B",
+        source_label: "#beta",
+        timezone: "UTC",
+        status: "completed",
+        trigger_type: "scheduled",
+        agent_version: "test",
+        masthead_json: JSON.stringify({ title: "Previous beta", summary: "Previous beta" }),
+        raw_payload_json: "{}",
+        generated_at: "2026-06-15T07:30:00.000Z",
+      })
+      .execute();
+    await db
+      .insertInto("agent_output_items")
+      .values({
+        id: "previous-beta-item",
+        agent_output_id: "previous-beta",
+        section_key: "highlights",
+        title: "Beta-only previous item",
+        summary: "Beta-only previous summary",
+        priority: "high",
+        label: "highlight",
+        display_ref: "#beta",
+        action_type: null,
+        action_label: null,
+        action_prompt: null,
+        knowledge_refs_json: JSON.stringify({ entityIds: [], fileIds: [] }),
+        source_url: null,
+        sort_order: 0,
+        created_at: NOW.toISOString(),
+      })
+      .execute();
+
+    const contexts: Record<string, Record<string, unknown>> = {};
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      const runtimeContext = runtimeContextFromUserMessage(params.userMessage);
+      contexts[String(runtimeContext.outputId)] = runtimeContext;
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Summarizer", summary: "Summary" },
+        rawPayload: emptySummaryPayload(),
+        items: [],
+      });
+      return successfulRunResult();
+    });
+    const outputDelivery = {
+      deliver: vi.fn(async () => {}),
+    } satisfies AgentOutputDeliveryPublisher;
+    const slackDelivery = allowSlackDelivery([
+      { id: "C_A", name: "alpha" },
+      { id: "C_B", name: "beta" },
+    ]);
+    const service = createService(db, tasks, {
+      runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      outputDelivery,
+      ...slackDelivery,
+    });
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      sources: [sourceA, sourceB],
+      deliveryModel: perSourceSelfModel(),
+    });
+
+    const rows = await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    for (const task of tasks) await task();
+
+    expect(rows.map((row) => row.source_key).sort()).toEqual(["slack:channel:C_A", "slack:channel:C_B"]);
+    for (const row of rows) {
+      const context = contexts[row.id];
+      expect(context.sources).toEqual([
+        expect.objectContaining({
+          targetId: row.source_key === "slack:channel:C_A" ? "C_A" : "C_B",
+        }),
+      ]);
+      expect(context.summarySources).toEqual([
+        expect.objectContaining({
+          targetId: row.source_key === "slack:channel:C_A" ? "C_A" : "C_B",
+        }),
+      ]);
+      expect(context.sameDayPreviousOutput).toBeNull();
+      expect(context.previousDayOutput).toBeNull();
+      expect(JSON.stringify(context)).not.toContain(row.source_key === "slack:channel:C_A" ? "C_B" : "C_A");
+      expect(JSON.stringify(context)).not.toContain(row.source_key === "slack:channel:C_A" ? "Beta-only" : "Alpha");
+    }
+    expect(outputDelivery.deliver).toHaveBeenCalledTimes(2);
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({ delivery: expect.objectContaining({ targetId: "C_A" }) }),
+    );
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({ delivery: expect.objectContaining({ targetId: "C_B" }) }),
+    );
+  });
+
+  it("schedules only incomplete per-source scopes and reruns an aged failed source", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    const sourceA = slackSource("C_A", "alpha");
+    const sourceB = slackSource("C_B", "beta");
+    const slackDelivery = allowSlackDelivery([
+      { id: "C_A", name: "alpha" },
+      { id: "C_B", name: "beta" },
+    ]);
+    const service = createService(db, tasks, slackDelivery);
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      scheduleHour: 8,
+      scheduleMinute: 0,
+      sources: [sourceA, sourceB],
+      deliveryModel: perSourceSelfModel(),
+    });
+    await db
+      .insertInto("agent_outputs")
+      .values([
+        {
+          id: "completed-a",
+          agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+          user_id: user.id,
+          output_date: OUTPUT_DATE,
+          source_key: "slack:channel:C_A",
+          source_label: "#alpha",
+          timezone: "UTC",
+          status: "completed",
+          trigger_type: "scheduled",
+          agent_version: "test",
+          generated_at: NOW.toISOString(),
+          created_at: NOW.toISOString(),
+          updated_at: NOW.toISOString(),
+        },
+        {
+          id: "aged-failed-b",
+          agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+          user_id: user.id,
+          output_date: OUTPUT_DATE,
+          source_key: "slack:channel:C_B",
+          source_label: "#beta",
+          timezone: "UTC",
+          status: "failed",
+          trigger_type: "scheduled",
+          agent_version: "test",
+          error_message: "Old failure",
+          created_at: new Date(NOW.getTime() - 2 * 60 * 60 * 1000).toISOString(),
+          updated_at: new Date(NOW.getTime() - 2 * 60 * 60 * 1000).toISOString(),
+        },
+      ])
+      .execute();
+
+    const userRow = await users.findById(user.id);
+    const due = await service.shouldGenerateForUser(conversationSummaryDefinition, userRow ?? user, NOW);
+    const rows = await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+      skipIfCompleted: true,
+    });
+
+    const running = await db
+      .selectFrom("agent_outputs")
+      .select(["source_key", "status"])
+      .where("agent_key", "=", CONVERSATION_SUMMARY_AGENT_KEY)
+      .where("user_id", "=", user.id)
+      .where("output_date", "=", OUTPUT_DATE)
+      .where("status", "=", "running")
+      .execute();
+
+    expect(due).toEqual({ outputDate: OUTPUT_DATE });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].source_key).toBe("slack:channel:C_B");
+    expect(running).toEqual([{ source_key: "slack:channel:C_B", status: "running" }]);
+    expect(tasks).toHaveLength(1);
+  });
+
+  it("preserves legacy delivery semantics without newly posting to added sources", async () => {
+    const sourceA = slackSource("C_A", "alpha");
+    const sourceB = slackSource("C_B", "beta");
+    const channels = [
+      { id: "C_A", name: "alpha" },
+      { id: "C_B", name: "beta" },
+      { id: "C_DEST", name: "leadership" },
+    ];
+
+    async function runScenario(
+      userIdPrefix: string,
+      initialPatch: Parameters<AgentRunService["updateConfigForUser"]>[2],
+      nextSources?: AgentSourceConfig[],
+    ) {
+      const tasks: Array<() => Promise<void>> = [];
+      const users = createUserRepository(db);
+      const user = await users.create({
+        name: `Agent User ${userIdPrefix}`,
+        email: `${userIdPrefix}@example.com`,
+        slackUserId: `U_${userIdPrefix}`,
+      });
+      const outputDelivery = { deliver: vi.fn(async () => {}) } satisfies AgentOutputDeliveryPublisher;
+      const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+        if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+        await params.agentOutputWriter.write({
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Summarizer", summary: "Summary" },
+          rawPayload: emptySummaryPayload(),
+          items: [],
+        });
+        return successfulRunResult();
+      });
+      const service = createService(db, tasks, {
+        runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+        outputDelivery,
+        ...allowSlackDelivery(channels),
+      });
+      await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+        enabled: true,
+        ...initialPatch,
+      });
+      if (nextSources) {
+        await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, { sources: nextSources });
+      }
+      const config = await service.getConfigView(CONVERSATION_SUMMARY_AGENT_KEY, user.id);
+      const rows = await service.requestGenerationForUser({
+        agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+        userId: user.id,
+        outputDate: OUTPUT_DATE,
+        triggerType: "manual",
+      });
+      for (const task of tasks) await task();
+      return { config, rows, outputDelivery };
+    }
+
+    const allOff = await runScenario("OFF", { sources: [sourceA], delivery: null }, [sourceA, sourceB]);
+    expect(allOff.config?.deliveryModel).toMatchObject({
+      mode: "per_source",
+      defaultRoute: "off",
+      perSource: {
+        "slack:channel:C_A": { kind: "off" },
+        "slack:channel:C_B": { kind: "off" },
+      },
+    });
+    expect(allOff.rows.map((row) => row.source_key).sort()).toEqual(["slack:channel:C_A", "slack:channel:C_B"]);
+    expect(allOff.outputDelivery.deliver).not.toHaveBeenCalled();
+
+    const sourceDelivery = await runScenario("SRC", {
+      sources: [sourceA, sourceB],
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_A",
+        label: "#alpha",
+      },
+    });
+    expect(sourceDelivery.config?.deliveryModel).toMatchObject({
+      mode: "per_source",
+      defaultRoute: "off",
+      perSource: {
+        "slack:channel:C_A": { kind: "self" },
+        "slack:channel:C_B": { kind: "off" },
+      },
+    });
+    expect(sourceDelivery.outputDelivery.deliver).toHaveBeenCalledTimes(1);
+    expect(sourceDelivery.outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({ delivery: expect.objectContaining({ targetId: "C_A" }) }),
+    );
+
+    const combined = await runScenario("COMBINED", {
+      sources: [sourceA, sourceB],
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DEST",
+        label: "#leadership",
+      },
+    });
+    expect(combined.config?.deliveryModel).toMatchObject({
+      mode: "combined",
+      combined: { targetId: "C_DEST", ackNonDm: true },
+    });
+    expect(combined.rows).toHaveLength(1);
+    expect(combined.rows[0].source_key).toBe("");
+    expect(combined.outputDelivery.deliver).toHaveBeenCalledTimes(1);
+    expect(combined.outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({ delivery: expect.objectContaining({ targetId: "C_DEST" }) }),
+    );
   });
 
   it("rejects WhatsApp group delivery when the current user is not a participant", async () => {
@@ -1110,7 +1553,7 @@ describe("AgentRunService", () => {
       },
     });
 
-    const row = await service.requestGenerationForUser({
+    const [row] = await service.requestGenerationForUser({
       agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
       outputDate: OUTPUT_DATE,
@@ -1169,7 +1612,7 @@ describe("AgentRunService", () => {
       },
     });
 
-    const row = await service.requestGenerationForUser({
+    const [row] = await service.requestGenerationForUser({
       agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
       outputDate: OUTPUT_DATE,
@@ -1214,7 +1657,7 @@ describe("AgentRunService", () => {
       },
     });
 
-    const row = await service.requestGenerationForUser({
+    const [row] = await service.requestGenerationForUser({
       agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
       outputDate: OUTPUT_DATE,
@@ -1262,7 +1705,7 @@ describe("AgentRunService", () => {
       },
     });
 
-    const row = await service.requestGenerationForUser({
+    const [row] = await service.requestGenerationForUser({
       agentKey: DAILY_BRIEF_AGENT_KEY,
       userId: user.id,
       outputDate: OUTPUT_DATE,

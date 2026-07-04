@@ -1052,6 +1052,10 @@ export interface AgentDeliveryConfig {
   mentions?: AgentDeliveryMention[];
 }
 
+export interface AgentCombinedDeliveryConfig extends AgentDeliveryConfig {
+  ackNonDm?: true;
+}
+
 export interface AgentDeliveryMention {
   platform: "slack" | "whatsapp";
   targetId: string;
@@ -1064,6 +1068,23 @@ export interface AgentSourceConfig {
   targetId: string;
   label: string | null;
 }
+
+export type AgentPerSourceDelivery =
+  | { kind: "self" }
+  | { kind: "off" }
+  | { kind: "target"; target: AgentDeliveryConfig };
+
+export type AgentDeliveryModel =
+  | {
+      mode: "per_source";
+      defaultRoute: "self" | "off";
+      perSource: Record<string, AgentPerSourceDelivery>;
+      combined: null;
+    }
+  | {
+      mode: "combined";
+      combined: AgentCombinedDeliveryConfig;
+    };
 
 export interface AgentSourceConfigMeta {
   maxSources: number;
@@ -1084,6 +1105,7 @@ export interface AgentConfig {
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  deliveryModel: AgentDeliveryModel;
   sourceConfig: AgentSourceConfigMeta | null;
   sources: AgentSourceConfig[];
   sections: AgentSectionConfig[];
@@ -1112,6 +1134,8 @@ export interface AgentOutput {
   agentKey: string;
   userId: string;
   outputDate: string;
+  sourceKey: string;
+  sourceLabel: string | null;
   timezone: string;
   status: string;
   generatedAt: string | null;
@@ -1139,6 +1163,7 @@ export interface AgentConfigPatch {
   sections?: Record<string, boolean>;
   focus?: string | null;
   delivery?: AgentDeliveryConfig | null;
+  deliveryModel?: AgentDeliveryModel;
   sources?: AgentSourceConfig[];
 }
 
@@ -1258,10 +1283,10 @@ export const api = {
       });
     },
     run(agentKey: string) {
-      return request<{ generation: { id: string; status: string; outputDate: string } | null }>(
-        `/api/agents/${agentKey}/runs`,
-        { method: "POST", body: JSON.stringify({}) },
-      );
+      return request<{
+        generation: { id: string; sourceKey: string; status: string; outputDate: string } | null;
+        generations: Array<{ id: string; sourceKey: string; status: string; outputDate: string }>;
+      }>(`/api/agents/${agentKey}/runs`, { method: "POST", body: JSON.stringify({}) });
     },
     outputs(agentKey: string, opts?: { limit?: number; cursor?: string | null }) {
       const params = new URLSearchParams();
