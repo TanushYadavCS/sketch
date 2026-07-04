@@ -1897,6 +1897,43 @@ describe("AgentRunService", () => {
     ).rejects.toThrow("Routes must not duplicate the same output scope");
   });
 
+  it("rejects combined channel route destinations that match a selected source", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const sourceA = slackSource("C_A", "alpha");
+    const sourceB = slackSource("C_B", "beta");
+    const user = await users.create({ name: "Agent User", email: "agent@example.com", slackUserId: "U_AGENT" });
+    const service = createService(
+      db,
+      tasks,
+      allowSlackDelivery([
+        { id: "C_A", name: "alpha" },
+        { id: "C_B", name: "beta" },
+      ]),
+    );
+
+    await expect(
+      service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+        enabled: true,
+        sources: [sourceA, sourceB],
+        routes: [
+          {
+            ...sourceRoute(sourceA),
+            id: "alpha-beta-to-alpha",
+            sources: ["slack:channel:C_A", "slack:channel:C_B"],
+            destination: {
+              kind: "channel",
+              platform: "slack",
+              targetType: "channel",
+              targetId: "C_A",
+              label: "#alpha",
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow("Combined routes cannot deliver to one of the selected sources");
+  });
+
   it("synthesizes legacy deliveryModel-only configs into equivalent routes", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);

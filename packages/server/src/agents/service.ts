@@ -863,6 +863,9 @@ export class AgentRunService {
             "Channel route destination must include a valid Slack channel or WhatsApp group",
           );
         }
+        if (sources.length > 1 && sources.includes(deliveryKeyForTarget(normalized) as AgentSourceKey)) {
+          throw new AgentDeliveryTargetError("Combined routes cannot deliver to one of the selected sources");
+        }
         destination = normalized;
       }
       for (const sourceKey of sources) {
