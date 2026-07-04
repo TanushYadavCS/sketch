@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [0.45.0] -- 2026-07-05
+
+- Summariser agents now route per source: each Slack channel or WhatsApp group can have its own route with an independent destination, schedule, focus, and sections, instead of one shared configuration. Existing single-destination summarisers are preserved.
+- Summariser delivery targets expanded: a route can post back to its source, to a specific Slack channel or WhatsApp group, or DM a teammate on Slack or WhatsApp. WhatsApp DMs respect the 24h customer-service window via the inbox/nudge path.
+- Each summariser route gets its own Runs and Config tabs with a scoped "run now" and its own run history, mirroring the daily brief page.
+- WhatsApp group history is synced into conversations on connect, with a manual refresh endpoint, so newly added groups and their recent messages are available as summariser sources without waiting for new traffic.
+- Summariser schedules are now configurable as daily, weekly, or every-N-hours, and manual runs floor the window to the selected frequency period.
+- Summariser output formatting is cleaner on web and in chat, delivers all items inline rather than linking out, and applies emphasis correctly on WhatsApp.
+
 ## [0.44.0] -- 2026-07-04
 
 - Managed WhatsApp templates are now resolved at send time by the platform: the managed provider sends the logical template key and parameters, and the platform owns the logical-to-Wati mapping. Managed tenants no longer need template mapping rows seeded in their database. Unknown templates surface as a `template_not_found` provider error. Self-hosted direct-Wati template mapping is unchanged.
