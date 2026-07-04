@@ -1069,6 +1069,8 @@ export interface AgentSourceConfig {
   label: string | null;
 }
 
+export type AgentSourceKey = `${AgentSourceConfig["platform"]}:${AgentSourceConfig["targetType"]}:${string}`;
+
 export type AgentPerSourceDelivery =
   | { kind: "self" }
   | { kind: "off" }
@@ -1085,6 +1087,22 @@ export type AgentDeliveryModel =
       mode: "combined";
       combined: AgentCombinedDeliveryConfig;
     };
+
+export type AgentRouteDestination =
+  | { kind: "self" }
+  | { kind: "off" }
+  | { kind: "member"; platform: "slack"; memberUserId: string };
+
+export interface AgentRoute {
+  id: string;
+  sources: AgentSourceKey[];
+  focus: string | null;
+  sections: Record<string, boolean> | null;
+  maxItemsPerSection: number | null;
+  schedule: { hour: number; minute: number } | null;
+  destination: AgentRouteDestination;
+  enabled: boolean;
+}
 
 export interface AgentSourceConfigMeta {
   maxSources: number;
@@ -1105,9 +1123,9 @@ export interface AgentConfig {
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
-  deliveryModel: AgentDeliveryModel;
   sourceConfig: AgentSourceConfigMeta | null;
   sources: AgentSourceConfig[];
+  routes: AgentRoute[];
   sections: AgentSectionConfig[];
 }
 
@@ -1163,8 +1181,8 @@ export interface AgentConfigPatch {
   sections?: Record<string, boolean>;
   focus?: string | null;
   delivery?: AgentDeliveryConfig | null;
-  deliveryModel?: AgentDeliveryModel;
   sources?: AgentSourceConfig[];
+  routes?: AgentRoute[];
 }
 
 export interface AgentOutputsResponse {

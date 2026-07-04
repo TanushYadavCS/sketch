@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { areJidsSameUser } from "@whiskeysockets/baileys";
 import type { Kysely, Selectable } from "kysely";
@@ -16,7 +17,10 @@ import {
   type AgentOutputRow,
   type AgentOutputTriggerType,
   type AgentPerSourceDelivery,
+  type AgentRoute,
+  type AgentRouteDestination,
   type AgentSourceConfig,
+  type AgentSourceKey,
   type AgentUserPrefs,
   createAgentOutputRepository,
 } from "../db/repositories/agent-outputs";
@@ -39,10 +43,12 @@ const SCHEDULED_FAILURE_SUPPRESS_AFTER_MS = 60 * 60 * 1000;
 type UserRow = Selectable<UsersTable>;
 
 export type AgentGenerationScope =
-  | { kind: "combined"; sourceKey: ""; sourceLabel: null }
+  | { kind: "combined"; sourceKey: string; sourceLabel: string | null }
   | { kind: "source"; source: AgentSourceConfig; sourceKey: string; sourceLabel: string | null };
 
-type AgentExpectedScope = AgentGenerationScope & { sources: AgentSourceConfig[] };
+export type ResolvedRoute = AgentRoute & { resolvedSources: AgentSourceConfig[] };
+
+type AgentExpectedScope = AgentGenerationScope & { sources: AgentSourceConfig[]; route?: ResolvedRoute };
 
 export interface AgentRunServiceDeps {
   db: Kysely<DB>;
@@ -69,6 +75,7 @@ export interface RequestAgentGenerationParams {
   outputDate?: string;
   triggerType: AgentOutputTriggerType;
   skipIfCompleted?: boolean;
+  scopeKeys?: string[];
 }
 
 export interface ResolvedAgentConfig {
@@ -82,6 +89,8 @@ export interface ResolvedAgentConfig {
   delivery: AgentDeliveryConfig | null;
   deliveryModel: AgentDeliveryModel;
   sources: AgentSourceConfig[];
+  routes: ResolvedRoute[];
+  configuredRoutes: AgentRoute[];
 }
 
 export interface AgentSectionView {
@@ -106,6 +115,7 @@ export interface AgentConfigView {
   deliveryModel: AgentDeliveryModel;
   sourceConfig: AgentSourceConfigDef | null;
   sources: AgentSourceConfig[];
+  routes: AgentRoute[];
   sections: AgentSectionView[];
 }
 
@@ -138,7 +148,9 @@ export interface AgentSummaryView {
 export class AgentDeliveryTargetError extends Error {}
 export class AgentSourceTargetError extends Error {}
 
-function sourceKeyForTarget(target: Pick<AgentSourceConfig, "platform" | "targetType" | "targetId">): string {
+export function sourceKeyForTarget(
+  target: Pick<AgentSourceConfig, "platform" | "targetType" | "targetId">,
+): AgentSourceKey {
   return `${target.platform}:${target.targetType}:${target.targetId}`;
 }
 
@@ -157,6 +169,36 @@ function sourceAsDelivery(source: AgentSourceConfig): AgentDeliveryConfig {
     targetType: source.targetType,
     targetId: source.targetId,
     label: source.label,
+  };
+}
+
+function stableRouteHash(parts: readonly string[]): string {
+  return createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 12);
+}
+
+function routeIdForSources(sources: readonly AgentSourceKey[]): string {
+  if (sources.length === 1) return sources[0];
+  return `route:${stableRouteHash(sources)}`;
+}
+
+export function scopeKeyForRoute(route: Pick<AgentRoute, "sources">, resolvedSources: AgentSourceConfig[]): string {
+  if (route.sources.length === 1) return sourceKeyForTarget(resolvedSources[0] ?? parseSourceKey(route.sources[0]));
+  return `route:${stableRouteHash(route.sources)}`;
+}
+
+export function labelForRoute(route: Pick<AgentRoute, "sources">, resolvedSources: AgentSourceConfig[]): string | null {
+  if (resolvedSources.length === 0) return null;
+  const first = resolvedSources[0].label ?? resolvedSources[0].targetId;
+  return route.sources.length === 1 ? first : `${first} +${route.sources.length - 1}`;
+}
+
+function parseSourceKey(sourceKey: AgentSourceKey): AgentSourceConfig {
+  const [platform, targetType, ...targetParts] = sourceKey.split(":");
+  return {
+    platform: platform as AgentSourceConfig["platform"],
+    targetType: targetType as AgentSourceConfig["targetType"],
+    targetId: targetParts.join(":"),
+    label: null,
   };
 }
 
@@ -268,9 +310,134 @@ function projectLegacyDelivery(model: AgentDeliveryModel, sources: AgentSourceCo
   return selfSources.length === 1 ? sourceAsDelivery(selfSources[0]) : null;
 }
 
-function perSourceDeliveryFor(model: AgentDeliveryModel, sourceKey: string): AgentPerSourceDelivery | null {
-  if (model.mode !== "per_source") return null;
-  return normalizePerSourceDelivery(model.perSource[sourceKey], model.defaultRoute);
+function isAgentRouteDestination(value: unknown): value is AgentRouteDestination {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  if (raw.kind === "self" || raw.kind === "off") return true;
+  return raw.kind === "member" && raw.platform === "slack" && typeof raw.memberUserId === "string";
+}
+
+function normalizeRouteSchedule(value: unknown): AgentRoute["schedule"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  return Number.isInteger(raw.hour) &&
+    Number.isInteger(raw.minute) &&
+    Number(raw.hour) >= 0 &&
+    Number(raw.hour) <= 23 &&
+    Number(raw.minute) >= 0 &&
+    Number(raw.minute) <= 59
+    ? { hour: Number(raw.hour), minute: Number(raw.minute) }
+    : null;
+}
+
+function normalizeRouteSections(value: unknown): Record<string, boolean> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, enabled]) => [key, Boolean(enabled)]),
+  );
+}
+
+function normalizeRouteSources(value: unknown): AgentSourceKey[] {
+  if (!Array.isArray(value)) return [];
+  const result: AgentSourceKey[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const source = parseSourceKey(entry as AgentSourceKey);
+    if (
+      (source.platform !== "slack" && source.platform !== "whatsapp") ||
+      (source.targetType !== "channel" && source.targetType !== "group") ||
+      !source.targetId
+    ) {
+      continue;
+    }
+    const key = sourceKeyForTarget(source);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(key);
+  }
+  return result;
+}
+
+function normalizeRoutesFromValue(value: unknown): AgentRoute[] | null {
+  if (!Array.isArray(value)) return null;
+  const routes: AgentRoute[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const raw = entry as Record<string, unknown>;
+    const sources = normalizeRouteSources(raw.sources);
+    if (sources.length === 0) continue;
+    const destination = isAgentRouteDestination(raw.destination) ? raw.destination : { kind: "off" as const };
+    const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : routeIdForSources(sources);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    routes.push({
+      id,
+      sources,
+      focus: typeof raw.focus === "string" && raw.focus.trim() ? raw.focus.trim() : null,
+      sections: normalizeRouteSections(raw.sections),
+      maxItemsPerSection:
+        Number.isInteger(raw.maxItemsPerSection) && Number(raw.maxItemsPerSection) > 0
+          ? Number(raw.maxItemsPerSection)
+          : null,
+      schedule: normalizeRouteSchedule(raw.schedule),
+      destination,
+      enabled: raw.enabled !== false,
+    });
+  }
+  return routes;
+}
+
+function synthesizeRoutesFromDeliveryModel(
+  deliveryModel: AgentDeliveryModel,
+  sources: AgentSourceConfig[],
+  prefs: AgentUserPrefs,
+  maxItemsPerSection: number,
+): AgentRoute[] {
+  const content = {
+    focus: prefs.focus?.trim() ? prefs.focus.trim() : null,
+    sections: prefs.sections ?? null,
+    maxItemsPerSection,
+    schedule: null,
+    enabled: true,
+  };
+
+  if (deliveryModel.mode === "combined") {
+    const routeSources = sources.map(sourceKeyForTarget);
+    if (routeSources.length === 0) return [];
+    return [
+      {
+        id: routeIdForSources(routeSources),
+        sources: routeSources,
+        ...content,
+        destination: { kind: "off" },
+      },
+    ];
+  }
+
+  return sources.map((source) => {
+    const sourceKey = sourceKeyForTarget(source);
+    const delivery = normalizePerSourceDelivery(deliveryModel.perSource[sourceKey], deliveryModel.defaultRoute);
+    return {
+      id: sourceKey,
+      sources: [sourceKey],
+      ...content,
+      destination: delivery.kind === "self" ? { kind: "self" } : { kind: "off" },
+    };
+  });
+}
+
+function enabledSectionsForRoute(def: AgentDefinition, route: AgentRoute | undefined): Record<string, boolean> {
+  const sections: Record<string, boolean> = {};
+  for (const section of def.sections) {
+    sections[section.key] = route?.sections?.[section.key] ?? section.enabledByDefault;
+  }
+  return sections;
+}
+
+function maxItemsPerSectionForRoute(def: AgentDefinition, route: AgentRoute | undefined): number {
+  return route?.maxItemsPerSection ?? def.defaults.maxItemsPerSection;
 }
 
 function whatsappNumberToJid(whatsappNumber: string): string {
@@ -416,17 +583,24 @@ export class AgentRunService {
     const deliveryModel =
       normalizeDeliveryModelFromValue(prefs.deliveryModel, sources) ??
       normalizeLegacyDeliveryModel(prefs.delivery ?? null, sources);
+    const maxItemsPerSection = raw.maxItemsPerSection ?? def.defaults.maxItemsPerSection;
+    const configuredRoutes =
+      normalizeRoutesFromValue(prefs.routes) ??
+      synthesizeRoutesFromDeliveryModel(deliveryModel, sources, prefs, maxItemsPerSection);
+    const routes = await this.resolveRoutesForRun(def, userId, configuredRoutes, sources);
     return {
       enabled: raw.exists ? raw.enabled : def.defaults.enabled,
       scheduleHour: raw.scheduleHour ?? def.defaults.scheduleHour,
       scheduleMinute: raw.scheduleMinute ?? def.defaults.scheduleMinute,
       timezone: raw.timezone,
-      maxItemsPerSection: raw.maxItemsPerSection ?? def.defaults.maxItemsPerSection,
+      maxItemsPerSection,
       enabledSections,
       focus: prefs.focus ?? null,
       delivery: projectLegacyDelivery(deliveryModel, sources),
       deliveryModel,
       sources,
+      routes,
+      configuredRoutes,
     };
   }
 
@@ -473,6 +647,7 @@ export class AgentRunService {
       deliveryModel: config.deliveryModel,
       sourceConfig: def.sourceConfig ?? null,
       sources: config.sources,
+      routes: config.configuredRoutes,
       sections: def.sections.map((section) => ({
         key: section.key,
         title: section.title,
@@ -494,6 +669,7 @@ export class AgentRunService {
       delivery?: AgentDeliveryConfig | null;
       deliveryModel?: AgentDeliveryModel;
       sources?: AgentSourceConfig[];
+      routes?: AgentRoute[];
     },
   ): Promise<AgentConfigView | null> {
     const def = getAgentDefinition(agentKey);
@@ -508,11 +684,16 @@ export class AgentRunService {
 
     let prefs: AgentUserPrefs | undefined;
     if (
+      patch.enabled !== undefined ||
+      patch.scheduleHour !== undefined ||
+      patch.scheduleMinute !== undefined ||
       patch.sections !== undefined ||
       patch.focus !== undefined ||
       patch.delivery !== undefined ||
       patch.deliveryModel !== undefined ||
-      patch.sources !== undefined
+      patch.sources !== undefined ||
+      patch.routes !== undefined ||
+      maxItemsPerSection !== undefined
     ) {
       const sections: Record<string, boolean> = { ...current.enabledSections };
       if (patch.sections) {
@@ -525,15 +706,41 @@ export class AgentRunService {
         patch.sources !== undefined
           ? await this.resolveSourceConfigsForUser(def, userId, patch.sources)
           : current.sources;
-      const deliveryModel = this.resolveDeliveryModelForUser(
+      const deliveryModel =
+        patch.deliveryModel !== undefined || patch.delivery !== undefined || patch.sources !== undefined
+          ? this.resolveDeliveryModelForUser(
+              sources,
+              patch.deliveryModel !== undefined
+                ? patch.deliveryModel
+                : patch.delivery !== undefined
+                  ? normalizeLegacyDeliveryModel(patch.delivery, sources)
+                  : reconcileDeliveryModel(current.deliveryModel, sources),
+            )
+          : current.deliveryModel;
+      const routes =
+        patch.routes !== undefined
+          ? this.resolveRoutesForUser(def, sources, patch.routes)
+          : patch.deliveryModel !== undefined || patch.delivery !== undefined || patch.sources !== undefined
+            ? synthesizeRoutesFromDeliveryModel(
+                deliveryModel,
+                sources,
+                { sections, focus },
+                maxItemsPerSection ?? current.maxItemsPerSection,
+              )
+            : current.configuredRoutes.map((route) => ({
+                ...route,
+                ...(patch.sections !== undefined ? { sections } : {}),
+                ...(patch.focus !== undefined ? { focus } : {}),
+                ...(maxItemsPerSection !== undefined ? { maxItemsPerSection } : {}),
+              }));
+      prefs = {
+        sections,
+        focus,
+        delivery: projectLegacyDelivery(deliveryModel, sources),
+        deliveryModel,
         sources,
-        patch.deliveryModel !== undefined
-          ? patch.deliveryModel
-          : patch.delivery !== undefined
-            ? normalizeLegacyDeliveryModel(patch.delivery, sources)
-            : reconcileDeliveryModel(current.deliveryModel, sources),
-      );
-      prefs = { sections, focus, delivery: projectLegacyDelivery(deliveryModel, sources), deliveryModel, sources };
+        routes,
+      };
     }
 
     await this.repo.upsertConfig(
@@ -572,6 +779,56 @@ export class AgentRunService {
     }
 
     return reconciled;
+  }
+
+  private resolveRoutesForUser(def: AgentDefinition, sources: AgentSourceConfig[], routes: AgentRoute[]): AgentRoute[] {
+    const sourceKeys = new Set(sources.map(sourceKeyForTarget));
+    const sectionKeys = new Set(def.sections.map((section) => section.key));
+    const range = def.itemsPerSectionRange;
+    const seenScopeKeys = new Set<string>();
+
+    return routes.map((route) => {
+      if (def.sourceConfig && route.sources.length !== 1) {
+        throw new AgentSourceTargetError("Arc 2 routes must include exactly one source");
+      }
+      if (route.destination.kind === "member") {
+        throw new AgentDeliveryTargetError("Member route destinations are not supported until Arc 1b");
+      }
+      for (const sourceKey of route.sources) {
+        if (!sourceKeys.has(sourceKey)) {
+          throw new AgentSourceTargetError("Route source must be one of the selected sources");
+        }
+      }
+      for (const sectionKey of Object.keys(route.sections ?? {})) {
+        if (!sectionKeys.has(sectionKey)) throw new AgentSourceTargetError(`Unknown route section: ${sectionKey}`);
+      }
+      if (
+        route.schedule &&
+        (!Number.isInteger(route.schedule.hour) ||
+          route.schedule.hour < 0 ||
+          route.schedule.hour > 23 ||
+          !Number.isInteger(route.schedule.minute) ||
+          route.schedule.minute < 0 ||
+          route.schedule.minute > 59)
+      ) {
+        throw new AgentSourceTargetError("Route schedule must be a valid hour and minute");
+      }
+      const scopeKey = route.sources.length === 1 ? route.sources[0] : `route:${stableRouteHash(route.sources)}`;
+      if (seenScopeKeys.has(scopeKey)) {
+        throw new AgentSourceTargetError("Routes must not duplicate the same output scope");
+      }
+      seenScopeKeys.add(scopeKey);
+
+      return {
+        ...route,
+        id: route.id.trim() || routeIdForSources(route.sources),
+        focus: route.focus?.trim() ? route.focus.trim() : null,
+        sections: route.sections ? { ...route.sections } : null,
+        maxItemsPerSection:
+          route.maxItemsPerSection === null ? null : Math.min(range.max, Math.max(range.min, route.maxItemsPerSection)),
+        enabled: route.enabled !== false,
+      };
+    });
   }
 
   async resolveDeliveryConfigForUser(
@@ -835,6 +1092,28 @@ export class AgentRunService {
     return resolved;
   }
 
+  private async resolveRoutesForRun(
+    def: AgentDefinition,
+    userId: string,
+    routes: AgentRoute[],
+    sources: AgentSourceConfig[],
+  ): Promise<ResolvedRoute[]> {
+    if (!def.sourceConfig) return routes.map((route) => ({ ...route, resolvedSources: [] }));
+    const resolvedSources = await this.resolveSourcesForRun(def, userId, sources);
+    const byKey = new Map(resolvedSources.map((source) => [sourceKeyForTarget(source), source]));
+    const resolvedRoutes: ResolvedRoute[] = [];
+
+    for (const route of routes) {
+      const routeSources = route.sources
+        .map((sourceKey) => byKey.get(sourceKey))
+        .filter((source) => source !== undefined);
+      if (routeSources.length !== route.sources.length) continue;
+      resolvedRoutes.push({ ...route, resolvedSources: routeSources });
+    }
+
+    return resolvedRoutes;
+  }
+
   private toApiOutput(
     def: AgentDefinition,
     value: Awaited<ReturnType<ReturnType<typeof createAgentOutputRepository>["findLatestCompletedForScope"]>>,
@@ -914,25 +1193,24 @@ export class AgentRunService {
 
   private async resolveExpectedScopesForUser(
     def: AgentDefinition,
-    user: UserRow,
+    _user: UserRow,
     config: ResolvedAgentConfig,
   ): Promise<AgentExpectedScope[]> {
     if (!def.sourceConfig) {
       return [{ kind: "combined", sourceKey: "", sourceLabel: null, sources: [] }];
     }
 
-    const sources = await this.resolveSourcesForRun(def, user.id, config.sources);
-    if (config.deliveryModel.mode === "combined") {
-      return [{ kind: "combined", sourceKey: "", sourceLabel: null, sources }];
-    }
-
-    return sources.map((source) => ({
-      kind: "source",
-      source,
-      sourceKey: sourceKeyForTarget(source),
-      sourceLabel: source.label,
-      sources: [source],
-    }));
+    return config.routes
+      .filter((route) => route.enabled)
+      .map((route): AgentExpectedScope => {
+        const sourceKey = scopeKeyForRoute(route, route.resolvedSources);
+        const sourceLabel = labelForRoute(route, route.resolvedSources);
+        if (route.resolvedSources.length === 1) {
+          const [source] = route.resolvedSources;
+          return { kind: "source", source, sourceKey, sourceLabel, route, sources: route.resolvedSources };
+        }
+        return { kind: "combined", sourceKey, sourceLabel, route, sources: route.resolvedSources };
+      });
   }
 
   async requestGenerationForUser(params: RequestAgentGenerationParams): Promise<AgentOutputRow[]> {
@@ -944,9 +1222,10 @@ export class AgentRunService {
     const outputDate = params.outputDate || localDateInTimezone(new Date(), timezone);
     const now = new Date();
     const scopes = await this.resolveExpectedScopesForUser(def, user, config);
+    const scopeKeys = params.scopeKeys ? new Set(params.scopeKeys) : null;
     const rows: AgentOutputRow[] = [];
 
-    for (const scope of scopes) {
+    for (const scope of scopeKeys ? scopes.filter((candidate) => scopeKeys.has(candidate.sourceKey)) : scopes) {
       let recoveredStaleRunning = false;
       const existingRunning = await this.repo.findRunning(def.key, user.id, outputDate, scope.sourceKey);
       if (existingRunning) {
@@ -996,9 +1275,9 @@ export class AgentRunService {
     def: AgentDefinition,
     user: UserRow,
     now = new Date(),
-  ): Promise<{ outputDate: string } | null> {
+  ): Promise<{ outputDate: string; scopeKeys: string[] } | null> {
     const config = await this.resolveConfig(def, user.id);
-    if (def.sourceConfig && config.sources.length === 0) return null;
+    if (def.sourceConfig && config.routes.length === 0) return null;
     if (!config.enabled) return null;
     const timezone = config.timezone || user.timezone || "UTC";
     const parts = new Intl.DateTimeFormat("en-US", {
@@ -1009,12 +1288,14 @@ export class AgentRunService {
     }).formatToParts(now);
     const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0");
     const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
-    if (hour !== config.scheduleHour || minute < config.scheduleMinute) return null;
     const outputDate = localDateInTimezone(now, timezone);
     const scopes = await this.resolveExpectedScopesForUser(def, user, config);
     if (scopes.length === 0) return null;
+    const dueScopeKeys: string[] = [];
 
     for (const scope of scopes) {
+      const schedule = scope.route?.schedule ?? { hour: config.scheduleHour, minute: config.scheduleMinute };
+      if (hour !== schedule.hour || minute < schedule.minute) continue;
       const [running, completed] = await Promise.all([
         this.repo.findRunning(def.key, user.id, outputDate, scope.sourceKey),
         this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, outputDate),
@@ -1023,10 +1304,10 @@ export class AgentRunService {
       if (running && !this.isRunningStale(running, now)) continue;
       const latest = await this.repo.findLatestAny(def.key, user.id, outputDate, scope.sourceKey);
       if (latest && this.isRecentScheduledFailure(latest, now)) continue;
-      return { outputDate };
+      dueScopeKeys.push(scope.sourceKey);
     }
 
-    return null;
+    return dueScopeKeys.length > 0 ? { outputDate, scopeKeys: dueScopeKeys } : null;
   }
 
   private isRunningStale(output: AgentOutputRow, now: Date): boolean {
@@ -1078,7 +1359,7 @@ export class AgentRunService {
 
   private async resolveScopeForOutput(
     def: AgentDefinition,
-    user: UserRow,
+    _user: UserRow,
     config: ResolvedAgentConfig,
     output: AgentOutputRow,
   ): Promise<AgentExpectedScope | null> {
@@ -1086,20 +1367,17 @@ export class AgentRunService {
       return { kind: "combined", sourceKey: "", sourceLabel: null, sources: [] };
     }
 
-    const sources = await this.resolveSourcesForRun(def, user.id, config.sources);
-    if (output.source_key === "") {
-      return { kind: "combined", sourceKey: "", sourceLabel: null, sources };
+    const route = config.routes.find(
+      (candidate) => scopeKeyForRoute(candidate, candidate.resolvedSources) === output.source_key,
+    );
+    if (!route) return null;
+    const sourceKey = scopeKeyForRoute(route, route.resolvedSources);
+    const sourceLabel = output.source_label ?? labelForRoute(route, route.resolvedSources);
+    if (route.resolvedSources.length === 1) {
+      const [source] = route.resolvedSources;
+      return { kind: "source", source, sourceKey, sourceLabel, route, sources: route.resolvedSources };
     }
-
-    const source = sources.find((candidate) => sourceKeyForTarget(candidate) === output.source_key);
-    if (!source) return null;
-    return {
-      kind: "source",
-      source,
-      sourceKey: output.source_key,
-      sourceLabel: output.source_label ?? source.label,
-      sources: [source],
-    };
+    return { kind: "combined", sourceKey, sourceLabel, route, sources: route.resolvedSources };
   }
 
   private async getPreviousOutputForContext(
@@ -1125,10 +1403,13 @@ export class AgentRunService {
     const config = await this.resolveConfig(def, user.id);
     const scope = await this.resolveScopeForOutput(def, user, config, output);
     if (!scope) {
-      await this.repo.markFailed(outputId, "Generation source is no longer available.");
+      await this.repo.markFailed(outputId, "Generation route was removed.");
       return;
     }
-    const enabledSections = def.sections.filter((s) => config.enabledSections[s.key]).map((s) => s.key);
+    const routeSections = enabledSectionsForRoute(def, scope.route);
+    const routeMaxItemsPerSection = maxItemsPerSectionForRoute(def, scope.route);
+    const routeFocus = scope.route ? scope.route.focus : config.focus;
+    const enabledSections = def.sections.filter((s) => routeSections[s.key]).map((s) => s.key);
 
     try {
       const now = new Date();
@@ -1151,9 +1432,9 @@ export class AgentRunService {
               adminCanReadAllFiles,
               contentUserEmails,
               agentConfig: {
-                enabledSections: config.enabledSections,
-                maxItemsPerSection: config.maxItemsPerSection,
-                focus: config.focus,
+                enabledSections: routeSections,
+                maxItemsPerSection: routeMaxItemsPerSection,
+                focus: routeFocus,
                 delivery: config.delivery,
                 sources: scope.sources,
                 sourceKey: scope.sourceKey,
@@ -1169,8 +1450,8 @@ export class AgentRunService {
         timezone: output.timezone,
         user: { id: user.id, name: user.name, email: user.email },
         sections: enabledSections,
-        maxItemsPerSection: config.maxItemsPerSection,
-        focus: config.focus,
+        maxItemsPerSection: routeMaxItemsPerSection,
+        focus: routeFocus,
         sources: scope.sources,
         sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious),
         previousDayOutput: this.formatOutputForContext(previousDay),
@@ -1253,7 +1534,7 @@ export class AgentRunService {
       const config = await this.resolveConfig(def, userId);
       const scope = await this.resolveScopeForOutput(def, user, config, output);
       if (!scope) return;
-      const configuredDelivery = this.deliveryForScope(config.deliveryModel, scope);
+      const configuredDelivery = scope.route ? this.deliveryForRoute(scope.route, scope.sources) : config.delivery;
       if (!configuredDelivery) return;
       const delivery = await this.resolveDeliveryConfigForUser(userId, configuredDelivery);
       if (!delivery) return;
@@ -1265,19 +1546,11 @@ export class AgentRunService {
     }
   }
 
-  private deliveryForScope(deliveryModel: AgentDeliveryModel, scope: AgentExpectedScope): AgentDeliveryConfig | null {
-    if (scope.kind === "combined") {
-      if (deliveryModel.mode !== "combined") return null;
-      if (!isDmDelivery(deliveryModel.combined) && deliveryModel.combined.ackNonDm !== true) return null;
-      const deliveryKey = deliveryKeyForTarget(deliveryModel.combined);
-      if (scope.sources.some((source) => sourceKeyForTarget(source) === deliveryKey)) return null;
-      return deliveryModel.combined;
-    }
-
-    const route = perSourceDeliveryFor(deliveryModel, scope.sourceKey);
-    if (!route || route.kind === "off") return null;
-    if (route.kind === "target") return null;
-    return sourceAsDelivery(scope.source);
+  private deliveryForRoute(route: AgentRoute, resolvedSources: AgentSourceConfig[]): AgentDeliveryConfig | null {
+    if (route.destination.kind === "off") return null;
+    if (route.destination.kind === "member") throw new Error("Arc 1b");
+    if (resolvedSources.length !== 1) return null;
+    return sourceAsDelivery(resolvedSources[0]);
   }
 
   private createWriter(

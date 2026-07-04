@@ -4,6 +4,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
+import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
 import { agentRoutes } from "./routes";
 import { AgentDeliveryTargetError, AgentRunService, type AgentRunServiceDeps, AgentSourceTargetError } from "./service";
 
@@ -42,7 +43,7 @@ describe("agentRoutes", () => {
     });
     const app = createRoutesTestApp(service);
 
-    const res = await app.request("/api/agents/daily-brief/config", {
+    const res = await app.request(`/api/agents/${DAILY_BRIEF_AGENT_KEY}/config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -59,7 +60,7 @@ describe("agentRoutes", () => {
 
     expect(res.status).toBe(200);
     expect(service.updateConfigForUser).toHaveBeenCalledWith(
-      "daily-brief",
+      DAILY_BRIEF_AGENT_KEY,
       "user-1",
       expect.objectContaining({
         delivery: expect.objectContaining({
@@ -82,7 +83,7 @@ describe("agentRoutes", () => {
     const service = createService();
     const app = createRoutesTestApp(service);
 
-    const res = await app.request("/api/agents/daily-brief/config", {
+    const res = await app.request(`/api/agents/${DAILY_BRIEF_AGENT_KEY}/config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -112,7 +113,7 @@ describe("agentRoutes", () => {
     });
     const app = createRoutesTestApp(service);
 
-    const res = await app.request("/api/agents/daily-brief/config", {
+    const res = await app.request(`/api/agents/${DAILY_BRIEF_AGENT_KEY}/config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -174,7 +175,7 @@ describe("agentRoutes", () => {
     });
     const app = createRoutesTestApp(service);
 
-    const res = await app.request("/api/agents/daily-brief/config", {
+    const res = await app.request(`/api/agents/${DAILY_BRIEF_AGENT_KEY}/config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -193,6 +194,118 @@ describe("agentRoutes", () => {
       error: { code: "VALIDATION_ERROR", message: "Slack channel is not available for this user" },
     });
     expect(res.status).toBe(400);
+  });
+
+  it("passes parsed routes to the service for saving", async () => {
+    const service = createService({
+      updateConfigForUser: vi.fn(async () => ({ agentKey: CONVERSATION_SUMMARY_AGENT_KEY, routes: [] })),
+    });
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [{ platform: "slack", targetType: "channel", targetId: "C_ALPHA", label: "#alpha" }],
+        routes: [
+          {
+            id: "alpha-route",
+            sources: ["slack:channel:C_ALPHA"],
+            focus: "  launch blockers  ",
+            sections: { highlights: true, decisions: false },
+            maxItemsPerSection: 2,
+            schedule: { hour: 9, minute: 15 },
+            destination: { kind: "self" },
+            enabled: true,
+          },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(service.updateConfigForUser).toHaveBeenCalledWith(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      "user-1",
+      expect.objectContaining({
+        routes: [
+          {
+            id: "alpha-route",
+            sources: ["slack:channel:C_ALPHA"],
+            focus: "launch blockers",
+            sections: { highlights: true, decisions: false },
+            maxItemsPerSection: 2,
+            schedule: { hour: 9, minute: 15 },
+            destination: { kind: "self" },
+            enabled: true,
+          },
+        ],
+      }),
+    );
+  });
+
+  it("rejects multi-source routes in Arc 2", async () => {
+    const service = createService();
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [
+          { platform: "slack", targetType: "channel", targetId: "C_ALPHA", label: "#alpha" },
+          { platform: "slack", targetType: "channel", targetId: "C_BETA", label: "#beta" },
+        ],
+        routes: [
+          {
+            id: "combined-route",
+            sources: ["slack:channel:C_ALPHA", "slack:channel:C_BETA"],
+            focus: null,
+            sections: null,
+            maxItemsPerSection: null,
+            schedule: null,
+            destination: { kind: "off" },
+            enabled: true,
+          },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR", message: "Arc 2 routes must include exactly one source" },
+    });
+    expect(service.updateConfigForUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects member route destinations in Arc 2", async () => {
+    const service = createService();
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [{ platform: "slack", targetType: "channel", targetId: "C_ALPHA", label: "#alpha" }],
+        routes: [
+          {
+            id: "member-route",
+            sources: ["slack:channel:C_ALPHA"],
+            focus: null,
+            sections: null,
+            maxItemsPerSection: null,
+            schedule: null,
+            destination: { kind: "member", platform: "slack", memberUserId: "U_MEMBER" },
+            enabled: true,
+          },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR", message: "Member route destinations are not supported until Arc 1b" },
+    });
+    expect(service.updateConfigForUser).not.toHaveBeenCalled();
   });
 
   it("lists completed outputs for an agent", async () => {
