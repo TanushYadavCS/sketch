@@ -15,7 +15,6 @@ import {
 } from "@/lib/api";
 import { CheckCircleIcon, HashIcon, MagnifyingGlassIcon, UserIcon, UsersThreeIcon } from "@phosphor-icons/react";
 import { Switch } from "@sketch/ui/components/switch";
-import { TabButton } from "@sketch/ui/components/tab-button";
 import { cn } from "@sketch/ui/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -267,6 +266,24 @@ export function SourcesField({ agent, controller }: { agent: AgentConfig; contro
   );
 }
 
+/** Pill-style delivery tab, matching the Team Adoption filter tabs on the usage page. */
+function DeliveryTab({ label, isActive, onClick }: { label: string; isActive: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "rounded-md px-2.5 py-1 text-xs transition-colors",
+        isActive
+          ? "bg-accent font-medium text-foreground dark:bg-[#1C1C1A]"
+          : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
 export function DestinationField({
   agent,
   agentKey,
@@ -298,15 +315,15 @@ export function DestinationField({
 
   return (
     <div>
-      <div className="flex items-center gap-6 border-b border-border">
-        <TabButton
+      <div className="inline-flex rounded-lg border-[0.5px] border-border bg-card p-0.5 dark:bg-[#111110]">
+        <DeliveryTab
           label="Groups"
           isActive={activeTab === "groups"}
           onClick={() => {
             if (destKind === "member") controller.setDestKind("channel");
           }}
         />
-        <TabButton label="DM" isActive={activeTab === "dm"} onClick={() => controller.setDestKind("member")} />
+        <DeliveryTab label="DM" isActive={activeTab === "dm"} onClick={() => controller.setDestKind("member")} />
       </div>
 
       {activeTab === "groups" ? (
