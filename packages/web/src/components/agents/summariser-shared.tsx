@@ -30,9 +30,18 @@ export function formatTime(hour: number, minute: number): string {
 }
 
 export function deliversLabel(route: AgentRoute): string {
-  if (route.destination.kind === "self") return "Post back";
-  if (route.destination.kind === "member") return "Direct message";
+  const dest = route.destination;
+  if (dest.kind === "self") return "Post back";
+  if (dest.kind === "member") return "Direct message";
+  if (dest.kind === "channel") return dest.label ?? (dest.platform === "slack" ? "Slack channel" : "WhatsApp group");
   return "Web only";
+}
+
+/** Narrows a selected input-shaped target into a channel destination, honoring the slack↔channel / whatsapp↔group pairing. */
+function channelDestination(target: AgentSourceConfig): AgentRouteDestination {
+  return target.platform === "slack"
+    ? { kind: "channel", platform: "slack", targetType: "channel", targetId: target.targetId, label: target.label }
+    : { kind: "channel", platform: "whatsapp", targetType: "group", targetId: target.targetId, label: target.label };
 }
 
 export function sectionsLabel(route: AgentRoute, agent: AgentConfig): string {
@@ -117,6 +126,7 @@ export interface RouteDraftController {
   sources: AgentSourceKey[];
   destKind: AgentRouteDestination["kind"];
   memberUserId: string | null;
+  channelTarget: AgentSourceConfig | null;
   hour: number;
   minute: number;
   sections: Record<string, boolean>;
@@ -128,6 +138,7 @@ export interface RouteDraftController {
   toggleSource: (source: AgentSourceConfig) => void;
   setDestKind: (kind: AgentRouteDestination["kind"]) => void;
   setMemberUserId: (id: string | null) => void;
+  setChannelTarget: (target: AgentSourceConfig | null) => void;
   setHour: (v: number) => void;
   setMinute: (v: number) => void;
   setSection: (key: string, on: boolean) => void;
@@ -140,9 +151,19 @@ export interface RouteDraftController {
 export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): RouteDraftController {
   const maxSources = agent.sourceConfig?.maxSources ?? 0;
   const [sources, setSources] = useState<AgentSourceKey[]>(route?.sources ?? []);
-  const [destKind, setDestKind] = useState<AgentRouteDestination["kind"]>(route?.destination.kind ?? "off");
+  const [destKind, setDestKind] = useState<AgentRouteDestination["kind"]>(route?.destination.kind ?? "self");
   const [memberUserId, setMemberUserId] = useState<string | null>(
     route?.destination.kind === "member" ? route.destination.memberUserId : null,
+  );
+  const [channelTarget, setChannelTarget] = useState<AgentSourceConfig | null>(
+    route?.destination.kind === "channel"
+      ? {
+          platform: route.destination.platform,
+          targetType: route.destination.targetType,
+          targetId: route.destination.targetId,
+          label: route.destination.label,
+        }
+      : null,
   );
   const [hour, setHour] = useState(route?.schedule?.hour ?? agent.scheduleHour);
   const [minute, setMinute] = useState(route?.schedule?.minute ?? agent.scheduleMinute);
@@ -154,7 +175,7 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
   const hasWhatsApp = sources.some((key) => key.startsWith("whatsapp:"));
 
   useEffect(() => {
-    if (destKind === "self" && sources.length !== 1) setDestKind("off");
+    if (destKind === "self" && sources.length > 1) setDestKind("channel");
   }, [destKind, sources.length]);
 
   const toggleSource = (source: AgentSourceConfig) => {
@@ -170,7 +191,8 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
   const isValid =
     sources.length > 0 &&
     !(destKind === "self" && sources.length !== 1) &&
-    !(destKind === "member" && (!memberUserId || hasWhatsApp));
+    !(destKind === "member" && (!memberUserId || hasWhatsApp)) &&
+    !(destKind === "channel" && !channelTarget);
 
   const build = (base: AgentRoute | null): AgentRoute => {
     const destination: AgentRouteDestination =
@@ -178,7 +200,9 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
         ? { kind: "self" }
         : destKind === "member" && memberUserId
           ? { kind: "member", platform: "slack", memberUserId }
-          : { kind: "off" };
+          : destKind === "channel" && channelTarget
+            ? channelDestination(channelTarget)
+            : { kind: "off" };
     return {
       id: base?.id ?? crypto.randomUUID(),
       sources,
@@ -195,6 +219,7 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
     sources,
     destKind,
     memberUserId,
+    channelTarget,
     hour,
     minute,
     sections,
@@ -206,6 +231,7 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
     toggleSource,
     setDestKind,
     setMemberUserId,
+    setChannelTarget,
     setHour,
     setMinute,
     setSection: (key, on) => setSections((prev) => ({ ...prev, [key]: on })),
@@ -268,22 +294,34 @@ export function DestinationField({
     enabled: destKind === "member" && controller.sources.length > 0 && !hasWhatsApp,
   });
 
-  const destOptions: Array<{ value: AgentRouteDestination["kind"]; label: string; disabled: boolean; hint?: string }> =
-    [
-      { value: "self", label: "Post back", disabled: combined, hint: combined ? "single input only" : undefined },
-      { value: "off", label: "Web only", disabled: false },
-      {
-        value: "member",
-        label: "DM a member",
-        disabled: !agent.sourceConfig?.supportsSlackChannels || hasWhatsApp,
-        hint: hasWhatsApp ? "Slack only" : undefined,
-      },
-    ];
+  const destOptions: Array<{
+    value: AgentRouteDestination["kind"];
+    label: string;
+    caption: string;
+    disabled: boolean;
+    hint?: string;
+  }> = [
+    {
+      value: "self",
+      label: "Post back",
+      caption: "To the source",
+      disabled: combined,
+      hint: combined ? "single input only" : undefined,
+    },
+    { value: "channel", label: "Another channel", caption: "Slack or WhatsApp", disabled: false },
+    {
+      value: "member",
+      label: "DM a member",
+      caption: "Direct message",
+      disabled: !agent.sourceConfig?.supportsSlackChannels || hasWhatsApp,
+      hint: hasWhatsApp ? "Slack only" : undefined,
+    },
+  ];
 
   return (
     <div>
       <span className={LABEL}>Delivers to</span>
-      <div className="mt-2 grid grid-cols-3 gap-1 rounded-lg border-[0.5px] border-border bg-muted/25 p-1">
+      <div className="mt-2 grid grid-cols-3 gap-2">
         {destOptions.map((option) => (
           <button
             key={option.value}
@@ -291,20 +329,23 @@ export function DestinationField({
             disabled={option.disabled}
             onClick={() => controller.setDestKind(option.value)}
             className={cn(
-              "flex flex-col items-center justify-center rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors",
+              "flex flex-col items-start gap-0.5 rounded-xl border-[0.5px] px-3 py-2.5 text-left transition-colors",
               destKind === option.value
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
-              option.disabled && "cursor-not-allowed opacity-40 hover:text-muted-foreground",
+                ? "border-foreground/30 bg-card shadow-sm"
+                : "border-border bg-card/40 hover:bg-card",
+              option.disabled && "cursor-not-allowed opacity-40 hover:bg-card/40",
             )}
           >
-            {option.label}
-            {option.hint ? <span className="text-[9px] text-muted-foreground/70">{option.hint}</span> : null}
+            <span className="text-[12.5px] font-medium text-foreground">{option.label}</span>
+            <span className="text-[10.5px] text-muted-foreground">{option.hint ?? option.caption}</span>
           </button>
         ))}
       </div>
+
+      {destKind === "channel" ? <ChannelDestinationPicker agent={agent} controller={controller} /> : null}
+
       {destKind === "member" ? (
-        <div className="mt-2">
+        <div className="mt-3">
           {hasWhatsApp ? (
             <p className="px-1 py-2 text-[12px] text-muted-foreground">
               Member DM works with Slack sources only. Remove the WhatsApp source to pick a member.
@@ -327,6 +368,83 @@ export function DestinationField({
           </p>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/** Single-select picker over every Slack channel and WhatsApp group the workspace can post to. */
+function ChannelDestinationPicker({ agent, controller }: { agent: AgentConfig; controller: RouteDraftController }) {
+  const { slackLoading, whatsappLoading, slackOptions, whatsappOptions } = useSourceOptions(agent);
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+
+  const options = [...slackOptions, ...whatsappOptions];
+  const filtered = q ? options.filter((o) => (o.label ?? o.targetId).toLowerCase().includes(q)) : options;
+  const loading = slackLoading || whatsappLoading;
+  const selectedId = controller.channelTarget?.targetId ?? "";
+  const showSearch = options.length > 6;
+
+  return (
+    <div className="mt-3">
+      <div className="rounded-lg border-[0.5px] border-border p-1">
+        {loading ? (
+          <p className="px-2 py-2 text-[12px] text-muted-foreground">Loading channels…</p>
+        ) : options.length === 0 ? (
+          <p className="px-2 py-2 text-[12px] text-muted-foreground">No channels or groups available.</p>
+        ) : (
+          <>
+            {showSearch ? (
+              <div className="relative mb-1">
+                <MagnifyingGlassIcon
+                  size={13}
+                  aria-hidden
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+                />
+                <input
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search channels & groups…"
+                  className="w-full rounded-md border-[0.5px] border-border bg-background py-1.5 pl-7 pr-2 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-foreground/30 focus:outline-none"
+                />
+              </div>
+            ) : null}
+            <div className="flex max-h-56 flex-col overflow-y-auto">
+              {filtered.length === 0 ? (
+                <p className="px-2 py-2 text-[12px] text-muted-foreground">No matches.</p>
+              ) : (
+                filtered.map((option) => {
+                  const active = selectedId === option.targetId;
+                  return (
+                    <button
+                      key={sourceKey(option)}
+                      type="button"
+                      onClick={() => controller.setChannelTarget(option)}
+                      className={cn(
+                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors",
+                        active ? "bg-emerald-500/10 text-foreground" : "text-muted-foreground hover:bg-muted/60",
+                      )}
+                    >
+                      <span className="shrink-0">
+                        {option.platform === "slack" ? (
+                          <HashIcon size={14} aria-hidden />
+                        ) : (
+                          <UsersThreeIcon size={14} aria-hidden />
+                        )}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">{option.label ?? option.targetId}</span>
+                      {active ? <CheckCircleIcon size={13} weight="fill" aria-hidden /> : null}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </>
+        )}
+      </div>
+      <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground/70">
+        The summary posts here, to any channel or group Sketch can reach — independent of the inputs above.
+      </p>
     </div>
   );
 }

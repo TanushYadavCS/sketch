@@ -109,7 +109,8 @@ function SetupBody({
   const inputsValid = controller.sources.length > 0;
   const deliveryValid =
     !(controller.destKind === "self" && controller.sources.length !== 1) &&
-    !(controller.destKind === "member" && (!controller.memberUserId || controller.hasWhatsApp));
+    !(controller.destKind === "member" && (!controller.memberUserId || controller.hasWhatsApp)) &&
+    !(controller.destKind === "channel" && !controller.channelTarget);
   const canAdvance = step === 0 ? inputsValid : step === 1 ? deliveryValid : controller.isValid;
   const isLast = step === STEPS.length - 1;
 
