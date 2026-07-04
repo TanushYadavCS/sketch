@@ -25,12 +25,14 @@ function createService(overrides: Record<string, unknown> = {}) {
     resolveDeliveryConfigForUser: vi.fn(async (_userId, delivery) => delivery),
     listDefinitions: vi.fn(() => [{ key: "daily-brief" }]),
     listOutputsForUser: vi.fn(async () => ({ outputs: [], nextCursor: null })),
+    listEligibleRouteMembers: vi.fn(async () => []),
     requestGenerationForUser: vi.fn(async () => []),
     updateConfigForUser: vi.fn(async () => ({ agentKey: "daily-brief", delivery: null })),
     ...overrides,
   } as unknown as AgentRunService & {
     resolveDeliveryConfigForUser: ReturnType<typeof vi.fn>;
     listOutputsForUser: ReturnType<typeof vi.fn>;
+    listEligibleRouteMembers: ReturnType<typeof vi.fn>;
     requestGenerationForUser: ReturnType<typeof vi.fn>;
     updateConfigForUser: ReturnType<typeof vi.fn>;
   };
@@ -243,8 +245,10 @@ describe("agentRoutes", () => {
     );
   });
 
-  it("rejects multi-source routes in Arc 2", async () => {
-    const service = createService();
+  it("passes multi-source routes and Slack member destinations to the service for saving", async () => {
+    const service = createService({
+      updateConfigForUser: vi.fn(async () => ({ agentKey: CONVERSATION_SUMMARY_AGENT_KEY, routes: [] })),
+    });
     const app = createRoutesTestApp(service);
 
     const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
@@ -258,26 +262,35 @@ describe("agentRoutes", () => {
         routes: [
           {
             id: "combined-route",
-            sources: ["slack:channel:C_ALPHA", "slack:channel:C_BETA"],
+            sources: ["slack:channel:C_ALPHA", "slack:channel:C_ALPHA", "slack:channel:C_BETA"],
             focus: null,
             sections: null,
             maxItemsPerSection: null,
             schedule: null,
-            destination: { kind: "off" },
+            destination: { kind: "member", platform: "slack", memberUserId: "  member-1  " },
             enabled: true,
           },
         ],
       }),
     });
 
-    expect(res.status).toBe(400);
-    await expect(res.json()).resolves.toMatchObject({
-      error: { code: "VALIDATION_ERROR", message: "Arc 2 routes must include exactly one source" },
-    });
-    expect(service.updateConfigForUser).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(service.updateConfigForUser).toHaveBeenCalledWith(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      "user-1",
+      expect.objectContaining({
+        routes: [
+          expect.objectContaining({
+            id: "combined-route",
+            sources: ["slack:channel:C_ALPHA", "slack:channel:C_BETA"],
+            destination: { kind: "member", platform: "slack", memberUserId: "member-1" },
+          }),
+        ],
+      }),
+    );
   });
 
-  it("rejects member route destinations in Arc 2", async () => {
+  it("rejects combined routes with self delivery", async () => {
     const service = createService();
     const app = createRoutesTestApp(service);
 
@@ -285,16 +298,19 @@ describe("agentRoutes", () => {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        sources: [{ platform: "slack", targetType: "channel", targetId: "C_ALPHA", label: "#alpha" }],
+        sources: [
+          { platform: "slack", targetType: "channel", targetId: "C_ALPHA", label: "#alpha" },
+          { platform: "slack", targetType: "channel", targetId: "C_BETA", label: "#beta" },
+        ],
         routes: [
           {
-            id: "member-route",
-            sources: ["slack:channel:C_ALPHA"],
+            id: "combined-self-route",
+            sources: ["slack:channel:C_ALPHA", "slack:channel:C_BETA"],
             focus: null,
             sections: null,
             maxItemsPerSection: null,
             schedule: null,
-            destination: { kind: "member", platform: "slack", memberUserId: "U_MEMBER" },
+            destination: { kind: "self" },
             enabled: true,
           },
         ],
@@ -303,9 +319,66 @@ describe("agentRoutes", () => {
 
     expect(res.status).toBe(400);
     await expect(res.json()).resolves.toMatchObject({
-      error: { code: "VALIDATION_ERROR", message: "Member route destinations are not supported until Arc 1b" },
+      error: { code: "VALIDATION_ERROR", message: "Combined routes cannot use self destination" },
     });
     expect(service.updateConfigForUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects member route destinations with WhatsApp sources", async () => {
+    const service = createService();
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [{ platform: "whatsapp", targetType: "group", targetId: "120363000000001@g.us", label: "Leads" }],
+        routes: [
+          {
+            id: "whatsapp-member-route",
+            sources: ["whatsapp:group:120363000000001@g.us"],
+            focus: null,
+            sections: null,
+            maxItemsPerSection: null,
+            schedule: null,
+            destination: { kind: "member", platform: "slack", memberUserId: "member-1" },
+            enabled: true,
+          },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: "VALIDATION_ERROR", message: "Member route destinations support Slack sources only" },
+    });
+    expect(service.updateConfigForUser).not.toHaveBeenCalled();
+  });
+
+  it("lists route members through the agent route-members endpoint", async () => {
+    const service = createService({
+      listEligibleRouteMembers: vi.fn(async () => [
+        { userId: "member-1", name: "Member One", slackUserId: "U_MEMBER_1" },
+      ]),
+    });
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/route-members`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: ["slack:channel:C_ALPHA", "slack:channel:C_ALPHA", "slack:channel:C_BETA"],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      members: [{ userId: "member-1", name: "Member One", slackUserId: "U_MEMBER_1" }],
+    });
+    expect(service.listEligibleRouteMembers).toHaveBeenCalledWith("user-1", [
+      "slack:channel:C_ALPHA",
+      "slack:channel:C_BETA",
+    ]);
   });
 
   it("lists completed outputs for an agent", async () => {

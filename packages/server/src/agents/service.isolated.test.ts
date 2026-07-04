@@ -1333,6 +1333,223 @@ describe("AgentRunService", () => {
     );
   });
 
+  it("generates one combined route output with isolated source context and member delivery", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    const member = await users.create({ name: "Route Member", email: "member@example.com", slackUserId: "U_MEMBER" });
+    const sourceA = slackSource("C_A", "alpha");
+    const sourceB = slackSource("C_B", "beta");
+    const sourceC = slackSource("C_C", "gamma");
+    const route: AgentRoute = {
+      id: "alpha-beta",
+      sources: ["slack:channel:C_A", "slack:channel:C_B"],
+      focus: "Combined launch status",
+      sections: { highlights: true, decisions: true, action_items: false, open_questions: false },
+      maxItemsPerSection: 3,
+      schedule: null,
+      destination: { kind: "member", platform: "slack", memberUserId: member.id },
+      enabled: true,
+    };
+    await seedSlackConversationMessage(db, sourceA, {
+      messageId: "a-combined-1",
+      text: "Alpha launch decision",
+      receivedAt: "2026-06-15T07:00:00.000Z",
+    });
+    await seedSlackConversationMessage(db, sourceB, {
+      messageId: "b-combined-1",
+      text: "Beta support risk",
+      receivedAt: "2026-06-15T07:05:00.000Z",
+    });
+    await seedSlackConversationMessage(db, sourceC, {
+      messageId: "c-combined-1",
+      text: "Gamma private escalation",
+      receivedAt: "2026-06-15T07:10:00.000Z",
+    });
+
+    const contexts: Record<string, Record<string, unknown>> = {};
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      const runtimeContext = runtimeContextFromUserMessage(params.userMessage);
+      contexts[String(runtimeContext.outputId)] = runtimeContext;
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Summarizer", summary: "Summary" },
+        rawPayload: {
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Summarizer", summary: "Summary" },
+          items: [],
+        },
+        items: [],
+      });
+      return successfulRunResult();
+    });
+    const outputDelivery = { deliver: vi.fn(async () => {}) } satisfies AgentOutputDeliveryPublisher;
+    const isUserInChannel = vi.fn(async (channelId: string, slackUserId: string) => {
+      if (slackUserId === "U_AGENT") return ["C_A", "C_B", "C_C"].includes(channelId);
+      if (slackUserId === "U_MEMBER") return ["C_A", "C_B"].includes(channelId);
+      return false;
+    });
+    const service = createService(db, tasks, {
+      runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      outputDelivery,
+      getSlack: () => ({
+        listChannels: vi.fn(async () => [
+          { id: "C_A", name: "alpha", type: "public_channel", isMember: true },
+          { id: "C_B", name: "beta", type: "public_channel", isMember: true },
+          { id: "C_C", name: "gamma", type: "public_channel", isMember: true },
+        ]),
+        isUserInChannel,
+      }),
+    });
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      sources: [sourceA, sourceB, sourceC],
+      routes: [route],
+    });
+
+    const rows = await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    for (const task of tasks) await task();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].source_key).toBe(scopeKeyForRoute(route, [sourceA, sourceB]));
+    expect(rows[0].source_key).toMatch(/^route:[a-f0-9]{12}$/);
+    const context = contexts[rows[0].id];
+    expect(context.sources).toEqual([
+      expect.objectContaining({ targetId: "C_A" }),
+      expect.objectContaining({ targetId: "C_B" }),
+    ]);
+    expect(context.summarySources).toEqual([
+      expect.objectContaining({ targetId: "C_A" }),
+      expect.objectContaining({ targetId: "C_B" }),
+    ]);
+    expect(JSON.stringify(context)).toContain("Alpha launch decision");
+    expect(JSON.stringify(context)).toContain("Beta support risk");
+    expect(JSON.stringify(context)).not.toContain("Gamma private escalation");
+    expect(outputDelivery.deliver).toHaveBeenCalledTimes(1);
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: {
+          enabled: true,
+          platform: "slack",
+          targetType: "dm",
+          targetId: "U_MEMBER",
+          label: "Route Member",
+        },
+      }),
+    );
+    expect(isUserInChannel).toHaveBeenCalledWith("C_A", "U_MEMBER");
+    expect(isUserInChannel).toHaveBeenCalledWith("C_B", "U_MEMBER");
+  });
+
+  it("guards member delivery by source intersection and lists only eligible route members", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    const member = await users.create({
+      name: "Eligible Member",
+      email: "member@example.com",
+      slackUserId: "U_MEMBER",
+    });
+    const partial = await users.create({
+      name: "Partial Member",
+      email: "partial@example.com",
+      slackUserId: "U_PARTIAL",
+    });
+    await users.create({ name: "No Slack", email: "noslack@example.com" });
+    const sourceA = slackSource("C_A", "alpha");
+    const sourceB = slackSource("C_B", "beta");
+    const isUserInChannel = vi.fn(async (channelId: string, slackUserId: string) => {
+      if (slackUserId === "U_AGENT" || slackUserId === "U_MEMBER") return ["C_A", "C_B"].includes(channelId);
+      if (slackUserId === "U_PARTIAL") return channelId === "C_A";
+      return false;
+    });
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Summarizer", summary: "Summary" },
+        rawPayload: {
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Summarizer", summary: "Summary" },
+          items: [],
+        },
+        items: [],
+      });
+      return successfulRunResult();
+    });
+    const outputDelivery = { deliver: vi.fn(async () => {}) } satisfies AgentOutputDeliveryPublisher;
+    const service = createService(db, tasks, {
+      runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      outputDelivery,
+      getSlack: () => ({
+        listChannels: vi.fn(async () => [
+          { id: "C_A", name: "alpha", type: "public_channel", isMember: true },
+          { id: "C_B", name: "beta", type: "public_channel", isMember: true },
+        ]),
+        isUserInChannel,
+      }),
+    });
+
+    const eligible = await service.listEligibleRouteMembers(user.id, ["slack:channel:C_A", "slack:channel:C_B"]);
+    const whatsappEligible = await service.listEligibleRouteMembers(user.id, [
+      "slack:channel:C_A",
+      "whatsapp:group:120363000000001@g.us",
+    ]);
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      sources: [sourceA, sourceB],
+      routes: [
+        {
+          id: "partial-member-route",
+          sources: ["slack:channel:C_A", "slack:channel:C_B"],
+          focus: null,
+          sections: null,
+          maxItemsPerSection: null,
+          schedule: null,
+          destination: { kind: "member", platform: "slack", memberUserId: partial.id },
+          enabled: true,
+        },
+      ],
+    });
+
+    const rows = await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    for (const task of tasks) await task();
+
+    expect(eligible).toEqual(
+      expect.arrayContaining([{ userId: member.id, name: "Eligible Member", slackUserId: "U_MEMBER" }]),
+    );
+    expect(eligible).not.toEqual(
+      expect.arrayContaining([{ userId: partial.id, name: "Partial Member", slackUserId: "U_PARTIAL" }]),
+    );
+    expect(eligible.some((candidate) => candidate.name === "No Slack")).toBe(false);
+    expect(whatsappEligible).toEqual([]);
+    expect(outputDelivery.deliver).not.toHaveBeenCalled();
+    const output = await db
+      .selectFrom("agent_outputs")
+      .select(["status", "error_message"])
+      .where("id", "=", rows[0].id)
+      .executeTakeFirstOrThrow();
+    expect(output).toEqual({
+      status: "failed",
+      error_message: "Recipient is not a member of every source",
+    });
+  });
+
   it("schedules only due routes and treats completed outputs per route", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);

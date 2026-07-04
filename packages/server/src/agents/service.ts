@@ -119,6 +119,12 @@ export interface AgentConfigView {
   sections: AgentSectionView[];
 }
 
+export interface AgentRouteMember {
+  userId: string;
+  name: string;
+  slackUserId: string;
+}
+
 export interface AgentOutputApi {
   id: string;
   agentKey: string;
@@ -310,11 +316,13 @@ function projectLegacyDelivery(model: AgentDeliveryModel, sources: AgentSourceCo
   return selfSources.length === 1 ? sourceAsDelivery(selfSources[0]) : null;
 }
 
-function isAgentRouteDestination(value: unknown): value is AgentRouteDestination {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+function normalizeRouteDestination(value: unknown): AgentRouteDestination | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
-  if (raw.kind === "self" || raw.kind === "off") return true;
-  return raw.kind === "member" && raw.platform === "slack" && typeof raw.memberUserId === "string";
+  if (raw.kind === "self" || raw.kind === "off") return { kind: raw.kind };
+  if (raw.kind !== "member" || raw.platform !== "slack") return null;
+  const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
+  return memberUserId ? { kind: "member", platform: "slack", memberUserId } : null;
 }
 
 function normalizeRouteSchedule(value: unknown): AgentRoute["schedule"] {
@@ -368,7 +376,7 @@ function normalizeRoutesFromValue(value: unknown): AgentRoute[] | null {
     const raw = entry as Record<string, unknown>;
     const sources = normalizeRouteSources(raw.sources);
     if (sources.length === 0) continue;
-    const destination = isAgentRouteDestination(raw.destination) ? raw.destination : { kind: "off" as const };
+    const destination = normalizeRouteDestination(raw.destination) ?? { kind: "off" as const };
     const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : routeIdForSources(sources);
     if (seen.has(id)) continue;
     seen.add(id);
@@ -788,13 +796,23 @@ export class AgentRunService {
     const seenScopeKeys = new Set<string>();
 
     return routes.map((route) => {
-      if (def.sourceConfig && route.sources.length !== 1) {
-        throw new AgentSourceTargetError("Arc 2 routes must include exactly one source");
+      const sources = [...new Set(route.sources)];
+      if (sources.length === 0) {
+        throw new AgentSourceTargetError("Route must include at least one source");
       }
+      if (sources.length > 1 && route.destination.kind === "self") {
+        throw new AgentDeliveryTargetError("Combined routes cannot use self destination");
+      }
+      let destination = route.destination;
       if (route.destination.kind === "member") {
-        throw new AgentDeliveryTargetError("Member route destinations are not supported until Arc 1b");
+        const raw = route.destination as Record<string, unknown>;
+        const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
+        if (raw.platform !== "slack" || !memberUserId) {
+          throw new AgentDeliveryTargetError("Member route destination must include a Slack member");
+        }
+        destination = { kind: "member", platform: "slack", memberUserId };
       }
-      for (const sourceKey of route.sources) {
+      for (const sourceKey of sources) {
         if (!sourceKeys.has(sourceKey)) {
           throw new AgentSourceTargetError("Route source must be one of the selected sources");
         }
@@ -813,7 +831,7 @@ export class AgentRunService {
       ) {
         throw new AgentSourceTargetError("Route schedule must be a valid hour and minute");
       }
-      const scopeKey = route.sources.length === 1 ? route.sources[0] : `route:${stableRouteHash(route.sources)}`;
+      const scopeKey = sources.length === 1 ? sources[0] : `route:${stableRouteHash(sources)}`;
       if (seenScopeKeys.has(scopeKey)) {
         throw new AgentSourceTargetError("Routes must not duplicate the same output scope");
       }
@@ -821,11 +839,13 @@ export class AgentRunService {
 
       return {
         ...route,
-        id: route.id.trim() || routeIdForSources(route.sources),
+        id: route.id.trim() || routeIdForSources(sources),
+        sources,
         focus: route.focus?.trim() ? route.focus.trim() : null,
         sections: route.sections ? { ...route.sections } : null,
         maxItemsPerSection:
           route.maxItemsPerSection === null ? null : Math.min(range.max, Math.max(range.min, route.maxItemsPerSection)),
+        destination,
         enabled: route.enabled !== false,
       };
     });
@@ -913,6 +933,35 @@ export class AgentRunService {
       ...normalized,
       ...withMentions(await this.resolveDeliveryMentions(normalized, { whatsappGroup: groupMetadata })),
     };
+  }
+
+  async listEligibleRouteMembers(userId: string, sourceKeys: string[]): Promise<AgentRouteMember[]> {
+    const sources = [...new Set(sourceKeys)].map((sourceKey) => parseSourceKey(sourceKey as AgentSourceKey));
+    if (sources.length === 0 || sources.some((source) => source.platform !== "slack")) return [];
+    const slack = this.deps.getSlack?.() ?? null;
+    if (!slack) return [];
+    const requester = await this.deps.users.findById(userId);
+    if (!requester?.slack_user_id) return [];
+    for (const source of sources) {
+      if (source.targetType !== "channel" || !(await slack.isUserInChannel(source.targetId, requester.slack_user_id))) {
+        return [];
+      }
+    }
+
+    const members: AgentRouteMember[] = [];
+    for (const user of await this.deps.users.list()) {
+      if (!user.slack_user_id) continue;
+      let eligible = true;
+      for (const source of sources) {
+        if (source.targetType !== "channel" || !(await slack.isUserInChannel(source.targetId, user.slack_user_id))) {
+          eligible = false;
+          break;
+        }
+      }
+      if (eligible) members.push({ userId: user.id, name: user.name, slackUserId: user.slack_user_id });
+    }
+
+    return members;
   }
 
   private async resolveDeliveryMentions(
@@ -1527,6 +1576,7 @@ export class AgentRunService {
 
   private async deliverCompletedOutput(def: AgentDefinition, outputId: string, userId: string): Promise<void> {
     if (!this.deps.outputDelivery) return;
+    let markFailedOnRouteTargetError = false;
     try {
       const output = await this.repo.findById(def.key, outputId);
       const user = await this.deps.users.findById(userId);
@@ -1534,23 +1584,69 @@ export class AgentRunService {
       const config = await this.resolveConfig(def, userId);
       const scope = await this.resolveScopeForOutput(def, user, config, output);
       if (!scope) return;
-      const configuredDelivery = scope.route ? this.deliveryForRoute(scope.route, scope.sources) : config.delivery;
-      if (!configuredDelivery) return;
-      const delivery = await this.resolveDeliveryConfigForUser(userId, configuredDelivery);
+      let delivery: AgentDeliveryConfig | null;
+      if (scope.route) {
+        markFailedOnRouteTargetError = true;
+        delivery = await this.deliveryForRoute(userId, scope.route, scope.sources);
+      } else {
+        delivery = await this.resolveDeliveryConfigForUser(userId, config.delivery);
+      }
       if (!delivery) return;
       const completed = await this.getByIdForUser(def.key, outputId, userId);
       if (!completed) return;
       await this.deps.outputDelivery.deliver({ definition: def, output: completed, delivery });
     } catch (err) {
+      if (markFailedOnRouteTargetError && err instanceof AgentDeliveryTargetError) {
+        await this.repo.markDeliveryFailed(outputId, err.message);
+      }
       this.deps.logger.warn({ err, agentKey: def.key, outputId, userId }, "Agent: output delivery failed");
     }
   }
 
-  private deliveryForRoute(route: AgentRoute, resolvedSources: AgentSourceConfig[]): AgentDeliveryConfig | null {
+  private async deliveryForRoute(
+    userId: string,
+    route: AgentRoute,
+    resolvedSources: AgentSourceConfig[],
+  ): Promise<AgentDeliveryConfig | null> {
     if (route.destination.kind === "off") return null;
-    if (route.destination.kind === "member") throw new Error("Arc 1b");
-    if (resolvedSources.length !== 1) return null;
-    return sourceAsDelivery(resolvedSources[0]);
+    if (route.destination.kind === "member") {
+      return this.resolveMemberRouteDelivery(route.destination, resolvedSources);
+    }
+    if (resolvedSources.length !== 1) {
+      throw new AgentDeliveryTargetError("Combined routes cannot use self destination");
+    }
+    return this.resolveDeliveryConfigForUser(userId, sourceAsDelivery(resolvedSources[0]));
+  }
+
+  private async resolveMemberRouteDelivery(
+    destination: Extract<AgentRouteDestination, { kind: "member" }>,
+    resolvedSources: AgentSourceConfig[],
+  ): Promise<AgentDeliveryConfig> {
+    const member = await this.deps.users.findById(destination.memberUserId);
+    if (!member?.slack_user_id) {
+      throw new AgentDeliveryTargetError("Recipient is not available for Slack delivery");
+    }
+
+    const slack = this.deps.getSlack?.() ?? null;
+    if (!slack) throw new AgentDeliveryTargetError("Slack is not connected");
+
+    for (const source of resolvedSources) {
+      if (
+        source.platform !== "slack" ||
+        source.targetType !== "channel" ||
+        !(await slack.isUserInChannel(source.targetId, member.slack_user_id))
+      ) {
+        throw new AgentDeliveryTargetError("Recipient is not a member of every source");
+      }
+    }
+
+    return {
+      enabled: true,
+      platform: "slack",
+      targetType: "dm",
+      targetId: member.slack_user_id,
+      label: member.name,
+    };
   }
 
   private createWriter(

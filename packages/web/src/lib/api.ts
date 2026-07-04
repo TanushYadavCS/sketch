@@ -1104,6 +1104,12 @@ export interface AgentRoute {
   enabled: boolean;
 }
 
+export interface AgentRouteMember {
+  userId: string;
+  name: string;
+  slackUserId: string;
+}
+
 export interface AgentSourceConfigMeta {
   maxSources: number;
   supportsSlackChannels: boolean;
@@ -1298,6 +1304,12 @@ export const api = {
       return request<{ agent: AgentConfig }>(`/api/agents/${agentKey}/config`, {
         method: "PUT",
         body: JSON.stringify(patch),
+      });
+    },
+    routeMembers(agentKey: string, sources: AgentSourceKey[]) {
+      return request<{ members: AgentRouteMember[] }>(`/api/agents/${agentKey}/route-members`, {
+        method: "POST",
+        body: JSON.stringify({ sources }),
       });
     },
     run(agentKey: string) {

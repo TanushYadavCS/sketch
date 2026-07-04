@@ -313,8 +313,13 @@ function parseRouteDestination(value: unknown): AgentRouteDestination {
   }
   const raw = value as Record<string, unknown>;
   if (raw.kind === "self" || raw.kind === "off") return { kind: raw.kind };
-  if (raw.kind === "member") throw new ConfigPatchError("Member route destinations are not supported until Arc 1b");
-  throw new ConfigPatchError("route.destination.kind must be self or off");
+  if (raw.kind === "member") {
+    if (raw.platform !== "slack") throw new ConfigPatchError("route.destination.platform must be slack");
+    const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
+    if (!memberUserId) throw new ConfigPatchError("route.destination.memberUserId is required");
+    return { kind: "member", platform: "slack", memberUserId };
+  }
+  throw new ConfigPatchError("route.destination.kind must be self, off, or member");
 }
 
 function parseRoutes(value: unknown, def: AgentDefinition): AgentRoute[] | undefined {
@@ -332,8 +337,21 @@ function parseRoutes(value: unknown, def: AgentDefinition): AgentRoute[] | undef
     if (seenIds.has(id)) throw new ConfigPatchError("route.id values must be unique");
     seenIds.add(id);
     if (!Array.isArray(raw.sources)) throw new ConfigPatchError("route.sources must be an array");
-    if (raw.sources.length !== 1) throw new ConfigPatchError("Arc 2 routes must include exactly one source");
-    const sources = raw.sources.map(parseRouteSourceKey);
+    const sources: AgentSourceKey[] = [];
+    const seenSources = new Set<string>();
+    for (const source of raw.sources.map(parseRouteSourceKey)) {
+      if (seenSources.has(source)) continue;
+      seenSources.add(source);
+      sources.push(source);
+    }
+    if (sources.length === 0) throw new ConfigPatchError("route.sources must include at least one source");
+    const destination = parseRouteDestination(raw.destination);
+    if (sources.length > 1 && destination.kind === "self") {
+      throw new ConfigPatchError("Combined routes cannot use self destination");
+    }
+    if (destination.kind === "member" && sources.some((source) => source.startsWith("whatsapp:"))) {
+      throw new ConfigPatchError("Member route destinations support Slack sources only");
+    }
     const maxItemsPerSection =
       raw.maxItemsPerSection === null || raw.maxItemsPerSection === undefined
         ? null
@@ -350,11 +368,23 @@ function parseRoutes(value: unknown, def: AgentDefinition): AgentRoute[] | undef
       sections: parseRouteSections(raw.sections, def),
       maxItemsPerSection,
       schedule: parseRouteSchedule(raw.schedule),
-      destination: parseRouteDestination(raw.destination),
+      destination,
       enabled: raw.enabled !== false,
     });
   }
   return routes;
+}
+
+function parseRouteMemberSources(value: unknown): AgentSourceKey[] {
+  if (!Array.isArray(value)) throw new ConfigPatchError("sources must be an array");
+  const sources: AgentSourceKey[] = [];
+  const seen = new Set<string>();
+  for (const source of value.map(parseRouteSourceKey)) {
+    if (seen.has(source)) continue;
+    seen.add(source);
+    sources.push(source);
+  }
+  return sources;
 }
 
 function assertRoutesReferenceSources(routes: AgentRoute[] | undefined, sources: AgentSourceConfig[] | undefined) {
@@ -473,6 +503,24 @@ export function agentRoutes(service: AgentRunService) {
     }
     if (!agent) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
     return c.json({ agent });
+  });
+
+  routes.post("/:agentKey/route-members", async (c) => {
+    const userId = await getCurrentUserId(c, service);
+    if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
+    const agentKey = c.req.param("agentKey");
+    const def = getAgentDefinition(agentKey);
+    if (!def) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    try {
+      const sources = parseRouteMemberSources(body.sources);
+      return c.json({ members: await service.listEligibleRouteMembers(userId, sources) });
+    } catch (err) {
+      if (err instanceof ConfigPatchError) {
+        return c.json({ error: { code: "VALIDATION_ERROR", message: err.message } }, 400);
+      }
+      throw err;
+    }
   });
 
   routes.get("/:agentKey/outputs", async (c) => {

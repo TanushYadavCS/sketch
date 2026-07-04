@@ -590,6 +590,15 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    async markDeliveryFailed(outputId: string, message: string): Promise<void> {
+      await db
+        .updateTable("agent_outputs")
+        .set({ status: "failed", error_message: message, updated_at: new Date().toISOString() })
+        .where("id", "=", outputId)
+        .where("status", "=", "completed")
+        .execute();
+    },
+
     async countKnownEntities(ids: string[]): Promise<number> {
       if (ids.length === 0) return 0;
       const row = await db
