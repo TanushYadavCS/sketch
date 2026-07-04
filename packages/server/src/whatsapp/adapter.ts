@@ -70,6 +70,16 @@ function parseInboxMetadata(value: string | null): Record<string, unknown> | nul
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isFromMeHistoryMessage(message: WhatsAppInboundMessage): boolean {
+  const raw = message.rawProviderPayload;
+  if (!isRecord(raw) || !isRecord(raw.key)) return false;
+  return raw.key.fromMe === true;
+}
+
 export interface WhatsAppAdapterDeps {
   db: Kysely<DB>;
   config: Config;
@@ -368,6 +378,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
 
     for (const message of messages) {
       if (message.kind !== "group") continue;
+      if (isFromMeHistoryMessage(message)) continue;
 
       candidateCount += 1;
       const receivedAt = message.providerTimestamp;
