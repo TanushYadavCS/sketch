@@ -561,6 +561,36 @@ const DAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"];
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const INTERVAL_OPTIONS = [1, 2, 3, 4, 6, 8, 12];
 
+function SegmentedControl<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="inline-flex rounded-lg border-[0.5px] border-border bg-card p-0.5 dark:bg-[#111110]">
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => onChange(option.value)}
+          className={cn(
+            "rounded-md px-3 py-1 text-xs transition-colors",
+            value === option.value
+              ? "bg-accent font-medium text-foreground dark:bg-[#1C1C1A]"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ScheduleChip({
   label,
   title,
@@ -607,13 +637,15 @@ export function ScheduleField({ controller }: { controller: RouteDraftController
   return (
     <div>
       <span className={LABEL}>Frequency</span>
-      <div className="mt-2 flex items-center gap-6 border-b border-border">
-        <TabButton label="Daily" isActive={frequency === "daily"} onClick={() => controller.setFrequency("daily")} />
-        <TabButton label="Weekly" isActive={frequency === "weekly"} onClick={() => controller.setFrequency("weekly")} />
-        <TabButton
-          label="Every N hours"
-          isActive={frequency === "every_n_hours"}
-          onClick={() => controller.setFrequency("every_n_hours")}
+      <div className="mt-2">
+        <SegmentedControl
+          value={frequency}
+          onChange={controller.setFrequency}
+          options={[
+            { value: "daily", label: "Daily" },
+            { value: "weekly", label: "Weekly" },
+            { value: "every_n_hours", label: "Every N hours" },
+          ]}
         />
       </div>
 
