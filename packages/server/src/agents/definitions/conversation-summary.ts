@@ -102,6 +102,30 @@ function previousOutputWatermark(
   );
 }
 
+/**
+ * Resolves the window start. Scheduled runs stay strictly incremental — the
+ * previous run's watermark — so consecutive digests never overlap. A manual "run
+ * now" instead floors the window at the frequency period (now -
+ * firstRunLookbackHours): it always covers at least that period — a weekly run
+ * spans ~7 days — even when an earlier same-day run already advanced the
+ * watermark to "now", which is what a user expects when they trigger it by hand.
+ * The floor takes the earlier of watermark and period so it never skips older
+ * messages the watermark has not yet covered. `floored` reports whether the floor
+ * extended the window past the watermark, for payload observability only.
+ */
+function resolveWindowStart(
+  previousOutput: LatestOutputRow | undefined,
+  now: Date,
+  firstRunLookbackHours: number,
+  floorToPeriod: boolean,
+): { windowStart: string; floored: boolean } {
+  const watermark = previousOutputWatermark(previousOutput, now, firstRunLookbackHours);
+  if (!floorToPeriod || !previousOutput) return { windowStart: watermark, floored: false };
+  const floor = fallbackWindowStart(now, firstRunLookbackHours);
+  const windowStart = watermark < floor ? watermark : floor;
+  return { windowStart, floored: windowStart !== watermark };
+}
+
 function firstRunLookbackHours(params: AgentRuntimeContextParams): number {
   const value = params.agentConfig?.firstRunLookbackHours;
   return typeof value === "number" && Number.isFinite(value) && value > 0
@@ -153,7 +177,12 @@ export async function buildConversationSummaryRuntimeContext(
   );
   const windowEnd = params.now.toISOString();
   const fallbackHours = firstRunLookbackHours(params);
-  const windowStart = previousOutputWatermark(previousOutput, params.now, fallbackHours);
+  const { windowStart, floored } = resolveWindowStart(
+    previousOutput,
+    params.now,
+    fallbackHours,
+    params.agentConfig?.floorWindowToPeriod ?? false,
+  );
   const conversations = createConversationRepository(params.db);
 
   const summarySources = await Promise.all(
@@ -183,7 +212,11 @@ export async function buildConversationSummaryRuntimeContext(
 
   return {
     summaryWindow: {
-      mode: previousOutput ? "since_last_successful_run" : `first_run_last_${fallbackHours}h`,
+      mode: !previousOutput
+        ? `first_run_last_${fallbackHours}h`
+        : floored
+          ? `floored_to_last_${fallbackHours}h`
+          : "since_last_successful_run",
       start: windowStart,
       end: windowEnd,
       previousOutputId: previousOutput?.id ?? null,

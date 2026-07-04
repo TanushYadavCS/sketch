@@ -1652,6 +1652,7 @@ export class AgentRunService {
                 sources: scope.sources,
                 sourceKey: scope.sourceKey,
                 firstRunLookbackHours,
+                floorWindowToPeriod: output.trigger_type === "manual",
               },
             })
           : Promise.resolve({}),
