@@ -1,4 +1,7 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { z } from "zod";
+import { type Attachment, mimeToExtension } from "../../files";
 import type { Logger } from "../../logger";
 import {
   type WhatsAppCapabilities,
@@ -18,7 +21,7 @@ export const WHATSAPP_MANAGED_PROVIDER_ID = "managed";
 
 const MANAGED_CAPABILITIES: WhatsAppCapabilities = {
   text: true,
-  media: false,
+  media: true,
   quotedReply: true,
   templates: true,
   templateProvisioning: "manual",
@@ -46,6 +49,17 @@ const optionalTrimmedStringSchema = z
   .nullish()
   .transform((value) => value ?? undefined);
 
+const inboundMediaSchema = z
+  .object({
+    type: z.string().trim().min(1),
+    providerMessageId: z.string().trim().min(1),
+    downloadPath: z.string().trim().min(1),
+    fileName: optionalTrimmedStringSchema,
+    mimeType: optionalTrimmedStringSchema,
+  })
+  .nullish()
+  .transform((value) => value ?? undefined);
+
 const inboundEventEnvelopeSchema = z
   .object({
     eventId: z.string().trim().min(1),
@@ -66,6 +80,7 @@ const inboundMessageEventSchema = z.object({
   tenantUserEmail: optionalTrimmedStringSchema,
   text: optionalStringSchema,
   mediaType: optionalTrimmedStringSchema,
+  media: inboundMediaSchema,
   quotedMessage: z
     .object({
       providerMessageId: z.string().trim().min(1),
@@ -168,6 +183,82 @@ export function createManagedWhatsAppProvider(config: ManagedWhatsAppConfig): Ma
     return sendResultFromManagedBody(body, target);
   };
 
+  const downloadMedia = async (
+    message: WhatsAppDmInboundMessage,
+    workspaceDir: string,
+    params: { maxFileBytes: number },
+  ): Promise<Attachment[]> => {
+    if (!message.mediaType) return [];
+
+    const media = managedMediaFromPayload(message.rawProviderPayload);
+    if (!media) return [];
+
+    const downloadUrl = managedMediaDownloadUrl(platformUrl, media.downloadPath);
+    if (!downloadUrl || !config.tenantToken) {
+      config.logger.warn(
+        { providerMessageId: message.providerMessageId, mediaType: message.mediaType },
+        "Managed WhatsApp media message has no downloadable platform path",
+      );
+      return [];
+    }
+
+    const response = await requestFetch(downloadUrl, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${config.tenantToken}`,
+        Accept: "application/octet-stream",
+      },
+      signal: AbortSignal.timeout(OUTBOUND_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      config.logger.warn(
+        { status: response.status, providerMessageId: message.providerMessageId, mediaType: message.mediaType },
+        "Failed to download managed WhatsApp media",
+      );
+      return [];
+    }
+
+    const contentLength = Number(response.headers.get("content-length") ?? "0");
+    if (contentLength > params.maxFileBytes) {
+      config.logger.warn(
+        { sizeBytes: contentLength, maxFileBytes: params.maxFileBytes, mediaType: message.mediaType },
+        "Managed WhatsApp media exceeds size limit",
+      );
+      return [];
+    }
+
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > params.maxFileBytes) {
+      config.logger.warn(
+        { sizeBytes: bytes.length, maxFileBytes: params.maxFileBytes, mediaType: message.mediaType },
+        "Managed WhatsApp media exceeds size limit",
+      );
+      return [];
+    }
+
+    const mimeType =
+      media.mimeType ?? response.headers.get("content-type")?.split(";")[0]?.trim() ?? "application/octet-stream";
+    const originalName =
+      media.fileName ??
+      fileNameFromHeaders(response.headers) ??
+      `${media.providerMessageId}.${mimeToExtension(mimeType)}`;
+    const safeName = sanitizeFilename(originalName);
+    const attachmentsDir = join(workspaceDir, "attachments");
+    await mkdir(attachmentsDir, { recursive: true });
+    const localPath = join(attachmentsDir, `${Date.now()}_${safeName}`);
+    await writeFile(localPath, bytes);
+
+    return [
+      {
+        originalName: safeName,
+        mimeType,
+        localPath,
+        sizeBytes: bytes.length,
+      },
+    ];
+  };
+
   return {
     dmProvider: {
       id: WHATSAPP_MANAGED_PROVIDER_ID,
@@ -178,6 +269,8 @@ export function createManagedWhatsAppProvider(config: ManagedWhatsAppConfig): Ma
       },
       sendText,
       sendTemplate,
+      downloadMedia: (message, workspaceDir, params) =>
+        message.kind === "dm" ? downloadMedia(message, workspaceDir, params) : Promise.resolve([]),
     },
     inboundProvider: {
       id: WHATSAPP_MANAGED_PROVIDER_ID,
@@ -210,7 +303,7 @@ export function createManagedWhatsAppProvider(config: ManagedWhatsAppConfig): Ma
       }
 
       const event = parsed.data;
-      const text = inboundMessageText(event.text, event.mediaType);
+      const text = inboundMessageText(event.text, event.mediaType, Boolean(event.media));
       const message: WhatsAppDmInboundMessage = {
         kind: "dm",
         providerId: WHATSAPP_MANAGED_PROVIDER_ID,
@@ -285,14 +378,51 @@ function assertValidE164Target(phoneE164: string, logger: Logger): void {
   throw new Error("Managed WhatsApp target phone number is invalid");
 }
 
-function inboundMessageText(text: string | undefined, mediaType: string | undefined): string {
+function inboundMessageText(
+  text: string | undefined,
+  mediaType: string | undefined,
+  hasDownloadableMedia = false,
+): string {
   if (text?.trim()) return text;
+  if (mediaType && hasDownloadableMedia) return "";
   if (mediaType) return `[WhatsApp media message (${mediaType}) - media content not available]`;
   return text ?? "";
 }
 
 function logicalTemplateParamRecord(params: Record<string, WhatsAppTemplateParamValue>): Record<string, string> {
   return Object.fromEntries(Object.entries(params).map(([key, value]) => [key, sanitizeTemplateParamValue(value)]));
+}
+
+function managedMediaFromPayload(payload: unknown): z.infer<typeof inboundMediaSchema> {
+  if (!isRecord(payload)) return undefined;
+  const parsed = inboundMediaSchema.safeParse(payload.media);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function managedMediaDownloadUrl(platformUrl: string, downloadPath: string): string | null {
+  if (!downloadPath.startsWith("/api/whatsapp/media/")) return null;
+
+  try {
+    return new URL(downloadPath, `${platformUrl}/`).toString();
+  } catch {
+    return null;
+  }
+}
+
+function fileNameFromHeaders(headers: Headers): string | null {
+  const value = headers.get("content-disposition");
+  const fileName = value?.match(/filename\*?=(?:UTF-8''|")?([^";]+)/iu)?.[1];
+  if (!fileName) return null;
+
+  try {
+    return decodeURIComponent(fileName).trim() || null;
+  } catch {
+    return fileName.trim() || null;
+  }
+}
+
+function sanitizeFilename(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/gu, "_");
 }
 
 function managedRequestError(status: number, text: string): ManagedWhatsAppRequestError {
