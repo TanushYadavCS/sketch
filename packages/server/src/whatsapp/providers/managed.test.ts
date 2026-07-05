@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { createTestLogger } from "../../test-utils";
@@ -26,6 +29,16 @@ function inboundPayload(overrides: Record<string, unknown> = {}) {
 }
 
 describe("managed WhatsApp provider", () => {
+  it("advertises managed inbound media support", () => {
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+    });
+
+    expect(provider.dmProvider.capabilities.media).toBe(true);
+  });
+
   it("sends outbound DM text through the platform API", async () => {
     const requestFetch = vi.fn(
       async () =>
@@ -340,6 +353,138 @@ describe("managed WhatsApp provider", () => {
     });
   });
 
+  it("emits downloadable inbound media references through the runtime shape", async () => {
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+    });
+    const handler = vi.fn(async (_message: WhatsAppInboundMessage) => undefined);
+    provider.inboundProvider.onMessage(handler);
+
+    await provider.handleInboundEvent(
+      inboundPayload({
+        text: "what is in this image?",
+        mediaType: "image",
+        media: {
+          type: "image",
+          providerMessageId: "wamid.inbound",
+          downloadPath: "/api/whatsapp/media/wamid.inbound?senderPhoneE164=%2B15551234567",
+          fileName: "photo.jpg",
+          mimeType: "image/jpeg",
+        },
+      }),
+    );
+
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "what is in this image?",
+        mediaType: "image",
+        rawProviderPayload: expect.objectContaining({
+          media: {
+            type: "image",
+            providerMessageId: "wamid.inbound",
+            downloadPath: "/api/whatsapp/media/wamid.inbound?senderPhoneE164=%2B15551234567",
+            fileName: "photo.jpg",
+            mimeType: "image/jpeg",
+          },
+        }),
+      }),
+    );
+  });
+
+  it("downloads managed inbound media into the workspace attachment directory", async () => {
+    const requestFetch = vi.fn(async () => {
+      return new Response("image-bytes", {
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="ignored.bin"',
+        },
+      });
+    });
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai/",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+    let captured: WhatsAppInboundMessage | undefined;
+    provider.inboundProvider.onMessage(async (message) => {
+      captured = message;
+    });
+    await provider.handleInboundEvent(
+      inboundPayload({
+        text: "",
+        mediaType: "image",
+        media: {
+          type: "image",
+          providerMessageId: "wamid.inbound",
+          downloadPath: "/api/whatsapp/media/wamid.inbound?senderPhoneE164=%2B15551234567",
+          fileName: "photo.jpg",
+          mimeType: "image/jpeg",
+        },
+      }),
+    );
+    const workspaceDir = await mkdtemp(join(tmpdir(), "managed-download-"));
+
+    try {
+      if (!captured) throw new Error("expected inbound message");
+      const attachments = await provider.dmProvider.downloadMedia?.(captured, workspaceDir, { maxFileBytes: 1024 });
+
+      expect(attachments).toEqual([
+        expect.objectContaining({
+          originalName: "photo.jpg",
+          mimeType: "image/jpeg",
+          sizeBytes: "image-bytes".length,
+        }),
+      ]);
+      expect(await readFile(attachments?.[0]?.localPath ?? "", "utf8")).toBe("image-bytes");
+      const [url, init] = requestFetch.mock.calls[0] as unknown as [string, RequestInit];
+      expect(url).toBe("https://app.getsketch.ai/api/whatsapp/media/wamid.inbound?senderPhoneE164=%2B15551234567");
+      expect(init.headers).toEqual({
+        Authorization: "Bearer tenant-token",
+        Accept: "application/octet-stream",
+      });
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses managed media download paths outside the platform media endpoint", async () => {
+    const requestFetch = vi.fn();
+    const logger = { warn: vi.fn() } as unknown as Logger;
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger,
+      fetch: requestFetch as unknown as typeof fetch,
+    });
+    let captured: WhatsAppInboundMessage | undefined;
+    provider.inboundProvider.onMessage(async (message) => {
+      captured = message;
+    });
+    await provider.handleInboundEvent(
+      inboundPayload({
+        text: "",
+        mediaType: "image",
+        media: {
+          type: "image",
+          providerMessageId: "wamid.inbound",
+          downloadPath: "https://example.test/media/wamid.inbound",
+        },
+      }),
+    );
+
+    if (!captured) throw new Error("expected inbound message");
+    await expect(provider.dmProvider.downloadMedia?.(captured, "/tmp", { maxFileBytes: 1024 })).resolves.toEqual([]);
+    expect(requestFetch).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      { providerMessageId: "wamid.inbound", mediaType: "image" },
+      "Managed WhatsApp media message has no downloadable platform path",
+    );
+  });
+
   it("ignores non-message event types with metadata-only logging", async () => {
     const logger = { info: vi.fn(), warn: vi.fn() } as unknown as Logger;
     const provider = createManagedWhatsAppProvider({
@@ -399,6 +544,30 @@ describe("managed WhatsApp provider", () => {
         mediaType: "image",
       }),
     );
+  });
+
+  it("keeps media-only inbound messages empty when media is downloadable", async () => {
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+    });
+    const handler = vi.fn(async (_message: WhatsAppInboundMessage) => undefined);
+    provider.inboundProvider.onMessage(handler);
+
+    await provider.handleInboundEvent(
+      inboundPayload({
+        text: "",
+        mediaType: "image",
+        media: {
+          type: "image",
+          providerMessageId: "wamid.inbound",
+          downloadPath: "/api/whatsapp/media/wamid.inbound?senderPhoneE164=%2B15551234567",
+        },
+      }),
+    );
+
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ text: "", mediaType: "image" }));
   });
 
   it("rejects group sends", async () => {

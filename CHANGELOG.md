@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [0.45.1] -- 2026-07-05
+
+- Managed WhatsApp DMs now preserve inbound media from the platform shared-number gateway: platform media references are accepted on `/api/system/whatsapp/managed/events`, downloaded with the tenant token, stored as normal workspace attachments, and passed into the agent. This fixes image+caption DMs being treated as text-only on managed tenants.
+- Managed media downloads are constrained to the platform media endpoint and retain the existing no-media-reference fallback for older platform events.
+
 ## [0.45.0] -- 2026-07-05
 
 - Summariser agents now route per source: each Slack channel or WhatsApp group can have its own route with an independent destination, schedule, focus, and sections, instead of one shared configuration. Existing single-destination summarisers are preserved.
