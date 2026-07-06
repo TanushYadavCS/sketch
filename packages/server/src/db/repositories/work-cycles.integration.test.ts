@@ -125,14 +125,17 @@ describe("work cycle sink postgres", () => {
 
   it("preserves carryover history and rejects a duplicate open membership", async () => {
     db = await createTestPgDb();
+    await seedBase(db);
     const task = await seedTask(db, { sourceTaskId: "carryover-task", title: "Carry over", status: "open" });
     const cycleA = await upsertWorkCycle(db, {
+      connectorConfigId: CONNECTOR_ID,
       source: "linear",
       externalRef: "sprint-a",
       name: "Sprint 1",
       lastSeenSyncRunId: "sync-1",
     });
     const cycleB = await upsertWorkCycle(db, {
+      connectorConfigId: CONNECTOR_ID,
       source: "linear",
       externalRef: "sprint-b",
       name: "Sprint 2",
@@ -258,6 +261,58 @@ describe("work cycle sink postgres", () => {
       total: 4,
     });
   }, 30000);
+
+  it("keeps work cycle identity scoped to connector config", async () => {
+    db = await createTestPgDb();
+    await seedBase(db);
+    await seedConnector(db, "work-cycle-pg-config-b");
+
+    const cycleA = await upsertWorkCycle(db, {
+      connectorConfigId: CONNECTOR_ID,
+      source: "clickup",
+      externalRef: "shared-list-id",
+      name: "Sprint Shared A",
+      lastSeenSyncRunId: "sync-old",
+    });
+    const cycleB = await upsertWorkCycle(db, {
+      connectorConfigId: "work-cycle-pg-config-b",
+      source: "clickup",
+      externalRef: "shared-list-id",
+      name: "Sprint Shared B",
+      lastSeenSyncRunId: "sync-old",
+    });
+
+    expect(cycleA.cycleId).not.toBe(cycleB.cycleId);
+    await expect(
+      db.selectFrom("work_cycles").selectAll().where("external_ref", "=", "shared-list-id").execute(),
+    ).resolves.toHaveLength(2);
+
+    await expect(
+      reconcileWorkCycles(db, {
+        connectorConfigId: CONNECTOR_ID,
+        syncRunId: "sync-new",
+        at: "2026-06-15T00:00:00.000Z",
+      }),
+    ).resolves.toBe(1);
+
+    await expect(loadCycleState(db, cycleA.cycleId)).resolves.toEqual({
+      state: "closed",
+      deleted_at: "2026-06-15T00:00:00.000Z",
+    });
+    await expect(loadCycleState(db, cycleB.cycleId)).resolves.toEqual({ state: "active", deleted_at: null });
+
+    await expect(
+      reconcileWorkCycles(db, {
+        connectorConfigId: "work-cycle-pg-config-b",
+        syncRunId: "sync-new",
+        at: "2026-06-16T00:00:00.000Z",
+      }),
+    ).resolves.toBe(1);
+    await expect(loadCycleState(db, cycleB.cycleId)).resolves.toEqual({
+      state: "closed",
+      deleted_at: "2026-06-16T00:00:00.000Z",
+    });
+  }, 30000);
 });
 
 async function seedBase(db: Kysely<DB>): Promise<void> {
@@ -265,10 +320,14 @@ async function seedBase(db: Kysely<DB>): Promise<void> {
     .insertInto("users")
     .values({ id: USER_ID, name: "Work Cycle PG User", email: "work-cycle-pg-user@example.com" })
     .execute();
+  await seedConnector(db, CONNECTOR_ID);
+}
+
+async function seedConnector(db: Kysely<DB>, id: string): Promise<void> {
   await db
     .insertInto("connector_configs")
     .values({
-      id: CONNECTOR_ID,
+      id,
       connector_type: "linear",
       auth_type: "api_key",
       credentials: "{}",
@@ -409,4 +468,8 @@ async function openMembershipCount(db: Kysely<DB>, sourceTaskId: string): Promis
     .where("task_cycle_memberships.removed_at", "is", null)
     .executeTakeFirstOrThrow();
   return Number(row.count);
+}
+
+async function loadCycleState(db: Kysely<DB>, id: string): Promise<{ state: string; deleted_at: string | null }> {
+  return db.selectFrom("work_cycles").select(["state", "deleted_at"]).where("id", "=", id).executeTakeFirstOrThrow();
 }
