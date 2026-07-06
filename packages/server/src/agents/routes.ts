@@ -15,13 +15,23 @@ import type {
 import type { DB } from "../db/schema";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
 import { getAgentDefinition } from "./registry";
-import { AgentDeliveryTargetError, type AgentOutputApi, type AgentRunService, AgentSourceTargetError } from "./service";
+import {
+  AgentDeliveryTargetError,
+  type AgentOutputApi,
+  type AgentRunService,
+  AgentSourceTargetError,
+  type AgentViewerRole,
+} from "./service";
 import type { AgentDefinition } from "./types";
 
 async function getCurrentUserId(c: { get: (key: "sub" | "email") => string | undefined }, service: AgentRunService) {
   const sub = c.get("sub");
   if (!sub) return null;
   return service.resolveUserId(sub, c.get("email"));
+}
+
+function getCurrentRole(c: { get: (key: "role") => string | undefined }): AgentViewerRole {
+  return c.get("role") === "admin" ? "admin" : "member";
 }
 
 /**
@@ -512,16 +522,17 @@ export function agentRoutes(service: AgentRunService) {
   routes.get("/", async (c) => {
     const userId = await getCurrentUserId(c, service);
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
-    return c.json({ agents: await service.listForUser(userId) });
+    return c.json({ agents: await service.listForViewer(userId, getCurrentRole(c)) });
   });
 
   routes.get("/:agentKey", async (c) => {
     const userId = await getCurrentUserId(c, service);
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
     const agentKey = c.req.param("agentKey");
-    const agent = await service.getConfigView(agentKey, userId);
+    const configUserId = await service.resolveConfigControlUserId(agentKey, userId, getCurrentRole(c));
+    const agent = await service.getConfigView(agentKey, configUserId);
     if (!agent) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
-    const latest = await service.getLatestForUser(agentKey, userId);
+    const latest = await service.getLatestForUser(agentKey, configUserId);
     return c.json({
       agent,
       output: latest.output,
@@ -542,8 +553,9 @@ export function agentRoutes(service: AgentRunService) {
     let agent: Awaited<ReturnType<AgentRunService["updateConfigForUser"]>>;
     try {
       patch = parseConfigPatch(body, def);
-      await validateDeliveryTargets(service, userId, patch);
-      agent = await service.updateConfigForUser(agentKey, userId, patch);
+      const configUserId = await service.resolveConfigControlUserId(agentKey, userId, getCurrentRole(c));
+      await validateDeliveryTargets(service, configUserId, patch);
+      agent = await service.updateConfigForUser(agentKey, configUserId, patch);
     } catch (err) {
       if (
         err instanceof ConfigPatchError ||
@@ -567,7 +579,8 @@ export function agentRoutes(service: AgentRunService) {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     try {
       const sources = parseRouteMemberSources(body.sources);
-      return c.json({ members: await service.listEligibleRouteMembers(userId, sources) });
+      const configUserId = await service.resolveConfigControlUserId(agentKey, userId, getCurrentRole(c));
+      return c.json({ members: await service.listEligibleRouteMembers(configUserId, sources) });
     } catch (err) {
       if (err instanceof ConfigPatchError) {
         return c.json({ error: { code: "VALIDATION_ERROR", message: err.message } }, 400);
@@ -595,7 +608,8 @@ export function agentRoutes(service: AgentRunService) {
     const rawLimit = Number(c.req.query("limit") ?? "20");
     const limit = Number.isInteger(rawLimit) ? rawLimit : 20;
     const cursor = c.req.query("cursor") || null;
-    return c.json(await service.listOutputsForUser(agentKey, userId, { limit, cursor }));
+    const configUserId = await service.resolveConfigControlUserId(agentKey, userId, getCurrentRole(c));
+    return c.json(await service.listOutputsForUser(agentKey, configUserId, { limit, cursor }));
   });
 
   routes.get("/:agentKey/outputs/:id", async (c) => {
@@ -605,7 +619,8 @@ export function agentRoutes(service: AgentRunService) {
     if (!service.listDefinitions().some((def) => def.key === agentKey)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
     }
-    const output = await service.getByIdForUser(agentKey, c.req.param("id"), userId);
+    const configUserId = await service.resolveConfigControlUserId(agentKey, userId, getCurrentRole(c));
+    const output = await service.getByIdForUser(agentKey, c.req.param("id"), configUserId);
     if (!output) return c.json({ error: { code: "NOT_FOUND", message: "Output not found" } }, 404);
     return c.json({ output });
   });
@@ -621,9 +636,10 @@ export function agentRoutes(service: AgentRunService) {
     const rawRouteId =
       body && typeof body === "object" && !Array.isArray(body) ? (body as { routeId?: unknown }).routeId : undefined;
     const routeId = typeof rawRouteId === "string" && rawRouteId.trim() ? rawRouteId.trim() : undefined;
+    const configUserId = await service.resolveConfigControlUserId(agentKey, userId, getCurrentRole(c));
     const rows = await service.requestGenerationForUser({
       agentKey,
-      userId,
+      userId: configUserId,
       triggerType: "manual",
       ...(routeId ? { routeIds: [routeId] } : {}),
     });

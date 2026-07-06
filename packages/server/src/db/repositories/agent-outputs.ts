@@ -243,6 +243,19 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
       return toConfig(row);
     },
 
+    async findFirstAdminConfigOwner(agentKey: string): Promise<string | null> {
+      const row = await db
+        .selectFrom("agent_user_configs as c")
+        .innerJoin("users as u", "u.id", "c.user_id")
+        .select(["c.user_id as userId"])
+        .where("c.agent_key", "=", agentKey)
+        .where("u.auth_role", "=", "admin")
+        .orderBy("c.created_at", "asc")
+        .orderBy("c.user_id", "asc")
+        .executeTakeFirst();
+      return row?.userId ?? null;
+    },
+
     async upsertConfig(
       agentKey: string,
       userId: string,

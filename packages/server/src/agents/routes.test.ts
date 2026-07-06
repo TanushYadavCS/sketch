@@ -11,11 +11,17 @@ import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
 import { agentRoutes } from "./routes";
 import { AgentDeliveryTargetError, AgentRunService, type AgentRunServiceDeps, AgentSourceTargetError } from "./service";
 
-function createRoutesTestApp(service: AgentRunService, sub = "auth-user", email = "user@example.com") {
+function createRoutesTestApp(
+  service: AgentRunService,
+  sub = "auth-user",
+  email = "user@example.com",
+  role: "admin" | "member" = "member",
+) {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("sub", sub);
     c.set("email", email);
+    c.set("role", role);
     await next();
   });
   app.route("/api/agents", agentRoutes(service));
@@ -25,8 +31,18 @@ function createRoutesTestApp(service: AgentRunService, sub = "auth-user", email 
 function createService(overrides: Record<string, unknown> = {}) {
   return {
     resolveUserId: vi.fn(async () => "user-1"),
+    resolveConfigControlUserId: vi.fn(async (_agentKey, viewerUserId) => viewerUserId),
     resolveDeliveryConfigForUser: vi.fn(async (_userId, delivery) => delivery),
     listDefinitions: vi.fn(() => [{ key: "daily-brief" }]),
+    listForViewer: vi.fn(async () => []),
+    getConfigView: vi.fn(async () => ({ agentKey: "daily-brief" })),
+    getLatestForUser: vi.fn(async () => ({
+      output: null,
+      running: false,
+      outputDate: "2026-07-06",
+      timezone: "UTC",
+    })),
+    getByIdForUser: vi.fn(async () => null),
     listOutputsForUser: vi.fn(async () => ({ outputs: [], nextCursor: null })),
     listEligibleRouteMembers: vi.fn(async () => []),
     listWhatsAppDmMembers: vi.fn(async () => []),
@@ -34,7 +50,12 @@ function createService(overrides: Record<string, unknown> = {}) {
     updateConfigForUser: vi.fn(async () => ({ agentKey: "daily-brief", delivery: null })),
     ...overrides,
   } as unknown as AgentRunService & {
+    resolveConfigControlUserId: ReturnType<typeof vi.fn>;
     resolveDeliveryConfigForUser: ReturnType<typeof vi.fn>;
+    listForViewer: ReturnType<typeof vi.fn>;
+    getConfigView: ReturnType<typeof vi.fn>;
+    getLatestForUser: ReturnType<typeof vi.fn>;
+    getByIdForUser: ReturnType<typeof vi.fn>;
     listOutputsForUser: ReturnType<typeof vi.fn>;
     listEligibleRouteMembers: ReturnType<typeof vi.fn>;
     listWhatsAppDmMembers: ReturnType<typeof vi.fn>;
@@ -62,6 +83,145 @@ function sourceRoute(source: AgentSourceConfig): AgentRoute {
 }
 
 describe("agentRoutes", () => {
+  it("lists agents through the viewer-aware service method", async () => {
+    const service = createService({
+      listForViewer: vi.fn(async () => [{ key: CONVERSATION_SUMMARY_AGENT_KEY, routes: [{ id: "shared-route" }] }]),
+    });
+    const app = createRoutesTestApp(service, "admin-b-sub", "admin-b@example.com", "admin");
+
+    const res = await app.request("/api/agents");
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      agents: [{ key: CONVERSATION_SUMMARY_AGENT_KEY, routes: [{ id: "shared-route" }] }],
+    });
+    expect(service.listForViewer).toHaveBeenCalledWith("user-1", "admin");
+  });
+
+  it("reads admin Summarizer detail and latest output through the shared config owner", async () => {
+    const service = createService({
+      resolveConfigControlUserId: vi.fn(async () => "admin-owner"),
+      getConfigView: vi.fn(async () => ({
+        agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+        routes: [{ id: "shared-route" }],
+      })),
+      getLatestForUser: vi.fn(async () => ({
+        output: { id: "out-1" },
+        running: false,
+        outputDate: "2026-07-06",
+        timezone: "UTC",
+      })),
+    });
+    const app = createRoutesTestApp(service, "admin-b-sub", "admin-b@example.com", "admin");
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}`);
+
+    expect(res.status).toBe(200);
+    expect(service.resolveConfigControlUserId).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "user-1", "admin");
+    expect(service.getConfigView).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "admin-owner");
+    expect(service.getLatestForUser).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "admin-owner");
+  });
+
+  it("saves admin Summarizer config through the shared config owner", async () => {
+    const service = createService({
+      resolveConfigControlUserId: vi.fn(async () => "admin-owner"),
+      updateConfigForUser: vi.fn(async () => ({ agentKey: CONVERSATION_SUMMARY_AGENT_KEY, delivery: null })),
+    });
+    const app = createRoutesTestApp(service, "admin-b-sub", "admin-b@example.com", "admin");
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        delivery: {
+          enabled: true,
+          platform: "slack",
+          targetType: "dm",
+          targetId: "U_OWNER",
+          label: "Owner",
+        },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(service.resolveConfigControlUserId).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "user-1", "admin");
+    expect(service.resolveDeliveryConfigForUser).toHaveBeenCalledWith(
+      "admin-owner",
+      expect.objectContaining({ targetId: "U_OWNER" }),
+    );
+    expect(service.updateConfigForUser).toHaveBeenCalledWith(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      "admin-owner",
+      expect.objectContaining({ delivery: expect.objectContaining({ targetId: "U_OWNER" }) }),
+    );
+  });
+
+  it("uses the shared config owner for admin Summarizer route members, outputs, and runs", async () => {
+    const service = createService({
+      resolveConfigControlUserId: vi.fn(async () => "admin-owner"),
+      listDefinitions: vi.fn(() => [{ key: CONVERSATION_SUMMARY_AGENT_KEY }]),
+      listEligibleRouteMembers: vi.fn(async () => [
+        { userId: "member-1", name: "Member One", slackUserId: "U_MEMBER_1" },
+      ]),
+      listOutputsForUser: vi.fn(async () => ({ outputs: [{ id: "out-1" }], nextCursor: null })),
+      requestGenerationForUser: vi.fn(async () => [
+        {
+          id: "run-1",
+          status: "running",
+          output_date: "2026-07-06",
+          source_key: "slack:channel:C_ALPHA",
+        },
+      ]),
+    });
+    const app = createRoutesTestApp(service, "admin-b-sub", "admin-b@example.com", "admin");
+
+    const routeMembers = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/route-members`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sources: ["slack:channel:C_ALPHA"] }),
+    });
+    const outputs = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/outputs?limit=5`);
+    const runs = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ routeId: "shared-route" }),
+    });
+
+    expect(routeMembers.status).toBe(200);
+    expect(outputs.status).toBe(200);
+    expect(runs.status).toBe(202);
+    expect(service.listEligibleRouteMembers).toHaveBeenCalledWith("admin-owner", ["slack:channel:C_ALPHA"]);
+    expect(service.listOutputsForUser).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "admin-owner", {
+      limit: 5,
+      cursor: null,
+    });
+    expect(service.requestGenerationForUser).toHaveBeenCalledWith({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: "admin-owner",
+      triggerType: "manual",
+      routeIds: ["shared-route"],
+    });
+  });
+
+  it("keeps member Summarizer config saves scoped to the viewer", async () => {
+    const service = createService();
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(service.resolveConfigControlUserId).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "user-1", "member");
+    expect(service.updateConfigForUser).toHaveBeenCalledWith(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      "user-1",
+      expect.objectContaining({ enabled: false }),
+    );
+  });
+
   it("passes parsed delivery config to the service for saving", async () => {
     const service = createService({
       updateConfigForUser: vi.fn(async () => ({ agentKey: "daily-brief", delivery: null })),

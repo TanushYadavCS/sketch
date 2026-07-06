@@ -55,6 +55,8 @@ const WEEKDAY_INDEX = new Map([
 
 type UserRow = Selectable<UsersTable>;
 
+export type AgentViewerRole = "admin" | "member";
+
 export type AgentGenerationScope =
   | { kind: "combined"; sourceKey: string; sourceLabel: string | null }
   | { kind: "source"; source: AgentSourceConfig; sourceKey: string; sourceLabel: string | null };
@@ -780,10 +782,16 @@ export class AgentRunService {
     return listAgentDefinitions();
   }
 
-  async listForUser(userId: string): Promise<AgentSummaryView[]> {
+  async resolveConfigControlUserId(agentKey: string, viewerUserId: string, role: AgentViewerRole): Promise<string> {
+    if (role !== "admin" || agentKey !== CONVERSATION_SUMMARY_AGENT_KEY) return viewerUserId;
+    return (await this.repo.findFirstAdminConfigOwner(agentKey)) ?? viewerUserId;
+  }
+
+  async listForViewer(userId: string, role: AgentViewerRole): Promise<AgentSummaryView[]> {
     const result: AgentSummaryView[] = [];
     for (const def of listAgentDefinitions()) {
-      const config = await this.resolveConfig(def, userId);
+      const configUserId = await this.resolveConfigControlUserId(def.key, userId, role);
+      const config = await this.resolveConfig(def, configUserId);
       result.push({
         key: def.key,
         title: def.title,
@@ -800,6 +808,10 @@ export class AgentRunService {
       });
     }
     return result;
+  }
+
+  async listForUser(userId: string): Promise<AgentSummaryView[]> {
+    return this.listForViewer(userId, "member");
   }
 
   async getConfigView(agentKey: string, userId: string): Promise<AgentConfigView | null> {

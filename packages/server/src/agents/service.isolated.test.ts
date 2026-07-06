@@ -866,6 +866,77 @@ describe("AgentRunService", () => {
     });
   });
 
+  it("resolves admin Summarizer control to the first admin-owned config", async () => {
+    const users = createUserRepository(db);
+    const adminA = await users.create({
+      name: "Admin A",
+      email: "admin-a@example.com",
+      slackUserId: "U_ADMIN_A",
+      authRole: "admin",
+    });
+    const adminB = await users.create({
+      name: "Admin B",
+      email: "admin-b@example.com",
+      slackUserId: "U_ADMIN_B",
+      authRole: "admin",
+    });
+    const source = slackSource("C_A", "alpha");
+    const route = sourceRoute(source);
+    const service = createService(db, [], allowSlackDelivery([{ id: "C_A", name: "alpha" }]));
+
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, adminA.id, {
+      sources: [source],
+      routes: [route],
+    });
+
+    await expect(service.resolveConfigControlUserId(CONVERSATION_SUMMARY_AGENT_KEY, adminB.id, "admin")).resolves.toBe(
+      adminA.id,
+    );
+
+    const summaries = await service.listForViewer(adminB.id, "admin");
+    expect(summaries.find((summary) => summary.key === CONVERSATION_SUMMARY_AGENT_KEY)).toMatchObject({
+      sources: [source],
+      routes: [route],
+    });
+  });
+
+  it("keeps admin Summarizer control on self when no admin config exists", async () => {
+    const users = createUserRepository(db);
+    const admin = await users.create({
+      name: "Admin",
+      email: "admin@example.com",
+      authRole: "admin",
+    });
+    const service = createService(db, []);
+
+    await expect(service.resolveConfigControlUserId(CONVERSATION_SUMMARY_AGENT_KEY, admin.id, "admin")).resolves.toBe(
+      admin.id,
+    );
+  });
+
+  it("keeps members and non-Summarizer agents scoped to the viewer", async () => {
+    const users = createUserRepository(db);
+    const admin = await users.create({
+      name: "Admin",
+      email: "admin@example.com",
+      slackUserId: "U_ADMIN",
+      authRole: "admin",
+    });
+    const member = await users.create({ name: "Member", email: "member@example.com", authRole: "member" });
+    const source = slackSource("C_A", "alpha");
+    const service = createService(db, [], allowSlackDelivery([{ id: "C_A", name: "alpha" }]));
+
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, admin.id, {
+      sources: [source],
+      routes: [sourceRoute(source)],
+    });
+
+    await expect(service.resolveConfigControlUserId(CONVERSATION_SUMMARY_AGENT_KEY, member.id, "member")).resolves.toBe(
+      member.id,
+    );
+    await expect(service.resolveConfigControlUserId(DAILY_BRIEF_AGENT_KEY, admin.id, "admin")).resolves.toBe(admin.id);
+  });
+
   it("resolves WhatsApp group sources by bot-known group membership without requiring a user WhatsApp number", async () => {
     const users = createUserRepository(db);
     const user = await users.create({ name: "Agent User", email: "user@example.com" });
