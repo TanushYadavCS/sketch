@@ -46,6 +46,7 @@ import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
+import { SectionCard, SectionLabel } from "./drawer-kit";
 import { ScopePanel } from "./scope-panel";
 import { TimelineStrip } from "./timeline-strip";
 
@@ -430,17 +431,14 @@ function SummaryBlock({ entity, accent }: { entity: EntityDetail; accent: string
   const crmBrief = entity.profile.crmActivityBrief;
   const hasContent = identity.length > 0 || activity.length > 0 || Boolean(crmBrief);
   return (
-    <section aria-label="Summary" className="rounded-lg border p-4" style={{ borderColor: `${accent}33` }}>
-      <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">Summary</div>
+    <SectionCard accent={accent} label="Summary">
       {hasContent ? (
         <div className="space-y-2 text-sm leading-snug">
           {identity ? <p>{identity}</p> : null}
           {activity ? <p className="text-muted-foreground">{activity}</p> : null}
           {crmBrief ? (
             <div className="border-t pt-2">
-              <div className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
-                CRM Activity
-              </div>
+              <SectionLabel className="mb-1">CRM Activity</SectionLabel>
               <p>{crmBrief.summary}</p>
               <p className="mt-1 text-[11px] text-muted-foreground">
                 {crmBrief.activityCount} {crmBrief.activityCount === 1 ? "activity" : "activities"} · updated{" "}
@@ -452,7 +450,7 @@ function SummaryBlock({ entity, accent }: { entity: EntityDetail; accent: string
       ) : (
         <p className="text-sm text-muted-foreground">No summary yet.</p>
       )}
-    </section>
+    </SectionCard>
   );
 }
 

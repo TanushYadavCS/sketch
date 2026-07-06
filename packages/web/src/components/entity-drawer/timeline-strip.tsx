@@ -15,6 +15,7 @@ import {
   PhoneIcon,
   SparkleIcon,
 } from "@phosphor-icons/react";
+import { EntryList, SectionLabel, SourceTag } from "./drawer-kit";
 
 interface TimelineStripProps {
   groups: EntityTimelineGroup[];
@@ -84,9 +85,7 @@ function TimelineRow({
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="shrink-0 rounded-sm bg-muted px-1 py-0.5 font-mono text-[9px] uppercase text-muted-foreground">
-            {item.sourceType}
-          </span>
+          <SourceTag>{item.sourceType}</SourceTag>
           <span className="truncate text-sm font-medium">{item.fileName}</span>
           {item.mentionCount > 1 ? (
             <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
@@ -116,16 +115,14 @@ export function TimelineStrip({ groups, onSelectItem }: TimelineStripProps) {
       <div className="flex flex-col gap-3">
         {groups.map((group) => (
           <div key={group.month} className="flex flex-col">
-            <h4 className="mb-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-              {monthLabel(group.month)}
-            </h4>
-            <ul className="flex flex-col divide-y rounded-md border bg-background">
+            <SectionLabel className="mb-1.5 font-medium">{monthLabel(group.month)}</SectionLabel>
+            <EntryList>
               {group.items.map((item) => (
                 <li key={item.fileId}>
                   <TimelineRow item={item} onSelectItem={onSelectItem} />
                 </li>
               ))}
-            </ul>
+            </EntryList>
           </div>
         ))}
       </div>
