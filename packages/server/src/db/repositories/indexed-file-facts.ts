@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
-import type { IndexedFileFactRaw } from "../../connectors/types";
+import type { IndexedFileFactRaw, LlmTaskCandidate, LlmTaskFactRaw } from "../../connectors/types";
 import type { DB } from "../schema";
 
 export type IndexedFileFactType =
@@ -13,6 +13,7 @@ export type IndexedFileFactType =
   | "structural_seed"
   | "structural_task"
   | "commitment"
+  | "llm_task"
   | "person_seed"
   | "llm_extracted"
   | "llm_relation"
@@ -83,6 +84,8 @@ export interface ReconcileResult {
   skipped?: { reason: "delta_exceeds_threshold"; ratio: number; threshold: number };
 }
 
+const LLM_TASK_ID_SEPARATOR = "\u001f";
+
 function normalizeName(name: string | null | undefined): string {
   return (name ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -139,6 +142,13 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
     const commitmentId = typeof raw?.commitmentId === "string" ? raw.commitmentId.trim().toLowerCase() : "";
     return createHash("sha256")
       .update([input.connectorConfigId ?? "", input.factType, input.source, commitmentId].join("|"))
+      .digest("hex");
+  }
+  if (input.factType === "llm_task") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const candidateId = typeof raw?.candidateId === "string" ? raw.candidateId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, candidateId].join("|"))
       .digest("hex");
   }
   const parts = [
@@ -280,6 +290,41 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
     if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
       throw new Error("commitment parentRef requires source and sourceId");
     }
+  } else if (input.factType === "llm_task") {
+    if (
+      !hasString(raw, "candidateId") ||
+      !hasString(raw, "title") ||
+      typeof raw.hasOwnerVerbObject !== "boolean" ||
+      !hasString(raw, "corroborationKey") ||
+      !hasString(raw, "promptVersion") ||
+      !isRecord(raw.evidence)
+    ) {
+      throw new Error(
+        "llm_task facts require candidateId, title, hasOwnerVerbObject, corroborationKey, promptVersion, and evidence",
+      );
+    }
+    const evidence = raw.evidence as Record<string, unknown>;
+    if (!Array.isArray(evidence.fileIds) || !Array.isArray(evidence.entityIds)) {
+      throw new Error("llm_task evidence requires fileIds and entityIds arrays");
+    }
+    if (raw.owner !== undefined && !isRecord(raw.owner)) {
+      throw new Error("llm_task owner must be an object");
+    }
+    const owner = raw.owner as Record<string, unknown> | undefined;
+    if (
+      owner &&
+      ((owner.name !== undefined && typeof owner.name !== "string") ||
+        (owner.email !== undefined && typeof owner.email !== "string"))
+    ) {
+      throw new Error("llm_task owner name and email must be strings");
+    }
+    if (raw.parentRef !== undefined && !isRecord(raw.parentRef)) {
+      throw new Error("llm_task parentRef must be an object");
+    }
+    const parentRef = raw.parentRef as Record<string, unknown> | undefined;
+    if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
+      throw new Error("llm_task parentRef requires source and sourceId");
+    }
   } else if (input.factType === "person_seed") {
     if (!hasString(raw, "source") && !hasString(raw, "subtype")) {
       throw new Error("person_seed facts require raw source identity or subtype metadata");
@@ -336,6 +381,78 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
   }
 
   return JSON.stringify(input.raw);
+}
+
+export interface UpsertLlmTaskFactInput {
+  experimentalFlag?: boolean;
+  indexedFileId: string;
+  connectorConfigId: string;
+  createdByUserId?: string | null;
+  lastSeenSyncRunId?: string | null;
+  contentHash?: string | null;
+  source: string;
+  candidate: LlmTaskCandidate;
+  candidateId?: string;
+  corroborationKey: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+  promptVersion: string;
+}
+
+export async function upsertLlmTaskFact(
+  db: Kysely<DB>,
+  input: UpsertLlmTaskFactInput,
+): Promise<{ emitted: boolean; factKey?: string; candidateId?: string }> {
+  const connectorConfigId = requireNonEmpty(input.connectorConfigId, "connectorConfigId");
+  const source = requireNonEmpty(input.source, "source");
+  const candidateId = requireNonEmpty(
+    input.candidateId ?? buildLlmTaskCandidateId(input.indexedFileId, input.candidate.title),
+    "candidateId",
+  );
+  if (!input.experimentalFlag) return { emitted: false };
+
+  const raw: LlmTaskFactRaw = {
+    candidateId,
+    title: input.candidate.title,
+    owner: input.candidate.owner,
+    hasOwnerVerbObject: input.candidate.hasOwnerVerbObject,
+    corroborationKey: input.corroborationKey,
+    parentRef: input.parentRef,
+    parentEntityId: input.parentEntityId,
+    evidence: input.evidence,
+    sourceExcerpt: input.candidate.sourceExcerpt,
+    promptVersion: input.promptVersion,
+  };
+  const factInput: UpsertIndexedFileFactInput = {
+    indexedFileId: input.indexedFileId,
+    connectorConfigId,
+    createdByUserId: input.createdByUserId ?? null,
+    lastSeenSyncRunId: input.lastSeenSyncRunId ?? null,
+    contentHash: input.contentHash ?? null,
+    source,
+    factType: "llm_task",
+    relation: "mentioned",
+    subjectName: input.candidate.title,
+    subjectSource: source,
+    subjectSourceId: candidateId,
+    contextSnippet: input.candidate.sourceExcerpt ?? null,
+    raw,
+  };
+  await createIndexedFileFactRepository(db).upsertFact(factInput);
+  return { emitted: true, factKey: buildIndexedFileFactKey(factInput), candidateId };
+}
+
+export function buildLlmTaskCandidateId(indexedFileId: string, title: string): string {
+  return createHash("sha256")
+    .update([indexedFileId, normalizeName(title)].join(LLM_TASK_ID_SEPARATOR))
+    .digest("hex");
+}
+
+function requireNonEmpty(value: string | null | undefined, name: string): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) throw new Error(`llm_task ${name} is required`);
+  return trimmed;
 }
 
 export function createIndexedFileFactRepository(db: Kysely<DB>) {
@@ -528,6 +645,28 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         ],
         tombstonedFactIds: stale.map((row) => row.id),
       };
+    },
+
+    async touchActiveFactsForFile(input: {
+      indexedFileId: string;
+      source: string;
+      factType: IndexedFileFactType;
+      lastSeenSyncRunId: string;
+      contentHash?: string | null;
+    }): Promise<number> {
+      const result = await db
+        .updateTable("indexed_file_facts")
+        .set({
+          last_seen_sync_run_id: input.lastSeenSyncRunId,
+          content_hash: input.contentHash ?? null,
+          updated_at: new Date().toISOString(),
+        })
+        .where("indexed_file_id", "=", input.indexedFileId)
+        .where("source", "=", input.source)
+        .where("fact_type", "=", input.factType)
+        .where("deleted_at", "is", null)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0);
     },
 
     async clearMaterializedAtForActiveFacts(indexedFileIds: string[]): Promise<void> {

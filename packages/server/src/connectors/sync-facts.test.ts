@@ -1,6 +1,6 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
+import { createIndexedFileFactRepository, upsertLlmTaskFact } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import { emitFactsForSyncedItem } from "./sync-facts";
@@ -178,6 +178,50 @@ describe("emitFactsForSyncedItem", () => {
         subject_email: "named@example.com",
       },
     ]);
+  });
+
+  it("keeps unchanged LLM task facts seen in the current sync run", async () => {
+    const factRepo = createIndexedFileFactRepository(db);
+    await upsertLlmTaskFact(db, {
+      experimentalFlag: true,
+      indexedFileId: "file-1",
+      connectorConfigId: "connector-1",
+      createdByUserId: "user-1",
+      lastSeenSyncRunId: "run-1",
+      contentHash: "hash-1",
+      source: "google_drive",
+      candidate: {
+        title: "Ship Slack capture",
+        owner: { name: "Jane Doe" },
+        hasOwnerVerbObject: true,
+      },
+      corroborationKey: "ship-slack-capture",
+      evidence: { fileIds: ["file-1"], entityIds: [] },
+      promptVersion: "llm-task-v1",
+    });
+
+    await emitFactsForSyncedItem({
+      db,
+      factRepo,
+      connector: testConnector,
+      connectorType: "google_drive",
+      factContext: {
+        connectorConfigId: "connector-1",
+        createdByUserId: "user-1",
+        lastSeenSyncRunId: "run-2",
+      },
+      item: baseItem,
+      indexedFileId: "file-1",
+      experimentalFlag: true,
+      contentChanged: false,
+    });
+
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .select(["last_seen_sync_run_id", "deleted_at"])
+      .where("fact_type", "=", "llm_task")
+      .executeTakeFirstOrThrow();
+    expect(fact).toEqual({ last_seen_sync_run_id: "run-2", deleted_at: null });
   });
 });
 

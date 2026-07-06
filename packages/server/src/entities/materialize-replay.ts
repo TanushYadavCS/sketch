@@ -8,6 +8,7 @@ import { materializeContactPointFact } from "./materialize-contact-points";
 import { buildMaterializeDeps } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
 import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
+import { materializeLlmTask } from "./materialize-llm-task";
 import { materializePersonFact, materializePersonSeed } from "./materialize-person";
 import { materializeProjectSeed } from "./materialize-project";
 import { materializeCrmRelationFact, materializeLlmRelationFact } from "./materialize-relations";
@@ -37,6 +38,7 @@ const FACT_REPLAY_ORDER = [
   "llm_relation",
   "structural_task",
   "commitment",
+  "llm_task",
 ] as const;
 
 export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
@@ -78,6 +80,9 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
   }
   if (fact.fact_type === "commitment") {
     return materializeCommitment(deps, fact);
+  }
+  if (fact.fact_type === "llm_task") {
+    return materializeLlmTask(deps, fact);
   }
   return { kind: "skipped", reason: "unknown_fact_type" };
 }
@@ -142,6 +147,7 @@ export async function replaySourceFacts(
 
   const deps = await buildMaterializeDeps(db, {
     llmPromotionThreshold: opts.llmPromotionThreshold,
+    llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateDryRun: opts.birthGateDryRun,
@@ -212,6 +218,7 @@ async function materializeUnmaterializedFactsInner(
 
   const deps = await buildMaterializeDeps(db, {
     llmPromotionThreshold: opts.llmPromotionThreshold,
+    llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateDryRun: opts.birthGateDryRun,
