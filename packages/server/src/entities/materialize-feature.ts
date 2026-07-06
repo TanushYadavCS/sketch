@@ -1,80 +1,71 @@
 import { createSubEntityRepository } from "../db/repositories/sub-entities";
-import { resolveParent } from "./materialize-commitment";
-import { resolveEffectiveAt } from "./materialize-effective-time";
+import { type SubEntityParentInput, resolveParent } from "./materialize-commitment";
 import { readJsonObject } from "./materialize-json";
 import type { IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 
-export async function materializeDecision(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
+export async function materializeFeature(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
   if (!deps.experimentalFlag) return { kind: "skipped", reason: "experimental_off" };
   const raw = readJsonObject(fact.raw);
-  const decision = readDecision(raw);
-  if (!decision) return { kind: "skipped", reason: "invalid_decision" };
+  const feature = readFeature(raw);
+  if (!feature) return { kind: "skipped", reason: "invalid_feature" };
 
-  const parent = resolveParent(deps, decision, ["project", "person"]);
-  if (!parent) return { kind: "skipped", reason: "missing_decision_parent" };
-  const effectiveAt = await resolveEffectiveAt(deps, fact, decision.decidedAt);
-  if (!effectiveAt) return { kind: "skipped", reason: "missing_decision_effective_time" };
+  const parent = resolveParent(deps, feature, ["product"]);
+  if (!parent) return { kind: "skipped", reason: "missing_feature_parent" };
 
   const repo = createSubEntityRepository(deps.db);
-  const result = await repo.supersedeSubEntity({
+  const result = await repo.upsertSubEntity({
     parentEntityId: parent.id,
-    kind: "decision",
-    dedupName: decision.topic,
-    displayName: decision.statement,
+    kind: "feature",
+    dedupName: feature.featureName,
+    displayName: feature.featureName,
+    status: feature.status,
     provenance: fact.source === "llm" ? "corroborated_llm" : "structural",
-    metadata: {
-      decidedBy: decision.decidedBy,
-      decidedAt: decision.decidedAt,
-      rationale: decision.rationale,
-    },
+    dueAt: feature.dueAt ?? null,
+    ownerUserId: deps.resolveOwner(fact),
     sourceFactId: fact.id,
-    effectiveAt,
   });
   await repo.upsertSubEntityEvidence(result.subEntityId, "fact", fact.id);
-  for (const fileId of decision.evidence.fileIds) {
+  for (const fileId of feature.evidence.fileIds) {
     await repo.upsertSubEntityEvidence(result.subEntityId, "file", fileId);
   }
-  for (const entityId of decision.evidence.entityIds) {
+  for (const entityId of feature.evidence.entityIds) {
     await repo.upsertSubEntityEvidence(result.subEntityId, "entity", entityId);
   }
-  return { kind: "decision_materialized" };
+  return { kind: "feature_materialized" };
 }
 
-interface DecisionInput {
-  decisionId: string;
-  parentRef?: { source: string; sourceId: string };
-  parentEntityId?: string;
-  topic: string;
-  statement: string;
-  decidedBy?: string;
-  decidedAt?: string;
-  rationale?: string;
+interface FeatureInput extends SubEntityParentInput {
+  featureId: string;
+  featureName: string;
+  status: "proposed" | "building" | "shipped" | "deprecated";
+  dueAt?: string;
   evidence: { fileIds: string[]; entityIds: string[] };
 }
 
-function readDecision(raw: Record<string, unknown>): DecisionInput | null {
+function readFeature(raw: Record<string, unknown>): FeatureInput | null {
   if (
-    typeof raw.decisionId !== "string" ||
-    typeof raw.topic !== "string" ||
-    typeof raw.statement !== "string" ||
+    typeof raw.featureId !== "string" ||
+    typeof raw.featureName !== "string" ||
+    (raw.status !== "proposed" &&
+      raw.status !== "building" &&
+      raw.status !== "shipped" &&
+      raw.status !== "deprecated") ||
     !isEvidence(raw.evidence)
   ) {
     return null;
   }
   return {
-    decisionId: raw.decisionId,
-    parentRef: readParentRef(raw.parentRef),
+    featureId: raw.featureId,
+    featureName: raw.featureName,
+    parentRef: readParentProductRef(raw.parentProductRef),
     parentEntityId: readOptionalString(raw.parentEntityId),
-    topic: raw.topic,
-    statement: raw.statement,
-    decidedBy: readOptionalString(raw.decidedBy),
-    decidedAt: readOptionalString(raw.decidedAt),
-    rationale: readOptionalString(raw.rationale),
+    status: raw.status,
+    dueAt: readOptionalString(raw.dueAt),
     evidence: { fileIds: raw.evidence.fileIds, entityIds: raw.evidence.entityIds },
   };
 }
 
-function readParentRef(value: unknown): { source: string; sourceId: string } | undefined {
+function readParentProductRef(value: unknown): { source: string; sourceId: string } | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
   if (typeof record.source !== "string" || typeof record.sourceId !== "string") return undefined;

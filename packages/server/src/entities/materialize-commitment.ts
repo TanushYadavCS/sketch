@@ -2,6 +2,7 @@ import { createSubEntityRepository } from "../db/repositories/sub-entities";
 import { TEST_ACCOUNT_ENTITY_ID } from "../db/repositories/tasks";
 import { readJsonObject } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { ProposeEntityType } from "./propose";
 
 export async function materializeCommitment(
   deps: MaterializeDeps,
@@ -12,7 +13,7 @@ export async function materializeCommitment(
   const commitment = readCommitment(raw);
   if (!commitment) return { kind: "skipped", reason: "invalid_commitment" };
 
-  const parent = resolveParent(deps, commitment);
+  const parent = resolveParent(deps, commitment, ["project", "person"]);
   const repo = createSubEntityRepository(deps.db);
   const result = await repo.upsertSubEntity({
     parentEntityId: parent?.id ?? null,
@@ -40,36 +41,40 @@ export interface SubEntityParentInput {
   evidence: { entityIds: string[] };
 }
 
-export function resolveParent(deps: MaterializeDeps, input: SubEntityParentInput): EntityRow | null {
+export function resolveParent(
+  deps: MaterializeDeps,
+  input: SubEntityParentInput,
+  allowedTypes: readonly string[],
+): EntityRow | null {
   if (input.parentRef) {
     const byRef = deps.index.bySourceRef.get(`${input.parentRef.source}:${input.parentRef.sourceId}`);
-    if (isAllowedParent(byRef)) return byRef;
+    if (isAllowedParent(byRef, allowedTypes)) return byRef;
   }
   if (input.parentEntityId) {
-    const byId = findEntityById(deps, input.parentEntityId);
-    if (isAllowedParent(byId)) return byId;
+    const byId = findEntityById(deps, input.parentEntityId, allowedTypes);
+    if (isAllowedParent(byId, allowedTypes)) return byId;
   }
   for (const entityId of input.evidence.entityIds) {
-    const byId = findEntityById(deps, entityId);
-    if (isAllowedParent(byId)) return byId;
+    const byId = findEntityById(deps, entityId, allowedTypes);
+    if (isAllowedParent(byId, allowedTypes)) return byId;
   }
   return null;
 }
 
-function findEntityById(deps: MaterializeDeps, entityId: string): EntityRow | undefined {
-  for (const type of ["project", "person"] as const) {
-    const found = deps.index.entitiesByType.get(type)?.find((entity) => entity.id === entityId);
+export function findEntityById(
+  deps: MaterializeDeps,
+  entityId: string,
+  allowedTypes: readonly string[],
+): EntityRow | undefined {
+  for (const type of allowedTypes) {
+    const found = deps.index.entitiesByType.get(type as ProposeEntityType)?.find((entity) => entity.id === entityId);
     if (found) return found;
   }
   return undefined;
 }
 
-function isAllowedParent(entity: EntityRow | undefined): entity is EntityRow {
-  return Boolean(
-    entity &&
-      entity.id !== TEST_ACCOUNT_ENTITY_ID &&
-      (entity.source_type === "project" || entity.source_type === "person"),
-  );
+export function isAllowedParent(entity: EntityRow | undefined, allowedTypes: readonly string[]): entity is EntityRow {
+  return Boolean(entity && entity.id !== TEST_ACCOUNT_ENTITY_ID && allowedTypes.includes(entity.source_type));
 }
 
 interface CommitmentInput extends SubEntityParentInput {

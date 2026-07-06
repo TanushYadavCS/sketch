@@ -13,6 +13,8 @@ export type IndexedFileFactType =
   | "structural_seed"
   | "structural_task"
   | "commitment"
+  | "feature"
+  | "milestone"
   | "decision"
   | "llm_task"
   | "person_seed"
@@ -143,6 +145,20 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
     const commitmentId = typeof raw?.commitmentId === "string" ? raw.commitmentId.trim().toLowerCase() : "";
     return createHash("sha256")
       .update([input.connectorConfigId ?? "", input.factType, input.source, commitmentId].join("|"))
+      .digest("hex");
+  }
+  if (input.factType === "feature") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const featureId = typeof raw?.featureId === "string" ? raw.featureId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, featureId].join("|"))
+      .digest("hex");
+  }
+  if (input.factType === "milestone") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const milestoneId = typeof raw?.milestoneId === "string" ? raw.milestoneId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, milestoneId].join("|"))
       .digest("hex");
   }
   if (input.factType === "decision") {
@@ -300,6 +316,87 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
     const parentRef = raw.parentRef as Record<string, unknown> | undefined;
     if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
       throw new Error("commitment parentRef requires source and sourceId");
+    }
+  } else if (input.factType === "feature") {
+    if (
+      !hasString(raw, "featureId") ||
+      !hasString(raw, "featureName") ||
+      !hasString(raw, "status") ||
+      !isRecord(raw.evidence)
+    ) {
+      throw new Error("feature facts require featureId, featureName, status, and evidence");
+    }
+    if (
+      raw.status !== "proposed" &&
+      raw.status !== "building" &&
+      raw.status !== "shipped" &&
+      raw.status !== "deprecated"
+    ) {
+      throw new Error("feature status must be proposed, building, shipped, or deprecated");
+    }
+    const evidence = raw.evidence as Record<string, unknown>;
+    if (!Array.isArray(evidence.fileIds) || !Array.isArray(evidence.entityIds)) {
+      throw new Error("feature evidence requires fileIds and entityIds arrays");
+    }
+    if (
+      !evidence.fileIds.every((id) => typeof id === "string") ||
+      !evidence.entityIds.every((id) => typeof id === "string")
+    ) {
+      throw new Error("feature evidence ids must be strings");
+    }
+    if (raw.parentProductRef !== undefined && !isRecord(raw.parentProductRef)) {
+      throw new Error("feature parentProductRef must be an object");
+    }
+    const parentProductRef = raw.parentProductRef as Record<string, unknown> | undefined;
+    if (parentProductRef && (!hasString(parentProductRef, "source") || !hasString(parentProductRef, "sourceId"))) {
+      throw new Error("feature parentProductRef requires source and sourceId");
+    }
+    for (const key of ["parentEntityId", "dueAt"]) {
+      if (raw[key] !== undefined && typeof raw[key] !== "string") {
+        throw new Error(`feature ${key} must be a string`);
+      }
+    }
+  } else if (input.factType === "milestone") {
+    if (
+      !input.connectorConfigId?.trim() ||
+      !input.source.trim() ||
+      !hasString(raw, "milestoneId") ||
+      !hasString(raw, "milestoneName") ||
+      !hasString(raw, "status") ||
+      !hasString(raw, "dueAt") ||
+      !isRecord(raw.evidence)
+    ) {
+      throw new Error(
+        "milestone facts require connectorConfigId, source, milestoneId, milestoneName, status, dueAt, and evidence",
+      );
+    }
+    if (raw.status !== "planned" && raw.status !== "hit" && raw.status !== "missed") {
+      throw new Error("milestone status must be planned, hit, or missed");
+    }
+    if (Number.isNaN(Date.parse(String(raw.dueAt)))) {
+      throw new Error("milestone dueAt must be an ISO date");
+    }
+    const evidence = raw.evidence as Record<string, unknown>;
+    if (!Array.isArray(evidence.fileIds) || !Array.isArray(evidence.entityIds)) {
+      throw new Error("milestone evidence requires fileIds and entityIds arrays");
+    }
+    if (
+      !evidence.fileIds.every((id) => typeof id === "string") ||
+      !evidence.entityIds.every((id) => typeof id === "string")
+    ) {
+      throw new Error("milestone evidence ids must be strings");
+    }
+    if (raw.parentRef !== undefined && !isRecord(raw.parentRef)) {
+      throw new Error("milestone parentRef must be an object");
+    }
+    const parentRef = raw.parentRef as Record<string, unknown> | undefined;
+    if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
+      throw new Error("milestone parentRef requires source and sourceId");
+    }
+    for (const key of ["parentEntityId", "observedAt"]) {
+      if (raw[key] !== undefined && typeof raw[key] !== "string") {
+        throw new Error(`milestone ${key} must be a string`);
+      }
     }
   } else if (input.factType === "decision") {
     if (
