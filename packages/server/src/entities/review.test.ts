@@ -11,6 +11,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../auth/password";
 import { normalizeName } from "../connectors/name-normalize";
+import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createTaskRepository } from "../db/repositories/tasks";
 import { createUserRepository } from "../db/repositories/users";
@@ -481,6 +482,58 @@ describe("entity-review routes — list endpoint shape", () => {
   });
 });
 
+describe("entity-review routes — types filter", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let ownerId: string;
+  let adminCookie: string;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedUsers(db);
+    ownerId = await userIdByEmail(db, OWNER_EMAIL);
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+      logger: createTestLogger(),
+    });
+    adminCookie = await login(app, ADMIN_EMAIL);
+    // One row per type: two spine types (product, team) plus a non-spine
+    // person row that must never leak through a spine-scoped filter.
+    await seedReviewRow(db, { proposedName: "Canvas Copilot", entityType: "product", triggeredBy: ownerId });
+    await seedReviewRow(db, { proposedName: "Platform Team", entityType: "team", triggeredBy: ownerId });
+    await seedReviewRow(db, { proposedName: "Simran Suri", entityType: "person", triggeredBy: ownerId });
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("?types=product filters to product rows with a matching total", async () => {
+    const res = await app.request("/api/entity-review?types=product", { headers: { Cookie: adminCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { rows: Array<{ entity_type: string }>; total: number };
+    expect(body.total).toBe(1);
+    expect(body.rows.map((r) => r.entity_type)).toEqual(["product"]);
+  });
+
+  it("filters by any entity type (not just the spine) and ignores unknown tokens", async () => {
+    // `person` is non-spine — the filter is generic, so it must work; `bogus`
+    // matches no rows and must not error or leak.
+    const res = await app.request("/api/entity-review?types=person,bogus", { headers: { Cookie: adminCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { rows: Array<{ entity_type: string }>; total: number };
+    expect(body.total).toBe(1);
+    expect(body.rows.map((r) => r.entity_type)).toEqual(["person"]);
+  });
+
+  it("no types param leaves results unfiltered (regression guard)", async () => {
+    const res = await app.request("/api/entity-review", { headers: { Cookie: adminCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { rows: Array<{ entity_type: string }>; total: number };
+    expect(body.total).toBe(3);
+    expect(new Set(body.rows.map((r) => r.entity_type))).toEqual(new Set(["product", "team", "person"]));
+  });
+});
+
 describe("entity-review A4 backend", () => {
   let db: Kysely<DB>;
   let app: ReturnType<typeof createApp>;
@@ -923,5 +976,258 @@ describe("entity-review A4 backend", () => {
       body: JSON.stringify({ candidateGeneratedAt: single.candidateGeneratedAt }),
     });
     expect(singleRes.status).toBe(200);
+  });
+});
+
+describe("entity-review routes — dismiss endpoint", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let ownerId: string;
+  let otherCookie: string;
+  let ownerCookie: string;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedUsers(db);
+    ownerId = await userIdByEmail(db, OWNER_EMAIL);
+    await seedConnectorConfig(db, "config-owner", ownerId);
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+      logger: createTestLogger(),
+    });
+    ownerCookie = await login(app, OWNER_EMAIL);
+    otherCookie = await login(app, OTHER_EMAIL);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("400 without candidateGeneratedAt, 403 for non-owner", async () => {
+    const seed = await seedReviewRow(db, {
+      proposedName: "Canvasx",
+      entityType: "team",
+      triggeredBy: ownerId,
+      source: "clickup",
+      sourceId: "clickup:team:canvasx",
+      candidateReason: "birth-gated",
+    });
+
+    const badRes = await app.request(`/api/entity-review/${seed.id}/dismiss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({}),
+    });
+    expect(badRes.status).toBe(400);
+
+    const forbiddenRes = await app.request(`/api/entity-review/${seed.id}/dismiss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: otherCookie },
+      body: JSON.stringify({ candidateGeneratedAt: seed.candidateGeneratedAt }),
+    });
+    expect(forbiddenRes.status).toBe(403);
+
+    const after = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("id", "=", seed.id)
+      .executeTakeFirstOrThrow();
+    expect(after.status).toBe("pending");
+  });
+
+  it("dismisses a birth row, creates no entity, and a later re-sync does not re-propose it", async () => {
+    const seed = await seedReviewRow(db, {
+      proposedName: "Canvasx",
+      entityType: "team",
+      triggeredBy: ownerId,
+      source: "clickup",
+      sourceId: "clickup:team:canvasx",
+      candidateReason: "birth-gated",
+    });
+
+    const res = await app.request(`/api/entity-review/${seed.id}/dismiss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({ candidateGeneratedAt: seed.candidateGeneratedAt }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { row: { status: string }; idempotent: boolean };
+    expect(body.row.status).toBe("dismissed");
+    expect(body.idempotent).toBe(false);
+
+    const entityCount = await db
+      .selectFrom("entities")
+      .select((eb) => eb.fn.countAll<number>().as("c"))
+      .executeTakeFirstOrThrow();
+    expect(Number(entityCount.c)).toBe(0);
+
+    // A later sync re-proposes the same source key: it must stay dismissed.
+    const repo = createEntityReviewRepo(db);
+    const resync = await repo.upsertQueueRow({
+      proposedName: "Canvasx",
+      normalizedName: normalizeName("Canvasx"),
+      entityType: "team",
+      source: "clickup",
+      sourceId: "clickup:team:canvasx",
+      candidateEntityId: null,
+      candidateScore: null,
+      candidateReason: "birth-gated",
+      triggeredByUserId: ownerId,
+    });
+    expect(resync.skipEvidence).toBe(true);
+
+    const afterResync = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("id", "=", seed.id)
+      .executeTakeFirstOrThrow();
+    expect(afterResync.status).toBe("dismissed");
+
+    const pending = await db
+      .selectFrom("entity_review_queue")
+      .select((eb) => eb.fn.countAll<number>().as("c"))
+      .where("status", "=", "pending")
+      .executeTakeFirstOrThrow();
+    expect(Number(pending.c)).toBe(0);
+  });
+});
+
+describe("entity-review routes — child tasks preview", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let ownerId: string;
+  let otherId: string;
+  let ownerCookie: string;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedUsers(db);
+    ownerId = await userIdByEmail(db, OWNER_EMAIL);
+    otherId = await userIdByEmail(db, OTHER_EMAIL);
+    await seedConnectorConfig(db, "config-owner", ownerId);
+    await seedConnectorConfig(db, "config-other", otherId);
+    app = createApp(db, createTestConfig({ ENCRYPTION_KEY, EXPERIMENTAL_FLAG: true }), {
+      logger: createTestLogger(),
+    });
+    ownerCookie = await login(app, OWNER_EMAIL);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  async function seedChildTask(
+    fileId: string,
+    parentSourceId: string,
+    name: string,
+    opts: { source?: string; configId?: string; accessScopeId?: string | null } = {},
+  ) {
+    const source = opts.source ?? "linear";
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: fileId,
+        connector_config_id: opts.configId ?? "config-owner",
+        provider_file_id: `pf-${fileId}`,
+        file_name: name,
+        file_type: "issue",
+        content_category: "document",
+        source,
+        provider_url: `https://linear.app/${fileId}`,
+        access_scope_id: opts.accessScopeId ?? null,
+        synced_at: new Date().toISOString(),
+        source_updated_at: new Date().toISOString(),
+      })
+      .execute();
+    await db
+      .insertInto("indexed_file_facts")
+      .values({
+        id: `fact-${fileId}`,
+        indexed_file_id: fileId,
+        source,
+        fact_type: "parent_entity",
+        relation: "mentioned",
+        subject_source_id: parentSourceId,
+        fact_key: `key-${fileId}`,
+      })
+      .execute();
+  }
+
+  it("returns child tasks for a structural-seed row, joined by parent source id", async () => {
+    const seed = await seedReviewRow(db, {
+      proposedName: "Sketch",
+      entityType: "team",
+      triggeredBy: ownerId,
+      seedSource: "linear",
+      seedSourceId: "team-1",
+    });
+    await seedChildTask("task-1", "team-1", "SKE-1: First");
+    await seedChildTask("task-2", "team-1", "SKE-2: Second");
+
+    const res = await app.request(`/api/entity-review/${seed.id}`, { headers: { Cookie: ownerCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      childTaskCount: number;
+      childTasks: Array<{ name: string; providerUrl: string | null }>;
+    };
+    expect(body.childTaskCount).toBe(2);
+    expect(body.childTasks.map((t) => t.name).sort()).toEqual(["SKE-1: First", "SKE-2: Second"]);
+    expect(body.childTasks.every((t) => t.providerUrl?.includes("linear.app"))).toBe(true);
+  });
+
+  it("filters child tasks through file visibility for member viewers", async () => {
+    const seed = await seedReviewRow(db, {
+      proposedName: "Sketch",
+      entityType: "team",
+      triggeredBy: ownerId,
+      seedSource: "linear",
+      seedSourceId: "team-2",
+    });
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-other",
+        connector_config_id: "config-other",
+        scope_type: "space",
+        provider_scope_id: "space-other",
+        label: "Other Space",
+      })
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({ access_scope_id: "scope-other", email: OTHER_EMAIL })
+      .execute();
+    await seedChildTask("task-visible", "team-2", "SKE-3: Visible");
+    await seedChildTask("task-hidden", "team-2", "SKE-4: Hidden", {
+      configId: "config-other",
+      accessScopeId: "scope-other",
+    });
+
+    const res = await app.request(`/api/entity-review/${seed.id}`, { headers: { Cookie: ownerCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      childTaskCount: number;
+      childTasks: Array<{ name: string }>;
+    };
+    expect(body.childTaskCount).toBe(1);
+    expect(body.childTasks.map((t) => t.name)).toEqual(["SKE-3: Visible"]);
+  });
+
+  it("omits child tasks for a non-seed (LLM) row", async () => {
+    const seed = await seedReviewRow(db, {
+      proposedName: "Acme Co",
+      entityType: "company",
+      triggeredBy: ownerId,
+      source: "fireflies",
+      sourceId: "fireflies:company:acme",
+      candidateReason: "birth-gated",
+    });
+    // A parent_entity fact keyed on the same string must not be reachable for an LLM row.
+    await seedChildTask("task-3", "fireflies:company:acme", "Should not appear");
+
+    const res = await app.request(`/api/entity-review/${seed.id}`, { headers: { Cookie: ownerCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { childTasks?: unknown; childTaskCount?: unknown };
+    expect(body.childTasks).toBeUndefined();
+    expect(body.childTaskCount).toBeUndefined();
   });
 });

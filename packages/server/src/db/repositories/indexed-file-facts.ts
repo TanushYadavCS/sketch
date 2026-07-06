@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type { IndexedFileFactRaw, LlmTaskCandidate, LlmTaskFactRaw } from "../../connectors/types";
 import type { DB } from "../schema";
+import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 
 export type IndexedFileFactType =
   | "attendee"
@@ -604,6 +605,15 @@ function requireNonEmpty(value: string | null | undefined, name: string): string
   return trimmed;
 }
 
+/** A tracker task/issue that sits under a parent project/team, for review preview. */
+export interface ChildTask {
+  indexedFileId: string;
+  name: string;
+  fileType: string | null;
+  providerUrl: string | null;
+  source: string;
+}
+
 export function createIndexedFileFactRepository(db: Kysely<DB>) {
   return {
     async upsertFact(input: UpsertIndexedFileFactInput): Promise<void> {
@@ -857,6 +867,61 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         if (matched.length >= limit) return matched;
       }
       return matched;
+    },
+
+    /**
+     * Tasks/issues that sit directly under a tracker parent (project / team),
+     * for previewing a structural-seed review row. Joins `parent_entity` facts
+     * — each emitted by a child task file and keyed by the parent's tracker id —
+     * back to their `indexed_files`. Matches on BOTH `source` and the parent id
+     * so a numeric ClickUp id can't collide with a Linear UUID. Returns the true
+     * distinct `total` (count is independent of the capped list) and a list
+     * capped at `limit`, deterministically ordered (recency, then id).
+     */
+    async childTasksForParent(opts: {
+      source: string;
+      parentSourceId: string;
+      limit: number;
+      viewer?: FileViewer;
+    }): Promise<{ tasks: ChildTask[]; total: number }> {
+      let base = db
+        .selectFrom("indexed_file_facts as f")
+        .innerJoin("indexed_files as i", "i.id", "f.indexed_file_id")
+        .where("f.fact_type", "=", "parent_entity")
+        .where("f.source", "=", opts.source)
+        .where("f.subject_source_id", "=", opts.parentSourceId)
+        .where("f.deleted_at", "is", null);
+      if (opts.viewer && !opts.viewer.isAdmin) {
+        base = base.where(fileVisibilityPredicate(opts.viewer, "i"));
+      }
+
+      const countRow = await base
+        .select((eb) => eb.fn.count("f.indexed_file_id").distinct().as("c"))
+        .executeTakeFirst();
+
+      const rows = await base
+        .select([
+          "i.id as indexedFileId",
+          "i.file_name as name",
+          "i.file_type as fileType",
+          "i.provider_url as providerUrl",
+          "i.source as source",
+          "i.source_updated_at as sourceUpdatedAt",
+        ])
+        .distinct()
+        .orderBy("i.source_updated_at", "desc")
+        .orderBy("i.id", "asc")
+        .limit(opts.limit)
+        .execute();
+
+      const tasks: ChildTask[] = rows.map((r) => ({
+        indexedFileId: r.indexedFileId,
+        name: r.name,
+        fileType: r.fileType,
+        providerUrl: r.providerUrl,
+        source: r.source,
+      }));
+      return { tasks, total: Number(countRow?.c ?? 0) };
     },
   };
 }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Kysely, RawBuilder, Selectable } from "kysely";
 import { sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
+import { normalizeEntityMatchName } from "../../entities/match-normalize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../../entities/profile-facts";
 import type { ProvenanceTier } from "../../entities/provenance";
 import { resolveLiveEntity, resolveLiveEntityId, resolveSourceRefToLiveEntityId } from "../../entities/redirect";
@@ -134,6 +135,19 @@ export interface UpsertEntityData {
   provenanceTier?: ProvenanceTier;
 }
 
+export interface DeclareProductData {
+  name: string;
+  aliases?: string[];
+}
+
+export interface DeclaredProductListEntry {
+  id: string;
+  name: string;
+  aliases: string[];
+  hotness: number;
+  provenance_tier: string;
+}
+
 export interface UpsertEntityFromToolData {
   name: string;
   sourceType: string;
@@ -209,6 +223,52 @@ function normalizeLinkedin(value: string): string {
   return decodeURIComponent(parts[inIndex + 1]).toLowerCase();
 }
 
+function parseAliasesString(aliases: string | null): string[] {
+  if (!aliases) return [];
+  try {
+    const parsed = JSON.parse(aliases);
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeAliasInput(aliases: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const alias of aliases ?? []) {
+    const trimmed = alias.trim();
+    if (!trimmed) continue;
+    const key = normalizeEntityMatchName("product", trimmed);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function mergeAliases(existing: string | null, incoming: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const alias of [...parseAliasesString(existing), ...incoming]) {
+    const key = normalizeEntityMatchName("product", alias);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(alias);
+  }
+  return out;
+}
+
+function toDeclaredProductListEntry(entity: Selectable<EntitiesTable>): DeclaredProductListEntry {
+  return {
+    id: entity.id,
+    name: entity.name,
+    aliases: parseAliasesString(entity.aliases),
+    hotness: Number(entity.hotness ?? 0),
+    provenance_tier: entity.provenance_tier,
+  };
+}
+
 export function normalizeContactPointValue(kind: EntityContactPointKind, value: string): string {
   if (kind === "email") {
     const normalized = value.trim().toLowerCase();
@@ -268,6 +328,35 @@ async function loadCrmActivityBrief(db: Kysely<DB>, entityId: string): Promise<E
 }
 
 export function createEntityRepository(db: Kysely<DB>) {
+  async function createEntityRow(data: UpsertEntityData) {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values({
+        id,
+        name: data.name,
+        source_type: data.sourceType,
+        subtype: data.subtype ?? null,
+        aliases: data.aliases ? JSON.stringify(data.aliases) : null,
+        metadata: data.metadata ? JSON.stringify(data.metadata) : null,
+        source_ref_id: data.sourceRefId ?? null,
+        status: data.status ?? "confirmed",
+        provenance_tier: data.provenanceTier ?? "inferred",
+        hotness: 0,
+        created_at: now,
+        updated_at: now,
+      })
+      .execute();
+
+    return await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", id)
+      .where(whereLiveEntity())
+      .executeTakeFirstOrThrow();
+  }
+
   return {
     // ── CRUD ──
 
@@ -325,32 +414,104 @@ export function createEntityRepository(db: Kysely<DB>) {
     },
 
     async createEntity(data: UpsertEntityData) {
-      const id = randomUUID();
-      const now = new Date().toISOString();
-      await db
-        .insertInto("entities")
-        .values({
-          id,
-          name: data.name,
-          source_type: data.sourceType,
-          subtype: data.subtype ?? null,
-          aliases: data.aliases ? JSON.stringify(data.aliases) : null,
-          metadata: data.metadata ? JSON.stringify(data.metadata) : null,
-          source_ref_id: data.sourceRefId ?? null,
-          status: data.status ?? "confirmed",
-          provenance_tier: data.provenanceTier ?? "inferred",
-          hotness: 0,
-          created_at: now,
-          updated_at: now,
-        })
-        .execute();
+      return await createEntityRow(data);
+    },
 
-      return await db
+    /**
+     * Declare a product as user-asserted ground truth. If duplicate live
+     * product rows share the normalized product name from the pre-gate window,
+     * the hottest and then most-mentioned row is upgraded and the others are
+     * left untouched so declaration stays non-blocking.
+     */
+    async declareProduct(data: DeclareProductData) {
+      const name = data.name.trim();
+      if (!name) throw new Error("Product name cannot be empty");
+      const aliases = normalizeAliasInput(data.aliases);
+      const incomingKeys = new Set(
+        [name, ...aliases].map((value) => normalizeEntityMatchName("product", value)).filter(Boolean),
+      );
+      const products = await db
         .selectFrom("entities")
         .selectAll()
-        .where("id", "=", id)
+        .where("source_type", "=", "product")
         .where(whereLiveEntity())
-        .executeTakeFirstOrThrow();
+        .execute();
+      const matches = products.filter((product) => {
+        const keys = [product.name, ...parseAliasesString(product.aliases)]
+          .map((value) => normalizeEntityMatchName("product", value))
+          .filter(Boolean);
+        return keys.some((key) => incomingKeys.has(key));
+      });
+
+      if (matches.length > 0) {
+        const mentionCounts = new Map<string, number>();
+        const counts = await db
+          .selectFrom("entity_mentions")
+          .select(["entity_id", (eb) => eb.fn.count<number>("id").as("mention_count")])
+          .where(
+            "entity_id",
+            "in",
+            matches.map((match) => match.id),
+          )
+          .groupBy("entity_id")
+          .execute();
+        for (const row of counts) mentionCounts.set(row.entity_id, Number(row.mention_count));
+        const best = [...matches].sort((a, b) => {
+          const hotnessDelta = Number(b.hotness ?? 0) - Number(a.hotness ?? 0);
+          if (hotnessDelta !== 0) return hotnessDelta;
+          const mentionDelta = (mentionCounts.get(b.id) ?? 0) - (mentionCounts.get(a.id) ?? 0);
+          if (mentionDelta !== 0) return mentionDelta;
+          return a.id.localeCompare(b.id);
+        })[0];
+        if (best.provenance_tier === "declared") return best;
+
+        const mergedAliases = mergeAliases(best.aliases, aliases);
+        const now = new Date().toISOString();
+        await db
+          .updateTable("entities")
+          .set({
+            aliases: mergedAliases.length > 0 ? JSON.stringify(mergedAliases) : best.aliases,
+            provenance_tier: "declared",
+            updated_at: now,
+          })
+          .where("id", "=", best.id)
+          .execute();
+        return await db
+          .selectFrom("entities")
+          .selectAll()
+          .where("id", "=", best.id)
+          .where(whereLiveEntity())
+          .executeTakeFirstOrThrow();
+      }
+
+      return await createEntityRow({
+        name,
+        sourceType: "product",
+        aliases,
+        status: "confirmed",
+        provenanceTier: "declared",
+      });
+    },
+
+    /**
+     * The curated product closed list shown on the Your Org surface: products
+     * the user has blessed, either by declaring them (`declared`) or by
+     * approving a proposal from the review queue (`human_confirmed`). This is
+     * the same tier set extraction matches against
+     * ({@link PRODUCT_MATCH_TARGET_PROVENANCE_TIERS}); raw `inferred` guesses are
+     * excluded so the curation home only shows trusted products. Each row keeps
+     * its tier so the UI can chip declared vs confirmed.
+     */
+    async listCuratedProducts(): Promise<DeclaredProductListEntry[]> {
+      const rows = await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("source_type", "=", "product")
+        .where("provenance_tier", "in", ["declared", "human_confirmed"])
+        .where(whereLiveEntity())
+        .orderBy("name", "asc")
+        .execute();
+      return rows.map(toDeclaredProductListEntry);
     },
 
     /**
