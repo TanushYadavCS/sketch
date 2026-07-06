@@ -105,6 +105,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     birthGateTypes: config.EXPERIMENTAL_FLAG
       ? new Set<ProposeEntityType>(["project", "product", "team"])
       : new Set<ProposeEntityType>(),
+    birthGateLiveTypes: config.EXPERIMENTAL_FLAG
+      ? new Set<ProposeEntityType>(["product"])
+      : new Set<ProposeEntityType>(),
     birthGateDryRun: config.BIRTH_GATE_DRY_RUN,
     experimentalFlag: config.EXPERIMENTAL_FLAG,
   });

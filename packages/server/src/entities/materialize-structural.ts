@@ -53,6 +53,7 @@ export async function materializeStructuralSeed(
     sourceUrl,
     sourceRefId: fact.indexed_file_id ?? undefined,
     metadata,
+    provenanceTier: "structural",
   })) as unknown as EntityRow;
   if (subjectSource === "zoho_crm" && sourceType === "company") {
     const domains = readCrmAccountDomains(metadataFromRaw);

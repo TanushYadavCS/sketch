@@ -60,10 +60,28 @@ async function countTable(db: Kysely<DB>, table: string): Promise<number> {
 }
 
 async function deleteTable(db: Kysely<DB>, table: string): Promise<number> {
+  if (table === "entities") return deleteRecreatableEntities(db);
   const count = await countTable(db, table);
   if (count === 0) return 0;
   try {
     await sql`DELETE FROM ${sql.raw(table)}`.execute(db);
+    return count;
+  } catch (err) {
+    if (isMissingTableError(err)) return 0;
+    throw err;
+  }
+}
+
+async function deleteRecreatableEntities(db: Kysely<DB>): Promise<number> {
+  try {
+    const before = await db
+      .selectFrom("entities")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("provenance_tier", "!=", "declared")
+      .executeTakeFirst();
+    const count = Number(before?.count ?? 0);
+    if (count === 0) return 0;
+    await db.deleteFrom("entities").where("provenance_tier", "!=", "declared").execute();
     return count;
   } catch (err) {
     if (isMissingTableError(err)) return 0;

@@ -36,6 +36,7 @@ export async function materializeProjectSeed(
       lookup: deps.lookup,
       logger: deps.logger,
       birthGateTypes: deps.birthGateTypes,
+      birthGateLiveTypes: deps.birthGateLiveTypes,
       birthGateDryRun: deps.birthGateDryRun,
       readEmail: deps.readEmail,
       onEntityResolved: deps.onEntityResolved,
@@ -49,6 +50,7 @@ export async function materializeProjectSeed(
       evidence: fact.indexed_file_id ? [{ indexedFileId: fact.indexed_file_id }] : [],
       triggeredByUserId,
       metadata,
+      provenanceTier: "structural",
     },
   );
 

@@ -809,20 +809,22 @@ describe("proposeEntity", () => {
     expect(companies.map((c) => c.name)).toEqual(["Canvas Labs"]);
   });
 
-  it("16. product version normalization links Claude 3 and Claude-3 but keeps Claude 3.5 separate", async () => {
+  it("16. declared product version normalization links Claude 3 and Claude-3 but keeps Claude 3.5 separate", async () => {
     const entityRepo = createEntityRepository(db);
     const claude3 = await entityRepo.upsertEntity({
       name: "Claude 3",
       sourceType: "product",
       subtype: "external",
       status: "confirmed",
+      provenanceTier: "declared",
     });
-    const before = await db.selectFrom("entities").selectAll().execute();
+    const materializeDeps = await buildMaterializeDeps(db);
     const deps = {
-      entityRepo,
-      reviewRepo: createEntityReviewRepo(db),
-      lookup: makeLookup(() => before),
-      readEmail,
+      entityRepo: materializeDeps.entityRepo,
+      reviewRepo: materializeDeps.reviewRepo,
+      lookup: materializeDeps.lookup,
+      readEmail: materializeDeps.readEmail,
+      onEntityResolved: materializeDeps.onEntityResolved,
     };
 
     const linked = await proposeEntity(deps, {
@@ -856,7 +858,53 @@ describe("proposeEntity", () => {
     expect(products.map((p) => p.name).sort()).toEqual(["Claude 3", "Claude 3.5"]);
   });
 
-  it("17. precomputed LLM candidates queue after exact-name fast-path is checked", async () => {
+  it("17. inferred product source-ref and exact-name matches are not eligible match targets", async () => {
+    const entityRepo = createEntityRepository(db);
+    const legacy = await entityRepo.upsertEntity({
+      name: "Claude Legacy",
+      sourceType: "product",
+      subtype: "external",
+      status: "confirmed",
+      provenanceTier: "inferred",
+    });
+    await entityRepo.upsertSourceRef({
+      entityId: legacy.id,
+      source: "llm_extraction",
+      sourceId: "product:claude-legacy",
+    });
+    const materializeDeps = await buildMaterializeDeps(db);
+    expect(
+      materializeDeps.index.byNormalizedName.get(normalizeName("Claude Legacy"))?.map((e) => e.id) ?? [],
+    ).not.toContain(legacy.id);
+    expect(materializeDeps.index.bySourceRef.has("llm_extraction:product:claude-legacy")).toBe(false);
+
+    const result = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+        onEntityResolved: materializeDeps.onEntityResolved,
+      },
+      {
+        name: "Claude Legacy",
+        entityType: "product",
+        subtype: "external",
+        source: "llm_extraction",
+        sourceId: "product:claude-legacy",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("created");
+    if (result.kind !== "created") throw new Error("unreachable");
+    expect(result.entity.id).not.toBe(legacy.id);
+    const products = await db.selectFrom("entities").selectAll().where("source_type", "=", "product").execute();
+    expect(products.map((product) => product.id).sort()).toEqual([legacy.id, result.entity.id].sort());
+  });
+
+  it("18. precomputed LLM candidates queue after exact-name fast-path is checked", async () => {
     const entityRepo = createEntityRepository(db);
     const exact = await entityRepo.upsertPersonEntity({
       name: "Sarah Chen",
@@ -915,7 +963,7 @@ describe("proposeEntity", () => {
     expect(queue.candidate_reason).toBe("llm-ambiguous");
   });
 
-  it("18. evidenceDomain links a token-overlapping company before fuzzy queueing", async () => {
+  it("19. evidenceDomain links a token-overlapping company before fuzzy queueing", async () => {
     const entityRepo = createEntityRepository(db);
     const domainsRepo = createEntityDomainsRepository(db);
     const canvas = await entityRepo.upsertEntity({
@@ -1087,12 +1135,14 @@ describe("proposeEntity", () => {
       sourceType: "product",
       subtype: "external",
       status: "confirmed",
+      provenanceTier: "human_confirmed",
     });
     const cold = await entityRepo.upsertEntity({
       name: "Aviation Edge",
       sourceType: "product",
       subtype: "external",
       status: "confirmed",
+      provenanceTier: "human_confirmed",
     });
     await db.updateTable("entities").set({ hotness: 17 }).where("id", "=", hot.id).execute();
     await db.updateTable("entities").set({ hotness: 0 }).where("id", "=", cold.id).execute();

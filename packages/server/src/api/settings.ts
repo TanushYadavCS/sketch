@@ -10,7 +10,7 @@ import {
   createEnrichmentGenerator,
   resolveOpenRouterEnrichmentConfig,
 } from "../connectors/enrichment-providers";
-import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
+import { type createSettingsRepository, parseOrgContext, serializeOrgContext } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 
 const searchConfigSchema = z.object({
@@ -26,6 +26,7 @@ const identityUpdateSchema = z.object({
     .object({
       description: z.string().trim().max(2000).optional(),
       industry: z.string().trim().max(80).optional(),
+      disambiguationGuidance: z.string().trim().max(2000).optional(),
     })
     .optional(),
 });
@@ -79,12 +80,7 @@ export function settingsRoutes(
     const updates: Parameters<typeof settings.update>[0] = {};
     if (parsed.data.orgName !== undefined) updates.orgName = parsed.data.orgName;
     if (parsed.data.orgContext !== undefined) {
-      const description = parsed.data.orgContext.description ?? "";
-      const industry = parsed.data.orgContext.industry ?? "";
-      const next: Record<string, string> = {};
-      if (description.length > 0) next.description = description;
-      if (industry.length > 0) next.industry = industry;
-      updates.orgContext = Object.keys(next).length > 0 ? JSON.stringify(next) : null;
+      updates.orgContext = serializeOrgContext(parsed.data.orgContext);
     }
 
     if (Object.keys(updates).length === 0) {

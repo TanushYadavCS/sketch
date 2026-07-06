@@ -254,6 +254,7 @@ async function materializeRelationEndpoint(
       lookup: deps.lookup,
       logger: deps.logger,
       birthGateTypes: deps.birthGateTypes,
+      birthGateLiveTypes: deps.birthGateLiveTypes,
       birthGateDryRun: deps.birthGateDryRun,
       readEmail: deps.readEmail,
       onEntityResolved: deps.onEntityResolved,
@@ -268,8 +269,10 @@ async function materializeRelationEndpoint(
       triggeredByUserId,
       aliases: endpoint.variations,
       metadata: { origin: "ai", relationEndpoint: true },
+      provenanceTier: "inferred",
       evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
-      queueInsteadOfCreate: endpoint.type === "project",
+      queueInsteadOfCreate:
+        endpoint.type === "project" || (endpoint.type === "product" && deps.birthGateTypes.has("product")),
     },
   );
   if (result.kind === "queued") {

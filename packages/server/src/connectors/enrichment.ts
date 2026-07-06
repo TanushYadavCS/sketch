@@ -18,9 +18,11 @@ import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
+import { parseOrgContext } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
+import { PRODUCT_MATCH_TARGET_PROVENANCE_TIERS } from "../entities/provenance";
 import { yieldToEventLoop } from "../lib/event-loop";
 import type { Chunk } from "./chunking";
 import { chunkText } from "./chunking";
@@ -336,6 +338,12 @@ export async function loadBaselineKnownEntities(
     .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
     .where("source_type", "in", ["product", "team"])
     .where("status", "=", "confirmed")
+    .where((eb) =>
+      eb.or([
+        eb("source_type", "!=", "product"),
+        eb("provenance_tier", "in", [...PRODUCT_MATCH_TARGET_PROVENANCE_TIERS]),
+      ]),
+    )
     .where(whereLiveEntity())
     .execute();
   const projectEntities = opts.experimentalFlag
@@ -376,7 +384,7 @@ export interface EnrichmentDeps {
   /** If set, only enrich these specific file IDs (ignoring pending status). */
   fileIds?: string[];
   /** Org context for enrichment prompts. Populated at start of enrichment run. */
-  orgContext?: { orgName?: string; description?: string; industry?: string } | null;
+  orgContext?: { orgName?: string; description?: string; industry?: string; disambiguationGuidance?: string } | null;
   /**
    * Org-wide baseline of confirmed entities used as a
    * fallback when a file has no resolvable anchors. The per-file scoped list
@@ -442,11 +450,12 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       .where("id", "=", "default")
       .executeTakeFirst();
     if (settings?.org_context) {
-      const parsed = JSON.parse(settings.org_context) as Record<string, string>;
+      const parsed = parseOrgContext(settings.org_context);
       deps.orgContext = {
         orgName: settings.org_name ?? undefined,
-        description: parsed.description,
-        industry: parsed.industry,
+        description: parsed?.description,
+        industry: parsed?.industry,
+        disambiguationGuidance: parsed?.disambiguationGuidance,
       };
     }
   } catch {

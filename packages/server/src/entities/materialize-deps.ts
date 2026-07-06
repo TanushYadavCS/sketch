@@ -20,12 +20,14 @@ import {
   removeFromCandidatePool,
 } from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
+import { canUseEntityAsMatchTarget } from "./provenance";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
 const DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD = 2;
 let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
 let configuredLlmTaskCorroborationThreshold = DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD;
 let configuredBirthGateTypes = new Set<ProposeEntityType>();
+let configuredBirthGateLiveTypes = new Set<ProposeEntityType>();
 let configuredBirthGateDryRun = true;
 let configuredExperimentalFlag = false;
 
@@ -39,6 +41,7 @@ export function configureMaterializeDefaults(opts: {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
+  birthGateLiveTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
 }): void {
@@ -49,6 +52,7 @@ export function configureMaterializeDefaults(opts: {
     configuredLlmTaskCorroborationThreshold = Math.floor(opts.llmTaskCorroborationThreshold);
   }
   if (opts.birthGateTypes) configuredBirthGateTypes = new Set(opts.birthGateTypes);
+  if (opts.birthGateLiveTypes) configuredBirthGateLiveTypes = new Set(opts.birthGateLiveTypes);
   if (typeof opts.birthGateDryRun === "boolean") configuredBirthGateDryRun = opts.birthGateDryRun;
   if (typeof opts.experimentalFlag === "boolean") configuredExperimentalFlag = opts.experimentalFlag;
 }
@@ -78,6 +82,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   const dedupEntriesByType = new Map<ProposeEntityType, CandidatePoolEntry[]>();
   for (const t of supportedTypes) dedupEntriesByType.set(t, []);
   for (const e of entities) {
+    if (!canUseEntityAsMatchTarget(e.source_type, e.provenance_tier)) continue;
     const entityType = e.source_type as ProposeEntityType;
     entitiesByType.get(entityType)?.push(e);
     dedupEntriesByType.get(entityType)?.push({ entityId: e.id, valueKind: "name", value: e.name });
@@ -106,6 +111,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
     .execute();
   const bySourceRef = new Map<string, EntityRow>();
   for (const row of sourceRefs) {
+    if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) continue;
     bySourceRef.set(`${row.source}:${row.source_id}`, row as unknown as EntityRow);
   }
   const domainRows = await db
@@ -171,6 +177,7 @@ export function registerEntity(index: LookupIndex, entity: EntityRow): void {
   const existingPersonScopeKeys = index.personScopeKeysByEntityId.get(entity.id);
   unregisterEntity(index, entity.id);
   const entityType = entity.source_type as ProposeEntityType;
+  if (!canUseEntityAsMatchTarget(entityType, entity.provenance_tier)) return;
   const typeBucket = index.entitiesByType.get(entityType);
   if (typeBucket && !typeBucket.some((p) => p.id === entity.id)) typeBucket.push(entity);
   const nameKey = normalizeEntityMatchName(entityType, entity.name);
@@ -268,6 +275,7 @@ export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIn
     if (indexedEntity.id === entity.id) index.bySourceRef.delete(key);
   }
   registerEntity(index, row);
+  if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) return;
   const scopeKeys = await buildPersonScopeKeys(db, row.source_type === "person" ? [row] : []);
   const personScopeKeys = scopeKeys.get(row.id);
   if (personScopeKeys) index.personScopeKeysByEntityId.set(row.id, personScopeKeys);
@@ -281,6 +289,7 @@ export interface BuildMaterializeDepsOptions {
   llmTaskCorroborationThreshold?: number;
   logger?: Logger;
   birthGateTypes?: Set<ProposeEntityType>;
+  birthGateLiveTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
 }
@@ -304,6 +313,7 @@ export async function buildMaterializeDeps(
       ? Math.floor(opts.llmTaskCorroborationThreshold)
       : configuredLlmTaskCorroborationThreshold;
   const birthGateTypes = new Set(opts.birthGateTypes ?? configuredBirthGateTypes);
+  const birthGateLiveTypes = new Set(opts.birthGateLiveTypes ?? configuredBirthGateLiveTypes);
   const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
   const experimentalFlag = opts.experimentalFlag ?? configuredExperimentalFlag;
 
@@ -365,6 +375,7 @@ export async function buildMaterializeDeps(
     llmPromotionThreshold,
     llmTaskCorroborationThreshold,
     birthGateTypes,
+    birthGateLiveTypes,
     birthGateDryRun,
     experimentalFlag,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),

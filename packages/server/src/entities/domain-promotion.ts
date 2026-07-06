@@ -229,6 +229,7 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
         evidence: evidenceFiles.map((indexedFileId) => ({ indexedFileId, note: `domain_promotion:${domain}` })),
         triggeredByUserId: candidate.first_observed_by_user_id ?? "system",
         metadata: { origin: "domain_promotion", domain },
+        provenanceTier: "inferred",
       },
     );
 

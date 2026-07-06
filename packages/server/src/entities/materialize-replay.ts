@@ -177,6 +177,7 @@ export async function replaySourceFacts(
     llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
     logger,
     birthGateTypes: opts.birthGateTypes,
+    birthGateLiveTypes: opts.birthGateLiveTypes,
     birthGateDryRun: opts.birthGateDryRun,
     experimentalFlag: opts.experimentalFlag,
   });
@@ -248,6 +249,7 @@ async function materializeUnmaterializedFactsInner(
     llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
     logger,
     birthGateTypes: opts.birthGateTypes,
+    birthGateLiveTypes: opts.birthGateLiveTypes,
     birthGateDryRun: opts.birthGateDryRun,
     experimentalFlag: opts.experimentalFlag,
   });

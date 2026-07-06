@@ -63,6 +63,7 @@ export async function materializeNonPersonLlmEntity(
       lookup: deps.lookup,
       logger: deps.logger,
       birthGateTypes: deps.birthGateTypes,
+      birthGateLiveTypes: deps.birthGateLiveTypes,
       birthGateDryRun: deps.birthGateDryRun,
       readEmail: deps.readEmail,
       onEntityResolved: deps.onEntityResolved,
@@ -77,6 +78,7 @@ export async function materializeNonPersonLlmEntity(
       triggeredByUserId,
       aliases: variations,
       metadata: { origin: "ai" },
+      provenanceTier: "inferred",
       evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
     },
   );

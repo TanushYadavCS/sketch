@@ -6,12 +6,12 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { materializeUnmaterializedFacts } from "./materialize";
 import type { ProposeEntityType } from "./propose";
-import { confirmReview } from "./resolve";
 
 const USER_ID = "user-1";
 const CONNECTOR_ID = "connector-1";
 const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 const A1_BIRTH_GATE_TYPES: Set<ProposeEntityType> = new Set(["project", "product", "team"]);
+const PRODUCT_LIVE_TYPES: Set<ProposeEntityType> = new Set(["product"]);
 
 async function seedConnector(db: Kysely<DB>, source = "google_drive"): Promise<void> {
   const now = new Date().toISOString();
@@ -81,30 +81,39 @@ async function upsertLlmMention(db: Kysely<DB>, fileId: string, name: string, ty
   });
 }
 
-async function upsertStructuralSeed(
+async function upsertLlmRelation(
   db: Kysely<DB>,
-  input: { fileId: string; sourceType: string; name: string; sourceId: string; source?: string; aliases?: string[] },
+  input: {
+    fileId: string;
+    relationType: "builds";
+    source: { name: string; type: string };
+    target: { name: string; type: string };
+  },
 ): Promise<void> {
-  const source = input.source ?? "linear";
   const repo = createIndexedFileFactRepository(db);
   await repo.upsertFact({
     indexedFileId: input.fileId,
     connectorConfigId: CONNECTOR_ID,
     createdByUserId: USER_ID,
-    source,
-    factType: "structural_seed",
-    relation: "seeded",
-    subjectName: input.name,
-    subjectSource: source,
-    subjectSourceId: input.sourceId,
+    contentHash: `hash-${input.fileId}`,
+    source: "llm_extraction",
+    factType: "llm_relation",
+    relation: input.relationType,
+    subjectName: input.source.name,
+    subjectSource: "llm_extraction",
+    subjectSourceId: `${input.fileId}:hash-${input.fileId}:llm-extraction-v8:${input.relationType}:${input.source.name}:${input.target.name}`,
+    contextSnippet: `${input.source.name} ${input.relationType} ${input.target.name}`,
     raw: {
-      name: input.name,
-      sourceType: input.sourceType,
-      source: source,
-      sourceId: input.sourceId,
-      aliases: input.aliases,
-      providerFileId: input.sourceId,
-      sourcePath: `${source}/${input.sourceId}`,
+      contentHash: `hash-${input.fileId}`,
+      promptVersion: "llm-extraction-v8",
+      model: "gemini",
+      relationType: input.relationType,
+      confidence: 0.92,
+      sourceConfidence: 0.9,
+      targetConfidence: 0.9,
+      context: `${input.source.name} ${input.relationType} ${input.target.name}`,
+      source: { ...input.source, variations: [] },
+      target: { ...input.target, variations: [] },
     },
   });
 }
@@ -138,7 +147,7 @@ describe("A1 birth gate", () => {
     await db.destroy();
   });
 
-  it("queues a conversational product birth gate and confirmReview creates the entity", async () => {
+  it("queues unmatched product mentions live while the global birth gate stays dry-run", async () => {
     await seedConnector(db);
     await seedFile(db, "file-1");
     await upsertLlmMention(db, "file-1", "Canvas Copilot", "product");
@@ -146,98 +155,78 @@ describe("A1 birth gate", () => {
     await materializeUnmaterializedFacts(db, createTestLogger(), {
       llmPromotionThreshold: 1,
       birthGateTypes: A1_BIRTH_GATE_TYPES,
-      birthGateDryRun: false,
+      birthGateLiveTypes: PRODUCT_LIVE_TYPES,
+      birthGateDryRun: true,
     });
 
     expect(await countEntitiesByType(db, "product")).toBe(0);
     expect(await countQueueRows(db)).toBe(1);
     const row = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
     expect(row.candidate_reason).toBe("birth-gated");
+    expect(row.entity_type).toBe("product");
     expect(row.source).toBe("llm_extraction");
     expect(row.source_id).toBe("file-1:hash-file-1:llm-extraction-v8:Canvas Copilot");
-    if (!row.candidate_generated_at) throw new Error("missing candidate_generated_at");
-
-    const result = await confirmReview({ db, userId: USER_ID }, row.id, {
-      candidateGeneratedAt: row.candidate_generated_at,
-    });
-
-    expect(result.targetEntityId).toBeTruthy();
-    expect(await countEntitiesByType(db, "product")).toBe(1);
+    expect(row.status).toBe("pending");
   });
 
-  it("drops conversational team mentions and queues Linear team structural seeds", async () => {
-    await seedConnector(db, "linear");
-    await seedFile(db, "file-1", "linear");
-    await seedFile(db, "file-2", "linear");
-    await upsertLlmMention(db, "file-1", "Platform Team", "team");
-
-    await materializeUnmaterializedFacts(db, createTestLogger(), {
-      llmPromotionThreshold: 1,
-      birthGateTypes: A1_BIRTH_GATE_TYPES,
-      birthGateDryRun: false,
-    });
-
-    expect(await countEntitiesByType(db, "team")).toBe(0);
-    expect(await countQueueRows(db)).toBe(0);
-
-    await upsertStructuralSeed(db, {
-      fileId: "file-2",
-      sourceType: "team",
-      name: "Sketch Platform",
-      sourceId: "team-1",
-      source: "linear",
-      aliases: ["Platform"],
-    });
-    await materializeUnmaterializedFacts(db, createTestLogger(), {
-      birthGateTypes: A1_BIRTH_GATE_TYPES,
-      birthGateDryRun: false,
-    });
-
-    expect(await countEntitiesByType(db, "team")).toBe(0);
-    expect(await countQueueRows(db)).toBe(1);
-    const row = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
-    expect(row).toMatchObject({
-      entity_type: "team",
-      seed_source: "linear",
-      seed_source_id: "team-1",
-      seed_aliases: '["Platform"]',
-    });
-    if (!row.candidate_generated_at) throw new Error("missing candidate_generated_at");
-
-    const result = await confirmReview({ db, userId: USER_ID }, row.id, {
-      candidateGeneratedAt: row.candidate_generated_at,
-    });
-    const team = await db
-      .selectFrom("entities")
-      .selectAll()
-      .where("id", "=", result.targetEntityId)
-      .executeTakeFirstOrThrow();
-    expect(team.name).toBe("Sketch Platform");
-    expect(JSON.parse(team.aliases ?? "[]")).toEqual(expect.arrayContaining(["Platform"]));
-  });
-
-  it("links exact product matches under the gate and flag-off product mentions still auto-create", async () => {
+  it("links declared product mentions without writing a review row", async () => {
     await seedConnector(db);
     await seedFile(db, "file-1");
     const entityRepo = createEntityRepository(db);
-    await entityRepo.upsertEntity({
+    const declared = await entityRepo.upsertEntity({
       name: "Canvas Copilot",
       sourceType: "product",
       status: "confirmed",
+      provenanceTier: "declared",
     });
     await upsertLlmMention(db, "file-1", "Canvas Copilot", "product");
 
     await materializeUnmaterializedFacts(db, createTestLogger(), {
       llmPromotionThreshold: 1,
       birthGateTypes: A1_BIRTH_GATE_TYPES,
-      birthGateDryRun: false,
+      birthGateLiveTypes: PRODUCT_LIVE_TYPES,
+      birthGateDryRun: true,
     });
 
     expect(await countEntitiesByType(db, "product")).toBe(1);
     expect(await countQueueRows(db)).toBe(0);
+    await expect(
+      db.selectFrom("entity_mentions").selectAll().where("entity_id", "=", declared.id).execute(),
+    ).resolves.toHaveLength(1);
+  });
 
-    await db.destroy();
-    db = await createTestDb();
+  it("keeps project births dry-run while unmatched relation product endpoints are queued", async () => {
+    await seedConnector(db);
+    await seedFile(db, "file-1");
+    await upsertLlmMention(db, "file-1", "Atlas Migration", "project");
+    await upsertLlmRelation(db, {
+      fileId: "file-1",
+      relationType: "builds",
+      source: { name: "Acme", type: "company" },
+      target: { name: "Canvas Copilot", type: "product" },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), {
+      llmPromotionThreshold: 1,
+      birthGateTypes: A1_BIRTH_GATE_TYPES,
+      birthGateLiveTypes: PRODUCT_LIVE_TYPES,
+      birthGateDryRun: true,
+    });
+
+    expect(await countEntitiesByType(db, "project")).toBe(1);
+    expect(await countEntitiesByType(db, "company")).toBe(1);
+    expect(await countEntitiesByType(db, "product")).toBe(0);
+    expect(await countQueueRows(db)).toBe(1);
+    const row = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(row).toMatchObject({
+      entity_type: "product",
+      proposed_name: "Canvas Copilot",
+      candidate_reason: "birth-gated",
+      status: "pending",
+    });
+  });
+
+  it("auto-creates product mentions with the gate off (EXPERIMENTAL_FLAG invisible)", async () => {
     await seedConnector(db);
     await seedFile(db, "file-1");
     await upsertLlmMention(db, "file-1", "Canvas Copilot", "product");
@@ -245,7 +234,8 @@ describe("A1 birth gate", () => {
     await materializeUnmaterializedFacts(db, createTestLogger(), {
       llmPromotionThreshold: 1,
       birthGateTypes: new Set(),
-      birthGateDryRun: false,
+      birthGateLiveTypes: new Set(),
+      birthGateDryRun: true,
     });
 
     expect(await countEntitiesByType(db, "product")).toBe(1);
