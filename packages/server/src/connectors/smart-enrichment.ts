@@ -44,6 +44,7 @@ import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { type ProposeEntityType, proposeEntity } from "../entities/propose";
 import { validateLearnedFact, validateLlmMention } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
+import { STRUCTURAL_TASK_FILE_TYPES } from "./document-facts";
 import type { EmbeddingProvider } from "./embeddings/types";
 import type { GeminiGenerator } from "./gemini-generate";
 import {
@@ -81,13 +82,24 @@ const CANDIDATE_PROMOTION_THRESHOLD = 2;
 /** Minimum entity name length for candidate matching (avoids false positives). */
 const MIN_ENTITY_NAME_LENGTH = 3;
 const LLM_EXTRACTION_PROMPT_VERSION = "llm-extraction-v9";
-const BASE_PROPOSABLE_ENTITY_TYPES: ProposeEntityType[] = ["person", "project", "company", "product", "team"];
+/**
+ * `team` is intentionally absent: teams are never proposed by the LLM. A team
+ * is a structural object (e.g. a Linear team) and is born only through
+ * structural seeding. The LLM may still *match* a mention to an existing team
+ * (see `MATCHABLE_ENTITY_TYPES`), but never create one.
+ */
+const BASE_PROPOSABLE_ENTITY_TYPES: ProposeEntityType[] = ["person", "project", "company", "product"];
 const MATCHABLE_ENTITY_TYPES: ProposeEntityType[] = ["person", "project", "company", "product", "team", "deal"];
+const SPINE_TYPES_FROM_STRUCTURE = new Set<ProposeEntityType>(["project", "team"]);
 
-function proposableEntityTypes(experimentalFlag = false): Set<ProposeEntityType> {
-  const types = BASE_PROPOSABLE_ENTITY_TYPES.filter((type) => !(experimentalFlag && type === "team"));
+function proposableEntityTypes(experimentalFlag = false, fileType?: string | null): Set<ProposeEntityType> {
+  const types = [...BASE_PROPOSABLE_ENTITY_TYPES];
   if (experimentalFlag) types.push("tool");
-  return new Set(types);
+  let set = new Set(types);
+  if (fileType && STRUCTURAL_TASK_FILE_TYPES.has(fileType.toLowerCase())) {
+    set = new Set([...set].filter((type) => !SPINE_TYPES_FROM_STRUCTURE.has(type)));
+  }
+  return set;
 }
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -163,6 +175,7 @@ interface FileContext {
   content: string;
   threadContext?: string | null;
   contentCategory: string;
+  fileType?: string | null;
   source: string;
   sourcePath: string | null;
   contentHash: string | null;
@@ -259,6 +272,7 @@ export async function extractEntities(
   participantBlock?: string,
   dumpDir?: string,
   experimentalFlag = false,
+  allowedTypes = proposableEntityTypes(experimentalFlag, file.fileType),
 ): Promise<EntityExtractionResult> {
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
 
@@ -293,16 +307,12 @@ export async function extractEntities(
   const threadSection = file.threadContext
     ? `\nEmail thread context for resolving references only. Do not emit entities or relationships that appear only in this context; emitted mentions and relationships must be supported by the current message content below.\n${file.threadContext}\n`
     : "";
-  const validTypes = [...proposableEntityTypes(experimentalFlag)];
+  const validTypes = [...allowedTypes];
   const validTypesPrompt = validTypes.map((type) => `"${type}"`).join(", ");
-  const teamFocusLine = experimentalFlag
-    ? ""
-    : '- **Teams**: named organizational teams (e.g., "QC team", "Content Team")\n';
   const toolFocusLine = experimentalFlag
     ? "- **Tools**: third-party SaaS apps/platforms the org uses (e.g., Slack, Notion, Zoom, Figma, GitHub)\n"
     : "";
-  const relationshipTypesPrompt = experimentalFlag
-    ? `Valid relationship types:
+  const relationshipTypesPrompt = `Valid relationship types:
 - "works_at": person -> company (the person is employed by the company)
 - "engaged_with": person -> company (the person is working with, for, or delivered to an external company without being employed by it — vendor, consultancy, or client-engagement context)
 - "leads": person -> project | product
@@ -310,19 +320,9 @@ export async function extractEntities(
 - "builds": company -> product
 - "part_of": project -> project, project -> product, product -> product
 - "engagement_for": project -> company (the project is a client engagement delivered for that company)
-- "partner_of": company -> company`
-    : `Valid relationship types:
-- "works_at": person -> company (the person is employed by the company)
-- "engaged_with": person | team -> company (the person/team is working with, for, or delivered to an external company without being employed by it — vendor, consultancy, or client-engagement context)
-- "leads": person -> project | product | team
-- "contributes_to": person | team -> project | product
-- "builds": company -> product
-- "part_of": project -> project, project -> product, product -> product, team -> company
-- "engagement_for": project -> company (the project is a client engagement delivered for that company)
 - "partner_of": company -> company`;
-  const engagementHint = experimentalFlag
-    ? 'Use "engagement_for" for a PROJECT delivered for a client company; use "engaged_with" for a PERSON working with a company.'
-    : 'Use "engagement_for" for a PROJECT delivered for a client company; use "engaged_with" for a PERSON or TEAM working with a company.';
+  const engagementHint =
+    'Use "engagement_for" for a PROJECT delivered for a client company; use "engaged_with" for a PERSON working with a company.';
 
   const prompt = `You are analyzing a document to identify meaningful business entities mentioned in it.
 ${orgSection}${knownSection}${participantSection}${threadSection}
@@ -335,7 +335,6 @@ Extract entities that a business team would want to track and reference across d
 - **Companies**: external businesses, clients, partners, vendors
 - **Products**: named products or services your org builds or uses (e.g., "Canvas AI", "Sketch", "Meetup by Habuild")
 - **Projects**: named umbrella engagements or programs with their own scope and timeline (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration"). A project is the umbrella, NOT a single ticket, pull request, or one feature of a product.
-${teamFocusLine}
 ${toolFocusLine}
 
 DO NOT extract:
@@ -374,7 +373,7 @@ For each entity, provide the primary name, type, name variations, and a confiden
 
 If email thread context is provided, use it only to resolve references in the current message. Do not extract an entity or relationship unless the current message refers to it directly or indirectly.
 
-Most relationships in a business corpus follow this hierarchy, top down: **Companies** (clients, partners, vendors) own engagements → **Projects** are named umbrella engagements with a defined scope → **Products** are named offerings or tools → **People${experimentalFlag ? "" : " and Teams"}** work on those projects and products, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down.
+Most relationships in a business corpus follow this hierarchy, top down: **Companies** (clients, partners, vendors) own engagements → **Projects** are named umbrella engagements with a defined scope → **Products** are named offerings or tools → **People** work on those projects and products, either internally for their own team or on behalf of a client engagement. Prefer extracting from the top down.
 
 Also extract direct relationships only when the text explicitly supports them.
 
@@ -503,6 +502,7 @@ export async function handleCandidates(
   deps: SmartEnrichmentDeps,
   fileId: string,
   unmatched: ExtractedMention[],
+  allowedTypes = proposableEntityTypes(deps.experimentalFlag),
 ): Promise<MatchedEntity[]> {
   const { db, logger } = deps;
   const entityRepo = createEntityRepository(db);
@@ -513,7 +513,7 @@ export async function handleCandidates(
       ...rawMention,
       type: coerceMentionType(rawMention.mention, rawMention.type, deps.experimentalFlag),
     };
-    if (!proposableEntityTypes(deps.experimentalFlag).has(mention.type as ProposeEntityType)) continue;
+    if (!allowedTypes.has(mention.type as ProposeEntityType)) continue;
     if (mention.mention.length < MIN_ENTITY_NAME_LENGTH) continue;
 
     // Check if candidate already exists (case-insensitive name match)
@@ -778,6 +778,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   const { db, logger, generator, embeddingProvider } = deps;
   const entityRepo = createEntityRepository(db);
   const fileVersion = contentVersionOf(file);
+  const allowedTypes = proposableEntityTypes(deps.experimentalFlag, file.fileType);
 
   const fileMeta = {
     fileId: file.id,
@@ -801,6 +802,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       deps.participantBlock,
       deps.debugDumpDir,
       deps.experimentalFlag,
+      allowedTypes,
     );
   } catch (err) {
     logger.error({ ...fileMeta, stage: "extractEntities", err }, "smartEnrichFile: stage failed");
@@ -818,7 +820,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   );
 
   await deps.ensureFresh?.();
-  const writtenLlmFactKeys = await reconcileLlmExtractionFacts(deps, file, extraction);
+  const writtenLlmFactKeys = await reconcileLlmExtractionFacts(deps, file, extraction, allowedTypes);
   try {
     await deps.ensureFresh?.();
   } catch (err) {
@@ -964,6 +966,7 @@ async function reconcileLlmExtractionFacts(
   deps: SmartEnrichmentDeps,
   file: FileContext,
   extraction: EntityExtractionResult,
+  allowedTypes: Set<ProposeEntityType>,
 ): Promise<string[]> {
   const { db } = deps;
   const factRepo = createIndexedFileFactRepository(db);
@@ -983,7 +986,7 @@ async function reconcileLlmExtractionFacts(
         ...rawMention,
         type: coerceMentionType(rawMention.mention, rawMention.type, deps.experimentalFlag),
       };
-      if (!proposableEntityTypes(deps.experimentalFlag).has(mention.type as ProposeEntityType)) {
+      if (!allowedTypes.has(mention.type as ProposeEntityType)) {
         deps.logger.info(
           { fileId: file.id, displayName: mention.mention, entityType: mention.type },
           "Dropped LLM mention with unsupported type",
@@ -1044,6 +1047,7 @@ async function reconcileLlmExtractionFacts(
         relation,
         mentions: extraction.mentions,
         experimentalFlag: deps.experimentalFlag,
+        allowedTypes,
       });
       if (!input) continue;
       const factKey = buildIndexedFileFactKey(input);
@@ -1129,6 +1133,7 @@ function buildRelationFactInput(input: {
   relation: ExtractedRelation;
   mentions: ExtractedMention[];
   experimentalFlag?: boolean;
+  allowedTypes: Set<ProposeEntityType>;
 }): UpsertIndexedFileFactInput | null {
   const relationType = normalizeRelationType(input.relation.type);
   if (!relationType || !isHighConfidenceRelation(input.relation.confidence)) return null;
@@ -1144,8 +1149,8 @@ function buildRelationFactInput(input: {
   if (!sourceType || !targetType) return null;
   if (!normalizeRelationEndpointType(sourceType) || !normalizeRelationEndpointType(targetType)) return null;
   if (
-    !proposableEntityTypes(input.experimentalFlag).has(sourceType as ProposeEntityType) ||
-    !proposableEntityTypes(input.experimentalFlag).has(targetType as ProposeEntityType)
+    !input.allowedTypes.has(sourceType as ProposeEntityType) ||
+    !input.allowedTypes.has(targetType as ProposeEntityType)
   ) {
     return null;
   }

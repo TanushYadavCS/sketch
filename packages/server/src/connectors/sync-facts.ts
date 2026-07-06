@@ -1,11 +1,11 @@
 import type { Kysely } from "kysely";
 import { upsertCommitmentFact } from "../db/repositories/commitments";
 import { upsertDecisionFactsForFile } from "../db/repositories/decisions";
-import { type createIndexedFileFactRepository, upsertLlmTaskFact } from "../db/repositories/indexed-file-facts";
+import type { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { normalizeRelationType } from "../entities/graph";
-import { LLM_TASK_PROMPT_VERSION, extractLlmTaskCandidates } from "./llm-task-extraction";
-import { normalizeName } from "./name-normalize";
+import { emitDocumentDerivedFacts, sortDocumentParentRefs } from "./document-facts";
+import type { GeminiGenerator } from "./gemini-generate";
 import type { Connector, ConnectorType, SyncedItem } from "./types";
 
 type IndexedFileFactRepository = ReturnType<typeof createIndexedFileFactRepository>;
@@ -27,6 +27,7 @@ interface EmitFactsForSyncedItemParams {
   emitCorrespondentFacts?: boolean;
   experimentalFlag?: boolean;
   contentChanged?: boolean;
+  generator?: GeminiGenerator;
 }
 
 export async function emitFactsForSyncedItem({
@@ -40,6 +41,7 @@ export async function emitFactsForSyncedItem({
   emitCorrespondentFacts = false,
   experimentalFlag = false,
   contentChanged = false,
+  generator,
 }: EmitFactsForSyncedItemParams): Promise<void> {
   if (item.entitySeeds && item.entitySeeds.length > 0) {
     for (const seed of item.entitySeeds) {
@@ -254,47 +256,27 @@ export async function emitFactsForSyncedItem({
     });
   }
 
-  if (experimentalFlag && db && item.contentCategory === "document" && item.content) {
-    if (!contentChanged) {
-      await touchExistingLlmTaskFacts(factRepo, {
+  if (db) {
+    await emitDocumentDerivedFacts(
+      db,
+      {
         indexedFileId,
         source: connectorType,
-        lastSeenSyncRunId: factContext.lastSeenSyncRunId,
+        content: item.content ?? "",
+        sourceDate: item.sourceCreatedAt ?? item.sourceUpdatedAt,
+        contentCategory: item.contentCategory,
+        fileType: item.fileType,
         contentHash: item.contentHash,
-      });
-    } else {
-      const parentRef = item.parentEntities?.[0]
-        ? { source: item.parentEntities[0].source, sourceId: item.parentEntities[0].sourceId }
-        : undefined;
-      const candidates = await extractLlmTaskCandidates({
-        content: item.content,
-        attendees: item.attendees,
-        parentRefs: item.parentEntities?.map((parent) => ({ source: parent.source, sourceId: parent.sourceId })),
-        promptVersion: LLM_TASK_PROMPT_VERSION,
-      });
-      const emittedKeys = new Set<string>();
-      for (const candidate of candidates) {
-        const result = await upsertLlmTaskFact(db, {
-          experimentalFlag,
-          indexedFileId,
-          connectorConfigId: factContext.connectorConfigId,
-          createdByUserId: factContext.createdByUserId,
-          lastSeenSyncRunId: factContext.lastSeenSyncRunId,
-          contentHash: item.contentHash,
-          source: connectorType,
-          candidate,
-          corroborationKey: buildLlmTaskCorroborationKey(candidate.title, parentRef),
-          parentRef,
-          evidence: { fileIds: [indexedFileId], entityIds: [] },
-          promptVersion: LLM_TASK_PROMPT_VERSION,
-        });
-        if (result.factKey) emittedKeys.add(result.factKey);
-      }
-      await factRepo.reconcileStaleFacts(
-        { kind: "file", indexedFileId, source: connectorType, factType: "llm_task" },
-        emittedKeys,
-      );
-    }
+        connectorConfigId: factContext.connectorConfigId,
+        createdByUserId: factContext.createdByUserId,
+        lastSeenSyncRunId: factContext.lastSeenSyncRunId,
+        attendees: item.attendees ?? [],
+        parentRefs: sortDocumentParentRefs(
+          item.parentEntities?.map((parent) => ({ source: parent.source, sourceId: parent.sourceId })) ?? [],
+        ),
+      },
+      { experimentalFlag, contentChanged, generator },
+    );
   }
 
   if (item.authorEmail || item.authorName) {
@@ -320,31 +302,6 @@ export async function emitFactsForSyncedItem({
       });
     }
   }
-}
-
-async function touchExistingLlmTaskFacts(
-  factRepo: IndexedFileFactRepository,
-  input: {
-    indexedFileId: string;
-    source: ConnectorType;
-    lastSeenSyncRunId: string;
-    contentHash?: string | null;
-  },
-): Promise<void> {
-  await factRepo.touchActiveFactsForFile({
-    indexedFileId: input.indexedFileId,
-    source: input.source,
-    factType: "llm_task",
-    lastSeenSyncRunId: input.lastSeenSyncRunId,
-    contentHash: input.contentHash,
-  });
-}
-
-function buildLlmTaskCorroborationKey(
-  title: string,
-  parentRef: { source: string; sourceId: string } | undefined,
-): string {
-  return [normalizeName(title), parentRef ? `${parentRef.source}:${parentRef.sourceId}` : "global"].join("|");
 }
 
 interface SeedAttendeePersonParams {

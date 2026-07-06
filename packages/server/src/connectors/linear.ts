@@ -20,8 +20,12 @@ import type { Connector, ConnectorCredentials, EntitySeedCallback, OAuthCredenti
 const LINEAR_API = "https://api.linear.app/graphql";
 const TOKEN_ENDPOINT = "https://api.linear.app/oauth/token";
 
-/** Max items per GraphQL page. */
-const PAGE_SIZE = 50;
+/**
+ * Max items per GraphQL page. Kept at 25 (not 50) because the issues query
+ * fans out into nested `comments`/`labels` connections; at 50 the per-page
+ * GraphQL complexity exceeds Linear's 10000 ceiling and the API rejects it.
+ */
+const PAGE_SIZE = 25;
 
 /** Rate limit: ~1,500 req/hour, we stay conservative at ~20 req/s. */
 const MIN_REQUEST_INTERVAL_MS = 50;
@@ -39,7 +43,7 @@ interface LinearIssue {
   state: { name: string; type: string } | null;
   priority: number;
   priorityLabel: string;
-  assignee: { name: string; displayName: string } | null;
+  assignee: { id: string; name: string; displayName: string; email: string | null } | null;
   labels: { nodes: Array<{ name: string }> };
   team: { id: string; name: string; key: string } | null;
   project: { id: string; name: string } | null;
@@ -217,7 +221,16 @@ function issueToSyncedItem(issue: LinearIssue): SyncedItem {
     contentHash: contentHash(content),
     sourceCreatedAt: issue.createdAt,
     sourceUpdatedAt: issue.updatedAt,
-    assignees: issue.assignee ? [{ name: issue.assignee.displayName }] : [],
+    assignees: issue.assignee
+      ? [
+          {
+            name: issue.assignee.displayName,
+            email: issue.assignee.email ?? undefined,
+            source: "linear",
+            sourceId: issue.assignee.id,
+          },
+        ]
+      : [],
     task: {
       sourceTaskId: issue.id,
       externalRef: issue.identifier,
@@ -227,7 +240,14 @@ function issueToSyncedItem(issue: LinearIssue): SyncedItem {
       priority: issue.priorityLabel || PRIORITY_LABELS[issue.priority] || undefined,
       dueAt: issue.dueDate ?? undefined,
       project: issue.project ? { name: issue.project.name, source: "linear", sourceId: issue.project.id } : undefined,
-      assignee: issue.assignee ? { name: issue.assignee.displayName } : undefined,
+      assignee: issue.assignee
+        ? {
+            name: issue.assignee.displayName,
+            email: issue.assignee.email ?? undefined,
+            source: "linear",
+            sourceId: issue.assignee.id,
+          }
+        : undefined,
     },
     parentEntities: [
       ...(issue.team
@@ -371,15 +391,15 @@ query Issues($first: Int!, $after: String, $filter: IssueFilter) {
 			state { name type }
 			priority
 			priorityLabel
-			assignee { name displayName }
-			labels { nodes { name } }
+			assignee { id name displayName email }
+			labels(first: 20) { nodes { name } }
 			team { id name key }
 			project { id name }
 			estimate
 			dueDate
 			createdAt
 			updatedAt
-			comments {
+			comments(first: 10) {
 				nodes {
 					body
 					user { name }
@@ -424,7 +444,7 @@ query Teams($first: Int!, $after: String) {
 			id
 			name
 			key
-			members(first: 250) {
+			members(first: 50) {
 				pageInfo {
 					hasNextPage
 					endCursor

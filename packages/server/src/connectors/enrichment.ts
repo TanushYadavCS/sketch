@@ -17,12 +17,14 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
+import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { yieldToEventLoop } from "../lib/event-loop";
 import type { Chunk } from "./chunking";
 import { chunkText } from "./chunking";
+import { type DocumentFactContext, emitDocumentDerivedFacts, sortDocumentParentRefs } from "./document-facts";
 import { ensureEmailThreadSummary, rebuildEmailThreadSummary } from "./email/thread-summary";
 import type { EmbeddingProvider } from "./embeddings/types";
 import { applyEngagementFloor } from "./engagement-floor";
@@ -216,6 +218,98 @@ async function resetSummaryRetry(db: Kysely<DB>, fileId: string, version?: FileC
   if (version) query = applyContentVersionWhere(query, version);
   const result = await query.executeTakeFirst();
   if (version) assertFreshUpdate(result, fileId);
+}
+
+type StoredDocumentFactFile = {
+  id: string;
+  source: string;
+  content: string | null;
+  source_created_at: string | null;
+  source_updated_at: string | null;
+  content_category: string;
+  file_type: string | null;
+  content_hash: string | null;
+  connector_config_id: string;
+};
+
+async function emitAndMaterializeDocumentFactsFromStoredFile(
+  file: StoredDocumentFactFile,
+  deps: EnrichmentDeps,
+  generator: GeminiGenerator | null,
+): Promise<void> {
+  const context = await buildStoredDocumentFactContext(deps.db, file);
+  const result = await emitDocumentDerivedFacts(deps.db, context, {
+    experimentalFlag: deps.experimentalFlag,
+    contentChanged: true,
+    generator: generator ?? undefined,
+    dumpDir: deps.debugDumpDir,
+    logger: deps.logger,
+  });
+  if (result.changed) {
+    await materializeUnmaterializedFacts(deps.db, deps.logger, {
+      experimentalFlag: deps.experimentalFlag,
+      factTypes: ["llm_task"],
+    });
+  }
+}
+
+async function buildStoredDocumentFactContext(
+  db: Kysely<DB>,
+  file: StoredDocumentFactFile,
+): Promise<DocumentFactContext> {
+  const owner = await db
+    .selectFrom("connector_configs")
+    .select("created_by")
+    .where("id", "=", file.connector_config_id)
+    .executeTakeFirst();
+  const participants = await db
+    .selectFrom("indexed_file_facts")
+    .select(["subject_name", "subject_email"])
+    .where("indexed_file_id", "=", file.id)
+    .where("fact_type", "in", PERSON_PARTICIPANT_FACT_TYPES)
+    .where("deleted_at", "is", null)
+    .execute();
+  const parentRows = await db
+    .selectFrom("indexed_file_facts")
+    .select(["subject_source", "subject_source_id"])
+    .where("indexed_file_id", "=", file.id)
+    .where("fact_type", "=", "parent_entity")
+    .where("deleted_at", "is", null)
+    .execute();
+
+  const seenParticipants = new Set<string>();
+  const attendees = participants
+    .flatMap((participant) => {
+      const name = participant.subject_name?.trim() || undefined;
+      const email = participant.subject_email?.trim() || undefined;
+      if (!name && !email) return [];
+      const key = `${name?.toLowerCase() ?? ""}|${email?.toLowerCase() ?? ""}`;
+      if (seenParticipants.has(key)) return [];
+      seenParticipants.add(key);
+      return [{ name, email }];
+    })
+    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? "") || (a.email ?? "").localeCompare(b.email ?? ""));
+
+  return {
+    indexedFileId: file.id,
+    source: file.source,
+    content: file.content ?? "",
+    sourceDate: file.source_created_at ?? file.source_updated_at,
+    contentCategory: file.content_category,
+    fileType: file.file_type,
+    contentHash: file.content_hash,
+    connectorConfigId: file.connector_config_id,
+    createdByUserId: owner?.created_by ?? null,
+    lastSeenSyncRunId: null,
+    attendees,
+    parentRefs: sortDocumentParentRefs(
+      parentRows.flatMap((row) =>
+        row.subject_source && row.subject_source_id
+          ? [{ source: row.subject_source, sourceId: row.subject_source_id }]
+          : [],
+      ),
+    ),
+  };
 }
 
 async function markEmbeddingFailure(
@@ -517,6 +611,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   content: file.content,
                   threadContext,
                   contentCategory: file.content_category,
+                  fileType: file.file_type,
                   source: file.source_path?.split("/")[0] ?? "unknown",
                   sourcePath: file.source_path,
                   contentHash: file.content_hash,
@@ -575,6 +670,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
           const skippedResult = await applyContentVersionWhere(skippedQuery, fileVersion).executeTakeFirst();
           assertFreshUpdate(skippedResult, file.id);
         }
+        await emitAndMaterializeDocumentFactsFromStoredFile(file, deps, getGenerator());
         result.filesProcessed++;
         if (isEmailMessage && file.thread_id) {
           touchedEmailThreads.set(`${file.connector_config_id}:${file.thread_id}`, {
@@ -709,6 +805,7 @@ async function enrichTextDocument(
     content_hash: string | null;
     connector_config_id: string;
     source_path: string | null;
+    source: string;
     source_created_at: string | null;
     source_updated_at: string | null;
     synced_at: string;
@@ -806,6 +903,7 @@ async function enrichTextDocument(
           content: file.content,
           threadContext,
           contentCategory: file.content_category,
+          fileType: file.file_type,
           source: file.source_path?.split("/")[0] ?? "unknown",
           sourcePath: file.source_path,
           contentHash: file.content_hash,
@@ -857,6 +955,10 @@ async function enrichTextDocument(
     assertFreshUpdate(summaryResult, file.id);
   }
 
+  await emitAndMaterializeDocumentFactsFromStoredFile(file, deps, generator);
+  await ensureFileFresh(db, file.id, fileVersion);
+
+  // 5. Embed chunks (best-effort — entity linking still succeeds if embedding fails)
   if (embeddingProvider && chunks.length > 0) {
     const texts = chunks.map((c) => c.content);
     let embeddings: number[][];

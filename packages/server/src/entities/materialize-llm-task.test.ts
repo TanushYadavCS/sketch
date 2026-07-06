@@ -139,8 +139,82 @@ describe("llm task materialization", () => {
     expect(evidence.map((row) => row.ref_id).sort()).toEqual(["llm-file-1", "llm-file-2"]);
   });
 
+  it("materializes llm task due dates and leaves absent due dates null", async () => {
+    await seedLlmFact({
+      fileId: "llm-file-1",
+      candidateId: "due-date-1",
+      title: "Fix outstanding queries",
+      hasOwnerVerbObject: true,
+      ownerUserId: U1,
+      corroborationKey: "fix outstanding queries|global",
+      dueDate: "2025-04-30",
+    });
+    await seedLlmFact({
+      fileId: "llm-file-2",
+      candidateId: "due-date-2",
+      title: "Share meeting notes",
+      hasOwnerVerbObject: true,
+      ownerUserId: U1,
+      corroborationKey: "share meeting notes|global",
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), {
+      experimentalFlag: true,
+      llmTaskCorroborationThreshold: 2,
+    });
+
+    const tasks = await db.selectFrom("tasks").selectAll().orderBy("title", "asc").execute();
+    expect(tasks).toEqual([
+      expect.objectContaining({ title: "Fix outstanding queries", due_at: "2025-04-30" }),
+      expect.objectContaining({ title: "Share meeting notes", due_at: null }),
+    ]);
+  });
+
+  it("resolves unique owner names and preserves raw owner names when names are ambiguous", async () => {
+    await seedPerson(db, "person-alice", "Alice Owner");
+    await seedPerson(db, "person-sam-1", "Sam Owner");
+    await seedPerson(db, "person-sam-2", "Sam Owner");
+    await seedLlmFact({
+      fileId: "llm-file-1",
+      candidateId: "owner-unique",
+      title: "Prepare launch notes",
+      owner: { name: "Alice Owner" },
+      hasOwnerVerbObject: true,
+      ownerUserId: U1,
+      corroborationKey: "prepare launch notes|global",
+    });
+    await seedLlmFact({
+      fileId: "llm-file-2",
+      candidateId: "owner-ambiguous",
+      title: "Review pricing deck",
+      owner: { name: "Sam Owner" },
+      hasOwnerVerbObject: true,
+      ownerUserId: U1,
+      corroborationKey: "review pricing deck|global",
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), {
+      experimentalFlag: true,
+      llmTaskCorroborationThreshold: 2,
+    });
+
+    const unique = await db
+      .selectFrom("tasks")
+      .selectAll()
+      .where("title", "=", "Prepare launch notes")
+      .executeTakeFirstOrThrow();
+    const ambiguous = await db
+      .selectFrom("tasks")
+      .selectAll()
+      .where("title", "=", "Review pricing deck")
+      .executeTakeFirstOrThrow();
+    expect(unique).toMatchObject({ assignee_entity_id: "person-alice", assignee_name: "Alice Owner" });
+    expect(ambiguous).toMatchObject({ assignee_entity_id: null, assignee_name: "Sam Owner" });
+  });
+
   it("collates onto structural tasks without duplicating and leaves llm tasks out of orphan expiry", async () => {
     await seedProject(db, "project-x", "Project X", "linear", "project-x");
+    await seedPerson(db, "person-existing-assignee", "Existing Assignee");
     const repo = createTaskRepository(db);
     const structural = await repo.upsertTask({
       parentEntityId: "project-x",
@@ -152,9 +226,9 @@ describe("llm task materialization", () => {
       status: "open",
       statusRaw: "Todo",
       statusAuthority: "external",
-      assigneeEntityId: null,
+      assigneeEntityId: "person-existing-assignee",
       priority: null,
-      dueAt: null,
+      dueAt: "2025-01-01",
       provenance: "structural",
       sourceTaskId: "linear-150",
     });
@@ -164,9 +238,11 @@ describe("llm task materialization", () => {
       fileId: "llm-file-1",
       candidateId: "collate-1",
       title: "Ship Slack capture",
+      owner: { name: "Alice Owner" },
       hasOwnerVerbObject: false,
       ownerUserId: U1,
       corroborationKey: "ship slack capture|linear:project-x",
+      dueDate: "2025-04-30",
       parentRef: { source: "linear", sourceId: "project-x" },
       entityIds: ["project-x", TEST_ACCOUNT_ENTITY_ID],
     });
@@ -183,7 +259,12 @@ describe("llm task materialization", () => {
       .orderBy("kind", "asc")
       .execute();
     expect(afterCollation).toHaveLength(beforeCount);
-    expect(afterCollation[0]).toMatchObject({ id: structural.taskId, status_authority: "external" });
+    expect(afterCollation[0]).toMatchObject({
+      id: structural.taskId,
+      status_authority: "external",
+      assignee_entity_id: "person-existing-assignee",
+      due_at: "2025-01-01",
+    });
     expect(structuralEvidence).toEqual([
       { task_id: structural.taskId, kind: "entity", ref_id: "project-x" },
       { task_id: structural.taskId, kind: "fact", ref_id: collatedFactId },
@@ -212,6 +293,8 @@ describe("llm task materialization", () => {
     fileId: string;
     candidateId: string;
     title: string;
+    owner?: { name?: string; email?: string };
+    dueDate?: string;
     hasOwnerVerbObject: boolean;
     ownerUserId: string;
     corroborationKey: string;
@@ -225,7 +308,12 @@ describe("llm task materialization", () => {
       createdByUserId: input.ownerUserId,
       source: "gmail",
       candidateId: input.candidateId,
-      candidate: { title: input.title, hasOwnerVerbObject: input.hasOwnerVerbObject },
+      candidate: {
+        title: input.title,
+        owner: input.owner,
+        dueDate: input.dueDate,
+        hasOwnerVerbObject: input.hasOwnerVerbObject,
+      },
       corroborationKey: input.corroborationKey,
       parentRef: input.parentRef,
       evidence: { fileIds: [input.fileId], entityIds: input.entityIds ?? [] },
@@ -317,6 +405,28 @@ async function seedProject(db: Kysely<DB>, id: string, name: string, source: str
       source_id: sourceId,
       source_url: null,
       last_seen_at: new Date().toISOString(),
+    })
+    .execute();
+}
+
+async function seedPerson(db: Kysely<DB>, id: string, name: string): Promise<void> {
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "person",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ai_brief: null,
+      deleted_at: null,
+      merged_into_entity_id: null,
     })
     .execute();
 }

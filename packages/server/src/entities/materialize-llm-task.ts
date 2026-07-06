@@ -22,8 +22,14 @@ export async function materializeLlmTask(deps: MaterializeDeps, fact: IndexedFil
   const corroborationCount = await countCorroboratingFiles(deps, raw.corroborationKey, ownerUserId);
   if (raw.hasOwnerVerbObject || corroborationCount >= deps.llmTaskCorroborationThreshold) {
     const corroborating = await loadCorroboratingFacts(deps, raw.corroborationKey, ownerUserId);
+    const assignee = await resolveAssignee(deps, raw.owner);
     const result = await upsertLlmTask(deps.db, {
-      candidate: { title: raw.title },
+      candidate: {
+        title: raw.title,
+        dueAt: raw.dueDate ?? null,
+        assigneeEntityId: assignee.entityId,
+        assigneeName: assignee.name,
+      },
       ownerUserId,
       parentEntityId: parent?.id ?? null,
       parentKey: parentKey(raw, parent),
@@ -49,6 +55,25 @@ function resolveParent(deps: MaterializeDeps, raw: LlmTaskInput): EntityRow | nu
     if (isAllowedParent(byId)) return byId;
   }
   return null;
+}
+
+async function resolveAssignee(
+  deps: MaterializeDeps,
+  owner: LlmTaskInput["owner"],
+): Promise<{ entityId: string | null; name: string | null }> {
+  if (!owner) return { entityId: null, name: null };
+  const name = owner.name ?? null;
+  if (owner.email) {
+    const matches = await deps.entityRepo.getPersonEntitiesByEmail(owner.email);
+    if (matches.length === 1) return { entityId: matches[0].id, name };
+  }
+  if (owner.name) {
+    const matches = (deps.index.byNormalizedName.get(normalizeName(owner.name)) ?? []).filter(
+      (entity) => entity.source_type === "person",
+    );
+    if (matches.length === 1) return { entityId: matches[0].id, name };
+  }
+  return { entityId: null, name };
 }
 
 function findEntityById(deps: MaterializeDeps, entityId: string): EntityRow | undefined {
@@ -179,6 +204,7 @@ interface LlmTaskInput {
   candidateId: string;
   title: string;
   owner?: { name?: string; email?: string };
+  dueDate?: string;
   hasOwnerVerbObject: boolean;
   corroborationKey: string;
   parentRef?: { source: string; sourceId: string };
@@ -203,6 +229,7 @@ function readLlmTask(raw: Record<string, unknown>): LlmTaskInput | null {
     candidateId: raw.candidateId,
     title: raw.title,
     owner: readOwner(raw.owner),
+    dueDate: readDueDate(raw.dueDate),
     hasOwnerVerbObject: raw.hasOwnerVerbObject,
     corroborationKey: raw.corroborationKey,
     parentRef: readParentRef(raw.parentRef),
@@ -241,4 +268,8 @@ function isEvidence(value: unknown): value is { fileIds: string[]; entityIds: st
 
 function readOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readDueDate(value: unknown): string | undefined {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
 }
