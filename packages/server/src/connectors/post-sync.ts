@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import { createTaskRepository } from "../db/repositories/tasks";
 import type { DB } from "../db/schema";
 import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
@@ -12,6 +13,7 @@ export interface PostSyncGraphPipelineParams {
   affectedIndexedFileIds: string[];
   coMentionContributesToThreshold?: number;
   floorRetryMaxFilesPerDomain?: number;
+  source?: string;
 }
 
 export async function runPostSyncGraphPipeline({
@@ -20,10 +22,17 @@ export async function runPostSyncGraphPipeline({
   affectedIndexedFileIds,
   coMentionContributesToThreshold,
   floorRetryMaxFilesPerDomain,
+  source,
 }: PostSyncGraphPipelineParams): Promise<void> {
   const materializeSummary = await materializeUnmaterializedFacts(db, syncLogger);
   if (materializeSummary.factsRead > 0) {
     syncLogger.info({ materializeSummary }, "Post-sync fact materialization complete");
+  }
+  const taskRepo = createTaskRepository(db);
+  const reanchoredTasks = await taskRepo.reanchorNullParentTasks();
+  const expiredTasks = await taskRepo.expireOrphanedTasks(source);
+  if (reanchoredTasks > 0 || expiredTasks > 0) {
+    syncLogger.info({ reanchoredTasks, expiredTasks }, "Post-sync task sweep complete");
   }
 
   const domainSweep = await sweepDomainPromotions(db, syncLogger.child({ component: "domain-sweep" }));

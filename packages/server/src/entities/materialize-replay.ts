@@ -11,6 +11,7 @@ import { materializePersonFact, materializePersonSeed } from "./materialize-pers
 import { materializeProjectSeed } from "./materialize-project";
 import { materializeCrmRelationFact, materializeLlmRelationFact } from "./materialize-relations";
 import { materializeParentEntity, materializeStructuralSeed } from "./materialize-structural";
+import { materializeStructuralTask } from "./materialize-task";
 import type {
   IndexedFileFactRow,
   MaterializeDeps,
@@ -33,6 +34,7 @@ const FACT_REPLAY_ORDER = [
   "crm_relation",
   "llm_extracted",
   "llm_relation",
+  "structural_task",
 ] as const;
 
 export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
@@ -69,6 +71,9 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
   if (fact.fact_type === "parent_entity") {
     return materializeParentEntity(deps, fact);
   }
+  if (fact.fact_type === "structural_task") {
+    return materializeStructuralTask(deps, fact);
+  }
   return { kind: "skipped", reason: "unknown_fact_type" };
 }
 
@@ -96,6 +101,10 @@ function accumulate(summary: ReplayFactsSummary, result: MaterializeResult): voi
     summary.entitiesLinked += result.entitiesLinked;
     summary.mentionsWritten += result.mentionsWritten;
     summary.relationshipsWritten += result.relationshipsWritten;
+    return;
+  }
+  if (result.kind === "task_materialized") {
+    if ("materialized" in summary) (summary as MaterializeFactsSummary).materialized++;
     return;
   }
   if (
@@ -231,7 +240,7 @@ async function materializeUnmaterializedFactsInner(
           .set({ materialized_at: new Date().toISOString() })
           .where("id", "=", fact.id)
           .execute();
-        summary.materialized++;
+        if (result.kind !== "task_materialized") summary.materialized++;
       } else {
         summary.deferred++;
       }
@@ -255,6 +264,7 @@ export function shouldMarkMaterialized(result: MaterializeResult): boolean {
     result.kind === "entity_linked" ||
     result.kind === "queued" ||
     result.kind === "relationship_materialized" ||
+    result.kind === "task_materialized" ||
     result.kind === "structural"
   ) {
     return true;

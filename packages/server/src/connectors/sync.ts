@@ -128,6 +128,7 @@ export async function runConnectorSync(
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"
+      | "EXPERIMENTAL_FLAG"
     >
   >,
 ): Promise<SyncResult> {
@@ -323,6 +324,7 @@ export async function runConnectorSync(
           item,
           indexedFileId: itemResult.indexedFileId,
           emitCorrespondentFacts: connector.emitsCorrespondentFacts ?? false,
+          experimentalFlag: appConfig?.EXPERIMENTAL_FLAG ?? false,
         });
 
         if (itemResult.kind === "unchanged") {
@@ -379,6 +381,7 @@ export async function runConnectorSync(
       affectedIndexedFileIds: [...affectedIndexedFileIds],
       coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
       floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
+      source: connectorType,
     });
 
     if (connectorType === "zoho_crm") {

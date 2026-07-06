@@ -118,6 +118,17 @@ export interface SyncedItem {
    * Each assignee is matched to a person entity and linked via entity_mentions.
    */
   assignees?: Array<{ name: string; email?: string; source?: string; sourceId?: string }>;
+  task?: {
+    sourceTaskId: string;
+    externalRef?: string;
+    title: string;
+    statusType: string;
+    statusRaw?: string;
+    priority?: string;
+    dueAt?: string;
+    project?: { name: string; source: string; sourceId: string };
+    assignee?: { name: string; email?: string; source?: string; sourceId?: string };
+  };
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
    * Sync seeds person entities from entries where `name` is present or can be
@@ -205,6 +216,10 @@ export type IndexedFileFactRaw =
     }
   | { providerFileId: string; author: { name?: string; email?: string; sourceId?: string } }
   | { providerFileId: string; parent: { source: string; sourceId: string; contextSnippet?: string } }
+  | {
+      indexedFileId: string;
+      task: NonNullable<SyncedItem["task"]>;
+    }
   | { providerFileId: string; contactPoint: ContactPointSeed }
   | { sourceType: string; sourceUrl?: string; sourcePath?: string; metadata?: Record<string, unknown> }
   | { subtype: "internal" | "external" }
