@@ -5,6 +5,7 @@ import type { DB } from "../db/schema";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { materializeCommitment } from "./materialize-commitment";
 import { materializeContactPointFact } from "./materialize-contact-points";
+import { materializeDecision } from "./materialize-decision";
 import { buildMaterializeDeps } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
 import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
@@ -38,6 +39,7 @@ const FACT_REPLAY_ORDER = [
   "llm_relation",
   "structural_task",
   "commitment",
+  "decision",
   "llm_task",
 ] as const;
 
@@ -81,6 +83,9 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
   if (fact.fact_type === "commitment") {
     return materializeCommitment(deps, fact);
   }
+  if (fact.fact_type === "decision") {
+    return materializeDecision(deps, fact);
+  }
   if (fact.fact_type === "llm_task") {
     return materializeLlmTask(deps, fact);
   }
@@ -118,6 +123,10 @@ function accumulate(summary: ReplayFactsSummary, result: MaterializeResult): voi
     return;
   }
   if (result.kind === "commitment_materialized") {
+    if ("materialized" in summary) (summary as MaterializeFactsSummary).materialized++;
+    return;
+  }
+  if (result.kind === "decision_materialized") {
     if ("materialized" in summary) (summary as MaterializeFactsSummary).materialized++;
     return;
   }
@@ -256,7 +265,12 @@ async function materializeUnmaterializedFactsInner(
           .set({ materialized_at: new Date().toISOString() })
           .where("id", "=", fact.id)
           .execute();
-        if (result.kind !== "task_materialized" && result.kind !== "commitment_materialized") summary.materialized++;
+        if (
+          result.kind !== "task_materialized" &&
+          result.kind !== "commitment_materialized" &&
+          result.kind !== "decision_materialized"
+        )
+          summary.materialized++;
       } else {
         summary.deferred++;
       }
@@ -282,6 +296,7 @@ export function shouldMarkMaterialized(result: MaterializeResult): boolean {
     result.kind === "relationship_materialized" ||
     result.kind === "task_materialized" ||
     result.kind === "commitment_materialized" ||
+    result.kind === "decision_materialized" ||
     result.kind === "structural"
   ) {
     return true;
