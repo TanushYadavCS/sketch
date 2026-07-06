@@ -12,6 +12,7 @@ export type IndexedFileFactType =
   | "contact_point"
   | "structural_seed"
   | "structural_task"
+  | "commitment"
   | "person_seed"
   | "llm_extracted"
   | "llm_relation"
@@ -133,6 +134,13 @@ export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): stri
       .update([input.connectorConfigId ?? "", input.factType, input.source, sourceTaskId].join("|"))
       .digest("hex");
   }
+  if (input.factType === "commitment") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const commitmentId = typeof raw?.commitmentId === "string" ? raw.commitmentId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, commitmentId].join("|"))
+      .digest("hex");
+  }
   const parts = [
     input.connectorConfigId ?? "",
     input.source,
@@ -248,6 +256,29 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
     const task = raw.task as Record<string, unknown>;
     if (!hasString(task, "sourceTaskId") || !hasString(task, "title") || !hasString(task, "statusType")) {
       throw new Error("structural_task facts require sourceTaskId, title, and statusType");
+    }
+  } else if (input.factType === "commitment") {
+    if (
+      !hasString(raw, "commitmentId") ||
+      !hasString(raw, "title") ||
+      !hasString(raw, "status") ||
+      !isRecord(raw.evidence)
+    ) {
+      throw new Error("commitment facts require commitmentId, title, status, and evidence");
+    }
+    if (raw.status !== "open" && raw.status !== "done" && raw.status !== "dropped") {
+      throw new Error("commitment status must be open, done, or dropped");
+    }
+    const evidence = raw.evidence as Record<string, unknown>;
+    if (!Array.isArray(evidence.fileIds) || !Array.isArray(evidence.entityIds)) {
+      throw new Error("commitment evidence requires fileIds and entityIds arrays");
+    }
+    if (raw.parentRef !== undefined && !isRecord(raw.parentRef)) {
+      throw new Error("commitment parentRef must be an object");
+    }
+    const parentRef = raw.parentRef as Record<string, unknown> | undefined;
+    if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
+      throw new Error("commitment parentRef requires source and sourceId");
     }
   } else if (input.factType === "person_seed") {
     if (!hasString(raw, "source") && !hasString(raw, "subtype")) {

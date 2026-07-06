@@ -129,6 +129,7 @@ export interface SyncedItem {
     project?: { name: string; source: string; sourceId: string };
     assignee?: { name: string; email?: string; source?: string; sourceId?: string };
   };
+  commitments?: CommitmentSeed[];
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
    * Sync seeds person entities from entries where `name` is present or can be
@@ -203,6 +204,16 @@ export interface ContactPointSeed {
   lastContactedAt?: string | null;
 }
 
+export interface CommitmentSeed {
+  commitmentId: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  title: string;
+  status: "open" | "done" | "dropped";
+  dueAt?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+}
+
 export type EntitySeedCallback = (seed: EntitySeed) => Promise<void>;
 export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>;
 
@@ -220,6 +231,7 @@ export type IndexedFileFactRaw =
       indexedFileId: string;
       task: NonNullable<SyncedItem["task"]>;
     }
+  | CommitmentSeed
   | { providerFileId: string; contactPoint: ContactPointSeed }
   | { sourceType: string; sourceUrl?: string; sourcePath?: string; metadata?: Record<string, unknown> }
   | { subtype: "internal" | "external" }
