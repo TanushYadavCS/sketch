@@ -1,3 +1,4 @@
+import { deriveQualifiedSeedName } from "../connectors/container-name";
 import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
 import { createMentionFromFact } from "./materialize-mentions";
 import { buildSeedProvenanceNote, isProjectCandidateSeed } from "./materialize-structural-gate";
@@ -26,7 +27,7 @@ export async function materializeSpineCandidate(
 ): Promise<MaterializeResult> {
   const spineType = canonicalSpineTypeForStructuralSource(args.sourceType);
   if (!spineType) {
-    const entity = (await deps.entityRepo.upsertEntityFromTool({
+    const entity = await upsertEntityFromSeed(deps, {
       name: fact.subject_name as string,
       sourceType: args.sourceType,
       source: args.subjectSource,
@@ -34,15 +35,15 @@ export async function materializeSpineCandidate(
       sourceUrl: args.sourceUrl,
       sourceRefId: fact.indexed_file_id ?? undefined,
       metadata: args.metadata,
-    })) as unknown as EntityRow;
-    registerEntity(deps.index, entity);
+      aliases: extractSeedAliases(args.raw),
+    });
     deps.index.bySourceRef.set(`${args.subjectSource}:${args.subjectSourceId}`, entity);
     return { kind: "structural", entity };
   }
 
   const existing = await deps.entityRepo.getEntityBySourceRef(args.subjectSource, args.subjectSourceId);
   if (existing && existing.source_type === spineType) {
-    const entity = existing as unknown as EntityRow;
+    const entity = await applySeedAliases(deps, existing as unknown as EntityRow, extractSeedAliases(args.raw));
     if (fact.indexed_file_id) {
       await createMentionFromFact(deps, {
         entityId: entity.id,
@@ -58,7 +59,11 @@ export async function materializeSpineCandidate(
   }
 
   if (spineType === "project" && existing && isProjectCandidateSeed(existing.source_type)) {
-    const entity = await promoteLegacyProjectContainer(deps, existing as unknown as EntityRow, fact, args.metadata);
+    const entity = await applySeedAliases(
+      deps,
+      await promoteLegacyProjectContainer(deps, existing as unknown as EntityRow, fact, args.metadata),
+      extractSeedAliases(args.raw),
+    );
     if (fact.indexed_file_id) {
       await createMentionFromFact(deps, {
         entityId: entity.id,
@@ -77,7 +82,11 @@ export async function materializeSpineCandidate(
     const owner = deps.resolveOwner(fact);
     if (!owner) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
 
-    const subjectName = fact.subject_name as string;
+    const { name: subjectName, aliases: seedAliases } = deriveQualifiedSeedName({
+      source: args.subjectSource,
+      subjectName: fact.subject_name as string,
+      raw: args.raw,
+    });
     const { row, skipEvidence } = await deps.reviewRepo.upsertSeedReviewRow({
       proposedName: subjectName,
       normalizedName: normalizeEntityMatchName(spineType, subjectName),
@@ -87,6 +96,7 @@ export async function materializeSpineCandidate(
       candidateEntityId: null,
       triggeredByUserId: owner,
       metadata: args.metadata,
+      seedAliases,
     });
 
     if (skipEvidence) {
@@ -104,18 +114,66 @@ export async function materializeSpineCandidate(
     return { kind: "queued", reviewId: row.id };
   }
 
-  const entity = (await deps.entityRepo.upsertEntityFromTool({
-    name: fact.subject_name as string,
+  const { name: qualifiedName, aliases: qualifiedAliases } = deriveQualifiedSeedName({
+    source: args.subjectSource,
+    subjectName: fact.subject_name as string,
+    raw: args.raw,
+  });
+  const entity = await upsertEntityFromSeed(deps, {
+    name: qualifiedName,
     sourceType: spineType,
     source: args.subjectSource,
     sourceId: args.subjectSourceId,
     sourceUrl: args.sourceUrl,
     sourceRefId: fact.indexed_file_id ?? undefined,
     metadata: args.metadata,
-  })) as unknown as EntityRow;
-  registerEntity(deps.index, entity);
+    aliases: qualifiedAliases,
+  });
   deps.index.bySourceRef.set(`${args.subjectSource}:${args.subjectSourceId}`, entity);
   return { kind: "structural", entity };
+}
+
+function extractSeedAliases(raw: Record<string, unknown>): string[] {
+  const aliases = raw.aliases;
+  if (!Array.isArray(aliases)) return [];
+  return aliases.filter((alias): alias is string => typeof alias === "string" && alias.trim().length > 0);
+}
+
+async function upsertEntityFromSeed(
+  deps: MaterializeDeps,
+  input: {
+    name: string;
+    sourceType: string;
+    source: string;
+    sourceId: string;
+    sourceUrl?: string;
+    sourceRefId?: string;
+    metadata?: Record<string, unknown>;
+    aliases: string[];
+  },
+): Promise<EntityRow> {
+  const entity = (await deps.entityRepo.upsertEntityFromTool({
+    name: input.name,
+    sourceType: input.sourceType,
+    source: input.source,
+    sourceId: input.sourceId,
+    sourceUrl: input.sourceUrl,
+    sourceRefId: input.sourceRefId,
+    metadata: input.metadata,
+  })) as unknown as EntityRow;
+  return applySeedAliases(deps, entity, input.aliases);
+}
+
+async function applySeedAliases(deps: MaterializeDeps, entity: EntityRow, aliases: string[]): Promise<EntityRow> {
+  let refreshed = entity;
+  for (const alias of aliases) {
+    await deps.entityRepo.appendAlias(refreshed.id, alias);
+  }
+  if (aliases.length > 0) {
+    refreshed = ((await deps.entityRepo.getEntity(refreshed.id)) ?? refreshed) as unknown as EntityRow;
+  }
+  registerEntity(deps.index, refreshed);
+  return refreshed;
 }
 
 async function promoteLegacyProjectContainer(

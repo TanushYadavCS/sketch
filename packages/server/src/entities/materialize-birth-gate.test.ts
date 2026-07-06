@@ -83,7 +83,7 @@ async function upsertLlmMention(db: Kysely<DB>, fileId: string, name: string, ty
 
 async function upsertStructuralSeed(
   db: Kysely<DB>,
-  input: { fileId: string; sourceType: string; name: string; sourceId: string; source?: string },
+  input: { fileId: string; sourceType: string; name: string; sourceId: string; source?: string; aliases?: string[] },
 ): Promise<void> {
   const source = input.source ?? "linear";
   const repo = createIndexedFileFactRepository(db);
@@ -98,7 +98,11 @@ async function upsertStructuralSeed(
     subjectSource: source,
     subjectSourceId: input.sourceId,
     raw: {
+      name: input.name,
       sourceType: input.sourceType,
+      source: source,
+      sourceId: input.sourceId,
+      aliases: input.aliases,
       providerFileId: input.sourceId,
       sourcePath: `${source}/${input.sourceId}`,
     },
@@ -179,9 +183,10 @@ describe("A1 birth gate", () => {
     await upsertStructuralSeed(db, {
       fileId: "file-2",
       sourceType: "team",
-      name: "Platform Team",
+      name: "Sketch Platform",
       sourceId: "team-1",
       source: "linear",
+      aliases: ["Platform"],
     });
     await materializeUnmaterializedFacts(db, createTestLogger(), {
       birthGateTypes: A1_BIRTH_GATE_TYPES,
@@ -195,7 +200,20 @@ describe("A1 birth gate", () => {
       entity_type: "team",
       seed_source: "linear",
       seed_source_id: "team-1",
+      seed_aliases: '["Platform"]',
     });
+    if (!row.candidate_generated_at) throw new Error("missing candidate_generated_at");
+
+    const result = await confirmReview({ db, userId: USER_ID }, row.id, {
+      candidateGeneratedAt: row.candidate_generated_at,
+    });
+    const team = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", result.targetEntityId)
+      .executeTakeFirstOrThrow();
+    expect(team.name).toBe("Sketch Platform");
+    expect(JSON.parse(team.aliases ?? "[]")).toEqual(expect.arrayContaining(["Platform"]));
   });
 
   it("links exact product matches under the gate and flag-off product mentions still auto-create", async () => {
