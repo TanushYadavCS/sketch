@@ -675,10 +675,22 @@ export function createClickUpConnector(): Connector {
       };
 
       for (const team of teamsRes.teams) {
-        // Workspace filter: skip workspaces not in scope
         if (allowedWorkspaces.length > 0 && !allowedWorkspaces.includes(team.id)) {
           continue;
         }
+
+        const spacesRes = (await clickupRequest(`/team/${team.id}/space`, token, logger)) as {
+          spaces: ClickUpSpace[];
+        };
+        const workspaceContainsAllowedSpace = spacesRes.spaces.some((space) => allowedSpaces.includes(space.id));
+        const workspaceInScope =
+          (allowedWorkspaces.length === 0 && allowedSpaces.length === 0) ||
+          allowedWorkspaces.includes(team.id) ||
+          (allowedWorkspaces.length === 0 && allowedSpaces.length > 0 && workspaceContainsAllowedSpace);
+        if (!workspaceInScope) {
+          continue;
+        }
+
         const workspaceName = team.name.trim();
         const workspaceEmails = extractMemberEmails(team.members);
         logger.info(
@@ -706,33 +718,6 @@ export function createClickUpConnector(): Connector {
           });
         }
 
-        // Seed workspace as top-level entity
-        if (!experimentalFlag && onEntitySeed) {
-          await onEntitySeed({
-            name: workspaceName,
-            sourceType: "clickup_workspace",
-            source: "clickup",
-            sourceId: team.id,
-            metadata: { memberCount: workspaceEmails.length },
-          });
-        }
-
-        // Seed workspace members as person entities
-        if (onPersonSeed) {
-          for (const member of team.members) {
-            if (member.user.username) {
-              await onPersonSeed({
-                name: member.user.username,
-                email: member.user.email,
-                subtype: "internal",
-                source: "clickup",
-                sourceId: `user:${member.user.id}`,
-              });
-            }
-          }
-        }
-
-        // Workspace-level access scope (used for docs and public spaces)
         const workspaceScope: SyncedItem["accessScope"] = {
           scopeType: "workspace",
           providerScopeId: team.id,
@@ -740,28 +725,13 @@ export function createClickUpConnector(): Connector {
           memberEmails: workspaceEmails,
         };
 
-        const spacesRes = (await clickupRequest(`/team/${team.id}/space`, token, logger)) as {
-          spaces: ClickUpSpace[];
-        };
-
+        let syncedAnyAllowedSpace = false;
         for (const space of spacesRes.spaces) {
           if (allowedSpaces.length > 0 && !allowedSpaces.includes(space.id)) {
             continue;
           }
+          syncedAnyAllowedSpace = true;
 
-          // Seed space as entity with workspace context
-          if (!experimentalFlag && onEntitySeed) {
-            await onEntitySeed({
-              name: space.name,
-              sourceType: "clickup_space",
-              source: "clickup",
-              sourceId: space.id,
-              metadata: { private: space.private, workspaceName, workspaceId: team.id },
-            });
-          }
-
-          // Build access scope for this space.
-          // Private spaces use space members; public spaces use all workspace members.
           let spaceScope: SyncedItem["accessScope"];
           if (space.private && space.members) {
             const memberEmails = extractMemberEmails(space.members);
@@ -956,8 +926,12 @@ export function createClickUpConnector(): Connector {
           }
         }
 
-        // Sync ClickUp Docs at workspace level
-        yield* fetchDocsFromWorkspace(team.id, token, logger, workspaceScope, cursor ?? undefined);
+        const workspaceInDocScope =
+          allowedWorkspaces.includes(team.id) ||
+          (allowedWorkspaces.length === 0 && (allowedSpaces.length === 0 || syncedAnyAllowedSpace));
+        if (workspaceInDocScope) {
+          yield* fetchDocsFromWorkspace(team.id, token, logger, workspaceScope, cursor ?? undefined);
+        }
       }
 
       // Seed assignees collected during task traversal as person entities
