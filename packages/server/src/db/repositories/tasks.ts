@@ -1,12 +1,15 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
+import { fileAccessFilterSql } from "../../connectors/search";
 import type { DB, TasksTable } from "../schema";
+import type { AgentKnowledgeRefs, AgentOutputItemInput } from "./agent-outputs";
 import type { FileViewer } from "./connectors";
 import { fileVisibilityPredicate } from "./connectors";
 import { whereLiveEntity } from "./entities";
 
 export const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
+const BRIEF_TASK_ID_SEPARATOR = "\u001f";
 
 export type TaskStatus = "open" | "in_progress" | "done" | "dropped";
 
@@ -23,13 +26,31 @@ export interface UpsertTaskInput {
   assigneeEntityId: string | null;
   priority: string | null;
   dueAt: string | null;
-  provenance: "structural";
+  provenance: "structural" | "brief";
   sourceTaskId: string;
 }
 
 export interface TaskListOptions {
   viewer: FileViewer;
+  viewerUserId?: string | null;
   status?: TaskStatus;
+  limit?: number;
+}
+
+export interface PromoteBriefTaskInput {
+  userId: string;
+  todo: AgentOutputItemInput;
+  knowledgeRefs: AgentKnowledgeRefs;
+}
+
+export type PromoteBriefTaskResult =
+  | { status: "skipped"; reason: "missing_file_id" }
+  | { status: "collated"; taskId: string }
+  | { status: "upserted"; taskId: string; created: boolean };
+
+export interface LoadOpenDurableTasksForBriefOptions {
+  userId: string;
+  userEmails: string[];
   limit?: number;
 }
 
@@ -103,6 +124,39 @@ export function createTaskRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    async promoteBriefTask(input: PromoteBriefTaskInput): Promise<PromoteBriefTaskResult> {
+      if (input.knowledgeRefs.fileIds.length === 0) return { status: "skipped", reason: "missing_file_id" };
+
+      const parent = await resolveBriefTaskParent(db, input.knowledgeRefs.entityIds);
+      const parentKey = parent?.id ?? "global";
+      const normalizedTitle = normalizeName(input.todo.title);
+
+      if (parent) {
+        const structural = await db
+          .selectFrom("tasks")
+          .select("id")
+          .where("provenance", "=", "structural")
+          .where("valid_to", "is", null)
+          .where("parent_entity_id", "=", parent.id)
+          .where("normalized_title", "=", normalizedTitle)
+          .executeTakeFirst();
+        if (structural) {
+          await promoteBriefTaskEvidence(db, structural.id, input.knowledgeRefs);
+          return { status: "collated", taskId: structural.id };
+        }
+      }
+
+      const result = await upsertBriefTask(db, {
+        userId: input.userId,
+        parentEntityId: parent?.id ?? null,
+        parentKey,
+        todo: input.todo,
+        normalizedTitle,
+      });
+      await promoteBriefTaskEvidence(db, result.taskId, input.knowledgeRefs);
+      return { status: "upserted", ...result };
+    },
+
     async reanchorNullParentTasks(): Promise<number> {
       const rows = await db
         .selectFrom("tasks")
@@ -131,6 +185,7 @@ export function createTaskRepository(db: Kysely<DB>) {
         .updateTable("tasks")
         .set({ valid_to: now, updated_at: now })
         .where("valid_to", "is", null)
+        .where("provenance", "=", "structural")
         .where((eb) =>
           eb.not(sql<boolean>`EXISTS (
             SELECT 1 FROM indexed_file_facts iff
@@ -146,7 +201,7 @@ export function createTaskRepository(db: Kysely<DB>) {
     },
 
     async listTasksByParent(entityId: string, opts: TaskListOptions): Promise<Selectable<TasksTable>[]> {
-      let query = visibleTaskQuery(db, opts.viewer)
+      let query = visibleTaskQuery(db, opts.viewer, opts.viewerUserId)
         .where("tasks.parent_entity_id", "=", entityId)
         .orderBy("tasks.status", "asc")
         .orderBy("tasks.updated_at", "desc")
@@ -156,7 +211,7 @@ export function createTaskRepository(db: Kysely<DB>) {
     },
 
     async listTasksByAssignee(entityId: string, opts: TaskListOptions): Promise<Selectable<TasksTable>[]> {
-      let query = visibleTaskQuery(db, opts.viewer)
+      let query = visibleTaskQuery(db, opts.viewer, opts.viewerUserId)
         .where("tasks.assignee_entity_id", "=", entityId)
         .orderBy("tasks.status", "asc")
         .orderBy("tasks.updated_at", "desc")
@@ -164,25 +219,159 @@ export function createTaskRepository(db: Kysely<DB>) {
       if (opts.status) query = query.where("tasks.status", "=", opts.status);
       return query.execute();
     },
+
+    async loadOpenDurableTasksForBrief(opts: LoadOpenDurableTasksForBriefOptions): Promise<Selectable<TasksTable>[]> {
+      if (opts.userEmails.length === 0) return [];
+      return db
+        .selectFrom("tasks")
+        .selectAll("tasks")
+        .where("tasks.valid_to", "is", null)
+        .where("tasks.status", "in", ["open", "in_progress"])
+        .where((eb) =>
+          eb.or([eb("tasks.provenance", "=", "structural"), eb("tasks.created_by_user_id", "=", opts.userId)]),
+        )
+        .where((eb) =>
+          eb.exists(sql<boolean>`(
+            SELECT 1 FROM task_evidence
+            INNER JOIN indexed_files ON indexed_files.id = task_evidence.ref_id
+            WHERE task_evidence.task_id = tasks.id
+              AND task_evidence.kind = 'file'
+              AND ${fileAccessFilterSql(opts.userEmails)}
+          )`),
+        )
+        .orderBy("tasks.updated_at", "desc")
+        .limit(opts.limit ?? 50)
+        .execute();
+    },
   };
 }
 
-function visibleTaskQuery(db: Kysely<DB>, viewer: FileViewer) {
-  const query = db
-    .selectFrom("tasks")
-    .selectAll("tasks")
-    .where("tasks.valid_to", "is", null);
+function briefStatusFromLabel(label: string): TaskStatus {
+  if (label === "in_progress") return "in_progress";
+  if (label === "done") return "done";
+  return "open";
+}
 
-  if (viewer.isAdmin) return query;
+async function upsertBriefTask(
+  db: Kysely<DB>,
+  input: {
+    userId: string;
+    parentEntityId: string | null;
+    parentKey: string;
+    todo: AgentOutputItemInput;
+    normalizedTitle: string;
+  },
+): Promise<{ taskId: string; created: boolean }> {
+  const sourceTaskId = createHash("sha256")
+    .update([input.userId, input.parentKey, input.normalizedTitle].join(BRIEF_TASK_ID_SEPARATOR))
+    .digest("hex");
+  const now = new Date().toISOString();
+  const existing = await db
+    .selectFrom("tasks")
+    .selectAll()
+    .where("source", "=", "brief")
+    .where("source_task_id", "=", sourceTaskId)
+    .executeTakeFirst();
+  const status = briefStatusFromLabel(input.todo.label);
+  const statusChanged = existing ? existing.status !== status : true;
+  const completedAt =
+    status === "done" ? (existing?.status === "done" && existing.completed_at ? existing.completed_at : now) : null;
+  const values = {
+    parent_entity_id: input.parentEntityId,
+    parent_source_ref: null,
+    parent_name: null,
+    source: "brief",
+    external_ref: null,
+    title: input.todo.title,
+    normalized_title: input.normalizedTitle,
+    status,
+    status_raw: input.todo.label,
+    status_authority: "local",
+    assignee_entity_id: null,
+    priority: input.todo.priority,
+    due_at: null,
+    provenance: "brief",
+    source_task_id: sourceTaskId,
+    created_by_user_id: input.userId,
+    status_changed_at: statusChanged ? now : (existing?.status_changed_at ?? null),
+    completed_at: completedAt,
+    valid_from: existing?.valid_from ?? now,
+    valid_to: null,
+    updated_at: now,
+  };
+
+  await db
+    .insertInto("tasks")
+    .values({
+      id: existing?.id ?? randomUUID(),
+      ...values,
+    })
+    .onConflict((oc) =>
+      oc.columns(["source", "source_task_id"]).doUpdateSet({
+        ...values,
+      }),
+    )
+    .execute();
+
+  const row = await db
+    .selectFrom("tasks")
+    .select("id")
+    .where("source", "=", "brief")
+    .where("source_task_id", "=", sourceTaskId)
+    .executeTakeFirstOrThrow();
+  return { taskId: row.id, created: !existing };
+}
+
+async function resolveBriefTaskParent(db: Kysely<DB>, entityIds: string[]) {
+  if (entityIds.length === 0) return null;
+  const rows = await db
+    .selectFrom("entities")
+    .select(["id", "source_type"])
+    .where("id", "in", entityIds)
+    .where("source_type", "=", "project")
+    .where("id", "!=", TEST_ACCOUNT_ENTITY_ID)
+    .where(whereLiveEntity())
+    .execute();
+  const liveProjects = new Set(rows.map((row) => row.id));
+  const id = entityIds.find((entityId) => liveProjects.has(entityId));
+  return id ? { id } : null;
+}
+
+async function promoteBriefTaskEvidence(db: Kysely<DB>, taskId: string, refs: AgentKnowledgeRefs): Promise<void> {
+  const edges = [
+    ...refs.fileIds.map((refId) => ({ kind: "file", refId })),
+    ...refs.entityIds.map((refId) => ({ kind: "entity", refId })),
+    ...(refs.factIds ?? []).map((refId) => ({ kind: "fact", refId })),
+    ...(refs.mentionIds ?? []).map((refId) => ({ kind: "mention", refId })),
+  ];
+  for (const edge of edges) {
+    await db
+      .insertInto("task_evidence")
+      .values({ task_id: taskId, kind: edge.kind, ref_id: edge.refId })
+      .onConflict((oc) => oc.columns(["task_id", "kind", "ref_id"]).doNothing())
+      .execute();
+  }
+}
+
+function visibleTaskQuery(db: Kysely<DB>, viewer: FileViewer, viewerUserId?: string | null) {
+  let query = db.selectFrom("tasks").selectAll("tasks").where("tasks.valid_to", "is", null);
+
+  if (!viewer.isAdmin) {
+    query = query.where((eb) =>
+      eb.exists(sql<boolean>`(
+          SELECT 1 FROM task_evidence
+          INNER JOIN indexed_files ON indexed_files.id = task_evidence.ref_id
+          WHERE task_evidence.task_id = tasks.id
+            AND task_evidence.kind = 'file'
+            AND ${fileVisibilityPredicate(viewer)}
+        )`),
+    );
+  }
+
+  if (!viewerUserId) return query.where("tasks.provenance", "!=", "brief");
 
   return query.where((eb) =>
-    eb.exists(sql<boolean>`(
-        SELECT 1 FROM task_evidence
-        INNER JOIN indexed_files ON indexed_files.id = task_evidence.ref_id
-        WHERE task_evidence.task_id = tasks.id
-          AND task_evidence.kind = 'file'
-          AND ${fileVisibilityPredicate(viewer)}
-      )`),
+    eb.or([eb("tasks.provenance", "!=", "brief"), eb("tasks.created_by_user_id", "=", viewerUserId)]),
   );
 }
 

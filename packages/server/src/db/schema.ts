@@ -939,6 +939,7 @@ export interface TasksTable {
   due_at: string | null;
   provenance: string;
   source_task_id: string;
+  created_by_user_id: string | null;
   status_changed_at: string | null;
   completed_at: string | null;
   valid_from: string | null;

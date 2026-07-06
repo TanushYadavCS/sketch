@@ -28,7 +28,12 @@ export async function handleListTasks(
     isAdmin: false,
   };
   const repo = createTaskRepository(deps.db);
-  const opts = { viewer, status: status as TaskStatus | undefined, limit: Math.min(limit ?? 50, 100) };
+  const opts = {
+    viewer,
+    viewerUserId: deps.currentUserId,
+    status: status as TaskStatus | undefined,
+    limit: Math.min(limit ?? 50, 100),
+  };
   const tasks = parentEntityId
     ? await repo.listTasksByParent(parentEntityId, opts)
     : await repo.listTasksByAssignee(assigneeEntityId as string, opts);

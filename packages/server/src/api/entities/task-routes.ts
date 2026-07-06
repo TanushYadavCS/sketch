@@ -32,6 +32,7 @@ export function createTaskRoutes(db: Kysely<DB>) {
     const limit = parseTaskLimit(c.req.query("limit"));
     const tasks = await taskRepo.listTasksByParent(entity.id, {
       viewer,
+      viewerUserId: c.get("sub"),
       status: status as TaskStatus | undefined,
       limit,
     });
