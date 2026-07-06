@@ -36,31 +36,50 @@ function createService(overrides: Record<string, unknown> = {}) {
     listDefinitions: vi.fn(() => [{ key: "daily-brief" }]),
     listForViewer: vi.fn(async () => []),
     getConfigView: vi.fn(async () => ({ agentKey: "daily-brief" })),
+    getConfigViewForViewer: vi.fn(async () => ({ agentKey: "daily-brief" })),
     getLatestForUser: vi.fn(async () => ({
       output: null,
       running: false,
       outputDate: "2026-07-06",
       timezone: "UTC",
     })),
+    getLatestForViewer: vi.fn(async () => ({
+      output: null,
+      running: false,
+      outputDate: "2026-07-06",
+      timezone: "UTC",
+    })),
     getByIdForUser: vi.fn(async () => null),
+    getByIdForViewer: vi.fn(async () => null),
     listOutputsForUser: vi.fn(async () => ({ outputs: [], nextCursor: null })),
+    listOutputsForViewer: vi.fn(async () => ({ outputs: [], nextCursor: null })),
     listEligibleRouteMembers: vi.fn(async () => []),
+    listEligibleRouteMembersForViewer: vi.fn(async () => []),
     listWhatsAppDmMembers: vi.fn(async () => []),
     requestGenerationForUser: vi.fn(async () => []),
+    requestGenerationForViewer: vi.fn(async () => []),
     updateConfigForUser: vi.fn(async () => ({ agentKey: "daily-brief", delivery: null })),
+    updateConfigForViewer: vi.fn(async () => ({ agentKey: "daily-brief", delivery: null })),
     ...overrides,
   } as unknown as AgentRunService & {
     resolveConfigControlUserId: ReturnType<typeof vi.fn>;
     resolveDeliveryConfigForUser: ReturnType<typeof vi.fn>;
     listForViewer: ReturnType<typeof vi.fn>;
     getConfigView: ReturnType<typeof vi.fn>;
+    getConfigViewForViewer: ReturnType<typeof vi.fn>;
     getLatestForUser: ReturnType<typeof vi.fn>;
+    getLatestForViewer: ReturnType<typeof vi.fn>;
     getByIdForUser: ReturnType<typeof vi.fn>;
+    getByIdForViewer: ReturnType<typeof vi.fn>;
     listOutputsForUser: ReturnType<typeof vi.fn>;
+    listOutputsForViewer: ReturnType<typeof vi.fn>;
     listEligibleRouteMembers: ReturnType<typeof vi.fn>;
+    listEligibleRouteMembersForViewer: ReturnType<typeof vi.fn>;
     listWhatsAppDmMembers: ReturnType<typeof vi.fn>;
     requestGenerationForUser: ReturnType<typeof vi.fn>;
+    requestGenerationForViewer: ReturnType<typeof vi.fn>;
     updateConfigForUser: ReturnType<typeof vi.fn>;
+    updateConfigForViewer: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -98,14 +117,13 @@ describe("agentRoutes", () => {
     expect(service.listForViewer).toHaveBeenCalledWith("user-1", "admin");
   });
 
-  it("reads admin Summarizer detail and latest output through the shared config owner", async () => {
+  it("reads admin Summarizer detail and latest output through the org-wide viewer methods", async () => {
     const service = createService({
-      resolveConfigControlUserId: vi.fn(async () => "admin-owner"),
-      getConfigView: vi.fn(async () => ({
+      getConfigViewForViewer: vi.fn(async () => ({
         agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
         routes: [{ id: "shared-route" }],
       })),
-      getLatestForUser: vi.fn(async () => ({
+      getLatestForViewer: vi.fn(async () => ({
         output: { id: "out-1" },
         running: false,
         outputDate: "2026-07-06",
@@ -117,15 +135,13 @@ describe("agentRoutes", () => {
     const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}`);
 
     expect(res.status).toBe(200);
-    expect(service.resolveConfigControlUserId).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "user-1", "admin");
-    expect(service.getConfigView).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "admin-owner");
-    expect(service.getLatestForUser).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "admin-owner");
+    expect(service.getConfigViewForViewer).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "user-1", "admin");
+    expect(service.getLatestForViewer).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "user-1", "admin");
   });
 
-  it("saves admin Summarizer config through the shared config owner", async () => {
+  it("saves admin Summarizer config through the org-wide viewer method", async () => {
     const service = createService({
-      resolveConfigControlUserId: vi.fn(async () => "admin-owner"),
-      updateConfigForUser: vi.fn(async () => ({ agentKey: CONVERSATION_SUMMARY_AGENT_KEY, delivery: null })),
+      updateConfigForViewer: vi.fn(async () => ({ agentKey: CONVERSATION_SUMMARY_AGENT_KEY, delivery: null })),
     });
     const app = createRoutesTestApp(service, "admin-b-sub", "admin-b@example.com", "admin");
 
@@ -144,27 +160,22 @@ describe("agentRoutes", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(service.resolveConfigControlUserId).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "user-1", "admin");
-    expect(service.resolveDeliveryConfigForUser).toHaveBeenCalledWith(
-      "admin-owner",
-      expect.objectContaining({ targetId: "U_OWNER" }),
-    );
-    expect(service.updateConfigForUser).toHaveBeenCalledWith(
+    expect(service.updateConfigForViewer).toHaveBeenCalledWith(
       CONVERSATION_SUMMARY_AGENT_KEY,
-      "admin-owner",
+      "user-1",
+      "admin",
       expect.objectContaining({ delivery: expect.objectContaining({ targetId: "U_OWNER" }) }),
     );
   });
 
-  it("uses the shared config owner for admin Summarizer route members, outputs, and runs", async () => {
+  it("uses org-wide viewer methods for admin Summarizer route members, outputs, and runs", async () => {
     const service = createService({
-      resolveConfigControlUserId: vi.fn(async () => "admin-owner"),
       listDefinitions: vi.fn(() => [{ key: CONVERSATION_SUMMARY_AGENT_KEY }]),
-      listEligibleRouteMembers: vi.fn(async () => [
+      listEligibleRouteMembersForViewer: vi.fn(async () => [
         { userId: "member-1", name: "Member One", slackUserId: "U_MEMBER_1" },
       ]),
-      listOutputsForUser: vi.fn(async () => ({ outputs: [{ id: "out-1" }], nextCursor: null })),
-      requestGenerationForUser: vi.fn(async () => [
+      listOutputsForViewer: vi.fn(async () => ({ outputs: [{ id: "out-1" }], nextCursor: null })),
+      requestGenerationForViewer: vi.fn(async () => [
         {
           id: "run-1",
           status: "running",
@@ -190,14 +201,21 @@ describe("agentRoutes", () => {
     expect(routeMembers.status).toBe(200);
     expect(outputs.status).toBe(200);
     expect(runs.status).toBe(202);
-    expect(service.listEligibleRouteMembers).toHaveBeenCalledWith("admin-owner", ["slack:channel:C_ALPHA"]);
-    expect(service.listOutputsForUser).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "admin-owner", {
+    expect(service.listEligibleRouteMembersForViewer).toHaveBeenCalledWith(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      "user-1",
+      "admin",
+      ["slack:channel:C_ALPHA"],
+      null,
+    );
+    expect(service.listOutputsForViewer).toHaveBeenCalledWith(CONVERSATION_SUMMARY_AGENT_KEY, "user-1", "admin", {
       limit: 5,
       cursor: null,
     });
-    expect(service.requestGenerationForUser).toHaveBeenCalledWith({
+    expect(service.requestGenerationForViewer).toHaveBeenCalledWith({
       agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
-      userId: "admin-owner",
+      userId: "user-1",
+      viewerRole: "admin",
       triggerType: "manual",
       routeIds: ["shared-route"],
     });
@@ -761,7 +779,7 @@ describe("agentRoutes", () => {
 
   it("lists route members through the agent route-members endpoint", async () => {
     const service = createService({
-      listEligibleRouteMembers: vi.fn(async () => [
+      listEligibleRouteMembersForViewer: vi.fn(async () => [
         { userId: "member-1", name: "Member One", slackUserId: "U_MEMBER_1" },
       ]),
     });
@@ -779,10 +797,13 @@ describe("agentRoutes", () => {
     await expect(res.json()).resolves.toEqual({
       members: [{ userId: "member-1", name: "Member One", slackUserId: "U_MEMBER_1" }],
     });
-    expect(service.listEligibleRouteMembers).toHaveBeenCalledWith("user-1", [
-      "slack:channel:C_ALPHA",
-      "slack:channel:C_BETA",
-    ]);
+    expect(service.listEligibleRouteMembersForViewer).toHaveBeenCalledWith(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      "user-1",
+      "member",
+      ["slack:channel:C_ALPHA", "slack:channel:C_BETA"],
+      null,
+    );
   });
 
   it("lists WhatsApp DM members through the agent route-members endpoint", async () => {
@@ -828,7 +849,7 @@ describe("agentRoutes", () => {
   it("lists completed outputs for an agent", async () => {
     const service = createService({
       listDefinitions: vi.fn(() => [{ key: "daily-brief" }]),
-      listOutputsForUser: vi.fn(async () => ({ outputs: [{ id: "out-1" }], nextCursor: "out-1" })),
+      listOutputsForViewer: vi.fn(async () => ({ outputs: [{ id: "out-1" }], nextCursor: "out-1" })),
     });
     const app = createRoutesTestApp(service);
 
@@ -836,13 +857,16 @@ describe("agentRoutes", () => {
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ outputs: [{ id: "out-1" }], nextCursor: "out-1" });
-    expect(service.listOutputsForUser).toHaveBeenCalledWith("daily-brief", "user-1", { limit: 10, cursor: "old" });
+    expect(service.listOutputsForViewer).toHaveBeenCalledWith("daily-brief", "user-1", "member", {
+      limit: 10,
+      cursor: "old",
+    });
   });
 
   it("returns fan-out generations while keeping legacy generation", async () => {
     const service = createService({
       listDefinitions: vi.fn(() => [{ key: "conversation_summary" }]),
-      requestGenerationForUser: vi.fn(async () => [
+      requestGenerationForViewer: vi.fn(async () => [
         {
           id: "out-a",
           status: "running",
@@ -868,6 +892,12 @@ describe("agentRoutes", () => {
         { id: "out-a", sourceKey: "slack:channel:C_A", status: "running", outputDate: "2026-07-04" },
         { id: "out-b", sourceKey: "slack:channel:C_B", status: "running", outputDate: "2026-07-04" },
       ],
+    });
+    expect(service.requestGenerationForViewer).toHaveBeenCalledWith({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: "user-1",
+      viewerRole: "member",
+      triggerType: "manual",
     });
   });
 
