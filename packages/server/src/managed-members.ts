@@ -77,9 +77,15 @@ export async function registerManagedTenantMember(
   }
 
   const record = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+  const emailSent = record.emailSent === true;
+  const whatsappSent = record.whatsappSent === true;
+  if (input.sendInvite !== false && !emailSent) {
+    throw new ManagedMemberRegistrationError(502, "INVITE_DELIVERY_FAILED", "Managed member invite delivery failed");
+  }
+
   return {
     registered: true,
-    emailSent: record.emailSent === true,
-    whatsappSent: record.whatsappSent === true,
+    emailSent,
+    whatsappSent,
   };
 }

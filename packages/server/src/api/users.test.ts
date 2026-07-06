@@ -161,7 +161,7 @@ describe("Users API — agent fields", () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(
-        new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: true }), { status: 200 }),
+        new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
       );
 
     const res = await managedApp.request("/api/users", {
@@ -194,6 +194,44 @@ describe("Users API — agent fields", () => {
         }),
       }),
     );
+    fetchMock.mockRestore();
+  });
+
+  it("rejects managed human members when platform email invite delivery is incomplete", async () => {
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ ok: true, emailSent: false, whatsappSent: true }), { status: 200 }),
+      );
+
+    const res = await managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Person",
+        type: "human",
+        email: "managed.incomplete@test.com",
+        whatsappNumber: "+14155550107",
+      }),
+    });
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: {
+        code: "MANAGED_MEMBER_REGISTRATION_FAILED",
+        message: "Managed member invite delivery failed",
+      },
+    });
+    await expect(createUserRepository(db).findByEmail("managed.incomplete@test.com")).resolves.toBeUndefined();
     fetchMock.mockRestore();
   });
 
