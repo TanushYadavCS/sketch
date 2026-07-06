@@ -55,6 +55,11 @@ import {
 } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { STRUCTURAL_TASK_FILE_TYPES } from "./document-facts";
+import {
+  type NameDedupEntityType,
+  reconcileMissingNameEmbeddings,
+  retrieveNameDedupCandidates,
+} from "./embeddings/trunk-name-embeddings";
 import type { EmbeddingProvider } from "./embeddings/types";
 import { isGenericEngagementName } from "./engagement-name-filter";
 import { isCodeShapedFeatureName } from "./feature-name-filter";
@@ -491,6 +496,37 @@ type DedupAdjudicationRow = {
 function isProjectOrProductMention(mention: ExtractedMention): boolean {
   const type = mention.type.trim().toLowerCase();
   return type === "project" || type === "product";
+}
+
+export function projectProductMentionNames(mentions: Array<Pick<ExtractedMention, "mention" | "type">>) {
+  const seen = new Set<string>();
+  const queries: Array<{ name: string; type: NameDedupEntityType }> = [];
+  for (const mention of mentions) {
+    const name = mention.mention.trim();
+    const type = mention.type.trim().toLowerCase();
+    if (!name) continue;
+    if (type !== "project" && type !== "product") continue;
+    const key = `${type}:${name.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    queries.push({ name, type });
+  }
+  return queries;
+}
+
+export function mergeKnownEntities(
+  existing: KnownEntityForPrompt[],
+  retrieved: KnownEntityForPrompt[],
+): KnownEntityForPrompt[] {
+  const byKey = new Map<string, KnownEntityForPrompt>();
+  for (const entity of existing) {
+    byKey.set(`${entity.type}:${entity.name.toLowerCase()}`, entity);
+  }
+  for (const entity of retrieved) {
+    const key = `${entity.type}:${entity.name.toLowerCase()}`;
+    if (!byKey.has(key)) byKey.set(key, entity);
+  }
+  return Array.from(byKey.values());
 }
 
 function normalizeDedupRejectionKey(entityId: string, mentionName: string): string {
@@ -1106,14 +1142,21 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   );
 
   if (deps.experimentalFlag) {
-    const rejectedKnownMatchPairs = await listRejectedKnownMatchPairs(db, deps.knownEntities);
-    const canonicalRewriteMap = await adjudicateKnownMatches(generator, extraction.mentions, deps.knownEntities, {
+    if (deps.embeddingProvider) {
+      await reconcileMissingNameEmbeddings(db, deps.embeddingProvider);
+    }
+    const retrievedKnown = deps.embeddingProvider
+      ? await retrieveNameDedupCandidates(db, deps.embeddingProvider, projectProductMentionNames(extraction.mentions))
+      : [];
+    const widenedKnown = mergeKnownEntities(deps.knownEntities ?? [], retrievedKnown);
+    const rejectedKnownMatchPairs = await listRejectedKnownMatchPairs(db, widenedKnown);
+    const canonicalRewriteMap = await adjudicateKnownMatches(generator, extraction.mentions, widenedKnown, {
       fileId: file.id,
       debugDumpDir: deps.debugDumpDir,
       logger,
       rejectedKnownMatchPairs,
     });
-    resolveKnownMatches(extraction.mentions, deps.knownEntities);
+    resolveKnownMatches(extraction.mentions, widenedKnown);
     applyCanonicalRewriteMap(extraction, canonicalRewriteMap);
   }
 
