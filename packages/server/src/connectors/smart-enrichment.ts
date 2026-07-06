@@ -9,12 +9,13 @@
  *
  * Falls back to deterministic enrichment when Gemini is unavailable.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { createEntityRepository } from "../db/repositories/entities";
+import { upsertFeatureFact } from "../db/repositories/features";
 import {
   type UpsertIndexedFileFactInput,
   buildIndexedFileFactKey,
@@ -40,9 +41,12 @@ import {
   cleanupRelationshipEvidenceForFacts,
   materializeUnmaterializedFacts,
 } from "../entities/materialize";
+import { normalizeEntityMatchName } from "../entities/materialize-deps";
+import { reconcileFeatureSubEntity } from "../entities/materialize-feature";
+import type { EntityRow, MaterializeDeps } from "../entities/materialize-types";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { type ProposeEntityType, proposeEntity } from "../entities/propose";
-import { validateLearnedFact, validateLlmMention } from "../entities/validators";
+import { isEmailProviderName, validateLearnedFact, validateLlmMention } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { STRUCTURAL_TASK_FILE_TYPES } from "./document-facts";
 import type { EmbeddingProvider } from "./embeddings/types";
@@ -102,6 +106,12 @@ function proposableEntityTypes(experimentalFlag = false, fileType?: string | nul
   return set;
 }
 
+function extractionValidTypes(experimentalFlag = false, fileType?: string | null): Set<string> {
+  const types = new Set<string>(proposableEntityTypes(experimentalFlag, fileType));
+  if (experimentalFlag) types.add("feature");
+  return types;
+}
+
 // ── Types ────────────────────────────────────────────────────────────────
 
 interface ExtractedMention {
@@ -109,6 +119,7 @@ interface ExtractedMention {
   type: string;
   variations: string[];
   confidence?: number;
+  parentProduct?: string;
 }
 
 interface ExtractedRelationEndpoint {
@@ -279,12 +290,12 @@ export async function extractEntities(
   participantBlock?: string,
   dumpDir?: string,
   experimentalFlag = false,
-  allowedTypes = proposableEntityTypes(experimentalFlag, file.fileType),
+  allowedTypes = extractionValidTypes(experimentalFlag, file.fileType),
 ): Promise<EntityExtractionResult> {
   const truncatedContent = file.content.slice(0, MAX_CONTENT_CHARS);
 
   const orgSection = orgContext?.description
-    ? `\nOrganization: ${orgContext.orgName ?? "Unknown"}. ${orgContext.description}${orgContext.industry ? ` (Industry: ${orgContext.industry})` : ""}\n`
+    ? `\nBackground on the organization that operates this system (${orgContext.orgName ?? "Unknown"}${orgContext.industry ? `, industry: ${orgContext.industry}` : ""}). This is context for disambiguation only — do NOT extract an entity merely because it is named in this background. Extract only entities the document content below actually refers to:\n${orgContext.description}\n`
     : "";
   const disambiguationSection = orgContext?.disambiguationGuidance
     ? `\nProduct/disambiguation guidance:\n${orgContext.disambiguationGuidance}\n`
@@ -322,6 +333,18 @@ export async function extractEntities(
   const toolFocusLine = experimentalFlag
     ? "- **Tools**: third-party SaaS apps/platforms the org uses (e.g., Slack, Notion, Zoom, Figma, GitHub)\n"
     : "";
+  const featureFocusLine = experimentalFlag
+    ? '- **Features**: a feature is a named sub-capability, module, tab, or screen within a product (e.g., "CRM Analytics", "Push Notifications"). Emit it as type "feature" and set "parentProduct" to the product it belongs to. Never emit a feature as a product or project.\n'
+    : "";
+  const featureSchemaInstruction = experimentalFlag
+    ? '\nFor feature mentions, include "parentProduct" with the product the feature belongs to. Omit "parentProduct" for non-feature mentions.\n'
+    : "";
+  const mentionExamples = experimentalFlag
+    ? `    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86 },
+    { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"], "confidence": 0.95 },
+    { "mention": "CRM Analytics", "type": "feature", "parentProduct": "Canvas CRM", "variations": ["Analytics tab"], "confidence": 0.91 }`
+    : `    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86 },
+    { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"], "confidence": 0.95 }`;
   const relationshipTypesPrompt = `Valid relationship types:
 - "works_at": person -> company (the person is employed by the company)
 - "engaged_with": person -> company (the person is working with, for, or delivered to an external company without being employed by it — vendor, consultancy, or client-engagement context)
@@ -345,7 +368,7 @@ Extract entities that a business team would want to track and reference across d
 - **Companies**: external businesses, clients, partners, vendors
 - **Products**: named products or services your org builds or uses. When product entries appear in the Known entities section, treat that injected known-products list as the source of truth instead of inventing product names.
 - **Projects**: named umbrella engagements or programs with their own scope and timeline (e.g., "OW Tourism Dashboard", "Paid Member Migration Phase 2", "K8S Migration"). A project is the umbrella, NOT a single ticket, pull request, or one feature of a product.
-${toolFocusLine}
+${toolFocusLine}${featureFocusLine}
 
 DO NOT extract:
 - Email addresses, phone numbers, URLs, or other system identifiers — these are stored separately. If a person is identifiable by name, use the name (e.g., "Sarah Chen"); never use an email address as the mention.
@@ -380,6 +403,7 @@ Type disambiguation:
 - Any mention ending in "Pvt Ltd", "Private Limited", "Inc", "LLC", "Ltd", "GmbH", "Consulting", "Solutions", or "Technologies" is type "company", never "person", regardless of where it appears (including the participant block).
 
 For each entity, provide the primary name, type, name variations, and a confidence score in [0, 1] reflecting how directly grounded the mention is in the text.
+${featureSchemaInstruction}
 
 If email thread context is provided, use it only to resolve references in the current message. Do not extract an entity or relationship unless the current message refers to it directly or indirectly.
 
@@ -398,8 +422,7 @@ When a "Meeting participants" block is present above and lists attendees from mu
 Return one JSON object:
 {
   "mentions": [
-    { "mention": "Project Atlas", "type": "project", "variations": ["Atlas", "the Atlas deal"], "confidence": 0.86 },
-    { "mention": "Sarah Chen", "type": "person", "variations": ["Sarah", "S. Chen"], "confidence": 0.95 }
+${mentionExamples}
   ],
   "relations": [
     {
@@ -790,7 +813,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   const { db, logger, generator, embeddingProvider } = deps;
   const entityRepo = createEntityRepository(db);
   const fileVersion = contentVersionOf(file);
-  const allowedTypes = proposableEntityTypes(deps.experimentalFlag, file.fileType);
+  const validExtractionTypes = extractionValidTypes(deps.experimentalFlag, file.fileType);
 
   const fileMeta = {
     fileId: file.id,
@@ -814,7 +837,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
       deps.participantBlock,
       deps.debugDumpDir,
       deps.experimentalFlag,
-      allowedTypes,
+      validExtractionTypes,
     );
   } catch (err) {
     logger.error({ ...fileMeta, stage: "extractEntities", err }, "smartEnrichFile: stage failed");
@@ -832,7 +855,7 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
   );
 
   await deps.ensureFresh?.();
-  const writtenLlmFactKeys = await reconcileLlmExtractionFacts(deps, file, extraction, allowedTypes);
+  const writtenLlmFactKeys = await reconcileLlmExtractionFacts(deps, file, extraction, validExtractionTypes);
   try {
     await deps.ensureFresh?.();
   } catch (err) {
@@ -842,7 +865,10 @@ export async function smartEnrichFile(deps: SmartEnrichmentDeps, file: FileConte
     throw err;
   }
 
-  const { matched, unmatched } = await matchEntities(db, extraction.mentions);
+  const matchableMentions = deps.experimentalFlag
+    ? extraction.mentions.filter((mention) => !isFeatureMention(mention))
+    : extraction.mentions;
+  const { matched, unmatched } = await matchEntities(db, matchableMentions);
   const allMatched = matched.map((m) => m.entity);
   logger.debug(
     { fileId: file.id, matchedCount: matched.length, unmatchedCount: unmatched.length },
@@ -978,7 +1004,7 @@ async function reconcileLlmExtractionFacts(
   deps: SmartEnrichmentDeps,
   file: FileContext,
   extraction: EntityExtractionResult,
-  allowedTypes: Set<ProposeEntityType>,
+  allowedTypes: Set<string>,
 ): Promise<string[]> {
   const { db } = deps;
   const factRepo = createIndexedFileFactRepository(db);
@@ -990,7 +1016,9 @@ async function reconcileLlmExtractionFacts(
   const contentHash = file.contentHash ?? `missing-content-hash:${file.id}`;
   const emittedMentionKeys: string[] = [];
   const emittedRelationKeys: string[] = [];
+  const emittedFeatureKeys: string[] = [];
   const writtenFactKeys: string[] = [];
+  let materializeDeps: MaterializeDeps | null = null;
 
   try {
     for (const rawMention of extraction.mentions) {
@@ -998,10 +1026,24 @@ async function reconcileLlmExtractionFacts(
         ...rawMention,
         type: coerceMentionType(rawMention.mention, rawMention.type, deps.experimentalFlag),
       };
-      if (!allowedTypes.has(mention.type as ProposeEntityType)) {
+      if (!allowedTypes.has(mention.type)) {
         deps.logger.info(
           { fileId: file.id, displayName: mention.mention, entityType: mention.type },
           "Dropped LLM mention with unsupported type",
+        );
+        continue;
+      }
+      if (mention.type === "company" && isEmailProviderName(mention.mention)) {
+        deps.logger.info({ fileId: file.id, displayName: mention.mention }, "Dropped email-provider company mention");
+        continue;
+      }
+      if (
+        mention.type === "project" &&
+        normalizeDocumentTitle(mention.mention) === normalizeDocumentTitle(file.fileName)
+      ) {
+        deps.logger.info(
+          { fileId: file.id, displayName: mention.mention },
+          "Dropped project mention matching document title",
         );
         continue;
       }
@@ -1013,12 +1055,50 @@ async function reconcileLlmExtractionFacts(
         fileContent: file.content,
         resolutionContext: file.threadContext,
         source: "llm_extraction",
+        experimentalFlag: deps.experimentalFlag,
       });
       if (!validation.ok) {
         deps.logger.info(
           { fileId: file.id, displayName: mention.mention, reason: validation.reason },
           "Dropped invalid LLM mention",
         );
+        continue;
+      }
+      if (mention.type === "feature") {
+        materializeDeps ??= await buildMaterializeDeps(db, { experimentalFlag: deps.experimentalFlag });
+        const parent = resolveFeatureParentProduct(materializeDeps, mention.parentProduct);
+        if (!parent) {
+          deps.logger.info(
+            { fileId: file.id, displayName: mention.mention, parentProduct: mention.parentProduct ?? null },
+            "Dropped LLM feature mention without a unique parent product",
+          );
+          continue;
+        }
+        const featureId = buildLlmFeatureId(file.id, mention.mention, parent.id);
+        const corroborationKey = buildLlmFeatureCorroborationKey(mention.mention, parent.id);
+        await deps.ensureFresh?.();
+        const result = await upsertFeatureFact(db, {
+          experimentalFlag: deps.experimentalFlag,
+          indexedFileId: file.id,
+          connectorConfigId: file.connectorConfigId,
+          createdByUserId: owner?.created_by ?? null,
+          contentHash,
+          source: "llm_extraction",
+          featureId,
+          featureName: mention.mention,
+          parentEntityId: parent.id,
+          status: "proposed",
+          evidence: { fileIds: [file.id], entityIds: [parent.id] },
+          corroborationKey,
+          promptVersion: LLM_EXTRACTION_PROMPT_VERSION,
+          model: "gemini",
+          confidence: typeof mention.confidence === "number" ? mention.confidence : 0.7,
+        });
+        if (result.emitted && result.factKey) {
+          emittedFeatureKeys.push(result.factKey);
+          writtenFactKeys.push(result.factKey);
+        }
+        await yieldToEventLoop();
         continue;
       }
       const input: UpsertIndexedFileFactInput = {
@@ -1071,6 +1151,11 @@ async function reconcileLlmExtractionFacts(
     }
 
     await deps.ensureFresh?.();
+    const featureCorroborationKeys = await collectStaleFeatureCorroborationKeys(
+      db,
+      file.id,
+      new Set(emittedFeatureKeys),
+    );
     const mentionReconcile = await factRepo.reconcileStaleFacts(
       { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_extracted" },
       new Set(emittedMentionKeys),
@@ -1079,11 +1164,21 @@ async function reconcileLlmExtractionFacts(
       { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "llm_relation" },
       new Set(emittedRelationKeys),
     );
+    await factRepo.reconcileStaleFacts(
+      { kind: "file", indexedFileId: file.id, source: "llm_extraction", factType: "feature" },
+      new Set(emittedFeatureKeys),
+    );
     await cleanupRelationshipEvidenceForFacts(db, [
       ...mentionReconcile.tombstonedFactIds,
       ...relationReconcile.tombstonedFactIds,
     ]);
     await cleanupEmptyRelationships(db);
+    if (featureCorroborationKeys.length > 0) {
+      materializeDeps ??= await buildMaterializeDeps(db, { experimentalFlag: deps.experimentalFlag });
+      for (const corroborationKey of featureCorroborationKeys) {
+        await reconcileFeatureSubEntity(materializeDeps, corroborationKey);
+      }
+    }
 
     await deps.ensureFresh?.();
     await db
@@ -1104,17 +1199,87 @@ async function reconcileLlmExtractionFacts(
   }
 }
 
+function isFeatureMention(mention: ExtractedMention): boolean {
+  return mention.type.trim().toLowerCase() === "feature";
+}
+
+function resolveFeatureParentProduct(
+  deps: MaterializeDeps,
+  parentProduct: string | null | undefined,
+): EntityRow | null {
+  const normalized = normalizeEntityMatchName("product", parentProduct ?? "");
+  if (!normalized) return null;
+  const matches = [
+    ...deps.lookup.getByNormalizedName(normalized),
+    ...(deps.lookup.getByAlias?.(normalized) ?? []),
+  ].filter((entity) => entity.source_type === "product");
+  const unique = new Map(matches.map((entity) => [entity.id, entity]));
+  return unique.size === 1 ? [...unique.values()][0] : null;
+}
+
+function buildLlmFeatureId(indexedFileId: string, featureName: string, parentEntityId: string): string {
+  return `llm-feature:${indexedFileId}:${createHash("sha256")
+    .update([normalizeName(featureName), parentEntityId].join("\x1f"))
+    .digest("hex")}`;
+}
+
+function buildLlmFeatureCorroborationKey(featureName: string, parentEntityId: string): string {
+  return createHash("sha256")
+    .update([normalizeName(featureName), parentEntityId].join("\x1f"))
+    .digest("hex");
+}
+
+async function collectStaleFeatureCorroborationKeys(
+  db: Kysely<DB>,
+  indexedFileId: string,
+  seenFactKeys: Set<string>,
+): Promise<string[]> {
+  let query = db
+    .selectFrom("indexed_file_facts")
+    .select("raw")
+    .where("indexed_file_id", "=", indexedFileId)
+    .where("source", "=", "llm_extraction")
+    .where("fact_type", "=", "feature")
+    .where("deleted_at", "is", null);
+  if (seenFactKeys.size > 0) {
+    query = query.where("fact_key", "not in", [...seenFactKeys]);
+  }
+  const rows = await query.execute();
+  const keys = rows.map((row) => readFeatureCorroborationKey(row.raw)).filter((key): key is string => Boolean(key));
+  return [...new Set(keys)];
+}
+
+function readFeatureCorroborationKey(raw: string | null): string | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { corroborationKey?: unknown };
+    return typeof parsed.corroborationKey === "string" && parsed.corroborationKey.length > 0
+      ? parsed.corroborationKey
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 async function tombstoneWrittenLlmFacts(deps: SmartEnrichmentDeps, factKeys: string[]): Promise<void> {
   const keys = [...new Set(factKeys)];
   if (keys.length === 0) return;
   const now = new Date().toISOString();
   const facts = await deps.db
     .selectFrom("indexed_file_facts")
-    .select(["id", "indexed_file_id"])
+    .select(["id", "indexed_file_id", "fact_type", "raw"])
     .where("fact_key", "in", keys)
     .where("deleted_at", "is", null)
     .execute();
   if (facts.length === 0) return;
+  const featureCorroborationKeys = [
+    ...new Set(
+      facts
+        .filter((fact) => fact.fact_type === "feature")
+        .map((fact) => readFeatureCorroborationKey(fact.raw))
+        .filter((key): key is string => Boolean(key)),
+    ),
+  ];
   await deps.db
     .updateTable("indexed_file_facts")
     .set({ deleted_at: now, materialized_at: null, updated_at: now })
@@ -1136,6 +1301,28 @@ async function tombstoneWrittenLlmFacts(deps: SmartEnrichmentDeps, factKeys: str
     .where("source", "=", "llm_extraction")
     .where("confidence", "!=", "EXTRACTED")
     .execute();
+  if (featureCorroborationKeys.length > 0) {
+    const materializeDeps = await buildMaterializeDeps(deps.db, { experimentalFlag: deps.experimentalFlag });
+    for (const corroborationKey of featureCorroborationKeys) {
+      await reconcileFeatureSubEntity(materializeDeps, corroborationKey);
+    }
+  }
+}
+
+/**
+ * Normalize a document title for comparison against an extracted project name:
+ * strip leading reply/forward prefixes (`Re:`, `Fwd:`, `Fw:`, possibly repeated)
+ * then lowercase/collapse whitespace via {@link normalizeName}. Used to drop a
+ * `project` mention that is merely the email subject / file title restated.
+ */
+function normalizeDocumentTitle(title: string | null | undefined): string {
+  let current = title ?? "";
+  let previous: string;
+  do {
+    previous = current;
+    current = current.replace(/^\s*(re|fwd|fw)\s*:\s*/i, "");
+  } while (current !== previous);
+  return normalizeName(current);
 }
 
 function buildRelationFactInput(input: {
@@ -1145,7 +1332,7 @@ function buildRelationFactInput(input: {
   relation: ExtractedRelation;
   mentions: ExtractedMention[];
   experimentalFlag?: boolean;
-  allowedTypes: Set<ProposeEntityType>;
+  allowedTypes: Set<string>;
 }): UpsertIndexedFileFactInput | null {
   const relationType = normalizeRelationType(input.relation.type);
   if (!relationType || !isHighConfidenceRelation(input.relation.confidence)) return null;
@@ -1160,9 +1347,12 @@ function buildRelationFactInput(input: {
   );
   if (!sourceType || !targetType) return null;
   if (!normalizeRelationEndpointType(sourceType) || !normalizeRelationEndpointType(targetType)) return null;
+  if (!input.allowedTypes.has(sourceType) || !input.allowedTypes.has(targetType)) {
+    return null;
+  }
   if (
-    !input.allowedTypes.has(sourceType as ProposeEntityType) ||
-    !input.allowedTypes.has(targetType as ProposeEntityType)
+    (sourceType === "company" && isEmailProviderName(sourceName)) ||
+    (targetType === "company" && isEmailProviderName(targetName))
   ) {
     return null;
   }
