@@ -1158,6 +1158,12 @@ export interface AgentRoute {
   schedule: AgentRouteSchedule | null;
   destination: AgentRouteDestination;
   enabled: boolean;
+  owner?: {
+    userId: string;
+    name: string;
+    email: string | null;
+    authRole: string;
+  };
 }
 
 export interface AgentRouteMember {
@@ -1362,10 +1368,10 @@ export const api = {
         body: JSON.stringify(patch),
       });
     },
-    routeMembers(agentKey: string, sources: AgentSourceKey[]) {
+    routeMembers(agentKey: string, sources: AgentSourceKey[], routeId?: string | null) {
       return request<{ members: AgentRouteMember[] }>(`/api/agents/${agentKey}/route-members`, {
         method: "POST",
-        body: JSON.stringify({ sources }),
+        body: JSON.stringify({ sources, ...(routeId ? { routeId } : {}) }),
       });
     },
     whatsappDmMembers(agentKey: string) {

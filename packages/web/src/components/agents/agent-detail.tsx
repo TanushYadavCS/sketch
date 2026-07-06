@@ -387,6 +387,11 @@ function SummariserIndex({
                     {input.extra > 0 ? (
                       <span className="shrink-0 text-[11px] text-muted-foreground">+{input.extra}</span>
                     ) : null}
+                    {route.owner ? (
+                      <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10.5px] text-muted-foreground">
+                        {route.owner.name}
+                      </span>
+                    ) : null}
                   </span>
                   <span className="text-[12px] text-muted-foreground">{deliversLabel(route)}</span>
                   <span className="w-16 text-right text-[12px] tabular-nums text-muted-foreground">

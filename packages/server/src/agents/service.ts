@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { areJidsSameUser } from "@whiskeysockets/baileys";
@@ -23,6 +24,7 @@ import {
   type AgentRouteSchedule,
   type AgentSourceConfig,
   type AgentSourceKey,
+  type AgentUserConfigWithOwner,
   type AgentUserPrefs,
   createAgentOutputRepository,
 } from "../db/repositories/agent-outputs";
@@ -54,6 +56,8 @@ const WEEKDAY_INDEX = new Map([
 ]);
 
 type UserRow = Selectable<UsersTable>;
+
+export type AgentViewerRole = "admin" | "member";
 
 export type AgentGenerationScope =
   | { kind: "combined"; sourceKey: string; sourceLabel: string | null }
@@ -136,9 +140,18 @@ export interface AgentConfigView {
   deliveryModel: AgentDeliveryModel;
   sourceConfig: AgentSourceConfigDef | null;
   sources: AgentSourceConfig[];
-  routes: AgentRoute[];
+  routes: AgentConfigRouteView[];
   sections: AgentSectionView[];
 }
+
+export interface AgentRouteOwnerView {
+  userId: string;
+  name: string;
+  email: string | null;
+  authRole: string;
+}
+
+export type AgentConfigRouteView = AgentRoute & { owner?: AgentRouteOwnerView };
 
 export interface AgentRouteMember {
   userId: string;
@@ -177,7 +190,20 @@ export interface AgentSummaryView {
   scheduleMinute: number;
   sourceConfig: AgentSourceConfigDef | null;
   sources: AgentSourceConfig[];
-  routes: AgentRoute[];
+  routes: AgentConfigRouteView[];
+}
+
+export interface AgentConfigUpdatePatch {
+  enabled?: boolean;
+  scheduleHour?: number;
+  scheduleMinute?: number;
+  maxItemsPerSection?: number;
+  sections?: Record<string, boolean>;
+  focus?: string | null;
+  delivery?: AgentDeliveryConfig | null;
+  deliveryModel?: AgentDeliveryModel;
+  sources?: AgentSourceConfig[];
+  routes?: AgentConfigRouteView[];
 }
 
 export class AgentDeliveryTargetError extends Error {}
@@ -222,6 +248,62 @@ function routeScopeKeyForSources(sources: readonly AgentSourceKey[]): string {
 
 function routeIdForSources(sources: readonly AgentSourceKey[]): string {
   return routeScopeKeyForSources(sources);
+}
+
+const ORG_ROUTE_ID_PREFIX = "org:";
+
+function encodeRouteIdSegment(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
+}
+
+function decodeRouteIdSegment(value: string): string | null {
+  try {
+    return Buffer.from(value, "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function encodeOrgRouteId(ownerUserId: string, routeId: string): string {
+  return `${ORG_ROUTE_ID_PREFIX}${encodeRouteIdSegment(ownerUserId)}:${encodeRouteIdSegment(routeId)}`;
+}
+
+function decodeOrgRouteId(routeId: string): { ownerUserId: string; routeId: string } | null {
+  if (!routeId.startsWith(ORG_ROUTE_ID_PREFIX)) return null;
+  const [ownerSegment, routeSegment, ...extra] = routeId.slice(ORG_ROUTE_ID_PREFIX.length).split(":");
+  if (!ownerSegment || !routeSegment || extra.length > 0) return null;
+  const ownerUserId = decodeRouteIdSegment(ownerSegment);
+  const decodedRouteId = decodeRouteIdSegment(routeSegment);
+  return ownerUserId && decodedRouteId ? { ownerUserId, routeId: decodedRouteId } : null;
+}
+
+function routeOwnerView(owner: AgentUserConfigWithOwner): AgentRouteOwnerView {
+  return {
+    userId: owner.userId,
+    name: owner.name,
+    email: owner.email,
+    authRole: owner.authRole,
+  };
+}
+
+function routeWithOwner(route: AgentRoute, owner: AgentUserConfigWithOwner): AgentConfigRouteView {
+  return {
+    ...route,
+    id: encodeOrgRouteId(owner.userId, route.id),
+    owner: routeOwnerView(owner),
+  };
+}
+
+function stripOrgRouteOwner(route: AgentConfigRouteView): { ownerUserId: string | null; route: AgentRoute } {
+  const decoded = decodeOrgRouteId(route.id);
+  const { owner: _owner, ...rest } = route;
+  return {
+    ownerUserId: decoded?.ownerUserId ?? null,
+    route: {
+      ...rest,
+      id: decoded?.routeId ?? route.id,
+    },
+  };
 }
 
 export function scopeKeyForRoute(route: Pick<AgentRoute, "sources">, resolvedSources: AgentSourceConfig[]): string {
@@ -776,14 +858,125 @@ export class AgentRunService {
     };
   }
 
+  private usesOrgWideSummarizerView(agentKey: string, role: AgentViewerRole): boolean {
+    return role === "admin" && agentKey === CONVERSATION_SUMMARY_AGENT_KEY;
+  }
+
+  private async getOrgWideSummarizerConfigView(
+    def: AgentDefinition,
+    viewerUserId: string,
+  ): Promise<AgentConfigView | null> {
+    const [owners, viewerConfig] = await Promise.all([
+      this.repo.listHumanConfigs(def.key),
+      this.resolveConfig(def, viewerUserId),
+    ]);
+    if (owners.length === 0) return this.getConfigView(def.key, viewerUserId);
+
+    const sources: AgentSourceConfig[] = [];
+    const sourceKeys = new Set<string>();
+    const routes: AgentConfigRouteView[] = [];
+    let enabled = false;
+
+    for (const owner of owners) {
+      const config = await this.resolveConfig(def, owner.userId);
+      enabled = enabled || config.enabled;
+      for (const source of config.sources) {
+        const key = sourceKeyForTarget(source);
+        if (sourceKeys.has(key)) continue;
+        sourceKeys.add(key);
+        sources.push(source);
+      }
+      routes.push(...config.configuredRoutes.map((route) => routeWithOwner(route, owner)));
+    }
+
+    return {
+      agentKey: def.key,
+      title: def.title,
+      tagline: def.tagline,
+      description: def.description,
+      enabled,
+      scheduleHour: viewerConfig.scheduleHour,
+      scheduleMinute: viewerConfig.scheduleMinute,
+      timezone: viewerConfig.timezone,
+      maxItemsPerSection: viewerConfig.maxItemsPerSection,
+      itemsPerSectionRange: def.itemsPerSectionRange,
+      focus: viewerConfig.focus,
+      delivery: viewerConfig.delivery,
+      deliveryModel: viewerConfig.deliveryModel,
+      sourceConfig: def.sourceConfig ?? null,
+      sources,
+      routes,
+      sections: def.sections.map((section) => ({
+        key: section.key,
+        title: section.title,
+        enabled: viewerConfig.enabledSections[section.key] ?? section.enabledByDefault,
+      })),
+    };
+  }
+
+  private async sourceLookupForOwnerPatch(
+    def: AgentDefinition,
+    owners: AgentUserConfigWithOwner[],
+    patchSources: AgentSourceConfig[] | undefined,
+  ): Promise<Map<string, AgentSourceConfig>> {
+    const lookup = new Map<string, AgentSourceConfig>();
+    for (const source of patchSources ?? []) lookup.set(sourceKeyForTarget(source), source);
+    for (const owner of owners) {
+      const config = await this.resolveConfig(def, owner.userId);
+      for (const source of config.sources) {
+        const key = sourceKeyForTarget(source);
+        if (!lookup.has(key)) lookup.set(key, source);
+      }
+    }
+    return lookup;
+  }
+
+  private sourcesForRoutes(routes: AgentRoute[], lookup: Map<string, AgentSourceConfig>): AgentSourceConfig[] {
+    const sources: AgentSourceConfig[] = [];
+    const seen = new Set<string>();
+    for (const route of routes) {
+      for (const key of route.sources) {
+        if (seen.has(key)) continue;
+        const source = lookup.get(key) ?? parseSourceKey(key);
+        seen.add(key);
+        sources.push(source);
+      }
+    }
+    return sources;
+  }
+
   listDefinitions(): readonly AgentDefinition[] {
     return listAgentDefinitions();
   }
 
-  async listForUser(userId: string): Promise<AgentSummaryView[]> {
+  async resolveConfigControlUserId(_agentKey: string, viewerUserId: string, _role: AgentViewerRole): Promise<string> {
+    return viewerUserId;
+  }
+
+  async listForViewer(userId: string, role: AgentViewerRole): Promise<AgentSummaryView[]> {
     const result: AgentSummaryView[] = [];
     for (const def of listAgentDefinitions()) {
-      const config = await this.resolveConfig(def, userId);
+      if (this.usesOrgWideSummarizerView(def.key, role)) {
+        const agent = await this.getOrgWideSummarizerConfigView(def, userId);
+        if (!agent) continue;
+        result.push({
+          key: def.key,
+          title: def.title,
+          tagline: def.tagline,
+          description: def.description,
+          category: def.category,
+          version: def.version,
+          enabled: agent.enabled,
+          scheduleHour: agent.scheduleHour,
+          scheduleMinute: agent.scheduleMinute,
+          sourceConfig: def.sourceConfig ?? null,
+          sources: agent.sources,
+          routes: agent.routes,
+        });
+        continue;
+      }
+      const configUserId = await this.resolveConfigControlUserId(def.key, userId, role);
+      const config = await this.resolveConfig(def, configUserId);
       result.push({
         key: def.key,
         title: def.title,
@@ -800,6 +993,22 @@ export class AgentRunService {
       });
     }
     return result;
+  }
+
+  async listForUser(userId: string): Promise<AgentSummaryView[]> {
+    return this.listForViewer(userId, "member");
+  }
+
+  async getConfigViewForViewer(
+    agentKey: string,
+    userId: string,
+    role: AgentViewerRole,
+  ): Promise<AgentConfigView | null> {
+    const def = getAgentDefinition(agentKey);
+    if (!def) return null;
+    if (this.usesOrgWideSummarizerView(agentKey, role)) return this.getOrgWideSummarizerConfigView(def, userId);
+    const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+    return this.getConfigView(agentKey, configUserId);
   }
 
   async getConfigView(agentKey: string, userId: string): Promise<AgentConfigView | null> {
@@ -831,21 +1040,61 @@ export class AgentRunService {
     };
   }
 
+  async updateConfigForViewer(
+    agentKey: string,
+    userId: string,
+    role: AgentViewerRole,
+    patch: AgentConfigUpdatePatch,
+  ): Promise<AgentConfigView | null> {
+    const def = getAgentDefinition(agentKey);
+    if (!def) return null;
+    if (!this.usesOrgWideSummarizerView(agentKey, role)) {
+      const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+      return this.updateConfigForUser(agentKey, configUserId, patch);
+    }
+
+    const hasRoutePatch = patch.routes !== undefined;
+    const owners = await this.repo.listHumanConfigs(def.key);
+
+    if (!hasRoutePatch) {
+      const patchKeys = Object.keys(patch);
+      const isEnabledOnlyPatch = patch.enabled !== undefined && patchKeys.length === 1;
+      const targetUserIds = isEnabledOnlyPatch && owners.length > 0 ? owners.map((owner) => owner.userId) : [userId];
+      for (const targetUserId of targetUserIds) await this.updateConfigForUser(agentKey, targetUserId, patch);
+      return this.getOrgWideSummarizerConfigView(def, userId);
+    }
+
+    const routesByOwner = new Map<string, AgentRoute[]>();
+    if (patch.routes !== undefined) {
+      for (const owner of owners) routesByOwner.set(owner.userId, []);
+    }
+
+    for (const route of patch.routes ?? []) {
+      const stripped = stripOrgRouteOwner(route);
+      const ownerUserId = stripped.ownerUserId ?? userId;
+      const routes = routesByOwner.get(ownerUserId) ?? [];
+      routes.push(stripped.route);
+      routesByOwner.set(ownerUserId, routes);
+    }
+
+    const sourceLookup = await this.sourceLookupForOwnerPatch(def, owners, patch.sources);
+    for (const [ownerUserId, routes] of routesByOwner) {
+      const ownerPatch: AgentConfigUpdatePatch = { ...patch };
+      if (patch.routes !== undefined) ownerPatch.routes = routes;
+      if (patch.sources !== undefined) ownerPatch.sources = this.sourcesForRoutes(routes, sourceLookup);
+      if (patch.enabled !== undefined && ownerUserId !== userId && patch.routes !== undefined) {
+        ownerPatch.enabled = undefined;
+      }
+      await this.updateConfigForUser(agentKey, ownerUserId, ownerPatch);
+    }
+
+    return this.getOrgWideSummarizerConfigView(def, userId);
+  }
+
   async updateConfigForUser(
     agentKey: string,
     userId: string,
-    patch: {
-      enabled?: boolean;
-      scheduleHour?: number;
-      scheduleMinute?: number;
-      maxItemsPerSection?: number;
-      sections?: Record<string, boolean>;
-      focus?: string | null;
-      delivery?: AgentDeliveryConfig | null;
-      deliveryModel?: AgentDeliveryModel;
-      sources?: AgentSourceConfig[];
-      routes?: AgentRoute[];
-    },
+    patch: AgentConfigUpdatePatch,
   ): Promise<AgentConfigView | null> {
     const def = getAgentDefinition(agentKey);
     if (!def) return null;
@@ -1135,6 +1384,36 @@ export class AgentRunService {
     return members;
   }
 
+  async listEligibleRouteMembersForViewer(
+    agentKey: string,
+    userId: string,
+    role: AgentViewerRole,
+    sourceKeys: string[],
+    routeId?: string | null,
+  ): Promise<AgentRouteMember[]> {
+    if (!this.usesOrgWideSummarizerView(agentKey, role)) {
+      const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+      return this.listEligibleRouteMembers(configUserId, sourceKeys);
+    }
+    const decoded = routeId ? decodeOrgRouteId(routeId) : null;
+    if (decoded) return this.listEligibleRouteMembers(decoded.ownerUserId, sourceKeys);
+
+    const normalizedSourceKeys = [...new Set(sourceKeys)].sort();
+    const owners = await this.repo.listHumanConfigs(agentKey);
+    for (const owner of owners) {
+      const config = await this.resolveConfig(requireAgentDefinition(agentKey), owner.userId);
+      const match = config.configuredRoutes.find((route) => {
+        const routeSources = [...new Set(route.sources)].sort();
+        return (
+          routeSources.length === normalizedSourceKeys.length &&
+          routeSources.every((source, index) => source === normalizedSourceKeys[index])
+        );
+      });
+      if (match) return this.listEligibleRouteMembers(owner.userId, sourceKeys);
+    }
+    return this.listEligibleRouteMembers(userId, sourceKeys);
+  }
+
   async listWhatsAppDmMembers(): Promise<AgentWhatsAppDmMember[]> {
     const members: AgentWhatsAppDmMember[] = [];
     for (const user of await this.deps.users.list()) {
@@ -1387,9 +1666,59 @@ export class AgentRunService {
     };
   }
 
+  async getLatestForViewer(
+    agentKey: string,
+    userId: string,
+    role: AgentViewerRole,
+    outputDate?: string,
+  ): Promise<{
+    output: AgentOutputApi | null;
+    running: boolean;
+    outputDate: string;
+    timezone: string;
+    enabledSections: string[];
+  }> {
+    if (!this.usesOrgWideSummarizerView(agentKey, role)) {
+      const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+      return this.getLatestForUser(agentKey, configUserId, outputDate);
+    }
+
+    const def = requireAgentDefinition(agentKey);
+    const user = await this.deps.users.findById(userId);
+    if (!user) throw new Error("User not found");
+    const timezone = user.timezone || "UTC";
+    const date = outputDate || localDateInTimezone(new Date(), timezone);
+    const now = new Date();
+    const [completed, running] = await Promise.all([
+      this.repo.findLatestCompletedAcrossHumanUsers(def.key, date),
+      this.repo.findRunningAcrossHumanUsers(def.key, date),
+    ]);
+    return {
+      output: this.toApiOutput(def, completed),
+      running: Boolean(running && !this.isRunningStale(running, now)),
+      outputDate: date,
+      timezone,
+      enabledSections: def.sections.map((section) => section.key),
+    };
+  }
+
   async getByIdForUser(agentKey: string, id: string, userId: string): Promise<AgentOutputApi | null> {
     const def = requireAgentDefinition(agentKey);
     return this.toApiOutput(def, await this.repo.getByIdForUser(def.key, id, userId));
+  }
+
+  async getByIdForViewer(
+    agentKey: string,
+    id: string,
+    userId: string,
+    role: AgentViewerRole,
+  ): Promise<AgentOutputApi | null> {
+    const def = requireAgentDefinition(agentKey);
+    if (this.usesOrgWideSummarizerView(agentKey, role)) {
+      return this.toApiOutput(def, await this.repo.getByIdForHumanUser(def.key, id));
+    }
+    const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+    return this.getByIdForUser(agentKey, id, configUserId);
   }
 
   async listOutputsForUser(
@@ -1399,6 +1728,27 @@ export class AgentRunService {
   ): Promise<{ outputs: AgentOutputApi[]; nextCursor: string | null }> {
     const def = requireAgentDefinition(agentKey);
     const result = await this.repo.listCompletedForUser(def.key, userId, options);
+    return {
+      outputs: result.outputs.flatMap((output) => {
+        const api = this.toApiOutput(def, output);
+        return api ? [api] : [];
+      }),
+      nextCursor: result.nextCursor,
+    };
+  }
+
+  async listOutputsForViewer(
+    agentKey: string,
+    userId: string,
+    role: AgentViewerRole,
+    options: { limit?: number; cursor?: string | null } = {},
+  ): Promise<{ outputs: AgentOutputApi[]; nextCursor: string | null }> {
+    const def = requireAgentDefinition(agentKey);
+    if (!this.usesOrgWideSummarizerView(agentKey, role)) {
+      const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+      return this.listOutputsForUser(agentKey, configUserId, options);
+    }
+    const result = await this.repo.listCompletedForHumanUsers(def.key, options);
     return {
       outputs: result.outputs.flatMap((output) => {
         const api = this.toApiOutput(def, output);
@@ -1428,6 +1778,48 @@ export class AgentRunService {
         }
         return { kind: "combined", sourceKey, sourceLabel, route, sources: route.resolvedSources };
       });
+  }
+
+  async requestGenerationForViewer(
+    params: RequestAgentGenerationParams & { viewerRole: AgentViewerRole },
+  ): Promise<AgentOutputRow[]> {
+    const { viewerRole, ...requestParams } = params;
+    if (!this.usesOrgWideSummarizerView(requestParams.agentKey, viewerRole)) {
+      const configUserId = await this.resolveConfigControlUserId(
+        requestParams.agentKey,
+        requestParams.userId,
+        viewerRole,
+      );
+      return this.requestGenerationForUser({ ...requestParams, userId: configUserId });
+    }
+
+    const ownerRoutes = new Map<string, string[] | null>();
+    if (requestParams.routeIds?.length) {
+      for (const routeId of requestParams.routeIds) {
+        const decoded = decodeOrgRouteId(routeId);
+        const ownerUserId = decoded?.ownerUserId ?? requestParams.userId;
+        const plainRouteId = decoded?.routeId ?? routeId;
+        const routeIds = ownerRoutes.get(ownerUserId) ?? [];
+        routeIds.push(plainRouteId);
+        ownerRoutes.set(ownerUserId, routeIds);
+      }
+    } else {
+      const owners = await this.repo.listHumanConfigs(requestParams.agentKey);
+      for (const owner of owners) ownerRoutes.set(owner.userId, null);
+      if (ownerRoutes.size === 0) ownerRoutes.set(requestParams.userId, null);
+    }
+
+    const rows: AgentOutputRow[] = [];
+    for (const [ownerUserId, routeIds] of ownerRoutes) {
+      rows.push(
+        ...(await this.requestGenerationForUser({
+          ...requestParams,
+          userId: ownerUserId,
+          ...(routeIds ? { routeIds } : {}),
+        })),
+      );
+    }
+    return rows;
   }
 
   async requestGenerationForUser(params: RequestAgentGenerationParams): Promise<AgentOutputRow[]> {

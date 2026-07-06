@@ -155,7 +155,7 @@ function SummariserContent({
             ) : null}
           </div>
           <p className="mt-1 text-[13px] text-muted-foreground">
-            Summariser · delivers {deliversLabel(route).toLowerCase()}
+            Summariser{route.owner ? ` · ${route.owner.name}` : ""} · delivers {deliversLabel(route).toLowerCase()}
           </p>
         </div>
         <span className="flex shrink-0 items-center gap-2 text-[12px] font-medium text-muted-foreground">

@@ -13,15 +13,26 @@ import type {
   AgentSourceKey,
 } from "../db/repositories/agent-outputs";
 import type { DB } from "../db/schema";
+import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
 import { getAgentDefinition } from "./registry";
-import { AgentDeliveryTargetError, type AgentOutputApi, type AgentRunService, AgentSourceTargetError } from "./service";
+import {
+  AgentDeliveryTargetError,
+  type AgentOutputApi,
+  type AgentRunService,
+  AgentSourceTargetError,
+  type AgentViewerRole,
+} from "./service";
 import type { AgentDefinition } from "./types";
 
 async function getCurrentUserId(c: { get: (key: "sub" | "email") => string | undefined }, service: AgentRunService) {
   const sub = c.get("sub");
   if (!sub) return null;
   return service.resolveUserId(sub, c.get("email"));
+}
+
+function getCurrentRole(c: { get: (key: "role") => string | undefined }): AgentViewerRole {
+  return c.get("role") === "admin" ? "admin" : "member";
 }
 
 /**
@@ -512,16 +523,17 @@ export function agentRoutes(service: AgentRunService) {
   routes.get("/", async (c) => {
     const userId = await getCurrentUserId(c, service);
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
-    return c.json({ agents: await service.listForUser(userId) });
+    return c.json({ agents: await service.listForViewer(userId, getCurrentRole(c)) });
   });
 
   routes.get("/:agentKey", async (c) => {
     const userId = await getCurrentUserId(c, service);
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
     const agentKey = c.req.param("agentKey");
-    const agent = await service.getConfigView(agentKey, userId);
+    const role = getCurrentRole(c);
+    const agent = await service.getConfigViewForViewer(agentKey, userId, role);
     if (!agent) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
-    const latest = await service.getLatestForUser(agentKey, userId);
+    const latest = await service.getLatestForViewer(agentKey, userId, role);
     return c.json({
       agent,
       output: latest.output,
@@ -538,12 +550,18 @@ export function agentRoutes(service: AgentRunService) {
     const def = getAgentDefinition(agentKey);
     if (!def) return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const role = getCurrentRole(c);
     let patch: ReturnType<typeof parseConfigPatch>;
     let agent: Awaited<ReturnType<AgentRunService["updateConfigForUser"]>>;
     try {
       patch = parseConfigPatch(body, def);
-      await validateDeliveryTargets(service, userId, patch);
-      agent = await service.updateConfigForUser(agentKey, userId, patch);
+      if (role === "admin" && agentKey === CONVERSATION_SUMMARY_AGENT_KEY) {
+        agent = await service.updateConfigForViewer(agentKey, userId, role, patch);
+      } else {
+        const configUserId = await service.resolveConfigControlUserId(agentKey, userId, role);
+        await validateDeliveryTargets(service, configUserId, patch);
+        agent = await service.updateConfigForUser(agentKey, configUserId, patch);
+      }
     } catch (err) {
       if (
         err instanceof ConfigPatchError ||
@@ -567,7 +585,10 @@ export function agentRoutes(service: AgentRunService) {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     try {
       const sources = parseRouteMemberSources(body.sources);
-      return c.json({ members: await service.listEligibleRouteMembers(userId, sources) });
+      const routeId = typeof body.routeId === "string" && body.routeId.trim() ? body.routeId.trim() : null;
+      return c.json({
+        members: await service.listEligibleRouteMembersForViewer(agentKey, userId, getCurrentRole(c), sources, routeId),
+      });
     } catch (err) {
       if (err instanceof ConfigPatchError) {
         return c.json({ error: { code: "VALIDATION_ERROR", message: err.message } }, 400);
@@ -595,7 +616,7 @@ export function agentRoutes(service: AgentRunService) {
     const rawLimit = Number(c.req.query("limit") ?? "20");
     const limit = Number.isInteger(rawLimit) ? rawLimit : 20;
     const cursor = c.req.query("cursor") || null;
-    return c.json(await service.listOutputsForUser(agentKey, userId, { limit, cursor }));
+    return c.json(await service.listOutputsForViewer(agentKey, userId, getCurrentRole(c), { limit, cursor }));
   });
 
   routes.get("/:agentKey/outputs/:id", async (c) => {
@@ -605,7 +626,7 @@ export function agentRoutes(service: AgentRunService) {
     if (!service.listDefinitions().some((def) => def.key === agentKey)) {
       return c.json({ error: { code: "NOT_FOUND", message: "Agent not found" } }, 404);
     }
-    const output = await service.getByIdForUser(agentKey, c.req.param("id"), userId);
+    const output = await service.getByIdForViewer(agentKey, c.req.param("id"), userId, getCurrentRole(c));
     if (!output) return c.json({ error: { code: "NOT_FOUND", message: "Output not found" } }, 404);
     return c.json({ output });
   });
@@ -621,9 +642,10 @@ export function agentRoutes(service: AgentRunService) {
     const rawRouteId =
       body && typeof body === "object" && !Array.isArray(body) ? (body as { routeId?: unknown }).routeId : undefined;
     const routeId = typeof rawRouteId === "string" && rawRouteId.trim() ? rawRouteId.trim() : undefined;
-    const rows = await service.requestGenerationForUser({
+    const rows = await service.requestGenerationForViewer({
       agentKey,
       userId,
+      viewerRole: getCurrentRole(c),
       triggerType: "manual",
       ...(routeId ? { routeIds: [routeId] } : {}),
     });

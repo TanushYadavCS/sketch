@@ -154,6 +154,7 @@ export function useSourceOptions(agent: AgentConfig) {
 }
 
 export interface RouteDraftController {
+  routeId: string | null;
   sources: AgentSourceKey[];
   destKind: AgentRouteDestination["kind"];
   memberUserId: string | null;
@@ -266,6 +267,7 @@ export function useRouteDraft(agent: AgentConfig, route: AgentRoute | null): Rou
   };
 
   return {
+    routeId: route?.id ?? null,
     sources,
     destKind,
     memberUserId,
@@ -337,8 +339,8 @@ export function DestinationField({
   const slackDmSupported = agent.sourceConfig?.supportsSlackChannels ?? false;
 
   const slackMemberQuery = useQuery({
-    queryKey: ["route-members", agentKey, controller.sources],
-    queryFn: () => api.agents.routeMembers(agentKey, controller.sources),
+    queryKey: ["route-members", agentKey, controller.routeId, controller.sources],
+    queryFn: () => api.agents.routeMembers(agentKey, controller.sources, controller.routeId),
     enabled: activeTab === "dm" && dmPlatform === "slack" && slackDmSupported && controller.sources.length > 0,
   });
   const whatsappMemberQuery = useQuery({
