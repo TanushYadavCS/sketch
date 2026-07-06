@@ -250,7 +250,12 @@ describe("structural task materialization", () => {
     const project = await seedProject(db, { name: "Queued Project", source: "linear", sourceId: "proj-queued" });
     const reanchored = await createTaskRepository(db).reanchorNullParentTasks();
     const after = await db.selectFrom("tasks").selectAll().executeTakeFirstOrThrow();
-    expect(reanchored).toBe(1);
+    expect(reanchored).toMatchObject({
+      count: 1,
+      taskIds: [before.id],
+      indexedFileIds: ["file-1"],
+      parentEntityIds: [project.id],
+    });
     expect(after.parent_entity_id).toBe(project.id);
   });
 
