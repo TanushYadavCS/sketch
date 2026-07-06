@@ -30,7 +30,7 @@ function managedPlatformUrl(config: Config): string | null {
 }
 
 function shouldRegisterManagedMembers(config: Config): boolean {
-  return Boolean(config.MANAGED_URL || config.MANAGED_WHATSAPP_PLATFORM_URL || config.MANAGED_WHATSAPP_TENANT_TOKEN);
+  return Boolean(managedPlatformUrl(config) && config.MANAGED_WHATSAPP_TENANT_TOKEN);
 }
 
 function errorFromBody(body: unknown): { code: string; message: string } {

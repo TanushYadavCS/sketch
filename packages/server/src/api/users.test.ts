@@ -148,6 +148,71 @@ describe("Users API — agent fields", () => {
     expect(body.error.message).toContain("Email and WhatsApp number");
   });
 
+  it("skips managed member registration when only managed login URL is configured", async () => {
+    const managedLoginOnlyApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedLoginOnlyApp, ADMIN_EMAIL);
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const res = await managedLoginOnlyApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Login Only",
+        type: "human",
+        email: "managed.login.only@gmail.com",
+        whatsappNumber: "+14155550108",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.user.email).toBe("managed.login.only@gmail.com");
+    expect(body.user.whatsapp_number).toBe("+14155550108");
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+  });
+
+  it("skips managed member registration on update when only managed login URL is configured", async () => {
+    const users = createUserRepository(db);
+    const existing = await users.create({
+      name: "Managed Login Existing",
+      type: "human",
+      email: "managed.login.existing@gmail.com",
+      whatsappNumber: "+14155550109",
+    });
+    const managedLoginOnlyApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedLoginOnlyApp, ADMIN_EMAIL);
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const res = await managedLoginOnlyApp.request(`/api/users/${existing.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Login Updated",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.user.name).toBe("Managed Login Updated");
+    expect(body.user.email).toBe("managed.login.existing@gmail.com");
+    expect(body.user.whatsapp_number).toBe("+14155550109");
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+  });
+
   it("registers managed human members with the platform before local create", async () => {
     const managedApp = createApp(
       db,
