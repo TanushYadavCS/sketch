@@ -14,6 +14,8 @@ import type {
   EntityReviewQueueTable,
   EntityShareEmailsTable,
 } from "../db/schema";
+import { parseAliasesString } from "./materialize-json";
+import { normalizeStrict } from "./name-dedup";
 
 type Entity = Selectable<EntitiesTable>;
 type Mention = Selectable<EntityMentionsTable>;
@@ -35,7 +37,8 @@ export type EntityMergeMove =
       table: "entity_candidates";
       rowId: string;
       colChanges: Record<string, { before: string | null; after: string | null }>;
-    };
+    }
+  | { kind: "alias_added"; value: string; normalizedKey: string };
 
 export type EntityMergeErrorCode =
   | "ENTITY_NOT_FOUND"
@@ -101,6 +104,10 @@ export interface MergePreview {
 
 function rowPayload(row: Record<string, unknown>): Record<string, unknown> {
   return { ...row };
+}
+
+function isAliasAddedMove(move: EntityMergeMove): move is Extract<EntityMergeMove, { kind: "alias_added" }> {
+  return "kind" in move && move.kind === "alias_added";
 }
 
 function updatedCount(result: { numUpdatedRows?: bigint | number | string } | undefined): number {
@@ -676,6 +683,42 @@ async function applyMergeMoves(
   await repointReviewQueue(db, loserId, survivorId, moves);
 }
 
+async function carryLoserAliasesToSurvivor(
+  db: Kysely<DB>,
+  loser: Entity,
+  survivor: Entity,
+  moves: EntityMergeMove[],
+): Promise<void> {
+  const aliases = parseAliasesString(survivor.aliases);
+  const existingKeys = new Set<string>();
+  const survivorNameKey = normalizeStrict(survivor.name);
+  if (survivorNameKey) existingKeys.add(survivorNameKey);
+  for (const alias of aliases) {
+    const key = normalizeStrict(alias);
+    if (key) existingKeys.add(key);
+  }
+
+  const added: string[] = [];
+  for (const raw of [loser.name, ...parseAliasesString(loser.aliases)]) {
+    const value = raw.trim();
+    const normalizedKey = normalizeStrict(value);
+    if (!value || !normalizedKey || existingKeys.has(normalizedKey)) continue;
+    existingKeys.add(normalizedKey);
+    aliases.push(value);
+    added.push(value);
+    moves.push({ kind: "alias_added", value, normalizedKey });
+  }
+
+  if (added.length === 0) return;
+  await db
+    .updateTable("entities")
+    .set({ aliases: JSON.stringify(aliases), updated_at: new Date().toISOString() })
+    .where("id", "=", survivor.id)
+    .where("deleted_at", "is", null)
+    .where("merged_into_entity_id", "is", null)
+    .execute();
+}
+
 function emptyMergePreview(
   input: { survivorId: string; loserId: string },
   blocked?: EntityMergeErrorCode,
@@ -812,6 +855,7 @@ async function insertPayload(db: Kysely<DB>, table: string, payload: Record<stri
 }
 
 async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void> {
+  if (isAliasAddedMove(move)) return;
   if ("collided" in move) {
     await insertPayload(db, move.table, move.payload);
     return;
@@ -934,6 +978,31 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
   }
 }
 
+async function reverseAliasAdditions(db: Kysely<DB>, survivorId: string, moves: EntityMergeMove[]): Promise<void> {
+  const aliasMoves = moves.filter(isAliasAddedMove);
+  if (aliasMoves.length === 0) return;
+
+  const row = await db
+    .selectFrom("entities")
+    .select("aliases")
+    .where("id", "=", survivorId)
+    .where("deleted_at", "is", null)
+    .where("merged_into_entity_id", "is", null)
+    .executeTakeFirst();
+  if (!row) return;
+
+  const toRemove = new Set(aliasMoves.map((move) => `${move.normalizedKey}\0${move.value}`));
+  const aliases = parseAliasesString(row.aliases);
+  const next = aliases.filter((alias) => !toRemove.has(`${normalizeStrict(alias)}\0${alias}`));
+  if (next.length === aliases.length) return;
+
+  await db
+    .updateTable("entities")
+    .set({ aliases: next.length > 0 ? JSON.stringify(next) : null, updated_at: new Date().toISOString() })
+    .where("id", "=", survivorId)
+    .execute();
+}
+
 export async function mergeEntitiesInTransaction(
   db: Kysely<DB>,
   input: MergeEntitiesInput,
@@ -944,6 +1013,7 @@ export async function mergeEntitiesInTransaction(
 
   const moves: EntityMergeMove[] = [];
   await applyMergeMoves(db, input.loserId, input.survivorId, moves);
+  if (survivor && loser) await carryLoserAliasesToSurvivor(db, loser, survivor, moves);
 
   const now = new Date().toISOString();
   const tombstone = await db
@@ -1020,6 +1090,7 @@ export async function unmergeEntities(db: Kysely<DB>, input: UnmergeEntitiesInpu
     }
 
     const moves = JSON.parse(merge.moves) as EntityMergeMove[];
+    await reverseAliasAdditions(trx, merge.survivor_entity_id, moves);
     for (const move of [...moves].reverse()) {
       await reverseMove(trx, move);
     }
