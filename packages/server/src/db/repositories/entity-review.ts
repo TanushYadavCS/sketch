@@ -15,6 +15,10 @@ import type { DB, EntityAliasRejectionsTable, EntityReviewEvidenceTable, EntityR
 export type QueueRow = Selectable<EntityReviewQueueTable>;
 export type AliasRejection = Selectable<EntityAliasRejectionsTable>;
 export type EvidenceRow = Selectable<EntityReviewEvidenceTable>;
+export type EntityReviewOrigin = "tracker" | "inferred";
+export type ReclassifyReviewResult =
+  | { result: "RECLASSIFY"; row: QueueRow; mergedFromReviewId: string | null }
+  | { result: "TYPE_RECLASSIFY_COLLISION"; row: QueueRow; collidingRow: QueueRow };
 
 /**
  * How long a `pending` row stays "frozen" after a reviewer opens it.
@@ -84,8 +88,60 @@ export interface UpsertEvidenceInput {
 }
 
 const TERMINAL_STATUSES = new Set(["confirmed", "rejected", "confirming"]);
+const SPINE_ENTITY_TYPES = new Set(["project", "product", "team"]);
+const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
+
+function refsDiffer(
+  left: { source: string | null; source_id: string | null },
+  right: { source: string | null; source_id: string | null },
+): boolean {
+  if (!left.source || !left.source_id || !right.source || !right.source_id) return false;
+  return left.source !== right.source || left.source_id !== right.source_id;
+}
+
+function seedRefsDiffer(
+  left: { seed_source: string | null; seed_source_id: string | null },
+  right: { seed_source: string | null; seed_source_id: string | null },
+): boolean {
+  if (!left.seed_source || !left.seed_source_id || !right.seed_source || !right.seed_source_id) return false;
+  return left.seed_source !== right.seed_source || left.seed_source_id !== right.seed_source_id;
+}
+
+function maxIso(left: string, right: string): string {
+  return left > right ? left : right;
+}
 
 export function createEntityReviewRepo(db: Kysely<DB>) {
+  async function recomputeCandidate(reviewId: string, entityType: string, now: string): Promise<void> {
+    const row = await db
+      .selectFrom("entity_review_queue")
+      .select(["id", "normalized_name", "candidate_reason"])
+      .where("id", "=", reviewId)
+      .executeTakeFirstOrThrow();
+    const entities = await db
+      .selectFrom("entities")
+      .select(["id", "name", "aliases"])
+      .where("source_type", "=", entityType)
+      .where("deleted_at", "is", null)
+      .where("id", "!=", TEST_ACCOUNT_ENTITY_ID)
+      .execute();
+    const candidate = entities.find((entity) => {
+      if (normalizeName(entity.name) === row.normalized_name) return true;
+      const aliases: string[] = entity.aliases ? JSON.parse(entity.aliases) : [];
+      return aliases.some((alias) => normalizeName(alias) === row.normalized_name);
+    });
+    await db
+      .updateTable("entity_review_queue")
+      .set({
+        candidate_entity_id: candidate?.id ?? null,
+        candidate_score: candidate ? 1 : null,
+        candidate_reason: candidate ? "reclassified" : row.candidate_reason,
+        candidate_generated_at: now,
+      })
+      .where("id", "=", row.id)
+      .execute();
+  }
+
   async function findSeedReviewRow(seedSource: string, seedSourceId: string): Promise<QueueRow | undefined> {
     return db
       .selectFrom("entity_review_queue")
@@ -423,6 +479,48 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
     },
 
     /**
+     * Group pending review rows by spine type and source-derived origin.
+     * The CASE expression is selected and grouped directly so SQLite and
+     * Postgres execute the same shape without boolean grouping.
+     */
+    async summarizePendingByTypeAndOrigin(opts: {
+      ownerUserId?: string;
+      isAdmin: boolean;
+    }): Promise<{ groups: Array<{ entityType: string; origin: EntityReviewOrigin; count: number }>; total: number }> {
+      const originExpr = sql<EntityReviewOrigin>`CASE WHEN source IS NOT NULL THEN 'tracker' ELSE 'inferred' END`;
+      let q = db
+        .selectFrom("entity_review_queue")
+        .select(["entity_type", originExpr.as("origin"), db.fn.countAll<number>().as("c")])
+        .where("status", "=", "pending");
+      if (!opts.isAdmin) {
+        if (!opts.ownerUserId) return { groups: [], total: 0 };
+        const ownerUserId = opts.ownerUserId;
+        q = q
+          .where("triggered_by_user_id", "=", ownerUserId)
+          .where((eb) =>
+            eb.not(
+              eb.exists(
+                eb
+                  .selectFrom("entity_review_evidence as e")
+                  .innerJoin("indexed_files as f", "f.id", "e.indexed_file_id")
+                  .innerJoin("connector_configs as cc", "cc.id", "f.connector_config_id")
+                  .select("e.review_id")
+                  .whereRef("e.review_id", "=", "entity_review_queue.id")
+                  .where("cc.created_by", "!=", ownerUserId),
+              ),
+            ),
+          );
+      }
+      const rows = await q.groupBy(["entity_type"]).groupBy(originExpr).orderBy("entity_type", "asc").execute();
+      const groups = rows.map((row) => ({
+        entityType: row.entity_type,
+        origin: row.origin,
+        count: Number(row.c),
+      }));
+      return { groups, total: groups.reduce((acc, group) => acc + group.count, 0) };
+    },
+
+    /**
      * For each review id, return (source, count) aggregated from
      * `entity_review_evidence`. One round-trip — the row fetch + this call
      * give the route handler everything it needs to assemble the
@@ -494,6 +592,131 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
      */
     async getById(reviewId: string) {
       return db.selectFrom("entity_review_queue").selectAll().where("id", "=", reviewId).executeTakeFirst();
+    },
+
+    /**
+     * Reclassify a pending queue row to a spine entity type. If the new
+     * normalized-name/type key already exists, evidence and compatible refs
+     * are folded into the existing row without violating either queue ref
+     * unique index.
+     */
+    async reclassifyType(reviewId: string, newEntityType: string, candidateGeneratedAt: string) {
+      if (!SPINE_ENTITY_TYPES.has(newEntityType)) {
+        throw new Error(`invalid spine entity type: ${newEntityType}`);
+      }
+      const now = new Date().toISOString();
+      const sourceRow = await db
+        .selectFrom("entity_review_queue")
+        .selectAll()
+        .where("id", "=", reviewId)
+        .executeTakeFirst();
+      if (!sourceRow) return undefined;
+      if (sourceRow.candidate_generated_at !== candidateGeneratedAt || sourceRow.status !== "pending") {
+        return { kind: "drift" as const, row: sourceRow };
+      }
+      if (sourceRow.entity_type === newEntityType) {
+        await recomputeCandidate(sourceRow.id, newEntityType, now);
+        const row = await db
+          .selectFrom("entity_review_queue")
+          .selectAll()
+          .where("id", "=", sourceRow.id)
+          .executeTakeFirstOrThrow();
+        return { kind: "updated" as const, row, mergedFromReviewId: null };
+      }
+
+      const targetRow = await db
+        .selectFrom("entity_review_queue")
+        .selectAll()
+        .where("normalized_name", "=", sourceRow.normalized_name)
+        .where("entity_type", "=", newEntityType)
+        .where("id", "!=", sourceRow.id)
+        .executeTakeFirst();
+
+      if (targetRow) {
+        if (refsDiffer(sourceRow, targetRow) || seedRefsDiffer(sourceRow, targetRow)) {
+          return { kind: "collision" as const, row: sourceRow, collidingRow: targetRow };
+        }
+
+        const sourceEvidence = await db
+          .selectFrom("entity_review_evidence")
+          .selectAll()
+          .where("review_id", "=", sourceRow.id)
+          .execute();
+        for (const evidence of sourceEvidence) {
+          await db
+            .insertInto("entity_review_evidence")
+            .values({
+              id: randomUUID(),
+              review_id: targetRow.id,
+              indexed_file_id: evidence.indexed_file_id,
+              source: evidence.source,
+              note: evidence.note,
+              seen_at: evidence.seen_at,
+            })
+            .onConflict((oc) => oc.columns(["review_id", "indexed_file_id", "source"]).doNothing())
+            .execute();
+        }
+
+        const captured = {
+          source: sourceRow.source,
+          source_id: sourceRow.source_id,
+          seed_source: sourceRow.seed_source,
+          seed_source_id: sourceRow.seed_source_id,
+        };
+        await db.deleteFrom("entity_review_queue").where("id", "=", sourceRow.id).execute();
+
+        const patch: {
+          occurrence_count: number;
+          last_seen_at: string;
+          candidate_generated_at: string;
+          source?: string;
+          source_id?: string;
+          seed_source?: string;
+          seed_source_id?: string;
+          candidate_reason?: string | null;
+        } = {
+          occurrence_count: targetRow.occurrence_count + sourceRow.occurrence_count,
+          last_seen_at: maxIso(targetRow.last_seen_at, sourceRow.last_seen_at),
+          candidate_generated_at: now,
+        };
+        if (!targetRow.source && !targetRow.source_id && captured.source && captured.source_id) {
+          patch.source = captured.source;
+          patch.source_id = captured.source_id;
+          if (!targetRow.candidate_reason) patch.candidate_reason = sourceRow.candidate_reason;
+        }
+        if (!targetRow.seed_source && !targetRow.seed_source_id && captured.seed_source && captured.seed_source_id) {
+          patch.seed_source = captured.seed_source;
+          patch.seed_source_id = captured.seed_source_id;
+        }
+        await db.updateTable("entity_review_queue").set(patch).where("id", "=", targetRow.id).execute();
+        await recomputeCandidate(targetRow.id, newEntityType, now);
+        const row = await db
+          .selectFrom("entity_review_queue")
+          .selectAll()
+          .where("id", "=", targetRow.id)
+          .executeTakeFirstOrThrow();
+        return { kind: "updated" as const, row, mergedFromReviewId: sourceRow.id };
+      }
+
+      await db
+        .updateTable("entity_review_queue")
+        .set({
+          entity_type: newEntityType,
+          candidate_entity_id: null,
+          candidate_score: null,
+          candidate_generated_at: now,
+        })
+        .where("id", "=", sourceRow.id)
+        .where("status", "=", "pending")
+        .where("candidate_generated_at", "=", candidateGeneratedAt)
+        .execute();
+      await recomputeCandidate(sourceRow.id, newEntityType, now);
+      const row = await db
+        .selectFrom("entity_review_queue")
+        .selectAll()
+        .where("id", "=", sourceRow.id)
+        .executeTakeFirstOrThrow();
+      return { kind: "updated" as const, row, mergedFromReviewId: null };
     },
 
     /**
