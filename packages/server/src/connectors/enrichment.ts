@@ -19,6 +19,7 @@ import { isPg } from "../db/dialect";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
+import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { yieldToEventLoop } from "../lib/event-loop";
 import type { Chunk } from "./chunking";
 import { chunkText } from "./chunking";
@@ -40,6 +41,7 @@ export const SCHEDULED_ENRICHMENT_TIME_BUDGET_MS = 5 * 60 * 1000;
 const MIN_ENTITY_NAME_LENGTH = 3;
 
 const DETERMINISTIC_LINK_BATCH_SIZE = 500;
+const PROJECT_BASELINE_LIMIT = 200;
 const ENRICHMENT_BACKOFF_MS = [
   30 * 60 * 1000,
   60 * 60 * 1000,
@@ -231,14 +233,30 @@ async function markEmbeddingFailure(
   await query.execute();
 }
 
-export async function loadBaselineKnownEntities(db: Kysely<DB>): Promise<KnownEntityForPrompt[]> {
-  const entities = await db
+export async function loadBaselineKnownEntities(
+  db: Kysely<DB>,
+  opts: { experimentalFlag?: boolean } = {},
+): Promise<KnownEntityForPrompt[]> {
+  const baseEntities = await db
     .selectFrom("entities")
     .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
     .where("source_type", "in", ["product", "team"])
     .where("status", "=", "confirmed")
     .where(whereLiveEntity())
     .execute();
+  const projectEntities = opts.experimentalFlag
+    ? await db
+        .selectFrom("entities")
+        .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
+        .where("source_type", "=", "project")
+        .where("status", "=", "confirmed")
+        .where(whereLiveEntity())
+        .orderBy("hotness", "desc")
+        .orderBy("name", "asc")
+        .limit(PROJECT_BASELINE_LIMIT)
+        .execute()
+    : [];
+  const entities = [...baseEntities, ...projectEntities];
   return entities.map((entity) => ({
     id: entity.id,
     name: entity.name,
@@ -258,6 +276,7 @@ export interface EnrichmentDeps {
   geminiApiKey?: string | null;
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
+  experimentalFlag?: boolean;
   /** Download image from Google Drive by provider file ID. Returns buffer + mime type. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
   /** If set, only enrich these specific file IDs (ignoring pending status). */
@@ -265,7 +284,7 @@ export interface EnrichmentDeps {
   /** Org context for enrichment prompts. Populated at start of enrichment run. */
   orgContext?: { orgName?: string; description?: string; industry?: string } | null;
   /**
-   * Org-wide baseline of confirmed entities (products + teams) used as a
+   * Org-wide baseline of confirmed entities used as a
    * fallback when a file has no resolvable anchors. The per-file scoped list
    * is built on top of this by `buildFileScopedKnownEntities`.
    */
@@ -341,7 +360,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
   }
 
   try {
-    deps.knownEntities = await loadBaselineKnownEntities(db);
+    deps.knownEntities = await loadBaselineKnownEntities(db, { experimentalFlag: deps.experimentalFlag });
   } catch {
     // entities table may not exist yet — ignore
   }
@@ -470,7 +489,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               const generator = getGenerator();
               if (!generator) throw new Error("Enrichment generator unavailable");
               const knownEntities = await buildFileScopedKnownEntities(
-                { db, logger },
+                { db, logger, experimentalFlag: deps.experimentalFlag },
                 file.id,
                 deps.knownEntities ?? [],
                 file.content,
@@ -488,6 +507,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   orgContext: deps.orgContext,
                   knownEntities,
                   participantBlock,
+                  experimentalFlag: deps.experimentalFlag,
                   debugDumpDir: deps.debugDumpDir,
                   ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
                 },
@@ -517,7 +537,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               );
               await ensureFileFresh(db, file.id, fileVersion);
               if (floor.emitted > 0) {
-                await materializeUnmaterializedFacts(db, logger);
+                await materializeUnmaterializedFacts(db, logger, { experimentalFlag: deps.experimentalFlag });
               }
               await resetSummaryRetry(db, file.id, fileVersion);
             } catch (err) {
@@ -761,7 +781,7 @@ async function enrichTextDocument(
   if (!summaryAlreadyResolved && generator && wordCount >= minWordsForSummary) {
     try {
       const knownEntities = await buildFileScopedKnownEntities(
-        { db, logger },
+        { db, logger, experimentalFlag: deps.experimentalFlag },
         file.id,
         deps.knownEntities ?? [],
         file.content,
@@ -778,6 +798,7 @@ async function enrichTextDocument(
           participantBlock,
           debugDumpDir: deps.debugDumpDir,
           ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
+          experimentalFlag: deps.experimentalFlag,
         },
         {
           id: file.id,
@@ -805,7 +826,7 @@ async function enrichTextDocument(
       );
       await ensureFileFresh(db, file.id, fileVersion);
       if (floor.emitted > 0) {
-        await materializeUnmaterializedFacts(db, logger);
+        await materializeUnmaterializedFacts(db, logger, { experimentalFlag: deps.experimentalFlag });
       }
       await resetSummaryRetry(db, file.id, fileVersion);
       usedSmartEnrichment = true;
@@ -960,7 +981,9 @@ export function matchesAsWord(content: string, name: string): boolean {
 
 export async function linkEntitiesByDeterministicMatch(db: Kysely<DB>, logger: Logger): Promise<EnrichmentResult> {
   const result: EnrichmentResult = { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] };
-  const allEntities = await createEntityRepository(db).getEntitiesByStatus("confirmed");
+  const allEntities = await createEntityRepository(db).getEntitiesByStatus("confirmed", {
+    excludeSourceTypes: Array.from(HIDDEN_ENTITY_SOURCE_TYPES),
+  });
   let lastFileId: string | null = null;
 
   while (true) {
@@ -1033,7 +1056,11 @@ async function linkEntitiesDeterministic(
 
   await deleteStaleLegacyDeterministicMentions(db, fileId);
 
-  const entities = allEntities ?? (await entityRepo.getEntitiesByStatus("confirmed"));
+  const entities =
+    allEntities ??
+    (await entityRepo.getEntitiesByStatus("confirmed", {
+      excludeSourceTypes: Array.from(HIDDEN_ENTITY_SOURCE_TYPES),
+    }));
   const contentLower = content.toLowerCase();
 
   for (const entity of entities) {

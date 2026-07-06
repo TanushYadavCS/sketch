@@ -320,6 +320,34 @@ describe("entity re-enrich", () => {
     expect(newEntity?.name).toBe("New Person");
   });
 
+  it("threads experimentalFlag into the re-enrich extraction phase", async () => {
+    const seenFlags: Array<boolean | undefined> = [];
+    const capture = async (deps: EnrichmentDeps) => {
+      seenFlags.push(deps.experimentalFlag);
+      return { filesProcessed: 1, filesSkipped: 0, filesFailed: 0, errors: [] };
+    };
+
+    await runReenrichJob({
+      db,
+      logger,
+      triggeredByUserId: "owner",
+      fileIds: ["file-1"],
+      runAfter: false,
+      experimentalFlag: true,
+      runEnrichmentImpl: capture,
+    });
+    await runReenrichJob({
+      db,
+      logger,
+      triggeredByUserId: "owner",
+      fileIds: ["file-1"],
+      runAfter: false,
+      runEnrichmentImpl: capture,
+    });
+
+    expect(seenFlags).toEqual([true, undefined]);
+  });
+
   it("uses decrypted OpenRouter settings for re-enrichment embeddings", async () => {
     const settings = createSettingsRepository(db, TEST_KEY);
     await settings.ensure();

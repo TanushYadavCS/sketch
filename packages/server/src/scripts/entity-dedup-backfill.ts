@@ -102,7 +102,7 @@ interface PersonScopes {
   byEntityId: Map<string, Set<string>>;
 }
 
-const SUPPORTED_TYPES: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal"];
+const SUPPORTED_TYPES: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal", "tool"];
 const DEFAULT_FUZZY_THRESHOLD = 0.85;
 const DEFAULT_ADJACENCY_THRESHOLD = 0.5;
 const DEFAULT_ADJACENCY_MIN_SHARED = 2;

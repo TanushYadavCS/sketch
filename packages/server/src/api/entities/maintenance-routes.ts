@@ -54,7 +54,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
   const routes = new Hono();
   const { logger, config } = deps;
 
-  const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project"];
+  const ORG_SOURCE_TYPES = ["person", "company", "product", "team", "project", "tool"];
 
   /**
    * GET /api/entities/resets/jobs
@@ -372,6 +372,7 @@ export function createEntityMaintenanceRoutes(db: Kysely<DB>, deps: EntityRoutes
           missingFileIds: resolved.missingFileIds,
           runAfter,
           lockAlreadyHeld,
+          experimentalFlag: config.EXPERIMENTAL_FLAG,
           llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
           coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
           geminiMaxRpm: config.GEMINI_MAX_RPM,

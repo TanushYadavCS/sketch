@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Kysely, RawBuilder, Selectable } from "kysely";
 import { sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
+import { HIDDEN_ENTITY_SOURCE_TYPES } from "../../entities/profile-facts";
 import { resolveLiveEntity, resolveLiveEntityId, resolveSourceRefToLiveEntityId } from "../../entities/redirect";
 import { parseTimestampMs } from "../../timestamps";
 import { isPg } from "../dialect";
@@ -346,8 +347,12 @@ export function createEntityRepository(db: Kysely<DB>) {
         .execute();
     },
 
-    async getEntitiesByStatus(status: string) {
-      return db.selectFrom("entities").selectAll().where("status", "=", status).where(whereLiveEntity()).execute();
+    async getEntitiesByStatus(status: string, opts?: { excludeSourceTypes?: string[] }) {
+      let query = db.selectFrom("entities").selectAll().where("status", "=", status).where(whereLiveEntity());
+      if (opts?.excludeSourceTypes && opts.excludeSourceTypes.length > 0) {
+        query = query.where("source_type", "not in", opts.excludeSourceTypes);
+      }
+      return query.execute();
     },
 
     async updateEntity(
@@ -699,6 +704,52 @@ export function createEntityRepository(db: Kysely<DB>) {
       return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
     },
 
+    async getPersonEntitiesByEmails(rawEmails: string[]): Promise<Map<string, Selectable<EntitiesTable>[]>> {
+      const emails = Array.from(new Set(rawEmails.map((email) => normalizeContactPointValue("email", email))));
+      const out = new Map<string, Selectable<EntitiesTable>[]>();
+      if (emails.length === 0) return out;
+
+      const byContactPoint = await db
+        .selectFrom("entity_contact_points")
+        .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+        .selectAll("entities")
+        .select("entity_contact_points.value as matched_email")
+        .where("entity_contact_points.kind", "=", "email")
+        .where("entity_contact_points.value", "in", emails)
+        .where("entities.source_type", "=", "person")
+        .where(whereLiveEntity())
+        .execute();
+      const byMetadata = await db
+        .selectFrom("entities")
+        .selectAll()
+        .select(
+          (isPg(db) ? sql<string>`(metadata::jsonb ->> 'email')` : sql<string>`json_extract(metadata, '$.email')`).as(
+            "matched_email",
+          ),
+        )
+        .where("source_type", "=", "person")
+        .where(whereLiveEntity())
+        .where(isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`, "in", emails)
+        .execute();
+
+      const byEmailAndId = new Map<string, Map<string, Selectable<EntitiesTable>>>();
+      for (const row of [...byContactPoint, ...byMetadata]) {
+        const matchedEmail = row.matched_email;
+        if (!matchedEmail) continue;
+        const normalized = normalizeContactPointValue("email", matchedEmail);
+        const entities = byEmailAndId.get(normalized) ?? new Map<string, Selectable<EntitiesTable>>();
+        entities.set(row.id, row);
+        byEmailAndId.set(normalized, entities);
+      }
+      for (const [email, entities] of byEmailAndId) {
+        out.set(
+          email,
+          [...entities.values()].sort((a, b) => a.id.localeCompare(b.id)),
+        );
+      }
+      return out;
+    },
+
     // ── Search ──
 
     async searchEntities(
@@ -714,6 +765,9 @@ export function createEntityRepository(db: Kysely<DB>) {
 
       if (opts?.sourceTypes && opts.sourceTypes.length > 0) {
         q = q.where("source_type", "in", opts.sourceTypes);
+      } else {
+        const hiddenTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
+        if (hiddenTypes.length > 0) q = q.where("source_type", "not in", hiddenTypes);
       }
 
       if (opts?.sortBy === "recency") {
@@ -749,11 +803,13 @@ export function createEntityRepository(db: Kysely<DB>) {
     // ── Hotness ──
 
     async getHotEntities(limit: number) {
+      const hiddenTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
       return db
         .selectFrom("entities")
         .selectAll()
         .where("status", "!=", "archived")
         .where(whereLiveEntity())
+        .where("source_type", "not in", hiddenTypes.length > 0 ? hiddenTypes : [""])
         .orderBy("hotness", "desc")
         .limit(limit)
         .execute();

@@ -60,6 +60,7 @@ import { createFileSharesRepository } from "../db/repositories/file-shares";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
+import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import {
   type ConnectorPermissions,
   connectorPermissions,
@@ -311,6 +312,7 @@ export function connectorRoutes(
       | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "EXPERIMENTAL_FLAG"
       | "ENCRYPTION_KEY"
       | "CONNECTOR_CREDENTIAL_SOURCE"
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
@@ -1087,6 +1089,7 @@ export function connectorRoutes(
         "entity_mentions.context_snippet",
       ])
       .where("entity_mentions.indexed_file_id", "=", fileId)
+      .where("entities.source_type", "not in", Array.from(HIDDEN_ENTITY_SOURCE_TYPES))
       .where(whereLiveEntity())
       .execute();
 
@@ -2342,6 +2345,7 @@ export function connectorRoutes(
       geminiApiKey: settings?.gemini_api_key,
       geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+      experimentalFlag: appConfig?.EXPERIMENTAL_FLAG,
       fileIds: [fileId],
       debugDumpDir,
     }).catch((err) => {

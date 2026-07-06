@@ -1,6 +1,7 @@
 import type { EntityRelationshipType } from "../db/repositories/entity-domains";
 
-export const NON_PERSON_MENTION_TYPES = ["project", "company", "product", "team", "deal"] as const;
+export const NON_PERSON_MENTION_TYPES = ["project", "company", "product", "team", "deal", "tool"] as const;
+export const RELATION_ENDPOINT_TYPES = ["person", "project", "company", "product", "team", "deal"] as const;
 export const ENTITY_GRAPH_RELATION_TYPES = [
   "works_at",
   "engaged_with",
@@ -20,6 +21,7 @@ export const LLM_RELATION_ENDPOINT_CONFIDENCE_THRESHOLD = 0.8;
 
 export type NonPersonMentionType = (typeof NON_PERSON_MENTION_TYPES)[number];
 export type MentionType = "person" | NonPersonMentionType;
+export type RelationEndpointType = (typeof RELATION_ENDPOINT_TYPES)[number];
 export type EntityGraphMentionType = MentionType;
 export type EntityGraphRelationType = (typeof ENTITY_GRAPH_RELATION_TYPES)[number];
 
@@ -30,9 +32,26 @@ export type EntityGraphRelationTypeExhaustivenessCheck = AssertNever<
 
 export interface EntityGraphRelationEndpoint {
   name: string;
-  type: MentionType;
+  type: RelationEndpointType;
   variations: string[];
 }
+
+export const TOOL_NAME_DENYLIST = new Set([
+  "airtable",
+  "asana",
+  "clickup",
+  "figma",
+  "github",
+  "google drive",
+  "hubspot",
+  "jira",
+  "linear",
+  "notion",
+  "salesforce",
+  "slack",
+  "trello",
+  "zoom",
+]);
 
 export function normalizeMentionType(raw: unknown): MentionType | null {
   if (typeof raw !== "string") return null;
@@ -42,6 +61,17 @@ export function normalizeMentionType(raw: unknown): MentionType | null {
     return lowered as NonPersonMentionType;
   }
   return null;
+}
+
+export function normalizeRelationEndpointType(raw: unknown): RelationEndpointType | null {
+  const type = normalizeMentionType(raw);
+  if (!type) return null;
+  return (RELATION_ENDPOINT_TYPES as readonly string[]).includes(type) ? (type as RelationEndpointType) : null;
+}
+
+export function coerceMentionType(name: string, type: string, experimentalFlag = false): string {
+  if (!experimentalFlag) return type;
+  return TOOL_NAME_DENYLIST.has(name.trim().toLowerCase()) ? "tool" : type;
 }
 
 export function normalizeRelationType(raw: unknown): EntityRelationshipType | null {
@@ -60,7 +90,7 @@ export function readRelationEndpoint(
   if (!endpoint || typeof endpoint !== "object" || Array.isArray(endpoint)) return null;
   const record = endpoint as Record<string, unknown>;
   if (typeof record.name !== "string") return null;
-  const type = normalizeMentionType(record.type);
+  const type = normalizeRelationEndpointType(record.type);
   if (!type) return null;
   const variations = Array.isArray(record.variations)
     ? record.variations.filter((value): value is string => typeof value === "string")
@@ -70,8 +100,8 @@ export function readRelationEndpoint(
 
 export function relationDirectionAllowed(
   relationType: EntityRelationshipType,
-  sourceType: MentionType,
-  targetType: MentionType,
+  sourceType: RelationEndpointType,
+  targetType: RelationEndpointType,
 ): boolean {
   if (relationType === "works_at") return sourceType === "person" && targetType === "company";
   if (relationType === "engaged_with") {

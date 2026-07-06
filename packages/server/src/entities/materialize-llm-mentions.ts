@@ -1,4 +1,4 @@
-import { type MentionType, type NonPersonMentionType, normalizeMentionType } from "./graph";
+import { type NonPersonMentionType, coerceMentionType, normalizeMentionType } from "./graph";
 import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
 import { isString, readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
@@ -14,9 +14,14 @@ export async function materializeLlmExtractedFact(
     return { kind: "skipped", reason: "missing_llm_subject" };
   }
   const raw = readJsonObject(fact.raw);
-  const mentionType = normalizeMentionType(raw.type);
+  const mentionType = normalizeMentionType(
+    coerceMentionType(fact.subject_name, String(raw.type ?? ""), deps.experimentalFlag),
+  );
   if (!mentionType) {
     return { kind: "skipped", reason: "missing_or_invalid_mention_type" };
+  }
+  if (mentionType === "team" && deps.birthGateTypes.has("team") && !deps.birthGateDryRun) {
+    return { kind: "skipped", reason: "team_conversational_birth_gated" };
   }
   const normalized = normalizeEntityMatchName(mentionType, fact.subject_name);
   if (!normalized) {
@@ -56,6 +61,9 @@ export async function materializeNonPersonLlmEntity(
       reviewRepo: deps.reviewRepo,
       domainsRepo: deps.domainsRepo,
       lookup: deps.lookup,
+      logger: deps.logger,
+      birthGateTypes: deps.birthGateTypes,
+      birthGateDryRun: deps.birthGateDryRun,
       readEmail: deps.readEmail,
       onEntityResolved: deps.onEntityResolved,
     },

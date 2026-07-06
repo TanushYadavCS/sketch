@@ -6,9 +6,10 @@
  */
 import type { RelationListEntry } from "../db/repositories/entity-relationships";
 
-export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "system" | "other";
+export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "tool" | "system" | "other";
 
 export const SYSTEM_SOURCE_TYPES = new Set(["clickup_workspace", "clickup_space"]);
+export const HIDDEN_ENTITY_SOURCE_TYPES = new Set([...SYSTEM_SOURCE_TYPES, "tool"]);
 
 export function mapSourceTypeToEntityType(sourceType: string): DrawerEntityType {
   switch (sourceType) {
@@ -22,6 +23,8 @@ export function mapSourceTypeToEntityType(sourceType: string): DrawerEntityType 
       return "project";
     case "team":
       return "team";
+    case "tool":
+      return "tool";
     default:
       return SYSTEM_SOURCE_TYPES.has(sourceType) ? "system" : "other";
   }
@@ -119,6 +122,8 @@ export function buildWhatRow(facts: EntityProfileFacts): string {
     }
     case "team":
       return `Team · ${facts.mentionCount} mentions · last seen ${lastSeen}`;
+    case "tool":
+      return `Tool · ${facts.mentionCount} mentions`;
     case "system":
       return `System container · ${facts.mentionCount} mentions`;
     default:

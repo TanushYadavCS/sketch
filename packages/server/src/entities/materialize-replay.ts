@@ -122,7 +122,13 @@ export async function replaySourceFacts(
     skipped: 0,
   };
 
-  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold, logger });
+  const deps = await buildMaterializeDeps(db, {
+    llmPromotionThreshold: opts.llmPromotionThreshold,
+    logger,
+    birthGateTypes: opts.birthGateTypes,
+    birthGateDryRun: opts.birthGateDryRun,
+    experimentalFlag: opts.experimentalFlag,
+  });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   const facts = (await db.selectFrom("indexed_file_facts").selectAll().where("deleted_at", "is", null).execute())
     .filter((f) => orderRank.has(f.fact_type))
@@ -186,7 +192,13 @@ async function materializeUnmaterializedFactsInner(
     deferredBelowThreshold: 0,
   };
 
-  const deps = await buildMaterializeDeps(db, { llmPromotionThreshold: opts.llmPromotionThreshold, logger });
+  const deps = await buildMaterializeDeps(db, {
+    llmPromotionThreshold: opts.llmPromotionThreshold,
+    logger,
+    birthGateTypes: opts.birthGateTypes,
+    birthGateDryRun: opts.birthGateDryRun,
+    experimentalFlag: opts.experimentalFlag,
+  });
   const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
   let factsQuery = db
     .selectFrom("indexed_file_facts")

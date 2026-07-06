@@ -12,13 +12,16 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
+import { loadBaselineKnownEntities } from "./enrichment";
 import {
+  BASELINE_ALWAYS_INCLUDE_CAP,
   BASELINE_RELEVANCE_CAP,
   HALF_LIFE_DAYS,
+  HUB_PERSON_DEGREE_CAP,
   MAX_ANCHORS_PER_SIDE,
   MIN_SCORE,
   PER_ANCHOR_INITIATIVE_CAP,
@@ -76,7 +79,7 @@ async function seedFile(db: Kysely<DB>, id: string, sourceUpdatedAt: string | nu
 
 async function seedEntity(
   db: Kysely<DB>,
-  args: { id: string; name: string; sourceType: string; hotness?: number },
+  args: { id: string; name: string; sourceType: string; hotness?: number; metadata?: Record<string, unknown> },
 ): Promise<void> {
   const now = new Date().toISOString();
   await db
@@ -87,13 +90,29 @@ async function seedEntity(
       source_type: args.sourceType,
       subtype: null,
       aliases: null,
-      metadata: null,
+      metadata: args.metadata ? JSON.stringify(args.metadata) : null,
       source_ref_id: null,
       status: "confirmed",
       hotness: args.hotness ?? 0,
       created_at: now,
       updated_at: now,
       ai_brief: null,
+    })
+    .execute();
+}
+
+async function seedContactPoint(db: Kysely<DB>, args: { entityId: string; email: string }): Promise<void> {
+  await db
+    .insertInto("entity_contact_points")
+    .values({
+      id: randomUUID(),
+      entity_id: args.entityId,
+      kind: "email",
+      value: args.email.toLowerCase(),
+      display_value: args.email,
+      label: null,
+      is_primary: 1,
+      source: "test",
     })
     .execute();
 }
@@ -404,5 +423,146 @@ describe("file-scope-context", () => {
       mentionCount: undefined,
       recentlyActive: undefined,
     });
+  });
+
+  it("uses person anchors when company anchoring fails and skips ambiguous participant emails", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const promptFile = "file-person-anchor-prompt";
+    const aliceEvidenceFile = "file-person-anchor-alice-evidence";
+    const ambiguousEvidenceFile = "file-person-anchor-ambiguous-evidence";
+    await seedFile(db, promptFile, recentDate);
+    await seedFile(db, aliceEvidenceFile, recentDate);
+    await seedFile(db, ambiguousEvidenceFile, recentDate);
+
+    await seedEntity(db, { id: "person-alice", name: "Alice Internal", sourceType: "person", hotness: 5 });
+    await seedContactPoint(db, { entityId: "person-alice", email: "alice@internal.test" });
+    await seedEntity(db, { id: "project-alice", name: "Internal Atlas", sourceType: "project", hotness: 5 });
+    await seedEntity(db, { id: "person-ambiguous-a", name: "Ambiguous A", sourceType: "person", hotness: 10 });
+    await seedEntity(db, { id: "person-ambiguous-b", name: "Ambiguous B", sourceType: "person", hotness: 9 });
+    await seedContactPoint(db, { entityId: "person-ambiguous-a", email: "shared@internal.test" });
+    await seedContactPoint(db, { entityId: "person-ambiguous-b", email: "shared@internal.test" });
+    await seedEntity(db, { id: "project-ambiguous", name: "Ambiguous Project", sourceType: "project", hotness: 20 });
+
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Alice", email: "alice@internal.test" });
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Shared", email: "shared@internal.test" });
+    await seedMention(db, { entityId: "person-alice", fileId: aliceEvidenceFile });
+    await seedMention(db, { entityId: "project-alice", fileId: aliceEvidenceFile });
+    await seedMention(db, { entityId: "person-ambiguous-a", fileId: ambiguousEvidenceFile });
+    await seedMention(db, { entityId: "project-ambiguous", fileId: ambiguousEvidenceFile });
+
+    const companyOnly = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, [], "");
+    const personAnchored = await buildFileScopedKnownEntities(
+      { db, now: () => now, experimentalFlag: true },
+      promptFile,
+      [],
+      "",
+    );
+
+    expect(companyOnly).toEqual([]);
+    expect(personAnchored).toContainEqual({
+      name: "Internal Atlas",
+      type: "project",
+      mentionCount: 1,
+      recentlyActive: true,
+    });
+    expect(personAnchored.map((entry) => entry.name)).not.toContain("Alice Internal");
+    expect(personAnchored.map((entry) => entry.name)).not.toContain("Ambiguous Project");
+  });
+
+  it("skips hub person anchors before adjacency while retaining low-degree person adjacency", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const promptFile = "file-hub-person-prompt";
+    const lowEvidenceFile = "file-low-person-evidence";
+    await seedFile(db, promptFile, recentDate);
+    await seedFile(db, lowEvidenceFile, recentDate);
+    await seedEntity(db, { id: "person-hub", name: "Hub Person", sourceType: "person", hotness: 100 });
+    await seedEntity(db, { id: "person-low", name: "Low Degree Person", sourceType: "person", hotness: 1 });
+    await seedContactPoint(db, { entityId: "person-hub", email: "hub@internal.test" });
+    await seedContactPoint(db, { entityId: "person-low", email: "low@internal.test" });
+    await seedEntity(db, { id: "project-low", name: "Low Degree Project", sourceType: "project", hotness: 5 });
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Hub", email: "hub@internal.test" });
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Low", email: "low@internal.test" });
+    await seedMention(db, { entityId: "person-low", fileId: lowEvidenceFile });
+    await seedMention(db, { entityId: "project-low", fileId: lowEvidenceFile });
+
+    for (let i = 0; i <= HUB_PERSON_DEGREE_CAP; i++) {
+      const fileId = `file-hub-evidence-${i}`;
+      const projectId = `project-hub-${i}`;
+      await seedFile(db, fileId, recentDate);
+      await seedEntity(db, { id: projectId, name: `Hub Project ${i}`, sourceType: "project", hotness: i });
+      await seedMention(db, { entityId: "person-hub", fileId });
+      await seedMention(db, { entityId: projectId, fileId });
+    }
+
+    const adjacencyCalls: string[] = [];
+    const loadAdjacencyForAnchor = vi.fn(async (deps, anchorId: string) => {
+      adjacencyCalls.push(anchorId);
+      return adjacencyForAnchor(deps, anchorId);
+    });
+    const known = await buildFileScopedKnownEntities(
+      { db, now: () => now, experimentalFlag: true, loadAdjacencyForAnchor },
+      promptFile,
+      [],
+      "",
+    );
+
+    expect(adjacencyCalls).not.toContain("person-hub");
+    expect(adjacencyCalls).toContain("person-low");
+    expect(known.map((entry) => entry.name)).toContain("Low Degree Project");
+    expect(known.map((entry) => entry.name).some((name) => name.startsWith("Hub Project"))).toBe(false);
+  });
+
+  it("keeps company-only ranking unchanged with flag off and bounds project baseline expansion with flag on", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const promptFile = "file-flag-off-parity";
+    const coMentionFile = "file-flag-off-parity-evidence";
+    await seedFile(db, promptFile, recentDate);
+    await seedFile(db, coMentionFile, recentDate);
+    await seedEntity(db, { id: "ent-parity-company", name: "Parity Co", sourceType: "company", hotness: 10 });
+    await seedEntity(db, { id: "ent-parity-product", name: "Parity Product", sourceType: "product", hotness: 10 });
+    await seedDomain(db, { entityId: "ent-parity-company", domain: "parity.example", kind: "corporate" });
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Parity Person", email: "person@parity.example" });
+    await seedMention(db, { entityId: "ent-parity-company", fileId: coMentionFile });
+    await seedMention(db, { entityId: "ent-parity-product", fileId: coMentionFile });
+
+    const baseline = [
+      { id: "baseline-cold", name: "Cold Product", type: "product", hotness: 1 },
+      { id: "ent-parity-product", name: "Parity Product", type: "product", hotness: 10 },
+    ];
+    const legacyFlagOmitted = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, baseline, "");
+    const explicitFlagOff = await buildFileScopedKnownEntities(
+      { db, now: () => now, experimentalFlag: false },
+      promptFile,
+      baseline,
+      "",
+    );
+    expect(explicitFlagOff).toEqual(legacyFlagOmitted);
+
+    for (let i = 0; i < 80; i++) {
+      await seedEntity(db, {
+        id: `baseline-project-${i}`,
+        name: `Bounded Project ${i}`,
+        sourceType: "project",
+        hotness: i,
+      });
+    }
+    const baselineFlagOff = await loadBaselineKnownEntities(db, { experimentalFlag: false });
+    const baselineFlagOn = await loadBaselineKnownEntities(db, { experimentalFlag: true });
+    expect(baselineFlagOff.map((entry) => entry.type)).not.toContain("project");
+    expect(baselineFlagOn.map((entry) => entry.name)).toContain("Bounded Project 79");
+
+    const content = Array.from({ length: 80 }, (_, i) => `Bounded Project ${i}`).join("\n");
+    const known = await buildFileScopedKnownEntities(
+      { db, now: () => now, experimentalFlag: true },
+      "file-baseline-bound",
+      baselineFlagOn,
+      content,
+    );
+    expect(known.filter((entry) => entry.type === "project").length).toBeLessThanOrEqual(
+      BASELINE_ALWAYS_INCLUDE_CAP + BASELINE_RELEVANCE_CAP,
+    );
   });
 });
