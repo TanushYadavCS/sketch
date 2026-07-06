@@ -122,6 +122,7 @@ import * as m119 from "./migrations/119-agent-outputs-source-scope";
 import * as m120 from "./migrations/120-agent-output-period-key";
 import * as m121 from "./migrations/121-tasks";
 import * as m122 from "./migrations/122-tasks-owner";
+import * as m123 from "./migrations/123-sub-entities";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -248,6 +249,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "120-agent-output-period-key": m120,
           "121-tasks": m121,
           "122-tasks-owner": m122,
+          "123-sub-entities": m123,
         };
       },
     },
