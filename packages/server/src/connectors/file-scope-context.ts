@@ -94,6 +94,8 @@ export interface PendingProposalEntry {
 
 export interface KnownEntityForPrompt {
   id?: string;
+  entityId?: string;
+  reviewId?: string;
   name: string;
   type: string;
   description?: string;
@@ -305,7 +307,7 @@ export async function buildFileScopedKnownEntities(
 
   for (const a of anchors.companies) {
     const k = keyOf(a.name, a.sourceType);
-    if (!byKey.has(k)) byKey.set(k, { name: a.name, type: a.sourceType });
+    if (!byKey.has(k)) byKey.set(k, { name: a.name, type: a.sourceType, entityId: a.id });
   }
 
   for (const anchor of [...anchors.companies, ...anchors.persons]) {
@@ -320,6 +322,7 @@ export async function buildFileScopedKnownEntities(
       byKey.set(k, {
         name: x.name,
         type: x.sourceType,
+        entityId: x.id,
         mentionCount: x.mentionCount,
         recentlyActive: x.recentlyActive,
       });
@@ -338,7 +341,7 @@ export async function buildFileScopedKnownEntities(
       for (const proposal of pendingProposals.slice(0, PER_ANCHOR_INITIATIVE_CAP)) {
         const k = keyOf(proposal.name, proposal.type);
         if (byKey.has(k)) continue;
-        byKey.set(k, { name: proposal.name, type: proposal.type });
+        byKey.set(k, { name: proposal.name, type: proposal.type, reviewId: proposal.id });
       }
     }
   }
@@ -347,13 +350,17 @@ export async function buildFileScopedKnownEntities(
 }
 
 function stripPromptInternalFields(entity: KnownEntityForPrompt): KnownEntityForPrompt {
-  return {
+  const stripped: KnownEntityForPrompt = {
     name: entity.name,
     type: entity.type,
     description: entity.description,
     mentionCount: entity.mentionCount,
     recentlyActive: entity.recentlyActive,
   };
+  const entityId = entity.entityId ?? entity.id;
+  if (entityId) stripped.entityId = entityId;
+  if (entity.reviewId) stripped.reviewId = entity.reviewId;
+  return stripped;
 }
 
 function escapeRegExp(value: string): string {
