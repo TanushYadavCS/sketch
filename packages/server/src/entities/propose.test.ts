@@ -1287,7 +1287,7 @@ describe("proposeEntity", () => {
     expect(refreshed.aliases ? JSON.parse(refreshed.aliases) : []).toContain("Project Atlas");
   });
 
-  it("25. person source-ref is skipped so email identity semantics still win", async () => {
+  it("25. person source-ref links before email identity", async () => {
     const entityRepo = createEntityRepository(db);
     const bob = await entityRepo.upsertPersonEntity({
       name: "Bob Chen",
@@ -1326,8 +1326,8 @@ describe("proposeEntity", () => {
 
     expect(result.kind).toBe("linked");
     if (result.kind !== "linked") throw new Error("unreachable");
-    expect(result.entity.id).toBe(alice.id);
-    expect(result.entity.id).not.toBe(bob.id);
+    expect(result.entity.id).toBe(bob.id);
+    expect(result.entity.id).not.toBe(alice.id);
   });
 
   it("26. same-batch source-ref link refreshes materialization index and avoids double-create", async () => {
@@ -1389,5 +1389,117 @@ describe("proposeEntity", () => {
 
     expect(second.kind).toBe("linked");
     expect(projects).toHaveLength(1);
+  });
+
+  it("27. strict name dedup links and appends the incoming spelling as an alias", async () => {
+    const entityRepo = createEntityRepository(db);
+    const redseer = await entityRepo.upsertEntity({
+      name: "Redseer Consulting",
+      sourceType: "company",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const materializeDeps = await buildMaterializeDeps(db);
+
+    const result = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+        onEntityResolved: materializeDeps.onEntityResolved,
+      },
+      {
+        name: "RedseerConsulting",
+        entityType: "company",
+        subtype: "external",
+        source: "llm",
+        sourceId: "mention-redseer",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("linked");
+    if (result.kind !== "linked") throw new Error("unreachable");
+    expect(result.entity.id).toBe(redseer.id);
+    expect(JSON.parse(result.entity.aliases ?? "[]")).toContain("RedseerConsulting");
+    expect(materializeDeps.index.byNormalizedAlias.get(normalizeName("RedseerConsulting"))?.map((e) => e.id)).toContain(
+      redseer.id,
+    );
+  });
+
+  it("28. compact person strict-name collisions queue instead of auto-linking", async () => {
+    const entityRepo = createEntityRepository(db);
+    const ann = await entityRepo.upsertEntity({
+      name: "Ann A",
+      sourceType: "person",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const materializeDeps = await buildMaterializeDeps(db);
+
+    const result = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+        onEntityResolved: materializeDeps.onEntityResolved,
+      },
+      {
+        name: "Anna",
+        entityType: "person",
+        subtype: "external",
+        source: "llm",
+        sourceId: "mention-anna",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("queued");
+    if (result.kind !== "queued") throw new Error("unreachable");
+    expect(result.candidateEntityId).toBe(ann.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(queue.candidate_entity_id).toBe(ann.id);
+    expect(queue.candidate_reason).toBe("strict-normalized");
+  });
+
+  it("29. materialized lookup queues token-set reorder matches", async () => {
+    const entityRepo = createEntityRepository(db);
+    const ohoud = await entityRepo.upsertEntity({
+      name: "Ohoud Zitan",
+      sourceType: "person",
+      subtype: "external",
+      status: "confirmed",
+    });
+    const materializeDeps = await buildMaterializeDeps(db);
+
+    const result = await proposeEntity(
+      {
+        entityRepo: materializeDeps.entityRepo,
+        reviewRepo: materializeDeps.reviewRepo,
+        lookup: materializeDeps.lookup,
+        readEmail: materializeDeps.readEmail,
+        onEntityResolved: materializeDeps.onEntityResolved,
+      },
+      {
+        name: "Zitan, Ohoud",
+        entityType: "person",
+        subtype: "external",
+        source: "llm",
+        sourceId: "mention-zitan-ohoud",
+        evidence: [],
+        triggeredByUserId: "user-1",
+      },
+    );
+
+    expect(result.kind).toBe("queued");
+    if (result.kind !== "queued") throw new Error("unreachable");
+    expect(result.candidateEntityId).toBe(ohoud.id);
+    const queue = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
+    expect(queue.candidate_entity_id).toBe(ohoud.id);
+    expect(queue.candidate_reason).toBe("token-set");
   });
 });

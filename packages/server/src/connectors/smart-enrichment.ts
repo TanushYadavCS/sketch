@@ -517,6 +517,7 @@ export async function handleCandidates(
           {
             entityRepo: materializeDeps.entityRepo,
             reviewRepo: materializeDeps.reviewRepo,
+            domainsRepo: materializeDeps.domainsRepo,
             lookup: materializeDeps.lookup,
             readEmail: materializeDeps.readEmail,
           },

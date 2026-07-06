@@ -849,6 +849,11 @@ describe("materializeFromFact — llm_relation typed edges", () => {
       confidenceScore: 0.9,
       source: "email_domain",
     });
+    await entityRepo.upsertSourceRef({
+      entityId: person.id,
+      source: "llm_relation",
+      sourceId: "file-1:hash-file-1:source:Sarah Chen",
+    });
     await domainsRepo.addEvidence({
       relationshipId,
       indexedFileId: "file-1",
@@ -896,7 +901,24 @@ describe("materializeFromFact — llm_relation typed edges", () => {
 
   it("removes relationships that lose their last source-fact evidence row", async () => {
     await seedFiles(db, 2);
-    await createEntityRepository(db).upsertEntityFromTool({
+    const entityRepo = createEntityRepository(db);
+    const person = await entityRepo.upsertPersonEntity({
+      name: "Sarah Chen",
+      subtype: "external",
+      source: "google_drive",
+      sourceId: "person:sarah",
+    });
+    await entityRepo.upsertSourceRef({
+      entityId: person.id,
+      source: "llm_relation",
+      sourceId: "file-1:hash-file-1:source:Sarah Chen",
+    });
+    await entityRepo.upsertSourceRef({
+      entityId: person.id,
+      source: "llm_relation",
+      sourceId: "file-2:hash-file-2:source:Sarah Chen",
+    });
+    await entityRepo.upsertEntityFromTool({
       name: "Project Atlas",
       sourceType: "project",
       source: "google_drive",

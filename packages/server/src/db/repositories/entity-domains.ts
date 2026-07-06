@@ -200,6 +200,19 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
       return (row ?? null) as EntitiesTable | null;
     },
 
+    async getCompanyIdsByDomain(domain: string): Promise<string[]> {
+      const rows = await db
+        .selectFrom("entity_domains")
+        .innerJoin("entities", "entities.id", "entity_domains.entity_id")
+        .select("entity_domains.entity_id")
+        .where("entity_domains.domain", "=", domain.toLowerCase())
+        .where("entity_domains.kind", "=", "corporate")
+        .where("entity_domains.entity_id", "is not", null)
+        .where(whereLiveEntity())
+        .execute();
+      return rows.flatMap((row) => (row.entity_id ? [row.entity_id] : []));
+    },
+
     async upsertDomain(input: UpsertDomainInput): Promise<void> {
       const existing = await db
         .selectFrom("entity_domains")

@@ -125,6 +125,7 @@ async function seedRawCorpus(db: Kysely<DB>) {
 
   // Person seed (file-less, e.g. ClickUp directory).
   await factRepo.upsertFact({
+    createdByUserId: TEST_USER_ID,
     source: "clickup",
     factType: "person_seed",
     relation: "seeded",
@@ -437,6 +438,7 @@ describe("replaySourceFacts", () => {
      */
     for (let i = 0; i < 25; i++) {
       await repo.upsertFact({
+        createdByUserId: TEST_USER_ID,
         source: "manual",
         factType: "person_seed",
         relation: "seeded",
@@ -452,6 +454,7 @@ describe("replaySourceFacts", () => {
     await first;
 
     await repo.upsertFact({
+      createdByUserId: TEST_USER_ID,
       source: "manual",
       factType: "person_seed",
       relation: "seeded",

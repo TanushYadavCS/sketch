@@ -6,9 +6,19 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { DB } from "../db/schema";
+import { personScopeKey, personScopeKeyId } from "./affiliations";
 import { type MentionType, normalizeMentionType } from "./graph";
 import { parseAliasesString, readJsonObject, readPersonEmailFromMetadata } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
+import {
+  type CandidatePoolEntry,
+  addToCandidatePool,
+  buildCandidatePool,
+  findFuzzyMatches,
+  findStrictMatches,
+  findTokenSetMatches,
+  removeFromCandidatePool,
+} from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
@@ -48,9 +58,12 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   for (const t of supportedTypes) entitiesByType.set(t, []);
   const byNormalizedName = new Map<string, EntityRow[]>();
   const byNormalizedAlias = new Map<string, EntityRow[]>();
+  const dedupEntriesByType = new Map<ProposeEntityType, CandidatePoolEntry[]>();
+  for (const t of supportedTypes) dedupEntriesByType.set(t, []);
   for (const e of entities) {
     const entityType = e.source_type as ProposeEntityType;
     entitiesByType.get(entityType)?.push(e);
+    dedupEntriesByType.get(entityType)?.push({ entityId: e.id, valueKind: "name", value: e.name });
     const nameKey = normalizeEntityMatchName(entityType, e.name);
     if (nameKey) {
       const bucket = byNormalizedName.get(nameKey);
@@ -58,6 +71,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
       else byNormalizedName.set(nameKey, [e]);
     }
     for (const alias of parseAliasesString(e.aliases)) {
+      dedupEntriesByType.get(entityType)?.push({ entityId: e.id, valueKind: "alias", value: alias });
       const aliasKey = normalizeEntityMatchName(entityType, alias);
       if (!aliasKey) continue;
       const bucket = byNormalizedAlias.get(aliasKey);
@@ -91,10 +105,53 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
     if (bucket) bucket.push(row.entity_id);
     else companyIdsByDomain.set(domain, [row.entity_id]);
   }
-  return { entitiesByType, byNormalizedName, byNormalizedAlias, bySourceRef, companyIdsByDomain };
+  const dedupPoolsByType = new Map<ProposeEntityType, ReturnType<typeof buildCandidatePool>>();
+  for (const t of supportedTypes) dedupPoolsByType.set(t, buildCandidatePool(dedupEntriesByType.get(t) ?? []));
+  const personScopeKeysByEntityId = await buildPersonScopeKeys(
+    db,
+    entities.filter((entity) => entity.source_type === "person"),
+  );
+  return {
+    entitiesByType,
+    byNormalizedName,
+    byNormalizedAlias,
+    dedupPoolsByType,
+    bySourceRef,
+    companyIdsByDomain,
+    personScopeKeysByEntityId,
+  };
+}
+
+async function buildPersonScopeKeys(db: Kysely<DB>, persons: EntityRow[]): Promise<Map<string, string[]>> {
+  const scopeKeys = new Map<string, Set<string>>();
+  for (const person of persons) scopeKeys.set(person.id, new Set());
+  const domainsRepo = createEntityDomainsRepository(db);
+  for (const person of persons) {
+    const email = readPersonEmailFromMetadata(person.metadata);
+    const scope = await personScopeKey(email, domainsRepo);
+    if (scope) scopeKeys.get(person.id)?.add(personScopeKeyId(scope));
+  }
+
+  const personIds = persons.map((person) => person.id);
+  const worksAtRows =
+    personIds.length > 0
+      ? await db
+          .selectFrom("entity_relationships")
+          .select(["source_entity_id", "target_entity_id"])
+          .where("relationship_type", "=", "works_at")
+          .where("source_entity_id", "in", personIds)
+          .where("valid_to", "is", null)
+          .execute()
+      : [];
+  for (const row of worksAtRows) {
+    scopeKeys.get(row.source_entity_id)?.add(personScopeKeyId({ kind: "company", value: row.target_entity_id }));
+  }
+
+  return new Map([...scopeKeys].map(([entityId, keys]) => [entityId, [...keys]]));
 }
 
 export function registerEntity(index: LookupIndex, entity: EntityRow): void {
+  const existingPersonScopeKeys = index.personScopeKeysByEntityId.get(entity.id);
   unregisterEntity(index, entity.id);
   const entityType = entity.source_type as ProposeEntityType;
   const typeBucket = index.entitiesByType.get(entityType);
@@ -118,6 +175,20 @@ export function registerEntity(index: LookupIndex, entity: EntityRow): void {
       index.byNormalizedAlias.set(aliasKey, [entity]);
     }
   }
+  const pool = index.dedupPoolsByType.get(entityType);
+  if (pool) {
+    addToCandidatePool(pool, [
+      { entityId: entity.id, valueKind: "name", value: entity.name },
+      ...parseAliasesString(entity.aliases).map((value) => ({
+        entityId: entity.id,
+        valueKind: "alias" as const,
+        value,
+      })),
+    ]);
+  }
+  if (entityType === "person" && existingPersonScopeKeys) {
+    index.personScopeKeysByEntityId.set(entity.id, existingPersonScopeKeys);
+  }
 }
 
 function removeEntityFromMapBuckets<T extends EntityRow>(map: Map<string, T[]>, entityId: string): void {
@@ -135,6 +206,10 @@ function unregisterEntity(index: LookupIndex, entityId: string): void {
   }
   removeEntityFromMapBuckets(index.byNormalizedName, entityId);
   removeEntityFromMapBuckets(index.byNormalizedAlias, entityId);
+  for (const pool of index.dedupPoolsByType.values()) {
+    removeFromCandidatePool(pool, entityId);
+  }
+  index.personScopeKeysByEntityId.delete(entityId);
 }
 
 function llmFileCountKey(normalizedName: string, mentionType: MentionType): string {
@@ -176,6 +251,9 @@ export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIn
     if (indexedEntity.id === entity.id) index.bySourceRef.delete(key);
   }
   registerEntity(index, row);
+  const scopeKeys = await buildPersonScopeKeys(db, row.source_type === "person" ? [row] : []);
+  const personScopeKeys = scopeKeys.get(row.id);
+  if (personScopeKeys) index.personScopeKeysByEntityId.set(row.id, personScopeKeys);
   for (const ref of sourceRefs) {
     index.bySourceRef.set(`${ref.source}:${ref.source_id}`, row);
   }
@@ -205,7 +283,39 @@ export async function buildMaterializeDeps(
     getByNormalizedName: (n) => index.byNormalizedName.get(n) ?? [],
     getByAlias: (n) => index.byNormalizedAlias.get(n) ?? [],
     listByType: (t: ProposeEntityType) => index.entitiesByType.get(t) ?? [],
+    findNameDedupCandidates: (entityType, name) => {
+      const pool = index.dedupPoolsByType.get(entityType);
+      if (!pool) return [];
+      const entitiesById = new Map((index.entitiesByType.get(entityType) ?? []).map((entity) => [entity.id, entity]));
+      const strict = findStrictMatches(name, pool);
+      const strictEntityIds = new Set(strict.map((match) => match.entityId));
+      const tokenSet = findTokenSetMatches(name, pool);
+      const tokenSetEntityIds = new Set(tokenSet.map((match) => match.entityId));
+      const fuzzy = findFuzzyMatches(name, pool);
+      const byEntity = new Map<
+        string,
+        {
+          entity: EntityRow;
+          score: number;
+          reason: "strict-normalized" | "token-set" | "minhash";
+        }
+      >();
+      for (const match of [...strict, ...tokenSet, ...fuzzy]) {
+        const entity = entitiesById.get(match.entityId);
+        if (!entity) continue;
+        const reason = strictEntityIds.has(match.entityId)
+          ? "strict-normalized"
+          : tokenSetEntityIds.has(match.entityId)
+            ? "token-set"
+            : "minhash";
+        const existing = byEntity.get(match.entityId);
+        if (!existing || match.score > existing.score)
+          byEntity.set(match.entityId, { entity, score: match.score, reason });
+      }
+      return [...byEntity.values()].sort((a, b) => b.score - a.score || a.entity.id.localeCompare(b.entity.id));
+    },
     getCompanyIdsByDomain: (domain) => index.companyIdsByDomain.get(domain.toLowerCase()) ?? [],
+    getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
   };
 
   const fileToConnector = new Map<string, string>();
