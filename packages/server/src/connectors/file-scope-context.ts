@@ -52,6 +52,8 @@ export const HUB_PERSON_DEGREE_CAP = 30;
 export const BASELINE_ALWAYS_INCLUDE_CAP = 50;
 export const PENDING_PROPOSAL_MIN_OCCURRENCE = 1;
 const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
+const STRUCTURAL_ASSIGNEE_SOURCE = "structural_assignee";
+const CO_MENTION_SOURCE = "co_mention";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface FileScopeDeps {
@@ -60,6 +62,7 @@ export interface FileScopeDeps {
   now?: () => number;
   experimentalFlag?: boolean;
   loadAdjacencyForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<AdjacencyEntry[]>;
+  loadContributesToForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<ContributesToEntry[]>;
   loadPendingProposalsForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<PendingProposalEntry[]>;
 }
 
@@ -92,6 +95,13 @@ export interface PendingProposalEntry {
   score: number;
 }
 
+export interface ContributesToEntry {
+  id: string;
+  name: string;
+  sourceType: string;
+  tier: number;
+}
+
 export interface KnownEntityForPrompt {
   id?: string;
   entityId?: string;
@@ -107,10 +117,18 @@ export interface KnownEntityForPrompt {
 
 interface BaselineScore {
   entity: KnownEntityForPrompt;
-  anchorOverlap: number;
+  overlap: number;
   recency: number;
   hotness: number;
   score: number;
+}
+
+interface AnchorScopedEntry {
+  id: string;
+  name: string;
+  sourceType: string;
+  mentionCount?: number;
+  recentlyActive?: boolean;
 }
 
 export interface BuildFileScopedKnownEntitiesOptions {
@@ -249,6 +267,59 @@ export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string):
     .sort((a, b) => b.score - a.score);
 }
 
+export async function contributesToForAnchor(deps: FileScopeDeps, anchorId: string): Promise<ContributesToEntry[]> {
+  const hiddenTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
+  const rows = await deps.db
+    .selectFrom("entity_relationships as rel")
+    .innerJoin("entities as t", "t.id", "rel.target_entity_id")
+    .select((eb) => [
+      eb.ref("t.id").as("id"),
+      eb.ref("t.name").as("name"),
+      eb.ref("t.source_type").as("source_type"),
+      eb.ref("rel.source").as("edge_source"),
+      eb.ref("rel.confidence_score").as("confidence_score"),
+      eb.ref("rel.valid_from").as("valid_from"),
+    ])
+    .where("rel.source_entity_id", "=", anchorId)
+    .where("rel.relationship_type", "=", "contributes_to")
+    .where("rel.valid_to", "is", null)
+    .where("rel.source", "in", [STRUCTURAL_ASSIGNEE_SOURCE, CO_MENTION_SOURCE])
+    .where("t.source_type", "in", ["project", "product"])
+    .where("t.source_type", "not in", hiddenTypes.length > 0 ? hiddenTypes : [""])
+    .where(whereLiveEntity("t"))
+    .execute();
+
+  return rows
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      sourceType: row.source_type,
+      tier: row.edge_source === STRUCTURAL_ASSIGNEE_SOURCE ? 0 : 1,
+      confidenceScore: Number(row.confidence_score),
+      validFromTime: new Date(row.valid_from).getTime(),
+    }))
+    .sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier;
+      if (b.confidenceScore !== a.confidenceScore) return b.confidenceScore - a.confidenceScore;
+      const aValidFrom = Number.isNaN(a.validFromTime) ? 0 : a.validFromTime;
+      const bValidFrom = Number.isNaN(b.validFromTime) ? 0 : b.validFromTime;
+      return bValidFrom - aValidFrom;
+    })
+    .map(({ confidenceScore, validFromTime, ...entry }) => entry);
+}
+
+function tieredFill<T extends { id: string }>(primary: T[], backfill: T[], cap: number): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const entry of [...primary, ...backfill]) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    out.push(entry);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
 function isPendingProposalType(value: string): value is PendingProposalEntry["type"] {
   return value === "project" || value === "product";
 }
@@ -310,7 +381,9 @@ export async function buildFileScopedKnownEntities(
     if (!byKey.has(k)) byKey.set(k, { name: a.name, type: a.sourceType, entityId: a.id });
   }
 
-  for (const anchor of [...anchors.companies, ...anchors.persons]) {
+  const contributesToTargetIds = new Set<string>();
+
+  for (const anchor of anchors.companies) {
     const adj = await (deps.loadAdjacencyForAnchor ?? adjacencyForAnchor)(deps, anchor.id);
     const initiatives = adj
       .filter((x) => x.sourceType === "project" || x.sourceType === "product")
@@ -329,7 +402,39 @@ export async function buildFileScopedKnownEntities(
     }
   }
 
-  for (const b of await rankBaselineKnownEntities(deps, baseline, anchors, fileContent ?? "", opts)) {
+  for (const anchor of anchors.persons) {
+    const contributesTo = await (deps.loadContributesToForAnchor ?? contributesToForAnchor)(deps, anchor.id);
+    for (const entry of contributesTo) contributesToTargetIds.add(entry.id);
+
+    const adj = await (deps.loadAdjacencyForAnchor ?? adjacencyForAnchor)(deps, anchor.id);
+    const adjacencyInitiatives = adj.filter((x) => x.sourceType === "project" || x.sourceType === "product");
+    const initiatives = tieredFill<AnchorScopedEntry>(contributesTo, adjacencyInitiatives, PER_ANCHOR_INITIATIVE_CAP);
+    const teams = adj.filter((x) => x.sourceType === "team").slice(0, PER_ANCHOR_TEAM_CAP);
+    for (const x of [...initiatives, ...teams]) {
+      const k = keyOf(x.name, x.sourceType);
+      if (byKey.has(k)) continue;
+      byKey.set(k, {
+        name: x.name,
+        type: x.sourceType,
+        entityId: x.id,
+        mentionCount: x.mentionCount,
+        recentlyActive: x.recentlyActive,
+      });
+    }
+  }
+
+  const alreadyInjectedIds = new Set(
+    Array.from(byKey.values()).flatMap((entry) => (entry.entityId ? [entry.entityId] : [])),
+  );
+  for (const b of await rankBaselineKnownEntities(
+    deps,
+    baseline,
+    anchors,
+    fileContent ?? "",
+    contributesToTargetIds,
+    alreadyInjectedIds,
+    opts,
+  )) {
     const k = keyOf(b.name, b.type);
     if (byKey.has(k)) continue;
     byKey.set(k, stripPromptInternalFields(b));
@@ -423,10 +528,12 @@ async function rankBaselineKnownEntities(
   baseline: KnownEntityForPrompt[],
   anchors: FileAnchors,
   fileContent: string,
+  contributesToTargetIds: Set<string>,
+  alreadyInjectedIds: Set<string>,
   opts: BuildFileScopedKnownEntitiesOptions,
 ): Promise<KnownEntityForPrompt[]> {
   const legacy = baseline.filter((entity) => !entity.id);
-  const scoredCandidates = baseline.filter((entity) => entity.id);
+  const scoredCandidates = baseline.filter((entity) => entity.id && !alreadyInjectedIds.has(entity.id));
   if (scoredCandidates.length === 0) return legacy;
 
   const cap = opts.baselineRelevanceCap ?? BASELINE_RELEVANCE_CAP;
@@ -443,7 +550,7 @@ async function rankBaselineKnownEntities(
   const candidates = scoredCandidates.filter((entity) => !alwaysIds.has(entity.id));
   const candidateIds = candidates.flatMap((entity) => (entity.id ? [entity.id] : []));
   const anchorIds = [...anchors.companies.map((anchor) => anchor.id), ...anchors.persons.map((anchor) => anchor.id)];
-  const [lastSeenById, overlapIds] = await Promise.all([
+  const [lastSeenById, coOccurOverlapIds] = await Promise.all([
     loadBaselineLastSeen(deps, candidateIds),
     loadBaselineAnchorOverlap(deps, candidateIds, anchorIds),
   ]);
@@ -454,14 +561,19 @@ async function rankBaselineKnownEntities(
     const lastSeen = entity.id ? lastSeenById.get(entity.id) : undefined;
     const ageDays = lastSeen === undefined ? Number.POSITIVE_INFINITY : Math.max(0, (now - lastSeen) / DAY_MS);
     const recency = ageDays <= BASELINE_RECENCY_WINDOW_DAYS ? Math.exp(-ageDays / BASELINE_RECENCY_WINDOW_DAYS) : 0;
-    const anchorOverlap = entity.id && overlapIds.has(entity.id) ? 1 : 0;
+    let overlap = 0;
+    if (entity.id && contributesToTargetIds.has(entity.id)) {
+      overlap = 0.6;
+    } else if (entity.id && coOccurOverlapIds.has(entity.id)) {
+      overlap = 0.4;
+    }
     const hotness = Number(entity.hotness ?? 0) / maxHotness;
     return {
       entity,
-      anchorOverlap,
+      overlap,
       recency,
       hotness,
-      score: 0.5 * anchorOverlap + 0.3 * recency + 0.2 * hotness,
+      score: overlap + 0.3 * recency + 0.2 * hotness,
     };
   });
 

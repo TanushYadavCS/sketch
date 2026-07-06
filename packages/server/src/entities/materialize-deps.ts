@@ -1,5 +1,7 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import { type NameDedupEntityType, retrieveEntityNameCandidates } from "../connectors/embeddings/trunk-name-embeddings";
+import type { EmbeddingProvider } from "../connectors/embeddings/types";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -19,7 +21,7 @@ import {
   findTokenSetMatches,
   removeFromCandidatePool,
 } from "./name-dedup";
-import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
+import type { Entity, EntityLookup, ProposeEntityType, RankedCandidate } from "./propose";
 import { canUseEntityAsMatchTarget } from "./provenance";
 
 export { normalizeEntityMatchName } from "./match-normalize";
@@ -199,6 +201,10 @@ async function findLlmExtractedThirdPartyMention(
   return null;
 }
 
+function isNameDedupEntityType(entityType: ProposeEntityType): entityType is NameDedupEntityType {
+  return entityType === "project" || entityType === "product" || entityType === "person" || entityType === "company";
+}
+
 export function registerEntity(index: LookupIndex, entity: EntityRow): void {
   const existingPersonScopeKeys = index.personScopeKeysByEntityId.get(entity.id);
   unregisterEntity(index, entity.id);
@@ -320,6 +326,7 @@ export interface BuildMaterializeDepsOptions {
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
+  embeddingProvider?: EmbeddingProvider | null;
 }
 
 export async function buildMaterializeDeps(
@@ -349,6 +356,7 @@ export async function buildMaterializeDeps(
   const structuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes ?? configuredStructuralAutoBirthTypes);
   const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
   const experimentalFlag = opts.experimentalFlag ?? configuredExperimentalFlag;
+  const embeddingProvider = opts.embeddingProvider ?? null;
 
   const lookup: EntityLookup = {
     getByNormalizedName: (n) => index.byNormalizedName.get(n) ?? [],
@@ -389,6 +397,25 @@ export async function buildMaterializeDeps(
     getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
     findLlmExtractedThirdPartyMention: (name) => findLlmExtractedThirdPartyMention(db, name),
   };
+  if (embeddingProvider && experimentalFlag) {
+    lookup.retrieveEmbeddingCandidates = async (entityType, name): Promise<RankedCandidate[]> => {
+      if (!isNameDedupEntityType(entityType)) return [];
+      try {
+        const pool = index.entitiesByType.get(entityType) ?? [];
+        const entitiesById = new Map(pool.map((entity) => [entity.id, entity]));
+        const rows = await retrieveEntityNameCandidates(db, embeddingProvider, { name, type: entityType });
+        const candidates: RankedCandidate[] = [];
+        for (const row of rows) {
+          const entity = entitiesById.get(row.entityId);
+          if (entity) candidates.push({ entity, score: row.similarity, reason: "embedding" });
+        }
+        return candidates;
+      } catch (err) {
+        opts.logger?.warn({ err, entityType }, "embedding lookup failed open");
+        return [];
+      }
+    };
+  }
 
   const fileToConnector = new Map<string, string>();
   const connectorOwners = new Map<string, string>();
@@ -414,6 +441,7 @@ export async function buildMaterializeDeps(
     structuralAutoBirthTypes,
     birthGateDryRun,
     experimentalFlag,
+    embeddingProvider,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),
     onEntityResolved: (entity: Entity) => refreshResolvedEntityIndex(db, index, entity),
     getIndexedFileSourceTime: (indexedFileId: string) =>

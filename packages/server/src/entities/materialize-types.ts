@@ -1,5 +1,6 @@
 import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
+import type { EmbeddingProvider } from "../connectors/embeddings/types";
 import type { createEntityRepository } from "../db/repositories/entities";
 import type { EntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -65,6 +66,7 @@ export interface MaterializeDeps {
   structuralAutoBirthTypes: Set<ProposeEntityType>;
   birthGateDryRun: boolean;
   experimentalFlag: boolean;
+  embeddingProvider: EmbeddingProvider | null;
 }
 
 export type MaterializeResult =
@@ -98,6 +100,7 @@ export interface ReplaySourceFactsOptions {
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
+  embeddingProvider?: EmbeddingProvider | null;
 }
 
 export interface MaterializeProgress {
@@ -115,6 +118,7 @@ export interface MaterializeUnmaterializedOptions {
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   experimentalFlag?: boolean;
+  embeddingProvider?: EmbeddingProvider | null;
   factTypes?: IndexedFileFactType[];
   /**
    * Fires before processing each fact with `completed = index, total = facts.length`
