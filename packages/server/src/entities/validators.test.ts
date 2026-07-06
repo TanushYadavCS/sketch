@@ -26,7 +26,7 @@ describe("validateLlmMention", () => {
     ).toEqual({ ok: false, reason: "short_token_no_boundary" });
   });
 
-  it("rejects removed LLM entity types", () => {
+  it("accepts feature LLM entity types", () => {
     expect(
       validateLlmMention({
         displayName: "Aviation Edge scraper",
@@ -34,7 +34,7 @@ describe("validateLlmMention", () => {
         fileContent: "Aviation Edge scraper was discussed.",
         source: "llm_extraction",
       }),
-    ).toEqual({ ok: false, reason: "type_removed" });
+    ).toEqual({ ok: true });
   });
 
   it("rejects domain-shaped LLM names while preserving normal project names", () => {

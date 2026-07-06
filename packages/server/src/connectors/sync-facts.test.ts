@@ -183,7 +183,6 @@ describe("emitFactsForSyncedItem", () => {
   it("keeps unchanged LLM task facts seen in the current sync run", async () => {
     const factRepo = createIndexedFileFactRepository(db);
     await upsertLlmTaskFact(db, {
-      experimentalFlag: true,
       indexedFileId: "file-1",
       connectorConfigId: "connector-1",
       createdByUserId: "user-1",
@@ -212,7 +211,6 @@ describe("emitFactsForSyncedItem", () => {
       },
       item: baseItem,
       indexedFileId: "file-1",
-      experimentalFlag: true,
       contentChanged: false,
     });
 

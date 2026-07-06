@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { normalizeEntityMatchName } from "../../entities/match-normalize";
+import { isPersonalOrSharedDomain } from "../../entities/personal-domains";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable } from "../schema";
 import { whereLiveEntity } from "./entities";
@@ -271,6 +272,10 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
     normalizeWebsiteDomain,
 
     async isPersonalOrShared(domain: string): Promise<boolean> {
+      // The code constant wins over any DB row: a poisoned `corporate` row for
+      // gmail.com must never flip this to false. It also keeps the guard alive
+      // when the migration-064 seed has been cleared by a rebuild.
+      if (isPersonalOrSharedDomain(domain)) return true;
       const row = await db.selectFrom("entity_domains").select("kind").where("domain", "=", domain).executeTakeFirst();
       if (!row) return false;
       return row.kind === "personal" || row.kind === "shared";

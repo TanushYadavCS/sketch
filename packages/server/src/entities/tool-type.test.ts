@@ -5,7 +5,6 @@ import { handleSearch, handleSearchEntities } from "../agent/tools/search";
 import { UploadCollector } from "../agent/tools/types";
 import { connectorRoutes } from "../api/connectors";
 import { createEntityProfileRoutes } from "../api/entities/profile-routes";
-import { linkEntitiesByDeterministicMatch } from "../connectors/enrichment";
 import type { GeminiGenerator } from "../connectors/gemini-generate";
 import { matchEntities, smartEnrichFile } from "../connectors/smart-enrichment";
 import { createConnectorRepository } from "../db/repositories/connectors";
@@ -160,11 +159,16 @@ describe("tool entity type", () => {
     await db.destroy();
   });
 
+  it("coerces denylisted names to tool without a flag", () => {
+    expect(coerceMentionType("Slack", "product")).toBe("tool");
+    expect(coerceMentionType("Internal Portal", "product")).toBe("product");
+  });
+
   it("classifies and materializes Slack mentions as tool while dropping tool relation endpoints", async () => {
     await seedFile(db, "file-tool-classify", "Slack and Acme Corp were discussed.");
     await seedFile(db, "file-tool-classify-2", "Slack and Acme Corp were discussed again.");
 
-    expect(coerceMentionType("Slack", "product", true)).toBe("tool");
+    expect(coerceMentionType("Slack", "product")).toBe("tool");
     expect(normalizeMentionType("tool")).toBe("tool");
 
     for (const fileId of ["file-tool-classify", "file-tool-classify-2"]) {
@@ -174,7 +178,6 @@ describe("tool entity type", () => {
           logger: createTestLogger(),
           generator: fakeGenerator(),
           embeddingProvider: null,
-          experimentalFlag: true,
         },
         {
           id: fileId,
@@ -241,7 +244,6 @@ describe("tool entity type", () => {
       llmPromotionThreshold: 1,
       birthGateTypes: A1_BIRTH_GATE_TYPES,
       birthGateDryRun: false,
-      experimentalFlag: true,
     });
 
     expect(await db.selectFrom("entity_relationships").select("id").execute()).toHaveLength(0);
@@ -255,7 +257,7 @@ describe("tool entity type", () => {
     ).toHaveLength(0);
   });
 
-  it("excludes tools from default search, API, graph, deterministic linking, file detail, and matching", async () => {
+  it("excludes tools from default search, API, graph, file detail, and matching", async () => {
     await seedFile(db, "file-tool-hidden", "Slack and Project Apollo are in this document.");
     await seedEntity(db, "entity-tool-slack", "Slack", "tool");
     await seedEntity(db, "entity-project-apollo", "Project Apollo", "project");
@@ -287,15 +289,6 @@ describe("tool entity type", () => {
     const graphRes = await entityApp.request("/graph");
     const graphBody = (await graphRes.json()) as { nodes: Array<{ name: string }> };
     expect(graphBody.nodes.map((node) => node.name)).not.toContain("Slack");
-
-    await linkEntitiesByDeterministicMatch(db, createTestLogger());
-    const deterministicToolMentions = await db
-      .selectFrom("entity_mentions")
-      .select("id")
-      .where("entity_id", "=", "entity-tool-slack")
-      .where("source", "=", "deterministic_substring")
-      .execute();
-    expect(deterministicToolMentions).toHaveLength(0);
 
     const connectorApp = adminApp(connectorRoutes(createConnectorRepository(db), db, createTestLogger()));
     const fileRes = await connectorApp.request("/files/file-tool-hidden/content");

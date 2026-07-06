@@ -9,7 +9,6 @@ import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult 
 export type FeatureReconcileReason = "minted" | "feature_parent_absent" | "below_threshold" | "noise_rejected";
 
 export async function materializeFeature(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
-  if (!deps.experimentalFlag) return { kind: "skipped", reason: "experimental_off" };
   const raw = readJsonObject(fact.raw);
   const feature = readFeature(raw);
   if (!feature) return { kind: "skipped", reason: "invalid_feature" };
@@ -51,7 +50,6 @@ export async function reconcileFeatureSubEntity(
   deps: MaterializeDeps,
   corroborationKey: string,
 ): Promise<{ support: number; materialized: boolean; reason: FeatureReconcileReason; subEntityId?: string }> {
-  if (!deps.experimentalFlag) return { support: 0, materialized: false, reason: "below_threshold" };
   const entries = await loadCorroboratingFeatureFacts(deps, corroborationKey);
   const support = distinctIndexedFileCount(entries);
   if (entries.length === 0) {

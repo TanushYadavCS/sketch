@@ -312,7 +312,6 @@ export function connectorRoutes(
       | "CO_MENTION_CONTRIBUTES_TO_THRESHOLD"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
-      | "EXPERIMENTAL_FLAG"
       | "ENCRYPTION_KEY"
       | "CONNECTOR_CREDENTIAL_SOURCE"
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
@@ -532,7 +531,7 @@ export function connectorRoutes(
           fileCount,
           perUserAuth: meta.perUserAuth,
           requiresOAuthClientSetup: meta.requiresOAuthClientSetup,
-          hierarchyLevels: appConfig?.EXPERIMENTAL_FLAG ? (meta.hierarchyLevels ?? null) : undefined,
+          hierarchyLevels: meta.hierarchyLevels ?? null,
           ...permissionFields(permissions),
         };
       }),
@@ -1800,7 +1799,7 @@ export function connectorRoutes(
         fileCount,
         perUserAuth: meta.perUserAuth,
         requiresOAuthClientSetup: meta.requiresOAuthClientSetup,
-        hierarchyLevels: appConfig?.EXPERIMENTAL_FLAG ? (meta.hierarchyLevels ?? null) : undefined,
+        hierarchyLevels: meta.hierarchyLevels ?? null,
         ...permissionFields(permissions),
       },
     });
@@ -2354,7 +2353,6 @@ export function connectorRoutes(
       geminiApiKey: settings?.gemini_api_key,
       geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
-      experimentalFlag: appConfig?.EXPERIMENTAL_FLAG,
       fileIds: [fileId],
       debugDumpDir,
     }).catch((err) => {

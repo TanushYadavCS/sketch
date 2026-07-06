@@ -4,11 +4,10 @@
  * Runs after sync completes. For each file with embedding_status = 'pending':
  * 1. Chunk text content
  * 2. Extract timeframes (deterministic regex-based)
- * 3. Link entities deterministically (substring match entity names against content)
+ * 3. Extract AI-grounded summaries and entity facts when available
  * 4. Generate embeddings (text chunks or images)
  * 5. Store everything in DB
  *
- * No LLM calls — all extraction is deterministic.
  * Images are downloaded temporarily from Google Drive, embedded, then discarded.
  */
 import { randomUUID } from "node:crypto";
@@ -21,10 +20,8 @@ import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-f
 import { parseOrgContext } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
-import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { PRODUCT_MATCH_TARGET_PROVENANCE_TIERS } from "../entities/provenance";
 import { yieldToEventLoop } from "../lib/event-loop";
-import type { Chunk } from "./chunking";
 import { chunkText } from "./chunking";
 import { type DocumentFactContext, emitDocumentDerivedFacts, sortDocumentParentRefs } from "./document-facts";
 import { ensureEmailThreadSummary, rebuildEmailThreadSummary } from "./email/thread-summary";
@@ -41,10 +38,6 @@ export const MAX_FILES_PER_RUN = 5000;
 export const SCHEDULED_ENRICHMENT_MAX_FILES_PER_RUN = 50;
 export const SCHEDULED_ENRICHMENT_TIME_BUDGET_MS = 5 * 60 * 1000;
 
-/** Minimum entity name length for substring matching (avoids false positives). */
-const MIN_ENTITY_NAME_LENGTH = 3;
-
-const DETERMINISTIC_LINK_BATCH_SIZE = 500;
 const PROJECT_BASELINE_LIMIT = 200;
 const ENRICHMENT_BACKOFF_MS = [
   30 * 60 * 1000,
@@ -66,12 +59,6 @@ class StaleEnrichmentError extends Error {
     this.name = "StaleEnrichmentError";
   }
 }
-
-type DeterministicEntity = {
-  id: string;
-  name: string;
-  aliases: string | null;
-};
 
 type FileContentVersion = {
   contentHash: string | null;
@@ -241,7 +228,6 @@ async function emitAndMaterializeDocumentFactsFromStoredFile(
 ): Promise<void> {
   const context = await buildStoredDocumentFactContext(deps.db, file);
   const result = await emitDocumentDerivedFacts(deps.db, context, {
-    experimentalFlag: deps.experimentalFlag,
     contentChanged: true,
     generator: generator ?? undefined,
     dumpDir: deps.debugDumpDir,
@@ -249,7 +235,6 @@ async function emitAndMaterializeDocumentFactsFromStoredFile(
   });
   if (result.changed) {
     await materializeUnmaterializedFacts(deps.db, deps.logger, {
-      experimentalFlag: deps.experimentalFlag,
       embeddingProvider: deps.embeddingProvider,
       factTypes: ["llm_task"],
     });
@@ -330,10 +315,7 @@ async function markEmbeddingFailure(
   await query.execute();
 }
 
-export async function loadBaselineKnownEntities(
-  db: Kysely<DB>,
-  opts: { experimentalFlag?: boolean } = {},
-): Promise<KnownEntityForPrompt[]> {
+export async function loadBaselineKnownEntities(db: Kysely<DB>): Promise<KnownEntityForPrompt[]> {
   const baseEntities = await db
     .selectFrom("entities")
     .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
@@ -347,18 +329,16 @@ export async function loadBaselineKnownEntities(
     )
     .where(whereLiveEntity())
     .execute();
-  const projectEntities = opts.experimentalFlag
-    ? await db
-        .selectFrom("entities")
-        .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
-        .where("source_type", "=", "project")
-        .where("status", "=", "confirmed")
-        .where(whereLiveEntity())
-        .orderBy("hotness", "desc")
-        .orderBy("name", "asc")
-        .limit(PROJECT_BASELINE_LIMIT)
-        .execute()
-    : [];
+  const projectEntities = await db
+    .selectFrom("entities")
+    .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
+    .where("source_type", "=", "project")
+    .where("status", "=", "confirmed")
+    .where(whereLiveEntity())
+    .orderBy("hotness", "desc")
+    .orderBy("name", "asc")
+    .limit(PROJECT_BASELINE_LIMIT)
+    .execute();
   const entities = [...baseEntities, ...projectEntities];
   return entities.map((entity) => ({
     id: entity.id,
@@ -380,7 +360,6 @@ export interface EnrichmentDeps {
   geminiApiKey?: string | null;
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
-  experimentalFlag?: boolean;
   /** Download image from Google Drive by provider file ID. Returns buffer + mime type. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
   /** If set, only enrich these specific file IDs (ignoring pending status). */
@@ -465,7 +444,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
   }
 
   try {
-    deps.knownEntities = await loadBaselineKnownEntities(db, { experimentalFlag: deps.experimentalFlag });
+    deps.knownEntities = await loadBaselineKnownEntities(db);
   } catch {
     // entities table may not exist yet — ignore
   }
@@ -594,7 +573,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               const generator = getGenerator();
               if (!generator) throw new Error("Enrichment generator unavailable");
               const knownEntities = await buildFileScopedKnownEntities(
-                { db, logger, experimentalFlag: deps.experimentalFlag },
+                { db, logger },
                 file.id,
                 deps.knownEntities ?? [],
                 file.content,
@@ -612,7 +591,6 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   orgContext: deps.orgContext,
                   knownEntities,
                   participantBlock,
-                  experimentalFlag: deps.experimentalFlag,
                   debugDumpDir: deps.debugDumpDir,
                   ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
                 },
@@ -644,7 +622,6 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               await ensureFileFresh(db, file.id, fileVersion);
               if (floor.emitted > 0) {
                 await materializeUnmaterializedFacts(db, logger, {
-                  experimentalFlag: deps.experimentalFlag,
                   embeddingProvider: deps.embeddingProvider,
                 });
               }
@@ -834,17 +811,13 @@ async function enrichTextDocument(
   const { db, logger, embeddingProvider } = deps;
   const fileVersion = contentVersionOf(file);
 
-  // For structured data (CSV/sheets), only extract timeframes + link entities — no chunking, no embedding
+  // For structured data (CSV/sheets), only extract timeframes — no chunking, summary, or embedding
   if (isStructured) {
     const timeframes = extractDatesFromText(file.content);
     await withFreshFileWriteLock(db, file.id, fileVersion, async (trx) => {
       await clearFileTimeframes(trx, file.id);
       await storeTimeframes(trx, file.id, timeframes);
     });
-
-    await linkEntitiesDeterministic(db, file.id, file.content, [], undefined, () =>
-      ensureFileFresh(db, file.id, fileVersion),
-    );
 
     logger.debug({ fileId: file.id, fileName: file.file_name }, "Structured file enriched (no chunking/embedding)");
     return;
@@ -873,7 +846,7 @@ async function enrichTextDocument(
     await storeTimeframes(trx, file.id, timeframes);
   });
 
-  // 4. Entity linking — AI-powered when Gemini available, deterministic fallback
+  // 4. Summary and entity extraction — AI-powered when Gemini is available
   // Skip LLM calls for tiny content; mail and calendar items use a lower threshold because the payload is often short.
   const wordCount = file.content.split(/\s+/).filter(Boolean).length;
   let usedSmartEnrichment = false;
@@ -892,7 +865,7 @@ async function enrichTextDocument(
   if (!summaryAlreadyResolved && generator && wordCount >= minWordsForSummary) {
     try {
       const knownEntities = await buildFileScopedKnownEntities(
-        { db, logger, experimentalFlag: deps.experimentalFlag },
+        { db, logger },
         file.id,
         deps.knownEntities ?? [],
         file.content,
@@ -909,7 +882,6 @@ async function enrichTextDocument(
           participantBlock,
           debugDumpDir: deps.debugDumpDir,
           ensureFresh: () => ensureFileFresh(db, file.id, fileVersion),
-          experimentalFlag: deps.experimentalFlag,
         },
         {
           id: file.id,
@@ -939,7 +911,6 @@ async function enrichTextDocument(
       await ensureFileFresh(db, file.id, fileVersion);
       if (floor.emitted > 0) {
         await materializeUnmaterializedFacts(db, logger, {
-          experimentalFlag: deps.experimentalFlag,
           embeddingProvider,
         });
       }
@@ -948,14 +919,11 @@ async function enrichTextDocument(
     } catch (err) {
       if (err instanceof StaleEnrichmentError) throw err;
       smartEnrichmentFailed = true;
-      logger.warn({ err, fileId: file.id }, "Smart enrichment failed, falling back to deterministic");
+      logger.warn({ err, fileId: file.id }, "Smart enrichment failed");
     }
   }
 
   if (!summaryAlreadyResolved && !usedSmartEnrichment) {
-    await linkEntitiesDeterministic(db, file.id, file.content, chunks, undefined, () =>
-      ensureFileFresh(db, file.id, fileVersion),
-    );
     const summaryQuery = db
       .updateTable("indexed_files")
       .set(
@@ -1075,194 +1043,6 @@ async function enrichImage(
   });
 
   // buffer is garbage collected — nothing stored on disk
-}
-
-/**
- * Deterministic entity linking: substring-match entity names/aliases
- * against document content, create mentions for matches.
- */
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Word-boundary substring match. Plain `String.includes` falsely matches
- * short names inside longer words — "Anshu" inside "Himanshu", "Tim" inside
- * "estimated", "Don" inside "donate". `\b` ensures the candidate sits at
- * an ASCII word boundary. JS `\b` is ASCII-only; names with non-ASCII
- * letters (accents, Devanagari, etc.) would need `\p{L}` boundaries — out
- * of scope for this fix, which targets the dominant false-positive class.
- */
-export function matchesAsWord(content: string, name: string): boolean {
-  if (!name || !content) return false;
-  return new RegExp(`\\b${escapeRegex(name)}\\b`).test(content);
-}
-
-export async function linkEntitiesByDeterministicMatch(db: Kysely<DB>, logger: Logger): Promise<EnrichmentResult> {
-  const result: EnrichmentResult = { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] };
-  const allEntities = await createEntityRepository(db).getEntitiesByStatus("confirmed", {
-    excludeSourceTypes: Array.from(HIDDEN_ENTITY_SOURCE_TYPES),
-  });
-  let lastFileId: string | null = null;
-
-  while (true) {
-    let query = db
-      .selectFrom("indexed_files")
-      .select(["id", "content"])
-      .where("is_archived", "=", 0)
-      .where("content", "is not", null)
-      .orderBy("id", "asc")
-      .limit(DETERMINISTIC_LINK_BATCH_SIZE);
-    if (lastFileId) {
-      query = query.where("id", ">", lastFileId);
-    }
-    const files = await query.execute();
-    if (files.length === 0) break;
-    lastFileId = files[files.length - 1].id;
-
-    const fileIds = files.map((file) => file.id);
-    const chunkRows = await db
-      .selectFrom("document_chunks")
-      .select(["indexed_file_id", "chunk_index", "content", "token_count"])
-      .where("indexed_file_id", "in", fileIds)
-      .orderBy("indexed_file_id", "asc")
-      .orderBy("chunk_index", "asc")
-      .execute();
-    const chunksByFile = new Map<string, Chunk[]>();
-    for (const chunk of chunkRows) {
-      const chunks = chunksByFile.get(chunk.indexed_file_id) ?? [];
-      chunks.push({
-        index: chunk.chunk_index,
-        content: chunk.content,
-        tokenCount: chunk.token_count ?? 0,
-      });
-      chunksByFile.set(chunk.indexed_file_id, chunks);
-    }
-
-    for (const file of files) {
-      try {
-        await linkEntitiesDeterministic(db, file.id, file.content ?? "", chunksByFile.get(file.id) ?? [], allEntities);
-        result.filesProcessed++;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        logger.warn({ err, fileId: file.id }, "Deterministic entity linking failed");
-        result.errors.push({ fileId: file.id, error: message });
-        result.filesFailed++;
-      }
-    }
-  }
-
-  return result;
-}
-
-async function linkEntitiesDeterministic(
-  db: Kysely<DB>,
-  fileId: string,
-  content: string,
-  chunks: Chunk[],
-  allEntities?: DeterministicEntity[],
-  ensureFresh?: () => Promise<void>,
-): Promise<void> {
-  const entityRepo = createEntityRepository(db);
-
-  await ensureFresh?.();
-  await db
-    .deleteFrom("entity_mentions")
-    .where("indexed_file_id", "=", fileId)
-    .where("source", "=", "deterministic_substring")
-    .where("confidence", "!=", "EXTRACTED")
-    .execute();
-
-  await deleteStaleLegacyDeterministicMentions(db, fileId);
-
-  const entities =
-    allEntities ??
-    (await entityRepo.getEntitiesByStatus("confirmed", {
-      excludeSourceTypes: Array.from(HIDDEN_ENTITY_SOURCE_TYPES),
-    }));
-  const contentLower = content.toLowerCase();
-
-  for (const entity of entities) {
-    const names: string[] = [entity.name];
-    try {
-      const aliases = JSON.parse(entity.aliases || "[]") as string[];
-      names.push(...aliases);
-    } catch {
-      /* skip bad JSON */
-    }
-
-    // Check if any name/alias appears in content (skip very short names).
-    // Word-boundary match avoids "anshu" inside "himanshu" false positives.
-    const matchedName = names.find((name) => {
-      const nameLower = name.toLowerCase();
-      if (nameLower.length < MIN_ENTITY_NAME_LENGTH) return false;
-      return matchesAsWord(contentLower, nameLower);
-    });
-
-    if (matchedName) {
-      const nameLower = matchedName.toLowerCase();
-      const chunkIndex = chunks.findIndex((c) => matchesAsWord(c.content.toLowerCase(), nameLower));
-
-      await ensureFresh?.();
-      await entityRepo.createMention({
-        entityId: entity.id,
-        indexedFileId: fileId,
-        chunkIndex: chunkIndex >= 0 ? chunkIndex : null,
-        contextSnippet: chunkIndex >= 0 ? chunks[chunkIndex].content.slice(0, 300) : null,
-        confidence: "INFERRED",
-        source: "deterministic_substring",
-        relation: "mentioned",
-      });
-      await entityRepo.updateHotness(entity.id);
-      await yieldToEventLoop();
-    }
-  }
-}
-
-function normalizeDeterministicName(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function entityNames(entity: { name: string; aliases: string | null }): string[] {
-  const names = [entity.name];
-  try {
-    const aliases = JSON.parse(entity.aliases || "[]") as string[];
-    names.push(...aliases.filter((alias) => typeof alias === "string"));
-  } catch {}
-  return names;
-}
-
-async function deleteStaleLegacyDeterministicMentions(db: Kysely<DB>, fileId: string): Promise<void> {
-  const activeFactRows = await db
-    .selectFrom("indexed_file_facts")
-    .select("subject_name")
-    .where("indexed_file_id", "=", fileId)
-    .where("source", "=", "llm_extraction")
-    .where("fact_type", "=", "llm_extracted")
-    .where("deleted_at", "is", null)
-    .execute();
-  const activeLlmNames = new Set(
-    activeFactRows
-      .map((row) => row.subject_name)
-      .filter((name): name is string => Boolean(name))
-      .map(normalizeDeterministicName),
-  );
-
-  const legacyMentions = await db
-    .selectFrom("entity_mentions")
-    .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
-    .select(["entity_mentions.id as id", "entities.name as name", "entities.aliases as aliases"])
-    .where("entity_mentions.indexed_file_id", "=", fileId)
-    .where("entity_mentions.source", "=", "llm_extraction")
-    .where("entity_mentions.confidence", "!=", "EXTRACTED")
-    .where(whereLiveEntity())
-    .execute();
-  const staleIds = legacyMentions
-    .filter((mention) => entityNames(mention).every((name) => !activeLlmNames.has(normalizeDeterministicName(name))))
-    .map((mention) => mention.id);
-
-  if (staleIds.length === 0) return;
-  await db.deleteFrom("entity_mentions").where("id", "in", staleIds).execute();
 }
 
 async function storeTimeframes(

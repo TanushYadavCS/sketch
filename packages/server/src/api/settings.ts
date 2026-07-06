@@ -52,7 +52,7 @@ export function settingsRoutes(
   settings: SettingsRepo,
   db?: Kysely<DB>,
   logger?: Logger,
-  config?: Pick<Config, "GEMINI_MAX_RPM" | "GEMINI_MAX_RETRIES" | "OPENROUTER_API_KEY" | "EXPERIMENTAL_FLAG">,
+  config?: Pick<Config, "GEMINI_MAX_RPM" | "GEMINI_MAX_RETRIES" | "OPENROUTER_API_KEY">,
 ) {
   const routes = new Hono();
 
@@ -170,7 +170,6 @@ export function settingsRoutes(
       geminiApiKey: row?.gemini_api_key,
       geminiMaxRpm: config?.GEMINI_MAX_RPM,
       geminiMaxRetries: config?.GEMINI_MAX_RETRIES,
-      experimentalFlag: config?.EXPERIMENTAL_FLAG,
     }).catch((err) => {
       logger.error({ err }, "Manual enrichment run failed");
     });

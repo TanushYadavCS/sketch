@@ -39,41 +39,28 @@ export const projectsRoute = createRoute({
 
 export function ProjectsPage() {
   const [showAdd, setShowAdd] = useState(false);
-  const { data: setupStatus } = useQuery({ queryKey: ["setup", "status"], queryFn: () => api.setup.status() });
-  const yourOrg = setupStatus?.experimentalFlag === true;
 
-  // Flag off → the GA Projects-only page, unchanged. Flag on → the full Your
-  // Org surface (review band + products + teams + the curated add control).
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <div className="mb-7 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-[22px] font-medium text-foreground">{yourOrg ? "Your org" : "Projects"}</h1>
+          <h1 className="text-[22px] font-medium text-foreground">Your org</h1>
           <p className="mt-1 text-[13px] text-muted-foreground">
-            {yourOrg
-              ? "The products, projects, and teams the graph is made of — confirm what the system proposes, and declare what it should already know."
-              : "Each project is a slice of the graph. Born from a connector or defined by you, then wired to the data sources that feed it."}
+            The products, projects, and teams the graph is made of — confirm what the system proposes, and declare what
+            it should already know.
           </p>
         </div>
-        {yourOrg ? (
-          <Button variant="outline" size="sm" className="h-7 shrink-0 gap-1.5 text-xs" onClick={() => setShowAdd(true)}>
-            <PlusIcon size={12} />
-            Add
-          </Button>
-        ) : null}
+        <Button variant="outline" size="sm" className="h-7 shrink-0 gap-1.5 text-xs" onClick={() => setShowAdd(true)}>
+          <PlusIcon size={12} />
+          Add
+        </Button>
       </div>
 
-      {yourOrg ? (
-        <>
-          <ReviewBand types={SPINE_TYPES} />
-          <ProductsSection />
-          <ProjectsSection legacyLabels={false} />
-          <TeamsSection />
-          <AddEntityDialog open={showAdd} onOpenChange={setShowAdd} defaultType="product" />
-        </>
-      ) : (
-        <ProjectsSection legacyLabels />
-      )}
+      <ReviewBand types={SPINE_TYPES} />
+      <ProductsSection />
+      <ProjectsSection />
+      <TeamsSection />
+      <AddEntityDialog open={showAdd} onOpenChange={setShowAdd} defaultType="product" />
     </div>
   );
 }
@@ -144,17 +131,15 @@ function TierBadge({ tier }: { tier: string }) {
   );
 }
 
-function ProjectsSection({ legacyLabels }: { legacyLabels: boolean }) {
+function ProjectsSection() {
   const { data, isLoading } = useQuery({ queryKey: ["projects", "index"], queryFn: () => api.projects.list() });
   const projects = data?.projects ?? [];
   const needsSources = projects.filter((p) => p.sourceCount === 0);
   const active = projects.filter((p) => p.sourceCount > 0);
-  const needsLabel = legacyLabels ? "Needs sources" : "Projects · needs sources";
-  const activeLabel = legacyLabels ? "Active" : "Projects · active";
   if (!isLoading && projects.length === 0) {
     return (
       <section>
-        {legacyLabels ? null : <GroupLabel label="Projects" note="0 tracked" />}
+        <GroupLabel label="Projects" note="0 tracked" />
         <EmptyHint>
           No projects yet — they appear here as the graph derives them from your connectors, or when you define one.
         </EmptyHint>
@@ -165,7 +150,7 @@ function ProjectsSection({ legacyLabels }: { legacyLabels: boolean }) {
     <>
       {needsSources.length > 0 ? (
         <section>
-          <GroupLabel label={needsLabel} note={`${needsSources.length} born · not wired yet`} accent={legacyLabels} />
+          <GroupLabel label="Projects · needs sources" note={`${needsSources.length} born · not wired yet`} />
           <div className="flex flex-col gap-1">
             {needsSources.map((project) => (
               <ProjectRow key={project.id} project={project} />
@@ -174,7 +159,7 @@ function ProjectsSection({ legacyLabels }: { legacyLabels: boolean }) {
         </section>
       ) : null}
       <section>
-        <GroupLabel label={activeLabel} note={`${active.length} fed by the graph`} />
+        <GroupLabel label="Projects · active" note={`${active.length} fed by the graph`} />
         {isLoading ? (
           <Skeleton className="h-12 w-full" />
         ) : active.length > 0 ? (

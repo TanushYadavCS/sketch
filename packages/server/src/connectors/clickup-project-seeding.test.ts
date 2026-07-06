@@ -192,7 +192,6 @@ async function syncRecordedClickUpPayload(db: Kysely<DB>, syncRunId: string): Pr
       factContext,
       item,
       indexedFileId: itemResult.indexedFileId,
-      experimentalFlag: true,
     });
   }
 
@@ -212,10 +211,10 @@ describe("ClickUp project entity seeding", () => {
     await db.destroy();
   });
 
-  it("seeds folder-with-lists and folderless-list projects and links folderless tasks to the list project", async () => {
+  it("seeds folder projects from the default hierarchy and leaves folderless tasks unparented", async () => {
     await syncRecordedClickUpPayload(db, "sync-run-1");
 
-    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     expect(summary.entitiesCreated).toBe(2);
     const projects = await db
@@ -235,9 +234,9 @@ describe("ClickUp project entity seeding", () => {
       },
       {
         id: expect.any(String),
-        name: "Delivery Customer Rollout",
-        aliases: '["Customer Rollout"]',
-        source_id: "cu-list-flat-1",
+        name: "Delivery No Active Work",
+        aliases: '["No Active Work"]',
+        source_id: "cu-folder-empty",
       },
     ]);
     const legacyFolders = await db
@@ -251,22 +250,19 @@ describe("ClickUp project entity seeding", () => {
       .select("id")
       .where("provider_file_id", "=", "cu-task-flat-1")
       .executeTakeFirstOrThrow();
-    const flatProject = projects.find((project) => project.source_id === "cu-list-flat-1");
-    expect(flatProject).toBeDefined();
     const flatProjectMention = await db
       .selectFrom("entity_mentions")
       .selectAll()
       .where("indexed_file_id", "=", flatTask.id)
-      .where("entity_id", "=", flatProject?.id ?? "")
       .where("source", "=", "clickup_parent_entity")
-      .executeTakeFirstOrThrow();
-    expect(flatProjectMention.context_snippet).toBe("In list: Customer Rollout");
+      .executeTakeFirst();
+    expect(flatProjectMention).toBeUndefined();
     const flatTaskRow = await db
       .selectFrom("tasks")
       .select(["parent_name"])
       .where("source_task_id", "=", "cu-task-flat-1")
       .executeTakeFirstOrThrow();
-    expect(flatTaskRow.parent_name).toBe("Delivery Customer Rollout");
+    expect(flatTaskRow.parent_name).toBeNull();
   });
 
   it("re-syncs the same ClickUp tree without duplicate project entities or entity churn", async () => {
@@ -307,13 +303,7 @@ describe("ClickUp project entity seeding", () => {
       .execute();
     expect(secondProjects).toEqual(firstProjects);
     const reviews = await db.selectFrom("entity_review_queue").selectAll().execute();
-    expect(reviews).toHaveLength(1);
-    expect(reviews[0]).toMatchObject({
-      proposed_name: "Delivery",
-      entity_type: "project",
-      seed_source: "clickup",
-      seed_source_id: "cu-space-1",
-    });
+    expect(reviews).toHaveLength(0);
   });
 
   it("migrates legacy ClickUp folder rows and tombstones only folder facts before reset replay", async () => {

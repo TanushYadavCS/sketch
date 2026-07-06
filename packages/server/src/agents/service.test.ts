@@ -25,7 +25,7 @@ describe("Daily Brief durable-task hooks", () => {
     await db.destroy();
   });
 
-  it("with the flag on, surfaces open durable tasks, scrubs completed prior todos, and promotes emitted todos", async () => {
+  it("surfaces open durable tasks, scrubs completed prior todos, and promotes emitted todos", async () => {
     const users = createUserRepository(db);
     const user = await users.create({ name: "Daily Brief User", email: "brief-owner@example.com" });
     await seedIndexedFile(db, "brief-file-1", user.id);
@@ -45,7 +45,7 @@ describe("Daily Brief durable-task hooks", () => {
     });
 
     const before = await countTasks(db);
-    const run = await runAndCapture(db, user.id, true, OUTPUT_DATE, [
+    const run = await runAndCapture(db, user.id, OUTPUT_DATE, [
       briefItem({ title: "Brand new follow-up", knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] } }),
     ]);
     const after = await countTasks(db);
@@ -58,30 +58,11 @@ describe("Daily Brief durable-task hooks", () => {
     expect(run.instructions).toContain("openDurableTasks");
     expect(after).toBeGreaterThan(before);
   });
-
-  it("with the flag off, omits durable tasks, leaves prior todos intact, and promotes nothing", async () => {
-    const users = createUserRepository(db);
-    const user = await users.create({ name: "Daily Brief User", email: "brief-owner-2@example.com" });
-    await seedIndexedFile(db, "brief-file-2", user.id);
-    await seedCompletedOutput(db, user.id, OUTPUT_DATE);
-
-    const before = await countTasks(db);
-    const run = await runAndCapture(db, user.id, false, OUTPUT_DATE, [
-      briefItem({ title: "Flag-off emitted todo", knowledgeRefs: { entityIds: [], fileIds: ["brief-file-2"] } }),
-    ]);
-    const after = await countTasks(db);
-
-    expect(run.context).not.toHaveProperty("openDurableTasks");
-    expect(priorTitles(run.context.sameDayPreviousOutput)).toEqual(["Completed prior todo", "Open prior todo"]);
-    expect(run.instructions).not.toContain("openDurableTasks");
-    expect(after).toBe(before);
-  });
 });
 
 async function runAndCapture(
   db: Kysely<DB>,
   userId: string,
-  experimentalFlag: boolean,
   outputDate: string,
   items: AgentOutputItemInput[],
 ): Promise<{ context: Record<string, unknown>; instructions: string }> {
@@ -89,7 +70,7 @@ async function runAndCapture(
   const capturedParams: RunAgentParams[] = [];
   const service = new AgentRunService({
     db,
-    config: createTestConfig({ EXPERIMENTAL_FLAG: experimentalFlag }),
+    config: createTestConfig(),
     logger: createTestLogger(),
     users: createUserRepository(db),
     settings: createSettingsRepository(db),

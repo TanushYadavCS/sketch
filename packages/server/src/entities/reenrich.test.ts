@@ -118,7 +118,7 @@ describe("entity re-enrich", () => {
     await db.destroy();
   });
 
-  it("tombstones only LLM facts and preserves connector mentions", async () => {
+  it("tombstones LLM facts and clears stale deterministic mentions while preserving connector mentions", async () => {
     await seedEntity(db, "person-1", "Alice");
     await seedLlmExtractedFact(db, "Alice");
     await seedLlmRelationFact(db);
@@ -320,10 +320,12 @@ describe("entity re-enrich", () => {
     expect(newEntity?.name).toBe("New Person");
   });
 
-  it("threads experimentalFlag into the re-enrich extraction phase", async () => {
-    const seenFlags: Array<boolean | undefined> = [];
+  it("runs re-enrich extraction with the current enrichment dependencies", async () => {
+    let calls = 0;
     const capture = async (deps: EnrichmentDeps) => {
-      seenFlags.push(deps.experimentalFlag);
+      expect(deps.db).toBe(db);
+      expect(deps.logger).toBeDefined();
+      calls++;
       return { filesProcessed: 1, filesSkipped: 0, filesFailed: 0, errors: [] };
     };
 
@@ -333,19 +335,10 @@ describe("entity re-enrich", () => {
       triggeredByUserId: "owner",
       fileIds: ["file-1"],
       runAfter: false,
-      experimentalFlag: true,
-      runEnrichmentImpl: capture,
-    });
-    await runReenrichJob({
-      db,
-      logger,
-      triggeredByUserId: "owner",
-      fileIds: ["file-1"],
-      runAfter: false,
       runEnrichmentImpl: capture,
     });
 
-    expect(seenFlags).toEqual([true, undefined]);
+    expect(calls).toBe(1);
   });
 
   it("uses decrypted OpenRouter settings for re-enrichment embeddings", async () => {

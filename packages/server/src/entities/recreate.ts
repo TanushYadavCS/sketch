@@ -1,7 +1,7 @@
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
-import { type EnrichmentResult, isEnrichmentActive, linkEntitiesByDeterministicMatch } from "../connectors/enrichment";
+import { type EnrichmentResult, isEnrichmentActive } from "../connectors/enrichment";
 import { type DomainSweepResult, sweepDomainPromotions } from "../connectors/smart-enrichment";
 import { getSyncProgress, seedTeamDirectoryEntities } from "../connectors/sync";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
@@ -278,7 +278,7 @@ export async function resetDerivedEntityData(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phase 3 — Reset → materialize facts → deterministic substring linking.
+// Phase 3 — Reset → materialize facts → relationship sweeps.
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface RecreateSummary {
@@ -320,11 +320,6 @@ export interface RecreateDeps {
   featureAutoMintThreshold?: number;
   coMentionContributesToThreshold?: number;
   /**
-   * Enables experimental rebuild phases that must stay invisible when the
-   * org-level experimental flag is off.
-   */
-  experimentalFlag?: boolean;
-  /**
    * Restrict the materialize replay to a subset of fact types. Used by
    * category reset+rebuild to avoid replaying unrelated pending facts.
    */
@@ -365,21 +360,17 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
     });
 
     if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
-    if (deps.experimentalFlag) {
-      const taskRepo = createTaskRepository(db);
-      await taskRepo.reanchorNullParentTasks();
-      if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
-      await taskRepo.expireOrphanedTasks();
-      if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
-      await reconcileStructuralAssigneeContributesTo(db, logger.child({ component: "recreate-structural-assignee" }), {
-        scope: { kind: "full" },
-      });
-      if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
-    }
-    // Domain promotions run between materialize and deterministic linking so
-    // any new company entity (and its `works_at` edges) is visible to the
-    // linker. Sweep also runs on every live sync — keep the two paths
-    // calling the same helper so recreate doesn't drift.
+    const taskRepo = createTaskRepository(db);
+    await taskRepo.reanchorNullParentTasks();
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
+    await taskRepo.expireOrphanedTasks();
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
+    await reconcileStructuralAssigneeContributesTo(db, logger.child({ component: "recreate-structural-assignee" }), {
+      scope: { kind: "full" },
+    });
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
+    // Domain promotions run after materialize so any new company entity and
+    // its `works_at` edges are available before downstream sweeps.
     const domainSweep = await sweepDomainPromotions(db, logger.child({ component: "recreate-domain-sweep" }));
     if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     await fixupPreservedEntityDomainReferences(db, logger.child({ component: "recreate-domain-fixup" }));
@@ -400,11 +391,13 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
       };
     }
 
-    const deterministic = await linkEntitiesByDeterministicMatch(
-      db,
-      logger.child({ component: "recreate-deterministic-linking" }),
-    );
-    return { reset, replay, domainSweep, enrichmentIterations: 1, enrichment: deterministic };
+    return {
+      reset,
+      replay,
+      domainSweep,
+      enrichmentIterations: 0,
+      enrichment: { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] },
+    };
   };
 
   return deps.lockAlreadyHeld ? run() : withRecreateLock(run);

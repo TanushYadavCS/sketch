@@ -36,7 +36,6 @@ let configuredBirthGateTypes = new Set<ProposeEntityType>();
 let configuredBirthGateLiveTypes = new Set<ProposeEntityType>();
 let configuredStructuralAutoBirthTypes = new Set<ProposeEntityType>();
 let configuredBirthGateDryRun = true;
-let configuredExperimentalFlag = false;
 
 /**
  * Set the default `llmPromotionThreshold` used by entry points
@@ -52,7 +51,6 @@ export function configureMaterializeDefaults(opts: {
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
-  experimentalFlag?: boolean;
 }): void {
   if (typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1) {
     configuredLlmPromotionThreshold = Math.floor(opts.llmPromotionThreshold);
@@ -67,7 +65,6 @@ export function configureMaterializeDefaults(opts: {
   if (opts.birthGateLiveTypes) configuredBirthGateLiveTypes = new Set(opts.birthGateLiveTypes);
   if (opts.structuralAutoBirthTypes) configuredStructuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes);
   if (typeof opts.birthGateDryRun === "boolean") configuredBirthGateDryRun = opts.birthGateDryRun;
-  if (typeof opts.experimentalFlag === "boolean") configuredExperimentalFlag = opts.experimentalFlag;
 }
 
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
@@ -325,7 +322,6 @@ export interface BuildMaterializeDepsOptions {
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
-  experimentalFlag?: boolean;
   embeddingProvider?: EmbeddingProvider | null;
 }
 
@@ -355,7 +351,6 @@ export async function buildMaterializeDeps(
   const birthGateLiveTypes = new Set(opts.birthGateLiveTypes ?? configuredBirthGateLiveTypes);
   const structuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes ?? configuredStructuralAutoBirthTypes);
   const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
-  const experimentalFlag = opts.experimentalFlag ?? configuredExperimentalFlag;
   const embeddingProvider = opts.embeddingProvider ?? null;
 
   const lookup: EntityLookup = {
@@ -397,7 +392,7 @@ export async function buildMaterializeDeps(
     getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
     findLlmExtractedThirdPartyMention: (name) => findLlmExtractedThirdPartyMention(db, name),
   };
-  if (embeddingProvider && experimentalFlag) {
+  if (embeddingProvider) {
     lookup.retrieveEmbeddingCandidates = async (entityType, name): Promise<RankedCandidate[]> => {
       if (!isNameDedupEntityType(entityType)) return [];
       try {
@@ -440,7 +435,6 @@ export async function buildMaterializeDeps(
     birthGateLiveTypes,
     structuralAutoBirthTypes,
     birthGateDryRun,
-    experimentalFlag,
     embeddingProvider,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),
     onEntityResolved: (entity: Entity) => refreshResolvedEntityIndex(db, index, entity),

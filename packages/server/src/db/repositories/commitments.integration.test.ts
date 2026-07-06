@@ -57,7 +57,6 @@ describe("commitment sub-entities postgres", () => {
       const project = await seedProject(freshDb, { id: "commitment-pg-project", name: "Commitment PG Project" });
 
       await upsertCommitmentFact(freshDb, {
-        experimentalFlag: true,
         connectorConfigId: CONNECTOR_ID,
         createdByUserId: USER_ID,
         lastSeenSyncRunId: "sync-1",
@@ -68,11 +67,10 @@ describe("commitment sub-entities postgres", () => {
         status: "open",
         evidence: { fileIds: [], entityIds: [project.id] },
       });
-      await materializeUnmaterializedFacts(freshDb, createTestLogger(), { experimentalFlag: true });
+      await materializeUnmaterializedFacts(freshDb, createTestLogger(), {});
       await expect(markCommitmentDone(freshDb, "pg-survives")).resolves.toBe(true);
 
       await upsertCommitmentFact(freshDb, {
-        experimentalFlag: true,
         connectorConfigId: CONNECTOR_ID,
         createdByUserId: USER_ID,
         lastSeenSyncRunId: "sync-2",
@@ -87,7 +85,7 @@ describe("commitment sub-entities postgres", () => {
         { kind: "connector", connectorConfigId: CONNECTOR_ID, syncRunId: "sync-2" },
         null,
       );
-      await materializeUnmaterializedFacts(freshDb, createTestLogger(), { experimentalFlag: true });
+      await materializeUnmaterializedFacts(freshDb, createTestLogger(), {});
 
       const rows = await freshDb
         .selectFrom("sub_entities")
@@ -100,7 +98,6 @@ describe("commitment sub-entities postgres", () => {
       expect(rows[0]).toMatchObject({ status: "done", status_authority: "local", parent_scope_key: project.id });
 
       await upsertCommitmentFact(freshDb, {
-        experimentalFlag: true,
         connectorConfigId: CONNECTOR_ID,
         createdByUserId: USER_ID,
         lastSeenSyncRunId: "sync-3",
@@ -111,9 +108,8 @@ describe("commitment sub-entities postgres", () => {
         status: "open",
         evidence: { fileIds: [], entityIds: [project.id] },
       });
-      await materializeUnmaterializedFacts(freshDb, createTestLogger(), { experimentalFlag: true });
+      await materializeUnmaterializedFacts(freshDb, createTestLogger(), {});
       await upsertCommitmentFact(freshDb, {
-        experimentalFlag: true,
         connectorConfigId: CONNECTOR_ID,
         createdByUserId: USER_ID,
         lastSeenSyncRunId: "sync-4",
@@ -124,7 +120,7 @@ describe("commitment sub-entities postgres", () => {
         status: "dropped",
         evidence: { fileIds: [], entityIds: [project.id] },
       });
-      await materializeUnmaterializedFacts(freshDb, createTestLogger(), { experimentalFlag: true });
+      await materializeUnmaterializedFacts(freshDb, createTestLogger(), {});
       const external = await freshDb
         .selectFrom("sub_entities")
         .selectAll()
@@ -159,7 +155,6 @@ async function seedBase(db: Kysely<DB>): Promise<void> {
 
 async function seedCommitment(db: Kysely<DB>, commitmentId: string): Promise<void> {
   await upsertCommitmentFact(db, {
-    experimentalFlag: true,
     connectorConfigId: CONNECTOR_ID,
     createdByUserId: USER_ID,
     lastSeenSyncRunId: "sync-prior",

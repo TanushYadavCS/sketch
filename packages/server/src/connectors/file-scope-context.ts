@@ -60,7 +60,6 @@ export interface FileScopeDeps {
   db: Kysely<DB>;
   logger?: Logger;
   now?: () => number;
-  experimentalFlag?: boolean;
   loadAdjacencyForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<AdjacencyEntry[]>;
   loadContributesToForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<ContributesToEntry[]>;
   loadPendingProposalsForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<PendingProposalEntry[]>;
@@ -154,6 +153,7 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
   for (const row of attendees) {
     const email = row.subject_email;
     if (!email) continue;
+    if (!email.includes("@")) continue;
     participantEmails.push(email);
     const domain = domainsRepo.normalizeEmailDomain(email);
     if (!domain) continue;
@@ -173,7 +173,6 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
   const companies = Array.from(companyMap.values())
     .sort((a, b) => b.hotness - a.hotness)
     .slice(0, MAX_ANCHORS_PER_SIDE);
-  if (!deps.experimentalFlag) return { companies, persons: [] };
 
   const entityRepo = createEntityRepository(deps.db);
   const personsByEmail = await entityRepo.getPersonEntitiesByEmails(participantEmails);
@@ -440,14 +439,12 @@ export async function buildFileScopedKnownEntities(
     byKey.set(k, stripPromptInternalFields(b));
   }
 
-  if (deps.experimentalFlag) {
-    for (const anchor of [...anchors.companies, ...anchors.persons]) {
-      const pendingProposals = await (deps.loadPendingProposalsForAnchor ?? pendingProposalsForAnchor)(deps, anchor.id);
-      for (const proposal of pendingProposals.slice(0, PER_ANCHOR_INITIATIVE_CAP)) {
-        const k = keyOf(proposal.name, proposal.type);
-        if (byKey.has(k)) continue;
-        byKey.set(k, { name: proposal.name, type: proposal.type, reviewId: proposal.id });
-      }
+  for (const anchor of [...anchors.companies, ...anchors.persons]) {
+    const pendingProposals = await (deps.loadPendingProposalsForAnchor ?? pendingProposalsForAnchor)(deps, anchor.id);
+    for (const proposal of pendingProposals.slice(0, PER_ANCHOR_INITIATIVE_CAP)) {
+      const k = keyOf(proposal.name, proposal.type);
+      if (byKey.has(k)) continue;
+      byKey.set(k, { name: proposal.name, type: proposal.type, reviewId: proposal.id });
     }
   }
 
@@ -537,15 +534,13 @@ async function rankBaselineKnownEntities(
   if (scoredCandidates.length === 0) return legacy;
 
   const cap = opts.baselineRelevanceCap ?? BASELINE_RELEVANCE_CAP;
-  const alwaysInclude = deps.experimentalFlag
-    ? scoredCandidates
-        .filter((entity) => hasVerbatimMention(fileContent, entity))
-        .sort((a, b) => {
-          const hotness = Number(b.hotness ?? 0) - Number(a.hotness ?? 0);
-          return hotness !== 0 ? hotness : a.name.localeCompare(b.name);
-        })
-        .slice(0, BASELINE_ALWAYS_INCLUDE_CAP)
-    : scoredCandidates.filter((entity) => hasVerbatimMention(fileContent, entity));
+  const alwaysInclude = scoredCandidates
+    .filter((entity) => hasVerbatimMention(fileContent, entity))
+    .sort((a, b) => {
+      const hotness = Number(b.hotness ?? 0) - Number(a.hotness ?? 0);
+      return hotness !== 0 ? hotness : a.name.localeCompare(b.name);
+    })
+    .slice(0, BASELINE_ALWAYS_INCLUDE_CAP);
   const alwaysIds = new Set(alwaysInclude.map((entity) => entity.id));
   const candidates = scoredCandidates.filter((entity) => !alwaysIds.has(entity.id));
   const candidateIds = candidates.flatMap((entity) => (entity.id ? [entity.id] : []));

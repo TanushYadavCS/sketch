@@ -101,12 +101,10 @@ async function main() {
   if (!(summary.reset.factsMarkedUnmaterialized > 0))
     issues.push(`[T2] factsMarkedUnmaterialized expected > 0, got ${summary.reset.factsMarkedUnmaterialized}`);
 
-  // TEST 3: INFERRED mentions exist via deterministic_substring
-  const inferredDeterministic = breakdown.find(
-    (r) => r.confidence === "INFERRED" && r.source === "deterministic_substring",
-  );
-  if (!inferredDeterministic || inferredDeterministic.count === 0)
-    issues.push(`[T3] no INFERRED mentions with source='deterministic_substring' — substring linker didn't fire`);
+  // TEST 3: deterministic_substring mentions are no longer produced
+  const deterministic = breakdown.find((r) => r.source === "deterministic_substring");
+  if (deterministic && deterministic.count > 0)
+    issues.push(`[T3] unexpected deterministic_substring mentions after recreate: ${deterministic.count}`);
 
   // TEST 3: no INFERRED llm_extraction mentions (we haven't run smart-enrichment)
   const llmInferred = breakdown.find((r) => r.confidence === "INFERRED" && r.source === "llm_extraction");

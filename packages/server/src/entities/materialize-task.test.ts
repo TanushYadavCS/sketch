@@ -8,12 +8,7 @@ import { TEST_ACCOUNT_ENTITY_ID, createTaskRepository } from "../db/repositories
 import { getCycleRollup } from "../db/repositories/work-cycles";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import {
-  buildMaterializeDeps,
-  materializeFromFact,
-  materializeUnmaterializedFacts,
-  shouldMarkMaterialized,
-} from "./materialize";
+import { materializeUnmaterializedFacts } from "./materialize";
 
 const USER_ID = "task-user";
 const CONNECTOR_ID = "task-config";
@@ -204,7 +199,7 @@ describe("structural task materialization", () => {
       project: { name: "Launch List", source: "clickup", sourceId: "list-1" },
     });
 
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     const rows = await db.selectFrom("tasks").selectAll().orderBy("source_task_id").execute();
     const byId = new Map(rows.map((row) => [row.source_task_id, row]));
@@ -233,7 +228,7 @@ describe("structural task materialization", () => {
       assignee: { name: "Priya Shah", source: "linear", sourceId: "user-1" },
     });
 
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     const before = await db.selectFrom("tasks").selectAll().executeTakeFirstOrThrow();
     expect(before.parent_entity_id).toBeNull();
@@ -259,66 +254,51 @@ describe("structural task materialization", () => {
     expect(after.parent_entity_id).toBe(project.id);
   });
 
-  it("keeps flag-off parity, updates status idempotently, and expires deleted structural tasks", async () => {
+  it("emits task facts, updates status idempotently, and expires deleted structural tasks", async () => {
     await seedBase(db, "linear");
     const connector = { type: "linear" } as Connector;
     const item: SyncedItem = {
       providerFileId: "task-1",
       providerUrl: null,
-      fileName: "Flag task",
+      fileName: "Task",
       fileType: "issue",
       contentCategory: "structured",
-      content: "Flag task",
+      content: "Task",
       sourcePath: null,
-      contentHash: "hash-flag",
+      contentHash: "hash-task",
       sourceCreatedAt: null,
       sourceUpdatedAt: null,
-      task: { sourceTaskId: "flag-task", title: "Flag task", statusType: "started", statusRaw: "Started" },
+      task: { sourceTaskId: "task-1", title: "Task", statusType: "started", statusRaw: "Started" },
     };
     await emitFactsForSyncedItem({
       factRepo: createIndexedFileFactRepository(db),
       connector,
       connectorType: "linear",
-      factContext: { connectorConfigId: CONNECTOR_ID, createdByUserId: USER_ID, lastSeenSyncRunId: "sync-off" },
+      factContext: { connectorConfigId: CONNECTOR_ID, createdByUserId: USER_ID, lastSeenSyncRunId: "sync-1" },
       item,
       indexedFileId: "file-1",
-      experimentalFlag: false,
     });
     let factCount = await db
       .selectFrom("indexed_file_facts")
       .select((eb) => eb.fn.countAll<number>().as("count"))
       .where("fact_type", "=", "structural_task")
       .executeTakeFirstOrThrow();
-    expect(Number(factCount.count)).toBe(0);
+    expect(Number(factCount.count)).toBe(1);
 
-    await upsertTaskFact(db, { sourceTaskId: "flag-task", statusType: "started", statusRaw: "Started" });
-    const depsOff = await buildMaterializeDeps(db, { experimentalFlag: false });
-    const fact = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
-    const offResult = await materializeFromFact(depsOff, fact);
-    expect(offResult).toEqual({ kind: "skipped", reason: "experimental_off" });
-    expect(shouldMarkMaterialized(offResult)).toBe(true);
-    await db.updateTable("indexed_file_facts").set({ materialized_at: new Date().toISOString() }).execute();
-    let taskCount = await db
-      .selectFrom("tasks")
-      .select((eb) => eb.fn.countAll<number>().as("count"))
-      .executeTakeFirstOrThrow();
-    expect(Number(taskCount.count)).toBe(0);
-
-    await upsertTaskFact(db, { sourceTaskId: "flag-task", statusType: "started", statusRaw: "Started" });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
     const started = await db.selectFrom("tasks").selectAll().executeTakeFirstOrThrow();
     await upsertTaskFact(db, {
-      sourceTaskId: "flag-task",
+      sourceTaskId: "task-1",
       statusType: "completed",
       statusRaw: "Done",
-      title: "Flag task renamed",
+      title: "Task renamed",
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
     const completedRows = await db.selectFrom("tasks").selectAll().execute();
     expect(completedRows).toHaveLength(1);
     expect(completedRows[0]).toMatchObject({
       id: started.id,
-      title: "Flag task renamed",
+      title: "Task renamed",
       status: "done",
       valid_to: null,
     });
@@ -340,7 +320,7 @@ describe("structural task materialization", () => {
       .select((eb) => eb.fn.countAll<number>().as("count"))
       .where("fact_type", "=", "structural_task")
       .executeTakeFirstOrThrow();
-    taskCount = await db
+    const taskCount = await db
       .selectFrom("tasks")
       .select((eb) => eb.fn.countAll<number>().as("count"))
       .executeTakeFirstOrThrow();
@@ -369,7 +349,7 @@ describe("structural task materialization", () => {
         isSprint: true,
       },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     const cycle = await db.selectFrom("work_cycles").selectAll().executeTakeFirstOrThrow();
     const openBefore = await db
@@ -388,7 +368,7 @@ describe("structural task materialization", () => {
       title: "Move from sprint",
       project: { name: "Delivery Folder", source: "clickup", sourceId: "folder-1" },
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     const memberships = await db
       .selectFrom("task_cycle_memberships")

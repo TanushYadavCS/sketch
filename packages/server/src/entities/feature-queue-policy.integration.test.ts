@@ -33,7 +33,6 @@ describe("feature lifecycle queue policy postgres", () => {
     await upsertStructuralProject(db, "queue-file-1", "Referral Service", "linear-project-referral");
 
     await materializeUnmaterializedFacts(db, createTestLogger(), {
-      experimentalFlag: true,
       llmPromotionThreshold: 2,
       birthGateTypes: BIRTH_GATE_TYPES,
       birthGateLiveTypes: LIVE_TYPES,

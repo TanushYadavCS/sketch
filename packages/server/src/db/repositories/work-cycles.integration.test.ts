@@ -19,7 +19,7 @@ describe("work cycle sink postgres", () => {
     db = undefined;
   });
 
-  it("promotes sprint cycles only when flagged and preserves task materialization for non-sprints", async () => {
+  it("promotes sprint cycles and preserves task materialization for non-sprints", async () => {
     db = await createTestPgDb();
     await seedBase(db);
     const scope = await seedProject(db, {
@@ -27,10 +27,10 @@ describe("work cycle sink postgres", () => {
       name: "Work Cycle Scope",
       sourceId: "scope-folder",
     });
-    await seedFile(db, "work-cycle-file-flag");
+    await seedFile(db, "work-cycle-file-sprint");
 
     await emitStructuralTaskFact(db, {
-      fileId: "work-cycle-file-flag",
+      fileId: "work-cycle-file-sprint",
       sourceTaskId: "work-cycle-task-sprint",
       title: "Finish sprint scope",
       cycle: {
@@ -42,25 +42,7 @@ describe("work cycle sink postgres", () => {
       },
       syncRunId: "sync-1",
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: false });
-    expect(await tableCount(db, "tasks")).toBe(0);
-    expect(await tableCount(db, "work_cycles")).toBe(0);
-    expect(await tableCount(db, "task_cycle_memberships")).toBe(0);
-
-    await emitStructuralTaskFact(db, {
-      fileId: "work-cycle-file-flag",
-      sourceTaskId: "work-cycle-task-sprint",
-      title: "Finish sprint scope",
-      cycle: {
-        source: "linear",
-        externalRef: "sprint-23",
-        name: "Sprint 23",
-        scopeRef: { source: "linear", sourceId: "scope-folder" },
-        isSprint: true,
-      },
-      syncRunId: "sync-1",
-    });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     const cycle = await db.selectFrom("work_cycles").selectAll().executeTakeFirstOrThrow();
     expect(cycle).toMatchObject({
@@ -78,7 +60,7 @@ describe("work cycle sink postgres", () => {
     expect(await openMembershipCount(db, "work-cycle-task-sprint")).toBe(1);
 
     await emitStructuralTaskFact(db, {
-      fileId: "work-cycle-file-flag",
+      fileId: "work-cycle-file-sprint",
       sourceTaskId: "work-cycle-task-sprint",
       title: "Finish sprint scope",
       cycle: {
@@ -90,7 +72,7 @@ describe("work cycle sink postgres", () => {
       },
       syncRunId: "sync-1",
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
     expect(await tableCount(db, "work_cycles")).toBe(1);
     expect(await openMembershipCount(db, "work-cycle-task-sprint")).toBe(1);
 
@@ -108,7 +90,7 @@ describe("work cycle sink postgres", () => {
       },
       syncRunId: "sync-1",
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+    await materializeUnmaterializedFacts(db, createTestLogger(), {});
     const nonSprintTask = await db
       .selectFrom("tasks")
       .select(["title", "source_task_id", "status"])

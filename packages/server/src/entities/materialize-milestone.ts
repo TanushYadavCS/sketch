@@ -9,7 +9,6 @@ export async function materializeMilestone(
   deps: MaterializeDeps,
   fact: IndexedFileFactRow,
 ): Promise<MaterializeResult> {
-  if (!deps.experimentalFlag) return { kind: "skipped", reason: "experimental_off" };
   const raw = readJsonObject(fact.raw);
   const milestone = readMilestone(raw);
   if (!milestone) return { kind: "skipped", reason: "invalid_milestone" };
