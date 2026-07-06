@@ -11,7 +11,7 @@ const USER_ID = "user-1";
 const CONNECTOR_ID = "connector-1";
 const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 const A1_BIRTH_GATE_TYPES: Set<ProposeEntityType> = new Set(["project", "product", "team"]);
-const PRODUCT_LIVE_TYPES: Set<ProposeEntityType> = new Set(["product"]);
+const PRODUCT_PROJECT_LIVE_TYPES: Set<ProposeEntityType> = new Set(["product", "project"]);
 
 async function seedConnector(db: Kysely<DB>, source = "google_drive"): Promise<void> {
   const now = new Date().toISOString();
@@ -155,7 +155,7 @@ describe("A1 birth gate", () => {
     await materializeUnmaterializedFacts(db, createTestLogger(), {
       llmPromotionThreshold: 1,
       birthGateTypes: A1_BIRTH_GATE_TYPES,
-      birthGateLiveTypes: PRODUCT_LIVE_TYPES,
+      birthGateLiveTypes: PRODUCT_PROJECT_LIVE_TYPES,
       birthGateDryRun: true,
     });
 
@@ -184,7 +184,7 @@ describe("A1 birth gate", () => {
     await materializeUnmaterializedFacts(db, createTestLogger(), {
       llmPromotionThreshold: 1,
       birthGateTypes: A1_BIRTH_GATE_TYPES,
-      birthGateLiveTypes: PRODUCT_LIVE_TYPES,
+      birthGateLiveTypes: PRODUCT_PROJECT_LIVE_TYPES,
       birthGateDryRun: true,
     });
 
@@ -195,7 +195,7 @@ describe("A1 birth gate", () => {
     ).resolves.toHaveLength(1);
   });
 
-  it("keeps project births dry-run while unmatched relation product endpoints are queued", async () => {
+  it("queues project births while unmatched relation product endpoints are queued", async () => {
     await seedConnector(db);
     await seedFile(db, "file-1");
     await upsertLlmMention(db, "file-1", "Atlas Migration", "project");
@@ -209,21 +209,19 @@ describe("A1 birth gate", () => {
     await materializeUnmaterializedFacts(db, createTestLogger(), {
       llmPromotionThreshold: 1,
       birthGateTypes: A1_BIRTH_GATE_TYPES,
-      birthGateLiveTypes: PRODUCT_LIVE_TYPES,
+      birthGateLiveTypes: PRODUCT_PROJECT_LIVE_TYPES,
       birthGateDryRun: true,
     });
 
-    expect(await countEntitiesByType(db, "project")).toBe(1);
+    expect(await countEntitiesByType(db, "project")).toBe(0);
     expect(await countEntitiesByType(db, "company")).toBe(1);
     expect(await countEntitiesByType(db, "product")).toBe(0);
-    expect(await countQueueRows(db)).toBe(1);
-    const row = await db.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
-    expect(row).toMatchObject({
-      entity_type: "product",
-      proposed_name: "Canvas Copilot",
-      candidate_reason: "birth-gated",
-      status: "pending",
-    });
+    expect(await countQueueRows(db)).toBe(2);
+    const rows = await db.selectFrom("entity_review_queue").selectAll().orderBy("proposed_name", "asc").execute();
+    expect(rows.map((row) => [row.entity_type, row.proposed_name, row.candidate_reason, row.status])).toEqual([
+      ["project", "Atlas Migration", "birth-gated", "pending"],
+      ["product", "Canvas Copilot", "birth-gated", "pending"],
+    ]);
   });
 
   it("does not let structural auto-birth bypass the LLM project birth gate", async () => {

@@ -24,10 +24,12 @@ import {
   HUB_PERSON_DEGREE_CAP,
   MAX_ANCHORS_PER_SIDE,
   MIN_SCORE,
+  PENDING_PROPOSAL_MIN_OCCURRENCE,
   PER_ANCHOR_INITIATIVE_CAP,
   PER_ANCHOR_TEAM_CAP,
   adjacencyForAnchor,
   buildFileScopedKnownEntities,
+  pendingProposalsForAnchor,
   resolveFileAnchors,
 } from "./file-scope-context";
 
@@ -181,6 +183,54 @@ async function seedMention(
     .execute();
 }
 
+async function seedReviewProposal(
+  db: Kysely<DB>,
+  args: {
+    proposedName: string;
+    entityType: string;
+    evidenceFileIds: string[];
+    occurrenceCount?: number;
+    status?: string;
+  },
+): Promise<string> {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entity_review_queue")
+    .values({
+      id,
+      proposed_name: args.proposedName,
+      normalized_name: `${args.proposedName.toLowerCase()} ${id}`,
+      entity_type: args.entityType,
+      candidate_entity_id: null,
+      candidate_score: null,
+      candidate_reason: null,
+      candidate_generated_at: now,
+      first_seen_at: now,
+      last_seen_at: now,
+      occurrence_count: args.occurrenceCount ?? PENDING_PROPOSAL_MIN_OCCURRENCE,
+      status: args.status ?? "pending",
+      triggered_by_user_id: "admin-fsc",
+    })
+    .execute();
+
+  for (const fileId of args.evidenceFileIds) {
+    await db
+      .insertInto("entity_review_evidence")
+      .values({
+        id: randomUUID(),
+        review_id: id,
+        indexed_file_id: fileId,
+        source: "llm_extraction",
+        note: null,
+        seen_at: now,
+      })
+      .execute();
+  }
+
+  return id;
+}
+
 describe("file-scope-context", () => {
   let db: Kysely<DB>;
 
@@ -284,6 +334,59 @@ describe("file-scope-context", () => {
     expect((recent?.score ?? 0) > (older?.score ?? 0)).toBe(true);
   });
 
+  it("returns pending proposals scoped to evidence files that mention the anchor", async () => {
+    await seedEntity(db, { id: "ent-anchor-proposal", name: "Anchor Co", sourceType: "company" });
+    await seedEntity(db, { id: "ent-other-proposal", name: "Other Co", sourceType: "company" });
+    await seedFile(db, "file-anchor-proposal");
+    await seedFile(db, "file-unrelated-proposal");
+    await seedMention(db, { entityId: "ent-anchor-proposal", fileId: "file-anchor-proposal" });
+    await seedMention(db, { entityId: "ent-other-proposal", fileId: "file-unrelated-proposal" });
+
+    const matchingId = await seedReviewProposal(db, {
+      proposedName: "Tourism Dashboard",
+      entityType: "project",
+      evidenceFileIds: ["file-anchor-proposal"],
+    });
+    await seedReviewProposal(db, {
+      proposedName: "Unrelated Dashboard",
+      entityType: "project",
+      evidenceFileIds: ["file-unrelated-proposal"],
+    });
+
+    const proposals = await pendingProposalsForAnchor({ db }, "ent-anchor-proposal");
+
+    expect(proposals).toEqual([
+      {
+        id: matchingId,
+        name: "Tourism Dashboard",
+        type: "project",
+        score: PENDING_PROPOSAL_MIN_OCCURRENCE,
+      },
+    ]);
+  });
+
+  it("excludes below-threshold pending proposals and non-project/product proposal types", async () => {
+    await seedEntity(db, { id: "ent-anchor-noise", name: "Anchor Co", sourceType: "company" });
+    await seedFile(db, "file-anchor-noise");
+    await seedMention(db, { entityId: "ent-anchor-noise", fileId: "file-anchor-noise" });
+    await seedReviewProposal(db, {
+      proposedName: "Single Mention Dashboard",
+      entityType: "project",
+      evidenceFileIds: ["file-anchor-noise"],
+      occurrenceCount: PENDING_PROPOSAL_MIN_OCCURRENCE - 1,
+    });
+    await seedReviewProposal(db, {
+      proposedName: "Queued Company",
+      entityType: "company",
+      evidenceFileIds: ["file-anchor-noise"],
+      occurrenceCount: PENDING_PROPOSAL_MIN_OCCURRENCE,
+    });
+
+    const proposals = await pendingProposalsForAnchor({ db }, "ent-anchor-noise");
+
+    expect(proposals).toEqual([]);
+  });
+
   it("merges anchors + adjacency above the baseline; degrades to baseline-only when no anchors resolve", async () => {
     await seedEntity(db, { id: "ent-ow", name: "Oliver Wyman", sourceType: "company", hotness: 0.9 });
     await seedEntity(db, { id: "ent-visa", name: "Visa Data Integration", sourceType: "project", hotness: 0.5 });
@@ -323,6 +426,34 @@ describe("file-scope-context", () => {
 
     const degraded = await buildFileScopedKnownEntities({ db, now: () => now }, fileWithoutAnchor, baseline);
     expect(degraded.map((e) => e.name).sort()).toEqual(["Oliver Wyman", "Sketch"]);
+  });
+
+  it("adds novel pending proposals after confirmed known entities win duplicate keys", async () => {
+    await seedEntity(db, { id: "ent-pending-anchor", name: "Pending Anchor Co", sourceType: "company", hotness: 1 });
+    await seedDomain(db, { entityId: "ent-pending-anchor", domain: "pending-anchor.example", kind: "corporate" });
+    await seedFile(db, "file-pending-build");
+    await seedAttendeeFact(db, {
+      fileId: "file-pending-build",
+      name: "Anchor Person",
+      email: "person@pending-anchor.example",
+    });
+
+    const loadAdjacencyForAnchor = vi.fn(async () => []);
+    const loadPendingProposalsForAnchor = vi.fn(async () => [
+      { id: "pending-tourism", name: "Tourism Dashboard", type: "project" as const, score: 4 },
+      { id: "pending-maaden", name: "Maaden Dashboard", type: "project" as const, score: 3 },
+    ]);
+
+    const known = await buildFileScopedKnownEntities(
+      { db, experimentalFlag: true, loadAdjacencyForAnchor, loadPendingProposalsForAnchor },
+      "file-pending-build",
+      [{ name: "Tourism Dashboard", type: "project", description: "confirmed" }],
+    );
+
+    const tourismEntries = known.filter((entry) => entry.name === "Tourism Dashboard" && entry.type === "project");
+    expect(tourismEntries).toHaveLength(1);
+    expect(tourismEntries[0]).toMatchObject({ name: "Tourism Dashboard", type: "project", description: "confirmed" });
+    expect(known).toContainEqual({ name: "Maaden Dashboard", type: "project" });
   });
 
   it("caps per-anchor initiatives and teams while preserving baseline", async () => {

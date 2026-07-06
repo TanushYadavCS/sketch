@@ -70,6 +70,7 @@ export interface ReenrichDeps {
   fileIds: string[];
   missingFileIds?: string[];
   llmPromotionThreshold?: number;
+  featureAutoMintThreshold?: number;
   coMentionContributesToThreshold?: number;
   geminiMaxRpm?: number;
   geminiMaxRetries?: number;
@@ -549,6 +550,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         skipReset: true,
         lockAlreadyHeld: true,
         llmPromotionThreshold: deps.llmPromotionThreshold,
+        featureAutoMintThreshold: deps.featureAutoMintThreshold,
         coMentionContributesToThreshold: deps.coMentionContributesToThreshold,
         experimentalFlag: deps.experimentalFlag,
         materializeFactTypes: deps.materializeFactTypes ?? [...AI_EXTRACTION_FACT_TYPES],
@@ -569,6 +571,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
         await materializeUnmaterializedFacts(deps.db, deps.logger.child({ phase: "post-floor-materialize" }), {
           llmPromotionThreshold: deps.llmPromotionThreshold,
+          featureAutoMintThreshold: deps.featureAutoMintThreshold,
           factTypes: [...AI_EXTRACTION_FACT_TYPES],
           shouldCancel: deps.shouldCancel,
         });

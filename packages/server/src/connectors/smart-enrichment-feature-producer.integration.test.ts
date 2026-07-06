@@ -2,15 +2,17 @@ import { randomUUID } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEntityRepository } from "../db/repositories/entities";
+import { upsertFeatureFact } from "../db/repositories/features";
 import { buildIndexedFileFactKey } from "../db/repositories/indexed-file-facts";
 import type { DB, IndexedFileFactsTable, SubEntitiesTable } from "../db/schema";
+import { buildMaterializeDeps, materializeFromFact } from "../entities/materialize";
 import { createTestLogger, createTestPgDb } from "../test-utils";
 import type { GeminiGenerator } from "./gemini-generate";
 import { smartEnrichFile } from "./smart-enrichment";
 
 const USER_ID = "feature-producer-user";
 const CONNECTOR_ID = "feature-producer-connector";
-const PROMPT_VERSION = "llm-extraction-v9";
+const PROMPT_VERSION = "llm-extraction-v11";
 let db: Kysely<DB>;
 
 type Mention = {
@@ -94,7 +96,7 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
     expect(new Set(raws.map((raw) => raw.corroborationKey)).size).toBe(1);
   }, 30000);
 
-  it("drops unresolved and ambiguous parents while keeping flag-off fact keys unchanged", async () => {
+  it("defers unresolved and ambiguous parents while keeping flag-off fact keys unchanged", async () => {
     const missingParentFile = {
       id: `feature-missing-parent-${randomUUID()}`,
       hash: "hash-feature-missing-parent",
@@ -116,7 +118,12 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
       ),
       fileContext(missingParentFile),
     );
-    expect(await activeFeatureFacts(db)).toHaveLength(0);
+    let featureFacts = await activeFeatureFacts(db);
+    expect(featureFacts).toHaveLength(1);
+    expect(readFeatureRaw(featureFacts[0].raw)).toMatchObject({
+      parentProductName: "Ghost Product",
+      parentEntityId: undefined,
+    });
     expect(await countFeatureSubEntities(db)).toBe(0);
     expect(await countEntitiesByType(db, "product")).toBe(0);
 
@@ -143,7 +150,8 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
       ),
       fileContext(ambiguousFile),
     );
-    expect(await activeFeatureFacts(db)).toHaveLength(0);
+    featureFacts = await activeFeatureFacts(db);
+    expect(featureFacts).toHaveLength(2);
     expect(await countFeatureSubEntities(db)).toBe(0);
 
     const flagOffFile = {
@@ -199,12 +207,92 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
         },
       }),
     );
-    expect(await db.selectFrom("indexed_file_facts").selectAll().where("fact_type", "=", "feature").execute()).toEqual(
-      [],
-    );
+    await expect(
+      db
+        .selectFrom("indexed_file_facts")
+        .selectAll()
+        .where("indexed_file_id", "=", flagOffFile.id)
+        .where("fact_type", "=", "feature")
+        .execute(),
+    ).resolves.toEqual([]);
   }, 30000);
 
-  it("corroborates across files and supersedes the feature when support drops below threshold", async () => {
+  it("filters code-shaped feature names in the producer and materializer", async () => {
+    const product = await seedProduct(db, "Canvas CRM");
+    const file = {
+      id: `feature-noise-${randomUUID()}`,
+      hash: "hash-feature-noise",
+      content: "Canvas CRM includes QuestionRequestDto internals, PayLater, and Daily Habits.",
+    };
+    await seedFile(db, file);
+
+    await smartEnrichFile(
+      deps(
+        generatorWithMentions([
+          {
+            mention: "QuestionRequestDto",
+            type: "feature",
+            parentProduct: "Canvas CRM",
+            variations: [],
+            confidence: 0.9,
+          },
+          {
+            mention: "PayLater",
+            type: "feature",
+            parentProduct: "Canvas CRM",
+            variations: [],
+            confidence: 0.92,
+          },
+          {
+            mention: "Daily Habits",
+            type: "feature",
+            parentProduct: "Canvas CRM",
+            variations: [],
+            confidence: 0.92,
+          },
+        ]),
+        true,
+      ),
+      fileContext(file),
+    );
+
+    const featureFacts = await activeFeatureFacts(db);
+    expect(featureFacts.map((fact) => fact.subject_name).sort()).toEqual(["Daily Habits", "PayLater"]);
+    await expect(currentFeatureRows(db, "paylater")).resolves.toHaveLength(1);
+    await expect(currentFeatureRows(db, "daily habits")).resolves.toHaveLength(1);
+    await expect(currentFeatureRows(db, "questionrequestdto")).resolves.toHaveLength(0);
+
+    await upsertFeatureFact(db, {
+      experimentalFlag: true,
+      indexedFileId: file.id,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: USER_ID,
+      source: "llm_extraction",
+      featureId: "feature-stored-noise",
+      featureName: "AnswerResponseDto",
+      corroborationKey: "feature-stored-noise-key",
+      parentProductName: "Canvas CRM",
+      status: "proposed",
+      evidence: { fileIds: [file.id], entityIds: [] },
+    });
+    const storedNoiseFact = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("subject_source_id", "=", "feature-stored-noise")
+      .executeTakeFirstOrThrow();
+    await expect(
+      materializeFromFact(
+        await buildMaterializeDeps(db, { experimentalFlag: true, featureAutoMintThreshold: 1 }),
+        storedNoiseFact,
+      ),
+    ).resolves.toEqual({ kind: "deferred_below_threshold", reason: "noise_rejected" });
+    await expect(currentFeatureRows(db, "answerresponsedto")).resolves.toHaveLength(0);
+    await expect(currentFeatureRows(db, "paylater")).resolves.toEqual([
+      expect.objectContaining({ parent_entity_id: product.id }),
+    ]);
+  }, 30000);
+
+  it("auto-mints from a single mention and supersedes the feature when support reaches zero", async () => {
     const product = await seedProduct(db, "Canvas CRM");
     const firstFile = {
       id: `feature-lifecycle-${randomUUID()}`,
@@ -230,10 +318,12 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
     ]);
     await smartEnrichFile(deps(featureGenerator, true), fileContext(firstFile));
     expect(await activeFeatureFacts(db)).toHaveLength(1);
-    expect(await currentFeatureRows(db, "usage dashboards")).toHaveLength(0);
+    let current = await currentFeatureRows(db, "usage dashboards");
+    expect(current).toHaveLength(1);
+    expect(current[0]).toMatchObject({ parent_entity_id: product.id, provenance: "corroborated_llm" });
 
     await smartEnrichFile(deps(featureGenerator, true), fileContext(secondFile));
-    let current = await currentFeatureRows(db, "usage dashboards");
+    current = await currentFeatureRows(db, "usage dashboards");
     expect(current).toHaveLength(1);
     expect(current[0]).toMatchObject({ parent_entity_id: product.id, provenance: "corroborated_llm" });
     await expect(currentEvidenceRefs(db, current[0].id, "file")).resolves.toEqual([firstFile.id, secondFile.id].sort());
@@ -253,6 +343,18 @@ describe("smartEnrichFile LLM feature producer postgres", () => {
       .where("fact_type", "=", "feature")
       .executeTakeFirstOrThrow();
     expect(secondFact.deleted_at).not.toBeNull();
+    current = await currentFeatureRows(db, "usage dashboards");
+    expect(current).toHaveLength(1);
+    await expect(currentEvidenceRefs(db, current[0].id, "file")).resolves.toEqual([firstFile.id]);
+
+    const updatedFirstFile = {
+      ...firstFile,
+      hash: "hash-feature-lifecycle-1b",
+      content: "Canvas CRM release notes cover cleanup work without that dashboard module.",
+    };
+    await updateFileContent(db, updatedFirstFile);
+    await smartEnrichFile(deps(generatorWithMentions([]), true), fileContext(updatedFirstFile));
+
     current = await currentFeatureRows(db, "usage dashboards");
     expect(current).toHaveLength(0);
     const allRows = await featureRows(db, "usage dashboards");
@@ -427,10 +529,25 @@ async function countEntitiesByType(db: Kysely<DB>, sourceType: string): Promise<
   return Number(row.count);
 }
 
-function readFeatureRaw(raw: string | null): { featureId: string; corroborationKey: string } {
-  const parsed = JSON.parse(raw ?? "{}") as { featureId?: unknown; corroborationKey?: unknown };
+function readFeatureRaw(raw: string | null): {
+  featureId: string;
+  corroborationKey: string;
+  parentProductName?: string;
+  parentEntityId?: string;
+} {
+  const parsed = JSON.parse(raw ?? "{}") as {
+    featureId?: unknown;
+    corroborationKey?: unknown;
+    parentProductName?: unknown;
+    parentEntityId?: unknown;
+  };
   if (typeof parsed.featureId !== "string" || typeof parsed.corroborationKey !== "string") {
     throw new Error("invalid feature raw");
   }
-  return { featureId: parsed.featureId, corroborationKey: parsed.corroborationKey };
+  return {
+    featureId: parsed.featureId,
+    corroborationKey: parsed.corroborationKey,
+    parentProductName: typeof parsed.parentProductName === "string" ? parsed.parentProductName : undefined,
+    parentEntityId: typeof parsed.parentEntityId === "string" ? parsed.parentEntityId : undefined,
+  };
 }

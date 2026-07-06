@@ -26,8 +26,10 @@ export { normalizeEntityMatchName } from "./match-normalize";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
 const DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD = 2;
+const DEFAULT_FEATURE_AUTO_MINT_THRESHOLD = 1;
 let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
 let configuredLlmTaskCorroborationThreshold = DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD;
+let configuredFeatureAutoMintThreshold = DEFAULT_FEATURE_AUTO_MINT_THRESHOLD;
 let configuredBirthGateTypes = new Set<ProposeEntityType>();
 let configuredBirthGateLiveTypes = new Set<ProposeEntityType>();
 let configuredStructuralAutoBirthTypes = new Set<ProposeEntityType>();
@@ -43,6 +45,7 @@ let configuredExperimentalFlag = false;
 export function configureMaterializeDefaults(opts: {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
+  featureAutoMintThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
@@ -54,6 +57,9 @@ export function configureMaterializeDefaults(opts: {
   }
   if (typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1) {
     configuredLlmTaskCorroborationThreshold = Math.floor(opts.llmTaskCorroborationThreshold);
+  }
+  if (typeof opts.featureAutoMintThreshold === "number" && opts.featureAutoMintThreshold >= 1) {
+    configuredFeatureAutoMintThreshold = Math.floor(opts.featureAutoMintThreshold);
   }
   if (opts.birthGateTypes) configuredBirthGateTypes = new Set(opts.birthGateTypes);
   if (opts.birthGateLiveTypes) configuredBirthGateLiveTypes = new Set(opts.birthGateLiveTypes);
@@ -166,6 +172,31 @@ async function buildPersonScopeKeys(db: Kysely<DB>, persons: EntityRow[]): Promi
   }
 
   return new Map([...scopeKeys].map(([entityId, keys]) => [entityId, [...keys]]));
+}
+
+async function findLlmExtractedThirdPartyMention(
+  db: Kysely<DB>,
+  name: string,
+): Promise<{ type: Extract<ProposeEntityType, "company" | "tool">; name: string } | null> {
+  const rows = await db
+    .selectFrom("indexed_file_facts")
+    .select(["subject_name", "raw"])
+    .where("source", "=", "llm_extraction")
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .where("subject_name", "is not", null)
+    .execute();
+  for (const row of rows) {
+    const raw = readJsonObject(row.raw);
+    const rawType = typeof raw.type === "string" ? raw.type.trim().toLowerCase() : "";
+    if (rawType !== "company" && rawType !== "tool") continue;
+    const mention = typeof raw.mention === "string" ? raw.mention : row.subject_name;
+    if (!mention) continue;
+    if (normalizeEntityMatchName(rawType, mention) === normalizeEntityMatchName(rawType, name)) {
+      return { type: rawType, name: mention };
+    }
+  }
+  return null;
 }
 
 export function registerEntity(index: LookupIndex, entity: EntityRow): void {
@@ -282,6 +313,7 @@ export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIn
 export interface BuildMaterializeDepsOptions {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
+  featureAutoMintThreshold?: number;
   logger?: Logger;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
@@ -308,6 +340,10 @@ export async function buildMaterializeDeps(
     typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1
       ? Math.floor(opts.llmTaskCorroborationThreshold)
       : configuredLlmTaskCorroborationThreshold;
+  const featureAutoMintThreshold =
+    typeof opts.featureAutoMintThreshold === "number" && opts.featureAutoMintThreshold >= 1
+      ? Math.floor(opts.featureAutoMintThreshold)
+      : configuredFeatureAutoMintThreshold;
   const birthGateTypes = new Set(opts.birthGateTypes ?? configuredBirthGateTypes);
   const birthGateLiveTypes = new Set(opts.birthGateLiveTypes ?? configuredBirthGateLiveTypes);
   const structuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes ?? configuredStructuralAutoBirthTypes);
@@ -351,6 +387,7 @@ export async function buildMaterializeDeps(
     },
     getCompanyIdsByDomain: (domain) => index.companyIdsByDomain.get(domain.toLowerCase()) ?? [],
     getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
+    findLlmExtractedThirdPartyMention: (name) => findLlmExtractedThirdPartyMention(db, name),
   };
 
   const fileToConnector = new Map<string, string>();
@@ -371,6 +408,7 @@ export async function buildMaterializeDeps(
     index,
     llmPromotionThreshold,
     llmTaskCorroborationThreshold,
+    featureAutoMintThreshold,
     birthGateTypes,
     birthGateLiveTypes,
     structuralAutoBirthTypes,

@@ -17,6 +17,7 @@ export interface UpsertFeatureFactInput {
   featureName: string;
   corroborationKey?: string;
   parentProductRef?: { source: string; sourceId: string };
+  parentProductName?: string;
   parentEntityId?: string;
   status: FeatureStatus;
   dueAt?: string;
@@ -61,6 +62,7 @@ function buildFeatureRaw(input: UpsertFeatureFactInput, featureId: string): Feat
     featureName: input.featureName,
     corroborationKey: input.corroborationKey,
     parentProductRef: input.parentProductRef,
+    parentProductName: input.parentProductName,
     parentEntityId: input.parentEntityId,
     status: input.status,
     dueAt: input.dueAt,

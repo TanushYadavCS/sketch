@@ -6,7 +6,12 @@ export type LlmMentionValidationResult =
   | { ok: true }
   | {
       ok: false;
-      reason: "name_absent_from_content" | "short_token_no_boundary" | "type_removed" | "missing_current_reference";
+      reason:
+        | "name_absent_from_content"
+        | "short_token_no_boundary"
+        | "type_removed"
+        | "missing_current_reference"
+        | "name_is_domain_or_url";
     };
 
 export type LearnedFactValidationResult = { ok: true } | { ok: false; reason: "negation" | "hedge" | "placeholder" };
@@ -61,6 +66,13 @@ export function isEmailProviderName(name: string): boolean {
   return EMAIL_PROVIDER_NAMES.has(normalized);
 }
 
+export function isDomainOrUrlOrEmailName(name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed || /\s/.test(trimmed)) return false;
+  if (/^[^\s@]+@([a-z0-9-]+\.)+[a-z]{2,}$/i.test(trimmed)) return true;
+  return /^(https?:\/\/)?([a-z0-9-]+\.)+[a-z]{2,}(\/\S*)?$/i.test(trimmed);
+}
+
 export function validateLlmMention(input: {
   displayName: string;
   entityType?: string;
@@ -71,6 +83,9 @@ export function validateLlmMention(input: {
   experimentalFlag?: boolean;
 }): LlmMentionValidationResult {
   if (input.source !== "llm_extraction") return { ok: true };
+  if (isDomainOrUrlOrEmailName(input.displayName)) {
+    return { ok: false, reason: "name_is_domain_or_url" };
+  }
   if (!input.experimentalFlag && input.entityType?.trim().toLowerCase() === "feature") {
     return { ok: false, reason: "type_removed" };
   }

@@ -513,6 +513,65 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     });
   });
 
+  it("drops feature mentions whose parent product is domain-shaped while writing valid feature facts", async () => {
+    const fileId = randomUUID();
+    const content = "beaconvendor.com exposes Vendor Analytics. Canvas CRM includes CRM Analytics.";
+    await seedFile(db, fileId, { content, contentHash: "hash-feature-domain-parent" });
+    const generator = {
+      generate: async () => "Canvas CRM includes CRM Analytics.",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+        if (opts?.label?.startsWith("extractEntities")) {
+          return {
+            mentions: [
+              {
+                mention: "Vendor Analytics",
+                type: "feature",
+                parentProduct: "beaconvendor.com",
+                variations: [],
+                confidence: 0.93,
+              },
+              {
+                mention: "CRM Analytics",
+                type: "feature",
+                parentProduct: "Canvas CRM",
+                variations: [],
+                confidence: 0.94,
+              },
+            ],
+            relations: [],
+          } as T;
+        }
+        return {} as T;
+      },
+    } as GeminiGenerator;
+
+    await smartEnrichFile(
+      { db, logger: createTestLogger(), generator, embeddingProvider: null, experimentalFlag: true },
+      {
+        id: fileId,
+        fileName: `${fileId}.txt`,
+        content,
+        contentCategory: "document",
+        source: "google_drive",
+        sourcePath: "/",
+        contentHash: "hash-feature-domain-parent",
+        connectorConfigId: "conn-smart",
+        sourceCreatedAt: null,
+        sourceUpdatedAt: null,
+      },
+    );
+
+    const featureFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["fact_type", "subject_name"])
+      .where("indexed_file_id", "=", fileId)
+      .where("source", "=", "llm_extraction")
+      .where("fact_type", "=", "feature")
+      .where("deleted_at", "is", null)
+      .execute();
+    expect(featureFacts).toEqual([{ fact_type: "feature", subject_name: "CRM Analytics" }]);
+  });
+
   it("preserves prior LLM facts when extractEntities throws", async () => {
     // Regression guard: smartEnrichFile re-throws on Gemini failure, so the
     // file-scope reconcile must never run with an empty mention set. If a
@@ -1395,7 +1454,8 @@ describe("smartEnrichFile — LLM leak gates", () => {
 
   it("drops a project mention that merely restates the email subject, keeps a body project", async () => {
     const fileId = randomUUID();
-    const content = "Rajesh Chaudhary discussed the Branding and MVP Design Proposal. We also kicked off K8s Migration.";
+    const content =
+      "Rajesh Chaudhary discussed the Branding and MVP Design Proposal. We also kicked off K8s Migration.";
     await seedFile(db, fileId, { content, contentHash: "hash-subject" });
     const generator = extractionGenerator({
       mentions: [
@@ -1439,5 +1499,70 @@ describe("smartEnrichFile — LLM leak gates", () => {
     const names = await extractedNames(fileId);
     expect(names).toContain("Live Nation");
     expect(names).toContain("Proton Labs");
+  });
+});
+
+describe("extractEntities — known-entity resolution (matchesKnown)", () => {
+  function knownResolutionGenerator(mentions: unknown[]): GeminiGenerator {
+    return {
+      generate: async () => "",
+      generateJSON: async <T>(_prompt: string, opts?: { label?: string }) =>
+        (opts?.label?.startsWith("extractEntities") ? { mentions, relations: [] } : {}) as T,
+    } as GeminiGenerator;
+  }
+
+  const file = {
+    id: "f-known",
+    fileName: "ow-tourism.txt",
+    content: "OW x Canvasx Tourism Recovery Dashboard kickoff.",
+    contentCategory: "document",
+    source: "google_drive",
+    sourcePath: "/",
+    contentHash: null,
+    connectorConfigId: "conn-known",
+    sourceCreatedAt: null,
+    sourceUpdatedAt: null,
+  };
+
+  it("rewrites a matched mention to the known canonical name and keeps the original in variations", async () => {
+    const generator = knownResolutionGenerator([
+      {
+        mention: "OW x Canvasx Tourism Recovery Dashboard",
+        type: "project",
+        variations: ["Recovery Dashboard"],
+        confidence: 0.9,
+        matchesKnown: "K1",
+      },
+    ]);
+
+    const result = await extractEntities(generator, file, null, [{ name: "Tourism Dashboard", type: "project" }]);
+
+    expect(result.mentions).toHaveLength(1);
+    expect(result.mentions[0].mention).toBe("Tourism Dashboard");
+    expect(result.mentions[0].variations).toContain("OW x Canvasx Tourism Recovery Dashboard");
+    expect(result.mentions[0].variations).toContain("Recovery Dashboard");
+  });
+
+  it("ignores a matchesKnown handle whose type disagrees with the mention type", async () => {
+    const generator = knownResolutionGenerator([
+      { mention: "Tarek Aziz", type: "person", variations: [], confidence: 0.95, matchesKnown: "K1" },
+    ]);
+
+    const result = await extractEntities(generator, file, null, [{ name: "Tourism Dashboard", type: "project" }]);
+
+    expect(result.mentions[0].mention).toBe("Tarek Aziz");
+    expect(result.mentions[0].variations).toEqual([]);
+  });
+
+  it("ignores out-of-range and unparseable handles without rewriting or throwing", async () => {
+    const generator = knownResolutionGenerator([
+      { mention: "Maaden Mining Dashboard", type: "project", variations: [], confidence: 0.9, matchesKnown: "K99" },
+      { mention: "Other Initiative", type: "project", variations: [], confidence: 0.9, matchesKnown: "banana" },
+    ]);
+
+    const result = await extractEntities(generator, file, null, [{ name: "Tourism Dashboard", type: "project" }]);
+
+    expect(result.mentions[0].mention).toBe("Maaden Mining Dashboard");
+    expect(result.mentions[1].mention).toBe("Other Initiative");
   });
 });

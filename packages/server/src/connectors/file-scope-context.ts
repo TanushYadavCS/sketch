@@ -22,6 +22,11 @@
  *     prompt grounds on what's currently active in the corpus.
  *   - Math runs in TypeScript so the query stays portable across SQLite + PG
  *     (no julianday / EXTRACT EPOCH).
+ *
+ * Pending proposals:
+ *   - Review-queue project/product proposals are pulled through their evidence
+ *     files when those files also mention the file anchor. This gives the
+ *     extractor pre-confirmation canonical names without changing the prompt.
  */
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
@@ -45,6 +50,7 @@ export const MIN_VERBATIM_NAME_LENGTH = 4;
 export const MAX_PERSON_ANCHORS = 5;
 export const HUB_PERSON_DEGREE_CAP = 30;
 export const BASELINE_ALWAYS_INCLUDE_CAP = 50;
+export const PENDING_PROPOSAL_MIN_OCCURRENCE = 1;
 const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -54,6 +60,7 @@ export interface FileScopeDeps {
   now?: () => number;
   experimentalFlag?: boolean;
   loadAdjacencyForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<AdjacencyEntry[]>;
+  loadPendingProposalsForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<PendingProposalEntry[]>;
 }
 
 export interface AnchorEntity {
@@ -76,6 +83,13 @@ export interface AdjacencyEntry {
   mentionCount: number;
   lastSeen: number;
   recentlyActive: boolean;
+}
+
+export interface PendingProposalEntry {
+  id: string;
+  name: string;
+  type: "project" | "product";
+  score: number;
 }
 
 export interface KnownEntityForPrompt {
@@ -233,12 +247,50 @@ export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string):
     .sort((a, b) => b.score - a.score);
 }
 
+function isPendingProposalType(value: string): value is PendingProposalEntry["type"] {
+  return value === "project" || value === "product";
+}
+
+export async function pendingProposalsForAnchor(
+  deps: FileScopeDeps,
+  anchorId: string,
+): Promise<PendingProposalEntry[]> {
+  const rows = await deps.db
+    .selectFrom("entity_review_queue as q")
+    .innerJoin("entity_review_evidence as ev", "ev.review_id", "q.id")
+    .innerJoin("entity_mentions as em", (join) =>
+      join.onRef("em.indexed_file_id", "=", "ev.indexed_file_id").on("em.entity_id", "=", anchorId),
+    )
+    .select(["q.id as id", "q.proposed_name as name", "q.entity_type as type", "q.occurrence_count as score"])
+    .where("q.status", "=", "pending")
+    .where("q.entity_type", "in", ["project", "product"])
+    .where("q.occurrence_count", ">=", PENDING_PROPOSAL_MIN_OCCURRENCE)
+    .groupBy(["q.id", "q.proposed_name", "q.entity_type", "q.occurrence_count"])
+    .orderBy("q.occurrence_count", "desc")
+    .orderBy("q.proposed_name", "asc")
+    .execute();
+
+  return rows.flatMap((row) =>
+    isPendingProposalType(row.type)
+      ? [
+          {
+            id: row.id,
+            name: row.name,
+            type: row.type,
+            score: Number(row.score),
+          },
+        ]
+      : [],
+  );
+}
+
 /**
  * Compose the file-scoped knownEntities list passed to the extraction prompt.
  *
  * Layering: anchors → adjacency (initiatives + teams, capped per anchor) →
- * org-wide baseline. File-scope wins on duplicate (lowercased name + type).
- * Returns the merged list — caller passes straight to extractEntities.
+ * org-wide baseline → pending anchor-cluster proposals. Earlier layers win on
+ * duplicate (lowercased name + type). Returns the merged list — caller passes
+ * straight to extractEntities.
  */
 export async function buildFileScopedKnownEntities(
   deps: FileScopeDeps,
@@ -278,6 +330,17 @@ export async function buildFileScopedKnownEntities(
     const k = keyOf(b.name, b.type);
     if (byKey.has(k)) continue;
     byKey.set(k, stripPromptInternalFields(b));
+  }
+
+  if (deps.experimentalFlag) {
+    for (const anchor of [...anchors.companies, ...anchors.persons]) {
+      const pendingProposals = await (deps.loadPendingProposalsForAnchor ?? pendingProposalsForAnchor)(deps, anchor.id);
+      for (const proposal of pendingProposals.slice(0, PER_ANCHOR_INITIATIVE_CAP)) {
+        const k = keyOf(proposal.name, proposal.type);
+        if (byKey.has(k)) continue;
+        byKey.set(k, { name: proposal.name, type: proposal.type });
+      }
+    }
   }
 
   return Array.from(byKey.values());

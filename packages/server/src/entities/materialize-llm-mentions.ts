@@ -86,6 +86,9 @@ export async function materializeNonPersonLlmEntity(
   if (result.kind === "queued") {
     return { kind: "queued_held", reviewId: result.reviewId, reason: "non_person_collision" };
   }
+  if (result.kind === "suppressed") {
+    return { kind: "skipped", reason: result.reason };
+  }
 
   const entity = result.entity as unknown as EntityRow;
   const created = result.kind === "created";

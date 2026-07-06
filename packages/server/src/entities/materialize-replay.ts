@@ -175,6 +175,7 @@ export async function replaySourceFacts(
   const deps = await buildMaterializeDeps(db, {
     llmPromotionThreshold: opts.llmPromotionThreshold,
     llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
+    featureAutoMintThreshold: opts.featureAutoMintThreshold,
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateLiveTypes: opts.birthGateLiveTypes,
@@ -248,6 +249,7 @@ async function materializeUnmaterializedFactsInner(
   const deps = await buildMaterializeDeps(db, {
     llmPromotionThreshold: opts.llmPromotionThreshold,
     llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
+    featureAutoMintThreshold: opts.featureAutoMintThreshold,
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateLiveTypes: opts.birthGateLiveTypes,
