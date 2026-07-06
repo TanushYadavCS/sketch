@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.46.0] -- 2026-07-06
+
+- Context graph moves from gated implementation to a broader GA-ready surface: entity dedup now uses birth gates, structural provenance tiers, embedding/adjudication passes, connector-aware hierarchy, task/commitment/decision/feature/work-cycle sub-entities, and a Your Org review surface for inspecting and correcting product/project/team structure.
+- Summariser configuration is now shared across tenant admins, with org-admin aggregation so admins can see and manage all summariser routes instead of only their own local config.
+- Managed member invites now support email-only registration while requiring tenant-scoped tokens for managed member registration, preserving the email-first identity flow without treating WhatsApp as an invite-delivery channel.
+
 ## [0.45.1] -- 2026-07-05
 
 - Managed WhatsApp DMs now preserve inbound media from the platform shared-number gateway: platform media references are accepted on `/api/system/whatsapp/managed/events`, downloaded with the tenant token, stored as normal workspace attachments, and passed into the agent. This fixes image+caption DMs being treated as text-only on managed tenants.
