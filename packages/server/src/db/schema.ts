@@ -956,6 +956,33 @@ export interface TaskEvidenceTable {
   ref_id: string;
 }
 
+export interface WorkCyclesTable {
+  id: string;
+  scope_entity_id: string | null;
+  connector_config_id: string | null;
+  source: string;
+  external_ref: string;
+  name: string;
+  sequence: number | null;
+  starts_at: string | null;
+  ends_at: string | null;
+  state: string;
+  last_seen_sync_run_id: string | null;
+  deleted_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface TaskCycleMembershipsTable {
+  id: string;
+  task_id: string;
+  cycle_id: string;
+  assigned_at: Generated<string>;
+  removed_at: string | null;
+  source_fact_id: string | null;
+  created_at: Generated<string>;
+}
+
 export interface SubEntitiesTable {
   id: string;
   parent_entity_id: string | null;
@@ -1051,6 +1078,8 @@ export interface DB {
   indexed_file_facts: IndexedFileFactsTable;
   tasks: TasksTable;
   task_evidence: TaskEvidenceTable;
+  work_cycles: WorkCyclesTable;
+  task_cycle_memberships: TaskCycleMembershipsTable;
   sub_entities: SubEntitiesTable;
   sub_entity_evidence: SubEntityEvidenceTable;
   entity_domains: EntityDomainsTable;

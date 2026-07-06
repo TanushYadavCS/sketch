@@ -5,6 +5,7 @@ import type { Connector, SyncedItem } from "../connectors/types";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import { TEST_ACCOUNT_ENTITY_ID, createTaskRepository } from "../db/repositories/tasks";
+import { getCycleRollup } from "../db/repositories/work-cycles";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import {
@@ -119,6 +120,16 @@ async function upsertTaskFact(
     project?: { name: string; source: string; sourceId: string };
     assignee?: { name: string; source?: string; sourceId?: string };
     fileId?: string;
+    cycle?: {
+      source: string;
+      externalRef: string;
+      name: string;
+      scopeRef?: { source: string; sourceId: string };
+      startsAt?: string;
+      endsAt?: string;
+      sequence?: number;
+      isSprint: boolean;
+    };
   },
 ) {
   await createIndexedFileFactRepository(db).upsertFact({
@@ -142,6 +153,7 @@ async function upsertTaskFact(
         statusRaw: input.statusRaw,
         project: input.project,
         assignee: input.assignee,
+        cycle: input.cycle,
       },
     },
   });
@@ -332,5 +344,59 @@ describe("structural task materialization", () => {
     expect(expired).toBe(1);
     expect(expiredRow.valid_to).not.toBeNull();
     expect(visible).toHaveLength(0);
+  });
+
+  it("closes an open sprint membership when a task is observed outside a sprint", async () => {
+    await seedBase(db, "clickup");
+    await seedProject(db, { name: "Delivery Folder", source: "clickup", sourceId: "folder-1" });
+    await upsertTaskFact(db, {
+      source: "clickup",
+      sourceTaskId: "cu-sprint-move",
+      statusType: "custom",
+      statusRaw: "In Progress",
+      title: "Move from sprint",
+      project: { name: "Delivery Folder", source: "clickup", sourceId: "folder-1" },
+      cycle: {
+        source: "clickup",
+        externalRef: "sprint-5",
+        name: "Sprint 5",
+        scopeRef: { source: "clickup", sourceId: "folder-1" },
+        isSprint: true,
+      },
+    });
+    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+
+    const cycle = await db.selectFrom("work_cycles").selectAll().executeTakeFirstOrThrow();
+    const openBefore = await db
+      .selectFrom("task_cycle_memberships")
+      .selectAll()
+      .where("cycle_id", "=", cycle.id)
+      .where("removed_at", "is", null)
+      .execute();
+    expect(openBefore).toHaveLength(1);
+
+    await upsertTaskFact(db, {
+      source: "clickup",
+      sourceTaskId: "cu-sprint-move",
+      statusType: "custom",
+      statusRaw: "In Progress",
+      title: "Move from sprint",
+      project: { name: "Delivery Folder", source: "clickup", sourceId: "folder-1" },
+    });
+    await materializeUnmaterializedFacts(db, createTestLogger(), { experimentalFlag: true });
+
+    const memberships = await db
+      .selectFrom("task_cycle_memberships")
+      .selectAll()
+      .where("cycle_id", "=", cycle.id)
+      .execute();
+    expect(memberships).toHaveLength(1);
+    expect(memberships[0].removed_at).not.toBeNull();
+    await expect(db.selectFrom("work_cycles").selectAll().executeTakeFirstOrThrow()).resolves.toMatchObject({
+      id: cycle.id,
+      deleted_at: null,
+      state: "active",
+    });
+    await expect(getCycleRollup(db, cycle.id)).resolves.toMatchObject({ total: 0 });
   });
 });
