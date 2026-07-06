@@ -54,13 +54,10 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { z } from "zod";
 
-const optionalEmail = z.literal("").or(emailSchema);
-const optionalPhone = z.literal("").or(whatsappNumberSchema);
-
 const editMemberSchema = z.object({
   name: z.string().min(1),
-  email: optionalEmail,
-  whatsappNumber: optionalPhone,
+  email: emailSchema,
+  whatsappNumber: whatsappNumberSchema,
 });
 
 export function EditMemberDialog({
@@ -205,9 +202,11 @@ export function EditMemberDialog({
 
   const canSubmit =
     isDirty &&
-    !phoneError &&
-    editMemberSchema.safeParse({ name: name.trim(), email: email.trim(), whatsappNumber: normalizedPhone ?? "" })
-      .success;
+    (isAgent
+      ? name.trim().length > 0
+      : !phoneError &&
+        editMemberSchema.safeParse({ name: name.trim(), email: email.trim(), whatsappNumber: normalizedPhone ?? "" })
+          .success);
 
   const otherUsers = users.filter((u) => u.id !== user?.id);
 

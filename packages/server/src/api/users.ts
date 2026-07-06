@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * Users API — CRUD for managing team members.
  * Primary use case: admin adds WhatsApp users so they can message the bot.
@@ -23,6 +24,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createEmailTransport, sendVerificationEmail } from "../email";
+import { ManagedMemberRegistrationError, type ManagedMemberRegistrationInput } from "../managed-members";
 import type { SlackBot } from "../slack/bot";
 
 import { getSmtpConfig, resolveBaseUrl } from "./shared";
@@ -41,6 +43,7 @@ interface UserRoutesDeps {
   channels?: ChannelRepo;
   whatsappGroups?: WhatsAppGroupRepo;
   getSlack?: () => SlackBot | null;
+  registerManagedMember?: (input: ManagedMemberRegistrationInput) => Promise<unknown>;
 }
 
 const allowedToolsSchema = z.array(z.string().refine(isKnownAgentToolName, "Unknown tool name")).nullable().optional();
@@ -166,6 +169,52 @@ async function sendOrLogVerification(
   return { sent: false };
 }
 
+function humanContactError() {
+  return {
+    error: {
+      code: "VALIDATION_ERROR",
+      message: "Email and WhatsApp number are required for human members",
+    },
+  };
+}
+
+async function ensureContactAvailable(
+  users: UserRepo,
+  contact: { email: string; whatsappNumber: string },
+  excludeUserId?: string,
+): Promise<"ok" | "conflict"> {
+  const [byEmail, byWhatsapp] = await Promise.all([
+    users.findByEmail(contact.email),
+    users.findByWhatsappNumber(contact.whatsappNumber),
+  ]);
+  if (byEmail && byEmail.id !== excludeUserId) return "conflict";
+  if (byWhatsapp && byWhatsapp.id !== excludeUserId) return "conflict";
+  return "ok";
+}
+
+function managedRegistrationResponse(err: unknown) {
+  if (err instanceof ManagedMemberRegistrationError) {
+    return {
+      status: err.status,
+      body: {
+        error: {
+          code: err.code === "CONFLICT" ? "CONFLICT" : "MANAGED_MEMBER_REGISTRATION_FAILED",
+          message: err.message,
+        },
+      },
+    };
+  }
+  return {
+    status: 502,
+    body: {
+      error: {
+        code: "MANAGED_MEMBER_REGISTRATION_FAILED",
+        message: "Managed member registration failed",
+      },
+    },
+  };
+}
+
 export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
   const routes = new Hono();
 
@@ -229,6 +278,12 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     }
 
     const userType = parsed.data.type ?? "human";
+    const humanEmail = parsed.data.email?.trim().toLowerCase() ?? null;
+    const humanWhatsappNumber = parsed.data.whatsappNumber ?? null;
+
+    if (userType === "human" && (!humanEmail || !humanWhatsappNumber)) {
+      return c.json(humanContactError(), 400);
+    }
 
     if (userType === "human" && parsed.data.whatsappNumber) {
       const existing = await users.findByWhatsappNumber(parsed.data.whatsappNumber);
@@ -241,6 +296,16 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
             },
             promotionCandidate: { id: existing.id, type: existing.type, whatsapp_number: existing.whatsapp_number },
           },
+          409,
+        );
+      }
+    }
+
+    if (userType === "human" && humanEmail && humanWhatsappNumber) {
+      const available = await ensureContactAvailable(users, { email: humanEmail, whatsappNumber: humanWhatsappNumber });
+      if (available === "conflict") {
+        return c.json(
+          { error: { code: "CONFLICT", message: "This email or number is already linked to another member" } },
           409,
         );
       }
@@ -325,10 +390,27 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     }
 
     try {
+      const id = randomUUID();
+      if (userType === "human" && humanEmail && humanWhatsappNumber && deps.registerManagedMember) {
+        try {
+          await deps.registerManagedMember({
+            tenantUserId: id,
+            email: humanEmail,
+            name: parsed.data.name,
+            phoneNumber: humanWhatsappNumber,
+            sendInvite: true,
+          });
+        } catch (err) {
+          const response = managedRegistrationResponse(err);
+          return c.json(response.body, response.status as 400);
+        }
+      }
+
       const user = await users.create({
+        id,
         name: parsed.data.name,
-        email: parsed.data.email ?? undefined,
-        whatsappNumber: parsed.data.whatsappNumber ?? undefined,
+        email: humanEmail ?? undefined,
+        whatsappNumber: humanWhatsappNumber ?? undefined,
         description: parsed.data.description ?? undefined,
         type: userType,
         role: parsed.data.role ?? undefined,
@@ -502,8 +584,45 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     }
 
     try {
-      const emailValue = (parsed.data as { email?: string | null }).email;
+      const rawEmailValue = (parsed.data as { email?: string | null }).email;
+      const emailValue = rawEmailValue == null ? rawEmailValue : rawEmailValue.trim().toLowerCase();
       const emailChanged = emailValue !== undefined && emailValue !== (existing.email ?? null);
+      const nextEmail = emailValue === undefined ? existing.email : emailValue;
+      const nextWhatsappNumber =
+        parsed.data.whatsappNumber === undefined ? existing.whatsapp_number : parsed.data.whatsappNumber;
+
+      if (existing.type === "human") {
+        if (!nextEmail || !nextWhatsappNumber) {
+          return c.json(humanContactError(), 400);
+        }
+
+        const available = await ensureContactAvailable(
+          users,
+          { email: nextEmail, whatsappNumber: nextWhatsappNumber },
+          existing.id,
+        );
+        if (available === "conflict") {
+          return c.json(
+            { error: { code: "CONFLICT", message: "This email or number is already linked to another member" } },
+            409,
+          );
+        }
+
+        if (deps.registerManagedMember) {
+          try {
+            await deps.registerManagedMember({
+              tenantUserId: existing.id,
+              email: nextEmail,
+              name: parsed.data.name ?? existing.name,
+              phoneNumber: nextWhatsappNumber,
+              sendInvite: false,
+            });
+          } catch (err) {
+            const response = managedRegistrationResponse(err);
+            return c.json(response.body, response.status as 400);
+          }
+        }
+      }
 
       const user = await users.update(id, {
         name: parsed.data.name,
@@ -575,7 +694,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     const body = await c.req.json();
     const promoteSchema = z.object({
       name: z.string().min(1),
-      email: emailSchema.nullable().optional(),
+      email: emailSchema,
       role: z.string().max(100).nullable().optional(),
     });
     const parsed = promoteSchema.safeParse(body);
@@ -584,12 +703,44 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
+    if (!existing.whatsapp_number) {
+      return c.json(humanContactError(), 400);
+    }
+
+    const email = parsed.data.email.trim().toLowerCase();
+    const available = await ensureContactAvailable(
+      users,
+      { email, whatsappNumber: existing.whatsapp_number },
+      existing.id,
+    );
+    if (available === "conflict") {
+      return c.json(
+        { error: { code: "CONFLICT", message: "This email or number is already linked to another member" } },
+        409,
+      );
+    }
+
+    if (deps.registerManagedMember) {
+      try {
+        await deps.registerManagedMember({
+          tenantUserId: existing.id,
+          email,
+          name: parsed.data.name,
+          phoneNumber: existing.whatsapp_number,
+          sendInvite: true,
+        });
+      } catch (err) {
+        const response = managedRegistrationResponse(err);
+        return c.json(response.body, response.status as 400);
+      }
+    }
+
     await deps.db
       .updateTable("users")
       .set({
         type: "human",
         name: parsed.data.name,
-        email: parsed.data.email ?? null,
+        email,
         role: parsed.data.role ?? null,
       })
       .where("id", "=", id)

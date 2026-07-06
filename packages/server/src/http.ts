@@ -72,6 +72,7 @@ import type { IntegrationProvider } from "./integrations/types";
 import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-dispatcher";
 import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
+import { registerManagedTenantMember } from "./managed-members";
 import { createManagedLoginUrl } from "./managed-url";
 import { mcpOAuthRoutes } from "./mcp/oauth/routes";
 import { mountPublicMcpServer } from "./mcp/server/transport";
@@ -339,7 +340,16 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/skills", skillsRoutes(config));
   app.route(
     "/api/users",
-    userRoutes(users, { settings, db, logger, config, channels, whatsappGroups, getSlack: deps?.getSlack }),
+    userRoutes(users, {
+      settings,
+      db,
+      logger,
+      config,
+      channels,
+      whatsappGroups,
+      getSlack: deps?.getSlack,
+      registerManagedMember: (input) => registerManagedTenantMember(config, input),
+    }),
   );
   app.route(
     "/api/agent-environment-variables",

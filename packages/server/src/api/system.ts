@@ -101,6 +101,7 @@ const llmSchema = z.discriminatedUnion("provider", [
 const systemUserSchema = z.object({
   email: z.string().email(),
   name: z.string().trim().min(1),
+  whatsappNumber: whatsappNumberSchema.optional(),
 });
 
 const systemBulkUsersSchema = z.object({
@@ -117,6 +118,9 @@ const systemBulkUsersSchema = z.object({
       })
       .refine((row) => !row.slackUserId || row.email, {
         message: "email is required for Slack users",
+      })
+      .refine((row) => !row.whatsappNumber || row.email, {
+        message: "email is required for WhatsApp users",
       }),
   ),
 });
@@ -423,6 +427,26 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
 
     const email = parsed.data.email.toLowerCase();
+    if (parsed.data.whatsappNumber) {
+      const result = await upsertWhatsAppIdentity(deps.userRepo, {
+        email,
+        name: parsed.data.name,
+        whatsappNumber: parsed.data.whatsappNumber,
+      });
+      if (result.status === "conflict") {
+        return c.json(
+          {
+            error: {
+              code: "CONFLICT",
+              message: "User is already linked to a different WhatsApp identity",
+            },
+          },
+          409,
+        );
+      }
+      return c.json({ ok: true, userId: result.user.id });
+    }
+
     const existing = await deps.userRepo.findByEmail(email);
     if (existing) {
       if (!existing.email_verified_at) {
