@@ -383,6 +383,18 @@ describe("Users API — agent fields", () => {
     });
     expect(create.status).toBe(201);
     const user = (await create.json()).user;
+    const connectorCredentials = JSON.stringify({ apiKey: "fireflies-test-key" });
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "managed-delete-failure-connector",
+        connector_type: "fireflies",
+        auth_type: "api_key",
+        credentials: connectorCredentials,
+        created_by: user.id,
+        sync_status: "active",
+      })
+      .execute();
 
     const res = await managedApp.request(`/api/users/${user.id}`, {
       method: "DELETE",
@@ -398,6 +410,18 @@ describe("Users API — agent fields", () => {
     });
     await expect(createUserRepository(db).findById(user.id)).resolves.toMatchObject({
       email: "managed.delete.failure@gmail.com",
+    });
+    await expect(
+      db
+        .selectFrom("connector_configs")
+        .select(["sync_status", "credentials", "credential_hint", "error_message"])
+        .where("id", "=", "managed-delete-failure-connector")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      sync_status: "active",
+      credentials: connectorCredentials,
+      credential_hint: null,
+      error_message: null,
     });
     fetchMock.mockRestore();
   });
