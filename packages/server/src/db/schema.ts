@@ -492,6 +492,7 @@ export interface ConversationSlicesTable {
   started_at: string;
   ended_at: string;
   message_count: number;
+  denoised_message_ids: string | null;
   flush_reason: string;
   roster_snapshot: string;
   salience_verdict: string | null;

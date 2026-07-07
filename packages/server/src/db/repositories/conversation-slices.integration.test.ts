@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createTestDb, getSharedPgDb } from "../../test-utils";
+import { createTestDb, createTestPgDb, getSharedPgDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { createConversationSlicesRepository } from "./conversation-slices";
 import { createConversationRepository } from "./conversations";
@@ -43,6 +43,7 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
         startedAt: "2026-07-07T09:00:00.000Z",
         endedAt: "2026-07-07T09:05:00.000Z",
         messageCount: 2,
+        denoisedMessageIds: [firstMessageId, lastMessageId],
         flushReason: "gap",
         rosterSnapshot: JSON.stringify([{ name: "Asha" }]),
       });
@@ -61,6 +62,7 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       expect(second.created).toBe(false);
       expect(second.row.id).toBe(first.row.id);
       expect(second.row.flush_reason).toBe("gap");
+      expect(first.row.denoised_message_ids).toBe(JSON.stringify([firstMessageId, lastMessageId]));
       await expect(countRows(db, "conversation_slices")).resolves.toBe(1);
     });
 
@@ -125,6 +127,41 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       expect(advanced.last_message_id).toBe(11);
     });
 
+    it("claims and releases a slice cursor with stale claim recovery", async () => {
+      const { conversationId } = await seedConversationWindow(db);
+      const repo = createConversationSlicesRepository(db);
+
+      const first = await repo.claimCursor({
+        conversationId,
+        claimToken: "claim-1",
+        now: "2026-07-07T09:00:00.000Z",
+        staleBefore: "2026-07-07T08:55:00.000Z",
+      });
+      const blocked = await repo.claimCursor({
+        conversationId,
+        claimToken: "claim-2",
+        now: "2026-07-07T09:01:00.000Z",
+        staleBefore: "2026-07-07T08:56:00.000Z",
+      });
+      const staleWinner = await repo.claimCursor({
+        conversationId,
+        claimToken: "claim-3",
+        now: "2026-07-07T09:10:00.000Z",
+        staleBefore: "2026-07-07T09:05:00.000Z",
+      });
+      const wrongRelease = await repo.releaseCursorClaim({ conversationId, claimToken: "claim-1" });
+      const released = await repo.releaseCursorClaim({ conversationId, claimToken: "claim-3" });
+      const cursor = await repo.getCursor(conversationId);
+
+      expect(first).toBe(true);
+      expect(blocked).toBe(false);
+      expect(staleWinner).toBe(true);
+      expect(wrongRelease).toBe(false);
+      expect(released).toBe(true);
+      expect(cursor?.claim_token).toBeNull();
+      expect(cursor?.claimed_at).toBeNull();
+    });
+
     it("upserts backfill checkpoint transitions by group", async () => {
       const repo = createConversationSlicesRepository(db);
 
@@ -181,5 +218,95 @@ async function countRows(db: Kysely<DB>, table: "conversation_slices" | "whatsap
   return Number(row.count);
 }
 
+function runStaleClaimTakeoverSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
+  describe(label, () => {
+    let db!: Kysely<DB>;
+
+    beforeEach(async () => {
+      db = await getDb();
+    }, 30000);
+
+    afterEach(async () => {
+      await db.destroy();
+    });
+
+    it("rolls back a stale worker write after another claim takes over", async () => {
+      const { conversationId, firstMessageId, lastMessageId } = await seedConversationWindow(db);
+      const repo = createConversationSlicesRepository(db);
+
+      await expect(
+        repo.claimCursor({
+          conversationId,
+          claimToken: "claim-a",
+          now: "2026-07-07T09:00:00.000Z",
+          staleBefore: "2026-07-07T08:55:00.000Z",
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        repo.claimCursor({
+          conversationId,
+          claimToken: "claim-b",
+          now: "2026-07-07T09:10:00.000Z",
+          staleBefore: "2026-07-07T09:05:00.000Z",
+        }),
+      ).resolves.toBe(true);
+
+      await expect(
+        db.transaction().execute(async (trx) => {
+          const txRepo = createConversationSlicesRepository(trx);
+          await txRepo.insertIfAbsent({
+            conversationId,
+            firstMessageId,
+            lastMessageId,
+            startedAt: "2026-07-07T09:00:00.000Z",
+            endedAt: "2026-07-07T09:05:00.000Z",
+            messageCount: 2,
+            flushReason: "gap",
+            rosterSnapshot: "[]",
+          });
+          const advanced = await txRepo.advanceCursorIfClaimed({
+            conversationId,
+            claimToken: "claim-a",
+            lastEffectiveAt: "2026-07-07T09:05:00.000Z",
+            lastMessageId,
+          });
+          if (!advanced) throw new Error("claim lost");
+        }),
+      ).rejects.toThrow("claim lost");
+
+      await expect(countRows(db, "conversation_slices")).resolves.toBe(0);
+
+      await db.transaction().execute(async (trx) => {
+        const txRepo = createConversationSlicesRepository(trx);
+        await txRepo.insertIfAbsent({
+          conversationId,
+          firstMessageId,
+          lastMessageId,
+          startedAt: "2026-07-07T09:00:00.000Z",
+          endedAt: "2026-07-07T09:05:00.000Z",
+          messageCount: 2,
+          flushReason: "gap",
+          rosterSnapshot: "[]",
+        });
+        await expect(
+          txRepo.advanceCursorIfClaimed({
+            conversationId,
+            claimToken: "claim-b",
+            lastEffectiveAt: "2026-07-07T09:05:00.000Z",
+            lastMessageId,
+          }),
+        ).resolves.toMatchObject({ last_message_id: lastMessageId });
+      });
+
+      const cursor = await repo.getCursor(conversationId);
+      await expect(countRows(db, "conversation_slices")).resolves.toBe(1);
+      expect(cursor?.claim_token).toBe("claim-b");
+      expect(cursor?.last_message_id).toBe(lastMessageId);
+    });
+  });
+}
+
 runRepositorySuite("createConversationSlicesRepository sqlite", createTestDb);
 runRepositorySuite("createConversationSlicesRepository postgres", getSharedPgDb, { shared: true });
+runStaleClaimTakeoverSuite("createConversationSlicesRepository stale takeover sqlite", createTestDb);
+runStaleClaimTakeoverSuite("createConversationSlicesRepository stale takeover postgres", createTestPgDb);

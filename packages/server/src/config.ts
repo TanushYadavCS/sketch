@@ -69,6 +69,9 @@ export const configSchema = z.object({
   MANAGED_WHATSAPP_PLATFORM_URL: z.preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
   MANAGED_WHATSAPP_TENANT_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   WHATSAPP_HISTORY_LOOKBACK_DAYS: z.coerce.number().int().min(1).default(30),
+  WHATSAPP_SLICE_GAP_MINUTES: z.coerce.number().int().min(1).default(25),
+  WHATSAPP_SLICE_MAX_AGE_MINUTES: z.coerce.number().int().min(1).default(120),
+  WHATSAPP_SLICE_MAX_MESSAGES: z.coerce.number().int().min(1).default(50),
   WHATSAPP_WINDOW_KEEPALIVE_ENABLED: z
     .enum(["true", "false", "1", "0"])
     .default("false")

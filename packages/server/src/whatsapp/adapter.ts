@@ -58,6 +58,8 @@ type ConversationRepository = ReturnType<typeof createConversationRepository>;
 const INLINE_BACKLOG_LIMIT = 10;
 const WHATSAPP_AGENT_ERROR_MESSAGE = "Something went wrong, try again.";
 const DAY_MS = 24 * 60 * 60 * 1000;
+const PROVIDER_TIMESTAMP_FLOOR_MS = Date.parse("2009-01-01T00:00:00.000Z");
+const MAX_PROVIDER_TIMESTAMP_FUTURE_MS = 48 * 60 * 60 * 1000;
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
@@ -78,6 +80,27 @@ function isFromMeHistoryMessage(message: WhatsAppInboundMessage): boolean {
   const raw = message.rawProviderPayload;
   if (!isRecord(raw) || !isRecord(raw.key)) return false;
   return raw.key.fromMe === true;
+}
+
+function validProviderTimestamp(providerTimestamp: string | null | undefined, now = new Date()): string | undefined {
+  if (!providerTimestamp) return undefined;
+  const timestampMs = Date.parse(providerTimestamp);
+  if (!Number.isFinite(timestampMs) || timestampMs <= PROVIDER_TIMESTAMP_FLOOR_MS) return undefined;
+  if (timestampMs >= now.getTime() + MAX_PROVIDER_TIMESTAMP_FUTURE_MS) return undefined;
+  return new Date(timestampMs).toISOString();
+}
+
+function maskPersonalNumberIdentifier(value: string): string {
+  return value.replace(/\+?\d{5,}/gu, (match) => {
+    const digits = match.replace(/\D/gu, "");
+    const prefix = match.startsWith("+") ? "+" : "";
+    return `${prefix}${"*".repeat(Math.max(0, digits.length - 2))}${digits.slice(-2)}`;
+  });
+}
+
+function providerConversationIdForLog(message: WhatsAppInboundMessage): string {
+  if (message.kind !== "dm") return message.providerConversationId;
+  return maskPersonalNumberIdentifier(message.providerConversationId);
 }
 
 export interface WhatsAppAdapterDeps {
@@ -236,7 +259,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       }
     } catch (err) {
       logger.debug(
-        { err, providerConversationId: message.providerConversationId, emoji },
+        { err, providerConversationId: providerConversationIdForLog(message), emoji },
         "Failed to update WhatsApp reaction",
       );
     }
@@ -291,6 +314,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     }
 
     const attachments = await downloadMessageAttachments(params.message, params.workspaceDir);
+    const providerTimestamp = validProviderTimestamp(params.message.providerTimestamp);
+    const receivedAt = params.receivedAt ? validProviderTimestamp(params.receivedAt) : providerTimestamp;
     const captured = await repos.conversations.insertMessage({
       conversationId: conversation.id,
       providerMessageId: params.message.providerMessageId,
@@ -302,8 +327,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       attachments,
       providerParentMessageId: params.message.quotedMessage?.providerMessageId ?? null,
       isThreadReply: Boolean(params.message.quotedMessage?.providerMessageId),
-      providerTimestamp: params.message.providerTimestamp,
-      receivedAt: params.receivedAt,
+      providerTimestamp: providerTimestamp ?? null,
+      receivedAt,
     });
 
     return { conversation, captured: captured.row, attachments, inserted: captured.inserted, omitted: false };
@@ -317,6 +342,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
   }) => {
     const providerMessageId = params.sent?.providerMessageId;
     if (!providerMessageId) return;
+    const providerTimestamp = validProviderTimestamp(params.sent?.providerTimestamp);
 
     await repos.conversations.insertMessage({
       conversationId: params.conversationId,
@@ -326,7 +352,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       isBot: true,
       addressedToSketch: false,
       text: params.text,
-      providerTimestamp: params.sent?.providerTimestamp ?? null,
+      providerTimestamp: providerTimestamp ?? null,
     });
   };
 

@@ -23,6 +23,7 @@ export interface ConversationSliceInsert {
   startedAt: string;
   endedAt: string;
   messageCount: number;
+  denoisedMessageIds?: number[] | null;
   flushReason: ConversationSliceFlushReason;
   rosterSnapshot: string;
   salienceVerdict?: ConversationSliceSalienceVerdict | null;
@@ -34,6 +35,22 @@ export interface ConversationSliceCursorAdvance {
   conversationId: number;
   lastEffectiveAt: string;
   lastMessageId: number;
+}
+
+export interface ConversationSliceCursorAdvanceIfClaimed extends ConversationSliceCursorAdvance {
+  claimToken: string;
+}
+
+export interface ConversationSliceCursorClaim {
+  conversationId: number;
+  claimToken: string;
+  now: string;
+  staleBefore: string;
+}
+
+export interface ConversationSliceCursorRelease {
+  conversationId: number;
+  claimToken: string;
 }
 
 export interface WhatsAppBackfillCheckpointSet {
@@ -51,6 +68,7 @@ function toSliceInsert(input: ConversationSliceInsert): Insertable<ConversationS
     started_at: input.startedAt,
     ended_at: input.endedAt,
     message_count: input.messageCount,
+    denoised_message_ids: input.denoisedMessageIds ? JSON.stringify(input.denoisedMessageIds) : null,
     flush_reason: input.flushReason,
     roster_snapshot: input.rosterSnapshot,
     salience_verdict: input.salienceVerdict ?? null,
@@ -110,6 +128,51 @@ export function createConversationSlicesRepository(db: Kysely<DB>) {
         .executeTakeFirst();
     },
 
+    async claimCursor(input: ConversationSliceCursorClaim): Promise<boolean> {
+      await db
+        .insertInto("conversation_slice_cursors")
+        .values({
+          conversation_id: input.conversationId,
+          updated_at: input.now,
+        })
+        .onConflict((oc) => oc.column("conversation_id").doNothing())
+        .execute();
+
+      const result = await db
+        .updateTable("conversation_slice_cursors")
+        .set({
+          claim_token: input.claimToken,
+          claimed_at: input.now,
+          updated_at: input.now,
+        })
+        .where("conversation_id", "=", input.conversationId)
+        .where((eb) =>
+          eb.or([
+            eb("claim_token", "is", null),
+            eb("claimed_at", "is", null),
+            eb("claimed_at", "<", input.staleBefore),
+          ]),
+        )
+        .executeTakeFirst();
+
+      return Number(result.numUpdatedRows ?? 0) > 0;
+    },
+
+    async releaseCursorClaim(input: ConversationSliceCursorRelease): Promise<boolean> {
+      const result = await db
+        .updateTable("conversation_slice_cursors")
+        .set({
+          claim_token: null,
+          claimed_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .where("conversation_id", "=", input.conversationId)
+        .where("claim_token", "=", input.claimToken)
+        .executeTakeFirst();
+
+      return Number(result.numUpdatedRows ?? 0) > 0;
+    },
+
     async advanceCursor(input: ConversationSliceCursorAdvance): Promise<ConversationSliceCursorRow> {
       const now = new Date().toISOString();
       await db
@@ -143,6 +206,40 @@ export function createConversationSlicesRepository(db: Kysely<DB>) {
         )
         .execute();
 
+      return db
+        .selectFrom("conversation_slice_cursors")
+        .selectAll()
+        .where("conversation_id", "=", input.conversationId)
+        .executeTakeFirstOrThrow();
+    },
+
+    async advanceCursorIfClaimed(
+      input: ConversationSliceCursorAdvanceIfClaimed,
+    ): Promise<ConversationSliceCursorRow | undefined> {
+      const now = new Date().toISOString();
+      const result = await db
+        .updateTable("conversation_slice_cursors")
+        .set({
+          last_effective_at: input.lastEffectiveAt,
+          last_message_id: input.lastMessageId,
+          updated_at: now,
+        })
+        .where("conversation_id", "=", input.conversationId)
+        .where("claim_token", "=", input.claimToken)
+        .where((eb) =>
+          eb.or([
+            eb("last_effective_at", "is", null),
+            eb("last_message_id", "is", null),
+            eb("last_effective_at", "<", input.lastEffectiveAt),
+            eb.and([
+              eb("last_effective_at", "=", input.lastEffectiveAt),
+              eb("last_message_id", "<", input.lastMessageId),
+            ]),
+          ]),
+        )
+        .executeTakeFirst();
+
+      if (Number(result.numUpdatedRows ?? 0) === 0) return undefined;
       return db
         .selectFrom("conversation_slice_cursors")
         .selectAll()

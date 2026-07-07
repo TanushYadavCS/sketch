@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createConversationRepository } from "../db/repositories/conversations";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
@@ -26,7 +27,7 @@ describe("createWhatsAppConnector", () => {
     );
   });
 
-  it("loads only index-enabled groups and yields no items before chunking exists", async () => {
+  it("loads only index-enabled groups, chunks them, and yields no items before Phase 4", async () => {
     const groups = createWhatsAppGroupRepository(db);
     await groups.upsert({
       jid: "disabled@g.us",
@@ -45,9 +46,23 @@ describe("createWhatsAppConnector", () => {
       updated_at: "2026-07-07T09:01:00.000Z",
     });
     await groups.setIndexEnabled("enabled@g.us", true);
+    const conversation = await createConversationRepository(db).getOrCreate({
+      platform: "whatsapp",
+      kind: "group",
+      providerConversationId: "enabled@g.us",
+    });
+    await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "enabled-1",
+      senderName: "Sender",
+      text: "first",
+      providerTimestamp: "2025-01-01T09:00:00.000Z",
+      receivedAt: "2025-01-01T09:00:00.000Z",
+    });
 
     const debug = vi.fn();
-    const logger = { debug } as unknown as Logger;
+    const info = vi.fn();
+    const logger = { debug, info } as unknown as Logger;
     const seen: unknown[] = [];
 
     for await (const item of createWhatsAppConnector().sync({
@@ -62,6 +77,7 @@ describe("createWhatsAppConnector", () => {
 
     expect(seen).toEqual([]);
     expect(debug).toHaveBeenCalledWith({ groupCount: 1 }, "Loaded opted-in WhatsApp groups for indexing");
+    await expect(db.selectFrom("conversation_slices").selectAll().execute()).resolves.toHaveLength(1);
   });
 
   it("disabled groups yield nothing by construction", async () => {
@@ -75,7 +91,7 @@ describe("createWhatsAppConnector", () => {
     });
 
     const debug = vi.fn();
-    const logger = { debug } as unknown as Logger;
+    const logger = { debug, info: vi.fn() } as unknown as Logger;
     const seen: unknown[] = [];
 
     for await (const item of createWhatsAppConnector().sync({

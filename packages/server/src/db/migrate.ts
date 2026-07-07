@@ -132,6 +132,7 @@ import * as m129 from "./migrations/129-container-name-qualification";
 import * as m130 from "./migrations/130-entity-provenance-tier";
 import * as m131 from "./migrations/131-trunk-name-embeddings";
 import * as m132 from "./migrations/132-whatsapp-context-graph-indexing";
+import * as m133 from "./migrations/133-whatsapp-slice-denoised-message-ids";
 import type { DB } from "./schema";
 
 export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
@@ -268,6 +269,7 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "130-entity-provenance-tier": m130,
           "131-trunk-name-embeddings": m131,
           "132-whatsapp-context-graph-indexing": m132,
+          "133-whatsapp-slice-denoised-message-ids": m133,
         };
       },
     },

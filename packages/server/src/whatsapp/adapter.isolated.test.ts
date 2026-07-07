@@ -466,6 +466,69 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.userName).toBe("Alice");
     });
 
+    it("masks personal DM provider conversation ids in reaction failure logs", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      mock.addReaction.mockRejectedValueOnce(new Error("reaction failed"));
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        kind: "dm" as const,
+        providerId: "wati",
+        providerMessageId: "wamid.reaction",
+        providerConversationId: "dm:+1234567890",
+        canonicalConversationId: "dm:+1234567890",
+        providerTimestamp: "2026-07-01T00:00:00.000Z",
+        senderName: "Alice",
+        senderProviderId: "1234567890",
+        senderPhoneE164: "+1234567890",
+        target: { kind: "dm" as const, phoneE164: "+1234567890" },
+        text: "hello",
+      });
+      await flush();
+
+      expect(deps.logger.debug).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerConversationId: "dm:+********90",
+          emoji: "👀",
+        }),
+        "Failed to update WhatsApp reaction",
+      );
+      expect(JSON.stringify(vi.mocked(deps.logger.debug).mock.calls)).not.toContain("+1234567890");
+    });
+
+    it("persists valid provider timestamps as received_at for live DM capture", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const providerTimestamp = new Date(Date.now() - 60_000).toISOString();
+
+      await handler({
+        kind: "dm" as const,
+        providerId: "wati",
+        providerMessageId: "wamid.timestamped",
+        providerConversationId: "wati-conversation-1",
+        canonicalConversationId: "dm:+1234567890",
+        providerTimestamp,
+        senderName: "Alice",
+        senderProviderId: "1234567890",
+        senderPhoneE164: "+1234567890",
+        target: { kind: "dm" as const, phoneE164: "+1234567890" },
+        text: "hello",
+      });
+      await flush();
+
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerMessageId: "wamid.timestamped",
+          providerTimestamp,
+          receivedAt: providerTimestamp,
+        }),
+      );
+    });
+
     it("does not persist or run duplicate Wati DM retries", async () => {
       const deps = makeDeps();
       const insertMessage = vi.mocked(deps.repos.conversations.insertMessage);
@@ -1293,6 +1356,59 @@ describe("whatsapp/adapter", () => {
 
       expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
         expect.objectContaining({ text: "random chat", addressedToSketch: false }),
+      );
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
+    it("ignores invalid provider timestamps for live group capture received_at", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const futureTimestamp = new Date(Date.now() + 49 * 60 * 60 * 1000).toISOString();
+
+      await handler({
+        kind: "group" as const,
+        providerId: "baileys",
+        providerMessageId: "future-timestamp",
+        providerConversationId: "group@g.us",
+        canonicalConversationId: "group:group@g.us",
+        providerTimestamp: futureTimestamp,
+        senderName: "Bob",
+        senderProviderId: "5555@s.whatsapp.net",
+        senderPhoneE164: "+5555",
+        target: { kind: "group" as const, groupId: "group@g.us" },
+        text: "random chat",
+        isMentioned: false,
+      });
+      await handler({
+        kind: "group" as const,
+        providerId: "baileys",
+        providerMessageId: "epoch-timestamp",
+        providerConversationId: "group@g.us",
+        canonicalConversationId: "group:group@g.us",
+        providerTimestamp: "1970-01-01T00:00:00.000Z",
+        senderName: "Bob",
+        senderProviderId: "5555@s.whatsapp.net",
+        senderPhoneE164: "+5555",
+        target: { kind: "group" as const, groupId: "group@g.us" },
+        text: "more chat",
+        isMentioned: false,
+      });
+
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerMessageId: "future-timestamp",
+          providerTimestamp: null,
+          receivedAt: undefined,
+        }),
+      );
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerMessageId: "epoch-timestamp",
+          providerTimestamp: null,
+          receivedAt: undefined,
+        }),
       );
       expect(deps.runAgent).not.toHaveBeenCalled();
     });
