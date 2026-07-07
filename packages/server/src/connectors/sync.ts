@@ -249,6 +249,7 @@ export async function runConnectorSync(
         : undefined;
 
     for await (const item of connector.sync({
+      db,
       connectorConfigId: config.id,
       credentials,
       accessTokenProvider: resolvedCredentials.accessTokenProvider,

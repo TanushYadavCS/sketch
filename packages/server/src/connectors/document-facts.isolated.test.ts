@@ -37,6 +37,18 @@ const testConnector: Connector = {
   },
 };
 
+const whatsappConnector: Connector = {
+  type: "whatsapp",
+  perUserAuth: false,
+  requiresOAuthClientSetup: false,
+  promotableFileTypes: [],
+  async validateCredentials(_credentials: ConnectorCredentials): Promise<void> {},
+  async *sync(): AsyncGenerator<SyncedItem> {},
+  async getCursor(): Promise<string | null> {
+    return null;
+  },
+};
+
 const taskCandidate = {
   title: "Ship Slack capture",
   owner: { name: "Alice", email: "alice@example.com" },
@@ -187,6 +199,50 @@ describe("document-derived facts", () => {
 
     expect(extractMock).not.toHaveBeenCalled();
     expect(await activeLlmTaskFacts(db)).toHaveLength(0);
+  });
+
+  it("skips WhatsApp-sourced task extraction on both the sync and enrich paths", async () => {
+    await seedIndexedFile(db, {
+      contentCategory: "document",
+      embeddingStatus: "done",
+      summaryStatus: "done",
+      source: "whatsapp",
+    });
+
+    await emitFactsForSyncedItem({
+      db,
+      factRepo: createIndexedFileFactRepository(db),
+      connector: whatsappConnector,
+      connectorType: "whatsapp",
+      factContext: { connectorConfigId: CONNECTOR_ID, createdByUserId: USER_ID, lastSeenSyncRunId: "sync-1" },
+      indexedFileId: FILE_ID,
+      item: baseSyncedItem(),
+      contentChanged: true,
+      generator: fakeGenerator,
+    });
+
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(await activeLlmTaskFacts(db)).toHaveLength(0);
+
+    await seedIndexedFile(db, {
+      id: FILE_ID_2,
+      contentCategory: "document",
+      embeddingStatus: "pending",
+      summaryStatus: "done",
+      source: "whatsapp",
+    });
+
+    await runEnrichment({
+      db,
+      logger: createTestLogger(),
+      embeddingProvider: null,
+      generator: fakeGenerator,
+      fileIds: [FILE_ID_2],
+    });
+
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(await activeLlmTaskFacts(db)).toHaveLength(0);
+    expect(await countRows(db, "tasks")).toBe(0);
   });
 
   it("reconstructs email correspondents as document-fact participants during enrich", async () => {
@@ -497,6 +553,7 @@ async function seedIndexedFile(
     embeddingStatus: "pending" | "done";
     summaryStatus: "pending" | "done" | "skipped";
     fileType?: string;
+    source?: string;
   },
 ): Promise<void> {
   await db
@@ -508,7 +565,7 @@ async function seedIndexedFile(
       file_name: `${input.id ?? "message"}.md`,
       file_type: input.fileType ?? "document",
       content_category: input.contentCategory,
-      source: "gmail",
+      source: input.source ?? "gmail",
       source_path: "Gmail/Inbox",
       source_created_at: "2025-04-25",
       content: CONTENT,

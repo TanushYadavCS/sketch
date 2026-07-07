@@ -55,6 +55,7 @@ export interface EmitDocumentDerivedFactsResult {
  * through to normal extraction.
  */
 export const STRUCTURAL_TASK_FILE_TYPES = new Set(["issue", "task", "subtask"]);
+export const LLM_TASK_EXCLUDED_SOURCES = new Set(["whatsapp"]);
 
 export function sortDocumentParentRefs(parentRefs: DocumentFactParentRef[]): DocumentFactParentRef[] {
   return [...parentRefs].sort((a, b) => a.source.localeCompare(b.source) || a.sourceId.localeCompare(b.sourceId));
@@ -72,17 +73,12 @@ export async function emitDocumentDerivedFacts(
     return { emittedFactKeys, tombstonedFactIds: [], changed: false };
   }
 
+  if (LLM_TASK_EXCLUDED_SOURCES.has(ctx.source)) {
+    return reconcileNoLlmTasks(db, factRepo, ctx, emittedFactKeys);
+  }
+
   if (ctx.fileType && STRUCTURAL_TASK_FILE_TYPES.has(ctx.fileType.toLowerCase())) {
-    const reconcile = await factRepo.reconcileStaleFacts(
-      { kind: "file", indexedFileId: ctx.indexedFileId, source: ctx.source, factType: "llm_task" },
-      new Set(),
-    );
-    await retireLlmTasksForTombstonedFacts(db, reconcile.tombstonedFactIds);
-    return {
-      emittedFactKeys,
-      tombstonedFactIds: reconcile.tombstonedFactIds,
-      changed: reconcile.tombstonedFactIds.length > 0,
-    };
+    return reconcileNoLlmTasks(db, factRepo, ctx, emittedFactKeys);
   }
 
   if (!contentChanged) {
@@ -143,6 +139,24 @@ export async function emitDocumentDerivedFacts(
     emittedFactKeys,
     tombstonedFactIds: reconcile.tombstonedFactIds,
     changed: emittedFactKeys.size > 0 || reconcile.tombstonedFactIds.length > 0,
+  };
+}
+
+async function reconcileNoLlmTasks(
+  db: Kysely<DB>,
+  factRepo: ReturnType<typeof createIndexedFileFactRepository>,
+  ctx: DocumentFactContext,
+  emittedFactKeys: Set<string>,
+): Promise<EmitDocumentDerivedFactsResult> {
+  const reconcile = await factRepo.reconcileStaleFacts(
+    { kind: "file", indexedFileId: ctx.indexedFileId, source: ctx.source, factType: "llm_task" },
+    emittedFactKeys,
+  );
+  await retireLlmTasksForTombstonedFacts(db, reconcile.tombstonedFactIds);
+  return {
+    emittedFactKeys,
+    tombstonedFactIds: reconcile.tombstonedFactIds,
+    changed: reconcile.tombstonedFactIds.length > 0,
   };
 }
 

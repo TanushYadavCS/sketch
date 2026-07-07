@@ -6,7 +6,9 @@
  * - "document": full content stored locally (docs, pages, PRDs)
  * - "structured": metadata only, live-fetched when needed (tasks, issues)
  */
+import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import type { DB } from "../db/schema";
 
 export type ConnectorType =
   | "google_drive"
@@ -19,9 +21,10 @@ export type ConnectorType =
   | "linear"
   | "fireflies"
   | "otter"
-  | "zoho_crm";
+  | "zoho_crm"
+  | "whatsapp";
 
-export type AuthType = "oauth" | "api_key" | "service_account";
+export type AuthType = "oauth" | "api_key" | "service_account" | "system";
 
 export type SyncStatus = "pending" | "active" | "syncing" | "paused" | "error" | "disabled";
 
@@ -68,7 +71,11 @@ export interface ServiceAccountCredentials {
   service_account_json: string;
 }
 
-export type ConnectorCredentials = OAuthCredentials | ApiKeyCredentials | ServiceAccountCredentials;
+export interface SystemCredentials {
+  type: "system";
+}
+
+export type ConnectorCredentials = OAuthCredentials | ApiKeyCredentials | ServiceAccountCredentials | SystemCredentials;
 
 export type AccessTokenProvider = (opts?: { forceRefresh?: boolean }) => Promise<{
   accessToken: string;
@@ -449,6 +456,7 @@ export interface Connector {
 
   /** Run initial or incremental sync. Returns items to index. */
   sync(opts: {
+    db?: Kysely<DB>;
     connectorConfigId?: string;
     credentials: ConnectorCredentials;
     scopeConfig: Record<string, unknown>;

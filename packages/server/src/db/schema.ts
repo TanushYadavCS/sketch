@@ -50,6 +50,10 @@ export interface WhatsAppGroupsTable {
   tool_progress: string | null;
   reasoning_text: Generated<number | null>;
   agent_user_id: string | null;
+  index_enabled: Generated<number>;
+  slice_gap_minutes: number | null;
+  slice_max_age_minutes: number | null;
+  slice_max_messages: number | null;
   updated_at: Generated<string>;
 }
 
@@ -478,6 +482,48 @@ export interface ConversationMessagesTable {
   provider_timestamp: string | null;
   received_at: string;
   created_at: Generated<string>;
+}
+
+export interface ConversationSlicesTable {
+  id: string;
+  conversation_id: number;
+  first_message_id: number;
+  last_message_id: number;
+  started_at: string;
+  ended_at: string;
+  message_count: number;
+  flush_reason: string;
+  roster_snapshot: string;
+  salience_verdict: string | null;
+  salience_signals: string | null;
+  indexed_file_id: string | null;
+  created_at: Generated<string>;
+}
+
+export interface ConversationSliceCursorsTable {
+  conversation_id: number;
+  last_effective_at: string | null;
+  last_message_id: number | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface WhatsAppGroupMemberLabelsTable {
+  group_jid: string;
+  phone_e164: string;
+  display_name: string;
+  company_name: string | null;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
+export interface WhatsAppBackfillCheckpointsTable {
+  group_jid: string;
+  last_fetched_key: string | null;
+  status: string;
+  updated_at: Generated<string>;
 }
 
 export interface WhatsAppWindowKeepAlivesTable {
@@ -1065,6 +1111,10 @@ export interface DB {
   conversations: ConversationsTable;
   conversation_cursors: ConversationCursorsTable;
   conversation_messages: ConversationMessagesTable;
+  conversation_slices: ConversationSlicesTable;
+  conversation_slice_cursors: ConversationSliceCursorsTable;
+  whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
+  whatsapp_backfill_checkpoints: WhatsAppBackfillCheckpointsTable;
   whatsapp_window_keepalives: WhatsAppWindowKeepAlivesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;

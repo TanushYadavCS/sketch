@@ -2229,6 +2229,10 @@ describe("whatsapp/adapter", () => {
         tool_progress: "friendly",
         reasoning_text: 0,
         agent_user_id: null,
+        index_enabled: 0,
+        slice_gap_minutes: null,
+        slice_max_age_minutes: null,
+        slice_max_messages: null,
         updated_at: "2025-01-01T00:00:00Z",
       });
       const { mock, getHandler } = createMockWhatsApp();
@@ -2373,6 +2377,10 @@ describe("whatsapp/adapter", () => {
         tool_progress: null,
         reasoning_text: null,
         agent_user_id: "agent-1",
+        index_enabled: 0,
+        slice_gap_minutes: null,
+        slice_max_age_minutes: null,
+        slice_max_messages: null,
         updated_at: "2025-01-01T00:00:00Z",
       });
       vi.mocked(deps.repos.users.findById).mockImplementation(async (id) =>

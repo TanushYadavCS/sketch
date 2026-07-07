@@ -216,7 +216,7 @@ export async function pruneGoogleCalendarFilesOutsideScope(params: {
   return result;
 }
 
-const VALID_AUTH_TYPES = ["oauth", "api_key", "service_account"] as const;
+const VALID_AUTH_TYPES = ["oauth", "api_key", "service_account", "system"] as const;
 
 const createConnectorSchema = z.object({
   connectorType: z.enum(VALID_CONNECTOR_TYPES as [string, ...string[]]),

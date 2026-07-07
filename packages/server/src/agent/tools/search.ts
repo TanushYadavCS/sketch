@@ -36,10 +36,10 @@ export const searchToolSchema = {
     .enum(["meeting", "doc", "task", "message"])
     .optional()
     .describe(
-      "Semantic content kind. meeting=Fireflies, doc=Drive/Notion/ClickUp Docs/Linear projects, task=ClickUp tasks/Linear issues, message=conversation.",
+      "Semantic content kind. meeting=Fireflies, doc=Drive/Notion/ClickUp Docs/Linear projects, task=ClickUp tasks/Linear issues, message=conversation/WhatsApp.",
     ),
   source: z
-    .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "local"])
+    .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "whatsapp", "local"])
     .optional()
     .describe("Filter to a specific source. Omit to search all."),
   sortBy: z
