@@ -32,7 +32,6 @@ RUN pnpm --filter @sketch/server deploy --prod --legacy /app/pruned
 # ── Stage 2: Runtime ──────────────────────────────────────────────
 FROM node:24-slim AS runtime
 
-ARG APP_VERSION=dev
 ARG GH_VERSION=2.92.0
 ARG GH_ARM64_DEB_SHA256=34d620b7c884774ed86236541535170889fda0b99aafbdab8b69c7d458b5ca6b
 ARG GH_AMD64_DEB_SHA256=8f8212b1a9cec261a8839e0893168f50d3fc70f095da257feef4229234cefdf8
@@ -66,6 +65,7 @@ RUN printf '%s\n' '#!/bin/sh' 'exec /app/node_modules/.bin/md-to-pdf "$@"' > /us
 RUN mkdir -p /app/data && chown 1000:1000 /app/data
 
 ENV NODE_ENV=production
+ARG APP_VERSION=dev
 ENV SKETCH_VERSION=$APP_VERSION
 ENV PATH=/app/node_modules/.bin:$PATH
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
