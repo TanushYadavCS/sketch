@@ -24,7 +24,11 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createEmailTransport, sendVerificationEmail } from "../email";
-import { ManagedMemberRegistrationError, type ManagedMemberRegistrationInput } from "../managed-members";
+import {
+  ManagedMemberRegistrationError,
+  type ManagedMemberRegistrationInput,
+  type ManagedMemberRemovalInput,
+} from "../managed-members";
 import type { SlackBot } from "../slack/bot";
 
 import { getSmtpConfig, resolveBaseUrl } from "./shared";
@@ -44,6 +48,7 @@ interface UserRoutesDeps {
   whatsappGroups?: WhatsAppGroupRepo;
   getSlack?: () => SlackBot | null;
   registerManagedMember?: (input: ManagedMemberRegistrationInput) => Promise<unknown>;
+  removeManagedMember?: (input: ManagedMemberRemovalInput) => Promise<unknown>;
 }
 
 const allowedToolsSchema = z.array(z.string().refine(isKnownAgentToolName, "Unknown tool name")).nullable().optional();
@@ -813,6 +818,15 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     const result = await createConnectorRepository(deps.db, deps.config.ENCRYPTION_KEY).archiveConnectorsForOwner(id);
     if (result.archived > 0) {
       deps.logger.info({ userId: id, count: result.archived }, "Archived connectors after user removal");
+    }
+
+    if (existing.type === "human" && existing.email && deps.removeManagedMember) {
+      try {
+        await deps.removeManagedMember({ email: existing.email });
+      } catch (err) {
+        const response = managedRegistrationResponse(err);
+        return c.json(response.body, response.status as 400);
+      }
     }
 
     await users.remove(id);

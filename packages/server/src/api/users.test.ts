@@ -300,6 +300,108 @@ describe("Users API — agent fields", () => {
     fetchMock.mockRestore();
   });
 
+  it("removes managed tenant members before deleting local human users", async () => {
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    const create = await managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Delete",
+        type: "human",
+        email: "managed.delete@gmail.com",
+        whatsappNumber: "+14155550110",
+      }),
+    });
+    expect(create.status).toBe(201);
+    const user = (await create.json()).user;
+
+    const res = await managedApp.request(`/api/users/${user.id}`, {
+      method: "DELETE",
+      headers: { Cookie: managedCookie },
+    });
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://platform.test/api/tenant/members/managed.delete%40gmail.com",
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({
+          Authorization: "Bearer tenant-token",
+        }),
+      }),
+    );
+    await expect(createUserRepository(db).findById(user.id)).resolves.toBeUndefined();
+    fetchMock.mockRestore();
+  });
+
+  it("keeps local human users when managed tenant member removal fails", async () => {
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { code: "REMOVE_FAILED", message: "Could not remove managed member" } }), {
+          status: 502,
+        }),
+      );
+
+    const create = await managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Delete Failure",
+        type: "human",
+        email: "managed.delete.failure@gmail.com",
+        whatsappNumber: "+14155550111",
+      }),
+    });
+    expect(create.status).toBe(201);
+    const user = (await create.json()).user;
+
+    const res = await managedApp.request(`/api/users/${user.id}`, {
+      method: "DELETE",
+      headers: { Cookie: managedCookie },
+    });
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: {
+        code: "MANAGED_MEMBER_REGISTRATION_FAILED",
+        message: "Could not remove managed member",
+      },
+    });
+    await expect(createUserRepository(db).findById(user.id)).resolves.toMatchObject({
+      email: "managed.delete.failure@gmail.com",
+    });
+    fetchMock.mockRestore();
+  });
+
   it("rejects WhatsApp numbers without an international country code", async () => {
     const res = await app.request("/api/users", {
       method: "POST",

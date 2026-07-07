@@ -8,6 +8,10 @@ export interface ManagedMemberRegistrationInput {
   sendInvite?: boolean;
 }
 
+export interface ManagedMemberRemovalInput {
+  email: string;
+}
+
 export interface ManagedMemberRegistrationResult {
   registered: boolean;
   emailSent?: boolean;
@@ -88,4 +92,36 @@ export async function registerManagedTenantMember(
     emailSent,
     whatsappSent,
   };
+}
+
+export async function removeManagedTenantMember(
+  config: Config,
+  input: ManagedMemberRemovalInput,
+  requestFetch: typeof fetch = fetch,
+): Promise<{ removed: boolean }> {
+  if (!shouldRegisterManagedMembers(config)) return { removed: false };
+
+  const platformUrl = managedPlatformUrl(config);
+  if (!platformUrl || !config.MANAGED_WHATSAPP_TENANT_TOKEN) {
+    throw new ManagedMemberRegistrationError(503, "UNCONFIGURED", "Managed member registration is not configured");
+  }
+
+  const email = input.email.trim().toLowerCase();
+  const response = await requestFetch(
+    `${platformUrl.replace(/\/+$/u, "")}/api/tenant/members/${encodeURIComponent(email)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${config.MANAGED_WHATSAPP_TENANT_TOKEN}`,
+      },
+    },
+  );
+
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = errorFromBody(body);
+    throw new ManagedMemberRegistrationError(response.status, error.code, error.message);
+  }
+
+  return { removed: true };
 }
