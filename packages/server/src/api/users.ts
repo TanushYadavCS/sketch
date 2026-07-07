@@ -24,7 +24,11 @@ import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createEmailTransport, sendVerificationEmail } from "../email";
-import { ManagedMemberRegistrationError, type ManagedMemberRegistrationInput } from "../managed-members";
+import {
+  ManagedMemberRegistrationError,
+  type ManagedMemberRegistrationInput,
+  type ManagedMemberRemovalInput,
+} from "../managed-members";
 import type { SlackBot } from "../slack/bot";
 
 import { getSmtpConfig, resolveBaseUrl } from "./shared";
@@ -44,6 +48,7 @@ interface UserRoutesDeps {
   whatsappGroups?: WhatsAppGroupRepo;
   getSlack?: () => SlackBot | null;
   registerManagedMember?: (input: ManagedMemberRegistrationInput) => Promise<unknown>;
+  removeManagedMember?: (input: ManagedMemberRemovalInput) => Promise<unknown>;
 }
 
 const allowedToolsSchema = z.array(z.string().refine(isKnownAgentToolName, "Unknown tool name")).nullable().optional();
@@ -805,11 +810,18 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       return c.json({ error: { code: "FORBIDDEN", message: "Cannot delete your own account" } }, 403);
     }
 
-    // Archive any per-user connectors (Fireflies etc.) before removing the user.
-    // Scrubs credentials and disables future syncs; leaves indexed_files intact so
-    // other attendees still see previously-synced meetings via file_access.
-    // Fail-noisy: if archival throws we let the 500 surface so the admin retries
-    // rather than silently leaving credentials in DB after the user row is gone.
+    if (existing.type === "human" && existing.email && deps.removeManagedMember) {
+      try {
+        await deps.removeManagedMember({ email: existing.email });
+      } catch (err) {
+        const response = managedRegistrationResponse(err);
+        return c.json(response.body, response.status as 400);
+      }
+    }
+
+    // Archive any per-user connectors (Fireflies etc.) only after managed
+    // membership cleanup succeeds, so a transient platform failure leaves the
+    // local user and their integrations unchanged.
     const result = await createConnectorRepository(deps.db, deps.config.ENCRYPTION_KEY).archiveConnectorsForOwner(id);
     if (result.archived > 0) {
       deps.logger.info({ userId: id, count: result.archived }, "Archived connectors after user removal");
