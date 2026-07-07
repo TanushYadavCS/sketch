@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to rebuild and push, e.g. v0.46.0"
+        required: true
+        type: string
 
 permissions:
   id-token: write
@@ -15,6 +21,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -26,9 +34,23 @@ jobs:
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Resolve release tag
+        id: release-tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+            git checkout "refs/tags/$tag"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+
+          if [[ "$tag" != v* ]]; then
+            echo "Release tag must start with v: $tag" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -39,7 +61,9 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ steps.ecr-login.outputs.registry }}/sketch:${{ steps.version.outputs.VERSION }}
+            ${{ steps.ecr-login.outputs.registry }}/sketch:${{ steps.release-tag.outputs.version }}
             ${{ steps.ecr-login.outputs.registry }}/sketch:latest
+          build-args: |
+            APP_VERSION=${{ steps.release-tag.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
