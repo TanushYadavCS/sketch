@@ -109,8 +109,8 @@ jobs:
           LATEST_TAG: ${{ steps.next-version.outputs.latest_tag }}
         run: |
           mkdir -p .release
-          : > .release/prs.raw.jsonl
-          : > .release/direct.jsonl
+          pr_objects=()
+          direct_commit_objects=()
 
           if [[ -z "$LATEST_TAG" ]]; then
             range="HEAD"
@@ -122,28 +122,33 @@ jobs:
             [[ -z "$sha" ]] && continue
             prs_json="$(gh api -H "Accept: application/vnd.github+json" "/repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls")"
             if [[ "$(jq 'length' <<< "$prs_json")" -gt 0 ]]; then
-              jq -c '.[0] | {number, title, body: (.body // ""), url: .html_url}' <<< "$prs_json" >> .release/prs.raw.jsonl
+              pr_objects+=("$(jq -c '.[0] | {number, title, body: (.body // ""), url: .html_url}' <<< "$prs_json")")
             else
               subject="$(git log -1 --format=%s "$sha")"
-              jq -cn --arg sha "$sha" --arg subject "$subject" '{sha: $sha, subject: $subject}' >> .release/direct.jsonl
+              direct_commit_objects+=("$(jq -cn --arg sha "$sha" --arg subject "$subject" '{sha: $sha, subject: $subject}')")
             fi
           done < <(git rev-list --reverse "$range")
 
-          jq -s 'unique_by(.number)[]' .release/prs.raw.jsonl > .release/prs.jsonl
+          if ((${#pr_objects[@]} > 0)); then
+            printf '%s\n' "${pr_objects[@]}" | jq -s -c 'unique_by(.number)' > .release/prs.json
+          else
+            printf '[]\n' > .release/prs.json
+          fi
+
+          if ((${#direct_commit_objects[@]} > 0)); then
+            printf '%s\n' "${direct_commit_objects[@]}" | jq -s -c '.' > .release/direct.json
+          else
+            printf '[]\n' > .release/direct.json
+          fi
 
           node <<'NODE'
           const fs = require("node:fs");
 
           const limit = 50000;
-          const readJsonl = (path) =>
-            fs
-              .readFileSync(path, "utf8")
-              .split("\n")
-              .filter(Boolean)
-              .map((line) => JSON.parse(line));
+          const readJson = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
 
-          const prs = readJsonl(".release/prs.jsonl");
-          const directCommits = readJsonl(".release/direct.jsonl");
+          const prs = readJson(".release/prs.json");
+          const directCommits = readJson(".release/direct.json");
           const rawBullets = [
             ...prs.map((pr) => `- #${pr.number}: ${pr.title}`),
             ...directCommits.map((commit) => `- ${commit.subject} (${commit.sha.slice(0, 7)})`),
