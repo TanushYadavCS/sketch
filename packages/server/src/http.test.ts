@@ -30,8 +30,10 @@ async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "t
 
 describe("HTTP health endpoint", () => {
   let db: Kysely<DB>;
+  const originalSketchVersion = process.env.SKETCH_VERSION;
 
   beforeEach(async () => {
+    process.env.SKETCH_VERSION = "test-version";
     db = await createTestDb();
   });
 
@@ -40,6 +42,11 @@ describe("HTTP health endpoint", () => {
       await db.destroy();
     } catch {
       // Already destroyed in some tests
+    }
+    if (originalSketchVersion === undefined) {
+      Reflect.deleteProperty(process.env, "SKETCH_VERSION");
+    } else {
+      process.env.SKETCH_VERSION = originalSketchVersion;
     }
   });
 
@@ -52,6 +59,7 @@ describe("HTTP health endpoint", () => {
       const body = await res.json();
       expect(body.status).toBe("ok");
       expect(body.db).toBe("ok");
+      expect(body.version).toBe("test-version");
       expect(typeof body.uptime).toBe("number");
     });
 
@@ -65,6 +73,7 @@ describe("HTTP health endpoint", () => {
       const body = await res.json();
       expect(body.status).toBe("error");
       expect(body.db).toBe("error");
+      expect(body.version).toBe("test-version");
     });
   });
 
