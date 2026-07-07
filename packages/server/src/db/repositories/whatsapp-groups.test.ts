@@ -1,5 +1,5 @@
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { createWhatsAppGroupRepository } from "./whatsapp-groups";
@@ -148,5 +148,78 @@ describe("createWhatsAppGroupRepository", () => {
     await expect(repo.listMemberLabels("123@g.us")).resolves.toHaveLength(1);
     await expect(repo.deleteMemberLabel("123@g.us", "+15551234567")).resolves.toBe(true);
     await expect(repo.getMemberLabel("123@g.us", "+15551234567")).resolves.toBeUndefined();
+  });
+
+  it("keeps an existing participant roster when an empty refresh arrives", async () => {
+    const groupJid = "123@g.us";
+    const logger = { warn: vi.fn() };
+    await repo.upsert({
+      jid: groupJid,
+      name: "Founders",
+      description: null,
+      updated_at: "2026-03-13T10:00:00.000Z",
+    });
+    await repo.refreshParticipants(
+      groupJid,
+      [
+        { participantJid: "15551234567@s.whatsapp.net", phoneE164: "+15551234567", adminRole: "admin" },
+        { participantJid: "15557654321@s.whatsapp.net", phoneE164: "+15557654321", adminRole: null },
+      ],
+      "2026-03-13T10:00:00.000Z",
+    );
+
+    const refreshed = await repo.refreshParticipants(groupJid, [], "2026-03-13T11:00:00.000Z", logger);
+
+    expect(refreshed).toEqual([
+      expect.objectContaining({
+        participant_jid: "15551234567@s.whatsapp.net",
+        phone_e164: "+15551234567",
+        admin_role: "admin",
+        last_seen_at: "2026-03-13T10:00:00.000Z",
+      }),
+      expect.objectContaining({
+        participant_jid: "15557654321@s.whatsapp.net",
+        phone_e164: "+15557654321",
+        admin_role: null,
+        last_seen_at: "2026-03-13T10:00:00.000Z",
+      }),
+    ]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      { groupJid, storedCount: 2, incomingCount: 0 },
+      "Skipped empty WhatsApp group participant refresh",
+    );
+  });
+
+  it("prunes participants missing from a non-empty refresh", async () => {
+    const groupJid = "123@g.us";
+    await repo.upsert({
+      jid: groupJid,
+      name: "Founders",
+      description: null,
+      updated_at: "2026-03-13T10:00:00.000Z",
+    });
+    await repo.refreshParticipants(
+      groupJid,
+      [
+        { participantJid: "15551234567@s.whatsapp.net", phoneE164: "+15551234567", adminRole: "admin" },
+        { participantJid: "15557654321@s.whatsapp.net", phoneE164: "+15557654321", adminRole: null },
+      ],
+      "2026-03-13T10:00:00.000Z",
+    );
+
+    const refreshed = await repo.refreshParticipants(
+      groupJid,
+      [{ participantJid: "15557654321@s.whatsapp.net", phoneE164: "+15557654321", adminRole: "superadmin" }],
+      "2026-03-13T11:00:00.000Z",
+    );
+
+    expect(refreshed).toEqual([
+      expect.objectContaining({
+        participant_jid: "15557654321@s.whatsapp.net",
+        phone_e164: "+15557654321",
+        admin_role: "superadmin",
+        last_seen_at: "2026-03-13T11:00:00.000Z",
+      }),
+    ]);
   });
 });

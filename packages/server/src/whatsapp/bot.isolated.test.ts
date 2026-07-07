@@ -494,7 +494,11 @@ describe("WhatsAppBot group metadata persistence", () => {
       groupMetadataStore: createWhatsAppGroupRepository(db),
     });
 
-    const groupMetadata = vi.fn().mockResolvedValue({ subject: "Product Team", desc: "Roadmap syncs" });
+    const groupMetadata = vi.fn().mockResolvedValue({
+      subject: "Product Team",
+      desc: "Roadmap syncs",
+      participants: [{ id: "15551234567@s.whatsapp.net", admin: "admin" }],
+    });
     (bot as unknown as { sock: { groupMetadata: typeof groupMetadata } }).sock = { groupMetadata };
 
     const meta = await bot.getGroupMetadata("123@g.us");
@@ -503,6 +507,125 @@ describe("WhatsAppBot group metadata persistence", () => {
     const stored = await db.selectFrom("whatsapp_groups").selectAll().where("jid", "=", "123@g.us").executeTakeFirst();
     expect(stored?.name).toBe("Product Team");
     expect(stored?.description).toBe("Roadmap syncs");
+    await expect(db.selectFrom("whatsapp_group_participants").selectAll().execute()).resolves.toEqual([
+      expect.objectContaining({
+        group_jid: "123@g.us",
+        participant_jid: "15551234567@s.whatsapp.net",
+        phone_e164: "+15551234567",
+        admin_role: "admin",
+      }),
+    ]);
+  });
+
+  it("persists unresolvable LID participants and skips unknown participant shapes", async () => {
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const bot = new WhatsAppBot({
+      db,
+      logger,
+      groupMetadataStore: createWhatsAppGroupRepository(db),
+    });
+
+    const groupMetadata = vi.fn().mockResolvedValue({
+      subject: "Product Team",
+      desc: null,
+      participants: [{ id: "lid-member@lid", admin: "superadmin" }, { id: "unknown-shape" }],
+    });
+    (bot as unknown as { sock: { groupMetadata: typeof groupMetadata } }).sock = { groupMetadata };
+
+    await bot.getGroupMetadata("123@g.us");
+
+    await expect(db.selectFrom("whatsapp_group_participants").selectAll().execute()).resolves.toEqual([
+      expect.objectContaining({
+        group_jid: "123@g.us",
+        participant_jid: "lid-member@lid",
+        phone_e164: null,
+        lid: "lid-member@lid",
+        admin_role: "superadmin",
+      }),
+    ]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ groupJid: "123@g.us", skippedCount: 1 }),
+      "Skipped unrecognized WhatsApp group participants",
+    );
+  });
+
+  it("returns provider metadata with normalized participant contract", async () => {
+    const bot = new WhatsAppBot({
+      db,
+      logger: createTestLogger(),
+      groupMetadataStore: createWhatsAppGroupRepository(db),
+    });
+
+    const groupMetadata = vi.fn().mockResolvedValue({
+      subject: "Product Team",
+      desc: "Roadmap syncs",
+      participants: [{ id: "15551234567@s.whatsapp.net", admin: "admin" }],
+    });
+    (bot as unknown as { sock: { groupMetadata: typeof groupMetadata } }).sock = { groupMetadata };
+
+    await expect(bot.getProviderGroupMetadata("123@g.us")).resolves.toEqual({
+      id: "123@g.us",
+      subject: "Product Team",
+      desc: "Roadmap syncs",
+      participants: [{ jid: "15551234567@s.whatsapp.net", phoneE164: "+15551234567", lid: null, admin: "admin" }],
+    });
+  });
+
+  it("persists Baileys participant phoneNumber and lid fields for both id shapes", async () => {
+    const bot = new WhatsAppBot({
+      db,
+      logger: createTestLogger(),
+      groupMetadataStore: createWhatsAppGroupRepository(db),
+    });
+    const getPNForLID = vi.fn().mockResolvedValue("15559999999@s.whatsapp.net");
+    const groupMetadata = vi.fn().mockResolvedValue({
+      subject: "Product Team",
+      desc: null,
+      participants: [
+        { id: "15551000001@s.whatsapp.net", lid: "participant-one@lid", admin: "admin" },
+        { id: "participant-two@lid", phoneNumber: "+1 (555) 100-0002", admin: null },
+      ],
+    });
+    (
+      bot as unknown as {
+        sock: {
+          groupMetadata: typeof groupMetadata;
+          signalRepository: { lidMapping: { getPNForLID: typeof getPNForLID } };
+        };
+      }
+    ).sock = { groupMetadata, signalRepository: { lidMapping: { getPNForLID } } };
+
+    await expect(bot.getProviderGroupMetadata("123@g.us")).resolves.toEqual({
+      id: "123@g.us",
+      subject: "Product Team",
+      desc: null,
+      participants: [
+        { jid: "15551000001@s.whatsapp.net", phoneE164: "+15551000001", lid: "participant-one@lid", admin: "admin" },
+        { jid: "participant-two@lid", phoneE164: "+15551000002", lid: "participant-two@lid", admin: null },
+      ],
+    });
+    await expect(
+      db
+        .selectFrom("whatsapp_group_participants")
+        .select(["participant_jid", "phone_e164", "lid", "admin_role"])
+        .orderBy("participant_jid", "asc")
+        .execute(),
+    ).resolves.toEqual([
+      {
+        participant_jid: "15551000001@s.whatsapp.net",
+        phone_e164: "+15551000001",
+        lid: "participant-one@lid",
+        admin_role: "admin",
+      },
+      {
+        participant_jid: "participant-two@lid",
+        phone_e164: "+15551000002",
+        lid: "participant-two@lid",
+        admin_role: null,
+      },
+    ]);
+    expect(getPNForLID).not.toHaveBeenCalled();
   });
 
   it("refreshes persisted metadata when a groups.update event arrives", async () => {

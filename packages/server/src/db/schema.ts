@@ -520,6 +520,15 @@ export interface WhatsAppGroupMemberLabelsTable {
   created_at: Generated<string>;
 }
 
+export interface WhatsAppGroupParticipantsTable {
+  group_jid: string;
+  participant_jid: string;
+  phone_e164: string | null;
+  lid: string | null;
+  admin_role: string | null;
+  last_seen_at: Generated<string>;
+}
+
 export interface WhatsAppBackfillCheckpointsTable {
   group_jid: string;
   last_fetched_key: string | null;
@@ -1115,6 +1124,7 @@ export interface DB {
   conversation_slices: ConversationSlicesTable;
   conversation_slice_cursors: ConversationSliceCursorsTable;
   whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
+  whatsapp_group_participants: WhatsAppGroupParticipantsTable;
   whatsapp_backfill_checkpoints: WhatsAppBackfillCheckpointsTable;
   whatsapp_window_keepalives: WhatsAppWindowKeepAlivesTable;
   scheduled_tasks: ScheduledTasksTable;

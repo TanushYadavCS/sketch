@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 129;
+const EXPECTED_MIGRATION_COUNT = 130;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -185,6 +185,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[126]).toBe("131-trunk-name-embeddings");
     expect(names[127]).toBe("132-whatsapp-context-graph-indexing");
     expect(names[128]).toBe("133-whatsapp-slice-denoised-message-ids");
+    expect(names[129]).toBe("134-whatsapp-group-participants");
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {

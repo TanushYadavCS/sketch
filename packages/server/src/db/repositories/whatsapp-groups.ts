@@ -1,9 +1,17 @@
-import type { Insertable, Kysely, Selectable } from "kysely";
-import type { DB, WhatsAppGroupMemberLabelsTable, WhatsAppGroupsTable } from "../schema";
+import { type Insertable, type Kysely, type Selectable, sql } from "kysely";
+import type {
+  DB,
+  WhatsAppGroupMemberLabelsTable,
+  WhatsAppGroupParticipantsTable,
+  WhatsAppGroupsTable,
+} from "../schema";
+import { normalizeContactPointValue } from "./entities";
 
 export type WhatsAppGroupRow = Selectable<WhatsAppGroupsTable>;
 export type NewWhatsAppGroup = Insertable<WhatsAppGroupsTable>;
 export type WhatsAppGroupMemberLabelRow = Selectable<WhatsAppGroupMemberLabelsTable>;
+export type WhatsAppGroupParticipantRow = Selectable<WhatsAppGroupParticipantsTable>;
+export type WhatsAppGroupParticipantAdminRole = "admin" | "superadmin";
 
 export interface WhatsAppGroupIndexingConfig {
   jid: string;
@@ -27,6 +35,17 @@ export interface WhatsAppGroupMemberLabelInput {
   displayName: string;
   companyName?: string | null;
   createdBy: string;
+}
+
+export interface WhatsAppGroupParticipantInput {
+  participantJid: string;
+  phoneE164?: string | null;
+  lid?: string | null;
+  adminRole?: WhatsAppGroupParticipantAdminRole | null;
+}
+
+export interface WhatsAppGroupParticipantRefreshLogger {
+  warn: (context: { groupJid: string; storedCount: number; incomingCount: number }, message: string) => void;
 }
 
 function toIndexingConfig(row: WhatsAppGroupRow): WhatsAppGroupIndexingConfig {
@@ -114,11 +133,12 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
     },
 
     async upsertMemberLabel(input: WhatsAppGroupMemberLabelInput): Promise<WhatsAppGroupMemberLabelRow> {
+      const phoneE164 = normalizeContactPointValue("whatsapp", input.phoneE164);
       await db
         .insertInto("whatsapp_group_member_labels")
         .values({
           group_jid: input.groupJid,
-          phone_e164: input.phoneE164,
+          phone_e164: phoneE164,
           display_name: input.displayName,
           company_name: input.companyName ?? null,
           created_by: input.createdBy,
@@ -136,16 +156,17 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
         .selectFrom("whatsapp_group_member_labels")
         .selectAll()
         .where("group_jid", "=", input.groupJid)
-        .where("phone_e164", "=", input.phoneE164)
+        .where("phone_e164", "=", phoneE164)
         .executeTakeFirstOrThrow();
     },
 
     async getMemberLabel(groupJid: string, phoneE164: string): Promise<WhatsAppGroupMemberLabelRow | undefined> {
+      const normalizedPhone = normalizeContactPointValue("whatsapp", phoneE164);
       return db
         .selectFrom("whatsapp_group_member_labels")
         .selectAll()
         .where("group_jid", "=", groupJid)
-        .where("phone_e164", "=", phoneE164)
+        .where("phone_e164", "=", normalizedPhone)
         .executeTakeFirst();
     },
 
@@ -160,12 +181,83 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
     },
 
     async deleteMemberLabel(groupJid: string, phoneE164: string): Promise<boolean> {
+      const normalizedPhone = normalizeContactPointValue("whatsapp", phoneE164);
       const result = await db
         .deleteFrom("whatsapp_group_member_labels")
         .where("group_jid", "=", groupJid)
-        .where("phone_e164", "=", phoneE164)
+        .where("phone_e164", "=", normalizedPhone)
         .executeTakeFirst();
       return Number(result.numDeletedRows ?? 0) > 0;
+    },
+
+    async refreshParticipants(
+      groupJid: string,
+      participants: WhatsAppGroupParticipantInput[],
+      lastSeenAt = new Date().toISOString(),
+      logger?: WhatsAppGroupParticipantRefreshLogger,
+    ): Promise<WhatsAppGroupParticipantRow[]> {
+      await db.transaction().execute(async (trx) => {
+        const participantJids = participants.map((participant) => participant.participantJid);
+
+        if (participantJids.length === 0) {
+          const stored = await trx
+            .selectFrom("whatsapp_group_participants")
+            .select("participant_jid")
+            .where("group_jid", "=", groupJid)
+            .execute();
+          if (stored.length > 0) {
+            logger?.warn(
+              { groupJid, storedCount: stored.length, incomingCount: participants.length },
+              "Skipped empty WhatsApp group participant refresh",
+            );
+          }
+          return;
+        }
+
+        await trx
+          .deleteFrom("whatsapp_group_participants")
+          .where("group_jid", "=", groupJid)
+          .where("participant_jid", "not in", participantJids)
+          .execute();
+
+        await trx
+          .insertInto("whatsapp_group_participants")
+          .values(
+            participants.map((participant) => ({
+              group_jid: groupJid,
+              participant_jid: participant.participantJid,
+              phone_e164: participant.phoneE164 ?? null,
+              lid: participant.lid ?? null,
+              admin_role: participant.adminRole ?? null,
+              last_seen_at: lastSeenAt,
+            })),
+          )
+          .onConflict((oc) =>
+            oc.columns(["group_jid", "participant_jid"]).doUpdateSet({
+              phone_e164: sql`excluded.phone_e164`,
+              lid: sql`excluded.lid`,
+              admin_role: sql`excluded.admin_role`,
+              last_seen_at: lastSeenAt,
+            }),
+          )
+          .execute();
+      });
+
+      return db
+        .selectFrom("whatsapp_group_participants")
+        .selectAll()
+        .where("group_jid", "=", groupJid)
+        .orderBy("participant_jid", "asc")
+        .execute();
+    },
+
+    async listParticipants(groupJid: string): Promise<WhatsAppGroupParticipantRow[]> {
+      return db
+        .selectFrom("whatsapp_group_participants")
+        .selectAll()
+        .where("group_jid", "=", groupJid)
+        .orderBy("participant_jid", "asc")
+        .execute();
     },
 
     async listJidsByAgent(agentUserId: string): Promise<string[]> {

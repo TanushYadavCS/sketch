@@ -38,6 +38,7 @@ import type { TaskScheduler } from "../scheduler/service";
 import { transcribeEagerAttachments } from "../transcription/service";
 import { resolveVisionConfigFromAppConfig } from "../vision/service";
 import { createWhatsAppMessageHandler } from "./message-handler";
+import { maskPersonalNumberIdentifier } from "./privacy";
 import {
   type WhatsAppInboundMessage,
   type WhatsAppSendResult,
@@ -88,14 +89,6 @@ function validProviderTimestamp(providerTimestamp: string | null | undefined, no
   if (!Number.isFinite(timestampMs) || timestampMs <= PROVIDER_TIMESTAMP_FLOOR_MS) return undefined;
   if (timestampMs >= now.getTime() + MAX_PROVIDER_TIMESTAMP_FUTURE_MS) return undefined;
   return new Date(timestampMs).toISOString();
-}
-
-function maskPersonalNumberIdentifier(value: string): string {
-  return value.replace(/\+?\d{5,}/gu, (match) => {
-    const digits = match.replace(/\D/gu, "");
-    const prefix = match.startsWith("+") ? "+" : "";
-    return `${prefix}${"*".repeat(Math.max(0, digits.length - 2))}${digits.slice(-2)}`;
-  });
 }
 
 function providerConversationIdForLog(message: WhatsAppInboundMessage): string {
