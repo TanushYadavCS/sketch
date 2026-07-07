@@ -68,16 +68,31 @@ export async function emitDocumentDerivedFacts(
   const emittedFactKeys = new Set<string>();
   const factRepo = createIndexedFileFactRepository(db);
 
-  if (!(contentChanged && ctx.contentCategory === "document" && ctx.content)) {
+  if (!(ctx.contentCategory === "document" && ctx.content)) {
     return { emittedFactKeys, tombstonedFactIds: [], changed: false };
   }
 
   if (ctx.fileType && STRUCTURAL_TASK_FILE_TYPES.has(ctx.fileType.toLowerCase())) {
-    return { emittedFactKeys, tombstonedFactIds: [], changed: false };
+    const reconcile = await factRepo.reconcileStaleFacts(
+      { kind: "file", indexedFileId: ctx.indexedFileId, source: ctx.source, factType: "llm_task" },
+      new Set(),
+    );
+    await retireLlmTasksForTombstonedFacts(db, reconcile.tombstonedFactIds);
+    return {
+      emittedFactKeys,
+      tombstonedFactIds: reconcile.tombstonedFactIds,
+      changed: reconcile.tombstonedFactIds.length > 0,
+    };
+  }
+
+  if (!contentChanged) {
+    const touched = await touchExistingLlmTaskFacts(factRepo, ctx);
+    return { emittedFactKeys, tombstonedFactIds: [], changed: touched > 0 };
   }
 
   if (!generator) {
-    return { emittedFactKeys, tombstonedFactIds: [], changed: false };
+    const touched = await touchExistingLlmTaskFacts(factRepo, ctx);
+    return { emittedFactKeys, tombstonedFactIds: [], changed: touched > 0 };
   }
 
   const parentRefs = sortDocumentParentRefs(ctx.parentRefs);
@@ -98,7 +113,8 @@ export async function emitDocumentDerivedFacts(
     });
   } catch (err) {
     logger?.warn({ err, indexedFileId: ctx.indexedFileId }, "llm_task extraction failed");
-    return { emittedFactKeys, tombstonedFactIds: [], changed: false };
+    const touched = await touchExistingLlmTaskFacts(factRepo, ctx);
+    return { emittedFactKeys, tombstonedFactIds: [], changed: touched > 0 };
   }
 
   for (const candidate of candidates) {
@@ -128,6 +144,20 @@ export async function emitDocumentDerivedFacts(
     tombstonedFactIds: reconcile.tombstonedFactIds,
     changed: emittedFactKeys.size > 0 || reconcile.tombstonedFactIds.length > 0,
   };
+}
+
+async function touchExistingLlmTaskFacts(
+  factRepo: ReturnType<typeof createIndexedFileFactRepository>,
+  ctx: DocumentFactContext,
+): Promise<number> {
+  if (!ctx.lastSeenSyncRunId) return 0;
+  return factRepo.touchActiveFactsForFile({
+    indexedFileId: ctx.indexedFileId,
+    source: ctx.source,
+    factType: "llm_task",
+    lastSeenSyncRunId: ctx.lastSeenSyncRunId,
+    contentHash: ctx.contentHash,
+  });
 }
 
 async function loadPriorLlmTaskTitles(db: Kysely<DB>, indexedFileId: string, logger: Logger | undefined) {

@@ -23,6 +23,9 @@ export class AgentScheduler {
 
   start(): void {
     if (this.timer) return;
+    this.tick().catch((err) => {
+      this.deps.logger.error({ err }, "Agent scheduler tick failed");
+    });
     this.timer = setInterval(() => {
       this.tick().catch((err) => {
         this.deps.logger.error({ err }, "Agent scheduler tick failed");
@@ -48,14 +51,23 @@ export class AgentScheduler {
         for (const def of definitions) {
           try {
             const due = await this.deps.service.shouldGenerateForUser(def, user, now);
-            if (!due) continue;
-            await this.deps.service.requestGenerationForUser({
-              agentKey: def.key,
-              userId: user.id,
-              outputDate: due.outputDate,
-              triggerType: "scheduled",
-              skipIfCompleted: true,
-            });
+            for (const group of due) {
+              const generations = await this.deps.service.requestGenerationForUser({
+                agentKey: def.key,
+                userId: user.id,
+                outputDate: group.outputDate,
+                periodKey: group.periodKey,
+                triggerType: "scheduled",
+                skipIfCompleted: true,
+                scopeKeys: group.scopeKeys,
+              });
+              for (const generation of generations) {
+                this.deps.logger.debug(
+                  { userId: user.id, agentKey: def.key, outputId: generation.id, sourceKey: generation.source_key },
+                  "Agent scheduler generation considered",
+                );
+              }
+            }
           } catch (err) {
             this.deps.logger.warn({ err, userId: user.id, agentKey: def.key }, "Agent scheduler skipped user");
           }

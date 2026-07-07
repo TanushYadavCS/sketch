@@ -132,12 +132,58 @@ export function normalizeWebsiteDomain(value: string | null | undefined): string
 }
 
 /**
- * Propose a company display name from a raw domain. `habuild.in` → `Habuild`,
- * `oliver-wyman.com` → `Oliver Wyman`. The result is a hint for the candidate
- * row — ECR-05 will route this through `proposeEntity` for real review.
+ * Multi-label public suffixes where the registrable label sits one further left
+ * than a single-label TLD. Hand-maintained (no public-suffix-list dependency);
+ * covers the ccTLD shapes that show up in this data. `x.co.in` → SLD `x`, not
+ * `co`.
+ */
+const COMPOUND_TLD_SUFFIXES: ReadonlySet<string> = new Set([
+  "co.in",
+  "co.uk",
+  "co.jp",
+  "co.nz",
+  "co.kr",
+  "co.za",
+  "com.au",
+  "com.br",
+  "com.sg",
+  "com.mx",
+  "com.tr",
+  "ac.in",
+  "ac.uk",
+  "ac.jp",
+  "org.in",
+  "org.uk",
+  "net.in",
+  "gov.in",
+  "gov.uk",
+  "edu.in",
+  "bank.in",
+]);
+
+/**
+ * Propose a company display name from a raw domain. Uses the registrable
+ * second-level label (the one left of the public suffix), NOT the leftmost
+ * label, so a subdomain host does not become the name: `habuild.in` → `Habuild`,
+ * `oliver-wyman.com` → `Oliver Wyman`, `support.aws.com` → `Aws`,
+ * `xwf.google.com` → `Google`, `x.co.in` → `X`. The result is a hint for the
+ * candidate row — ECR-05 will route this through `proposeEntity` for real review.
  */
 export function proposeCompanyNameFromDomain(domain: string): string {
-  const base = domain.split(".")[0] ?? domain;
+  const normalized = domain.trim().toLowerCase().replace(/\.+$/, "");
+  const labels = normalized.split(".").filter((s) => s.length > 0);
+  let base: string;
+  if (labels.length <= 1) {
+    base = labels[0] ?? normalized;
+  } else {
+    const suffixLen = COMPOUND_TLD_SUFFIXES.has(labels.slice(-2).join(".")) ? 2 : 1;
+    const sldIndex = labels.length - 1 - suffixLen;
+    // The input is nothing but a public suffix (e.g. `co.in`) — there is no
+    // registrable label to name a company after, so refuse rather than mint a
+    // bogus "Co" candidate. An empty name is skipped by the promotion sweep.
+    if (sldIndex < 0) return "";
+    base = labels[sldIndex];
+  }
   return base
     .split(/[-_]/)
     .filter((s) => s.length > 0)

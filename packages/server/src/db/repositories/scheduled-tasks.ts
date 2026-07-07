@@ -83,6 +83,19 @@ export function createScheduledTaskRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    async countActiveForUserWithin(userId: string, startAt: string, endAt: string): Promise<number> {
+      const row = await db
+        .selectFrom("scheduled_tasks")
+        .select((eb) => eb.fn.countAll<number>().as("count"))
+        .where("created_by", "=", userId)
+        .where("status", "=", "active")
+        .where("next_run_at", "is not", null)
+        .where("next_run_at", ">=", startAt)
+        .where("next_run_at", "<=", endAt)
+        .executeTakeFirst();
+      return Number(row?.count ?? 0);
+    },
+
     async update(
       id: string,
       fields: Partial<UpdatableFields>,

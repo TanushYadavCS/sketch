@@ -70,6 +70,23 @@ async function upsertPersonSeed(
   });
 }
 
+async function upsertAttendee(db: Kysely<DB>, input: { name: string; email: string; sourceId: string }): Promise<void> {
+  await createIndexedFileFactRepository(db).upsertFact({
+    indexedFileId: "file-1",
+    connectorConfigId: CONNECTOR_ID,
+    createdByUserId: ADMIN_ID,
+    contentHash: "hash-1",
+    source: "google_drive",
+    factType: "attendee",
+    relation: "attended",
+    subjectName: input.name,
+    subjectEmail: input.email,
+    subjectSource: "google_drive",
+    subjectSourceId: input.sourceId,
+    raw: { providerFileId: "file-1", attendee: { name: input.name, email: input.email } },
+  });
+}
+
 async function createCompanyWithDomain(db: Kysely<DB>, id: string, name: string, domain: string): Promise<void> {
   await db
     .insertInto("entities")
@@ -142,6 +159,26 @@ describe("materializePersonSeed company-scoped dedup", () => {
 
     expect(summary.queued).toBe(0);
     expect(await people(db)).toHaveLength(2);
+  });
+
+  it("creates separate email-backed fuzzy attendees under the same weak bare-domain scope", async () => {
+    await upsertAttendee(db, {
+      name: "Safe Person 0-0",
+      email: "safe-0-0@example.com",
+      sourceId: "safe-0-0",
+    });
+    await upsertAttendee(db, {
+      name: "Safe Person 0-1",
+      email: "safe-0-1@example.com",
+      sourceId: "safe-0-1",
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger());
+
+    expect(summary.queued).toBe(0);
+    expect(await people(db)).toHaveLength(2);
+    const mentions = await db.selectFrom("entity_mentions").selectAll().execute();
+    expect(mentions).toHaveLength(2);
   });
 
   it("preserves the matching company-scoped person when linking a new source ref", async () => {

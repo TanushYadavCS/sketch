@@ -110,6 +110,14 @@ describe("createTaskRepository sqlite", () => {
       userId: "brief-u1",
       userEmails: ["u1@example.com", "alias-u1@example.com"],
     });
+    const u1Listed = await repo.listTasksByParent("project-x", {
+      viewer: { email: "u1@example.com", isAdmin: false },
+      viewerUserId: "brief-u1",
+    });
+    const u2Listed = await repo.listTasksByParent("project-x", {
+      viewer: { email: "u2@example.com", isAdmin: false },
+      viewerUserId: "brief-u2",
+    });
 
     expect(first.status).toBe("upserted");
     expect(second).toMatchObject({ status: "upserted", taskId: first.status === "upserted" ? first.taskId : "" });
@@ -148,6 +156,8 @@ describe("createTaskRepository sqlite", () => {
       created_by_user_id: null,
     });
     expect(u1Visible.map((task) => task.created_by_user_id)).toEqual(["brief-u1"]);
+    expect(u1Listed.map((task) => task.created_by_user_id)).toEqual(["brief-u1"]);
+    expect(u2Listed.map((task) => task.created_by_user_id)).toEqual(["brief-u2"]);
   });
 
   it("collates brief todos into structural tasks and keeps orphan expiry off brief tasks", async () => {

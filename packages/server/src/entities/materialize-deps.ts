@@ -8,7 +8,7 @@ import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { DB } from "../db/schema";
 import { personScopeKey, personScopeKeyId } from "./affiliations";
-import { type MentionType, coerceMentionType, normalizeMentionType } from "./graph";
+import { type MentionType, normalizeMentionType } from "./graph";
 import { normalizeEntityMatchName } from "./match-normalize";
 import { parseAliasesString, readJsonObject, readPersonEmailFromMetadata } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
@@ -198,34 +198,6 @@ async function findLlmExtractedThirdPartyMention(
   return null;
 }
 
-function llmFileCountKey(normalizedName: string, mentionType: MentionType): string {
-  return `${mentionType}\u0000${normalizedName}`;
-}
-
-async function buildActiveLlmFileCounts(db: Kysely<DB>): Promise<Map<string, number>> {
-  const rows = await db
-    .selectFrom("indexed_file_facts")
-    .select(["indexed_file_id", "subject_name", "raw"])
-    .where("fact_type", "=", "llm_extracted")
-    .where("deleted_at", "is", null)
-    .where("subject_name", "is not", null)
-    .execute();
-  const filesByName = new Map<string, Set<string>>();
-  for (const row of rows) {
-    if (!row.indexed_file_id || !row.subject_name) continue;
-    const raw = readJsonObject(row.raw);
-    const mentionType = normalizeMentionType(coerceMentionType(row.subject_name, String(raw.type ?? "")));
-    if (!mentionType) continue;
-    const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
-    if (!normalizedName) continue;
-    const key = llmFileCountKey(normalizedName, mentionType);
-    const files = filesByName.get(key);
-    if (files) files.add(row.indexed_file_id);
-    else filesByName.set(key, new Set([row.indexed_file_id]));
-  }
-  return new Map([...filesByName.entries()].map(([key, files]) => [key, files.size]));
-}
-
 function isNameDedupEntityType(entityType: ProposeEntityType): entityType is NameDedupEntityType {
   return entityType === "project" || entityType === "product" || entityType === "person" || entityType === "company";
 }
@@ -293,6 +265,33 @@ function unregisterEntity(index: LookupIndex, entityId: string): void {
   index.personScopeKeysByEntityId.delete(entityId);
 }
 
+function llmFileCountKey(normalizedName: string, mentionType: MentionType): string {
+  return `${mentionType}\u0000${normalizedName}`;
+}
+
+async function buildActiveLlmFileCounts(db: Kysely<DB>): Promise<Map<string, number>> {
+  const rows = await db
+    .selectFrom("indexed_file_facts")
+    .select(["indexed_file_id", "subject_name", "raw"])
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .where("subject_name", "is not", null)
+    .execute();
+  const filesByName = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (!row.indexed_file_id || !row.subject_name) continue;
+    const mentionType = normalizeMentionType(readJsonObject(row.raw).type);
+    if (!mentionType) continue;
+    const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
+    if (!normalizedName) continue;
+    const key = llmFileCountKey(normalizedName, mentionType);
+    const files = filesByName.get(key);
+    if (files) files.add(row.indexed_file_id);
+    else filesByName.set(key, new Set([row.indexed_file_id]));
+  }
+  return new Map([...filesByName.entries()].map(([key, files]) => [key, files.size]));
+}
+
 export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIndex, entity: Entity): Promise<void> {
   const sourceRefs = await db
     .selectFrom("entity_source_refs")
@@ -339,6 +338,7 @@ export async function buildMaterializeDeps(
     typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1
       ? Math.floor(opts.llmPromotionThreshold)
       : configuredLlmPromotionThreshold;
+  let activeLlmFileCounts: Promise<Map<string, number>> | null = null;
   const llmTaskCorroborationThreshold =
     typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1
       ? Math.floor(opts.llmTaskCorroborationThreshold)
@@ -352,7 +352,6 @@ export async function buildMaterializeDeps(
   const structuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes ?? configuredStructuralAutoBirthTypes);
   const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
   const embeddingProvider = opts.embeddingProvider ?? null;
-  let activeLlmFileCounts: Promise<Map<string, number>> | null = null;
 
   const lookup: EntityLookup = {
     getByNormalizedName: (n) => index.byNormalizedName.get(n) ?? [],
@@ -437,11 +436,6 @@ export async function buildMaterializeDeps(
     structuralAutoBirthTypes,
     birthGateDryRun,
     embeddingProvider,
-    countActiveLlmFilesForName: async (normalizedName, mentionType) => {
-      activeLlmFileCounts ??= buildActiveLlmFileCounts(db);
-      const counts = await activeLlmFileCounts;
-      return counts.get(llmFileCountKey(normalizedName, mentionType)) ?? 0;
-    },
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),
     onEntityResolved: (entity: Entity) => refreshResolvedEntityIndex(db, index, entity),
     getIndexedFileSourceTime: (indexedFileId: string) =>
@@ -463,6 +457,11 @@ export async function buildMaterializeDeps(
         }
       }
       return null;
+    },
+    countActiveLlmFilesForName: async (normalizedName, mentionType) => {
+      activeLlmFileCounts ??= buildActiveLlmFileCounts(db);
+      const counts = await activeLlmFileCounts;
+      return counts.get(llmFileCountKey(normalizedName, mentionType)) ?? 0;
     },
   };
 }

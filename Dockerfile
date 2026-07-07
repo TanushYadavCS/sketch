@@ -65,6 +65,8 @@ RUN printf '%s\n' '#!/bin/sh' 'exec /app/node_modules/.bin/md-to-pdf "$@"' > /us
 RUN mkdir -p /app/data && chown 1000:1000 /app/data
 
 ENV NODE_ENV=production
+ARG APP_VERSION=dev
+ENV SKETCH_VERSION=$APP_VERSION
 ENV PATH=/app/node_modules/.bin:$PATH
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium

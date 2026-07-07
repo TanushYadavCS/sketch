@@ -15,9 +15,11 @@ import {
 } from "@/lib/api";
 import {
   ArrowLeftIcon,
+  CaretRightIcon,
   CheckCircleIcon,
   HashIcon,
   PencilSimpleIcon,
+  PlusIcon,
   SlackLogoIcon,
   UserIcon,
   UsersThreeIcon,
@@ -32,11 +34,16 @@ import {
   SheetTitle,
 } from "@sketch/ui/components/sheet";
 import { Switch } from "@sketch/ui/components/switch";
+import { TabButton } from "@sketch/ui/components/tab-button";
+import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { EmptyCard, OutputView, RunButton, formatOutputDate } from "./agent-outputs-view";
+import { SummariserSetupModal } from "./summariser-setup-modal";
+import { InputIcon, deliversLabel, routeInput } from "./summariser-shared";
 
 type Tab = "outputs" | "config";
 type EditField = "schedule" | "focus" | "volume" | "delivery" | "sources" | null;
@@ -125,7 +132,7 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
     <Shell>
       <header className="mt-5 flex items-start gap-4">
         <div className="min-w-0 flex-1">
-          <h1 className="text-[19px] font-semibold text-foreground">{agent.title}</h1>
+          <h1 className="text-[22px] font-medium text-foreground">{agent.title}</h1>
           <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">{agent.tagline}</p>
         </div>
         <span className="flex shrink-0 items-center gap-2 text-[12px] font-medium text-muted-foreground">
@@ -140,16 +147,12 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
         </span>
       </header>
 
-      <div className="mt-6 flex items-center gap-1 border-b border-border/60">
-        <TabButton active={tab === "outputs"} onClick={() => setTab("outputs")}>
-          Outputs
-        </TabButton>
-        <TabButton active={tab === "config"} onClick={() => setTab("config")}>
-          Config
-        </TabButton>
+      <div className="mt-6 flex items-center gap-6 border-b border-border">
+        <TabButton label="Outputs" isActive={tab === "outputs"} onClick={() => setTab("outputs")} />
+        <TabButton label="Config" isActive={tab === "config"} onClick={() => setTab("config")} />
       </div>
 
-      <div className="pt-5">
+      <TabContentContainer className="pt-5">
         {tab === "outputs" ? (
           <OutputsTab
             data={data}
@@ -165,7 +168,7 @@ export function AgentDetail({ agentKey }: { agentKey: string }) {
         ) : (
           <ConfigTab agentKey={agentKey} agent={agent} onEdit={setEditing} onChanged={invalidate} />
         )}
-      </div>
+      </TabContentContainer>
 
       <EditDrawer
         field={editing}
@@ -221,7 +224,7 @@ function OutputsTab({
       <div className="mb-4 flex items-center justify-between">
         <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
           {selectedOutput
-            ? `Generated ${formatDate(selectedOutput.generatedAt ?? selectedOutput.outputDate)}`
+            ? `Generated ${formatOutputDate(selectedOutput.generatedAt ?? selectedOutput.outputDate)}`
             : "No output yet"}
         </span>
         <RunButton running={running} pending={runPending} onRun={onRun} />
@@ -248,11 +251,9 @@ function OutputsTab({
                     : "text-muted-foreground hover:bg-muted/50",
                 )}
               >
-                <span className="block text-[12.5px] font-medium">
-                  {formatDate(output.generatedAt ?? output.outputDate)}
-                </span>
+                <span className="block truncate text-[12.5px] font-medium">{output.sourceLabel ?? "Summary"}</span>
                 <span className="mt-0.5 block truncate font-mono text-[10px] uppercase tracking-[0.08em]">
-                  {output.outputDate}
+                  {formatOutputDate(output.generatedAt ?? output.outputDate)}
                 </span>
               </button>
             ))}
@@ -261,72 +262,6 @@ function OutputsTab({
         </div>
       )}
     </div>
-  );
-}
-
-function OutputView({ output, sectionTitles }: { output: AgentOutput; sectionTitles: Record<string, string> }) {
-  const sectionEntries = Object.entries(output.sections).filter(([, items]) => items.length > 0);
-  return (
-    <div className="flex flex-col gap-6">
-      {output.masthead ? (
-        <div className="rounded-xl border-[0.5px] border-border bg-gradient-to-b from-muted/50 to-card px-4 py-3.5">
-          <p className="text-[14px] font-semibold text-foreground">{output.masthead.title}</p>
-          <p className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">{output.masthead.summary}</p>
-        </div>
-      ) : null}
-      {sectionEntries.length === 0 ? (
-        <EmptyCard>No items in this run.</EmptyCard>
-      ) : (
-        sectionEntries.map(([sectionKey, items]) => (
-          <div key={sectionKey}>
-            <div className="mb-2 border-b border-border/60 pb-2">
-              <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-                {sectionTitles[sectionKey] ?? sectionKey}
-              </span>
-            </div>
-            <div className="flex flex-col gap-2">
-              {items.map((item) => (
-                <div key={item.id} className="rounded-xl border-[0.5px] border-border bg-card px-4 py-3">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span className="text-[13px] font-medium text-foreground">{item.title}</span>
-                    {item.label ? (
-                      <span className="rounded-full bg-muted/60 px-1.5 py-[1px] font-mono text-[8.5px] uppercase tracking-[0.06em] text-muted-foreground">
-                        {item.label.replaceAll("_", " ")}
-                      </span>
-                    ) : null}
-                    {item.displayRef ? (
-                      <span className="font-mono text-[10px] text-muted-foreground/70">{item.displayRef}</span>
-                    ) : null}
-                  </div>
-                  <p className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">{item.summary}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))
-      )}
-    </div>
-  );
-}
-
-function RunButton({ running, pending, onRun }: { running: boolean; pending: boolean; onRun: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onRun}
-      disabled={running || pending}
-      className="inline-flex items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[12px] font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
-    >
-      {running ? "Running…" : "Run now"}
-    </button>
-  );
-}
-
-function EmptyCard({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="rounded-xl border border-dashed border-border py-10 text-center text-[12.5px] text-muted-foreground">
-      {children}
-    </p>
   );
 }
 
@@ -341,6 +276,9 @@ function ConfigTab({
   onEdit: (field: EditField) => void;
   onChanged: () => void;
 }) {
+  if (agent.sourceConfig) {
+    return <SummariserIndex agentKey={agentKey} agent={agent} onChanged={onChanged} />;
+  }
   return (
     <>
       <div className="rounded-xl border-[0.5px] border-border bg-card px-4">
@@ -357,15 +295,6 @@ function ConfigTab({
             {agent.focus ? agent.focus : <span className="text-muted-foreground">None — add what to emphasize.</span>}
           </p>
         </Row>
-        {agent.sourceConfig ? (
-          <Row label="Sources" onEdit={() => onEdit("sources")}>
-            <p className="line-clamp-2 text-[12.5px] leading-relaxed text-foreground/85">
-              {agent.sources.length > 0
-                ? agent.sources.map((source) => source.label ?? source.targetId).join(", ")
-                : "No sources selected"}
-            </p>
-          </Row>
-        ) : null}
         <Row label="Volume" onEdit={() => onEdit("volume")}>
           <p className="text-[12.5px] text-foreground/85">Up to {agent.maxItemsPerSection} items per section</p>
         </Row>
@@ -391,6 +320,105 @@ function ConfigTab({
         ))}
       </div>
     </>
+  );
+}
+
+/**
+ * Source-backed agents manage their summarisers as sub-rows in the roster and on
+ * per-summariser config pages. The agent's Config tab is a lightweight index:
+ * what it does, plus links into each summariser and a New-summariser modal.
+ */
+function SummariserIndex({
+  agentKey,
+  agent,
+  onChanged,
+}: {
+  agentKey: string;
+  agent: AgentConfig;
+  onChanged: () => void;
+}) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const lookup = new Map(agent.sources.map((source) => [sourceKey(source), source] as const));
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-lg border-[0.5px] border-border bg-card p-4 dark:bg-[#111110]">
+        <p className="font-mono text-[10px] uppercase tracking-[0.07em] text-muted-foreground">What it does</p>
+        <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/85">{agent.description}</p>
+      </div>
+
+      <div className="overflow-hidden rounded-lg border-[0.5px] border-border bg-card">
+        <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+          <div className="flex items-baseline gap-2">
+            <span className="font-mono text-[11px] uppercase tracking-[0.07em] text-muted-foreground">Summarisers</span>
+            <span className="font-mono text-[10px] text-muted-foreground/60">{agent.routes.length}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setModalOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-md border-[0.5px] border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent dark:bg-[#111110] dark:hover:bg-[#1C1C1A]"
+          >
+            <PlusIcon size={12} weight="bold" aria-hidden />
+            New summariser
+          </button>
+        </div>
+
+        {agent.routes.length === 0 ? (
+          <p className="px-4 py-10 text-center text-[13px] text-muted-foreground">
+            No summarisers yet. Add one to start delivering digests.
+          </p>
+        ) : (
+          <div className="flex flex-col">
+            {agent.routes.map((route) => {
+              const input = routeInput(route, lookup);
+              return (
+                <Link
+                  key={route.id}
+                  to="/agents/$agentKey/summarisers/$routeId"
+                  params={{ agentKey, routeId: route.id }}
+                  className={cn(
+                    "group flex items-center gap-3 border-b border-border px-4 py-3 transition-colors last:border-b-0 hover:bg-secondary/50 dark:hover:bg-muted/30",
+                    !route.enabled && "opacity-55",
+                  )}
+                >
+                  <span className="flex min-w-0 flex-1 items-center gap-2">
+                    <InputIcon platform={input.platform} />
+                    <span className="truncate text-[12.5px] font-medium text-foreground">{input.label}</span>
+                    {input.extra > 0 ? (
+                      <span className="shrink-0 text-[11px] text-muted-foreground">+{input.extra}</span>
+                    ) : null}
+                    {route.owner ? (
+                      <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10.5px] text-muted-foreground">
+                        {route.owner.name}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="text-[12px] text-muted-foreground">{deliversLabel(route)}</span>
+                  <span className="w-16 text-right text-[12px] tabular-nums text-muted-foreground">
+                    {formatTime(
+                      route.schedule?.hour ?? agent.scheduleHour,
+                      route.schedule?.minute ?? agent.scheduleMinute,
+                    )}
+                  </span>
+                  <CaretRightIcon
+                    size={13}
+                    aria-hidden
+                    className="shrink-0 text-muted-foreground/30 group-hover:text-muted-foreground"
+                  />
+                </Link>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <SummariserSetupModal
+        agentKey={agentKey}
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        onCreated={onChanged}
+      />
+    </div>
   );
 }
 
@@ -448,21 +476,6 @@ function Row({ label, children, onEdit }: { label: string; children: React.React
   return (
     <button type="button" onClick={onEdit} className={className}>
       {inner}
-    </button>
-  );
-}
-
-function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors",
-        active ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
-      )}
-    >
-      {children}
     </button>
   );
 }
@@ -1108,10 +1121,4 @@ function MentionList({
       })}
     </div>
   );
-}
-
-function formatDate(value: string): string {
-  const parsed = new Date(value.length === 10 ? `${value}T00:00:00` : value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }

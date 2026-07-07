@@ -650,10 +650,22 @@ export function createClickUpConnector(): Connector {
       };
 
       for (const team of teamsRes.teams) {
-        // Workspace filter: skip workspaces not in scope
         if (allowedWorkspaces.length > 0 && !allowedWorkspaces.includes(team.id)) {
           continue;
         }
+
+        const spacesRes = (await clickupRequest(`/team/${team.id}/space`, token, logger)) as {
+          spaces: ClickUpSpace[];
+        };
+        const workspaceContainsAllowedSpace = spacesRes.spaces.some((space) => allowedSpaces.includes(space.id));
+        const workspaceInScope =
+          (allowedWorkspaces.length === 0 && allowedSpaces.length === 0) ||
+          allowedWorkspaces.includes(team.id) ||
+          (allowedWorkspaces.length === 0 && allowedSpaces.length > 0 && workspaceContainsAllowedSpace);
+        if (!workspaceInScope) {
+          continue;
+        }
+
         const workspaceName = team.name.trim();
         const workspaceEmails = extractMemberEmails(team.members);
         logger.info(
@@ -679,31 +691,11 @@ export function createClickUpConnector(): Connector {
           });
         }
 
-        // Seed workspace members as person entities
-        if (onPersonSeed) {
-          for (const member of team.members) {
-            if (member.user.username) {
-              await onPersonSeed({
-                name: member.user.username,
-                email: member.user.email,
-                subtype: "internal",
-                source: "clickup",
-                sourceId: `user:${member.user.id}`,
-              });
-            }
-          }
-        }
-
-        // Workspace-level access scope (used for docs and public spaces)
         const workspaceScope: SyncedItem["accessScope"] = {
           scopeType: "workspace",
           providerScopeId: team.id,
           label: workspaceName,
           memberEmails: workspaceEmails,
-        };
-
-        const spacesRes = (await clickupRequest(`/team/${team.id}/space`, token, logger)) as {
-          spaces: ClickUpSpace[];
         };
 
         let syncedAnyAllowedSpace = false;
@@ -713,8 +705,6 @@ export function createClickUpConnector(): Connector {
           }
           syncedAnyAllowedSpace = true;
 
-          // Build access scope for this space.
-          // Private spaces use space members; public spaces use all workspace members.
           let spaceScope: SyncedItem["accessScope"];
           if (space.private && space.members) {
             const memberEmails = extractMemberEmails(space.members);
@@ -872,14 +862,6 @@ export function createClickUpConnector(): Connector {
           }
         }
 
-        // Sync ClickUp Docs at workspace level.
-        // Docs are fetched per-workspace with no space-level filter, so they would leak
-        // across workspaces the user never selected. When workspaces are explicitly scoped,
-        // this team already passed the workspace filter above. When only spaces are selected
-        // (workspaces empty), sync docs only if this workspace contains a selected space;
-        // otherwise a workspace reachable by the token but never opted into would still have
-        // its docs ingested. With neither workspaces nor spaces selected, the connection is
-        // unscoped and every workspace's docs sync (unchanged behavior).
         const workspaceInDocScope =
           allowedWorkspaces.includes(team.id) ||
           (allowedWorkspaces.length === 0 && (allowedSpaces.length === 0 || syncedAnyAllowedSpace));

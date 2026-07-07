@@ -438,6 +438,13 @@ function isSingleStrictPersonReference(ranked: RankedCandidate[]): boolean {
   );
 }
 
+function canAutoLinkScopedPersonCandidate(input: ProposeInput, candidate: RankedCandidate): boolean {
+  return (
+    (candidate.reason === "exact-ambiguous" || candidate.reason === "strict-normalized") &&
+    canAutoLinkNameDedupCandidate(input, candidate)
+  );
+}
+
 async function queueProposal(
   deps: ProposeDeps,
   input: ProposeInput,
@@ -547,12 +554,12 @@ async function decideScopedPersonCandidates(
   }
   const incomingScope = deps.domainsRepo ? await personScopeKey(input.email ?? null, deps.domainsRepo) : null;
   if (!incomingScope) {
-    if (
-      !input.strictPersonScopeGate &&
-      isSingleStrictPersonReference(ranked) &&
-      canAutoLinkNameDedupCandidate(input, ranked[0])
-    ) {
+    if (!input.strictPersonScopeGate && ranked.length === 1 && canAutoLinkScopedPersonCandidate(input, ranked[0])) {
       return linkNameDedupCandidate(deps, input, ranked[0].entity);
+    }
+    if (input.email && !input.strictPersonScopeGate && !input.queueInsteadOfCreate) {
+      const { entity } = await persistEntity(deps, input);
+      return { kind: "created", entity };
     }
     return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
   }
@@ -562,7 +569,17 @@ async function decideScopedPersonCandidates(
     return { candidate, scopeKeys };
   });
   const matching = candidatesWithScopes.filter(({ scopeKeys }) => scopeKeys.has(incomingScopeId));
-  if (matching.length === 1) return linkNameDedupCandidate(deps, input, matching[0].candidate.entity);
+  if (matching.length === 1) {
+    const match = matching[0];
+    if (canAutoLinkScopedPersonCandidate(input, match.candidate)) {
+      return linkNameDedupCandidate(deps, input, match.candidate.entity);
+    }
+    if (input.email && !input.queueInsteadOfCreate) {
+      const { entity } = await persistEntity(deps, input);
+      return { kind: "created", entity };
+    }
+    return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+  }
   if (matching.length >= 2) {
     return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
   }

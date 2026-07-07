@@ -1,4 +1,4 @@
-import type { proto } from "@whiskeysockets/baileys";
+import type { GroupMetadata, proto } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
@@ -576,6 +576,130 @@ describe("WhatsAppBot group metadata persistence", () => {
   });
 });
 
+describe("WhatsAppBot syncAllGroups", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await db.destroy();
+  });
+
+  function metadata(id: string, subject: string, desc?: string): GroupMetadata {
+    return {
+      id,
+      owner: undefined,
+      subject,
+      desc,
+      participants: [],
+    };
+  }
+
+  function attachGroupSyncSocket(bot: WhatsAppBot, groups: Record<string, GroupMetadata>) {
+    const groupFetchAllParticipating = vi.fn().mockResolvedValue(groups);
+    (bot as unknown as { sock: { groupFetchAllParticipating: typeof groupFetchAllParticipating } }).sock = {
+      groupFetchAllParticipating,
+    };
+    return groupFetchAllParticipating;
+  }
+
+  it("upserts every fetched group while preserving agent bindings", async () => {
+    const repo = createWhatsAppGroupRepository(db);
+    const bot = new WhatsAppBot({
+      db,
+      logger: createTestLogger(),
+      groupMetadataStore: repo,
+    });
+
+    await db.insertInto("users").values({ id: "agent-1", name: "Agent One" }).execute();
+    await repo.upsert({
+      jid: "existing@g.us",
+      name: "Old Group",
+      description: "Old desc",
+      updated_at: "2026-03-13T10:00:00.000Z",
+    });
+    await db
+      .updateTable("whatsapp_groups")
+      .set({ agent_user_id: "agent-1" })
+      .where("jid", "=", "existing@g.us")
+      .execute();
+
+    attachGroupSyncSocket(bot, {
+      "existing@g.us": metadata("existing@g.us", "Renamed Group", "New desc"),
+      "new@g.us": metadata("new@g.us", "New Group"),
+    });
+
+    await expect(bot.syncAllGroups()).resolves.toBe(2);
+
+    const existing = await db
+      .selectFrom("whatsapp_groups")
+      .selectAll()
+      .where("jid", "=", "existing@g.us")
+      .executeTakeFirstOrThrow();
+    const inserted = await db
+      .selectFrom("whatsapp_groups")
+      .selectAll()
+      .where("jid", "=", "new@g.us")
+      .executeTakeFirstOrThrow();
+
+    expect(existing.name).toBe("Renamed Group");
+    expect(existing.description).toBe("New desc");
+    expect(existing.agent_user_id).toBe("agent-1");
+    expect(inserted.name).toBe("New Group");
+    expect(inserted.description).toBeNull();
+    await expect(bot.getGroupMetadata("new@g.us")).resolves.toMatchObject({ subject: "New Group" });
+  });
+
+  it("returns the synced count so far and warns when the socket fetch fails", async () => {
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const bot = new WhatsAppBot({
+      db,
+      logger,
+      groupMetadataStore: createWhatsAppGroupRepository(db),
+    });
+    const groupFetchAllParticipating = vi.fn().mockRejectedValue(new Error("socket unavailable"));
+    (bot as unknown as { sock: { groupFetchAllParticipating: typeof groupFetchAllParticipating } }).sock = {
+      groupFetchAllParticipating,
+    };
+
+    await expect(bot.syncAllGroups()).resolves.toBe(0);
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), syncedCount: 0 }),
+      "Failed to sync WhatsApp groups",
+    );
+  });
+
+  it("throttles repeated syncs and allows forced refreshes", async () => {
+    const dateSpy = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const bot = new WhatsAppBot({
+      db,
+      logger: createTestLogger(),
+      groupMetadataStore: createWhatsAppGroupRepository(db),
+    });
+    const groupFetchAllParticipating = attachGroupSyncSocket(bot, {
+      "team@g.us": metadata("team@g.us", "Team"),
+    });
+
+    await expect(bot.syncAllGroups()).resolves.toBe(1);
+    await expect(bot.syncAllGroups()).resolves.toBe(0);
+    (bot as unknown as { activeSocketGeneration: number }).activeSocketGeneration = 2;
+    const nextGenerationFetch = attachGroupSyncSocket(bot, {
+      "next-team@g.us": metadata("next-team@g.us", "Next Team"),
+    });
+    await expect(bot.syncAllGroups()).resolves.toBe(1);
+    await expect(bot.syncAllGroups({ force: true })).resolves.toBe(1);
+
+    expect(groupFetchAllParticipating).toHaveBeenCalledTimes(1);
+    expect(nextGenerationFetch).toHaveBeenCalledTimes(2);
+    dateSpy.mockRestore();
+  });
+});
+
 describe("WhatsAppBot handleGroupMessage LID resolution", () => {
   let db: Kysely<DB>;
 
@@ -679,6 +803,91 @@ describe("WhatsAppBot handleGroupMessage LID resolution", () => {
     const msg = captured[0] as { type: string; senderPhone: string | null };
     expect(msg.type).toBe("group");
     expect(msg.senderPhone).toBeNull();
+  });
+});
+
+describe("WhatsAppBot history sync", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("persists group history when Baileys puts sender on the top-level participant field", async () => {
+    const handlers = new Map<string, (payload: { messages: proto.IWebMessageInfo[] }) => Promise<void>>();
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      debug: vi.fn(),
+      error: vi.fn(),
+    } as unknown as ReturnType<typeof createTestLogger>;
+    const bot = new WhatsAppBot({ db, logger });
+    const mockSock = {
+      user: { id: "99999@s.whatsapp.net", name: "Sketch", lid: undefined },
+      ev: {
+        on: (event: string, handler: (payload: { messages: proto.IWebMessageInfo[] }) => Promise<void>) => {
+          handlers.set(event, handler);
+        },
+      },
+    };
+    const captured: unknown[][] = [];
+
+    (bot as unknown as { sock: typeof mockSock }).sock = mockSock;
+    bot.onHistoryMessages(async (messages) => {
+      captured.push(messages);
+      return { persisted: messages.length, skippedOld: 0, skippedDup: 0 };
+    });
+    (bot as unknown as { registerHistoryHandler: () => void }).registerHistoryHandler();
+
+    await handlers.get("messaging-history.set")?.({
+      messages: [
+        {
+          key: {
+            remoteJid: "group-1@g.us",
+            fromMe: false,
+            id: "history-001",
+          },
+          participant: "14155238886@s.whatsapp.net",
+          message: { conversation: "history context" },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+          pushName: "History Sender",
+        } as proto.IWebMessageInfo,
+        {
+          key: {
+            remoteJid: "group-1@g.us",
+            fromMe: false,
+            id: "history-002",
+          },
+          message: { conversation: "missing sender" },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+          pushName: "Unknown",
+        } as proto.IWebMessageInfo,
+      ],
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toHaveLength(1);
+    expect(captured[0][0]).toEqual(
+      expect.objectContaining({
+        type: "group",
+        senderJid: "14155238886@s.whatsapp.net",
+        senderPhone: "+14155238886",
+        text: "history context",
+      }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        total: 2,
+        candidates: 1,
+        persisted: 1,
+        skippedNoSender: 1,
+      }),
+      "WhatsApp history batch processed",
+    );
   });
 });
 

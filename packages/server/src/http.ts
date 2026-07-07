@@ -72,6 +72,7 @@ import type { IntegrationProvider } from "./integrations/types";
 import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-dispatcher";
 import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
+import { registerManagedTenantMember, removeManagedTenantMember } from "./managed-members";
 import { createManagedLoginUrl } from "./managed-url";
 import { mcpOAuthRoutes } from "./mcp/oauth/routes";
 import { mountPublicMcpServer } from "./mcp/server/transport";
@@ -111,9 +112,14 @@ interface AppDeps {
     platform: string;
     message: string;
     template?: WhatsAppTemplateRequest;
+    senderUserId?: string;
+    storeInInbox?: boolean;
+    inboxKind?: string;
+    inboxMetadata?: Record<string, unknown> | null;
   }) => Promise<{
     channelId: string;
     messageRef: string;
+    inboxMessageId?: string;
   }>;
   localDeviceGateway?: LocalDeviceGateway;
   localClaudeSessionService?: LocalClaudeSessionService;
@@ -334,7 +340,17 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/skills", skillsRoutes(config));
   app.route(
     "/api/users",
-    userRoutes(users, { settings, db, logger, config, channels, whatsappGroups, getSlack: deps?.getSlack }),
+    userRoutes(users, {
+      settings,
+      db,
+      logger,
+      config,
+      channels,
+      whatsappGroups,
+      getSlack: deps?.getSlack,
+      registerManagedMember: (input) => registerManagedTenantMember(config, input),
+      removeManagedMember: (input) => removeManagedTenantMember(config, input),
+    }),
   );
   app.route(
     "/api/agent-environment-variables",

@@ -33,9 +33,9 @@ import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import type { RecordWorkflowStep } from "../telemetry/agent-run-telemetry";
-import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import { deliverProactiveDm } from "../whatsapp/proactive-delivery";
+import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
-import { buildProactiveUpdateTemplate } from "../whatsapp/templates";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import { type AutomationExecutionResult, executeAutomation } from "../workflows/runtime";
 import { testAutomationStep } from "../workflows/runtime";
@@ -69,13 +69,15 @@ export class TaskScheduler {
   private cronInstances: Map<string, Cron> = new Map();
   private repo: ReturnType<typeof createScheduledTaskRepository>;
   private deliveryCapture: ReturnType<typeof createWorkflowDeliveryCapture>;
+  private conversations: ReturnType<typeof createConversationRepository>;
   private deps: TaskSchedulerDeps;
 
   constructor(deps: TaskSchedulerDeps) {
     this.deps = deps;
     this.repo = createScheduledTaskRepository(deps.db);
+    this.conversations = createConversationRepository(deps.db);
     this.deliveryCapture = createWorkflowDeliveryCapture({
-      conversations: createConversationRepository(deps.db),
+      conversations: this.conversations,
       settingsRepo: deps.settingsRepo,
       logger: deps.logger,
     });
@@ -305,27 +307,44 @@ export class TaskScheduler {
 
     return async (text) => {
       const target = whatsappTargetFromDeliveryTarget(delivery.targetId);
-      const sent =
+      const result =
         target.kind === "dm"
-          ? await whatsapp.sendTemplate(
-              target,
-              buildProactiveUpdateTemplate({
-                botName: (await this.deps.settingsRepo.get())?.bot_name,
-                messageSummary: text,
-              }),
-            )
-          : await whatsapp.sendText(target, text);
-      const messageRef = sent?.providerMessageId;
-      if (!messageRef) return;
+          ? await this.deliverWhatsAppDmForTask(task, target, text)
+          : { mode: "text" as const, sent: await whatsapp.sendText(target, text) };
+      const messageRef = result.sent?.providerMessageId;
+      if (!messageRef || result.mode !== "text") return;
       await this.deliveryCapture.captureWhatsApp({
-        deliveryTarget: target.kind === "dm" ? whatsappDeliveryTargetFromTarget(target) : delivery.targetId,
+        deliveryTarget: "deliveryTarget" in result ? result.deliveryTarget : delivery.targetId,
         messageRef,
-        providerTimestamp: sent.providerTimestamp,
+        providerTimestamp: result.sent?.providerTimestamp ?? null,
         text,
       });
     };
   }
 
+  private async deliverWhatsAppDmForTask(
+    task: ScheduledTaskRow,
+    target: ReturnType<typeof whatsappTargetFromDeliveryTarget>,
+    text: string,
+  ) {
+    if (target.kind !== "dm") throw new Error("Expected WhatsApp DM target");
+    if (!task.created_by) throw new Error(`Task ${task.id} has no creator for WhatsApp DM delivery`);
+    if (!this.deps.inboxMessagesRepo) throw new Error("Inbox storage is not available for WhatsApp DM delivery");
+    const recipient = await this.deps.userRepo.findById(task.created_by);
+    return deliverProactiveDm({
+      target,
+      recipientUserId: task.created_by,
+      senderUserId: task.created_by,
+      text,
+      whatsapp: this.deps.whatsapp,
+      conversations: this.conversations,
+      inboxMessages: this.deps.inboxMessagesRepo,
+      logger: this.deps.logger,
+      recipientName: recipient?.name,
+      recipientPhoneE164: recipient?.whatsapp_number ?? target.phoneE164,
+      inboxMetadata: { source: "scheduled_task", taskId: task.id },
+    });
+  }
   private getQueueKey(task: ScheduledTaskRow): string {
     return getScheduledTaskRowQueueKey(task);
   }

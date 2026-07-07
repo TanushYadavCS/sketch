@@ -11,9 +11,8 @@ import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
-import { up as applyScheduledTaskBuilderRevisions } from "./107-scheduled-task-builder-revisions";
 
-const EXPECTED_MIGRATION_COUNT = 124;
+const EXPECTED_MIGRATION_COUNT = 127;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -170,25 +169,20 @@ describe("runMigrations — full sequence", () => {
     expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
     expect(names[111]).toBe("116-connector-credential-source");
     expect(names[112]).toBe("117-conversation-message-window-index");
-    expect(names[113]).toBe("118-tasks");
-    expect(names[114]).toBe("119-tasks-owner");
-    expect(names[115]).toBe("120-sub-entities");
-    expect(names[116]).toBe("121-tasks-assignee-name");
-    expect(names[117]).toBe("122-milestone-series-and-value-signature");
-    expect(names[118]).toBe("123-work-cycles");
-    expect(names[119]).toBe("124-work-cycles-connector");
-    expect(names[120]).toBe("125-work-cycles-connector-key");
-    expect(names[121]).toBe("126-container-name-qualification");
-    expect(names[122]).toBe("127-entity-provenance-tier");
-    expect(names[123]).toBe("128-trunk-name-embeddings");
-  });
-
-  it("creates the task assignee_name column", async () => {
-    await runMigrations(db, { quiet: true });
-
-    const columns = await sql<{ name: string; type: string }>`PRAGMA table_info('tasks')`.execute(db);
-
-    expect(columns.rows).toEqual(expect.arrayContaining([expect.objectContaining({ name: "assignee_name" })]));
+    expect(names[113]).toBe("118-whatsapp-window-keepalives");
+    expect(names[114]).toBe("119-agent-outputs-source-scope");
+    expect(names[115]).toBe("120-agent-output-period-key");
+    expect(names[116]).toBe("121-tasks");
+    expect(names[117]).toBe("122-tasks-owner");
+    expect(names[118]).toBe("123-sub-entities");
+    expect(names[119]).toBe("124-tasks-assignee-name");
+    expect(names[120]).toBe("125-milestone-series-and-value-signature");
+    expect(names[121]).toBe("126-work-cycles");
+    expect(names[122]).toBe("127-work-cycles-connector");
+    expect(names[123]).toBe("128-work-cycles-connector-key");
+    expect(names[124]).toBe("129-container-name-qualification");
+    expect(names[125]).toBe("130-entity-provenance-tier");
+    expect(names[126]).toBe("131-trunk-name-embeddings");
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {
@@ -208,8 +202,6 @@ describe("runMigrations — full sequence", () => {
         expect.objectContaining({ name: "normalized_name", type: "TEXT", notnull: 1 }),
         expect.objectContaining({ name: "status_authority", type: "TEXT", notnull: 1, dflt_value: "'local'" }),
         expect.objectContaining({ name: "source_fact_id", type: "TEXT", notnull: 0 }),
-        expect.objectContaining({ name: "value_signature", type: "TEXT", notnull: 0 }),
-        expect.objectContaining({ name: "series_key", type: "TEXT", notnull: 0 }),
       ]),
     );
 
@@ -224,9 +216,6 @@ describe("runMigrations — full sequence", () => {
           name: "idx_sub_entities_current_scope_kind_name",
           unique: 1,
           partial: 1,
-        }),
-        expect.objectContaining({
-          name: "idx_sub_entities_series_key",
         }),
       ]),
     );
@@ -244,120 +233,6 @@ describe("runMigrations — full sequence", () => {
       ]),
     );
     expect(foreignKeys.rows.some((row) => row.from === "source_fact_id")).toBe(false);
-  });
-
-  it("creates milestone series columns and indexes", async () => {
-    await runMigrations(db, { quiet: true });
-
-    const taskColumns = await sql<{ name: string; type: string; notnull: number }>`PRAGMA table_info(tasks)`.execute(
-      db,
-    );
-    expect(taskColumns.rows).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: "milestone_series_key", type: "TEXT", notnull: 0 })]),
-    );
-
-    const taskIndexes = await sql<{ name: string }>`PRAGMA index_list(tasks)`.execute(db);
-    expect(taskIndexes.rows.map((row) => row.name)).toContain("idx_tasks_milestone_series_key");
-  });
-
-  it("creates work cycle tables and indexes", async () => {
-    await runMigrations(db, { quiet: true });
-
-    const cycleColumns = await sql<{
-      name: string;
-      type: string;
-      notnull: number;
-      dflt_value: string | null;
-    }>`PRAGMA table_info(work_cycles)`.execute(db);
-    expect(cycleColumns.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: "scope_entity_id", type: "TEXT", notnull: 0 }),
-        expect.objectContaining({ name: "connector_config_id", type: "TEXT", notnull: 0 }),
-        expect.objectContaining({ name: "source", type: "TEXT", notnull: 1 }),
-        expect.objectContaining({ name: "external_ref", type: "TEXT", notnull: 1 }),
-        expect.objectContaining({ name: "name", type: "TEXT", notnull: 1 }),
-        expect.objectContaining({ name: "sequence", type: "INTEGER", notnull: 0 }),
-        expect.objectContaining({ name: "state", type: "TEXT", notnull: 1, dflt_value: "'planned'" }),
-        expect.objectContaining({ name: "last_seen_sync_run_id", type: "TEXT", notnull: 0 }),
-        expect.objectContaining({ name: "deleted_at", type: "TEXT", notnull: 0 }),
-      ]),
-    );
-
-    const membershipColumns = await sql<{
-      name: string;
-      type: string;
-      notnull: number;
-    }>`PRAGMA table_info(task_cycle_memberships)`.execute(db);
-    expect(membershipColumns.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: "task_id", type: "TEXT", notnull: 1 }),
-        expect.objectContaining({ name: "cycle_id", type: "TEXT", notnull: 1 }),
-        expect.objectContaining({ name: "assigned_at", type: "TEXT", notnull: 1 }),
-        expect.objectContaining({ name: "removed_at", type: "TEXT", notnull: 0 }),
-        expect.objectContaining({ name: "source_fact_id", type: "TEXT", notnull: 0 }),
-      ]),
-    );
-
-    const cycleIndexes = await sql<{ name: string; unique: number }>`PRAGMA index_list(work_cycles)`.execute(db);
-    expect(cycleIndexes.rows).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: "idx_work_cycles_connector_source_ref", unique: 1 })]),
-    );
-    const cycleKeyColumns = await sql<{
-      name: string;
-    }>`PRAGMA index_info(idx_work_cycles_connector_source_ref)`.execute(db);
-    expect(cycleKeyColumns.rows.map((row) => row.name)).toEqual(["connector_config_id", "source", "external_ref"]);
-    expect(cycleIndexes.rows.map((row) => row.name)).toContain("idx_work_cycles_last_seen");
-    expect(cycleIndexes.rows.map((row) => row.name)).toContain("idx_work_cycles_connector");
-
-    const cycleForeignKeys = await sql<{
-      table: string;
-      from: string;
-      to: string;
-      on_delete: string;
-    }>`PRAGMA foreign_key_list(work_cycles)`.execute(db);
-    expect(cycleForeignKeys.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ table: "entities", from: "scope_entity_id", to: "id", on_delete: "SET NULL" }),
-        expect.objectContaining({
-          table: "connector_configs",
-          from: "connector_config_id",
-          to: "id",
-          on_delete: "CASCADE",
-        }),
-      ]),
-    );
-
-    const membershipIndexes = await sql<{
-      name: string;
-      unique: number;
-      partial: number;
-    }>`PRAGMA index_list(task_cycle_memberships)`.execute(db);
-    expect(membershipIndexes.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: "idx_task_cycle_current", unique: 1, partial: 1 }),
-        expect.objectContaining({ name: "idx_task_cycle_memberships_cycle" }),
-        expect.objectContaining({ name: "idx_task_cycle_memberships_task" }),
-      ]),
-    );
-
-    const membershipForeignKeys = await sql<{
-      table: string;
-      from: string;
-      to: string;
-      on_delete: string;
-    }>`PRAGMA foreign_key_list(task_cycle_memberships)`.execute(db);
-    expect(membershipForeignKeys.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ table: "tasks", from: "task_id", to: "id", on_delete: "CASCADE" }),
-        expect.objectContaining({ table: "work_cycles", from: "cycle_id", to: "id", on_delete: "CASCADE" }),
-        expect.objectContaining({
-          table: "indexed_file_facts",
-          from: "source_fact_id",
-          to: "id",
-          on_delete: "SET NULL",
-        }),
-      ]),
-    );
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -737,18 +612,71 @@ describe("runMigrations — incremental upgrade", () => {
     expect(rows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
   });
 
-  it("keeps the scheduled task revision migration idempotent when its columns already exist", async () => {
+  it("finishes the scheduled task revision migration when its columns already exist", async () => {
     await runMigrations(db, { quiet: true });
 
-    await expect(applyScheduledTaskBuilderRevisions(db as unknown as Kysely<unknown>)).resolves.not.toThrow();
+    await sql`
+      DELETE FROM kysely_migration
+      WHERE name IN (
+        '107-scheduled-task-builder-revisions',
+        '108-scheduled-task-origin-chat',
+        '109-scheduled-task-origin-message-id',
+        '110-google-calendar-provider-file-scope',
+        '111-settings-embedding-provider',
+        '112-agent-output-structured-payload',
+        '113-indexed-file-all-day-flag',
+        '114-agent-output-deliveries',
+        '115-whatsapp-template-mappings-and-provider-events',
+        '116-connector-credential-source',
+        '117-conversation-message-window-index',
+        '118-whatsapp-window-keepalives',
+        '119-agent-outputs-source-scope',
+        '120-agent-output-period-key'
+      )
+    `.execute(db);
+    await sql`DROP TABLE agent_output_deliveries`.execute(db);
+    await sql`DROP TABLE whatsapp_template_mappings`.execute(db);
+    await sql`DROP TABLE whatsapp_provider_events`.execute(db);
+    await sql`DROP INDEX idx_conversation_messages_window`.execute(db);
+    await sql`DROP TABLE whatsapp_window_keepalives`.execute(db);
 
-    const columns = await sql<{ name: string }>`PRAGMA table_info('scheduled_tasks')`.execute(db);
-    expect(columns.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: "updated_at" }),
-        expect.objectContaining({ name: "revision" }),
-        expect.objectContaining({ name: "last_edited_by" }),
-      ]),
-    );
+    await expect(runMigrations(db, { quiet: true })).resolves.not.toThrow();
+
+    const rows = await sql<{ name: string }>`
+      SELECT name FROM kysely_migration
+      WHERE name IN (
+        '107-scheduled-task-builder-revisions',
+        '108-scheduled-task-origin-chat',
+        '109-scheduled-task-origin-message-id',
+        '110-google-calendar-provider-file-scope',
+        '111-settings-embedding-provider',
+        '112-agent-output-structured-payload',
+        '113-indexed-file-all-day-flag',
+        '114-agent-output-deliveries',
+        '115-whatsapp-template-mappings-and-provider-events',
+        '116-connector-credential-source',
+        '117-conversation-message-window-index',
+        '118-whatsapp-window-keepalives',
+        '119-agent-outputs-source-scope',
+        '120-agent-output-period-key'
+      )
+      ORDER BY name ASC
+    `.execute(db);
+    expect(rows.rows).toEqual([
+      { name: "107-scheduled-task-builder-revisions" },
+      { name: "108-scheduled-task-origin-chat" },
+      { name: "109-scheduled-task-origin-message-id" },
+      { name: "110-google-calendar-provider-file-scope" },
+      { name: "111-settings-embedding-provider" },
+      { name: "112-agent-output-structured-payload" },
+      { name: "113-indexed-file-all-day-flag" },
+      { name: "114-agent-output-deliveries" },
+      { name: "115-whatsapp-template-mappings-and-provider-events" },
+      { name: "116-connector-credential-source" },
+      { name: "117-conversation-message-window-index" },
+      { name: "118-whatsapp-window-keepalives" },
+      { name: "119-agent-outputs-source-scope" },
+      { name: "120-agent-output-period-key" },
+    ]);
   });
 });

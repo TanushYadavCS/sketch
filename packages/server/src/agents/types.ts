@@ -9,8 +9,38 @@ import type {
   AgentStoredItemRow,
   AgentStructuredPayload,
 } from "../db/repositories/agent-outputs";
+import type { createUserRepository } from "../db/repositories/users";
 import type { DB, UsersTable } from "../db/schema";
 import type { Logger } from "../logger";
+
+/**
+ * Context handed to {@link AgentDefinition.augmentRuntimeContext}. The engine builds
+ * the shared runtime context, then lets a definition add or override fields (e.g. an
+ * experimental, definition-specific data slice) before it is serialized into the user
+ * message. `baseContext` is the engine-built context so a definition can transform it.
+ */
+export interface AgentRuntimeContextArgs {
+  db: Kysely<DB>;
+  config: Config;
+  users: ReturnType<typeof createUserRepository>;
+  userId: string;
+  maxItemsPerSection: number;
+  baseContext: Record<string, unknown>;
+}
+
+/**
+ * Context handed to {@link AgentDefinition.onOutputSaved} after an output is persisted.
+ * Lets a definition run side effects (e.g. promoting brief todos into durable tasks)
+ * without baking definition-specific behavior into the generic engine.
+ */
+export interface AgentOutputSavedArgs {
+  db: Kysely<DB>;
+  config: Config;
+  logger: Logger;
+  userId: string;
+  outputId: string;
+  items: AgentOutputItemInput[];
+}
 
 export type AgentStoredItem = AgentStoredItemRow;
 
@@ -66,27 +96,11 @@ export interface AgentRuntimeContextParams {
     focus: string | null;
     delivery: AgentDeliveryConfig | null;
     sources: AgentSourceConfig[];
+    sourceKey: string;
+    firstRunLookbackHours?: number;
+    floorWindowToPeriod?: boolean;
+    deliveryPlatform?: "slack" | "whatsapp" | null;
   };
-}
-
-export interface AgentRuntimeContextArgs {
-  db: Kysely<DB>;
-  config: Config;
-  userId: string;
-  users: {
-    getAllEmailsForUser(userId: string): Promise<string[]>;
-  };
-  maxItemsPerSection: number;
-  baseContext: Record<string, unknown>;
-}
-
-export interface AgentOutputSavedArgs {
-  db: Kysely<DB>;
-  config: Config;
-  logger: Logger;
-  userId: string;
-  outputId: string;
-  items: AgentOutputItemInput[];
 }
 
 /**
@@ -132,10 +146,13 @@ export interface AgentDefinition {
     items: AgentOutputItemInput[];
     runtimeContext: Record<string, unknown>;
   }): Promise<AgentOutputItemInput[]>;
-  /** Optional per-definition runtime context augmentation after the shared context is built. */
-  augmentRuntimeContext?(args: AgentRuntimeContextArgs): Promise<Record<string, unknown>>;
-  /** Optional side effects after an output is persisted. */
-  onOutputSaved?(args: AgentOutputSavedArgs): Promise<void>;
   /** Normalize a stored item into its API representation (label/action/displayRef fallbacks). */
   toApiItem(item: AgentStoredItem): AgentApiItem;
+  /**
+   * Optional: add or override runtime-context fields before serialization. Returns a
+   * partial object merged over the engine-built context.
+   */
+  augmentRuntimeContext?(args: AgentRuntimeContextArgs): Promise<Record<string, unknown>>;
+  /** Optional: side effects to run after an output is persisted (e.g. task promotion). */
+  onOutputSaved?(args: AgentOutputSavedArgs): Promise<void>;
 }

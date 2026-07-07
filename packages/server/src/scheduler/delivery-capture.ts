@@ -1,7 +1,7 @@
 import type { createConversationRepository } from "../db/repositories/conversations";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { Logger } from "../logger";
-import { canonicalDmConversationId, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
+import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 
 export interface WorkflowDeliveryCaptureDeps {
   conversations: ReturnType<typeof createConversationRepository>;
@@ -43,7 +43,7 @@ export function createWorkflowDeliveryCapture(deps: WorkflowDeliveryCaptureDeps)
     }
 
     const target = whatsappTargetFromDeliveryTarget(deliveryTarget);
-    const providerConversationId = target.kind === "dm" ? canonicalDmConversationId(target.phoneE164) : target.groupId;
+    const providerConversationId = target.kind === "dm" ? whatsappDeliveryTargetFromTarget(target) : target.groupId;
     return { platform: "whatsapp", kind: "dm", providerConversationId };
   }
 

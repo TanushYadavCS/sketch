@@ -97,6 +97,16 @@ export function channelRoutes(deps: ChannelDeps) {
     return c.json({ groups: await deps.whatsappGroups.list() });
   });
 
+  routes.post("/whatsapp/groups/sync", async (c) => {
+    await deps.whatsapp?.syncAllGroups({ force: true });
+
+    if (!deps.whatsappGroups) {
+      return c.json({ groups: [] });
+    }
+
+    return c.json({ groups: await deps.whatsappGroups.list() });
+  });
+
   routes.get("/whatsapp/templates/provider", async (c) => {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;

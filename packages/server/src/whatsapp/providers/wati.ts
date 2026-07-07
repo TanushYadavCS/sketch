@@ -19,6 +19,7 @@ import {
   type WhatsAppTarget,
   canonicalDmConversationId,
 } from "../provider";
+import { mapTemplateParams } from "../template-params";
 import type { WhatsAppTemplateParamValue, WhatsAppTemplateRequest } from "../templates";
 
 export const WHATSAPP_WATI_PROVIDER_ID = "wati";
@@ -122,21 +123,31 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
     form.set("file", new Blob([new Uint8Array(fileBytes)], { type: mimeType }), fileName);
 
     if (!channelPhoneDigits) {
-      await fetchJson(requestFetch, new URL(`${endpoint}/api/v1/sendSessionFile/${encodeURIComponent(phone)}`), {
-        method: "POST",
-        headers: authorizationHeaders(config.accessToken),
-        body: form,
-      });
+      const responseBody = await fetchJson(
+        requestFetch,
+        new URL(`${endpoint}/api/v1/sendSessionFile/${encodeURIComponent(phone)}`),
+        {
+          method: "POST",
+          headers: authorizationHeaders(config.accessToken),
+          body: form,
+        },
+      );
+      assertWatiFileSendAccepted(responseBody);
       return;
     }
 
     form.set("target", `${channelPhoneDigits}:${phone}`);
 
-    await fetchJson(requestFetch, new URL(`${v3Endpoint}/api/ext/v3/conversations/messages/file`), {
-      method: "POST",
-      headers: authorizationHeaders(config.accessToken),
-      body: form,
-    });
+    const responseBody = await fetchJson(
+      requestFetch,
+      new URL(`${v3Endpoint}/api/ext/v3/conversations/messages/file`),
+      {
+        method: "POST",
+        headers: authorizationHeaders(config.accessToken),
+        body: form,
+      },
+    );
+    assertWatiFileSendAccepted(responseBody);
   };
 
   const sendTemplate = async (
@@ -493,16 +504,10 @@ function providerTemplateParameters(
   parameterMap: Record<string, string> | null,
   params: Record<string, WhatsAppTemplateParamValue>,
 ): Array<{ name: string; value: string }> {
-  const entries = parameterMap ? Object.entries(parameterMap) : Object.keys(params).map((key) => [key, key]);
-  return entries.map(([providerName, logicalName]) => ({
+  return mapTemplateParams(parameterMap, params).map(([providerName, value]) => ({
     name: providerName,
-    value: stringifyTemplateParam(params[logicalName]),
+    value,
   }));
-}
-
-function stringifyTemplateParam(value: WhatsAppTemplateParamValue): string {
-  if (value == null) return "";
-  return String(value);
 }
 
 function buildBroadcastName(key: string): string {
@@ -548,6 +553,8 @@ async function fetchJson(requestFetch: typeof fetch, url: URL, init: RequestInit
 function sendResultFromWatiBody(body: unknown, target: WhatsAppTarget): WhatsAppSendResult | null {
   const record = isRecord(body) ? body : {};
   const message = isRecord(record.message) ? record.message : record;
+  const failureReason = watiMessageSendFailure(record, message);
+  if (failureReason) throw new Error(failureReason);
   const fallbackConversationId =
     target.kind === "dm" ? (target.providerConversationId ?? `wati:${target.phoneE164}`) : target.groupId;
 
@@ -570,6 +577,43 @@ function sendResultFromWatiBody(body: unknown, target: WhatsAppTarget): WhatsApp
       parseWatiTimestamp(record.created),
     rawProviderPayload: body,
   };
+}
+
+function watiMessageSendFailure(record: Record<string, unknown>, message: Record<string, unknown>): string | null {
+  if (hasWatiSendFailure(record, message)) return "Wati message send failed: provider rejected request";
+  return null;
+}
+
+function assertWatiFileSendAccepted(body: unknown): void {
+  const record = isRecord(body) ? body : {};
+  const message = isRecord(record.message) ? record.message : record;
+  if (hasWatiSendFailure(record, message)) throw new Error("Wati file send failed: provider rejected request");
+}
+
+function hasWatiSendFailure(record: Record<string, unknown>, message: Record<string, unknown>): boolean {
+  if (
+    isExplicitFalse(record.result) ||
+    isExplicitFalse(record.ok) ||
+    isExplicitFalse(record.success) ||
+    isExplicitFalse(message.result) ||
+    isExplicitFalse(message.ok) ||
+    isExplicitFalse(message.success) ||
+    hasProviderErrors(record.error) ||
+    hasProviderErrors(record.errors) ||
+    hasProviderErrors(message.error) ||
+    hasProviderErrors(message.errors)
+  ) {
+    return true;
+  }
+
+  const status =
+    optionalString(message.status) ??
+    optionalString(message.statusString) ??
+    optionalString(message.result) ??
+    optionalString(record.status) ??
+    optionalString(record.statusString) ??
+    optionalString(record.result);
+  return isFailureStatus(status);
 }
 
 function sendResultFromWatiTemplateBody(body: unknown, target: WhatsAppTarget): WhatsAppSendResult | null {
@@ -641,6 +685,11 @@ function hasProviderErrors(value: unknown): boolean {
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === "string") return value.trim().length > 0;
   return true;
+}
+
+function isFailureStatus(value: string | null): boolean {
+  if (!value) return false;
+  return /fail|error|reject/iu.test(value);
 }
 
 function parseWatiTemplateList(body: unknown): ProviderTemplateSummary[] {

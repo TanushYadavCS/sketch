@@ -4,7 +4,7 @@ import { createEntityRepository, whereLiveEntity } from "../db/repositories/enti
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB, EntitiesTable } from "../db/schema";
-import { isPersonalOrSharedDomain } from "./personal-domains";
+import { isPersonalOrSharedDomain, isWellKnownNonClientDomain } from "./personal-domains";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
 import { isEmailProviderName } from "./validators";
 
@@ -202,6 +202,10 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
     // provider brand name ("Gmail").
     if (isPersonalOrSharedDomain(domain) || isEmailProviderName(proposedName)) {
       logger.info({ domain, proposedName }, "Skipping personal/shared domain promotion");
+      continue;
+    }
+    if (isWellKnownNonClientDomain(domain)) {
+      logger.info({ domain, proposedName }, "Skipping well-known non-client (vendor/infra) domain promotion");
       continue;
     }
     const observedPeople = parseStringArray(candidate.observed_person_entity_ids);

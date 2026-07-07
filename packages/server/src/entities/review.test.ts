@@ -1220,13 +1220,16 @@ describe("entity-review routes — child tasks preview", () => {
   let db: Kysely<DB>;
   let app: ReturnType<typeof createApp>;
   let ownerId: string;
+  let otherId: string;
   let ownerCookie: string;
 
   beforeEach(async () => {
     db = await createTestDb();
     await seedUsers(db);
     ownerId = await userIdByEmail(db, OWNER_EMAIL);
+    otherId = await userIdByEmail(db, OTHER_EMAIL);
     await seedConnectorConfig(db, "config-owner", ownerId);
+    await seedConnectorConfig(db, "config-other", otherId);
     app = createApp(db, createTestConfig({ ENCRYPTION_KEY }), {
       logger: createTestLogger(),
     });
@@ -1237,18 +1240,25 @@ describe("entity-review routes — child tasks preview", () => {
     await db.destroy();
   });
 
-  async function seedChildTask(fileId: string, parentSourceId: string, name: string, source = "linear") {
+  async function seedChildTask(
+    fileId: string,
+    parentSourceId: string,
+    name: string,
+    opts: { source?: string; configId?: string; accessScopeId?: string | null } = {},
+  ) {
+    const source = opts.source ?? "linear";
     await db
       .insertInto("indexed_files")
       .values({
         id: fileId,
-        connector_config_id: "config-owner",
+        connector_config_id: opts.configId ?? "config-owner",
         provider_file_id: `pf-${fileId}`,
         file_name: name,
         file_type: "issue",
         content_category: "document",
         source,
         provider_url: `https://linear.app/${fileId}`,
+        access_scope_id: opts.accessScopeId ?? null,
         synced_at: new Date().toISOString(),
         source_updated_at: new Date().toISOString(),
       })
@@ -1287,6 +1297,44 @@ describe("entity-review routes — child tasks preview", () => {
     expect(body.childTaskCount).toBe(2);
     expect(body.childTasks.map((t) => t.name).sort()).toEqual(["SKE-1: First", "SKE-2: Second"]);
     expect(body.childTasks.every((t) => t.providerUrl?.includes("linear.app"))).toBe(true);
+  });
+
+  it("filters child tasks through file visibility for member viewers", async () => {
+    const seed = await seedReviewRow(db, {
+      proposedName: "Sketch",
+      entityType: "team",
+      triggeredBy: ownerId,
+      seedSource: "linear",
+      seedSourceId: "team-2",
+    });
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-other",
+        connector_config_id: "config-other",
+        scope_type: "space",
+        provider_scope_id: "space-other",
+        label: "Other Space",
+      })
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({ access_scope_id: "scope-other", email: OTHER_EMAIL })
+      .execute();
+    await seedChildTask("task-visible", "team-2", "SKE-3: Visible");
+    await seedChildTask("task-hidden", "team-2", "SKE-4: Hidden", {
+      configId: "config-other",
+      accessScopeId: "scope-other",
+    });
+
+    const res = await app.request(`/api/entity-review/${seed.id}`, { headers: { Cookie: ownerCookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      childTaskCount: number;
+      childTasks: Array<{ name: string }>;
+    };
+    expect(body.childTaskCount).toBe(1);
+    expect(body.childTasks.map((t) => t.name)).toEqual(["SKE-3: Visible"]);
   });
 
   it("omits child tasks for a non-seed (LLM) row", async () => {

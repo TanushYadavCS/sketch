@@ -58,12 +58,14 @@ import { initTelemetry } from "./telemetry/setup";
 import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
+import { WORKFLOW_OUTPUT_INBOX_KIND, deliverProactiveDm } from "./whatsapp/proactive-delivery";
 import { whatsappDeliveryTargetFromTarget } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
 import { WHATSAPP_MANAGED_PROVIDER_ID, createManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
 import { createWhatsAppRuntime } from "./whatsapp/runtime";
 import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
+import { startWhatsAppWindowKeepAliveJob } from "./whatsapp/window-keepalive";
 
 export interface ServerHandle {
   config: Config;
@@ -267,7 +269,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
           platformUrl: config.MANAGED_WHATSAPP_PLATFORM_URL ?? "",
           tenantToken: config.MANAGED_WHATSAPP_TENANT_TOKEN ?? "",
           logger,
-          templateMappings: whatsappTemplateMappingsRepo,
         })
       : null;
   const whatsappRuntime = createWhatsAppRuntime({
@@ -292,11 +293,25 @@ export async function createServer(config: Config, options?: CreateServerOptions
     platform,
     message,
     template,
+    senderUserId,
+    inboxKind,
+    inboxMetadata,
   }: {
     userId: string;
     platform: string;
     message: string;
     template?: WhatsAppTemplateRequest;
+    senderUserId?: string;
+    /**
+     * This adapter does not create a duplicate inbox row for successful
+     * in-window WhatsApp text sends; callers that want sender-visible inbox
+     * bookkeeping own that after delivery. Out-of-window WhatsApp content is
+     * always parked by proactive delivery regardless of this flag so the full
+     * message is never silently dropped.
+     */
+    storeInInbox?: boolean;
+    inboxKind?: string;
+    inboxMetadata?: Record<string, unknown> | null;
   }) => {
     const recipient = await users.findById(userId);
 
@@ -318,17 +333,31 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
     if (platform === "whatsapp") {
       if (!recipient?.whatsapp_number) throw new Error("No WhatsApp number for recipient");
-      if (config.WHATSAPP_DM_PROVIDER === WHATSAPP_WATI_PROVIDER_ID && !template) {
-        throw new Error("Wati WhatsApp DMs require an approved template for proactive delivery");
-      }
 
       const target = { kind: "dm" as const, phoneE164: recipient.whatsapp_number };
       const channelId = whatsappDeliveryTargetFromTarget(target);
-      const sent = template
-        ? await whatsappRuntime.sendTemplate(target, { ...template, fallbackText: template.fallbackText ?? message })
-        : await whatsappRuntime.sendText(target, message);
+      if (template) {
+        const sent = await whatsappRuntime.sendTemplate(target, template);
+        return { channelId, messageRef: sent?.providerMessageId ?? "" };
+      }
 
-      if (sent?.providerMessageId) {
+      const result = await deliverProactiveDm({
+        target,
+        recipientUserId: userId,
+        senderUserId: senderUserId ?? userId,
+        text: message,
+        whatsapp: whatsappRuntime,
+        conversations: conversationsRepo,
+        inboxMessages: inboxMessagesRepo,
+        logger,
+        recipientName: recipient.name,
+        recipientPhoneE164: recipient.whatsapp_number,
+        inboxKind: inboxKind ?? (senderUserId ? "note" : WORKFLOW_OUTPUT_INBOX_KIND),
+        inboxMetadata: inboxMetadata ?? null,
+      });
+      const sent = result.sent;
+
+      if (result.mode === "text" && sent?.providerMessageId) {
         const settingsRow = await settingsRepo.get();
         const conversation = await conversationsRepo.getOrCreate(
           { platform: "whatsapp", kind: "dm", providerConversationId: channelId },
@@ -346,7 +375,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
         });
       }
 
-      return { channelId, messageRef: sent?.providerMessageId ?? "" };
+      return {
+        channelId,
+        messageRef: sent?.providerMessageId ?? "",
+        ...(result.inboxMessageId ? { inboxMessageId: result.inboxMessageId } : {}),
+      };
     }
 
     throw new Error(`Unsupported platform: ${platform}`);
@@ -424,6 +457,14 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
   const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
+  const whatsappWindowKeepAliveJob = config.WHATSAPP_WINDOW_KEEPALIVE_ENABLED
+    ? startWhatsAppWindowKeepAliveJob({
+        db,
+        logger,
+        whatsapp: whatsappRuntime,
+        settingsRepo,
+      })
+    : null;
   const agentOutputDelivery = createAgentOutputDeliveryService({
     db,
     logger,
@@ -563,6 +604,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger.info("Shutting down...");
     await telemetry.shutdown();
     await syncScheduler.stop();
+    whatsappWindowKeepAliveJob?.stop();
     agentScheduler.stop();
     scheduler.stop();
     if (slack) await slack.stop();

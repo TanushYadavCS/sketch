@@ -7,7 +7,7 @@
  * additions from SKE-51.
  */
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../auth/password";
 import { createChannelRepository } from "../db/repositories/channels";
 import { createSettingsRepository } from "../db/repositories/settings";
@@ -57,6 +57,7 @@ describe("Users API — agent fields", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await db.destroy();
   });
 
@@ -91,6 +92,7 @@ describe("Users API — agent fields", () => {
         name: "Real Person",
         type: "human",
         email: "person@test.com",
+        whatsappNumber: "+14155550101",
         allowedTools: ["Read"],
       }),
     });
@@ -129,6 +131,299 @@ describe("Users API — agent fields", () => {
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.user.whatsapp_number).toBe("+919876543210");
+  });
+
+  it("rejects human member creation without a WhatsApp number", async () => {
+    const res = await app.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        name: "Email Only",
+        type: "human",
+        email: "email-only@test.com",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("Email and WhatsApp number");
+  });
+
+  it("skips managed member registration when only managed login URL is configured", async () => {
+    const managedLoginOnlyApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedLoginOnlyApp, ADMIN_EMAIL);
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const res = await managedLoginOnlyApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Login Only",
+        type: "human",
+        email: "managed.login.only@gmail.com",
+        whatsappNumber: "+14155550108",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.user.email).toBe("managed.login.only@gmail.com");
+    expect(body.user.whatsapp_number).toBe("+14155550108");
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+  });
+
+  it("skips managed member registration on update when only managed login URL is configured", async () => {
+    const users = createUserRepository(db);
+    const existing = await users.create({
+      name: "Managed Login Existing",
+      type: "human",
+      email: "managed.login.existing@gmail.com",
+      whatsappNumber: "+14155550109",
+    });
+    const managedLoginOnlyApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedLoginOnlyApp, ADMIN_EMAIL);
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const res = await managedLoginOnlyApp.request(`/api/users/${existing.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Login Updated",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.user.name).toBe("Managed Login Updated");
+    expect(body.user.email).toBe("managed.login.existing@gmail.com");
+    expect(body.user.whatsapp_number).toBe("+14155550109");
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+  });
+
+  it("registers managed human members with the platform before local create", async () => {
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
+      );
+
+    const res = await managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Person",
+        type: "human",
+        email: "managed.person@gmail.com",
+        whatsappNumber: "+14155550106",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://platform.test/api/tenant/members",
+      expect.objectContaining({
+        method: "PUT",
+        headers: expect.objectContaining({
+          Authorization: "Bearer tenant-token",
+          "Content-Type": "application/json",
+        }),
+        body: JSON.stringify({
+          tenantUserId: body.user.id,
+          email: "managed.person@gmail.com",
+          name: "Managed Person",
+          phoneNumber: "+14155550106",
+          sendInvite: true,
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it("rejects managed human members when platform email invite delivery is incomplete", async () => {
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ ok: true, emailSent: false, whatsappSent: true }), { status: 200 }),
+      );
+
+    const res = await managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Person",
+        type: "human",
+        email: "managed.incomplete@test.com",
+        whatsappNumber: "+14155550107",
+      }),
+    });
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: {
+        code: "MANAGED_MEMBER_REGISTRATION_FAILED",
+        message: "Managed member invite delivery failed",
+      },
+    });
+    await expect(createUserRepository(db).findByEmail("managed.incomplete@test.com")).resolves.toBeUndefined();
+    fetchMock.mockRestore();
+  });
+
+  it("removes managed tenant members before deleting local human users", async () => {
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    const create = await managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Delete",
+        type: "human",
+        email: "managed.delete@gmail.com",
+        whatsappNumber: "+14155550110",
+      }),
+    });
+    expect(create.status).toBe(201);
+    const user = (await create.json()).user;
+
+    const res = await managedApp.request(`/api/users/${user.id}`, {
+      method: "DELETE",
+      headers: { Cookie: managedCookie },
+    });
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://platform.test/api/tenant/members/managed.delete%40gmail.com",
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({
+          Authorization: "Bearer tenant-token",
+        }),
+      }),
+    );
+    await expect(createUserRepository(db).findById(user.id)).resolves.toBeUndefined();
+    fetchMock.mockRestore();
+  });
+
+  it("keeps local human users when managed tenant member removal fails", async () => {
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { code: "REMOVE_FAILED", message: "Could not remove managed member" } }), {
+          status: 502,
+        }),
+      );
+
+    const create = await managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Managed Delete Failure",
+        type: "human",
+        email: "managed.delete.failure@gmail.com",
+        whatsappNumber: "+14155550111",
+      }),
+    });
+    expect(create.status).toBe(201);
+    const user = (await create.json()).user;
+    const connectorCredentials = JSON.stringify({ apiKey: "fireflies-test-key" });
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "managed-delete-failure-connector",
+        connector_type: "fireflies",
+        auth_type: "api_key",
+        credentials: connectorCredentials,
+        created_by: user.id,
+        sync_status: "active",
+      })
+      .execute();
+
+    const res = await managedApp.request(`/api/users/${user.id}`, {
+      method: "DELETE",
+      headers: { Cookie: managedCookie },
+    });
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: {
+        code: "MANAGED_MEMBER_REGISTRATION_FAILED",
+        message: "Could not remove managed member",
+      },
+    });
+    await expect(createUserRepository(db).findById(user.id)).resolves.toMatchObject({
+      email: "managed.delete.failure@gmail.com",
+    });
+    await expect(
+      db
+        .selectFrom("connector_configs")
+        .select(["sync_status", "credentials", "credential_hint", "error_message"])
+        .where("id", "=", "managed-delete-failure-connector")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      sync_status: "active",
+      credentials: connectorCredentials,
+      credential_hint: null,
+      error_message: null,
+    });
+    fetchMock.mockRestore();
   });
 
   it("rejects WhatsApp numbers without an international country code", async () => {
@@ -210,6 +505,7 @@ describe("Users API — agent fields", () => {
         name: "Real Person",
         type: "human",
         email: "rp@test.com",
+        whatsappNumber: "+14155550102",
       }),
     });
     expect(create.status).toBe(201);
@@ -311,6 +607,7 @@ describe("Users API — agent fields", () => {
           name: "Real Person",
           type: "human",
           email: "rp2@test.com",
+          whatsappNumber: "+14155550103",
           slackChannelIds: ["C-MARKETING"],
         }),
       });
@@ -472,6 +769,7 @@ describe("Users API — agent fields", () => {
           name: "Real Person",
           type: "human",
           email: "rp3@test.com",
+          whatsappNumber: "+14155550104",
           whatsappGroupJids: ["group-marketing@g.us"],
         }),
       });
@@ -562,6 +860,7 @@ describe("Users API — agent fields", () => {
           name: "Real Person",
           type: "human",
           email: "rp4@test.com",
+          whatsappNumber: "+14155550105",
           isWhatsappFallback: true,
         }),
       });

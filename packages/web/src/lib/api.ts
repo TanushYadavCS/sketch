@@ -1076,6 +1076,9 @@ export interface AgentSummary {
   enabled: boolean;
   scheduleHour: number;
   scheduleMinute: number;
+  sourceConfig: AgentSourceConfigMeta | null;
+  sources: AgentSourceConfig[];
+  routes: AgentRoute[];
 }
 
 export interface AgentSectionConfig {
@@ -1093,6 +1096,10 @@ export interface AgentDeliveryConfig {
   mentions?: AgentDeliveryMention[];
 }
 
+export interface AgentCombinedDeliveryConfig extends AgentDeliveryConfig {
+  ackNonDm?: true;
+}
+
 export interface AgentDeliveryMention {
   platform: "slack" | "whatsapp";
   targetId: string;
@@ -1104,6 +1111,65 @@ export interface AgentSourceConfig {
   targetType: "channel" | "group";
   targetId: string;
   label: string | null;
+}
+
+export type AgentSourceKey = `${AgentSourceConfig["platform"]}:${AgentSourceConfig["targetType"]}:${string}`;
+
+export type AgentPerSourceDelivery =
+  | { kind: "self" }
+  | { kind: "off" }
+  | { kind: "target"; target: AgentDeliveryConfig };
+
+export type AgentDeliveryModel =
+  | {
+      mode: "per_source";
+      defaultRoute: "self" | "off";
+      perSource: Record<string, AgentPerSourceDelivery>;
+      combined: null;
+    }
+  | {
+      mode: "combined";
+      combined: AgentCombinedDeliveryConfig;
+    };
+
+export type AgentRouteDestination =
+  | { kind: "self" }
+  | { kind: "off" }
+  | { kind: "member"; platform: "slack" | "whatsapp"; memberUserId: string }
+  | { kind: "channel"; platform: "slack"; targetType: "channel"; targetId: string; label: string | null }
+  | { kind: "channel"; platform: "whatsapp"; targetType: "group"; targetId: string; label: string | null };
+
+export type AgentRouteFrequency = "daily" | "weekly" | "every_n_hours";
+
+export interface AgentRouteSchedule {
+  frequency: AgentRouteFrequency;
+  hour: number;
+  minute: number;
+  daysOfWeek?: number[];
+  intervalHours?: number;
+}
+
+export interface AgentRoute {
+  id: string;
+  sources: AgentSourceKey[];
+  focus: string | null;
+  sections: Record<string, boolean> | null;
+  maxItemsPerSection: number | null;
+  schedule: AgentRouteSchedule | null;
+  destination: AgentRouteDestination;
+  enabled: boolean;
+  owner?: {
+    userId: string;
+    name: string;
+    email: string | null;
+    authRole: string;
+  };
+}
+
+export interface AgentRouteMember {
+  userId: string;
+  name: string;
+  slackUserId: string;
 }
 
 export interface AgentSourceConfigMeta {
@@ -1127,6 +1193,7 @@ export interface AgentConfig {
   delivery: AgentDeliveryConfig | null;
   sourceConfig: AgentSourceConfigMeta | null;
   sources: AgentSourceConfig[];
+  routes: AgentRoute[];
   sections: AgentSectionConfig[];
 }
 
@@ -1153,6 +1220,8 @@ export interface AgentOutput {
   agentKey: string;
   userId: string;
   outputDate: string;
+  sourceKey: string;
+  sourceLabel: string | null;
   timezone: string;
   status: string;
   generatedAt: string | null;
@@ -1181,6 +1250,7 @@ export interface AgentConfigPatch {
   focus?: string | null;
   delivery?: AgentDeliveryConfig | null;
   sources?: AgentSourceConfig[];
+  routes?: AgentRoute[];
 }
 
 export interface AgentOutputsResponse {
@@ -1298,11 +1368,25 @@ export const api = {
         body: JSON.stringify(patch),
       });
     },
-    run(agentKey: string) {
-      return request<{ generation: { id: string; status: string; outputDate: string } | null }>(
-        `/api/agents/${agentKey}/runs`,
-        { method: "POST", body: JSON.stringify({}) },
+    routeMembers(agentKey: string, sources: AgentSourceKey[], routeId?: string | null) {
+      return request<{ members: AgentRouteMember[] }>(`/api/agents/${agentKey}/route-members`, {
+        method: "POST",
+        body: JSON.stringify({ sources, ...(routeId ? { routeId } : {}) }),
+      });
+    },
+    whatsappDmMembers(agentKey: string) {
+      return request<{ members: Array<{ userId: string; name: string }> }>(
+        `/api/agents/${agentKey}/route-members/whatsapp`,
       );
+    },
+    run(agentKey: string, opts?: { routeId?: string }) {
+      return request<{
+        generation: { id: string; sourceKey: string; status: string; outputDate: string } | null;
+        generations: Array<{ id: string; sourceKey: string; status: string; outputDate: string }>;
+      }>(`/api/agents/${agentKey}/runs`, {
+        method: "POST",
+        body: JSON.stringify(opts?.routeId ? { routeId: opts.routeId } : {}),
+      });
     },
     outputs(agentKey: string, opts?: { limit?: number; cursor?: string | null }) {
       const params = new URLSearchParams();

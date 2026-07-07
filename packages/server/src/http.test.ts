@@ -30,8 +30,10 @@ async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "t
 
 describe("HTTP health endpoint", () => {
   let db: Kysely<DB>;
+  const originalSketchVersion = process.env.SKETCH_VERSION;
 
   beforeEach(async () => {
+    process.env.SKETCH_VERSION = "test-version";
     db = await createTestDb();
   });
 
@@ -40,6 +42,11 @@ describe("HTTP health endpoint", () => {
       await db.destroy();
     } catch {
       // Already destroyed in some tests
+    }
+    if (originalSketchVersion === undefined) {
+      Reflect.deleteProperty(process.env, "SKETCH_VERSION");
+    } else {
+      process.env.SKETCH_VERSION = originalSketchVersion;
     }
   });
 
@@ -52,6 +59,7 @@ describe("HTTP health endpoint", () => {
       const body = await res.json();
       expect(body.status).toBe("ok");
       expect(body.db).toBe("ok");
+      expect(body.version).toBe("test-version");
       expect(typeof body.uptime).toBe("number");
     });
 
@@ -65,6 +73,7 @@ describe("HTTP health endpoint", () => {
       const body = await res.json();
       expect(body.status).toBe("error");
       expect(body.db).toBe("error");
+      expect(body.version).toBe("test-version");
     });
   });
 
@@ -1799,19 +1808,20 @@ describe("Users API", () => {
   });
 
   describe("POST /api/users", () => {
-    it("creates user with name and whatsappNumber", async () => {
+    it("creates user with name, email, and whatsappNumber", async () => {
       const app = createApp(db, config);
       const cookie = await setupAdmin(app);
 
       const res = await app.request("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookie },
-        body: JSON.stringify({ name: "Charlie", whatsappNumber: "+14155551234" }),
+        body: JSON.stringify({ name: "Charlie", email: "charlie@test.com", whatsappNumber: "+14155551234" }),
       });
       expect(res.status).toBe(201);
 
       const body = await res.json();
       expect(body.user.name).toBe("Charlie");
+      expect(body.user.email).toBe("charlie@test.com");
       expect(body.user.whatsapp_number).toBe("+14155551234");
       expect(body.user.id).toBeDefined();
     });
@@ -1853,13 +1863,13 @@ describe("Users API", () => {
       await app.request("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookie },
-        body: JSON.stringify({ name: "Eve", whatsappNumber: "+14155559999" }),
+        body: JSON.stringify({ name: "Eve", email: "eve@test.com", whatsappNumber: "+14155559999" }),
       });
 
       const res = await app.request("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookie },
-        body: JSON.stringify({ name: "Frank", whatsappNumber: "+14155559999" }),
+        body: JSON.stringify({ name: "Frank", email: "frank@test.com", whatsappNumber: "+14155559999" }),
       });
       expect(res.status).toBe(409);
 
@@ -1876,7 +1886,7 @@ describe("Users API", () => {
       const createRes = await app.request("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookie },
-        body: JSON.stringify({ name: "Grace", whatsappNumber: "+14155550001" }),
+        body: JSON.stringify({ name: "Grace", email: "grace@test.com", whatsappNumber: "+14155550001" }),
       });
       const { user: created } = await createRes.json();
 
@@ -1899,7 +1909,7 @@ describe("Users API", () => {
       const createRes = await app.request("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookie },
-        body: JSON.stringify({ name: "Hank", whatsappNumber: "+14155550002" }),
+        body: JSON.stringify({ name: "Hank", email: "hank@test.com", whatsappNumber: "+14155550002" }),
       });
       const { user: created } = await createRes.json();
 
@@ -1918,7 +1928,11 @@ describe("Users API", () => {
       const app = createApp(db, config);
       const cookie = await setupAdmin(app);
       const users = createUserRepository(db);
-      const target = await users.create({ name: "Target User", email: "target@test.com" });
+      const target = await users.create({
+        name: "Target User",
+        email: "target@test.com",
+        whatsappNumber: "+14155550004",
+      });
 
       const res = await app.request(`/api/users/${target.id}`, {
         method: "PATCH",
@@ -1939,6 +1953,7 @@ describe("Users API", () => {
       const target = await users.create({
         name: "Second Admin",
         email: "second-admin@test.com",
+        whatsappNumber: "+14155550005",
         authRole: "admin",
       });
 
@@ -1962,8 +1977,16 @@ describe("Users API", () => {
       if (!jwtSecret) throw new Error("JWT secret missing");
 
       const users = createUserRepository(db);
-      const caller = await users.create({ name: "Member Caller", email: "caller@test.com" });
-      const target = await users.create({ name: "Target User", email: "target-member@test.com" });
+      const caller = await users.create({
+        name: "Member Caller",
+        email: "caller@test.com",
+        whatsappNumber: "+14155550006",
+      });
+      const target = await users.create({
+        name: "Target User",
+        email: "target-member@test.com",
+        whatsappNumber: "+14155550007",
+      });
       const memberCookie = `sketch_session=${await signJwt(caller.id, "member", jwtSecret)}`;
 
       const res = await app.request(`/api/users/${target.id}`, {
@@ -2014,13 +2037,13 @@ describe("Users API", () => {
       await app.request("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookie },
-        body: JSON.stringify({ name: "Ivy", whatsappNumber: "+14155550010" }),
+        body: JSON.stringify({ name: "Ivy", email: "ivy@test.com", whatsappNumber: "+14155550010" }),
       });
 
       const createRes = await app.request("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookie },
-        body: JSON.stringify({ name: "Jack", whatsappNumber: "+14155550011" }),
+        body: JSON.stringify({ name: "Jack", email: "jack@test.com", whatsappNumber: "+14155550011" }),
       });
       const { user: jack } = await createRes.json();
 
@@ -2041,7 +2064,7 @@ describe("Users API", () => {
       const createRes = await app.request("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookie },
-        body: JSON.stringify({ name: "Kim", whatsappNumber: "+14155550020" }),
+        body: JSON.stringify({ name: "Kim", email: "kim@test.com", whatsappNumber: "+14155550020" }),
       });
       const { user: created } = await createRes.json();
 
@@ -2067,8 +2090,17 @@ describe("Users API", () => {
       const users = createUserRepository(db);
       const admin = await users.findByEmail("admin@test.com");
       if (!admin) throw new Error("Admin user missing");
-      const manager = await users.create({ name: "Manager", email: "manager@test.com" });
-      const report = await users.create({ name: "Report", email: "report@test.com", reportsTo: manager.id });
+      const manager = await users.create({
+        name: "Manager",
+        email: "manager@test.com",
+        whatsappNumber: "+14155550012",
+      });
+      const report = await users.create({
+        name: "Report",
+        email: "report@test.com",
+        whatsappNumber: "+14155550013",
+        reportsTo: manager.id,
+      });
 
       await db
         .insertInto("user_provider_identities")
@@ -2156,7 +2188,11 @@ describe("RBAC", () => {
   /** Create a member user and return a member session cookie. */
   async function createMemberSession(jwtSecret: string) {
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Member User" });
+    const user = await users.create({
+      name: "Member User",
+      email: "member-session@test.com",
+      whatsappNumber: "+14155550014",
+    });
     const token = await signJwt(user.id, "member", jwtSecret);
     return { memberId: user.id, memberCookie: `sketch_session=${token}` };
   }
@@ -2205,7 +2241,11 @@ describe("RBAC", () => {
 
       // Create another user
       const users = createUserRepository(db);
-      const other = await users.create({ name: "Other User" });
+      const other = await users.create({
+        name: "Other User",
+        email: "other-user@test.com",
+        whatsappNumber: "+14155550015",
+      });
 
       const res = await app.request(`/api/users/${other.id}`, {
         method: "PATCH",
@@ -2224,7 +2264,10 @@ describe("RBAC", () => {
       const { memberCookie } = await createMemberSession(jwtSecret);
 
       const users = createUserRepository(db);
-      const other = await users.create({ name: "Other" });
+      const other = await users.create({
+        name: "Other",
+        whatsappNumber: "+14155550016",
+      });
 
       const res = await app.request(`/api/users/${other.id}/verification`, {
         method: "POST",

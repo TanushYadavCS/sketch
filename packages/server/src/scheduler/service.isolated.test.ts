@@ -11,11 +11,13 @@
  */
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
 import { QueueManager } from "../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import { WHATSAPP_TEXT_LIMIT } from "../whatsapp/chunking";
 import type { ExecuteAutomationParams } from "../workflows/runtime";
 import { TaskScheduler } from "./service";
 
@@ -81,6 +83,7 @@ function buildMockSlack() {
 
 function buildMockWhatsApp(connected = true) {
   return {
+    getCapabilities: vi.fn().mockReturnValue({ templates: true }),
     sendText: vi.fn().mockResolvedValue({
       providerMessageId: "wa-message-1",
       providerConversationId: "5511999999999@s.whatsapp.net",
@@ -157,6 +160,8 @@ function buildDeps(
     },
     inboxMessagesRepo: {
       create: vi.fn().mockResolvedValue({ id: "inbox-1" }),
+      hasPendingForRecipientByKind: vi.fn().mockResolvedValue(false),
+      listPendingForRecipientByKind: vi.fn().mockResolvedValue([{ id: "inbox-1" }]),
     },
     sendDm: vi.fn().mockResolvedValue({ channelId: "D123", messageRef: "1111.0001" }),
     _mockRunAgent: mockRunAgent,
@@ -850,7 +855,7 @@ describe("executeTask() delivery routing", () => {
     );
   });
 
-  it("WhatsApp DM: sendMessage calls sendTemplate", async () => {
+  it("WhatsApp DM: sendMessage parks output and sends a task nudge when no session window is open", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -874,33 +879,22 @@ describe("executeTask() delivery routing", () => {
         providerConversationId: "5511999999999@s.whatsapp.net",
       },
       expect.objectContaining({
-        key: "whatsapp.proactive_update",
-        params: expect.objectContaining({ messageSummary: "WhatsApp message" }),
+        key: "whatsapp.task_nudge",
+        params: expect.objectContaining({ recipientName: "there" }),
+      }),
+    );
+    expect(deps.inboxMessagesRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipientUserId: "U_USER1",
+        senderUserId: "U_USER1",
+        message: "WhatsApp message",
+        kind: "workflow_output",
+        resolutionMode: "auto_consume",
       }),
     );
 
-    const captured = await db
-      .selectFrom("conversation_messages")
-      .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
-      .select([
-        "conversations.platform",
-        "conversations.kind",
-        "conversations.provider_conversation_id",
-        "conversation_messages.provider_message_id",
-        "conversation_messages.sender_jid",
-        "conversation_messages.is_bot",
-        "conversation_messages.text",
-      ])
-      .executeTakeFirstOrThrow();
-    expect(captured).toMatchObject({
-      platform: "whatsapp",
-      kind: "dm",
-      provider_conversation_id: "dm:+5511999999999",
-      provider_message_id: "wa-template-1",
-      sender_jid: "bot",
-      is_bot: 1,
-      text: "WhatsApp message",
-    });
+    const captured = await db.selectFrom("conversation_messages").selectAll().execute();
+    expect(captured).toHaveLength(0);
   });
 
   it("WhatsApp group: sendMessage captures the delivered bot message", async () => {
@@ -944,6 +938,63 @@ describe("executeTask() delivery routing", () => {
       is_bot: 1,
       text: "Group workflow result",
     });
+  });
+
+  it("WhatsApp DM: sendMessage chunks in-window text and captures one last-chunk ref", async () => {
+    const conversations = createConversationRepository(db);
+    const conversation = await conversations.getOrCreate(
+      { platform: "whatsapp", kind: "dm", providerConversationId: "5511999999999@s.whatsapp.net" },
+      "Requester",
+    );
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "wa-inbound-1",
+      senderJid: "+5511999999999",
+      senderName: "Requester",
+      isBot: false,
+      addressedToSketch: true,
+      text: "latest inbound",
+      providerTimestamp: new Date(Date.now() - 1_000).toISOString(),
+      receivedAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    const whatsapp = buildMockWhatsApp();
+    whatsapp.sendText = vi.fn(async (_target: unknown, _text: string) => ({
+      providerMessageId: `wa-message-${whatsapp.sendText.mock.calls.length}`,
+      providerConversationId: "5511999999999@s.whatsapp.net",
+      providerTimestamp: "2024-06-04T10:00:00.000Z",
+    }));
+    const deps = buildDeps(db, { whatsapp });
+    const scheduler = new TaskScheduler(deps as never);
+    const row = await repo.add({
+      ...baseTaskFields,
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "5511999999999@s.whatsapp.net",
+    });
+    const text = `${"a".repeat(WHATSAPP_TEXT_LIMIT)} ${"b".repeat(24)}`;
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await vi.waitFor(() => expect(lastExecuteAutomationParams).not.toBeNull());
+    await lastExecuteAutomationParams?.sendMessage?.(text);
+
+    expect(whatsapp.sendText).toHaveBeenCalledTimes(2);
+    expect(whatsapp.sendText).toHaveBeenNthCalledWith(
+      1,
+      { kind: "dm", phoneE164: "+5511999999999", providerConversationId: "5511999999999@s.whatsapp.net" },
+      "a".repeat(WHATSAPP_TEXT_LIMIT),
+    );
+    expect(whatsapp.sendText).toHaveBeenNthCalledWith(
+      2,
+      { kind: "dm", phoneE164: "+5511999999999", providerConversationId: "5511999999999@s.whatsapp.net" },
+      "b".repeat(24),
+    );
+    const captured = await db
+      .selectFrom("conversation_messages")
+      .select(["provider_message_id", "is_bot", "text"])
+      .where("is_bot", "=", 1)
+      .execute();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({ provider_message_id: "wa-message-2", is_bot: 1, text });
   });
 });
 

@@ -31,7 +31,7 @@
 import { type Context, Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
-import { isAdmin } from "../api/auth-helpers";
+import { getContentViewer, isAdmin } from "../api/auth-helpers";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo, readReviewFreezeMs } from "../db/repositories/entity-review";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
@@ -435,6 +435,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
         source: baseRow.seed_source,
         parentSourceId: baseRow.seed_source_id,
         limit: 50,
+        viewer: getContentViewer(c),
       });
       return c.json({ row: enrichedRow, evidence: enrichedEvidence, childTasks: tasks, childTaskCount: total });
     }

@@ -20,6 +20,7 @@ export interface UserRepository {
   searchByNamePrefix(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
   searchByNameSubstring(query: string, limit?: number, excludeUserId?: string): Promise<UserRow[]>;
   create(data: {
+    id?: string;
     name: string;
     slackUserId?: string;
     whatsappNumber?: string;
@@ -213,6 +214,7 @@ export function createUserRepository(db: UserDb): UserRepository {
     },
 
     async create(data: {
+      id?: string;
       name: string;
       slackUserId?: string;
       whatsappNumber?: string;
@@ -226,7 +228,7 @@ export function createUserRepository(db: UserDb): UserRepository {
       reportsTo?: string;
       allowedTools?: string[] | null;
     }) {
-      const id = randomUUID();
+      const id = data.id ?? randomUUID();
       await db
         .insertInto("users")
         .values({

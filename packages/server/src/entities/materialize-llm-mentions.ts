@@ -18,7 +18,7 @@ export async function materializeLlmExtractedFact(
   if (!mentionType) {
     return { kind: "skipped", reason: "missing_or_invalid_mention_type" };
   }
-  if (mentionType === "team" && deps.birthGateTypes.has("team")) {
+  if (mentionType === "team" && deps.birthGateTypes.has("team") && !deps.birthGateDryRun) {
     return { kind: "skipped", reason: "team_conversational_birth_gated" };
   }
   const normalized = normalizeEntityMatchName(mentionType, fact.subject_name);

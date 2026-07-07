@@ -57,14 +57,67 @@ export interface AgentDeliveryConfig {
   targetType: AgentDeliveryTargetType;
   targetId: string;
   label: string | null;
+  recipientUserId?: string;
   mentions?: AgentDeliveryMention[];
 }
+
+export type AgentSourceKey = `${AgentSourcePlatform}:${AgentSourceTargetType}:${string}`;
+export type AgentRouteFrequency = "daily" | "weekly" | "every_n_hours";
+
+export interface AgentRouteSchedule {
+  frequency: AgentRouteFrequency;
+  hour: number;
+  minute: number;
+  daysOfWeek?: number[];
+  intervalHours?: number;
+}
+
+export interface AgentCombinedDeliveryConfig extends AgentDeliveryConfig {
+  ackNonDm?: true;
+}
+
+export type AgentPerSourceDelivery =
+  | { kind: "self" }
+  | { kind: "off" }
+  | { kind: "target"; target: AgentDeliveryConfig };
+
+export type AgentDeliveryModel =
+  | {
+      mode: "per_source";
+      defaultRoute: "self" | "off";
+      perSource: Record<string, AgentPerSourceDelivery>;
+      combined: null;
+    }
+  | {
+      mode: "combined";
+      combined: AgentCombinedDeliveryConfig;
+    };
 
 export interface AgentSourceConfig {
   platform: AgentSourcePlatform;
   targetType: AgentSourceTargetType;
   targetId: string;
   label: string | null;
+}
+
+export type AgentRouteId = string;
+
+export type AgentRouteDestination =
+  | { kind: "self" }
+  | { kind: "off" }
+  | { kind: "member"; platform: "slack" | "whatsapp"; memberUserId: string }
+  | { kind: "channel"; platform: "slack"; targetType: "channel"; targetId: string; label: string | null }
+  | { kind: "channel"; platform: "whatsapp"; targetType: "group"; targetId: string; label: string | null };
+
+export interface AgentRoute {
+  id: AgentRouteId;
+  sources: AgentSourceKey[];
+  focus: string | null;
+  sections: Record<string, boolean> | null;
+  maxItemsPerSection: number | null;
+  schedule: AgentRouteSchedule | null;
+  destination: AgentRouteDestination;
+  enabled: boolean;
 }
 
 /**
@@ -76,7 +129,9 @@ export interface AgentUserPrefs {
   sections?: Record<string, boolean>;
   focus?: string | null;
   delivery?: AgentDeliveryConfig | null;
+  deliveryModel?: AgentDeliveryModel;
   sources?: AgentSourceConfig[];
+  routes?: AgentRoute[];
 }
 
 export interface AgentUserConfig {
@@ -155,6 +210,14 @@ export interface AgentOutputListResult {
   nextCursor: string | null;
 }
 
+export interface AgentUserConfigWithOwner {
+  userId: string;
+  name: string;
+  email: string | null;
+  authRole: string;
+  config: AgentUserConfig;
+}
+
 function withRefs(item: AgentOutputItemRow): AgentStoredItemRow {
   return {
     ...item,
@@ -177,6 +240,47 @@ export interface UpsertAgentConfigPatch {
  * `agent_key` so multiple agents share the same tables without cross-contamination.
  */
 export function createAgentOutputRepository(db: Kysely<DB>) {
+  async function outputWithItems(output: AgentOutputRow): Promise<AgentOutputWithItems> {
+    const items = await db
+      .selectFrom("agent_output_items")
+      .selectAll()
+      .where("agent_output_id", "=", output.id)
+      .orderBy("section_key", "asc")
+      .orderBy("sort_order", "asc")
+      .execute();
+    return {
+      output,
+      masthead: parseJson<AgentMasthead>(output.masthead_json),
+      items: items.map(withRefs),
+    };
+  }
+
+  async function outputsWithItems(rows: AgentOutputRow[]): Promise<AgentOutputWithItems[]> {
+    const ids = rows.map((row) => row.id);
+    const itemRows =
+      ids.length === 0
+        ? []
+        : await db
+            .selectFrom("agent_output_items")
+            .selectAll()
+            .where("agent_output_id", "in", ids)
+            .orderBy("agent_output_id", "asc")
+            .orderBy("section_key", "asc")
+            .orderBy("sort_order", "asc")
+            .execute();
+    const itemsByOutput = new Map<string, AgentStoredItemRow[]>();
+    for (const item of itemRows) {
+      const items = itemsByOutput.get(item.agent_output_id) ?? [];
+      items.push(withRefs(item));
+      itemsByOutput.set(item.agent_output_id, items);
+    }
+    return rows.map((output) => ({
+      output,
+      masthead: parseJson<AgentMasthead>(output.masthead_json),
+      items: itemsByOutput.get(output.id) ?? [],
+    }));
+  }
+
   return {
     async getConfig(agentKey: string, userId: string): Promise<AgentUserConfig> {
       const row = await db
@@ -186,6 +290,51 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .where("user_id", "=", userId)
         .executeTakeFirst();
       return toConfig(row);
+    },
+
+    async listHumanConfigs(agentKey: string): Promise<AgentUserConfigWithOwner[]> {
+      const rows = await db
+        .selectFrom("agent_user_configs as c")
+        .innerJoin("users as u", "u.id", "c.user_id")
+        .select([
+          "c.agent_key as agentKey",
+          "c.user_id as userId",
+          "c.enabled as enabled",
+          "c.schedule_hour as scheduleHour",
+          "c.schedule_minute as scheduleMinute",
+          "c.timezone as timezone",
+          "c.max_items_per_section as maxItemsPerSection",
+          "c.prefs_json as prefsJson",
+          "c.created_at as createdAt",
+          "c.updated_at as updatedAt",
+          "u.name as name",
+          "u.email as email",
+          "u.auth_role as authRole",
+        ])
+        .where("c.agent_key", "=", agentKey)
+        .where("u.type", "=", "human")
+        .orderBy("c.created_at", "asc")
+        .orderBy("c.user_id", "asc")
+        .execute();
+
+      return rows.map((row) => ({
+        userId: row.userId,
+        name: row.name,
+        email: row.email,
+        authRole: row.authRole,
+        config: toConfig({
+          agent_key: row.agentKey,
+          user_id: row.userId,
+          enabled: row.enabled,
+          schedule_hour: row.scheduleHour,
+          schedule_minute: row.scheduleMinute,
+          timezone: row.timezone,
+          max_items_per_section: row.maxItemsPerSection,
+          prefs_json: row.prefsJson,
+          created_at: row.createdAt,
+          updated_at: row.updatedAt,
+        }),
+      }));
     },
 
     async upsertConfig(
@@ -235,15 +384,22 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
       agentVersion: string;
       userId: string;
       outputDate: string;
+      periodKey?: string;
+      sourceKey?: string;
+      sourceLabel?: string | null;
       timezone: string;
       triggerType: AgentOutputTriggerType;
     }): Promise<{ row: AgentOutputRow; created: boolean }> {
       const now = new Date().toISOString();
+      const sourceKey = params.sourceKey ?? "";
       const row: NewAgentOutput = {
         id: randomUUID(),
         agent_key: params.agentKey,
         user_id: params.userId,
         output_date: params.outputDate,
+        period_key: params.periodKey ?? params.outputDate,
+        source_key: sourceKey,
+        source_label: params.sourceLabel ?? null,
         timezone: params.timezone,
         status: "running",
         trigger_type: params.triggerType,
@@ -260,7 +416,8 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
           .selectAll()
           .where("agent_key", "=", params.agentKey)
           .where("user_id", "=", params.userId)
-          .where("output_date", "=", params.outputDate)
+          .where("period_key", "=", params.periodKey ?? params.outputDate)
+          .where("source_key", "=", sourceKey)
           .where("status", "=", "running")
           .executeTakeFirst();
         if (existing) return { row: existing, created: false };
@@ -281,7 +438,29 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .executeTakeFirst();
     },
 
-    async findRunning(agentKey: string, userId: string, outputDate: string): Promise<AgentOutputRow | undefined> {
+    async findRunning(
+      agentKey: string,
+      userId: string,
+      periodKey: string,
+      sourceKey = "",
+    ): Promise<AgentOutputRow | undefined> {
+      return db
+        .selectFrom("agent_outputs")
+        .selectAll()
+        .where("agent_key", "=", agentKey)
+        .where("user_id", "=", userId)
+        .where("period_key", "=", periodKey)
+        .where("source_key", "=", sourceKey)
+        .where("status", "=", "running")
+        .orderBy("created_at", "desc")
+        .executeTakeFirst();
+    },
+
+    async findRunningAcrossScopes(
+      agentKey: string,
+      userId: string,
+      outputDate: string,
+    ): Promise<AgentOutputRow | undefined> {
       return db
         .selectFrom("agent_outputs")
         .selectAll()
@@ -293,19 +472,85 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .executeTakeFirst();
     },
 
-    async findLatestAny(agentKey: string, userId: string, outputDate: string): Promise<AgentOutputRow | undefined> {
+    async findLatestAny(
+      agentKey: string,
+      userId: string,
+      periodKey: string,
+      sourceKey = "",
+    ): Promise<AgentOutputRow | undefined> {
       return db
         .selectFrom("agent_outputs")
         .selectAll()
         .where("agent_key", "=", agentKey)
         .where("user_id", "=", userId)
-        .where("output_date", "=", outputDate)
+        .where("period_key", "=", periodKey)
+        .where("source_key", "=", sourceKey)
         .orderBy("created_at", "desc")
         .orderBy("id", "desc")
         .executeTakeFirst();
     },
 
-    async findLatestCompleted(
+    async findLatestCompletedForScope(
+      agentKey: string,
+      userId: string,
+      sourceKey: string,
+      periodKey?: string,
+    ): Promise<AgentOutputWithItems | null> {
+      let query = db
+        .selectFrom("agent_outputs")
+        .selectAll()
+        .where("agent_key", "=", agentKey)
+        .where("user_id", "=", userId)
+        .where("source_key", "=", sourceKey)
+        .where("status", "=", "completed");
+      if (periodKey) query = query.where("period_key", "=", periodKey);
+      const output = await query.orderBy("generated_at", "desc").orderBy("id", "desc").executeTakeFirst();
+      if (!output) return null;
+      const items = await db
+        .selectFrom("agent_output_items")
+        .selectAll()
+        .where("agent_output_id", "=", output.id)
+        .orderBy("section_key", "asc")
+        .orderBy("sort_order", "asc")
+        .execute();
+      return {
+        output,
+        masthead: parseJson<AgentMasthead>(output.masthead_json),
+        items: items.map(withRefs),
+      };
+    },
+
+    async findLatestCompletedForScopeOnDate(
+      agentKey: string,
+      userId: string,
+      sourceKey: string,
+      outputDate: string,
+    ): Promise<AgentOutputWithItems | null> {
+      const query = db
+        .selectFrom("agent_outputs")
+        .selectAll()
+        .where("agent_key", "=", agentKey)
+        .where("user_id", "=", userId)
+        .where("source_key", "=", sourceKey)
+        .where("output_date", "=", outputDate)
+        .where("status", "=", "completed");
+      const output = await query.orderBy("generated_at", "desc").orderBy("id", "desc").executeTakeFirst();
+      if (!output) return null;
+      const items = await db
+        .selectFrom("agent_output_items")
+        .selectAll()
+        .where("agent_output_id", "=", output.id)
+        .orderBy("section_key", "asc")
+        .orderBy("sort_order", "asc")
+        .execute();
+      return {
+        output,
+        masthead: parseJson<AgentMasthead>(output.masthead_json),
+        items: items.map(withRefs),
+      };
+    },
+
+    async findLatestCompletedAcrossScopes(
       agentKey: string,
       userId: string,
       outputDate: string,
@@ -356,6 +601,18 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         masthead: parseJson<AgentMasthead>(output.masthead_json),
         items: items.map(withRefs),
       };
+    },
+
+    async getByIdForHumanUser(agentKey: string, id: string): Promise<AgentOutputWithItems | null> {
+      const output = await db
+        .selectFrom("agent_outputs as o")
+        .innerJoin("users as u", "u.id", "o.user_id")
+        .selectAll("o")
+        .where("o.agent_key", "=", agentKey)
+        .where("o.id", "=", id)
+        .where("u.type", "=", "human")
+        .executeTakeFirst();
+      return output ? outputWithItems(output) : null;
     },
 
     async listCompletedForUser(
@@ -423,6 +680,79 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
       };
     },
 
+    async listCompletedForHumanUsers(
+      agentKey: string,
+      options: { limit?: number; cursor?: string | null } = {},
+    ): Promise<AgentOutputListResult> {
+      const limit = Math.max(1, Math.min(options.limit ?? 20, 50));
+      let query = db
+        .selectFrom("agent_outputs as o")
+        .innerJoin("users as u", "u.id", "o.user_id")
+        .selectAll("o")
+        .where("o.agent_key", "=", agentKey)
+        .where("o.status", "=", "completed")
+        .where("u.type", "=", "human");
+
+      if (options.cursor) {
+        const cursorRow = await db
+          .selectFrom("agent_outputs")
+          .selectAll()
+          .where("agent_key", "=", agentKey)
+          .where("id", "=", options.cursor)
+          .executeTakeFirst();
+        if (cursorRow?.generated_at) {
+          query = query.where((eb) =>
+            eb.or([
+              eb("o.generated_at", "<", cursorRow.generated_at),
+              eb.and([eb("o.generated_at", "=", cursorRow.generated_at), eb("o.id", "<", cursorRow.id)]),
+            ]),
+          );
+        }
+      }
+
+      const rows = await query
+        .orderBy("o.generated_at", "desc")
+        .orderBy("o.id", "desc")
+        .limit(limit + 1)
+        .execute();
+      const visibleRows = rows.slice(0, limit);
+      return {
+        outputs: await outputsWithItems(visibleRows),
+        nextCursor: rows.length > limit ? (visibleRows[visibleRows.length - 1]?.id ?? null) : null,
+      };
+    },
+
+    async findLatestCompletedAcrossHumanUsers(
+      agentKey: string,
+      outputDate: string,
+    ): Promise<AgentOutputWithItems | null> {
+      const output = await db
+        .selectFrom("agent_outputs as o")
+        .innerJoin("users as u", "u.id", "o.user_id")
+        .selectAll("o")
+        .where("o.agent_key", "=", agentKey)
+        .where("o.output_date", "=", outputDate)
+        .where("o.status", "=", "completed")
+        .where("u.type", "=", "human")
+        .orderBy("o.generated_at", "desc")
+        .orderBy("o.id", "desc")
+        .executeTakeFirst();
+      return output ? outputWithItems(output) : null;
+    },
+
+    async findRunningAcrossHumanUsers(agentKey: string, outputDate: string): Promise<AgentOutputRow | undefined> {
+      return db
+        .selectFrom("agent_outputs as o")
+        .innerJoin("users as u", "u.id", "o.user_id")
+        .selectAll("o")
+        .where("o.agent_key", "=", agentKey)
+        .where("o.output_date", "=", outputDate)
+        .where("o.status", "=", "running")
+        .where("u.type", "=", "human")
+        .orderBy("o.created_at", "desc")
+        .executeTakeFirst();
+    },
+
     async completeOutput(params: {
       outputId: string;
       masthead: AgentMasthead;
@@ -480,6 +810,15 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .set({ status: "failed", error_message: message, updated_at: new Date().toISOString() })
         .where("id", "=", outputId)
         .where("status", "=", "running")
+        .execute();
+    },
+
+    async markDeliveryFailed(outputId: string, message: string): Promise<void> {
+      await db
+        .updateTable("agent_outputs")
+        .set({ status: "failed", error_message: message, updated_at: new Date().toISOString() })
+        .where("id", "=", outputId)
+        .where("status", "=", "completed")
         .execute();
     },
 

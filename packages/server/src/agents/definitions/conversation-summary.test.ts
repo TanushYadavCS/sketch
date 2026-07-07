@@ -121,6 +121,8 @@ describe("buildConversationSummaryRuntimeContext", () => {
         focus: null,
         delivery: null,
         sources: [source()],
+        sourceKey: "slack:channel:C_SUMMARY",
+        deliveryPlatform: "whatsapp",
       },
     });
 
@@ -129,6 +131,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
       start: "2026-06-30T18:00:00.000Z",
       end: "2026-07-01T18:00:00.000Z",
     });
+    expect(context.deliveryPlatform).toBe("whatsapp");
     expect(context.summarySources).toEqual([
       expect.objectContaining({
         label: "#summary-room",
@@ -148,6 +151,8 @@ describe("buildConversationSummaryRuntimeContext", () => {
         agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
         user_id: user.id,
         output_date: "2026-07-01",
+        source_key: "slack:channel:C_SUMMARY",
+        source_label: "#summary-room",
         timezone: "UTC",
         status: "completed",
         trigger_type: "scheduled",
@@ -191,6 +196,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
         focus: null,
         delivery: null,
         sources: [source()],
+        sourceKey: "slack:channel:C_SUMMARY",
       },
     });
 
@@ -206,6 +212,66 @@ describe("buildConversationSummaryRuntimeContext", () => {
           expect.objectContaining({ text: "arrived while the prior summary was still writing" }),
           expect.objectContaining({ text: "later unblocker" }),
         ],
+      }),
+    ]);
+  });
+
+  it("floors a manual weekly run to the frequency period even when a recent watermark exists", async () => {
+    const conversationId = await seedConversation(db);
+    await db
+      .insertInto("agent_outputs")
+      .values({
+        id: "summary-recent",
+        agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+        user_id: user.id,
+        output_date: "2026-07-01",
+        source_key: "slack:channel:C_SUMMARY",
+        source_label: "#summary-room",
+        timezone: "UTC",
+        status: "completed",
+        trigger_type: "manual",
+        agent_version: "test",
+        generated_at: "2026-07-01T17:05:00.000Z",
+        raw_payload_json: JSON.stringify({
+          summaryWindow: { start: "2026-07-01T16:00:00.000Z", end: "2026-07-01T17:00:00.000Z" },
+        }),
+      })
+      .execute();
+    await seedMessage(db, conversationId, {
+      id: "m-earlier-week",
+      text: "earlier this week, before the last run",
+      receivedAt: "2026-06-28T09:00:00.000Z",
+    });
+
+    const context = await buildConversationSummaryRuntimeContext({
+      db,
+      user,
+      outputDate: "2026-07-01",
+      timezone: "UTC",
+      now: NOW,
+      adminCanReadAllFiles: false,
+      contentUserEmails: ["user@example.com"],
+      agentConfig: {
+        enabledSections: {},
+        maxItemsPerSection: 5,
+        focus: null,
+        delivery: null,
+        sources: [source()],
+        sourceKey: "slack:channel:C_SUMMARY",
+        firstRunLookbackHours: 168,
+        floorWindowToPeriod: true,
+      },
+    });
+
+    expect(context.summaryWindow).toMatchObject({
+      mode: "floored_to_last_168h",
+      start: "2026-06-24T18:00:00.000Z",
+      previousOutputId: "summary-recent",
+    });
+    expect(context.summarySources).toEqual([
+      expect.objectContaining({
+        messageCount: 1,
+        messages: [expect.objectContaining({ text: "earlier this week, before the last run" })],
       }),
     ]);
   });

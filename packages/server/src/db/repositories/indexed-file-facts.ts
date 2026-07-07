@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type { IndexedFileFactRaw, LlmTaskCandidate, LlmTaskFactRaw } from "../../connectors/types";
 import type { DB } from "../schema";
+import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 
 export type IndexedFileFactType =
   | "attendee"
@@ -806,6 +807,28 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
       };
     },
 
+    async touchActiveFactsForFile(input: {
+      indexedFileId: string;
+      source: string;
+      factType: IndexedFileFactType;
+      lastSeenSyncRunId: string;
+      contentHash?: string | null;
+    }): Promise<number> {
+      const result = await db
+        .updateTable("indexed_file_facts")
+        .set({
+          last_seen_sync_run_id: input.lastSeenSyncRunId,
+          content_hash: input.contentHash ?? null,
+          updated_at: new Date().toISOString(),
+        })
+        .where("indexed_file_id", "=", input.indexedFileId)
+        .where("source", "=", input.source)
+        .where("fact_type", "=", input.factType)
+        .where("deleted_at", "is", null)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0);
+    },
+
     async clearMaterializedAtForActiveFacts(indexedFileIds: string[]): Promise<void> {
       if (indexedFileIds.length === 0) return;
       await db
@@ -860,14 +883,18 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
       source: string;
       parentSourceId: string;
       limit: number;
+      viewer?: FileViewer;
     }): Promise<{ tasks: ChildTask[]; total: number }> {
-      const base = db
+      let base = db
         .selectFrom("indexed_file_facts as f")
         .innerJoin("indexed_files as i", "i.id", "f.indexed_file_id")
         .where("f.fact_type", "=", "parent_entity")
         .where("f.source", "=", opts.source)
         .where("f.subject_source_id", "=", opts.parentSourceId)
         .where("f.deleted_at", "is", null);
+      if (opts.viewer && !opts.viewer.isAdmin) {
+        base = base.where(fileVisibilityPredicate(opts.viewer, "i"));
+      }
 
       const countRow = await base
         .select((eb) => eb.fn.count("f.indexed_file_id").distinct().as("c"))

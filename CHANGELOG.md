@@ -2,6 +2,46 @@
 
 All notable changes to this project are documented here.
 
+## [0.46.0] -- 2026-07-06
+
+- Context graph moves from gated implementation to a broader GA-ready surface: entity dedup now uses birth gates, structural provenance tiers, embedding/adjudication passes, connector-aware hierarchy, task/commitment/decision/feature/work-cycle sub-entities, and a Your Org review surface for inspecting and correcting product/project/team structure.
+- Summariser configuration is now shared across tenant admins, with org-admin aggregation so admins can see and manage all summariser routes instead of only their own local config.
+- Managed member invites now support email-only registration while requiring tenant-scoped tokens for managed member registration, preserving the email-first identity flow without treating WhatsApp as an invite-delivery channel.
+
+## [0.45.1] -- 2026-07-05
+
+- Managed WhatsApp DMs now preserve inbound media from the platform shared-number gateway: platform media references are accepted on `/api/system/whatsapp/managed/events`, downloaded with the tenant token, stored as normal workspace attachments, and passed into the agent. This fixes image+caption DMs being treated as text-only on managed tenants.
+- Managed media downloads are constrained to the platform media endpoint and retain the existing no-media-reference fallback for older platform events.
+
+## [0.45.0] -- 2026-07-05
+
+- Summariser agents now route per source: each Slack channel or WhatsApp group can have its own route with an independent destination, schedule, focus, and sections, instead of one shared configuration. Existing single-destination summarisers are preserved.
+- Summariser delivery targets expanded: a route can post back to its source, to a specific Slack channel or WhatsApp group, or DM a teammate on Slack or WhatsApp. WhatsApp DMs respect the 24h customer-service window via the inbox/nudge path.
+- Each summariser route gets its own Runs and Config tabs with a scoped "run now" and its own run history, mirroring the daily brief page.
+- WhatsApp group history is synced into conversations on connect, with a manual refresh endpoint, so newly added groups and their recent messages are available as summariser sources without waiting for new traffic.
+- Summariser schedules are now configurable as daily, weekly, or every-N-hours, and manual runs floor the window to the selected frequency period.
+- Summariser output formatting is cleaner on web and in chat, delivers all items inline rather than linking out, and applies emphasis correctly on WhatsApp.
+
+## [0.44.0] -- 2026-07-04
+
+- Managed WhatsApp templates are now resolved at send time by the platform: the managed provider sends the logical template key and parameters, and the platform owns the logical-to-Wati mapping. Managed tenants no longer need template mapping rows seeded in their database. Unknown templates surface as a `template_not_found` provider error. Self-hosted direct-Wati template mapping is unchanged.
+- Wati session sends that return an HTTP 200 failure body (`result: false`) are now treated as errors instead of successes, so delivery fallbacks and keep-alive metrics see the real outcome.
+
+## [0.43.0] -- 2026-07-04
+
+- WhatsApp 24h-window keep-alive: an hourly internal job pings users whose customer-service window is about to lapse (last inbound 21-23h ago) with a personalized session text prompting a reply, so proactive deliveries can keep arriving as full messages instead of template nudges. One ping per window cycle, aware of upcoming scheduled tasks, no-op on providers without window semantics (Baileys). Gated behind `WHATSAPP_WINDOW_KEEPALIVE_ENABLED` (default off).
+
+## [0.42.1] -- 2026-07-04
+
+- Fix WhatsApp proactive delivery for scheduled tasks, workflows, and agent outputs on managed tenants whose delivery target was stored as a Wati conversation id: the sender now falls back to the recipient's registered phone number (preserving the provider conversation id), the target parser understands `wati:+<phone>` ids and no longer fabricates invalid phone numbers from opaque ids, and newly created tasks store durable `dm:+<phone>` targets.
+
+## [0.42.0] -- 2026-07-03
+
+- WhatsApp proactive delivery is now session-first: reminders, workflow outputs, and agent deliveries send full multi-line content as a normal message when the user was active in the last 23 hours. Outside that window the output is parked in the user's inbox and a short approved nudge template is sent instead; the agent delivers the parked output on the user's next reply, and multiple pending outputs produce a single nudge.
+- Explicit template sends (magic links, onboarding introductions) are unchanged and always use their dedicated templates.
+- Managed WhatsApp errors from the platform now carry a provider code (contact not found, window expired) used to trigger the inbox fallback.
+- Template parameters are defensively sanitized to single-line values.
+
 ## [0.41.2] -- 2026-07-03
 
 - Fix(OpenRouter): request JSON mode for enrichment JSON calls and require providers to honor structured-output parameters, preventing prose responses from breaking smart entity extraction.

@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { areJidsSameUser } from "@whiskeysockets/baileys";
 import type { Kysely, Selectable } from "kysely";
@@ -7,13 +9,22 @@ import type { AgentOutputWriter, WriteAgentOutputPayload } from "../agent/tools/
 import { ensureWorkspace } from "../agent/workspace";
 import type { Config } from "../config";
 import {
+  type AgentCombinedDeliveryConfig,
   type AgentDeliveryConfig,
   type AgentDeliveryMention,
+  type AgentDeliveryModel,
   type AgentMasthead,
   type AgentOutputItemInput,
   type AgentOutputRow,
   type AgentOutputTriggerType,
+  type AgentPerSourceDelivery,
+  type AgentRoute,
+  type AgentRouteDestination,
+  type AgentRouteFrequency,
+  type AgentRouteSchedule,
   type AgentSourceConfig,
+  type AgentSourceKey,
+  type AgentUserConfigWithOwner,
   type AgentUserPrefs,
   createAgentOutputRepository,
 } from "../db/repositories/agent-outputs";
@@ -25,14 +36,36 @@ import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppBot } from "../whatsapp/bot";
+import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
 import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { getAgentDefinition, listAgentDefinitions, requireAgentDefinition } from "./registry";
 import type { AgentApiItem, AgentDefinition, AgentSourceConfigDef } from "./types";
 
 const RUNNING_STALE_AFTER_MS = 30 * 60 * 1000;
 const SCHEDULED_FAILURE_SUPPRESS_AFTER_MS = 60 * 60 * 1000;
+const ROUTE_FREQUENCIES = new Set<AgentRouteFrequency>(["daily", "weekly", "every_n_hours"]);
+const ROUTE_INTERVAL_HOURS = new Set([1, 2, 3, 4, 6, 8, 12]);
+const WEEKDAY_INDEX = new Map([
+  ["Sun", 0],
+  ["Mon", 1],
+  ["Tue", 2],
+  ["Wed", 3],
+  ["Thu", 4],
+  ["Fri", 5],
+  ["Sat", 6],
+]);
 
 type UserRow = Selectable<UsersTable>;
+
+export type AgentViewerRole = "admin" | "member";
+
+export type AgentGenerationScope =
+  | { kind: "combined"; sourceKey: string; sourceLabel: string | null }
+  | { kind: "source"; source: AgentSourceConfig; sourceKey: string; sourceLabel: string | null };
+
+export type ResolvedRoute = AgentRoute & { resolvedSources: AgentSourceConfig[] };
+
+type AgentExpectedScope = AgentGenerationScope & { sources: AgentSourceConfig[]; route?: ResolvedRoute };
 
 export interface AgentRunServiceDeps {
   db: Kysely<DB>;
@@ -57,8 +90,17 @@ export interface RequestAgentGenerationParams {
   agentKey: string;
   userId: string;
   outputDate?: string;
+  periodKey?: string;
   triggerType: AgentOutputTriggerType;
   skipIfCompleted?: boolean;
+  scopeKeys?: string[];
+  routeIds?: string[];
+}
+
+export interface AgentDueGenerationGroup {
+  outputDate: string;
+  periodKey: string;
+  scopeKeys: string[];
 }
 
 export interface ResolvedAgentConfig {
@@ -70,7 +112,10 @@ export interface ResolvedAgentConfig {
   enabledSections: Record<string, boolean>;
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  deliveryModel: AgentDeliveryModel;
   sources: AgentSourceConfig[];
+  routes: ResolvedRoute[];
+  configuredRoutes: AgentRoute[];
 }
 
 export interface AgentSectionView {
@@ -92,9 +137,31 @@ export interface AgentConfigView {
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  deliveryModel: AgentDeliveryModel;
   sourceConfig: AgentSourceConfigDef | null;
   sources: AgentSourceConfig[];
+  routes: AgentConfigRouteView[];
   sections: AgentSectionView[];
+}
+
+export interface AgentRouteOwnerView {
+  userId: string;
+  name: string;
+  email: string | null;
+  authRole: string;
+}
+
+export type AgentConfigRouteView = AgentRoute & { owner?: AgentRouteOwnerView };
+
+export interface AgentRouteMember {
+  userId: string;
+  name: string;
+  slackUserId: string;
+}
+
+export interface AgentWhatsAppDmMember {
+  userId: string;
+  name: string;
 }
 
 export interface AgentOutputApi {
@@ -104,6 +171,8 @@ export interface AgentOutputApi {
   outputDate: string;
   timezone: string;
   status: string;
+  sourceKey: string;
+  sourceLabel: string | null;
   generatedAt: string | null;
   masthead: AgentMasthead | null;
   sections: Record<string, AgentApiItem[]>;
@@ -119,10 +188,433 @@ export interface AgentSummaryView {
   enabled: boolean;
   scheduleHour: number;
   scheduleMinute: number;
+  sourceConfig: AgentSourceConfigDef | null;
+  sources: AgentSourceConfig[];
+  routes: AgentConfigRouteView[];
+}
+
+export interface AgentConfigUpdatePatch {
+  enabled?: boolean;
+  scheduleHour?: number;
+  scheduleMinute?: number;
+  maxItemsPerSection?: number;
+  sections?: Record<string, boolean>;
+  focus?: string | null;
+  delivery?: AgentDeliveryConfig | null;
+  deliveryModel?: AgentDeliveryModel;
+  sources?: AgentSourceConfig[];
+  routes?: AgentConfigRouteView[];
 }
 
 export class AgentDeliveryTargetError extends Error {}
 export class AgentSourceTargetError extends Error {}
+
+export function sourceKeyForTarget(
+  target: Pick<AgentSourceConfig, "platform" | "targetType" | "targetId">,
+): AgentSourceKey {
+  return `${target.platform}:${target.targetType}:${target.targetId}`;
+}
+
+function deliveryKeyForTarget(target: Pick<AgentDeliveryConfig, "platform" | "targetType" | "targetId">): string {
+  return `${target.platform}:${target.targetType}:${target.targetId}`;
+}
+
+function isDmDelivery(delivery: AgentDeliveryConfig): boolean {
+  return delivery.targetType === "dm";
+}
+
+function sourceAsDelivery(source: AgentSourceConfig): AgentDeliveryConfig {
+  return {
+    enabled: true,
+    platform: source.platform,
+    targetType: source.targetType,
+    targetId: source.targetId,
+    label: source.label,
+  };
+}
+
+function stableRouteHash(parts: readonly string[]): string {
+  return createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 12);
+}
+
+function canonicalRouteSources(sources: readonly AgentSourceKey[]): AgentSourceKey[] {
+  return [...sources].sort();
+}
+
+function routeScopeKeyForSources(sources: readonly AgentSourceKey[]): string {
+  if (sources.length === 1) return sources[0];
+  return `route:${stableRouteHash(canonicalRouteSources(sources))}`;
+}
+
+function routeIdForSources(sources: readonly AgentSourceKey[]): string {
+  return routeScopeKeyForSources(sources);
+}
+
+const ORG_ROUTE_ID_PREFIX = "org:";
+
+function encodeRouteIdSegment(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
+}
+
+function decodeRouteIdSegment(value: string): string | null {
+  try {
+    return Buffer.from(value, "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function encodeOrgRouteId(ownerUserId: string, routeId: string): string {
+  return `${ORG_ROUTE_ID_PREFIX}${encodeRouteIdSegment(ownerUserId)}:${encodeRouteIdSegment(routeId)}`;
+}
+
+function decodeOrgRouteId(routeId: string): { ownerUserId: string; routeId: string } | null {
+  if (!routeId.startsWith(ORG_ROUTE_ID_PREFIX)) return null;
+  const [ownerSegment, routeSegment, ...extra] = routeId.slice(ORG_ROUTE_ID_PREFIX.length).split(":");
+  if (!ownerSegment || !routeSegment || extra.length > 0) return null;
+  const ownerUserId = decodeRouteIdSegment(ownerSegment);
+  const decodedRouteId = decodeRouteIdSegment(routeSegment);
+  return ownerUserId && decodedRouteId ? { ownerUserId, routeId: decodedRouteId } : null;
+}
+
+function routeOwnerView(owner: AgentUserConfigWithOwner): AgentRouteOwnerView {
+  return {
+    userId: owner.userId,
+    name: owner.name,
+    email: owner.email,
+    authRole: owner.authRole,
+  };
+}
+
+function routeWithOwner(route: AgentRoute, owner: AgentUserConfigWithOwner): AgentConfigRouteView {
+  return {
+    ...route,
+    id: encodeOrgRouteId(owner.userId, route.id),
+    owner: routeOwnerView(owner),
+  };
+}
+
+function stripOrgRouteOwner(route: AgentConfigRouteView): { ownerUserId: string | null; route: AgentRoute } {
+  const decoded = decodeOrgRouteId(route.id);
+  const { owner: _owner, ...rest } = route;
+  return {
+    ownerUserId: decoded?.ownerUserId ?? null,
+    route: {
+      ...rest,
+      id: decoded?.routeId ?? route.id,
+    },
+  };
+}
+
+export function scopeKeyForRoute(route: Pick<AgentRoute, "sources">, resolvedSources: AgentSourceConfig[]): string {
+  if (route.sources.length === 1) return sourceKeyForTarget(resolvedSources[0] ?? parseSourceKey(route.sources[0]));
+  return routeScopeKeyForSources(route.sources);
+}
+
+export function labelForRoute(route: Pick<AgentRoute, "sources">, resolvedSources: AgentSourceConfig[]): string | null {
+  if (resolvedSources.length === 0) return null;
+  const first = resolvedSources[0].label ?? resolvedSources[0].targetId;
+  return route.sources.length === 1 ? first : `${first} +${route.sources.length - 1}`;
+}
+
+function parseSourceKey(sourceKey: AgentSourceKey): AgentSourceConfig {
+  const [platform, targetType, ...targetParts] = sourceKey.split(":");
+  return {
+    platform: platform as AgentSourceConfig["platform"],
+    targetType: targetType as AgentSourceConfig["targetType"],
+    targetId: targetParts.join(":"),
+    label: null,
+  };
+}
+
+function routeFromDefault(defaultRoute: "self" | "off"): AgentPerSourceDelivery {
+  return defaultRoute === "self" ? { kind: "self" } : { kind: "off" };
+}
+
+function normalizePerSourceDelivery(value: unknown, defaultRoute: "self" | "off"): AgentPerSourceDelivery {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const kind = (value as Record<string, unknown>).kind;
+    if (kind === "self" || kind === "off") return { kind };
+  }
+  return routeFromDefault(defaultRoute);
+}
+
+function looksLikeDeliveryConfig(value: unknown): value is AgentDeliveryConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  return (
+    raw.enabled === true &&
+    (raw.platform === "slack" || raw.platform === "whatsapp") &&
+    (raw.targetType === "channel" || raw.targetType === "dm" || raw.targetType === "group") &&
+    typeof raw.targetId === "string" &&
+    raw.targetId.length > 0
+  );
+}
+
+function normalizeDeliveryModelFromValue(value: unknown, sources: AgentSourceConfig[]): AgentDeliveryModel | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.mode === "combined" && looksLikeDeliveryConfig(raw.combined)) {
+    const combined = raw.combined as AgentCombinedDeliveryConfig;
+    return {
+      mode: "combined",
+      combined: {
+        ...combined,
+        ...(combined.ackNonDm === true ? { ackNonDm: true as const } : {}),
+      },
+    };
+  }
+
+  if (raw.mode !== "per_source") return null;
+  const defaultRoute = raw.defaultRoute === "self" ? "self" : "off";
+  const rawPerSource =
+    raw.perSource && typeof raw.perSource === "object" && !Array.isArray(raw.perSource)
+      ? (raw.perSource as Record<string, unknown>)
+      : {};
+  const perSource: Record<string, AgentPerSourceDelivery> = {};
+  for (const source of sources) {
+    const key = sourceKeyForTarget(source);
+    perSource[key] = normalizePerSourceDelivery(rawPerSource[key], defaultRoute);
+  }
+  return { mode: "per_source", defaultRoute, perSource, combined: null };
+}
+
+function normalizeLegacyDeliveryModel(
+  delivery: AgentDeliveryConfig | null | undefined,
+  sources: AgentSourceConfig[],
+): AgentDeliveryModel {
+  const offModel = (): AgentDeliveryModel => ({
+    mode: "per_source",
+    defaultRoute: "off",
+    perSource: Object.fromEntries(sources.map((source) => [sourceKeyForTarget(source), { kind: "off" as const }])),
+    combined: null,
+  });
+  if (!delivery) return offModel();
+
+  const matchingSource = sources.find((source) => sourceKeyForTarget(source) === deliveryKeyForTarget(delivery));
+  if (matchingSource) {
+    return {
+      mode: "per_source",
+      defaultRoute: "off",
+      perSource: Object.fromEntries(
+        sources.map((source) => [
+          sourceKeyForTarget(source),
+          { kind: sourceKeyForTarget(source) === sourceKeyForTarget(matchingSource) ? "self" : "off" },
+        ]),
+      ) as Record<string, AgentPerSourceDelivery>,
+      combined: null,
+    };
+  }
+
+  return {
+    mode: "combined",
+    combined: {
+      ...delivery,
+      ...(!isDmDelivery(delivery) ? { ackNonDm: true as const } : {}),
+    },
+  };
+}
+
+function reconcileDeliveryModel(model: AgentDeliveryModel, sources: AgentSourceConfig[]): AgentDeliveryModel {
+  if (model.mode === "combined") return model;
+  const perSource: Record<string, AgentPerSourceDelivery> = {};
+  for (const source of sources) {
+    const key = sourceKeyForTarget(source);
+    perSource[key] = normalizePerSourceDelivery(model.perSource[key], model.defaultRoute);
+  }
+  return { ...model, perSource, combined: null };
+}
+
+function projectLegacyDelivery(model: AgentDeliveryModel, sources: AgentSourceConfig[]): AgentDeliveryConfig | null {
+  if (model.mode === "combined") {
+    const { ackNonDm: _ackNonDm, ...delivery } = model.combined;
+    return delivery;
+  }
+
+  const selfSources = sources.filter((source) => model.perSource[sourceKeyForTarget(source)]?.kind === "self");
+  return selfSources.length === 1 ? sourceAsDelivery(selfSources[0]) : null;
+}
+
+function normalizeRouteDestination(value: unknown): AgentRouteDestination | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.kind === "self" || raw.kind === "off") return { kind: raw.kind };
+  if (raw.kind === "member") {
+    if (raw.platform !== "slack" && raw.platform !== "whatsapp") return null;
+    const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
+    return memberUserId ? { kind: "member", platform: raw.platform, memberUserId } : null;
+  }
+  if (raw.kind === "channel") {
+    const targetId = typeof raw.targetId === "string" ? raw.targetId.trim() : "";
+    if (!targetId) return null;
+    const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : null;
+    if (raw.platform === "slack" && raw.targetType === "channel") {
+      return { kind: "channel", platform: "slack", targetType: "channel", targetId, label };
+    }
+    if (raw.platform === "whatsapp" && raw.targetType === "group") {
+      return { kind: "channel", platform: "whatsapp", targetType: "group", targetId, label };
+    }
+  }
+  return null;
+}
+
+function normalizeRouteSchedule(value: unknown): AgentRoute["schedule"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (
+    !Number.isInteger(raw.hour) ||
+    !Number.isInteger(raw.minute) ||
+    Number(raw.hour) < 0 ||
+    Number(raw.hour) > 23 ||
+    Number(raw.minute) < 0 ||
+    Number(raw.minute) > 59
+  ) {
+    return null;
+  }
+  const frequency = raw.frequency === undefined ? "daily" : raw.frequency;
+  if (!ROUTE_FREQUENCIES.has(frequency as AgentRouteFrequency)) return null;
+  const base = { frequency: frequency as AgentRouteFrequency, hour: Number(raw.hour), minute: Number(raw.minute) };
+  if (base.frequency === "daily") return base;
+  if (base.frequency === "weekly") {
+    if (!Array.isArray(raw.daysOfWeek)) return null;
+    const daysOfWeek = [...new Set(raw.daysOfWeek)];
+    if (
+      daysOfWeek.length === 0 ||
+      daysOfWeek.some((day) => !Number.isInteger(day) || Number(day) < 0 || Number(day) > 6)
+    ) {
+      return null;
+    }
+    return { ...base, daysOfWeek: daysOfWeek.map(Number) };
+  }
+  if (!Number.isInteger(raw.intervalHours) || !ROUTE_INTERVAL_HOURS.has(Number(raw.intervalHours))) return null;
+  return { ...base, intervalHours: Number(raw.intervalHours) };
+}
+
+function normalizeRouteSections(value: unknown): Record<string, boolean> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, enabled]) => [key, Boolean(enabled)]),
+  );
+}
+
+function normalizeRouteSources(value: unknown): AgentSourceKey[] {
+  if (!Array.isArray(value)) return [];
+  const result: AgentSourceKey[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const source = parseSourceKey(entry as AgentSourceKey);
+    if (
+      (source.platform !== "slack" && source.platform !== "whatsapp") ||
+      (source.targetType !== "channel" && source.targetType !== "group") ||
+      !source.targetId
+    ) {
+      continue;
+    }
+    const key = sourceKeyForTarget(source);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(key);
+  }
+  return result;
+}
+
+function normalizeRoutesFromValue(value: unknown): AgentRoute[] | null {
+  if (!Array.isArray(value)) return null;
+  const routes: AgentRoute[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const raw = entry as Record<string, unknown>;
+    const sources = normalizeRouteSources(raw.sources);
+    if (sources.length === 0) continue;
+    const destination = normalizeRouteDestination(raw.destination) ?? { kind: "off" as const };
+    const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : routeIdForSources(sources);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    routes.push({
+      id,
+      sources,
+      focus: typeof raw.focus === "string" && raw.focus.trim() ? raw.focus.trim() : null,
+      sections: normalizeRouteSections(raw.sections),
+      maxItemsPerSection:
+        Number.isInteger(raw.maxItemsPerSection) && Number(raw.maxItemsPerSection) > 0
+          ? Number(raw.maxItemsPerSection)
+          : null,
+      schedule: normalizeRouteSchedule(raw.schedule),
+      destination,
+      enabled: raw.enabled !== false,
+    });
+  }
+  return routes;
+}
+
+function synthesizeRoutesFromDeliveryModel(
+  deliveryModel: AgentDeliveryModel,
+  sources: AgentSourceConfig[],
+  prefs: AgentUserPrefs,
+  maxItemsPerSection: number,
+): AgentRoute[] {
+  const content = {
+    focus: prefs.focus?.trim() ? prefs.focus.trim() : null,
+    sections: prefs.sections ?? null,
+    maxItemsPerSection,
+    schedule: null,
+    enabled: true,
+  };
+
+  if (deliveryModel.mode === "combined") {
+    const routeSources = sources.map(sourceKeyForTarget);
+    if (routeSources.length === 0) return [];
+    return [
+      {
+        id: routeIdForSources(routeSources),
+        sources: routeSources,
+        ...content,
+        destination: { kind: "off" },
+      },
+    ];
+  }
+
+  return sources.map((source) => {
+    const sourceKey = sourceKeyForTarget(source);
+    const delivery = normalizePerSourceDelivery(deliveryModel.perSource[sourceKey], deliveryModel.defaultRoute);
+    return {
+      id: sourceKey,
+      sources: [sourceKey],
+      ...content,
+      destination: delivery.kind === "self" ? { kind: "self" } : { kind: "off" },
+    };
+  });
+}
+
+function enabledSectionsForRoute(def: AgentDefinition, route: AgentRoute | undefined): Record<string, boolean> {
+  const sections: Record<string, boolean> = {};
+  for (const section of def.sections) {
+    sections[section.key] = route?.sections?.[section.key] ?? section.enabledByDefault;
+  }
+  return sections;
+}
+
+function enabledSectionsForScope(
+  def: AgentDefinition,
+  config: Pick<ResolvedAgentConfig, "enabledSections">,
+  route: AgentRoute | undefined,
+): Record<string, boolean> {
+  return route ? enabledSectionsForRoute(def, route) : config.enabledSections;
+}
+
+function maxItemsPerSectionForRoute(def: AgentDefinition, route: AgentRoute | undefined): number {
+  return route?.maxItemsPerSection ?? def.defaults.maxItemsPerSection;
+}
+
+function maxItemsPerSectionForScope(
+  def: AgentDefinition,
+  config: Pick<ResolvedAgentConfig, "maxItemsPerSection">,
+  route: AgentRoute | undefined,
+): number {
+  return route ? maxItemsPerSectionForRoute(def, route) : config.maxItemsPerSection;
+}
 
 function whatsappNumberToJid(whatsappNumber: string): string {
   return `${normalizeWhatsappNumber(whatsappNumber)}@s.whatsapp.net`;
@@ -195,6 +687,84 @@ function localDateInTimezone(now: Date, timezone: string): string {
   return `${year}-${month}-${day}`;
 }
 
+function localSchedulePartsInTimezone(
+  now: Date,
+  timezone: string,
+): {
+  date: string;
+  dayOfWeek: number;
+  hour: number;
+  minute: number;
+} {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  const weekday = parts.find((part) => part.type === "weekday")?.value ?? "Sun";
+  return {
+    date: `${year}-${month}-${day}`,
+    dayOfWeek: WEEKDAY_INDEX.get(weekday) ?? 0,
+    hour: Number(parts.find((part) => part.type === "hour")?.value ?? "0"),
+    minute: Number(parts.find((part) => part.type === "minute")?.value ?? "0"),
+  };
+}
+
+/**
+ * Returns the scheduler de-dup bucket when a route is due in the user's local
+ * timezone. Completed output history remains append-only; this key coalesces the
+ * common single-process scheduled path per route scope and period.
+ */
+export function computeDuePeriodKey(
+  schedule: AgentRouteSchedule | ({ hour: number; minute: number } & Partial<AgentRouteSchedule>),
+  now: Date,
+  timezone: string,
+): string | null {
+  const local = localSchedulePartsInTimezone(now, timezone);
+  const frequency = schedule.frequency ?? "daily";
+  if (frequency === "daily") {
+    return local.hour === schedule.hour && local.minute >= schedule.minute ? local.date : null;
+  }
+  if (frequency === "weekly") {
+    return local.hour === schedule.hour &&
+      local.minute >= schedule.minute &&
+      Array.isArray(schedule.daysOfWeek) &&
+      schedule.daysOfWeek.includes(local.dayOfWeek)
+      ? local.date
+      : null;
+  }
+  const intervalHours = schedule.intervalHours ?? 0;
+  if (!ROUTE_INTERVAL_HOURS.has(intervalHours)) return null;
+  return local.hour % intervalHours === 0 && local.minute >= schedule.minute
+    ? `${local.date}T${String(local.hour).padStart(2, "0")}`
+    : null;
+}
+
+function firstRunLookbackHoursForSchedule(schedule: AgentRouteSchedule | null | undefined): number {
+  if (!schedule || schedule.frequency === "daily") return 24;
+  if (schedule.frequency === "weekly") return 168;
+  return schedule.intervalHours ?? 24;
+}
+
+/** The platform a route delivers to, so the agent can tailor its prose; null for off/web-only routes. */
+function deliveryPlatformForRoute(
+  route: AgentRoute | null | undefined,
+  resolvedSources: AgentSourceConfig[],
+): "slack" | "whatsapp" | null {
+  const destination = route?.destination;
+  if (destination && (destination.kind === "channel" || destination.kind === "member")) return destination.platform;
+  if (destination?.kind === "self" && resolvedSources.length === 1) return resolvedSources[0].platform;
+  return null;
+}
+
 function addDays(date: string, days: number): string {
   const parsed = new Date(`${date}T00:00:00.000Z`);
   parsed.setUTCDate(parsed.getUTCDate() + days);
@@ -263,27 +833,150 @@ export class AgentRunService {
     for (const section of def.sections) {
       enabledSections[section.key] = prefs.sections?.[section.key] ?? section.enabledByDefault;
     }
+    const sources = prefs.sources ?? [];
+    const deliveryModel =
+      normalizeDeliveryModelFromValue(prefs.deliveryModel, sources) ??
+      normalizeLegacyDeliveryModel(prefs.delivery ?? null, sources);
+    const maxItemsPerSection = raw.maxItemsPerSection ?? def.defaults.maxItemsPerSection;
+    const configuredRoutes =
+      normalizeRoutesFromValue(prefs.routes) ??
+      synthesizeRoutesFromDeliveryModel(deliveryModel, sources, prefs, maxItemsPerSection);
+    const routes = await this.resolveRoutesForRun(def, userId, configuredRoutes, sources);
     return {
       enabled: raw.exists ? raw.enabled : def.defaults.enabled,
       scheduleHour: raw.scheduleHour ?? def.defaults.scheduleHour,
       scheduleMinute: raw.scheduleMinute ?? def.defaults.scheduleMinute,
       timezone: raw.timezone,
-      maxItemsPerSection: raw.maxItemsPerSection ?? def.defaults.maxItemsPerSection,
+      maxItemsPerSection,
       enabledSections,
       focus: prefs.focus ?? null,
-      delivery: prefs.delivery ?? null,
-      sources: prefs.sources ?? [],
+      delivery: projectLegacyDelivery(deliveryModel, sources),
+      deliveryModel,
+      sources,
+      routes,
+      configuredRoutes,
     };
+  }
+
+  private usesOrgWideSummarizerView(agentKey: string, role: AgentViewerRole): boolean {
+    return role === "admin" && agentKey === CONVERSATION_SUMMARY_AGENT_KEY;
+  }
+
+  private async getOrgWideSummarizerConfigView(
+    def: AgentDefinition,
+    viewerUserId: string,
+  ): Promise<AgentConfigView | null> {
+    const [owners, viewerConfig] = await Promise.all([
+      this.repo.listHumanConfigs(def.key),
+      this.resolveConfig(def, viewerUserId),
+    ]);
+    if (owners.length === 0) return this.getConfigView(def.key, viewerUserId);
+
+    const sources: AgentSourceConfig[] = [];
+    const sourceKeys = new Set<string>();
+    const routes: AgentConfigRouteView[] = [];
+    let enabled = false;
+
+    for (const owner of owners) {
+      const config = await this.resolveConfig(def, owner.userId);
+      enabled = enabled || config.enabled;
+      for (const source of config.sources) {
+        const key = sourceKeyForTarget(source);
+        if (sourceKeys.has(key)) continue;
+        sourceKeys.add(key);
+        sources.push(source);
+      }
+      routes.push(...config.configuredRoutes.map((route) => routeWithOwner(route, owner)));
+    }
+
+    return {
+      agentKey: def.key,
+      title: def.title,
+      tagline: def.tagline,
+      description: def.description,
+      enabled,
+      scheduleHour: viewerConfig.scheduleHour,
+      scheduleMinute: viewerConfig.scheduleMinute,
+      timezone: viewerConfig.timezone,
+      maxItemsPerSection: viewerConfig.maxItemsPerSection,
+      itemsPerSectionRange: def.itemsPerSectionRange,
+      focus: viewerConfig.focus,
+      delivery: viewerConfig.delivery,
+      deliveryModel: viewerConfig.deliveryModel,
+      sourceConfig: def.sourceConfig ?? null,
+      sources,
+      routes,
+      sections: def.sections.map((section) => ({
+        key: section.key,
+        title: section.title,
+        enabled: viewerConfig.enabledSections[section.key] ?? section.enabledByDefault,
+      })),
+    };
+  }
+
+  private async sourceLookupForOwnerPatch(
+    def: AgentDefinition,
+    owners: AgentUserConfigWithOwner[],
+    patchSources: AgentSourceConfig[] | undefined,
+  ): Promise<Map<string, AgentSourceConfig>> {
+    const lookup = new Map<string, AgentSourceConfig>();
+    for (const source of patchSources ?? []) lookup.set(sourceKeyForTarget(source), source);
+    for (const owner of owners) {
+      const config = await this.resolveConfig(def, owner.userId);
+      for (const source of config.sources) {
+        const key = sourceKeyForTarget(source);
+        if (!lookup.has(key)) lookup.set(key, source);
+      }
+    }
+    return lookup;
+  }
+
+  private sourcesForRoutes(routes: AgentRoute[], lookup: Map<string, AgentSourceConfig>): AgentSourceConfig[] {
+    const sources: AgentSourceConfig[] = [];
+    const seen = new Set<string>();
+    for (const route of routes) {
+      for (const key of route.sources) {
+        if (seen.has(key)) continue;
+        const source = lookup.get(key) ?? parseSourceKey(key);
+        seen.add(key);
+        sources.push(source);
+      }
+    }
+    return sources;
   }
 
   listDefinitions(): readonly AgentDefinition[] {
     return listAgentDefinitions();
   }
 
-  async listForUser(userId: string): Promise<AgentSummaryView[]> {
+  async resolveConfigControlUserId(_agentKey: string, viewerUserId: string, _role: AgentViewerRole): Promise<string> {
+    return viewerUserId;
+  }
+
+  async listForViewer(userId: string, role: AgentViewerRole): Promise<AgentSummaryView[]> {
     const result: AgentSummaryView[] = [];
     for (const def of listAgentDefinitions()) {
-      const config = await this.resolveConfig(def, userId);
+      if (this.usesOrgWideSummarizerView(def.key, role)) {
+        const agent = await this.getOrgWideSummarizerConfigView(def, userId);
+        if (!agent) continue;
+        result.push({
+          key: def.key,
+          title: def.title,
+          tagline: def.tagline,
+          description: def.description,
+          category: def.category,
+          version: def.version,
+          enabled: agent.enabled,
+          scheduleHour: agent.scheduleHour,
+          scheduleMinute: agent.scheduleMinute,
+          sourceConfig: def.sourceConfig ?? null,
+          sources: agent.sources,
+          routes: agent.routes,
+        });
+        continue;
+      }
+      const configUserId = await this.resolveConfigControlUserId(def.key, userId, role);
+      const config = await this.resolveConfig(def, configUserId);
       result.push({
         key: def.key,
         title: def.title,
@@ -294,9 +987,28 @@ export class AgentRunService {
         enabled: config.enabled,
         scheduleHour: config.scheduleHour,
         scheduleMinute: config.scheduleMinute,
+        sourceConfig: def.sourceConfig ?? null,
+        sources: config.sources,
+        routes: config.configuredRoutes,
       });
     }
     return result;
+  }
+
+  async listForUser(userId: string): Promise<AgentSummaryView[]> {
+    return this.listForViewer(userId, "member");
+  }
+
+  async getConfigViewForViewer(
+    agentKey: string,
+    userId: string,
+    role: AgentViewerRole,
+  ): Promise<AgentConfigView | null> {
+    const def = getAgentDefinition(agentKey);
+    if (!def) return null;
+    if (this.usesOrgWideSummarizerView(agentKey, role)) return this.getOrgWideSummarizerConfigView(def, userId);
+    const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+    return this.getConfigView(agentKey, configUserId);
   }
 
   async getConfigView(agentKey: string, userId: string): Promise<AgentConfigView | null> {
@@ -316,8 +1028,10 @@ export class AgentRunService {
       itemsPerSectionRange: def.itemsPerSectionRange,
       focus: config.focus,
       delivery: config.delivery,
+      deliveryModel: config.deliveryModel,
       sourceConfig: def.sourceConfig ?? null,
       sources: config.sources,
+      routes: config.configuredRoutes,
       sections: def.sections.map((section) => ({
         key: section.key,
         title: section.title,
@@ -326,19 +1040,61 @@ export class AgentRunService {
     };
   }
 
+  async updateConfigForViewer(
+    agentKey: string,
+    userId: string,
+    role: AgentViewerRole,
+    patch: AgentConfigUpdatePatch,
+  ): Promise<AgentConfigView | null> {
+    const def = getAgentDefinition(agentKey);
+    if (!def) return null;
+    if (!this.usesOrgWideSummarizerView(agentKey, role)) {
+      const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+      return this.updateConfigForUser(agentKey, configUserId, patch);
+    }
+
+    const hasRoutePatch = patch.routes !== undefined;
+    const owners = await this.repo.listHumanConfigs(def.key);
+
+    if (!hasRoutePatch) {
+      const patchKeys = Object.keys(patch);
+      const isEnabledOnlyPatch = patch.enabled !== undefined && patchKeys.length === 1;
+      const targetUserIds = isEnabledOnlyPatch && owners.length > 0 ? owners.map((owner) => owner.userId) : [userId];
+      for (const targetUserId of targetUserIds) await this.updateConfigForUser(agentKey, targetUserId, patch);
+      return this.getOrgWideSummarizerConfigView(def, userId);
+    }
+
+    const routesByOwner = new Map<string, AgentRoute[]>();
+    if (patch.routes !== undefined) {
+      for (const owner of owners) routesByOwner.set(owner.userId, []);
+    }
+
+    for (const route of patch.routes ?? []) {
+      const stripped = stripOrgRouteOwner(route);
+      const ownerUserId = stripped.ownerUserId ?? userId;
+      const routes = routesByOwner.get(ownerUserId) ?? [];
+      routes.push(stripped.route);
+      routesByOwner.set(ownerUserId, routes);
+    }
+
+    const sourceLookup = await this.sourceLookupForOwnerPatch(def, owners, patch.sources);
+    for (const [ownerUserId, routes] of routesByOwner) {
+      const ownerPatch: AgentConfigUpdatePatch = { ...patch };
+      if (patch.routes !== undefined) ownerPatch.routes = routes;
+      if (patch.sources !== undefined) ownerPatch.sources = this.sourcesForRoutes(routes, sourceLookup);
+      if (patch.enabled !== undefined && ownerUserId !== userId && patch.routes !== undefined) {
+        ownerPatch.enabled = undefined;
+      }
+      await this.updateConfigForUser(agentKey, ownerUserId, ownerPatch);
+    }
+
+    return this.getOrgWideSummarizerConfigView(def, userId);
+  }
+
   async updateConfigForUser(
     agentKey: string,
     userId: string,
-    patch: {
-      enabled?: boolean;
-      scheduleHour?: number;
-      scheduleMinute?: number;
-      maxItemsPerSection?: number;
-      sections?: Record<string, boolean>;
-      focus?: string | null;
-      delivery?: AgentDeliveryConfig | null;
-      sources?: AgentSourceConfig[];
-    },
+    patch: AgentConfigUpdatePatch,
   ): Promise<AgentConfigView | null> {
     const def = getAgentDefinition(agentKey);
     if (!def) return null;
@@ -352,10 +1108,16 @@ export class AgentRunService {
 
     let prefs: AgentUserPrefs | undefined;
     if (
+      patch.enabled !== undefined ||
+      patch.scheduleHour !== undefined ||
+      patch.scheduleMinute !== undefined ||
       patch.sections !== undefined ||
       patch.focus !== undefined ||
       patch.delivery !== undefined ||
-      patch.sources !== undefined
+      patch.deliveryModel !== undefined ||
+      patch.sources !== undefined ||
+      patch.routes !== undefined ||
+      maxItemsPerSection !== undefined
     ) {
       const sections: Record<string, boolean> = { ...current.enabledSections };
       if (patch.sections) {
@@ -364,12 +1126,45 @@ export class AgentRunService {
         }
       }
       const focus = patch.focus !== undefined ? (patch.focus?.trim() ? patch.focus.trim() : null) : current.focus;
-      const delivery = patch.delivery !== undefined ? patch.delivery : current.delivery;
       const sources =
         patch.sources !== undefined
           ? await this.resolveSourceConfigsForUser(def, userId, patch.sources)
           : current.sources;
-      prefs = { sections, focus, delivery, sources };
+      const deliveryModel =
+        patch.deliveryModel !== undefined || patch.delivery !== undefined || patch.sources !== undefined
+          ? this.resolveDeliveryModelForUser(
+              sources,
+              patch.deliveryModel !== undefined
+                ? patch.deliveryModel
+                : patch.delivery !== undefined
+                  ? normalizeLegacyDeliveryModel(patch.delivery, sources)
+                  : reconcileDeliveryModel(current.deliveryModel, sources),
+            )
+          : current.deliveryModel;
+      const routes =
+        patch.routes !== undefined
+          ? this.resolveRoutesForUser(def, sources, patch.routes)
+          : patch.deliveryModel !== undefined || patch.delivery !== undefined || patch.sources !== undefined
+            ? synthesizeRoutesFromDeliveryModel(
+                deliveryModel,
+                sources,
+                { sections, focus },
+                maxItemsPerSection ?? current.maxItemsPerSection,
+              )
+            : current.configuredRoutes.map((route) => ({
+                ...route,
+                ...(patch.sections !== undefined ? { sections } : {}),
+                ...(patch.focus !== undefined ? { focus } : {}),
+                ...(maxItemsPerSection !== undefined ? { maxItemsPerSection } : {}),
+              }));
+      prefs = {
+        sections,
+        focus,
+        delivery: projectLegacyDelivery(deliveryModel, sources),
+        deliveryModel,
+        sources,
+        routes,
+      };
     }
 
     await this.repo.upsertConfig(
@@ -390,6 +1185,90 @@ export class AgentRunService {
       },
     );
     return this.getConfigView(agentKey, userId);
+  }
+
+  private resolveDeliveryModelForUser(
+    sources: AgentSourceConfig[],
+    deliveryModel: AgentDeliveryModel,
+  ): AgentDeliveryModel {
+    const reconciled = reconcileDeliveryModel(deliveryModel, sources);
+    if (reconciled.mode === "per_source") return reconciled;
+
+    const deliveryKey = deliveryKeyForTarget(reconciled.combined);
+    if (sources.some((source) => sourceKeyForTarget(source) === deliveryKey)) {
+      throw new AgentDeliveryTargetError("Combined delivery cannot target one of the selected sources");
+    }
+    if (!isDmDelivery(reconciled.combined) && reconciled.combined.ackNonDm !== true) {
+      throw new AgentDeliveryTargetError("Non-DM combined delivery requires acknowledgement");
+    }
+
+    return reconciled;
+  }
+
+  private resolveRoutesForUser(def: AgentDefinition, sources: AgentSourceConfig[], routes: AgentRoute[]): AgentRoute[] {
+    const sourceKeys = new Set(sources.map(sourceKeyForTarget));
+    const sectionKeys = new Set(def.sections.map((section) => section.key));
+    const range = def.itemsPerSectionRange;
+    const seenScopeKeys = new Set<string>();
+
+    return routes.map((route) => {
+      const sources = [...new Set(route.sources)];
+      if (sources.length === 0) {
+        throw new AgentSourceTargetError("Route must include at least one source");
+      }
+      if (sources.length > 1 && route.destination.kind === "self") {
+        throw new AgentDeliveryTargetError("Combined routes cannot use self destination");
+      }
+      let destination = route.destination;
+      if (route.destination.kind === "member") {
+        const raw = route.destination as Record<string, unknown>;
+        const memberUserId = typeof raw.memberUserId === "string" ? raw.memberUserId.trim() : "";
+        if ((raw.platform !== "slack" && raw.platform !== "whatsapp") || !memberUserId) {
+          throw new AgentDeliveryTargetError("Member route destination must include a Slack or WhatsApp member");
+        }
+        destination = { kind: "member", platform: raw.platform, memberUserId };
+      }
+      if (route.destination.kind === "channel") {
+        const normalized = normalizeRouteDestination(route.destination);
+        if (!normalized || normalized.kind !== "channel") {
+          throw new AgentDeliveryTargetError(
+            "Channel route destination must include a valid Slack channel or WhatsApp group",
+          );
+        }
+        if (sources.length > 1 && sources.includes(deliveryKeyForTarget(normalized) as AgentSourceKey)) {
+          throw new AgentDeliveryTargetError("Combined routes cannot deliver to one of the selected sources");
+        }
+        destination = normalized;
+      }
+      for (const sourceKey of sources) {
+        if (!sourceKeys.has(sourceKey)) {
+          throw new AgentSourceTargetError("Route source must be one of the selected sources");
+        }
+      }
+      for (const sectionKey of Object.keys(route.sections ?? {})) {
+        if (!sectionKeys.has(sectionKey)) throw new AgentSourceTargetError(`Unknown route section: ${sectionKey}`);
+      }
+      const schedule = normalizeRouteSchedule(route.schedule);
+      if (route.schedule && !schedule) throw new AgentSourceTargetError("Route schedule must be valid");
+      const scopeKey = routeScopeKeyForSources(sources);
+      if (seenScopeKeys.has(scopeKey)) {
+        throw new AgentSourceTargetError("Routes must not duplicate the same output scope");
+      }
+      seenScopeKeys.add(scopeKey);
+
+      return {
+        ...route,
+        id: route.id.trim() || routeIdForSources(sources),
+        sources,
+        focus: route.focus?.trim() ? route.focus.trim() : null,
+        sections: route.sections ? { ...route.sections } : null,
+        maxItemsPerSection:
+          route.maxItemsPerSection === null ? null : Math.min(range.max, Math.max(range.min, route.maxItemsPerSection)),
+        schedule,
+        destination,
+        enabled: route.enabled !== false,
+      };
+    });
   }
 
   async resolveDeliveryConfigForUser(
@@ -474,6 +1353,74 @@ export class AgentRunService {
       ...normalized,
       ...withMentions(await this.resolveDeliveryMentions(normalized, { whatsappGroup: groupMetadata })),
     };
+  }
+
+  async listEligibleRouteMembers(userId: string, sourceKeys: string[]): Promise<AgentRouteMember[]> {
+    const sources = [...new Set(sourceKeys)].map((sourceKey) => parseSourceKey(sourceKey as AgentSourceKey));
+    if (sources.length === 0 || sources.some((source) => source.platform !== "slack")) return [];
+    const slack = this.deps.getSlack?.() ?? null;
+    if (!slack) return [];
+    const requester = await this.deps.users.findById(userId);
+    if (!requester?.slack_user_id) return [];
+    for (const source of sources) {
+      if (source.targetType !== "channel" || !(await slack.isUserInChannel(source.targetId, requester.slack_user_id))) {
+        return [];
+      }
+    }
+
+    const members: AgentRouteMember[] = [];
+    for (const user of await this.deps.users.list()) {
+      if (!user.slack_user_id) continue;
+      let eligible = true;
+      for (const source of sources) {
+        if (source.targetType !== "channel" || !(await slack.isUserInChannel(source.targetId, user.slack_user_id))) {
+          eligible = false;
+          break;
+        }
+      }
+      if (eligible) members.push({ userId: user.id, name: user.name, slackUserId: user.slack_user_id });
+    }
+
+    return members;
+  }
+
+  async listEligibleRouteMembersForViewer(
+    agentKey: string,
+    userId: string,
+    role: AgentViewerRole,
+    sourceKeys: string[],
+    routeId?: string | null,
+  ): Promise<AgentRouteMember[]> {
+    if (!this.usesOrgWideSummarizerView(agentKey, role)) {
+      const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+      return this.listEligibleRouteMembers(configUserId, sourceKeys);
+    }
+    const decoded = routeId ? decodeOrgRouteId(routeId) : null;
+    if (decoded) return this.listEligibleRouteMembers(decoded.ownerUserId, sourceKeys);
+
+    const normalizedSourceKeys = [...new Set(sourceKeys)].sort();
+    const owners = await this.repo.listHumanConfigs(agentKey);
+    for (const owner of owners) {
+      const config = await this.resolveConfig(requireAgentDefinition(agentKey), owner.userId);
+      const match = config.configuredRoutes.find((route) => {
+        const routeSources = [...new Set(route.sources)].sort();
+        return (
+          routeSources.length === normalizedSourceKeys.length &&
+          routeSources.every((source, index) => source === normalizedSourceKeys[index])
+        );
+      });
+      if (match) return this.listEligibleRouteMembers(owner.userId, sourceKeys);
+    }
+    return this.listEligibleRouteMembers(userId, sourceKeys);
+  }
+
+  async listWhatsAppDmMembers(): Promise<AgentWhatsAppDmMember[]> {
+    const members: AgentWhatsAppDmMember[] = [];
+    for (const user of await this.deps.users.list()) {
+      if (user.type === "agent" || !user.whatsapp_number) continue;
+      members.push({ userId: user.id, name: user.name });
+    }
+    return members;
   }
 
   private async resolveDeliveryMentions(
@@ -605,19 +1552,7 @@ export class AgentRunService {
       .where("jid", "=", source.targetId)
       .executeTakeFirst();
     if (!group) throw new AgentSourceTargetError("WhatsApp group is not available as a source");
-    if (!user.whatsapp_number) throw new AgentSourceTargetError("WhatsApp sources are not available for this user");
-    const whatsapp = this.deps.getWhatsApp?.() ?? null;
-    if (!whatsapp) throw new AgentSourceTargetError("WhatsApp is not connected");
-    const groupMetadata = await whatsapp.getGroupMetadata(group.jid);
-    if (
-      !(await whatsappGroupHasParticipant(
-        groupMetadata,
-        user.whatsapp_number,
-        async (jid) => (await whatsapp.resolveJidToPhone?.(jid)) ?? null,
-      ))
-    ) {
-      throw new AgentSourceTargetError("WhatsApp group is not available for this user");
-    }
+    if (!this.deps.getWhatsApp?.()) throw new AgentSourceTargetError("WhatsApp is not connected");
     return {
       platform: "whatsapp",
       targetType: "group",
@@ -653,9 +1588,31 @@ export class AgentRunService {
     return resolved;
   }
 
+  private async resolveRoutesForRun(
+    def: AgentDefinition,
+    userId: string,
+    routes: AgentRoute[],
+    sources: AgentSourceConfig[],
+  ): Promise<ResolvedRoute[]> {
+    if (!def.sourceConfig) return routes.map((route) => ({ ...route, resolvedSources: [] }));
+    const resolvedSources = await this.resolveSourcesForRun(def, userId, sources);
+    const byKey = new Map(resolvedSources.map((source) => [sourceKeyForTarget(source), source]));
+    const resolvedRoutes: ResolvedRoute[] = [];
+
+    for (const route of routes) {
+      const routeSources = route.sources
+        .map((sourceKey) => byKey.get(sourceKey))
+        .filter((source) => source !== undefined);
+      if (routeSources.length !== route.sources.length) continue;
+      resolvedRoutes.push({ ...route, resolvedSources: routeSources });
+    }
+
+    return resolvedRoutes;
+  }
+
   private toApiOutput(
     def: AgentDefinition,
-    value: Awaited<ReturnType<ReturnType<typeof createAgentOutputRepository>["findLatestCompleted"]>>,
+    value: Awaited<ReturnType<ReturnType<typeof createAgentOutputRepository>["findLatestCompletedForScope"]>>,
   ): AgentOutputApi | null {
     if (!value) return null;
     const sections = emptySections(def);
@@ -670,6 +1627,8 @@ export class AgentRunService {
       outputDate: value.output.output_date,
       timezone: value.output.timezone,
       status: value.output.status,
+      sourceKey: value.output.source_key,
+      sourceLabel: value.output.source_label,
       generatedAt: value.output.generated_at,
       masthead: value.masthead,
       sections,
@@ -695,8 +1654,8 @@ export class AgentRunService {
     const date = outputDate || localDateInTimezone(new Date(), timezone);
     const now = new Date();
     const [completed, running] = await Promise.all([
-      this.repo.findLatestCompleted(def.key, user.id, date),
-      this.repo.findRunning(def.key, user.id, date),
+      this.repo.findLatestCompletedAcrossScopes(def.key, user.id, date),
+      this.repo.findRunningAcrossScopes(def.key, user.id, date),
     ]);
     return {
       output: this.toApiOutput(def, completed),
@@ -707,9 +1666,59 @@ export class AgentRunService {
     };
   }
 
+  async getLatestForViewer(
+    agentKey: string,
+    userId: string,
+    role: AgentViewerRole,
+    outputDate?: string,
+  ): Promise<{
+    output: AgentOutputApi | null;
+    running: boolean;
+    outputDate: string;
+    timezone: string;
+    enabledSections: string[];
+  }> {
+    if (!this.usesOrgWideSummarizerView(agentKey, role)) {
+      const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+      return this.getLatestForUser(agentKey, configUserId, outputDate);
+    }
+
+    const def = requireAgentDefinition(agentKey);
+    const user = await this.deps.users.findById(userId);
+    if (!user) throw new Error("User not found");
+    const timezone = user.timezone || "UTC";
+    const date = outputDate || localDateInTimezone(new Date(), timezone);
+    const now = new Date();
+    const [completed, running] = await Promise.all([
+      this.repo.findLatestCompletedAcrossHumanUsers(def.key, date),
+      this.repo.findRunningAcrossHumanUsers(def.key, date),
+    ]);
+    return {
+      output: this.toApiOutput(def, completed),
+      running: Boolean(running && !this.isRunningStale(running, now)),
+      outputDate: date,
+      timezone,
+      enabledSections: def.sections.map((section) => section.key),
+    };
+  }
+
   async getByIdForUser(agentKey: string, id: string, userId: string): Promise<AgentOutputApi | null> {
     const def = requireAgentDefinition(agentKey);
     return this.toApiOutput(def, await this.repo.getByIdForUser(def.key, id, userId));
+  }
+
+  async getByIdForViewer(
+    agentKey: string,
+    id: string,
+    userId: string,
+    role: AgentViewerRole,
+  ): Promise<AgentOutputApi | null> {
+    const def = requireAgentDefinition(agentKey);
+    if (this.usesOrgWideSummarizerView(agentKey, role)) {
+      return this.toApiOutput(def, await this.repo.getByIdForHumanUser(def.key, id));
+    }
+    const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+    return this.getByIdForUser(agentKey, id, configUserId);
   }
 
   async listOutputsForUser(
@@ -728,39 +1737,149 @@ export class AgentRunService {
     };
   }
 
-  async requestGenerationForUser(params: RequestAgentGenerationParams): Promise<AgentOutputRow | null> {
+  async listOutputsForViewer(
+    agentKey: string,
+    userId: string,
+    role: AgentViewerRole,
+    options: { limit?: number; cursor?: string | null } = {},
+  ): Promise<{ outputs: AgentOutputApi[]; nextCursor: string | null }> {
+    const def = requireAgentDefinition(agentKey);
+    if (!this.usesOrgWideSummarizerView(agentKey, role)) {
+      const configUserId = await this.resolveConfigControlUserId(agentKey, userId, role);
+      return this.listOutputsForUser(agentKey, configUserId, options);
+    }
+    const result = await this.repo.listCompletedForHumanUsers(def.key, options);
+    return {
+      outputs: result.outputs.flatMap((output) => {
+        const api = this.toApiOutput(def, output);
+        return api ? [api] : [];
+      }),
+      nextCursor: result.nextCursor,
+    };
+  }
+
+  private async resolveExpectedScopesForUser(
+    def: AgentDefinition,
+    _user: UserRow,
+    config: ResolvedAgentConfig,
+  ): Promise<AgentExpectedScope[]> {
+    if (!def.sourceConfig) {
+      return [{ kind: "combined", sourceKey: "", sourceLabel: null, sources: [] }];
+    }
+
+    return config.routes
+      .filter((route) => route.enabled)
+      .map((route): AgentExpectedScope => {
+        const sourceKey = scopeKeyForRoute(route, route.resolvedSources);
+        const sourceLabel = labelForRoute(route, route.resolvedSources);
+        if (route.resolvedSources.length === 1) {
+          const [source] = route.resolvedSources;
+          return { kind: "source", source, sourceKey, sourceLabel, route, sources: route.resolvedSources };
+        }
+        return { kind: "combined", sourceKey, sourceLabel, route, sources: route.resolvedSources };
+      });
+  }
+
+  async requestGenerationForViewer(
+    params: RequestAgentGenerationParams & { viewerRole: AgentViewerRole },
+  ): Promise<AgentOutputRow[]> {
+    const { viewerRole, ...requestParams } = params;
+    if (!this.usesOrgWideSummarizerView(requestParams.agentKey, viewerRole)) {
+      const configUserId = await this.resolveConfigControlUserId(
+        requestParams.agentKey,
+        requestParams.userId,
+        viewerRole,
+      );
+      return this.requestGenerationForUser({ ...requestParams, userId: configUserId });
+    }
+
+    const ownerRoutes = new Map<string, string[] | null>();
+    if (requestParams.routeIds?.length) {
+      for (const routeId of requestParams.routeIds) {
+        const decoded = decodeOrgRouteId(routeId);
+        const ownerUserId = decoded?.ownerUserId ?? requestParams.userId;
+        const plainRouteId = decoded?.routeId ?? routeId;
+        const routeIds = ownerRoutes.get(ownerUserId) ?? [];
+        routeIds.push(plainRouteId);
+        ownerRoutes.set(ownerUserId, routeIds);
+      }
+    } else {
+      const owners = await this.repo.listHumanConfigs(requestParams.agentKey);
+      for (const owner of owners) ownerRoutes.set(owner.userId, null);
+      if (ownerRoutes.size === 0) ownerRoutes.set(requestParams.userId, null);
+    }
+
+    const rows: AgentOutputRow[] = [];
+    for (const [ownerUserId, routeIds] of ownerRoutes) {
+      rows.push(
+        ...(await this.requestGenerationForUser({
+          ...requestParams,
+          userId: ownerUserId,
+          ...(routeIds ? { routeIds } : {}),
+        })),
+      );
+    }
+    return rows;
+  }
+
+  async requestGenerationForUser(params: RequestAgentGenerationParams): Promise<AgentOutputRow[]> {
     const def = requireAgentDefinition(params.agentKey);
     const user = await this.deps.users.findById(params.userId);
     if (!user) throw new Error("User not found");
     const config = await this.resolveConfig(def, user.id);
     const timezone = config.timezone || user.timezone || "UTC";
     const outputDate = params.outputDate || localDateInTimezone(new Date(), timezone);
+    const periodKey = params.periodKey ?? outputDate;
     const now = new Date();
+    const scopes = await this.resolveExpectedScopesForUser(def, user, config);
+    const scopeKeys = params.scopeKeys ? new Set(params.scopeKeys) : null;
+    const routeIds = params.routeIds ? new Set(params.routeIds) : null;
+    const rows: AgentOutputRow[] = [];
 
-    let recoveredStaleRunning = false;
-    const existingRunning = await this.repo.findRunning(def.key, user.id, outputDate);
-    if (existingRunning) {
-      if (!this.isRunningStale(existingRunning, now)) return existingRunning;
-      recoveredStaleRunning = true;
-      await this.repo.markFailed(existingRunning.id, "Generation expired after being left running.");
+    for (const scope of scopes.filter((candidate) => {
+      if (scopeKeys && !scopeKeys.has(candidate.sourceKey)) return false;
+      if (routeIds && (!candidate.route || !routeIds.has(candidate.route.id))) return false;
+      return true;
+    })) {
+      let recoveredStaleRunning = false;
+      const existingRunning = await this.repo.findRunning(def.key, user.id, periodKey, scope.sourceKey);
+      if (existingRunning) {
+        if (!this.isRunningStale(existingRunning, now)) {
+          rows.push(existingRunning);
+          continue;
+        }
+        recoveredStaleRunning = true;
+        await this.repo.markFailed(existingRunning.id, "Generation expired after being left running.");
+      }
+      if (
+        params.skipIfCompleted &&
+        (await this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, periodKey))
+      ) {
+        continue;
+      }
+      if (params.skipIfCompleted && params.triggerType === "scheduled" && !recoveredStaleRunning) {
+        const latest = await this.repo.findLatestAny(def.key, user.id, periodKey, scope.sourceKey);
+        if (latest && this.isRecentScheduledFailure(latest, now)) {
+          rows.push(latest);
+          continue;
+        }
+      }
+      const result = await this.repo.createRunning({
+        agentKey: def.key,
+        agentVersion: def.version,
+        userId: user.id,
+        outputDate,
+        periodKey,
+        sourceKey: scope.sourceKey,
+        sourceLabel: scope.sourceLabel,
+        timezone,
+        triggerType: params.triggerType,
+      });
+      if (result.created) this.enqueueRun(def.key, result.row.id, user.id);
+      rows.push(result.row);
     }
-    if (params.skipIfCompleted && (await this.repo.findLatestCompleted(def.key, user.id, outputDate))) {
-      return null;
-    }
-    if (params.skipIfCompleted && params.triggerType === "scheduled" && !recoveredStaleRunning) {
-      const latest = await this.repo.findLatestAny(def.key, user.id, outputDate);
-      if (latest && this.isRecentScheduledFailure(latest, now)) return latest;
-    }
-    const result = await this.repo.createRunning({
-      agentKey: def.key,
-      agentVersion: def.version,
-      userId: user.id,
-      outputDate,
-      timezone,
-      triggerType: params.triggerType,
-    });
-    if (result.created) this.enqueueRun(def.key, result.row.id, user.id);
-    return result.row;
+
+    return rows;
   }
 
   async listSchedulableUsers(): Promise<UserRow[]> {
@@ -772,30 +1891,38 @@ export class AgentRunService {
     def: AgentDefinition,
     user: UserRow,
     now = new Date(),
-  ): Promise<{ outputDate: string } | null> {
+  ): Promise<AgentDueGenerationGroup[]> {
     const config = await this.resolveConfig(def, user.id);
-    if (def.sourceConfig && config.sources.length === 0) return null;
-    if (!config.enabled) return null;
+    if (def.sourceConfig && config.routes.length === 0) return [];
+    if (!config.enabled) return [];
     const timezone = config.timezone || user.timezone || "UTC";
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone,
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(now);
-    const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0");
-    const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
-    if (hour !== config.scheduleHour || minute < config.scheduleMinute) return null;
     const outputDate = localDateInTimezone(now, timezone);
-    const [running, completed] = await Promise.all([
-      this.repo.findRunning(def.key, user.id, outputDate),
-      this.repo.findLatestCompleted(def.key, user.id, outputDate),
-    ]);
-    if (running && !this.isRunningStale(running, now)) return null;
-    if (completed) return null;
-    const latest = await this.repo.findLatestAny(def.key, user.id, outputDate);
-    if (latest && this.isRecentScheduledFailure(latest, now)) return null;
-    return { outputDate };
+    const scopes = await this.resolveExpectedScopesForUser(def, user, config);
+    if (scopes.length === 0) return [];
+    const dueByPeriodKey = new Map<string, AgentDueGenerationGroup>();
+
+    for (const scope of scopes) {
+      const schedule = scope.route?.schedule ?? {
+        frequency: "daily" as const,
+        hour: config.scheduleHour,
+        minute: config.scheduleMinute,
+      };
+      const periodKey = computeDuePeriodKey(schedule, now, timezone);
+      if (!periodKey) continue;
+      const [running, completed] = await Promise.all([
+        this.repo.findRunning(def.key, user.id, periodKey, scope.sourceKey),
+        this.repo.findLatestCompletedForScope(def.key, user.id, scope.sourceKey, periodKey),
+      ]);
+      if (completed) continue;
+      if (running && !this.isRunningStale(running, now)) continue;
+      const latest = await this.repo.findLatestAny(def.key, user.id, periodKey, scope.sourceKey);
+      if (latest && this.isRecentScheduledFailure(latest, now)) continue;
+      const group = dueByPeriodKey.get(periodKey) ?? { outputDate, periodKey, scopeKeys: [] };
+      group.scopeKeys.push(scope.sourceKey);
+      dueByPeriodKey.set(periodKey, group);
+    }
+
+    return [...dueByPeriodKey.values()];
   }
 
   private isRunningStale(output: AgentOutputRow, now: Date): boolean {
@@ -845,6 +1972,42 @@ export class AgentRunService {
     };
   }
 
+  private async resolveScopeForOutput(
+    def: AgentDefinition,
+    _user: UserRow,
+    config: ResolvedAgentConfig,
+    output: AgentOutputRow,
+  ): Promise<AgentExpectedScope | null> {
+    if (!def.sourceConfig) {
+      return { kind: "combined", sourceKey: "", sourceLabel: null, sources: [] };
+    }
+
+    const route = config.routes.find(
+      (candidate) => scopeKeyForRoute(candidate, candidate.resolvedSources) === output.source_key,
+    );
+    if (!route) return null;
+    const sourceKey = scopeKeyForRoute(route, route.resolvedSources);
+    const sourceLabel = output.source_label ?? labelForRoute(route, route.resolvedSources);
+    if (route.resolvedSources.length === 1) {
+      const [source] = route.resolvedSources;
+      return { kind: "source", source, sourceKey, sourceLabel, route, sources: route.resolvedSources };
+    }
+    return { kind: "combined", sourceKey, sourceLabel, route, sources: route.resolvedSources };
+  }
+
+  private async getPreviousOutputForContext(
+    def: AgentDefinition,
+    user: UserRow,
+    outputDate: string,
+    scope: AgentGenerationScope,
+  ): Promise<AgentOutputApi | null> {
+    if (def.key === CONVERSATION_SUMMARY_AGENT_KEY && scope.kind === "source") return null;
+    return this.toApiOutput(
+      def,
+      await this.repo.findLatestCompletedForScopeOnDate(def.key, user.id, scope.sourceKey, outputDate),
+    );
+  }
+
   private async generateExistingOutput(agentKey: string, outputId: string, userId: string): Promise<void> {
     const def = requireAgentDefinition(agentKey);
     const output = await this.repo.findById(def.key, outputId);
@@ -853,8 +2016,16 @@ export class AgentRunService {
 
     let saved = false;
     const config = await this.resolveConfig(def, user.id);
-    const sources = await this.resolveSourcesForRun(def, user.id, config.sources);
-    const enabledSections = def.sections.filter((s) => config.enabledSections[s.key]).map((s) => s.key);
+    const scope = await this.resolveScopeForOutput(def, user, config, output);
+    if (!scope) {
+      await this.repo.markFailed(outputId, "Generation route was removed.");
+      return;
+    }
+    const routeSections = enabledSectionsForScope(def, config, scope.route);
+    const routeMaxItemsPerSection = maxItemsPerSectionForScope(def, config, scope.route);
+    const routeFocus = scope.route ? scope.route.focus : config.focus;
+    const firstRunLookbackHours = firstRunLookbackHoursForSchedule(scope.route?.schedule);
+    const enabledSections = def.sections.filter((s) => routeSections[s.key]).map((s) => s.key);
 
     try {
       const now = new Date();
@@ -865,8 +2036,8 @@ export class AgentRunService {
           ? undefined
           : await this.deps.users.getAllEmailsForUser(user.id);
       const [sameDayPrevious, previousDay, definitionContext] = await Promise.all([
-        this.getLatestForUser(def.key, user.id, output.output_date),
-        this.getLatestForUser(def.key, user.id, addDays(output.output_date, -1)),
+        this.getPreviousOutputForContext(def, user, output.output_date, scope),
+        this.getPreviousOutputForContext(def, user, addDays(output.output_date, -1), scope),
         def.buildRuntimeContext
           ? def.buildRuntimeContext({
               db: this.deps.db,
@@ -877,11 +2048,15 @@ export class AgentRunService {
               adminCanReadAllFiles,
               contentUserEmails,
               agentConfig: {
-                enabledSections: config.enabledSections,
-                maxItemsPerSection: config.maxItemsPerSection,
-                focus: config.focus,
+                enabledSections: routeSections,
+                maxItemsPerSection: routeMaxItemsPerSection,
+                focus: routeFocus,
                 delivery: config.delivery,
-                sources,
+                sources: scope.sources,
+                sourceKey: scope.sourceKey,
+                firstRunLookbackHours,
+                floorWindowToPeriod: output.trigger_type === "manual",
+                deliveryPlatform: deliveryPlatformForRoute(scope.route, scope.sources),
               },
             })
           : Promise.resolve({}),
@@ -894,11 +2069,11 @@ export class AgentRunService {
         timezone: output.timezone,
         user: { id: user.id, name: user.name, email: user.email },
         sections: enabledSections,
-        maxItemsPerSection: config.maxItemsPerSection,
-        focus: config.focus,
-        sources,
-        sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious.output),
-        previousDayOutput: this.formatOutputForContext(previousDay.output),
+        maxItemsPerSection: routeMaxItemsPerSection,
+        focus: routeFocus,
+        sources: scope.sources,
+        sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious),
+        previousDayOutput: this.formatOutputForContext(previousDay),
         ...definitionContext,
       };
       if (def.augmentRuntimeContext) {
@@ -985,17 +2160,134 @@ export class AgentRunService {
 
   private async deliverCompletedOutput(def: AgentDefinition, outputId: string, userId: string): Promise<void> {
     if (!this.deps.outputDelivery) return;
+    let markFailedOnRouteTargetError = false;
     try {
-      const configuredDelivery = (await this.resolveConfig(def, userId)).delivery;
-      if (!configuredDelivery) return;
-      const delivery = await this.resolveDeliveryConfigForUser(userId, configuredDelivery);
+      const output = await this.repo.findById(def.key, outputId);
+      const user = await this.deps.users.findById(userId);
+      if (!output || !user) return;
+      const config = await this.resolveConfig(def, userId);
+      const scope = await this.resolveScopeForOutput(def, user, config, output);
+      if (!scope) return;
+      let delivery: AgentDeliveryConfig | null;
+      if (scope.route) {
+        markFailedOnRouteTargetError = true;
+        delivery = await this.deliveryForRoute(userId, scope.route, scope.sources);
+      } else {
+        delivery = await this.resolveDeliveryConfigForUser(userId, config.delivery);
+      }
       if (!delivery) return;
       const completed = await this.getByIdForUser(def.key, outputId, userId);
       if (!completed) return;
       await this.deps.outputDelivery.deliver({ definition: def, output: completed, delivery });
     } catch (err) {
+      if (markFailedOnRouteTargetError && err instanceof AgentDeliveryTargetError) {
+        await this.repo.markDeliveryFailed(outputId, err.message);
+      }
       this.deps.logger.warn({ err, agentKey: def.key, outputId, userId }, "Agent: output delivery failed");
     }
+  }
+
+  private async deliveryForRoute(
+    userId: string,
+    route: AgentRoute,
+    resolvedSources: AgentSourceConfig[],
+  ): Promise<AgentDeliveryConfig | null> {
+    if (route.destination.kind === "off") return null;
+    if (route.destination.kind === "member") {
+      return this.resolveMemberRouteDelivery(route.destination, resolvedSources);
+    }
+    if (route.destination.kind === "channel") {
+      return this.resolveChannelRouteDelivery(route.destination);
+    }
+    if (resolvedSources.length !== 1) {
+      throw new AgentDeliveryTargetError("Combined routes cannot use self destination");
+    }
+    return this.resolveDeliveryConfigForUser(userId, sourceAsDelivery(resolvedSources[0]));
+  }
+
+  private async resolveMemberRouteDelivery(
+    destination: Extract<AgentRouteDestination, { kind: "member" }>,
+    resolvedSources: AgentSourceConfig[],
+  ): Promise<AgentDeliveryConfig> {
+    const member = await this.deps.users.findById(destination.memberUserId);
+
+    if (destination.platform === "whatsapp") {
+      if (!member?.whatsapp_number) {
+        throw new AgentDeliveryTargetError("Recipient has no WhatsApp number");
+      }
+      return {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "dm",
+        targetId: member.whatsapp_number,
+        label: member.name,
+        recipientUserId: member.id,
+      };
+    }
+
+    if (!member?.slack_user_id) {
+      throw new AgentDeliveryTargetError("Recipient is not available for Slack delivery");
+    }
+
+    const slack = this.deps.getSlack?.() ?? null;
+    if (!slack) throw new AgentDeliveryTargetError("Slack is not connected");
+
+    for (const source of resolvedSources) {
+      if (
+        source.platform !== "slack" ||
+        source.targetType !== "channel" ||
+        !(await slack.isUserInChannel(source.targetId, member.slack_user_id))
+      ) {
+        throw new AgentDeliveryTargetError("Recipient is not a member of every source");
+      }
+    }
+
+    return {
+      enabled: true,
+      platform: "slack",
+      targetType: "dm",
+      targetId: member.slack_user_id,
+      label: member.name,
+    };
+  }
+
+  private async resolveChannelRouteDelivery(
+    destination: Extract<AgentRouteDestination, { kind: "channel" }>,
+  ): Promise<AgentDeliveryConfig> {
+    if (destination.platform === "slack") {
+      const slack = this.deps.getSlack?.() ?? null;
+      if (!slack) throw new AgentDeliveryTargetError("Slack is not connected");
+
+      const channel = (await slack.listChannels()).find((candidate) => candidate.id === destination.targetId);
+      if (!channel?.isMember) {
+        throw new AgentDeliveryTargetError("Slack channel is not available for delivery");
+      }
+      return {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: channel.id,
+        label: `#${channel.name}`,
+      };
+    }
+
+    const group = await this.deps.db
+      .selectFrom("whatsapp_groups")
+      .select(["jid", "name"])
+      .where("jid", "=", destination.targetId)
+      .executeTakeFirst();
+    if (!group) throw new AgentDeliveryTargetError("WhatsApp group is not available for delivery");
+
+    const whatsapp = this.deps.getWhatsApp?.() ?? null;
+    if (!whatsapp) throw new AgentDeliveryTargetError("WhatsApp is not connected");
+
+    return {
+      enabled: true,
+      platform: "whatsapp",
+      targetType: "group",
+      targetId: group.jid,
+      label: group.name ?? destination.label ?? null,
+    };
   }
 
   private createWriter(

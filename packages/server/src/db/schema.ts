@@ -480,6 +480,13 @@ export interface ConversationMessagesTable {
   created_at: Generated<string>;
 }
 
+export interface WhatsAppWindowKeepAlivesTable {
+  recipient_user_id: string;
+  sent_at: string;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface ScheduledTasksTable {
   id: string;
   platform: string;
@@ -538,6 +545,9 @@ export interface AgentOutputsTable {
   agent_key: string;
   user_id: string;
   output_date: string;
+  period_key: Generated<string | null>;
+  source_key: Generated<string>;
+  source_label: string | null;
   timezone: string;
   status: string;
   trigger_type: string;
@@ -1055,6 +1065,7 @@ export interface DB {
   conversations: ConversationsTable;
   conversation_cursors: ConversationCursorsTable;
   conversation_messages: ConversationMessagesTable;
+  whatsapp_window_keepalives: WhatsAppWindowKeepAlivesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
   automation_step_content: AutomationStepContentTable;

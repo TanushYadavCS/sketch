@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 124;
+const EXPECTED_MIGRATION_COUNT = 127;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -146,28 +146,20 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
     expect(names[111]).toBe("116-connector-credential-source");
     expect(names[112]).toBe("117-conversation-message-window-index");
-    expect(names[113]).toBe("118-tasks");
-    expect(names[114]).toBe("119-tasks-owner");
-    expect(names[115]).toBe("120-sub-entities");
-    expect(names[116]).toBe("121-tasks-assignee-name");
-    expect(names[117]).toBe("122-milestone-series-and-value-signature");
-    expect(names[118]).toBe("123-work-cycles");
-    expect(names[119]).toBe("124-work-cycles-connector");
-    expect(names[120]).toBe("125-work-cycles-connector-key");
-    expect(names[121]).toBe("126-container-name-qualification");
-    expect(names[122]).toBe("127-entity-provenance-tier");
-    expect(names[123]).toBe("128-trunk-name-embeddings");
-  });
-
-  it("creates the task assignee_name column", async () => {
-    const columns = await sql<{ column_name: string }>`
-      SELECT column_name
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = 'tasks'
-    `.execute(db);
-
-    expect(columns.rows).toEqual(expect.arrayContaining([expect.objectContaining({ column_name: "assignee_name" })]));
+    expect(names[113]).toBe("118-whatsapp-window-keepalives");
+    expect(names[114]).toBe("119-agent-outputs-source-scope");
+    expect(names[115]).toBe("120-agent-output-period-key");
+    expect(names[116]).toBe("121-tasks");
+    expect(names[117]).toBe("122-tasks-owner");
+    expect(names[118]).toBe("123-sub-entities");
+    expect(names[119]).toBe("124-tasks-assignee-name");
+    expect(names[120]).toBe("125-milestone-series-and-value-signature");
+    expect(names[121]).toBe("126-work-cycles");
+    expect(names[122]).toBe("127-work-cycles-connector");
+    expect(names[123]).toBe("128-work-cycles-connector-key");
+    expect(names[124]).toBe("129-container-name-qualification");
+    expect(names[125]).toBe("130-entity-provenance-tier");
+    expect(names[126]).toBe("131-trunk-name-embeddings");
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {
@@ -189,8 +181,6 @@ describe("runMigrations on Postgres — full sequence", () => {
         expect.objectContaining({ column_name: "kind", data_type: "text", is_nullable: "NO" }),
         expect.objectContaining({ column_name: "normalized_name", data_type: "text", is_nullable: "NO" }),
         expect.objectContaining({ column_name: "source_fact_id", data_type: "text", is_nullable: "YES" }),
-        expect.objectContaining({ column_name: "value_signature", data_type: "text", is_nullable: "YES" }),
-        expect.objectContaining({ column_name: "series_key", data_type: "text", is_nullable: "YES" }),
       ]),
     );
 
@@ -206,7 +196,6 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(currentIndex?.indexdef).toContain("kind");
     expect(currentIndex?.indexdef).toContain("normalized_name");
     expect(currentIndex?.indexdef).toContain("WHERE (valid_to IS NULL)");
-    expect(indexes.rows.map((row) => row.indexname)).toContain("idx_sub_entities_series_key");
 
     const foreignKeys = await sql<{
       column_name: string;
@@ -245,186 +234,6 @@ describe("runMigrations on Postgres — full sequence", () => {
       ]),
     );
     expect(foreignKeys.rows.some((row) => row.column_name === "source_fact_id")).toBe(false);
-  });
-
-  it("creates milestone series columns and indexes", async () => {
-    const taskColumns = await sql<{ column_name: string; data_type: string; is_nullable: string }>`
-      SELECT column_name, data_type, is_nullable
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = 'tasks'
-    `.execute(db);
-    expect(taskColumns.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ column_name: "milestone_series_key", data_type: "text", is_nullable: "YES" }),
-      ]),
-    );
-
-    const taskIndexes = await sql<{ indexname: string }>`
-      SELECT indexname
-      FROM pg_indexes
-      WHERE schemaname = 'public'
-        AND tablename = 'tasks'
-    `.execute(db);
-    expect(taskIndexes.rows.map((row) => row.indexname)).toContain("idx_tasks_milestone_series_key");
-  });
-
-  it("creates work cycle tables and indexes", async () => {
-    const cycleColumns = await sql<{
-      column_name: string;
-      data_type: string;
-      is_nullable: string;
-      column_default: string | null;
-    }>`
-      SELECT column_name, data_type, is_nullable, column_default
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = 'work_cycles'
-    `.execute(db);
-    expect(cycleColumns.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ column_name: "scope_entity_id", data_type: "text", is_nullable: "YES" }),
-        expect.objectContaining({ column_name: "connector_config_id", data_type: "text", is_nullable: "YES" }),
-        expect.objectContaining({ column_name: "source", data_type: "text", is_nullable: "NO" }),
-        expect.objectContaining({ column_name: "external_ref", data_type: "text", is_nullable: "NO" }),
-        expect.objectContaining({ column_name: "name", data_type: "text", is_nullable: "NO" }),
-        expect.objectContaining({ column_name: "sequence", data_type: "integer", is_nullable: "YES" }),
-        expect.objectContaining({ column_name: "state", data_type: "text", is_nullable: "NO" }),
-        expect.objectContaining({ column_name: "last_seen_sync_run_id", data_type: "text", is_nullable: "YES" }),
-        expect.objectContaining({ column_name: "deleted_at", data_type: "text", is_nullable: "YES" }),
-      ]),
-    );
-    expect(cycleColumns.rows.find((row) => row.column_name === "state")?.column_default).toContain("'planned'");
-
-    const membershipColumns = await sql<{
-      column_name: string;
-      data_type: string;
-      is_nullable: string;
-    }>`
-      SELECT column_name, data_type, is_nullable
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = 'task_cycle_memberships'
-    `.execute(db);
-    expect(membershipColumns.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ column_name: "task_id", data_type: "text", is_nullable: "NO" }),
-        expect.objectContaining({ column_name: "cycle_id", data_type: "text", is_nullable: "NO" }),
-        expect.objectContaining({ column_name: "assigned_at", data_type: "text", is_nullable: "NO" }),
-        expect.objectContaining({ column_name: "removed_at", data_type: "text", is_nullable: "YES" }),
-        expect.objectContaining({ column_name: "source_fact_id", data_type: "text", is_nullable: "YES" }),
-      ]),
-    );
-
-    const cycleIndexes = await sql<{ indexname: string; indexdef: string }>`
-      SELECT indexname, indexdef
-      FROM pg_indexes
-      WHERE schemaname = 'public'
-        AND tablename = 'work_cycles'
-    `.execute(db);
-    const sourceRefIndex = cycleIndexes.rows.find((row) => row.indexname === "idx_work_cycles_connector_source_ref");
-    expect(sourceRefIndex?.indexdef).toContain("UNIQUE INDEX");
-    expect(sourceRefIndex?.indexdef).toContain("connector_config_id");
-    expect(sourceRefIndex?.indexdef).toContain("source");
-    expect(sourceRefIndex?.indexdef).toContain("external_ref");
-    expect(cycleIndexes.rows.map((row) => row.indexname)).toContain("idx_work_cycles_last_seen");
-    expect(cycleIndexes.rows.map((row) => row.indexname)).toContain("idx_work_cycles_connector");
-
-    const cycleForeignKeys = await sql<{
-      column_name: string;
-      foreign_table_name: string;
-      foreign_column_name: string;
-      delete_rule: string;
-    }>`
-      SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name, rc.delete_rule
-      FROM information_schema.table_constraints tc
-      JOIN information_schema.key_column_usage kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-      JOIN information_schema.constraint_column_usage ccu
-        ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-      JOIN information_schema.referential_constraints rc
-        ON rc.constraint_name = tc.constraint_name
-       AND rc.constraint_schema = tc.table_schema
-      WHERE tc.table_schema = 'public'
-        AND tc.table_name = 'work_cycles'
-        AND tc.constraint_type = 'FOREIGN KEY'
-    `.execute(db);
-    expect(cycleForeignKeys.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          column_name: "scope_entity_id",
-          foreign_table_name: "entities",
-          foreign_column_name: "id",
-          delete_rule: "SET NULL",
-        }),
-        expect.objectContaining({
-          column_name: "connector_config_id",
-          foreign_table_name: "connector_configs",
-          foreign_column_name: "id",
-          delete_rule: "CASCADE",
-        }),
-      ]),
-    );
-
-    const membershipIndexes = await sql<{ indexname: string; indexdef: string }>`
-      SELECT indexname, indexdef
-      FROM pg_indexes
-      WHERE schemaname = 'public'
-        AND tablename = 'task_cycle_memberships'
-    `.execute(db);
-    const currentIndex = membershipIndexes.rows.find((row) => row.indexname === "idx_task_cycle_current");
-    expect(currentIndex?.indexdef).toContain("UNIQUE INDEX");
-    expect(currentIndex?.indexdef).toContain("task_id");
-    expect(currentIndex?.indexdef).toContain("WHERE (removed_at IS NULL)");
-    expect(membershipIndexes.rows.map((row) => row.indexname)).toEqual(
-      expect.arrayContaining(["idx_task_cycle_memberships_cycle", "idx_task_cycle_memberships_task"]),
-    );
-
-    const foreignKeys = await sql<{
-      column_name: string;
-      foreign_table_name: string;
-      foreign_column_name: string;
-      delete_rule: string;
-    }>`
-      SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name, rc.delete_rule
-      FROM information_schema.table_constraints tc
-      JOIN information_schema.key_column_usage kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-      JOIN information_schema.constraint_column_usage ccu
-        ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-      JOIN information_schema.referential_constraints rc
-        ON rc.constraint_name = tc.constraint_name
-       AND rc.constraint_schema = tc.table_schema
-      WHERE tc.table_schema = 'public'
-        AND tc.table_name = 'task_cycle_memberships'
-        AND tc.constraint_type = 'FOREIGN KEY'
-    `.execute(db);
-    expect(foreignKeys.rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          column_name: "task_id",
-          foreign_table_name: "tasks",
-          foreign_column_name: "id",
-          delete_rule: "CASCADE",
-        }),
-        expect.objectContaining({
-          column_name: "cycle_id",
-          foreign_table_name: "work_cycles",
-          foreign_column_name: "id",
-          delete_rule: "CASCADE",
-        }),
-        expect.objectContaining({
-          column_name: "source_fact_id",
-          foreign_table_name: "indexed_file_facts",
-          foreign_column_name: "id",
-          delete_rule: "SET NULL",
-        }),
-      ]),
-    );
   });
 
   it("running migrations twice is idempotent", async () => {

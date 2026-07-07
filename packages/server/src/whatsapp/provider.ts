@@ -62,9 +62,18 @@ export type WhatsAppInboundMessage = WhatsAppDmInboundMessage | WhatsAppGroupInb
 
 export type WhatsAppMessageHandler = (message: WhatsAppInboundMessage) => Promise<void>;
 
+export interface WhatsAppHistorySyncResult {
+  persisted: number;
+  skippedOld: number;
+  skippedDup: number;
+}
+
+export type WhatsAppHistoryMessagesHandler = (messages: WhatsAppInboundMessage[]) => Promise<WhatsAppHistorySyncResult>;
+
 export interface WhatsAppInboundProvider {
   id: string;
   onMessage: (handler: WhatsAppMessageHandler) => void;
+  onHistoryMessages?: (handler: WhatsAppHistoryMessagesHandler) => void;
 }
 
 export interface WhatsAppSendResult {
@@ -122,11 +131,16 @@ export function canonicalGroupConversationId(groupId: string): string {
   return `group:${groupId}`;
 }
 
+export function isWhatsAppDmPhoneE164(value: string | null | undefined): value is string {
+  return typeof value === "string" && /^\+[1-9]\d{6,14}$/u.test(value);
+}
+
 export function phoneE164ToWhatsAppJid(phoneE164: string): string {
   return `${phoneE164.replace("+", "")}@s.whatsapp.net`;
 }
 
 export function whatsappJidToPhoneE164(jid: string): string {
+  if (jid.startsWith("wati:+")) return jid.slice("wati:".length);
   const raw = jid.replace("@s.whatsapp.net", "").replace("@lid", "");
   const number = raw.includes(":") ? raw.split(":")[0] : raw;
   return `+${number}`;
@@ -135,11 +149,18 @@ export function whatsappJidToPhoneE164(jid: string): string {
 export function whatsappTargetFromDeliveryTarget(targetId: string): WhatsAppTarget {
   if (targetId.endsWith("@g.us")) return { kind: "group", groupId: targetId };
   if (targetId.startsWith("dm:+")) return { kind: "dm", phoneE164: targetId.slice("dm:".length) };
+  if (targetId.startsWith("wati:+")) {
+    return { kind: "dm", phoneE164: targetId.slice("wati:".length), providerConversationId: targetId };
+  }
   if (targetId.startsWith("+")) return { kind: "dm", phoneE164: targetId };
-  return { kind: "dm", phoneE164: whatsappJidToPhoneE164(targetId), providerConversationId: targetId };
+  if (targetId.endsWith("@s.whatsapp.net") || targetId.endsWith("@lid")) {
+    return { kind: "dm", phoneE164: whatsappJidToPhoneE164(targetId), providerConversationId: targetId };
+  }
+  return { kind: "dm", phoneE164: "", providerConversationId: targetId };
 }
 
 export function whatsappDeliveryTargetFromTarget(target: WhatsAppTarget): string {
   if (target.kind === "group") return target.groupId;
+  if (isWhatsAppDmPhoneE164(target.phoneE164)) return canonicalDmConversationId(target.phoneE164);
   return target.providerConversationId ?? canonicalDmConversationId(target.phoneE164);
 }

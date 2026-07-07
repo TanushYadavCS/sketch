@@ -1,11 +1,14 @@
 import type { Logger } from "../logger";
 import {
   WHATSAPP_NONE_PROVIDER_ID,
+  type WhatsAppCapabilities,
   type WhatsAppDmProvider,
   type WhatsAppDmProviderId,
   type WhatsAppGroupMetadata,
   type WhatsAppGroupProvider,
   type WhatsAppGroupProviderId,
+  type WhatsAppHistoryMessagesHandler,
+  type WhatsAppHistorySyncResult,
   type WhatsAppInboundMessage,
   type WhatsAppInboundProvider,
   type WhatsAppMessageHandler,
@@ -18,6 +21,8 @@ import type { WhatsAppTemplateRequest } from "./templates";
 export interface WhatsAppRuntime {
   isConnected: boolean;
   onMessage(handler: WhatsAppMessageHandler): void;
+  onHistoryMessages(handler: WhatsAppHistoryMessagesHandler): void;
+  getCapabilities(target: WhatsAppTarget): WhatsAppCapabilities;
   sendText(target: WhatsAppTarget, text: string, options?: WhatsAppSendOptions): Promise<WhatsAppSendResult | null>;
   sendTemplate(target: WhatsAppTarget, template: WhatsAppTemplateRequest): Promise<WhatsAppSendResult | null>;
   sendFile(target: WhatsAppTarget, filePath: string, mimeType: string, fileName: string): Promise<void>;
@@ -75,6 +80,8 @@ export function createWhatsAppRuntime(config: WhatsAppRuntimeConfig): WhatsAppRu
     return config.groupProviderId !== WHATSAPP_NONE_PROVIDER_ID && message.providerId === config.groupProviderId;
   };
 
+  const emptyHistoryResult = (): WhatsAppHistorySyncResult => ({ persisted: 0, skippedOld: 0, skippedDup: 0 });
+
   return {
     get isConnected() {
       const dmProvider = dmProviders.get(config.dmProviderId);
@@ -90,6 +97,20 @@ export function createWhatsAppRuntime(config: WhatsAppRuntimeConfig): WhatsAppRu
           await handler(message);
         });
       }
+    },
+
+    onHistoryMessages(handler) {
+      for (const provider of config.inboundProviders) {
+        provider.onHistoryMessages?.(async (messages) => {
+          const filtered = messages.filter(shouldHandleInboundMessage);
+          if (filtered.length === 0) return emptyHistoryResult();
+          return handler(filtered);
+        });
+      }
+    },
+
+    getCapabilities(target) {
+      return resolveProviderForTarget(target).capabilities;
     },
 
     async sendText(target, text, options) {

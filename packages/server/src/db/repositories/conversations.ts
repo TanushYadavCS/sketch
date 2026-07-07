@@ -141,6 +141,14 @@ function mergeSeenMessageId(left: number | null, right: number | null): number |
   if (left === null || right === null) return null;
   return Math.min(left, right);
 }
+function whatsappPhoneSenderCandidates(phoneE164?: string | null): string[] {
+  const phone = phoneE164?.trim();
+  if (!phone) return [];
+  const digits = phone.replace(/\D/gu, "");
+  return [phone, digits ? `${digits}@s.whatsapp.net` : null, digits || null, `wati:${phone}`].filter(
+    (value, index, values): value is string => Boolean(value) && values.indexOf(value) === index,
+  );
+}
 
 export function createConversationRepository(db: Kysely<DB>) {
   async function mergeConversationRows(
@@ -336,6 +344,36 @@ export function createConversationRepository(db: Kysely<DB>) {
         .executeTakeFirst();
     },
 
+    async findLatestInboundWhatsAppDmFromRecipient(params: {
+      recipientUserId: string;
+      phoneE164?: string | null;
+    }): Promise<StoredConversationMessage | undefined> {
+      const senderJids = whatsappPhoneSenderCandidates(params.phoneE164);
+      let query = db
+        .selectFrom("conversation_messages")
+        .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
+        .selectAll("conversation_messages")
+        .where("conversations.platform", "=", "whatsapp")
+        .where("conversations.kind", "=", "dm")
+        .where("conversation_messages.is_bot", "=", 0);
+
+      if (senderJids.length > 0) {
+        query = query.where(({ eb, or }) =>
+          or([
+            eb("conversation_messages.sender_user_id", "=", params.recipientUserId),
+            eb("conversation_messages.sender_jid", "in", senderJids),
+          ]),
+        );
+      } else {
+        query = query.where("conversation_messages.sender_user_id", "=", params.recipientUserId);
+      }
+
+      const row = await query
+        .orderBy("conversation_messages.received_at", "desc")
+        .orderBy("conversation_messages.id", "desc")
+        .executeTakeFirst();
+      return row ? toStored(row) : undefined;
+    },
     async claimProviderConversationId(
       id: number,
       ref: ConversationRef,

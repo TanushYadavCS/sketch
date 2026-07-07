@@ -66,6 +66,13 @@ export interface MaterializeDeps {
   birthGateDryRun: boolean;
   embeddingProvider: EmbeddingProvider | null;
   countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
+  llmTaskCorroborationThreshold: number;
+  featureAutoMintThreshold: number;
+  birthGateTypes: Set<ProposeEntityType>;
+  birthGateLiveTypes: Set<ProposeEntityType>;
+  structuralAutoBirthTypes: Set<ProposeEntityType>;
+  birthGateDryRun: boolean;
+  embeddingProvider: EmbeddingProvider | null;
 }
 
 export type MaterializeResult =
