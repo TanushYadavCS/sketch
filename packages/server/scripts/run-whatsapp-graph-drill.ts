@@ -9,10 +9,10 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
-import { handleSearch } from "../src/agent/tools/search";
-import { handleWhatsAppGroupHistory } from "../src/agent/tools/whatsapp-group-history";
-import type { SketchMcpDeps } from "../src/agent/tools/types";
 import { UploadCollector } from "../src/agent/sketch-tools";
+import { handleSearch } from "../src/agent/tools/search";
+import type { SketchMcpDeps } from "../src/agent/tools/types";
+import { handleWhatsAppGroupHistory } from "../src/agent/tools/whatsapp-group-history";
 import { loadConfig, validateConfig } from "../src/config";
 import { createDatabase } from "../src/db";
 import { runMigrations } from "../src/db/migrate";
@@ -64,10 +64,7 @@ async function main() {
       .executeTakeFirst();
     if (!carol) {
       const id = randomUUID();
-      await db
-        .insertInto("users")
-        .values({ id, name: "Carol NonMember", email: "carol@canvasx-test.ai" })
-        .execute();
+      await db.insertInto("users").values({ id, name: "Carol NonMember", email: "carol@canvasx-test.ai" }).execute();
       carol = { id, email: "carol@canvasx-test.ai" };
     }
 
@@ -131,7 +128,9 @@ async function main() {
       deps(db, alice.id),
     );
     const page1Payload = JSON.parse(firstText(page1)) as { nextPageToken?: string; messages: unknown[] };
-    console.log(`\n=== pagination page1: ${page1Payload.messages.length} msgs, hasToken=${Boolean(page1Payload.nextPageToken)} ===`);
+    console.log(
+      `\n=== pagination page1: ${page1Payload.messages.length} msgs, hasToken=${Boolean(page1Payload.nextPageToken)} ===`,
+    );
     if (page1Payload.nextPageToken) {
       const page2 = await handleWhatsAppGroupHistory(
         { sliceId: busyKeptSlice.id, expandMinutes: 120, limit: 2, pageToken: page1Payload.nextPageToken },
@@ -142,10 +141,7 @@ async function main() {
 
     /** G1/F3: the REAL Search tool — Alice gets WhatsApp hits, non-member Carol gets none. */
     for (const viewer of [alice, carol]) {
-      const search = await handleSearch(
-        { query: "Acme proposal", source: "whatsapp", limit: 10 },
-        deps(db, viewer.id),
-      );
+      const search = await handleSearch({ query: "Acme proposal", source: "whatsapp", limit: 10 }, deps(db, viewer.id));
       report(`G1/F3 Search as ${viewer.email}`, firstText(search), "member: whatsapp hits; non-member: none");
     }
   } finally {

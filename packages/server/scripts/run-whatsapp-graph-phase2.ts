@@ -164,7 +164,12 @@ async function main() {
       db,
       busyId,
       [
-        { atMinutes: -70, senderPhone: RAHUL_PHONE, senderName: "Rahul", text: "reviewed both vendor options overnight" },
+        {
+          atMinutes: -70,
+          senderPhone: RAHUL_PHONE,
+          senderName: "Rahul",
+          text: "reviewed both vendor options overnight",
+        },
         { atMinutes: -69, senderPhone: ALICE_PHONE, senderName: "Alice Founder", text: "let's go with option B then" },
         { atMinutes: -68, senderPhone: RAHUL_PHONE, senderName: "Rahul", text: "ok noted" },
       ],
@@ -174,7 +179,12 @@ async function main() {
       db,
       busyId,
       [
-        { atMinutes: -40, senderPhone: PRIYA_PHONE, senderName: "Priya", text: "the Acme folks visited our office today" },
+        {
+          atMinutes: -40,
+          senderPhone: PRIYA_PHONE,
+          senderName: "Priya",
+          text: "the Acme folks visited our office today",
+        },
         { atMinutes: -39, senderPhone: RAHUL_PHONE, senderName: "Rahul", text: "nice, good sign" },
       ],
       "b5-entity",
@@ -313,7 +323,7 @@ async function main() {
 
     const busyFiles = files.filter((f) => f.file_name.includes("Acme Deal Room"));
     const latestBusy = busyFiles[busyFiles.length - 1];
-    console.log(`\n=== C3/C7 roster excerpt (latest busy file) ===`);
+    console.log("\n=== C3/C7 roster excerpt (latest busy file) ===");
     for (const line of (latestBusy?.content ?? "").split("\n")) {
       if (/Priya|Vikram|option B|Acme folks/u.test(line)) console.log(line);
     }
@@ -324,7 +334,7 @@ async function main() {
       .orderBy("created_at", "desc")
       .limit(3)
       .execute();
-    console.log(`\n=== F2 roster_snapshot hygiene (latest 3 slices) ===`);
+    console.log("\n=== F2 roster_snapshot hygiene (latest 3 slices) ===");
     for (const snap of snapshots) {
       const leak = snap.roster_snapshot ? rawIdentifier.exec(snap.roster_snapshot) : null;
       console.log(`${snap.id}: ${leak ? `LEAK: ${leak[0]}` : "clean"}`);

@@ -35,7 +35,13 @@ async function main() {
       .execute();
     await db
       .insertInto("whatsapp_groups")
-      .values({ jid: GROUP_JID, name: "Perf Group", description: null, updated_at: new Date().toISOString(), index_enabled: 1 })
+      .values({
+        jid: GROUP_JID,
+        name: "Perf Group",
+        description: null,
+        updated_at: new Date().toISOString(),
+        index_enabled: 1,
+      })
       .execute();
     for (let i = 0; i < 5; i += 1) {
       await db

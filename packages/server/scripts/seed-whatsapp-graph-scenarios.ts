@@ -54,7 +54,7 @@ async function insertConversation(db: Kysely<DB>, providerId: string, kind: stri
       provider_conversation_id: providerId,
       display_name: name,
     })
-    .onConflict((oc) => oc.column("provider_conversation_id").doNothing())
+    .onConflict((oc) => oc.columns(["platform", "kind", "provider_conversation_id"]).doNothing())
     .execute();
   const row = await db
     .selectFrom("conversations")
@@ -109,44 +109,50 @@ async function main() {
       [aliceId, TEAMMATE_ALICE],
       [bobId, TEAMMATE_BOB],
     ] as const) {
+      const existing = await db.selectFrom("users").select("id").where("email", "=", teammate.email).executeTakeFirst();
+      if (existing) continue;
       await db
         .insertInto("users")
         .values({
           id,
           name: teammate.name,
           email: teammate.email,
-          role: "member",
-          status: "active",
           whatsapp_number: teammate.phone,
         })
-        .onConflict((oc) => oc.column("email").doNothing())
         .execute();
     }
 
-    const rahulEntityId = randomUUID();
-    await db
-      .insertInto("entities")
-      .values({
-        id: rahulEntityId,
-        name: CRM_RAHUL.name,
-        entity_type: "person",
-        status: "active",
-        source: "zoho_crm",
-      })
-      .onConflict((oc) => oc.doNothing())
-      .execute();
-    await db
-      .insertInto("entity_contact_points")
-      .values({
-        id: randomUUID(),
-        entity_id: rahulEntityId,
-        kind: "phone",
-        value: CRM_RAHUL.phone,
-        is_primary: 1,
-        source: "zoho_crm",
-      })
-      .onConflict((oc) => oc.doNothing())
-      .execute();
+    const existingRahul = await db
+      .selectFrom("entities")
+      .select("id")
+      .where("name", "=", CRM_RAHUL.name)
+      .executeTakeFirst();
+    const rahulEntityId = existingRahul?.id ?? randomUUID();
+    if (!existingRahul) {
+      await db
+        .insertInto("entities")
+        .values({
+          id: rahulEntityId,
+          name: CRM_RAHUL.name,
+          source_type: "person",
+          status: "active",
+          hotness: 0,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .execute();
+      await db
+        .insertInto("entity_contact_points")
+        .values({
+          id: randomUUID(),
+          entity_id: rahulEntityId,
+          kind: "phone",
+          value: CRM_RAHUL.phone,
+          is_primary: 1,
+          source: "zoho_crm",
+        })
+        .execute();
+    }
 
     const groups: Array<[string, string]> = [
       [BUSY_GROUP_JID, "Acme Deal Room"],
