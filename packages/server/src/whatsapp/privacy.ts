@@ -21,13 +21,28 @@ export function maskPersonalNumberIdentifier(value: string): string {
 }
 
 /**
- * Fully redacts identifiers for user-facing or persisted display text (roster
- * snapshots, rendered names), where even a masked number is unnecessary.
+ * Sanitizes identifiers for persisted display text by replacing JIDs and
+ * masking phone-like tokens.
  */
 export function sanitizeWhatsAppDisplayText(value: string): string {
   return value
     .replace(WHATSAPP_JID_TOKEN_PATTERN, "[whatsapp-id]")
     .replace(PHONE_LIKE_IDENTIFIER_PATTERN, maskDigitsKeepingLastTwo)
     .replace(/\s{2,}/gu, " ")
+    .trim();
+}
+
+/**
+ * Strips personal numbers for user-facing rendered surfaces where no digits are
+ * allowed. This is distinct from log masking: masking preserves partial digits
+ * for operational correlation, while stripping removes the identifier entirely.
+ */
+export function stripPersonalNumberTokens(value: string): string {
+  return value
+    .replace(WHATSAPP_JID_TOKEN_PATTERN, "")
+    .replace(PHONE_LIKE_IDENTIFIER_PATTERN, "")
+    .replace(/\s{2,}/gu, " ")
+    .replace(/\s+([,.)\]])/gu, "$1")
+    .replace(/([(])\s+/gu, "$1")
     .trim();
 }

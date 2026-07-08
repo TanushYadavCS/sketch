@@ -93,7 +93,7 @@ type SearchEntitiesArgs = z.infer<z.ZodObject<typeof searchEntitiesToolSchema>>;
 type GetEntityContextArgs = z.infer<z.ZodObject<typeof getEntityContextToolSchema>>;
 type GetFileContentArgs = z.infer<z.ZodObject<typeof getFileContentToolSchema>>;
 
-async function resolveUserEmails(deps: SketchMcpDeps): Promise<string[]> {
+export async function resolveUserEmails(deps: SketchMcpDeps): Promise<string[]> {
   if (deps.publicMcp?.userEmails) return deps.publicMcp.userEmails;
   if (!deps.currentUserId || !deps.userRepo?.getAllEmailsForUser) return [];
   return deps.userRepo.getAllEmailsForUser(deps.currentUserId);
