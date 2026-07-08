@@ -404,6 +404,35 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
       );
     });
 
+    it("bounds incremental scans by received_at while preserving cursor filtering", async () => {
+      const seeded = await seedEnabledGroup(db);
+      await insertMessage(db, seeded.conversationId, {
+        providerMessageId: "cursor-message",
+        effectiveAt: "2026-07-07T09:00:00.000Z",
+      });
+      await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:30:00.000Z") });
+      await insertMessage(db, seeded.conversationId, {
+        providerMessageId: "inside-bound-late",
+        effectiveAt: "2026-07-07T08:59:00.000Z",
+        providerTimestamp: "2026-07-07T08:59:00.000Z",
+        receivedAt: "2026-07-05T09:00:00.001Z",
+      });
+      await insertMessage(db, seeded.conversationId, {
+        providerMessageId: "outside-bound-newer-effective",
+        effectiveAt: "2026-07-07T09:10:00.000Z",
+        providerTimestamp: "2026-07-07T09:10:00.000Z",
+        receivedAt: "2026-07-05T08:59:59.999Z",
+      });
+
+      const result = await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:31:00.000Z") });
+      const slices = await listSlices(db);
+
+      expect(result.lateArrivals).toBe(1);
+      expect(result.messagesProcessed).toBe(0);
+      expect(result.slicesCreated).toBe(0);
+      expect(slices).toHaveLength(1);
+    });
+
     it("respects per-group gap overrides", async () => {
       const seeded = await seedEnabledGroup(db, { sliceGapMinutes: 5 });
       await insertMessage(db, seeded.conversationId, {

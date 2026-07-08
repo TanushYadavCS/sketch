@@ -131,6 +131,7 @@ export async function runConnectorSync(
       | "WHATSAPP_SLICE_MAX_AGE_MINUTES"
       | "WHATSAPP_SLICE_MAX_MESSAGES"
       | "WHATSAPP_SALIENCE_BATCH_LIMIT"
+      | "WHATSAPP_EMISSION_REFRESH_DAYS"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"
@@ -183,6 +184,7 @@ export async function runConnectorSync(
               sliceMaxAgeMinutes: storedScopeConfig.sliceMaxAgeMinutes ?? appConfig?.WHATSAPP_SLICE_MAX_AGE_MINUTES,
               sliceMaxMessages: storedScopeConfig.sliceMaxMessages ?? appConfig?.WHATSAPP_SLICE_MAX_MESSAGES,
               salienceBatchLimit: storedScopeConfig.salienceBatchLimit ?? appConfig?.WHATSAPP_SALIENCE_BATCH_LIMIT,
+              emissionRefreshDays: storedScopeConfig.emissionRefreshDays ?? appConfig?.WHATSAPP_EMISSION_REFRESH_DAYS,
             }
           : storedScopeConfig;
   const owner = await userRepo.findById(config.created_by);
@@ -572,6 +574,7 @@ export interface SyncSchedulerDeps {
       | "TEAMS_INITIAL_LOOKBACK_DAYS"
       | "TEAMS_MAX_INFLIGHT"
       | "WHATSAPP_SALIENCE_BATCH_LIMIT"
+      | "WHATSAPP_EMISSION_REFRESH_DAYS"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"

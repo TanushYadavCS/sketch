@@ -12,14 +12,18 @@ import { createTestDb, createTestLogger, createTestPgDb } from "../test-utils";
 import type { GeminiGenerator } from "./gemini-generate";
 import { runConnectorSync } from "./sync";
 import { createWhatsAppConnector } from "./whatsapp";
+import { emitWhatsAppSyncedItems } from "./whatsapp-salience";
 
 const RAW_IDENTIFIER_PATTERN = /(?:\+?[1-9]\d{9,14}\b|@s\.whatsapp\.net|@lid)/iu;
+const SALIENCE_SIGNALS = JSON.stringify({ signals: ["decision"], entities: [] });
+let seededTeammateSequence = 0;
 
 interface SeededSlice {
   groupJid: string;
   conversationId: number;
   sliceId: string;
   teammateEmail: string | null;
+  teammateUserId: string | null;
 }
 
 interface FakeGenerator extends GeminiGenerator {
@@ -62,6 +66,11 @@ async function seedConnectorConfig(db: Kysely<DB>) {
   });
 }
 
+function nextTeammatePhone(): string {
+  seededTeammateSequence += 1;
+  return `+1555${String(seededTeammateSequence).padStart(7, "0")}`;
+}
+
 async function seedSlice(
   db: Kysely<DB>,
   options: {
@@ -69,6 +78,8 @@ async function seedSlice(
     verdict?: "kept" | "dropped" | null;
     salienceSignals?: string | null;
     text?: string;
+    teammatePhone?: string;
+    teammateUserId?: string;
   } = {},
 ): Promise<SeededSlice> {
   const groupJid = `${randomUUID()}@g.us`;
@@ -81,19 +92,22 @@ async function seedSlice(
   });
   await groups.setIndexEnabled(groupJid, true);
 
-  const teammateEmail = options.teammate === false ? null : `teammate-${randomUUID()}@example.com`;
-  if (teammateEmail) {
+  const teammateUserId = options.teammate === false ? null : (options.teammateUserId ?? `teammate-${randomUUID()}`);
+  const teammatePhone = options.teammatePhone ?? nextTeammatePhone();
+  const teammateJid = `${teammatePhone.replace(/\D/gu, "")}@s.whatsapp.net`;
+  const teammateEmail = teammateUserId ? `${teammateUserId}@example.com` : null;
+  if (teammateUserId && teammateEmail) {
     await createUserRepository(db).create({
-      id: "teammate-user",
+      id: teammateUserId,
       name: "Tara Teammate",
       email: teammateEmail,
-      whatsappNumber: "+15550000001",
+      whatsappNumber: teammatePhone,
     });
   }
 
   const participants = teammateEmail
     ? [
-        { participantJid: "15550000001@s.whatsapp.net", phoneE164: "+15550000001", adminRole: null },
+        { participantJid: teammateJid, phoneE164: teammatePhone, adminRole: null },
         { participantJid: "15550000002@s.whatsapp.net", phoneE164: "+15550000002", adminRole: null },
       ]
     : [{ participantJid: "15550000002@s.whatsapp.net", phoneE164: "+15550000002", adminRole: null }];
@@ -109,7 +123,7 @@ async function seedSlice(
     ? await messages.insertMessage({
         conversationId: conversation.id,
         providerMessageId: `${groupJid}:1`,
-        senderJid: "15550000001@s.whatsapp.net",
+        senderJid: teammateJid,
         senderName: "Tara Teammate",
         text: options.text ?? "We decided Project Atlas starts Monday.",
         receivedAt: "2026-07-07T09:00:00.000Z",
@@ -145,7 +159,7 @@ async function seedSlice(
     salienceSignals: options.salienceSignals ?? null,
   });
 
-  return { groupJid, conversationId: conversation.id, sliceId: inserted.row.id, teammateEmail };
+  return { groupJid, conversationId: conversation.id, sliceId: inserted.row.id, teammateEmail, teammateUserId };
 }
 
 async function collectWhatsAppItems(db: Kysely<DB>, generator?: GeminiGenerator | null) {
@@ -161,6 +175,61 @@ async function collectWhatsAppItems(db: Kysely<DB>, generator?: GeminiGenerator 
     items.push(item);
   }
   return items;
+}
+
+async function collectEmittedWhatsAppItems(db: Kysely<DB>, options: { emissionRefreshDays?: number; now?: Date } = {}) {
+  const items = [];
+  for await (const item of emitWhatsAppSyncedItems({
+    db,
+    logger: fakeLogger(),
+    emissionRefreshDays: options.emissionRefreshDays,
+    now: options.now,
+  })) {
+    items.push(item);
+  }
+  return items;
+}
+
+async function setSliceWindow(db: Kysely<DB>, sliceId: string, startedAt: string, endedAt: string): Promise<void> {
+  await db
+    .updateTable("conversation_slices")
+    .set({ started_at: startedAt, ended_at: endedAt })
+    .where("id", "=", sliceId)
+    .execute();
+}
+
+async function linkSliceToIndexedFile(db: Kysely<DB>, connectorConfigId: string, sliceId: string): Promise<string> {
+  const fileId = `file-${randomUUID()}`;
+  await db
+    .insertInto("indexed_files")
+    .values({
+      id: fileId,
+      connector_config_id: connectorConfigId,
+      provider_file_id: sliceId,
+      provider_message_id: null,
+      thread_id: null,
+      provider_url: null,
+      file_name: `WhatsApp slice ${sliceId}`,
+      file_type: "whatsapp_conversation_slice",
+      content_category: "document",
+      content: "Linked WhatsApp slice",
+      summary: null,
+      source: "whatsapp",
+      source_path: null,
+      rollup_group_id: null,
+      content_hash: null,
+      source_created_at: null,
+      source_updated_at: null,
+      synced_at: "2026-07-08T00:00:00.000Z",
+      context_note: null,
+      access_scope_id: null,
+      mime_type: null,
+      embedding_next_retry_at: null,
+      summary_next_retry_at: null,
+    })
+    .execute();
+  await db.updateTable("conversation_slices").set({ indexed_file_id: fileId }).where("id", "=", sliceId).execute();
+  return fileId;
 }
 
 function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
@@ -301,6 +370,7 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       });
       const config = await seedConnectorConfig(db);
       await runConnectorSync(db, config.id, createTestLogger());
+      if (!seeded.teammateUserId) throw new Error("expected teammate user");
       const before = await db
         .selectFrom("conversation_slices")
         .selectAll()
@@ -308,7 +378,7 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
         .executeTakeFirstOrThrow();
       if (!before.indexed_file_id) throw new Error("expected linked file");
 
-      await db.updateTable("users").set({ whatsapp_number: null }).where("id", "=", "teammate-user").execute();
+      await db.updateTable("users").set({ whatsapp_number: null }).where("id", "=", seeded.teammateUserId).execute();
       const result = await runConnectorSync(db, config.id, createTestLogger());
       const after = await db
         .selectFrom("conversation_slices")
@@ -360,6 +430,28 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       expect(file.source).toBe("whatsapp");
       expect(file.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
       expect(scopeMembers).toEqual([{ email: seeded.teammateEmail, provider_scope_id: seeded.groupJid }]);
+    });
+
+    it("emits old unlinked and recent linked kept slices while skipping old linked slices", async () => {
+      const config = await seedConnectorConfig(db);
+      const oldLinked = await seedSlice(db, { verdict: "kept", salienceSignals: SALIENCE_SIGNALS });
+      const oldUnlinked = await seedSlice(db, { verdict: "kept", salienceSignals: SALIENCE_SIGNALS });
+      const recentLinked = await seedSlice(db, { verdict: "kept", salienceSignals: SALIENCE_SIGNALS });
+
+      await setSliceWindow(db, oldLinked.sliceId, "2026-06-30T09:00:00.000Z", "2026-06-30T09:01:00.000Z");
+      await setSliceWindow(db, oldUnlinked.sliceId, "2026-06-30T10:00:00.000Z", "2026-06-30T10:01:00.000Z");
+      await setSliceWindow(db, recentLinked.sliceId, "2026-07-05T09:00:00.000Z", "2026-07-05T09:01:00.000Z");
+      await linkSliceToIndexedFile(db, config.id, oldLinked.sliceId);
+      await linkSliceToIndexedFile(db, config.id, recentLinked.sliceId);
+
+      const items = await collectEmittedWhatsAppItems(db, {
+        emissionRefreshDays: 7,
+        now: new Date("2026-07-08T00:00:00.000Z"),
+      });
+
+      expect(items.map((item) => item.providerFileId).sort()).toEqual(
+        [oldUnlinked.sliceId, recentLinked.sliceId].sort(),
+      );
     });
 
     it("stops emissions for disabled groups while retaining previously indexed rows", async () => {

@@ -184,13 +184,19 @@ function runIdentityIntegrationSuite(label: string, createDb: DbFactory) {
       await repo.refreshParticipants(groupJid, toParticipantInputs(collected.participants), "2026-07-07T09:00:00.000Z");
       const rows = await repo.listParticipants(groupJid);
 
-      expect(collected.skippedCount).toBe(3);
+      expect(collected.skippedCount).toBe(2);
       expect(resolveLidToPhone).not.toHaveBeenCalled();
       expect(rows).toEqual([
         expect.objectContaining({
           participant_jid: "15555000001@s.whatsapp.net",
           phone_e164: "+15555000001",
           lid: "phone-shape@lid",
+          admin_role: "admin",
+        }),
+        expect.objectContaining({
+          participant_jid: "abc@s.whatsapp.net",
+          phone_e164: null,
+          lid: null,
           admin_role: "admin",
         }),
         expect.objectContaining({

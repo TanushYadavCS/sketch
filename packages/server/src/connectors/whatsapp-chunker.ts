@@ -158,6 +158,20 @@ function isAfterCursor(message: { id: number; effectiveAt: string }, cursor: Con
   );
 }
 
+/**
+ * Returns a portable SQL lower bound that is only a superset of isAfterCursor.
+ * effective_at is provider_timestamp ?? received_at. Any message with
+ * effective_at > cursor must have received_at > cursor - 48h: if effective_at is
+ * received_at this is direct, and if effective_at is provider_timestamp then a
+ * valid provider_timestamp can exceed received_at by at most 48h.
+ */
+function cursorReceivedAtLowerBound(cursor: ConversationSliceCursorRow): string | null {
+  if (cursor.last_effective_at === null || cursor.last_message_id === null) return null;
+  const cursorMs = Date.parse(cursor.last_effective_at);
+  if (!Number.isFinite(cursorMs)) return null;
+  return new Date(cursorMs - MAX_PROVIDER_TIMESTAMP_FUTURE_MS).toISOString();
+}
+
 function emptyRunSummary(): WhatsAppChunkerRunSummary {
   return {
     conversationsProcessed: 0,
@@ -324,12 +338,13 @@ async function listMessagesAfterCursor(
   cursor: ConversationSliceCursorRow,
   now: Date,
 ): Promise<WhatsAppChunkerMessage[]> {
-  const rows = await db
+  const lowerBound = cursorReceivedAtLowerBound(cursor);
+  let query = db
     .selectFrom("conversation_messages")
     .select(["id", "provider_message_id", "is_bot", "text", "attachments", "provider_timestamp", "received_at"])
-    .where("conversation_id", "=", conversationId)
-    .orderBy("id", "asc")
-    .execute();
+    .where("conversation_id", "=", conversationId);
+  if (lowerBound) query = query.where("received_at", ">", lowerBound);
+  const rows = await query.orderBy("id", "asc").execute();
 
   return rows
     .map((row: ChunkerRawRow) => ({
@@ -354,12 +369,14 @@ async function countLateArrivals(
 ): Promise<number> {
   if (cursor.last_effective_at === null || cursor.last_message_id === null) return 0;
 
-  const rows = await db
+  const lowerBound = cursorReceivedAtLowerBound(cursor);
+  let query = db
     .selectFrom("conversation_messages")
     .select(["id", "provider_timestamp", "received_at"])
     .where("conversation_id", "=", conversationId)
-    .where("id", ">", cursor.last_message_id)
-    .execute();
+    .where("id", ">", cursor.last_message_id);
+  if (lowerBound) query = query.where("received_at", ">", lowerBound);
+  const rows = await query.execute();
 
   return rows.filter(
     (row: ChunkerTimestampRow) => !isAfterCursor({ id: row.id, effectiveAt: effectiveTimestamp(row, now) }, cursor),

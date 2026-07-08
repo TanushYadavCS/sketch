@@ -18,8 +18,10 @@ import type { GeminiGenerator } from "./gemini-generate";
 import type { EntitySeed, SyncedItem } from "./types";
 
 export const DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT = 50;
+export const WHATSAPP_EMISSION_REFRESH_DAYS = 7;
 
 const PROMPT_VERSION = "whatsapp-salience-v1";
+const DAY_MS = 24 * 60 * 60 * 1000;
 const SALIENCE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const SALIENCE_SIGNALS = new Set(["decision", "commitment", "question", "named_entity"]);
 const PERSON_ENTITY_TYPES = new Set(["person", "people", "human", "individual", "contact"]);
@@ -108,6 +110,10 @@ function stableContentHash(content: string): string {
 
 function normalizeBatchLimit(value: number | undefined): number {
   return Number.isInteger(value) && value && value > 0 ? value : DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT;
+}
+
+function normalizeEmissionRefreshDays(value: number | undefined): number {
+  return Number.isInteger(value) && value && value > 0 ? value : WHATSAPP_EMISSION_REFRESH_DAYS;
 }
 
 export function assertNoRawWhatsAppIdentifiers(value: string): void {
@@ -307,7 +313,19 @@ async function listPendingSliceContexts(
   });
 }
 
-async function listKeptSliceContexts(db: Kysely<DB>): Promise<SliceContext[]> {
+/**
+ * Re-emits unlinked slices plus recent linked slices. Recent linked slices refresh
+ * indexed content when roster improvements add labels or CRM matches; older linked
+ * slices are stable.
+ */
+async function listKeptSliceContexts(
+  db: Kysely<DB>,
+  emissionRefreshDays = WHATSAPP_EMISSION_REFRESH_DAYS,
+  now = new Date(),
+): Promise<SliceContext[]> {
+  const refreshCutoff = new Date(
+    now.getTime() - normalizeEmissionRefreshDays(emissionRefreshDays) * DAY_MS,
+  ).toISOString();
   const rows = await db
     .selectFrom("conversation_slices")
     .innerJoin("conversations", "conversations.id", "conversation_slices.conversation_id")
@@ -322,6 +340,12 @@ async function listKeptSliceContexts(db: Kysely<DB>): Promise<SliceContext[]> {
     .where("conversations.kind", "=", "group")
     .where("whatsapp_groups.index_enabled", "=", 1)
     .where("conversation_slices.salience_verdict", "=", "kept")
+    .where((eb) =>
+      eb.or([
+        eb("conversation_slices.indexed_file_id", "is", null),
+        eb("conversation_slices.ended_at", ">=", refreshCutoff),
+      ]),
+    )
     .orderBy("conversation_slices.started_at", "asc")
     .orderBy("conversation_slices.id", "asc")
     .execute();
@@ -593,9 +617,11 @@ export async function processWhatsAppSalience(options: WhatsAppSalienceOptions):
 export async function* emitWhatsAppSyncedItems(options: {
   db: Kysely<DB>;
   logger: Logger;
+  emissionRefreshDays?: number;
+  now?: Date;
   onSkippedNoScope?: () => void;
 }): AsyncGenerator<SyncedItem> {
-  const kept = await listKeptSliceContexts(options.db);
+  const kept = await listKeptSliceContexts(options.db, options.emissionRefreshDays, options.now);
   for (const context of kept) {
     const { item, skippedNoScope } = await syncedItemForKeptSlice(options.db, context, options.logger);
     if (skippedNoScope) options.onSkippedNoScope?.();

@@ -3,6 +3,7 @@ import type { BrowseResult, Connector, ConnectorCredentials, SyncedItem } from "
 import { type WhatsAppChunkerKnobs, chunkWhatsAppIndexingGroups } from "./whatsapp-chunker";
 import {
   DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT,
+  WHATSAPP_EMISSION_REFRESH_DAYS,
   emitWhatsAppSyncedItems,
   processWhatsAppSalience,
 } from "./whatsapp-salience";
@@ -28,6 +29,10 @@ function chunkerDefaultsFromScopeConfig(scopeConfig: Record<string, unknown>): P
 
 function salienceBatchLimitFromScopeConfig(scopeConfig: Record<string, unknown>): number {
   return positiveInteger(scopeConfig.salienceBatchLimit) ?? DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT;
+}
+
+function emissionRefreshDaysFromScopeConfig(scopeConfig: Record<string, unknown>): number {
+  return positiveInteger(scopeConfig.emissionRefreshDays) ?? WHATSAPP_EMISSION_REFRESH_DAYS;
 }
 
 export function createWhatsAppConnector(): Connector {
@@ -82,6 +87,7 @@ export function createWhatsAppConnector(): Connector {
       for await (const item of emitWhatsAppSyncedItems({
         db,
         logger,
+        emissionRefreshDays: emissionRefreshDaysFromScopeConfig(scopeConfig),
         onSkippedNoScope: () => {
           skippedNoScope += 1;
         },

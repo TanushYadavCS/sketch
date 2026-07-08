@@ -529,13 +529,26 @@ describe("WhatsAppBot group metadata persistence", () => {
     const groupMetadata = vi.fn().mockResolvedValue({
       subject: "Product Team",
       desc: null,
-      participants: [{ id: "lid-member@lid", admin: "superadmin" }, { id: "unknown-shape" }],
+      participants: [
+        { id: "lid-member@lid", admin: "superadmin" },
+        { id: "abc@s.whatsapp.net", admin: "admin" },
+        { id: "unknown-shape" },
+      ],
     });
     (bot as unknown as { sock: { groupMetadata: typeof groupMetadata } }).sock = { groupMetadata };
 
     await bot.getGroupMetadata("123@g.us");
 
-    await expect(db.selectFrom("whatsapp_group_participants").selectAll().execute()).resolves.toEqual([
+    await expect(
+      db.selectFrom("whatsapp_group_participants").selectAll().orderBy("participant_jid", "asc").execute(),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        group_jid: "123@g.us",
+        participant_jid: "abc@s.whatsapp.net",
+        phone_e164: null,
+        lid: null,
+        admin_role: "admin",
+      }),
       expect.objectContaining({
         group_jid: "123@g.us",
         participant_jid: "lid-member@lid",

@@ -56,7 +56,7 @@ async function phoneForParticipant(
 ): Promise<string | null | undefined> {
   const phoneNumber = explicitPhoneNumber(row.phoneNumber);
   if (phoneNumber) return phoneNumber;
-  if (jid.endsWith("@s.whatsapp.net")) return phoneFromSWhitelistedJid(jid) ?? undefined;
+  if (jid.endsWith("@s.whatsapp.net")) return phoneFromSWhitelistedJid(jid);
   if (!jid.endsWith("@lid")) return undefined;
 
   try {
