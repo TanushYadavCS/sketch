@@ -506,6 +506,7 @@ export interface Connector {
    * Optional — connectors without scope selection don't implement this.
    */
   browse?(opts: {
+    db?: Kysely<DB>;
     credentials: ConnectorCredentials;
     logger: Logger;
     accessTokenProvider?: AccessTokenProvider;
@@ -518,6 +519,7 @@ export interface Connector {
    * to return results directly without starting a background job.
    */
   browseExisting?(opts: {
+    db?: Kysely<DB>;
     credentials: ConnectorCredentials;
     logger: Logger;
     accessTokenProvider?: AccessTokenProvider;

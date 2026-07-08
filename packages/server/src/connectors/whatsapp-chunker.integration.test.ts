@@ -254,6 +254,31 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
       });
     });
 
+    it("skips slice creation when a group is disabled after the sync snapshot", async () => {
+      const seeded = await seedEnabledGroup(db);
+      await insertMessage(db, seeded.conversationId, {
+        providerMessageId: "m-1",
+        effectiveAt: "2026-07-07T09:00:00.000Z",
+      });
+
+      const result = await runChunker(db, seeded.group, {
+        now: new Date("2026-07-07T09:30:00.000Z"),
+        onConversationClaimed: async () => {
+          await createWhatsAppGroupRepository(db).setIndexEnabled(seeded.group.jid, false);
+        },
+      });
+      const slices = await listSlices(db);
+      const cursor = await db
+        .selectFrom("conversation_slice_cursors")
+        .selectAll()
+        .where("conversation_id", "=", seeded.conversationId)
+        .executeTakeFirstOrThrow();
+
+      expect(result.slicesCreated).toBe(0);
+      expect(slices).toHaveLength(0);
+      expect(cursor.claim_token).toBeNull();
+    });
+
     it("prevents overlapping runs from creating duplicate slices", async () => {
       const seeded = await seedEnabledGroup(db);
       await insertMessage(db, seeded.conversationId, {

@@ -395,6 +395,17 @@ async function chunkWhatsAppGroup(options: ChunkWhatsAppGroupOptions): Promise<W
         return emptyRunSummary();
       }
 
+      const enabledGroup = await trx
+        .selectFrom("whatsapp_groups")
+        .select("index_enabled")
+        .where("jid", "=", group.jid)
+        .executeTakeFirst();
+      if (enabledGroup?.index_enabled !== 1) {
+        const released = await txRepo.releaseCursorClaim({ conversationId: conversation.id, claimToken });
+        if (!released) throw new ConversationSliceClaimLostError();
+        return emptyRunSummary();
+      }
+
       const lateArrivals = await countLateArrivals(trx, conversation.id, cursor, now);
       if (lateArrivals > 0) {
         logger.info({ conversationId: conversation.id, lateArrivals }, "late_arrival_skipped");

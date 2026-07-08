@@ -1,5 +1,5 @@
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
-import type { Connector, ConnectorCredentials, SyncedItem } from "./types";
+import type { BrowseResult, Connector, ConnectorCredentials, SyncedItem } from "./types";
 import { type WhatsAppChunkerKnobs, chunkWhatsAppIndexingGroups } from "./whatsapp-chunker";
 import {
   DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT,
@@ -38,6 +38,23 @@ export function createWhatsAppConnector(): Connector {
 
     async validateCredentials(credentials: ConnectorCredentials): Promise<void> {
       assertSystemCredentials(credentials);
+    },
+
+    async browse({ db, credentials }): Promise<BrowseResult> {
+      assertSystemCredentials(credentials);
+      if (!db) {
+        throw new Error("WhatsApp connector requires database access");
+      }
+      const groups = await createWhatsAppGroupRepository(db).list();
+      return {
+        type: "flat",
+        items: groups
+          .map((group) => ({
+            id: group.jid,
+            name: group.name,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)),
+      };
     },
 
     async *sync({ db, credentials, logger, scopeConfig, salienceGenerator }): AsyncGenerator<SyncedItem> {

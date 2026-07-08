@@ -10,16 +10,19 @@ import { IntegrationIcon } from "@/components/connect-integration-dialog";
  */
 import { HierarchyMappingPanel } from "@/components/hierarchy-mapping-panel";
 import { GenericScopeEditor } from "@/components/scope-picker";
-import type { ConnectorConfig, HierarchyLevel } from "@/lib/api";
+import type { ConnectorConfig, HierarchyLevel, WhatsAppGroupMemberLabel } from "@/lib/api";
 import { api } from "@/lib/api";
 import type { IntegrationDefinition } from "@/lib/integrations";
 import {
   ArrowsClockwiseIcon,
   CheckCircleIcon,
   CircleNotchIcon,
+  PencilSimpleIcon,
+  PlusIcon,
   SpinnerGapIcon,
   TrashIcon,
   WarningCircleIcon,
+  XIcon,
 } from "@phosphor-icons/react";
 import {
   AlertDialog,
@@ -45,7 +48,7 @@ import { Input } from "@sketch/ui/components/input";
 import { Label } from "@sketch/ui/components/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { FileDetailSheet } from "./file-detail-sheet";
 
@@ -213,17 +216,23 @@ export function ManageConnectorDialog({
           )}
 
           {canChangeScope ? (
-            <ScopeEditorDispatch
-              scopeType={definition.scopeType}
-              connectorId={connector.id}
-              connectorType={connector.connectorType}
-              scopeConfig={connector.scopeConfig}
-              hierarchyLevels={connector.hierarchyLevels}
-              scopeConfigKey={definition.scopeConfigKey}
-              scopeLabel={definition.scopeLabel}
-              scopeEntries={scopeEntries}
-              onBrowsingChange={setIsBrowsingScope}
-            />
+            <>
+              <ScopeEditorDispatch
+                scopeType={definition.scopeType}
+                connectorId={connector.id}
+                connectorType={connector.connectorType}
+                scopeConfig={connector.scopeConfig}
+                hierarchyLevels={connector.hierarchyLevels}
+                scopeConfigKey={definition.scopeConfigKey}
+                scopeLabel={definition.scopeLabel}
+                scopeEntries={scopeEntries}
+                allowEmptySelection={definition.allowEmptyScopeSelection === true}
+                onBrowsingChange={setIsBrowsingScope}
+              />
+              {connector.connectorType === "whatsapp" && (
+                <WhatsAppMemberLabelsEditor connectorId={connector.id} scopeConfig={connector.scopeConfig} />
+              )}
+            </>
           ) : (
             <div className="rounded-lg border border-border bg-muted/20 px-3 py-3 text-xs text-muted-foreground">
               Read-only connection. Scope and credential controls are unavailable for this account.
@@ -430,6 +439,7 @@ function ScopeEditorDispatch({
   scopeConfigKey,
   scopeLabel,
   scopeEntries,
+  allowEmptySelection,
   onBrowsingChange,
 }: {
   scopeType: "none" | "flat" | "nested" | "tree";
@@ -440,6 +450,7 @@ function ScopeEditorDispatch({
   scopeConfigKey?: string;
   scopeLabel: string;
   scopeEntries: [string, unknown][];
+  allowEmptySelection?: boolean;
   onBrowsingChange?: (browsing: boolean) => void;
 }) {
   const showHierarchy = Array.isArray(hierarchyLevels) && hierarchyLevels.length > 0;
@@ -491,8 +502,277 @@ function ScopeEditorDispatch({
         scopeConfig={scopeConfig}
         scopeConfigKey={scopeConfigKey}
         noun={scopeLabel}
+        allowEmptySelection={allowEmptySelection}
         onBrowsingChange={onBrowsingChange}
       />
+    </div>
+  );
+}
+
+function selectedWhatsAppGroupJids(scopeConfig: Record<string, unknown>): string[] {
+  const value = scopeConfig.groupJids;
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+type WhatsAppGroupMemberLabelDraft = WhatsAppGroupMemberLabel & { phoneE164?: string };
+
+function labelsKey(
+  labels: Array<Pick<WhatsAppGroupMemberLabelDraft, "id" | "phoneE164" | "displayName" | "companyName">>,
+): string {
+  return JSON.stringify(
+    labels
+      .map((label) => [label.id, label.phoneE164 ?? "", label.displayName, label.companyName ?? ""])
+      .sort((a, b) => a[0].localeCompare(b[0])),
+  );
+}
+
+function maskPhoneLastTwo(phoneE164: string): string {
+  const lastTwo = phoneE164.replace(/\D/gu, "").slice(-2);
+  return lastTwo ? `**${lastTwo}` : "**";
+}
+
+function WhatsAppMemberLabelsEditor({
+  connectorId,
+  scopeConfig,
+}: {
+  connectorId: string;
+  scopeConfig: Record<string, unknown>;
+}) {
+  const queryClient = useQueryClient();
+  const groupJids = selectedWhatsAppGroupJids(scopeConfig);
+  const [selectedGroupJid, setSelectedGroupJid] = useState(groupJids[0] ?? "");
+  const [draftRows, setDraftRows] = useState<WhatsAppGroupMemberLabelDraft[]>([]);
+  const [phone, setPhone] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [companyName, setCompanyName] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const browseQuery = useQuery({
+    queryKey: ["generic-browse", connectorId],
+    queryFn: () => api.integrations.browseExisting(connectorId),
+    enabled: groupJids.length > 0,
+  });
+  const groupNameByJid = useMemo(() => {
+    const map = new Map<string, string>();
+    const data = browseQuery.data;
+    if (data?.type === "flat") {
+      for (const item of data.items) map.set(item.id, item.name);
+    }
+    return map;
+  }, [browseQuery.data]);
+
+  useEffect(() => {
+    if (groupJids.length === 0) {
+      setSelectedGroupJid("");
+      return;
+    }
+    if (!selectedGroupJid || !groupJids.includes(selectedGroupJid)) {
+      setSelectedGroupJid(groupJids[0] ?? "");
+    }
+  }, [groupJids, selectedGroupJid]);
+
+  const labelsQuery = useQuery({
+    queryKey: ["whatsapp-group-member-labels", selectedGroupJid],
+    queryFn: () => api.channels.listWhatsAppGroupMemberLabels(selectedGroupJid),
+    enabled: !!selectedGroupJid,
+  });
+
+  useEffect(() => {
+    setDraftRows(labelsQuery.data?.labels ?? []);
+    setPhone("");
+    setDisplayName("");
+    setCompanyName("");
+    setEditingId(null);
+  }, [labelsQuery.data?.labels]);
+
+  const baselineKey = labelsKey(labelsQuery.data?.labels ?? []);
+  const draftKey = labelsKey(draftRows);
+  const dirty = draftKey !== baselineKey;
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      api.channels.replaceWhatsAppGroupMemberLabels(
+        selectedGroupJid,
+        draftRows.map((row) => ({
+          ...(row.phoneE164 ? { phoneE164: row.phoneE164 } : { id: row.id }),
+          displayName: row.displayName,
+          companyName: row.companyName,
+        })),
+      ),
+    onSuccess: () => {
+      toast.success("Member labels saved.");
+      queryClient.invalidateQueries({ queryKey: ["whatsapp-group-member-labels", selectedGroupJid] });
+      setPhone("");
+      setDisplayName("");
+      setCompanyName("");
+      setEditingId(null);
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const startEdit = (row: WhatsAppGroupMemberLabelDraft) => {
+    setEditingId(row.id);
+    setPhone(row.phoneE164 ?? row.maskedPhone);
+    setDisplayName(row.displayName);
+    setCompanyName(row.companyName ?? "");
+  };
+
+  const resetForm = () => {
+    setPhone("");
+    setDisplayName("");
+    setCompanyName("");
+    setEditingId(null);
+  };
+
+  const addOrUpdateRow = () => {
+    const trimmedPhone = phone.trim();
+    const trimmedName = displayName.trim();
+    if ((!editingId && !trimmedPhone) || !trimmedName) return;
+    setDraftRows((rows) => {
+      const draftId = editingId ?? `draft:${trimmedPhone}`;
+      const next = rows.filter((row) => row.id !== draftId);
+      const existing = rows.find((row) => row.id === draftId);
+      const phoneE164 = editingId ? existing?.phoneE164 : trimmedPhone;
+      return [
+        ...next,
+        {
+          id: draftId,
+          ...(phoneE164 ? { phoneE164 } : {}),
+          maskedPhone: existing?.maskedPhone ?? maskPhoneLastTwo(trimmedPhone),
+          displayName: trimmedName,
+          companyName: companyName.trim() || null,
+        },
+      ].sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
+    });
+    resetForm();
+  };
+
+  if (groupJids.length === 0) {
+    return (
+      <div className="rounded-lg border border-border bg-muted/20 px-3 py-3">
+        <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Member labels</p>
+        <p className="mt-1 text-xs text-muted-foreground">Select WhatsApp groups above to label external members.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-muted/10 px-3 py-3">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <div>
+          <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Member labels</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">Manual identity hints for selected groups.</p>
+        </div>
+        <Select value={selectedGroupJid} onValueChange={setSelectedGroupJid}>
+          <SelectTrigger className="h-8 w-48 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {groupJids.map((jid) => (
+              <SelectItem key={jid} value={jid}>
+                {groupNameByJid.get(jid) ?? jid}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
+        <Input
+          value={phone}
+          onChange={(event) => setPhone(event.target.value)}
+          placeholder="+14155551234"
+          aria-label="Member phone number"
+          disabled={!!editingId}
+          className="h-8 text-xs"
+        />
+        <Input
+          value={displayName}
+          onChange={(event) => setDisplayName(event.target.value)}
+          placeholder="Name"
+          aria-label="Member display name"
+          className="h-8 text-xs"
+        />
+        <Input
+          value={companyName}
+          onChange={(event) => setCompanyName(event.target.value)}
+          placeholder="Company"
+          aria-label="Member company"
+          className="h-8 text-xs"
+        />
+        <div className="flex gap-1">
+          <Button
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={addOrUpdateRow}
+            disabled={(!editingId && !phone.trim()) || !displayName.trim()}
+          >
+            <PlusIcon size={12} />
+            {editingId ? "Update" : "Add"}
+          </Button>
+          {editingId && (
+            <Button variant="ghost" size="icon" className="size-8" onClick={resetForm}>
+              <XIcon size={13} />
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-md border border-border">
+        <div className="grid grid-cols-[7rem_minmax(0,1fr)_minmax(0,1fr)_5rem] bg-muted/40 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          <span>Number</span>
+          <span>Name</span>
+          <span>Company</span>
+          <span className="text-right">Actions</span>
+        </div>
+        {labelsQuery.isLoading ? (
+          <div className="px-3 py-3 text-xs text-muted-foreground">Loading labels...</div>
+        ) : draftRows.length === 0 ? (
+          <div className="px-3 py-3 text-xs text-muted-foreground">No member labels yet.</div>
+        ) : (
+          <div className="divide-y divide-border">
+            {draftRows.map((row) => (
+              <div
+                key={row.id}
+                className="grid grid-cols-[7rem_minmax(0,1fr)_minmax(0,1fr)_5rem] items-center gap-2 px-3 py-2 text-xs"
+              >
+                <span className="font-mono text-muted-foreground">{row.maskedPhone}</span>
+                <span className="min-w-0 truncate font-medium">{row.displayName}</span>
+                <span className="min-w-0 truncate text-muted-foreground">{row.companyName || "-"}</span>
+                <span className="flex justify-end gap-1">
+                  <Button variant="ghost" size="icon" className="size-6" onClick={() => startEdit(row)}>
+                    <PencilSimpleIcon size={12} />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6 text-destructive hover:text-destructive"
+                    onClick={() => setDraftRows((rows) => rows.filter((item) => item.id !== row.id))}
+                  >
+                    <TrashIcon size={12} />
+                  </Button>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <Button
+        size="sm"
+        className="h-7 w-full text-xs"
+        onClick={() => mutation.mutate()}
+        disabled={!dirty || mutation.isPending || !selectedGroupJid}
+      >
+        {mutation.isPending ? (
+          <>
+            <SpinnerGapIcon size={12} className="animate-spin" />
+            Saving...
+          </>
+        ) : (
+          "Save labels"
+        )}
+      </Button>
     </div>
   );
 }

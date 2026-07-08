@@ -85,6 +85,23 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       return rows.map(toIndexingConfig);
     },
 
+    async replaceIndexEnabledJids(jids: string[]): Promise<WhatsAppGroupIndexingConfig[]> {
+      const selected = [...new Set(jids)];
+      await db.transaction().execute(async (trx) => {
+        await trx.updateTable("whatsapp_groups").set({ index_enabled: 0 }).execute();
+        if (selected.length > 0) {
+          await trx.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", selected).execute();
+        }
+      });
+      const rows = await db
+        .selectFrom("whatsapp_groups")
+        .selectAll()
+        .where("index_enabled", "=", 1)
+        .orderBy("updated_at", "desc")
+        .execute();
+      return rows.map(toIndexingConfig);
+    },
+
     async upsert(group: NewWhatsAppGroup): Promise<WhatsAppGroupRow> {
       await db
         .insertInto("whatsapp_groups")
@@ -171,6 +188,55 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
     },
 
     async listMemberLabels(groupJid: string): Promise<WhatsAppGroupMemberLabelRow[]> {
+      return db
+        .selectFrom("whatsapp_group_member_labels")
+        .selectAll()
+        .where("group_jid", "=", groupJid)
+        .orderBy("display_name", "asc")
+        .orderBy("phone_e164", "asc")
+        .execute();
+    },
+
+    async replaceMemberLabels(
+      groupJid: string,
+      labels: Array<{ phoneE164: string; displayName: string; companyName?: string | null; createdBy: string }>,
+    ): Promise<WhatsAppGroupMemberLabelRow[]> {
+      const normalizedLabels = labels.map((label) => ({
+        ...label,
+        phoneE164: normalizeContactPointValue("whatsapp", label.phoneE164),
+      }));
+      const targetPhones = new Set(normalizedLabels.map((label) => label.phoneE164));
+      await db.transaction().execute(async (trx) => {
+        if (targetPhones.size === 0) {
+          await trx.deleteFrom("whatsapp_group_member_labels").where("group_jid", "=", groupJid).execute();
+        } else {
+          await trx
+            .deleteFrom("whatsapp_group_member_labels")
+            .where("group_jid", "=", groupJid)
+            .where("phone_e164", "not in", [...targetPhones])
+            .execute();
+        }
+
+        for (const label of normalizedLabels) {
+          await trx
+            .insertInto("whatsapp_group_member_labels")
+            .values({
+              group_jid: groupJid,
+              phone_e164: label.phoneE164,
+              display_name: label.displayName,
+              company_name: label.companyName ?? null,
+              created_by: label.createdBy,
+            })
+            .onConflict((oc) =>
+              oc.columns(["group_jid", "phone_e164"]).doUpdateSet({
+                display_name: label.displayName,
+                company_name: label.companyName ?? null,
+                created_by: label.createdBy,
+              }),
+            )
+            .execute();
+        }
+      });
       return db
         .selectFrom("whatsapp_group_member_labels")
         .selectAll()

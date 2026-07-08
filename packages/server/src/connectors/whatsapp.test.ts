@@ -27,6 +27,40 @@ describe("createWhatsAppConnector", () => {
     );
   });
 
+  it("browses locally captured WhatsApp groups as flat scope items", async () => {
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: "zeta@g.us",
+      name: "Zeta Group",
+      description: null,
+      tool_progress: null,
+      reasoning_text: null,
+      updated_at: "2026-07-07T09:00:00.000Z",
+    });
+    await groups.upsert({
+      jid: "alpha@g.us",
+      name: "Alpha Group",
+      description: null,
+      tool_progress: null,
+      reasoning_text: null,
+      updated_at: "2026-07-07T09:01:00.000Z",
+    });
+
+    await expect(
+      createWhatsAppConnector().browse?.({
+        db,
+        credentials: { type: "system" },
+        logger: { debug: vi.fn(), info: vi.fn() } as unknown as Logger,
+      }),
+    ).resolves.toEqual({
+      type: "flat",
+      items: [
+        { id: "alpha@g.us", name: "Alpha Group" },
+        { id: "zeta@g.us", name: "Zeta Group" },
+      ],
+    });
+  });
+
   it("loads only index-enabled groups, chunks them, and yields no items without a salience generator", async () => {
     const groups = createWhatsAppGroupRepository(db);
     await groups.upsert({
