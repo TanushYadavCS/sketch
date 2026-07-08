@@ -22,6 +22,7 @@ import { getNewSessionConfirmation, parseSketchCommand } from "../commands";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createConversationSlicesRepository } from "../db/repositories/conversation-slices";
 import type { createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
@@ -37,9 +38,18 @@ import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import { transcribeEagerAttachments } from "../transcription/service";
 import { resolveVisionConfigFromAppConfig } from "../vision/service";
+import {
+  checkpointMessageFromInbound,
+  compareWhatsAppBackfillCheckpointKeys,
+  encodeWhatsAppBackfillCheckpointKey,
+  oldestWhatsAppBackfillCheckpointKey,
+} from "./backfill-checkpoint";
+import { stableWhatsAppParticipantJidRef } from "./identity-resolution";
 import { createWhatsAppMessageHandler } from "./message-handler";
 import { maskPersonalNumberIdentifier } from "./privacy";
 import {
+  type WhatsAppHistoryBatchMetadata,
+  type WhatsAppHistorySyncResult,
   type WhatsAppInboundMessage,
   type WhatsAppSendResult,
   type WhatsAppTarget,
@@ -105,6 +115,7 @@ export interface WhatsAppAdapterDeps {
     settings: SettingsRepository;
     whatsappGroups: WhatsAppGroupsRepository;
     conversations: ConversationRepository;
+    conversationSlices?: ReturnType<typeof createConversationSlicesRepository>;
   };
   queue: QueueManager;
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
@@ -217,6 +228,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
   } = deps;
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
+  const backfillCheckpoints = repos.conversationSlices ?? createConversationSlicesRepository(db);
 
   const getOrCreateConversationForMessage = async (message: WhatsAppInboundMessage, displayName?: string | null) => {
     const ref = conversationRefForMessage(message);
@@ -385,8 +397,40 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
   const buildMissingQuotedContextMessage = () =>
     "I can see you're replying to a message, but I couldn't read the replied-to content. Please resend the issue text or quote a text message and I'll act on that.";
 
-  whatsapp.onHistoryMessages(async (messages) => {
-    const result = { persisted: 0, skippedOld: 0, skippedDup: 0 };
+  const emptyHistoryResult = (): WhatsAppHistorySyncResult => ({
+    persisted: 0,
+    skippedOld: 0,
+    skippedDup: 0,
+  });
+
+  const addHistoryResult = (target: WhatsAppHistorySyncResult, source: WhatsAppHistorySyncResult): void => {
+    target.persisted += source.persisted;
+    target.skippedOld += source.skippedOld;
+    target.skippedDup += source.skippedDup;
+  };
+
+  /**
+   * Baileys `isLatest` means "first processed history notification" in v7,
+   * not end-of-transfer. The only completion-like signal on
+   * `messaging-history.set` is the proto progress value reaching 100.
+   */
+  const isHistorySyncComplete = (metadata: WhatsAppHistoryBatchMetadata | undefined): boolean => {
+    return typeof metadata?.progress === "number" && metadata.progress >= 100;
+  };
+
+  /**
+   * Writes checkpoint progress only after eligible rows reach insert/dedup. An
+   * eligible row is provider-authored group history with a valid provider
+   * timestamp inside the configured lookback window. Both fresh inserts and
+   * unique-key dedup hits are durable progress; the checkpoint is ops
+   * observability, not a fetch cursor or correctness gate.
+   */
+  const processHistoryGroupBatch = async (
+    groupJid: string,
+    groupMessages: WhatsAppInboundMessage[],
+    metadata: WhatsAppHistoryBatchMetadata | undefined,
+  ): Promise<WhatsAppHistorySyncResult> => {
+    const result = emptyHistoryResult();
     const cutoffMs = Date.now() - config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS;
     let candidateCount = 0;
     let candidateBeforeCutoff = 0;
@@ -394,14 +438,41 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     let candidateMissingTimestamp = 0;
     let minProviderTimestampMs: number | null = null;
     let maxProviderTimestampMs: number | null = null;
+    let lastDurableKey: string | null = null;
+    const groupRef = stableWhatsAppParticipantJidRef(groupJid);
+    const candidateMessages = groupMessages.filter((message) => !isFromMeHistoryMessage(message));
+    const candidateCheckpointMessages = candidateMessages.map(checkpointMessageFromInbound);
+    const existingCheckpoint = await backfillCheckpoints.getBackfillCheckpoint(groupJid);
+    const completeCheckpointKey =
+      existingCheckpoint?.status === "complete" ? existingCheckpoint.last_fetched_key : null;
 
-    for (const message of messages) {
-      if (message.kind !== "group") continue;
-      if (isFromMeHistoryMessage(message)) continue;
+    if (
+      completeCheckpointKey &&
+      candidateCheckpointMessages.length > 0 &&
+      candidateCheckpointMessages.every((message) => {
+        const key = encodeWhatsAppBackfillCheckpointKey(message);
+        return Boolean(key && compareWhatsAppBackfillCheckpointKeys(key, completeCheckpointKey) <= 0);
+      })
+    ) {
+      logger.info(
+        {
+          groupRef,
+          batchSize: groupMessages.length,
+          candidates: candidateMessages.length,
+          checkpointKey: completeCheckpointKey,
+          isLatest: metadata?.isLatest,
+          progress: metadata?.progress,
+          syncType: metadata?.syncType,
+        },
+        "WhatsApp history group batch arrived at or before complete checkpoint",
+      );
+    }
 
+    for (const message of candidateMessages) {
       candidateCount += 1;
       const receivedAt = message.providerTimestamp;
       const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+      const messageKey = encodeWhatsAppBackfillCheckpointKey(checkpointMessageFromInbound(message));
       if (receivedAt && Number.isFinite(receivedAtMs)) {
         minProviderTimestampMs =
           minProviderTimestampMs === null ? receivedAtMs : Math.min(minProviderTimestampMs, receivedAtMs);
@@ -421,7 +492,6 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         continue;
       }
 
-      const groupJid = message.target.groupId;
       const user = message.senderPhoneE164
         ? await repos.users.findByWhatsappNumber(message.senderPhoneE164)
         : undefined;
@@ -430,25 +500,52 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       const workspaceDir = boundAgent
         ? await ensureAgentSubWorkspace(config, boundAgent.id, `whatsappgroup-${groupJid}`)
         : await ensureGroupWorkspace(config, groupJid);
-      const capture = await captureUserMessage({
-        message,
-        workspaceDir,
-        senderName: user?.name ?? message.senderName,
-        senderUserId: user?.id ?? null,
-        addressedToSketch: false,
-        receivedAt,
-        skipControlMessages: false,
-      });
-      if (capture.inserted) {
-        result.persisted += 1;
-      } else {
-        result.skippedDup += 1;
+      try {
+        const capture = await captureUserMessage({
+          message,
+          workspaceDir,
+          senderName: user?.name ?? message.senderName,
+          senderUserId: user?.id ?? null,
+          addressedToSketch: false,
+          receivedAt,
+          skipControlMessages: false,
+        });
+        if (messageKey) {
+          lastDurableKey = oldestWhatsAppBackfillCheckpointKey(lastDurableKey, messageKey);
+        }
+        if (capture.inserted) {
+          result.persisted += 1;
+        } else {
+          result.skippedDup += 1;
+        }
+      } catch (err) {
+        try {
+          await backfillCheckpoints.setBackfillCheckpoint({
+            groupJid,
+            lastFetchedKey: lastDurableKey,
+            status: "failed",
+          });
+        } catch (checkpointErr) {
+          logger.warn(
+            { err: checkpointErr, groupRef, checkpointKey: lastDurableKey },
+            "Failed to mark WhatsApp history checkpoint failed",
+          );
+        }
+        throw err;
       }
     }
 
+    const checkpointStatus = isHistorySyncComplete(metadata) ? "complete" : "in_progress";
+    const checkpoint = await backfillCheckpoints.setBackfillCheckpoint({
+      groupJid,
+      lastFetchedKey: lastDurableKey,
+      status: checkpointStatus,
+    });
+
     logger.info(
       {
-        total: messages.length,
+        groupRef,
+        batchSize: groupMessages.length,
         candidates: candidateCount,
         cutoff: new Date(cutoffMs).toISOString(),
         minProviderTimestamp: minProviderTimestampMs === null ? null : new Date(minProviderTimestampMs).toISOString(),
@@ -456,9 +553,35 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         candidateBeforeCutoff,
         candidateAtOrAfterCutoff,
         candidateMissingTimestamp,
+        persisted: result.persisted,
+        skippedOld: result.skippedOld,
+        skippedDup: result.skippedDup,
+        checkpointKey: checkpoint.last_fetched_key,
+        checkpointStatus: checkpoint.status,
+        isLatest: metadata?.isLatest,
+        progress: metadata?.progress,
+        syncType: metadata?.syncType,
       },
-      "WhatsApp history candidate timestamp diagnostics",
+      "WhatsApp history group batch processed",
     );
+
+    return result;
+  };
+
+  whatsapp.onHistoryMessages(async (messages, metadata) => {
+    const result = emptyHistoryResult();
+    const messagesByGroup = new Map<string, WhatsAppInboundMessage[]>();
+
+    for (const message of messages) {
+      if (message.kind !== "group") continue;
+      const existing = messagesByGroup.get(message.target.groupId) ?? [];
+      existing.push(message);
+      messagesByGroup.set(message.target.groupId, existing);
+    }
+
+    for (const [groupJid, groupMessages] of messagesByGroup) {
+      addHistoryResult(result, await processHistoryGroupBatch(groupJid, groupMessages, metadata));
+    }
 
     return result;
   });

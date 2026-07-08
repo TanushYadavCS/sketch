@@ -96,7 +96,16 @@ export interface WhatsAppHistoryBatchResult {
   skippedDup: number;
 }
 
-export type WhatsAppHistoryMessagesHandler = (messages: WhatsAppGroupMessage[]) => Promise<WhatsAppHistoryBatchResult>;
+export interface WhatsAppHistoryBatchMetadata {
+  isLatest?: boolean;
+  progress?: number | null;
+  syncType?: proto.HistorySync.HistorySyncType | null;
+}
+
+export type WhatsAppHistoryMessagesHandler = (
+  messages: WhatsAppGroupMessage[],
+  metadata?: WhatsAppHistoryBatchMetadata,
+) => Promise<WhatsAppHistoryBatchResult>;
 
 export interface PairingCallbacks {
   onQr: (qr: string) => Promise<void>;
@@ -575,7 +584,7 @@ export class WhatsAppBot {
     socket: WASocket = this.sock as WASocket,
     socketGeneration = this.activeSocketGeneration,
   ): void {
-    socket.ev.on("messaging-history.set", async ({ messages }) => {
+    socket.ev.on("messaging-history.set", async ({ messages, isLatest, progress, syncType }) => {
       if (socketGeneration !== this.activeSocketGeneration || socket !== this.sock) {
         return;
       }
@@ -617,7 +626,7 @@ export class WhatsAppBot {
       let result: WhatsAppHistoryBatchResult = { persisted: 0, skippedOld: 0, skippedDup: 0 };
       try {
         if (groupMessages.length > 0 && this.historyHandler) {
-          result = await this.historyHandler(groupMessages);
+          result = await this.historyHandler(groupMessages, { isLatest, progress, syncType });
         }
       } catch (err) {
         this.logger.warn(
@@ -644,6 +653,9 @@ export class WhatsAppBot {
           skippedNontext,
           skippedNonGroup,
           skippedNoSender,
+          isLatest,
+          progress,
+          syncType,
         },
         "WhatsApp history batch processed",
       );

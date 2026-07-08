@@ -68,7 +68,16 @@ export interface WhatsAppHistorySyncResult {
   skippedDup: number;
 }
 
-export type WhatsAppHistoryMessagesHandler = (messages: WhatsAppInboundMessage[]) => Promise<WhatsAppHistorySyncResult>;
+export interface WhatsAppHistoryBatchMetadata {
+  isLatest?: boolean;
+  progress?: number | null;
+  syncType?: number | string | null;
+}
+
+export type WhatsAppHistoryMessagesHandler = (
+  messages: WhatsAppInboundMessage[],
+  metadata?: WhatsAppHistoryBatchMetadata,
+) => Promise<WhatsAppHistorySyncResult>;
 
 export interface WhatsAppInboundProvider {
   id: string;

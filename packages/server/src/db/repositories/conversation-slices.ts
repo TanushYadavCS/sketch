@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Insertable, Kysely, Selectable } from "kysely";
+import { type Insertable, type Kysely, type Selectable, sql } from "kysely";
 import type {
   ConversationSliceCursorsTable,
   ConversationSlicesTable,
@@ -300,6 +300,12 @@ export function createConversationSlicesRepository(db: Kysely<DB>) {
         .executeTakeFirst();
     },
 
+    /**
+     * Atomically merges backfill checkpoint writes. `last_fetched_key` records
+     * the oldest eligible durable history row reached, so it only moves to the
+     * lexical minimum key. `complete` is sticky because later racing partial or
+     * failed batches cannot make a completed passive history delivery incomplete.
+     */
     async setBackfillCheckpoint(input: WhatsAppBackfillCheckpointSet): Promise<WhatsAppBackfillCheckpointRow> {
       const updatedAt = new Date().toISOString();
       await db
@@ -312,8 +318,17 @@ export function createConversationSlicesRepository(db: Kysely<DB>) {
         })
         .onConflict((oc) =>
           oc.column("group_jid").doUpdateSet({
-            last_fetched_key: input.lastFetchedKey ?? null,
-            status: input.status,
+            last_fetched_key: sql`CASE
+              WHEN whatsapp_backfill_checkpoints.last_fetched_key IS NULL THEN excluded.last_fetched_key
+              WHEN excluded.last_fetched_key IS NULL THEN whatsapp_backfill_checkpoints.last_fetched_key
+              WHEN excluded.last_fetched_key < whatsapp_backfill_checkpoints.last_fetched_key THEN excluded.last_fetched_key
+              ELSE whatsapp_backfill_checkpoints.last_fetched_key
+            END`,
+            status: sql`CASE
+              WHEN whatsapp_backfill_checkpoints.status = 'complete' THEN whatsapp_backfill_checkpoints.status
+              WHEN excluded.status = 'complete' THEN excluded.status
+              ELSE excluded.status
+            END`,
             updated_at: updatedAt,
           }),
         )

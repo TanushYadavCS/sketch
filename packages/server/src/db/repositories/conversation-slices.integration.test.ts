@@ -177,21 +177,73 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
 
     it("upserts backfill checkpoint transitions by group", async () => {
       const repo = createConversationSlicesRepository(db);
+      const newerKey = "v1:1783415100000:newer";
+      const olderKey = "v1:1783414800000:older";
 
       const first = await repo.setBackfillCheckpoint({
         groupJid: "123@g.us",
-        lastFetchedKey: "key-1",
+        lastFetchedKey: newerKey,
         status: "in_progress",
       });
       const complete = await repo.setBackfillCheckpoint({
         groupJid: "123@g.us",
-        lastFetchedKey: "key-2",
+        lastFetchedKey: olderKey,
         status: "complete",
       });
 
       expect(first.status).toBe("in_progress");
-      expect(complete).toMatchObject({ group_jid: "123@g.us", last_fetched_key: "key-2", status: "complete" });
+      expect(complete).toMatchObject({ group_jid: "123@g.us", last_fetched_key: olderKey, status: "complete" });
       await expect(countRows(db, "whatsapp_backfill_checkpoints")).resolves.toBe(1);
+    });
+
+    it("keeps complete status and the oldest key when racing checkpoint batches arrive in either order", async () => {
+      const repo = createConversationSlicesRepository(db);
+      const oldestKey = "v1:1783414700000:oldest";
+      const olderKey = "v1:1783414800000:older";
+      const newerKey = "v1:1783415100000:newer";
+
+      await repo.setBackfillCheckpoint({
+        groupJid: "older-first@g.us",
+        lastFetchedKey: olderKey,
+        status: "complete",
+      });
+      const newerAfterComplete = await repo.setBackfillCheckpoint({
+        groupJid: "older-first@g.us",
+        lastFetchedKey: newerKey,
+        status: "in_progress",
+      });
+
+      await repo.setBackfillCheckpoint({
+        groupJid: "newer-first@g.us",
+        lastFetchedKey: newerKey,
+        status: "in_progress",
+      });
+      const olderAfterPartial = await repo.setBackfillCheckpoint({
+        groupJid: "newer-first@g.us",
+        lastFetchedKey: olderKey,
+        status: "complete",
+      });
+      const failedAfterComplete = await repo.setBackfillCheckpoint({
+        groupJid: "older-first@g.us",
+        lastFetchedKey: oldestKey,
+        status: "failed",
+      });
+
+      expect(newerAfterComplete).toMatchObject({
+        group_jid: "older-first@g.us",
+        last_fetched_key: olderKey,
+        status: "complete",
+      });
+      expect(olderAfterPartial).toMatchObject({
+        group_jid: "newer-first@g.us",
+        last_fetched_key: olderKey,
+        status: "complete",
+      });
+      expect(failedAfterComplete).toMatchObject({
+        group_jid: "older-first@g.us",
+        last_fetched_key: oldestKey,
+        status: "complete",
+      });
     });
   });
 }
