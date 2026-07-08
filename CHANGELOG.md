@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.47.0] -- 2026-07-08
+
+- Managed member deletion now cleanly removes platform tenant membership before local user removal, blocking local deletion if platform cleanup fails to prevent membership drift.
+- CI introduces a one-click release cut workflow with changelog generation, beta build support for feature branches, and version reporting in the `/api/health` endpoint.
+- Fixes changelog source parsing in the release workflow to handle JSON arrays correctly, preventing failures with multi-line PR content.
+
 ## [0.46.0] -- 2026-07-06
 
 - Context graph moves from gated implementation to a broader GA-ready surface: entity dedup now uses birth gates, structural provenance tiers, embedding/adjudication passes, connector-aware hierarchy, task/commitment/decision/feature/work-cycle sub-entities, and a Your Org review surface for inspecting and correcting product/project/team structure.
