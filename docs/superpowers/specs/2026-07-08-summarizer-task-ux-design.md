@@ -27,6 +27,12 @@ This is an end-to-end UX pass across existing surfaces:
 
 This pass should not create a standalone Tasks product, assignment workflows, admin override editing, notifications, or reminders.
 
+## Relationship To Story 2 And Story 3
+
+This UX pass is aligned with `story-2-structured-tasks-gated-writers-plan.md` and should be treated as Story 2 UX completion. It does not change the Story 2 ownership model: Summarizer writes `summary` tasks when create-tasks is enabled, Daily Brief writes `brief` tasks when enabled, agents create or collate only, owners edit local status, admins monitor project-visible progress, and external tracker tasks remain read-only.
+
+This UX pass is also compatible with `story-3-daily-brief-reads-summarizer-plan.md`, but it does not implement Story 3 runtime behavior. Daily Brief should not read Summarizer output, load `recentSummaries`, load `summaryTasks`, or perform no-double-count Brief logic as part of this pass. The UI should only prepare the display language and task source semantics so future `summary` and `brief` tasks can appear together clearly.
+
 ## Current UX Problems
 
 - The project drawer shows generated tasks, but `Read-only` does not explain that admins are monitoring another user's task.
