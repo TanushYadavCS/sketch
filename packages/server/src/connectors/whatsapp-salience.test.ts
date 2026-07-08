@@ -337,4 +337,24 @@ describe("processWhatsAppSalience batch limit", () => {
     expect(summary).toMatchObject({ pendingConsidered: 1, judged: 1, kept: 1 });
     expect(slice).toEqual({ salience_verdict: "kept", salience_claim_token: null, salience_claimed_at: null });
   });
+
+  it("skips the batch without claiming slices when no generator is configured", async () => {
+    const seeded = await seedPendingSlice(db);
+
+    const summary = await processWhatsAppSalience({
+      db,
+      groups: [seeded.group],
+      logger: fakeLogger(),
+      generator: null,
+      batchLimit: 5,
+    });
+    const slice = await db
+      .selectFrom("conversation_slices")
+      .select(["salience_verdict", "salience_claim_token", "salience_claimed_at"])
+      .where("id", "=", seeded.sliceId)
+      .executeTakeFirstOrThrow();
+
+    expect(summary).toMatchObject({ pendingConsidered: 1, judged: 0, failures: 1 });
+    expect(slice).toEqual({ salience_verdict: null, salience_claim_token: null, salience_claimed_at: null });
+  });
 });

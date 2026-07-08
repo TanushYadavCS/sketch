@@ -593,6 +593,20 @@ export async function processWhatsAppSalience(options: WhatsAppSalienceOptions):
   const pending = await listPendingSliceContexts(options.db, options.groups, batchLimit);
   summary.pendingConsidered = pending.length;
 
+  /**
+   * Without a generator every slice would be claimed, fail, and release —
+   * batchLimit wasted claim cycles and error logs per sync. One warning and an
+   * early return keeps the slices pending for the next configured run.
+   */
+  if (!options.generator && pending.length > 0) {
+    summary.failures = pending.length;
+    options.logger.warn(
+      { pendingSlices: pending.length },
+      "WhatsApp salience gate skipped: no enrichment generator configured; slices remain pending",
+    );
+    return summary;
+  }
+
   for (const context of pending) {
     try {
       const result = await processPendingSlice(options, context);
