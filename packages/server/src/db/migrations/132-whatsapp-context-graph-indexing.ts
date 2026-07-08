@@ -14,6 +14,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .addColumn("roster_snapshot", "text", (col) => col.notNull())
     .addColumn("salience_verdict", "text")
     .addColumn("salience_signals", "text")
+    .addColumn("salience_claim_token", "text")
+    .addColumn("salience_claimed_at", "text")
     .addColumn("indexed_file_id", "text", (col) => col.references("indexed_files.id").onDelete("set null"))
     .addColumn("created_at", "text", (col) => col.notNull().defaultTo(sql`CURRENT_TIMESTAMP`))
     .addUniqueConstraint("conversation_slices_conversation_first_uidx", ["conversation_id", "first_message_id"])

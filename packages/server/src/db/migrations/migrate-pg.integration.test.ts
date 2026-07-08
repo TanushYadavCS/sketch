@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 130;
+const EXPECTED_MIGRATION_COUNT = 131;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -163,6 +163,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[127]).toBe("132-whatsapp-context-graph-indexing");
     expect(names[128]).toBe("133-whatsapp-slice-denoised-message-ids");
     expect(names[129]).toBe("134-whatsapp-group-participants");
+    expect(names[130]).toBe("135-whatsapp-identity-candidates");
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {

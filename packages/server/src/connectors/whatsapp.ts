@@ -1,6 +1,11 @@
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { Connector, ConnectorCredentials, SyncedItem } from "./types";
 import { type WhatsAppChunkerKnobs, chunkWhatsAppIndexingGroups } from "./whatsapp-chunker";
+import {
+  DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT,
+  emitWhatsAppSyncedItems,
+  processWhatsAppSalience,
+} from "./whatsapp-salience";
 
 function assertSystemCredentials(credentials: ConnectorCredentials): void {
   if (credentials.type !== "system") {
@@ -21,6 +26,10 @@ function chunkerDefaultsFromScopeConfig(scopeConfig: Record<string, unknown>): P
   };
 }
 
+function salienceBatchLimitFromScopeConfig(scopeConfig: Record<string, unknown>): number {
+  return positiveInteger(scopeConfig.salienceBatchLimit) ?? DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT;
+}
+
 export function createWhatsAppConnector(): Connector {
   return {
     type: "whatsapp",
@@ -31,7 +40,7 @@ export function createWhatsAppConnector(): Connector {
       assertSystemCredentials(credentials);
     },
 
-    async *sync({ db, credentials, logger, scopeConfig }): AsyncGenerator<SyncedItem> {
+    async *sync({ db, credentials, logger, scopeConfig, salienceGenerator }): AsyncGenerator<SyncedItem> {
       assertSystemCredentials(credentials);
       if (!db) {
         throw new Error("WhatsApp connector requires database access");
@@ -44,7 +53,26 @@ export function createWhatsAppConnector(): Connector {
         logger,
         defaultKnobs: chunkerDefaultsFromScopeConfig(scopeConfig),
       });
-      yield* [] as SyncedItem[];
+      const salienceSummary = await processWhatsAppSalience({
+        db,
+        groups,
+        logger,
+        generator: salienceGenerator,
+        batchLimit: salienceBatchLimitFromScopeConfig(scopeConfig),
+      });
+      let skippedNoScope = salienceSummary.skippedNoScope;
+      let emitted = 0;
+      for await (const item of emitWhatsAppSyncedItems({
+        db,
+        logger,
+        onSkippedNoScope: () => {
+          skippedNoScope += 1;
+        },
+      })) {
+        emitted += 1;
+        yield item;
+      }
+      logger.info({ emitted, skippedNoScope }, "Completed WhatsApp synced item emission");
     },
 
     async getCursor(): Promise<string | null> {

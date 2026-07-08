@@ -497,6 +497,8 @@ export interface ConversationSlicesTable {
   roster_snapshot: string;
   salience_verdict: string | null;
   salience_signals: string | null;
+  salience_claim_token: string | null;
+  salience_claimed_at: string | null;
   indexed_file_id: string | null;
   created_at: Generated<string>;
 }
@@ -507,6 +509,19 @@ export interface ConversationSliceCursorsTable {
   last_message_id: number | null;
   claim_token: string | null;
   claimed_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface WhatsAppIdentityCandidatesTable {
+  group_jid: string;
+  candidate_ref: string;
+  participant_jid_ref: string;
+  display_name: string | null;
+  kept_slice_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  last_slice_id: string;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
@@ -1123,6 +1138,7 @@ export interface DB {
   conversation_messages: ConversationMessagesTable;
   conversation_slices: ConversationSlicesTable;
   conversation_slice_cursors: ConversationSliceCursorsTable;
+  whatsapp_identity_candidates: WhatsAppIdentityCandidatesTable;
   whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
   whatsapp_group_participants: WhatsAppGroupParticipantsTable;
   whatsapp_backfill_checkpoints: WhatsAppBackfillCheckpointsTable;

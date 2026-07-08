@@ -72,6 +72,7 @@ export const configSchema = z.object({
   WHATSAPP_SLICE_GAP_MINUTES: z.coerce.number().int().min(1).default(25),
   WHATSAPP_SLICE_MAX_AGE_MINUTES: z.coerce.number().int().min(1).default(120),
   WHATSAPP_SLICE_MAX_MESSAGES: z.coerce.number().int().min(1).default(50),
+  WHATSAPP_SALIENCE_BATCH_LIMIT: z.coerce.number().int().min(1).default(50),
   WHATSAPP_WINDOW_KEEPALIVE_ENABLED: z
     .enum(["true", "false", "1", "0"])
     .default("false")

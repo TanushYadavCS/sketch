@@ -9,6 +9,7 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import type { DB } from "../db/schema";
+import type { GeminiGenerator } from "./gemini-generate";
 
 export type ConnectorType =
   | "google_drive"
@@ -477,6 +478,7 @@ export interface Connector {
      * Optional — connectors that don't need it leave it unset.
      */
     resolveNameToEmail?: NameResolver;
+    salienceGenerator?: GeminiGenerator | null;
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
     onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;

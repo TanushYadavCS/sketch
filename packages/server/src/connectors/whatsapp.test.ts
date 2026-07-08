@@ -27,7 +27,7 @@ describe("createWhatsAppConnector", () => {
     );
   });
 
-  it("loads only index-enabled groups, chunks them, and yields no items before Phase 4", async () => {
+  it("loads only index-enabled groups, chunks them, and yields no items without a salience generator", async () => {
     const groups = createWhatsAppGroupRepository(db);
     await groups.upsert({
       jid: "disabled@g.us",
@@ -62,7 +62,7 @@ describe("createWhatsAppConnector", () => {
 
     const debug = vi.fn();
     const info = vi.fn();
-    const logger = { debug, info } as unknown as Logger;
+    const logger = { debug, info, warn: vi.fn(), error: vi.fn() } as unknown as Logger;
     const seen: unknown[] = [];
 
     for await (const item of createWhatsAppConnector().sync({

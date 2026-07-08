@@ -66,7 +66,7 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       await expect(countRows(db, "conversation_slices")).resolves.toBe(1);
     });
 
-    it("updates salience verdict only while it is pending", async () => {
+    it("updates salience verdict only for the active claim", async () => {
       const { conversationId, firstMessageId, lastMessageId } = await seedConversationWindow(db);
       const repo = createConversationSlicesRepository(db);
       const { row } = await repo.insertIfAbsent({
@@ -80,11 +80,20 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
         rosterSnapshot: "[]",
       });
 
-      const kept = await repo.updateSalienceVerdictIfPending(row.id, {
+      const claimed = await repo.claimSalienceIfPending(row.id, {
+        claimToken: "salience-1",
+        now: "2026-07-07T09:00:00.000Z",
+        staleBefore: "2026-07-07T08:55:00.000Z",
+      });
+      const wrongClaim = await repo.updateSalienceVerdictIfClaimed(row.id, "salience-2", {
+        verdict: "dropped",
+        signals: JSON.stringify({ banter: true }),
+      });
+      const kept = await repo.updateSalienceVerdictIfClaimed(row.id, "salience-1", {
         verdict: "kept",
         signals: JSON.stringify({ decisions: 1 }),
       });
-      const dropped = await repo.updateSalienceVerdictIfPending(row.id, {
+      const dropped = await repo.updateSalienceVerdictIfClaimed(row.id, "salience-1", {
         verdict: "dropped",
         signals: JSON.stringify({ banter: true }),
       });
@@ -94,10 +103,14 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
         .where("id", "=", row.id)
         .executeTakeFirstOrThrow();
 
+      expect(claimed).toBe(true);
+      expect(wrongClaim).toBeUndefined();
       expect(kept?.salience_verdict).toBe("kept");
       expect(dropped).toBeUndefined();
       expect(stored.salience_verdict).toBe("kept");
       expect(stored.salience_signals).toBe(JSON.stringify({ decisions: 1 }));
+      expect(stored.salience_claim_token).toBeNull();
+      expect(stored.salience_claimed_at).toBeNull();
     });
 
     it("gets and advances the composite slice cursor without regressing", async () => {

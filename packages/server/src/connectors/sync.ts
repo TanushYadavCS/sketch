@@ -130,9 +130,11 @@ export async function runConnectorSync(
       | "WHATSAPP_SLICE_GAP_MINUTES"
       | "WHATSAPP_SLICE_MAX_AGE_MINUTES"
       | "WHATSAPP_SLICE_MAX_MESSAGES"
+      | "WHATSAPP_SALIENCE_BATCH_LIMIT"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"
+      | "OPENROUTER_API_KEY"
     >
   >,
 ): Promise<SyncResult> {
@@ -180,6 +182,7 @@ export async function runConnectorSync(
               sliceGapMinutes: storedScopeConfig.sliceGapMinutes ?? appConfig?.WHATSAPP_SLICE_GAP_MINUTES,
               sliceMaxAgeMinutes: storedScopeConfig.sliceMaxAgeMinutes ?? appConfig?.WHATSAPP_SLICE_MAX_AGE_MINUTES,
               sliceMaxMessages: storedScopeConfig.sliceMaxMessages ?? appConfig?.WHATSAPP_SLICE_MAX_MESSAGES,
+              salienceBatchLimit: storedScopeConfig.salienceBatchLimit ?? appConfig?.WHATSAPP_SALIENCE_BATCH_LIMIT,
             }
           : storedScopeConfig;
   const owner = await userRepo.findById(config.created_by);
@@ -257,6 +260,18 @@ export async function runConnectorSync(
             maxRetries: appConfig?.GEMINI_MAX_RETRIES,
           })
         : undefined;
+    const salienceOpenRouterConfig = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
+    const salienceGenerator =
+      settings?.enrichment_enabled !== 0
+        ? createEnrichmentGenerator({
+            geminiApiKey: settings?.gemini_api_key,
+            geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
+            geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+            openRouterApiKey: salienceOpenRouterConfig.openRouterApiKey,
+            openRouterModel: salienceOpenRouterConfig.openRouterModel,
+            logger: syncLogger,
+          })
+        : null;
 
     for await (const item of connector.sync({
       db,
@@ -268,6 +283,7 @@ export async function runConnectorSync(
       logger: syncLogger,
       ownerEmail,
       resolveNameToEmail,
+      salienceGenerator,
       onEntitySeed: async (seed) => {
         await factRepo.upsertFact({
           ...factContext,
@@ -328,6 +344,10 @@ export async function runConnectorSync(
 
         if (itemResult.kind === "skipped_empty") {
           continue;
+        }
+
+        if (connectorType === "whatsapp") {
+          await linkWhatsAppSliceIndexedFile(db, item.providerFileId, itemResult.indexedFileId, syncLogger);
         }
 
         affectedIndexedFileIds.add(itemResult.indexedFileId);
@@ -513,6 +533,22 @@ async function refreshCrmRollupsForSync(params: {
   }
 }
 
+async function linkWhatsAppSliceIndexedFile(
+  db: Kysely<DB>,
+  sliceId: string,
+  indexedFileId: string,
+  logger: Logger,
+): Promise<void> {
+  const result = await db
+    .updateTable("conversation_slices")
+    .set({ indexed_file_id: indexedFileId })
+    .where("id", "=", sliceId)
+    .executeTakeFirst();
+  if (Number(result.numUpdatedRows ?? 0) === 0) {
+    logger.warn({ sliceId, indexedFileId }, "WhatsApp synced item did not match a conversation slice");
+  }
+}
+
 export interface SyncSchedulerDeps {
   /** Download image from Google Drive for embedding. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
@@ -535,6 +571,7 @@ export interface SyncSchedulerDeps {
       | "OUTLOOK_MAX_INFLIGHT"
       | "TEAMS_INITIAL_LOOKBACK_DAYS"
       | "TEAMS_MAX_INFLIGHT"
+      | "WHATSAPP_SALIENCE_BATCH_LIMIT"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"
