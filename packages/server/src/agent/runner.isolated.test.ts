@@ -1,8 +1,12 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { simulateReadableStream } from "ai";
+import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 import { extractAssistantText, extractAssistantTextDelta, runAgent } from "./runner";
+import { DEFAULT_AGENT_RUNTIME_COST_TABLE } from "./runtime/pricing";
+import type { AgentRuntimeProvider } from "./runtime/provider";
 
 // Mock the SDK so runAgent can be tested without spawning subprocesses
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
@@ -15,9 +19,12 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 }));
 
 vi.mock("./sessions", () => ({
-  deleteSessionId: vi.fn().mockResolvedValue(undefined),
+  archiveSdkSessionId: vi.fn().mockResolvedValue(undefined),
   getSessionId: vi.fn().mockResolvedValue(undefined),
+  getSessionIdForRuntime: vi.fn().mockResolvedValue(undefined),
+  isArchivedRuntimeSessionId: vi.fn().mockResolvedValue(false),
   saveSessionId: vi.fn().mockResolvedValue(undefined),
+  saveSessionIdForRuntime: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("./sketch-tools", () => {
@@ -48,6 +55,7 @@ vi.mock("./sketch-tools", () => {
     AutomationArtifactCollector: MockAutomationArtifactCollector,
     IntegrationConnectionCollector: MockIntegrationConnectionCollector,
     UploadCollector: MockUploadCollector,
+    createSketchMcpToolDefinitions: vi.fn().mockReturnValue([]),
     createSketchMcpServer: vi.fn().mockReturnValue({}),
   };
 });
@@ -211,7 +219,79 @@ function makeRichResultMessage(overrides?: Record<string, unknown>) {
   };
 }
 
+function usage(inputTokens: number, outputTokens: number) {
+  return {
+    inputTokens: { total: inputTokens, noCache: inputTokens, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: outputTokens, text: outputTokens, reasoning: undefined },
+  };
+}
+
+function makeMockAgentRuntimeProvider(): AgentRuntimeProvider {
+  return {
+    provider: "anthropic",
+    modelId: "claude-sonnet-4-6",
+    model: new MockLanguageModelV4({
+      provider: "mock-anthropic",
+      modelId: "claude-sonnet-4-6",
+      doStream: {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: "text-start", id: "text-1" },
+            { type: "text-delta", id: "text-1", delta: "aisdk selected" },
+            { type: "text-end", id: "text-1" },
+            {
+              type: "finish",
+              finishReason: { unified: "stop", raw: undefined },
+              usage: usage(10, 2),
+            },
+          ],
+        }),
+      },
+    }),
+    costTable: DEFAULT_AGENT_RUNTIME_COST_TABLE,
+    preparePrompt: (input) => ({
+      instructions: input.systemPrompt,
+      messages: input.messages ?? [{ role: "user", content: input.prompt }],
+    }),
+  };
+}
+
 describe("runAgent", () => {
+  it("keeps the Claude SDK runtime as the default selector", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(query).mockClear();
+
+    const result = await runAgent(makeBaseParams({ sessionMode: "fresh", persistSession: false }));
+
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result.sessionId).toBe("sess-test");
+  });
+
+  it("selects the AI SDK runtime when requested", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const workspace = await mkdtemp(join(tmpdir(), "sketch-runner-selector-"));
+    vi.mocked(query).mockClear();
+
+    try {
+      const result = await runAgent(
+        makeBaseParams({
+          agentRuntime: "aisdk",
+          agentRuntimeProvider: makeMockAgentRuntimeProvider(),
+          workspaceDir: workspace,
+          claudeConfigDir: workspace,
+          sessionMode: "fresh",
+          persistSession: false,
+        }),
+      );
+
+      expect(query).not.toHaveBeenCalled();
+      expect(result.trace.finalText).toBe("aisdk selected");
+      expect(result.rawUsage.promptMode).toBe("text");
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("resumes an explicit session without saving it when persistSession is false", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     const sessions = await import("./sessions");
@@ -269,7 +349,7 @@ describe("runAgent", () => {
     const result = await runAgent(makeBaseParams());
 
     expect(capturedResume).toEqual(["sess-stale", undefined]);
-    expect(sessions.deleteSessionId).toHaveBeenCalledWith(expect.anything(), "u-test", undefined);
+    expect(sessions.archiveSdkSessionId).toHaveBeenCalledWith(expect.anything(), "u-test", undefined);
     expect(sessions.saveSessionId).toHaveBeenCalledWith(expect.anything(), "u-test", "sess-fresh", undefined);
     expect(result.rawUsage.isResumedSession).toBe(false);
     expect(result.trace.finalText).toBe("Recovered");
@@ -355,6 +435,30 @@ describe("runAgent", () => {
     expect(typeof callArgs.options.systemPrompt).toBe("string");
     expect(callArgs.options.systemPrompt).not.toContain("Phone:");
     expect(callArgs.options.systemPrompt).not.toContain("Alice");
+  });
+
+  it("passes allowlisted WebSearch and WebFetch through to the Claude SDK runtime without a degradation note", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const capturedOptions: unknown[] = [];
+    vi.mocked(query).mockImplementation(((args: unknown) => {
+      capturedOptions.push(args);
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-sdk-web-tools" };
+        yield { type: "result", session_id: "sess-sdk-web-tools", total_cost_usd: 0 };
+      })();
+    }) as unknown as typeof query);
+
+    await runAgent(
+      makeBaseParams({
+        agentAllowedTools: ["WebSearch", "WebFetch"],
+      }),
+    );
+
+    const callArgs = capturedOptions[capturedOptions.length - 1] as {
+      options: { systemPrompt: string; tools: string[] };
+    };
+    expect(callArgs.options.tools).toEqual(["WebSearch", "WebFetch"]);
+    expect(callArgs.options.systemPrompt).not.toContain("Direct WebSearch and WebFetch tools are not available");
   });
 
   it("passes optional model and maxTurns overrides to the SDK query", async () => {

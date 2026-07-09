@@ -61,6 +61,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/arm64
           push: true
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/sketch:${{ steps.release-tag.outputs.version }}

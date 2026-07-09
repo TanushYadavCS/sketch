@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunAgentParams } from "../agent/runner";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
+import { createAgentMessagesRepository } from "../db/repositories/agent-messages";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -715,6 +716,10 @@ describe("agent invoke API", () => {
 
   it("allows API-key callers to read session transcript messages by sessionId", async () => {
     await seedTenant(db);
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "user-U1", thread_key: "", runtime: "sdk", session_id: "sess-1" })
+      .execute();
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
       logger: createTestLogger(),
     });
@@ -725,8 +730,178 @@ describe("agent invoke API", () => {
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({
       ok: true,
+      version: 1,
+      runtime: "sdk",
       sessionId: "sess-1",
       messages: [{ type: "assistant", uuid: "msg-1", session_id: "sess-1", message: {} }],
+    });
+  });
+
+  it("returns an empty message list for an existing SDK session with no replayable messages", async () => {
+    await seedTenant(db);
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "user-U1", thread_key: "", runtime: "sdk", session_id: "sess-empty" })
+      .execute();
+    const { getSessionMessages } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(getSessionMessages).mockResolvedValueOnce([]);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+    });
+
+    const res = await app.request("/api/agent-sessions/sess-empty/messages", {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      version: 1,
+      runtime: "sdk",
+      sessionId: "sess-empty",
+      messages: [],
+    });
+  });
+
+  it("logs SDK transcript read failures and returns a retryable server error", async () => {
+    await seedTenant(db);
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "user-U1", thread_key: "", runtime: "sdk", session_id: "sess-fails" })
+      .execute();
+    const { getSessionMessages } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(getSessionMessages).mockRejectedValueOnce(new Error("disk read failed"));
+    const logger = createTestLogger();
+    const warnSpy = vi.spyOn(logger, "warn");
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), { logger });
+
+    const res = await app.request("/api/agent-sessions/sess-fails/messages", {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+
+    expect(res.status).toBe(500);
+    await expect(res.json()).resolves.toEqual({
+      error: { code: "SESSION_READ_FAILED", message: "Failed to read session messages" },
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), sessionId: "sess-fails", runtime: "sdk" }),
+      "Failed to read Claude SDK session transcript",
+    );
+  });
+
+  it("falls back to Claude Agent SDK for session ids missing from chat_sessions", async () => {
+    await seedTenant(db);
+    const { getSessionMessages } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(getSessionMessages).mockResolvedValueOnce([
+      {
+        type: "assistant",
+        uuid: "msg-external",
+        session_id: "external-session-1",
+        parent_tool_use_id: null,
+        message: {},
+      },
+    ]);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+    });
+
+    const res = await app.request("/api/agent-sessions/external-session-1/messages", {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      version: 1,
+      runtime: "sdk",
+      sessionId: "external-session-1",
+      messages: [
+        {
+          type: "assistant",
+          uuid: "msg-external",
+          session_id: "external-session-1",
+          parent_tool_use_id: null,
+          message: {},
+        },
+      ],
+    });
+  });
+
+  it("returns not found when neither chat_sessions nor Claude Agent SDK can resolve a session id", async () => {
+    await seedTenant(db);
+    const { getSessionMessages } = await import("@anthropic-ai/claude-agent-sdk");
+    vi.mocked(getSessionMessages).mockResolvedValueOnce([]);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+    });
+
+    const res = await app.request("/api/agent-sessions/missing-session/messages", {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toEqual({
+      error: { code: "SESSION_NOT_FOUND", message: "Session not found" },
+    });
+  });
+
+  it("reads AI SDK transcript messages from agent_messages", async () => {
+    await seedTenant(db);
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "user-U1", thread_key: "", runtime: "aisdk", session_id: "sess-ai" })
+      .execute();
+    await createAgentMessagesRepository(db).appendBatch([
+      { sessionId: "sess-ai", seq: 1, role: "user", content: { role: "user", content: "hello" } },
+      { sessionId: "sess-ai", seq: 2, role: "assistant", content: { role: "assistant", content: "hi" } },
+    ]);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+    });
+
+    const res = await app.request("/api/agent-sessions/sess-ai/messages", {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      ok: true,
+      version: 1,
+      runtime: "aisdk",
+      sessionId: "sess-ai",
+      messages: [
+        { seq: 1, role: "user", content: { role: "user", content: "hello" } },
+        { seq: 2, role: "assistant", content: { role: "assistant", content: "hi" } },
+      ],
+    });
+    expect(body.messages[0].createdAt).toEqual(expect.any(String));
+  });
+
+  it("treats AI SDK transcript reads as API-key-only admin reads across workspaces", async () => {
+    await seedTenant(db);
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "user-other-workspace", thread_key: "", runtime: "aisdk", session_id: "sess-ai-admin" })
+      .execute();
+    await createAgentMessagesRepository(db).appendBatch([
+      { sessionId: "sess-ai-admin", seq: 1, role: "user", content: { role: "user", content: "admin read" } },
+    ]);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+    });
+
+    const res = await app.request("/api/agent-sessions/sess-ai-admin/messages", {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      version: 1,
+      runtime: "aisdk",
+      sessionId: "sess-ai-admin",
+      messages: [{ seq: 1, role: "user", content: { role: "user", content: "admin read" } }],
     });
   });
 

@@ -21,7 +21,7 @@ import {
   type RunAgentResult,
   canUseVisualAnalysisTool,
 } from "../agent/runner";
-import { deleteSessionId } from "../agent/sessions";
+import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
 import { appendAutomationBuilderLinks } from "../automation/artifact-links";
@@ -522,7 +522,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       const command = parseSketchCommand(message.text);
       const dmConversation = await repos.conversations.getOrCreate(slackConversationRefForMessage(message), user.name);
       if (command === "new_session") {
-        await deleteSessionId(db, user.id);
+        await archiveRuntimeSessions(db, user.id);
         await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
         await replyToUser(getNewSessionConfirmation());
         return;
@@ -840,7 +840,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           channel.name,
         );
         if (command === "new_session") {
-          await deleteSessionId(db, channelWorkspaceKey, threadTs);
+          await archiveRuntimeSessions(db, channelWorkspaceKey, threadTs);
           await repos.conversations.advanceCursorToCurrentMax({
             conversationId: channelConversation.id,
             scopeType: SLACK_THREAD_CURSOR_SCOPE,

@@ -1905,7 +1905,7 @@ describe("web chat API", () => {
     });
   });
 
-  it("deletes a persisted web chat conversation and its agent session", async () => {
+  it("deletes a persisted web chat conversation and archives its agent session", async () => {
     const admin = await seedAdmin(db);
     const transcriptDir = join(dataDir, "web-chat", admin.id);
     await mkdir(transcriptDir, { recursive: true });
@@ -1936,6 +1936,13 @@ describe("web chat API", () => {
     await expect(res.json()).resolves.toEqual({ success: true });
     await expect(readFile(join(transcriptDir, "chat-alpha.json"), "utf-8")).rejects.toThrow();
     await expect(getSessionId(db, admin.id, "chat-alpha")).resolves.toBeUndefined();
+    const session = await db
+      .selectFrom("chat_sessions")
+      .select(["session_id", "archived_at"])
+      .where("workspace_key", "=", admin.id)
+      .where("thread_key", "=", "chat-alpha")
+      .executeTakeFirstOrThrow();
+    expect(session).toEqual({ session_id: "sess-alpha", archived_at: expect.any(String) });
     await expect(conversations.json()).resolves.toEqual({ conversations: [] });
   });
 

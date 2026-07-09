@@ -436,8 +436,19 @@ export interface ChatSessionsTable {
   id: Generated<number>;
   workspace_key: string;
   thread_key: Generated<string>;
+  runtime: Generated<string>;
   session_id: string;
   updated_at: Generated<string>;
+  archived_at: Generated<string | null>;
+}
+
+export interface AgentMessagesTable {
+  id: Generated<number>;
+  session_id: string;
+  seq: number;
+  role: string;
+  content: string;
+  created_at: Generated<string>;
 }
 
 export interface ConversationsTable {
@@ -1062,6 +1073,7 @@ export interface DB {
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
+  agent_messages: AgentMessagesTable;
   conversations: ConversationsTable;
   conversation_cursors: ConversationCursorsTable;
   conversation_messages: ConversationMessagesTable;

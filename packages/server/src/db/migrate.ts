@@ -131,6 +131,9 @@ import * as m128 from "./migrations/128-work-cycles-connector-key";
 import * as m129 from "./migrations/129-container-name-qualification";
 import * as m130 from "./migrations/130-entity-provenance-tier";
 import * as m131 from "./migrations/131-trunk-name-embeddings";
+import * as m132 from "./migrations/132-agent-messages";
+import * as m133 from "./migrations/133-chat-session-runtime";
+import * as m134 from "./migrations/134-chat-session-archived-at";
 import type { DB } from "./schema";
 
 /**
@@ -271,6 +274,9 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "129-container-name-qualification": m129,
           "130-entity-provenance-tier": m130,
           "131-trunk-name-embeddings": m131,
+          "132-agent-messages": m132,
+          "133-chat-session-runtime": m133,
+          "134-chat-session-archived-at": m134,
         };
       },
     },

@@ -2,15 +2,21 @@
  * Tests for DB-based session persistence on Postgres (PGlite).
  *
  * Exercises the same saveSessionId/getSessionId logic as sessions.test.ts but
- * against a real Postgres dialect. Specifically validates that the ON CONFLICT
- * target (workspace_key, thread_key) works correctly on Postgres, which requires
- * a plain column-based unique constraint (not an expression index).
+ * against a real Postgres dialect. Specifically validates that update-then-insert
+ * session saves work against the active-session partial unique index.
  */
 import { type Kysely, sql } from "kysely";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../db/schema";
 import { getSharedPgDb } from "../test-utils";
-import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
+import {
+  archiveRuntimeSessions,
+  archiveSdkSessionId,
+  getSessionId,
+  getSessionIdForRuntime,
+  saveSessionId,
+  saveSessionIdForRuntime,
+} from "./sessions";
 
 describe("session persistence on Postgres", () => {
   let db!: Kysely<DB>;
@@ -28,6 +34,16 @@ describe("session persistence on Postgres", () => {
   });
 
   describe("workspace-level sessions (empty string thread_key sentinel)", () => {
+    it.each([
+      { label: "user DM", workspaceKey: "user-U1", threadKey: undefined },
+      { label: "Slack channel thread", workspaceKey: "channel-C1", threadKey: "1111.0000" },
+      { label: "WhatsApp group", workspaceKey: "wa-group-group@g.us", threadKey: undefined },
+    ])("round-trips a $label session", async ({ workspaceKey, threadKey }) => {
+      await saveSessionId(db, workspaceKey, "sess_abc123", threadKey);
+      const result = await getSessionId(db, workspaceKey, threadKey);
+      expect(result).toBe("sess_abc123");
+    });
+
     it("saveSessionId inserts a new session", async () => {
       await saveSessionId(db, "user-U1", "sess_abc123");
       const result = await getSessionId(db, "user-U1");
@@ -55,11 +71,19 @@ describe("session persistence on Postgres", () => {
       expect(rows).toHaveLength(1);
     });
 
-    it("deleteSessionId removes a workspace session", async () => {
+    it("archiveSdkSessionId archives a workspace session", async () => {
       await saveSessionId(db, "user-U1", "sess_abc123");
-      await deleteSessionId(db, "user-U1");
+      await archiveSdkSessionId(db, "user-U1");
       const result = await getSessionId(db, "user-U1");
       expect(result).toBeUndefined();
+
+      const row = await db
+        .selectFrom("chat_sessions")
+        .select(["session_id", "archived_at"])
+        .where("workspace_key", "=", "user-U1")
+        .executeTakeFirstOrThrow();
+      expect(row.session_id).toBe("sess_abc123");
+      expect(row.archived_at).toEqual(expect.any(String));
     });
   });
 
@@ -107,14 +131,67 @@ describe("session persistence on Postgres", () => {
       expect(rows).toHaveLength(1);
     });
 
-    it("deleteSessionId removes only the targeted thread session", async () => {
+    it("archiveSdkSessionId archives only the targeted thread session", async () => {
       await saveSessionId(db, "channel-C1", "sess_a", "1111.0000");
       await saveSessionId(db, "channel-C1", "sess_b", "2222.0000");
-      await deleteSessionId(db, "channel-C1", "1111.0000");
+      await archiveSdkSessionId(db, "channel-C1", "1111.0000");
 
       expect(await getSessionId(db, "channel-C1", "1111.0000")).toBeUndefined();
       expect(await getSessionId(db, "channel-C1", "2222.0000")).toBe("sess_b");
+
+      const rows = await db
+        .selectFrom("chat_sessions")
+        .select(["thread_key", "archived_at"])
+        .where("workspace_key", "=", "channel-C1")
+        .orderBy("thread_key", "asc")
+        .execute();
+      expect(rows).toEqual([
+        { thread_key: "1111.0000", archived_at: expect.any(String) },
+        { thread_key: "2222.0000", archived_at: null },
+      ]);
     });
+  });
+
+  it("allows a new active SDK session after archiving the old one", async () => {
+    await saveSessionId(db, "user-U5", "sess-old");
+    await archiveSdkSessionId(db, "user-U5");
+    await saveSessionId(db, "user-U5", "sess-new");
+
+    expect(await getSessionId(db, "user-U5")).toBe("sess-new");
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["session_id", "archived_at"])
+      .where("workspace_key", "=", "user-U5")
+      .orderBy("id", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { session_id: "sess-old", archived_at: expect.any(String) },
+      { session_id: "sess-new", archived_at: null },
+    ]);
+  });
+
+  it("does not resurrect an archived runtime session id when save races with archive", async () => {
+    await saveSessionIdForRuntime(db, "user-U6", "sess-race", undefined, "aisdk");
+    await archiveRuntimeSessions(db, "user-U6");
+    await saveSessionIdForRuntime(db, "user-U6", "sess-race", undefined, "aisdk");
+
+    expect(await getSessionIdForRuntime(db, "user-U6", undefined, "aisdk")).toBeUndefined();
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["workspace_key", "thread_key", "runtime", "session_id", "archived_at"])
+      .where("session_id", "=", "sess-race")
+      .execute();
+    expect(rows).toEqual([
+      {
+        workspace_key: "user-U6",
+        thread_key: "",
+        runtime: "aisdk",
+        session_id: "sess-race",
+        archived_at: expect.any(String),
+      },
+    ]);
   });
 
   describe("empty string thread_key sentinel", () => {

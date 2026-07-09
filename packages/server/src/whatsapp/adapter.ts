@@ -15,7 +15,7 @@ import {
   type RunAgentResult,
   canUseVisualAnalysisTool,
 } from "../agent/runner";
-import { deleteSessionId } from "../agent/sessions";
+import { archiveRuntimeSessions } from "../agent/sessions";
 import { ensureAgentSubWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
 import { appendAutomationBuilderLinks } from "../automation/artifact-links";
 import { getNewSessionConfirmation, parseSketchCommand } from "../commands";
@@ -498,7 +498,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         const dmWorkspaceKeyEarly = fallbackAgentEarly ? `agent-${fallbackAgentEarly.id}/${user.id}` : user.id;
         const dmConversation = await getOrCreateConversationForMessage(message, user.name);
         if (command === "new_session") {
-          await deleteSessionId(db, dmWorkspaceKeyEarly);
+          await archiveRuntimeSessions(db, dmWorkspaceKeyEarly);
           await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
           await whatsapp.sendText(replyTarget, getNewSessionConfirmation());
           return;
@@ -750,7 +750,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         : `wa-group-${groupJid}`;
       const groupConversation = await getOrCreateConversationForMessage(message);
       if (command === "new_session") {
-        await deleteSessionId(db, groupWorkspaceKey);
+        await archiveRuntimeSessions(db, groupWorkspaceKey);
         await repos.conversations.advanceWatermarkToCurrentMax(groupConversation.id);
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupTarget, message);
         await onFinalMessage(getNewSessionConfirmation());

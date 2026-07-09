@@ -1,4 +1,7 @@
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
+import { runAgentRuntimeCore } from "../agent/runtime/core";
+import { DEFAULT_AGENT_RUNTIME_COST_TABLE } from "../agent/runtime/pricing";
 import { executeAutomation, testAutomationStep } from "./runtime";
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -20,6 +23,31 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
       };
       yield { type: "result", session_id: "sess-light", total_cost_usd: 0 };
     })();
+  }),
+}));
+
+vi.mock("../agent/runtime/core", () => ({
+  runAgentRuntimeCore: vi.fn().mockResolvedValue({
+    sessionId: "aisdk-session",
+    finalText: "aisdk result",
+    stopReason: "end_turn",
+    num_turns: 1,
+    durations: { totalMs: 10, providerMs: 5 },
+    usage: {
+      byModel: {
+        "claude-sonnet-4-6": {
+          inputTokens: 10,
+          outputTokens: 3,
+          cacheReadTokens: 2,
+          cacheWriteTokens: 1,
+        },
+      },
+      totalInputTokens: 10,
+      totalOutputTokens: 3,
+      totalCacheReadTokens: 2,
+      totalCacheWriteTokens: 1,
+    },
+    cost: { totalUsd: 0.001, byModel: {}, pricing: {} },
   }),
 }));
 
@@ -105,6 +133,7 @@ function makeParams(overrides: Record<string, unknown> = {}) {
       CLAUDE_CONFIG_DIR: "/tmp/sketch-runtime-test/.claude",
       BASE_URL: "https://sketch.test",
       PORT: 3000,
+      AGENT_RUNTIME: "sdk",
     },
     runsRepo,
     stepContentRepo,
@@ -284,6 +313,8 @@ describe("executeAutomation agent steps", () => {
   });
 
   it("keeps light-mode agent steps on the lightweight SDK path", async () => {
+    const queryMock = vi.mocked(query);
+    queryMock.mockClear();
     const runAgent = vi.fn();
     const limitAgentExecution = vi.fn((work: () => Promise<unknown>) => work());
     const params = makeParams({
@@ -308,7 +339,96 @@ describe("executeAutomation agent steps", () => {
 
     expect(runAgent).not.toHaveBeenCalled();
     expect(limitAgentExecution).toHaveBeenCalledTimes(1);
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const queryCall = queryMock.mock.calls[0]?.[0];
+    if (!queryCall?.options) throw new Error("Expected query call options");
+    expect(queryCall.prompt).toContain("Summarize the open workflow-related Linear issues");
+    const { options } = queryCall;
+    expect(options).toMatchObject({
+      maxTurns: 10,
+      cwd: "/tmp/sketch-runtime-test/workspaces/user-1",
+      permissionMode: "bypassPermissions",
+      settingSources: [],
+      stderr: expect.any(Function),
+    });
+    expect(options.systemPrompt).toContain("You are a workflow step in an automation.");
+    expect(options).not.toHaveProperty("mcpServers");
+    expect(options).not.toHaveProperty("tools");
+    expect(options).not.toHaveProperty("canUseTool");
     expect(params.sendMessage).toHaveBeenCalledWith("light result");
+  });
+
+  it("routes light-mode agent steps through the AI SDK runtime when flagged", async () => {
+    const queryMock = vi.mocked(query);
+    queryMock.mockClear();
+    const runtimeMock = vi.mocked(runAgentRuntimeCore);
+    runtimeMock.mockClear();
+    const runAgent = vi.fn();
+    const recordWorkflowStep = vi.fn();
+    const params = makeParams({
+      runAgent,
+      recordWorkflowStep,
+      loadAgentRuntimeProviderConfig: vi.fn().mockResolvedValue({
+        provider: "anthropic",
+        modelId: "claude-sonnet-4-6",
+        apiKey: "sk-ant-test",
+        costTable: DEFAULT_AGENT_RUNTIME_COST_TABLE,
+      }),
+      config: {
+        DATA_DIR: "/tmp/sketch-runtime-test",
+        CLAUDE_CONFIG_DIR: "/tmp",
+        BASE_URL: "https://sketch.test",
+        PORT: 3000,
+        AGENT_RUNTIME: "aisdk",
+      },
+      task: makeTask({
+        steps: JSON.stringify([
+          { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
+          {
+            id: "step1",
+            type: "agent",
+            label: "Summarize Linear issues",
+            icon: "sketch-ai",
+            position: { x: 0, y: 100 },
+            agentMode: "light",
+          },
+        ]),
+      }),
+    });
+
+    await executeAutomation(params as never);
+
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(runtimeMock).toHaveBeenCalledTimes(1);
+    expect(runtimeMock.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        prompt: expect.stringContaining("Summarize the open workflow-related Linear issues"),
+        systemPrompt: expect.stringContaining("You are a workflow step in an automation."),
+        maxTurns: 10,
+        persistSession: false,
+      }),
+    );
+    expect(Object.keys(runtimeMock.mock.calls[0]?.[0].tools ?? {}).sort()).toEqual([
+      "Bash",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Read",
+      "Write",
+    ]);
+    expect(recordWorkflowStep).toHaveBeenCalledWith(
+      expect.objectContaining({ platform: "slack", contextType: "scheduled_task", workspaceKey: "user-1" }),
+      expect.objectContaining({
+        model: "claude-sonnet-4-6",
+        inputTokens: 10,
+        outputTokens: 3,
+        cacheReadTokens: 2,
+        cacheCreationTokens: 1,
+        sdkCostUsd: 0.001,
+      }),
+    );
+    expect(params.sendMessage).toHaveBeenCalledWith("aisdk result");
   });
 
   it("keeps running when execution event delivery fails", async () => {

@@ -17,8 +17,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
+import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
+import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 127;
+const EXPECTED_MIGRATION_COUNT = 130;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -160,6 +162,9 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[124]).toBe("129-container-name-qualification");
     expect(names[125]).toBe("130-entity-provenance-tier");
     expect(names[126]).toBe("131-trunk-name-embeddings");
+    expect(names[127]).toBe("132-agent-messages");
+    expect(names[128]).toBe("133-chat-session-runtime");
+    expect(names[129]).toBe("134-chat-session-archived-at");
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {
@@ -505,10 +510,11 @@ describe("runMigrations on Postgres — full sequence", () => {
     }
   });
 
-  it("creates mcp_servers, chat_sessions, scheduled_tasks, inbox_messages, and conversation tables", async () => {
+  it("creates mcp_servers, chat_sessions, agent_messages, scheduled_tasks, inbox_messages, and conversation tables", async () => {
     for (const table of [
       "mcp_servers",
       "chat_sessions",
+      "agent_messages",
       "scheduled_tasks",
       "inbox_messages",
       "conversations",
@@ -736,6 +742,34 @@ describe("runMigrations on Postgres — chat_sessions schema", () => {
     expect(result.rows[0].column_default).toContain("''");
   });
 
+  it("chat_sessions has runtime NOT NULL with default sdk", async () => {
+    const result = await sql<{ column_name: string; is_nullable: string; column_default: string }>`
+      SELECT column_name, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'chat_sessions'
+        AND column_name = 'runtime'
+    `.execute(db);
+
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].is_nullable).toBe("NO");
+    expect(result.rows[0].column_default).toContain("'sdk'");
+  });
+
+  it("chat_sessions has nullable archived_at", async () => {
+    const result = await sql<{ column_name: string; is_nullable: string; column_default: string | null }>`
+      SELECT column_name, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'chat_sessions'
+        AND column_name = 'archived_at'
+    `.execute(db);
+
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].is_nullable).toBe("YES");
+    expect(result.rows[0].column_default).toBeNull();
+  });
+
   it("chat_sessions has id as auto-incrementing integer primary key", async () => {
     const result = await sql<{ column_name: string; data_type: string; column_default: string }>`
       SELECT column_name, data_type, column_default
@@ -751,31 +785,22 @@ describe("runMigrations on Postgres — chat_sessions schema", () => {
     expect(result.rows[0].column_default).toMatch(/nextval/i);
   });
 
-  it("UNIQUE constraint on (workspace_key, thread_key) exists", async () => {
-    const result = await sql<{ constraint_name: string; constraint_type: string }>`
-      SELECT tc.constraint_name, tc.constraint_type
-      FROM information_schema.table_constraints tc
-      WHERE tc.table_schema = 'public'
-        AND tc.table_name = 'chat_sessions'
-        AND tc.constraint_type = 'UNIQUE'
+  it("partial UNIQUE index on active (workspace_key, thread_key, runtime) exists", async () => {
+    const result = await sql<{ indexname: string; indexdef: string }>`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'chat_sessions'
+        AND indexname = 'chat_sessions_workspace_thread_uidx'
     `.execute(db);
 
-    expect(result.rows.length).toBeGreaterThanOrEqual(1);
-
-    // Verify the unique constraint covers workspace_key and thread_key
-    const constraintName = result.rows[0].constraint_name;
-    const columns = await sql<{ column_name: string }>`
-      SELECT kcu.column_name
-      FROM information_schema.key_column_usage kcu
-      WHERE kcu.table_schema = 'public'
-        AND kcu.table_name = 'chat_sessions'
-        AND kcu.constraint_name = ${constraintName}
-      ORDER BY kcu.ordinal_position
-    `.execute(db);
-
-    const colNames = columns.rows.map((r) => r.column_name);
-    expect(colNames).toContain("workspace_key");
-    expect(colNames).toContain("thread_key");
+    expect(result.rows).toHaveLength(1);
+    const indexDef = result.rows[0].indexdef.toLowerCase();
+    expect(indexDef).toContain("unique");
+    expect(indexDef).toContain("workspace_key");
+    expect(indexDef).toContain("thread_key");
+    expect(indexDef).toContain("runtime");
+    expect(indexDef).toContain("archived_at is null");
   });
 
   it("chat_sessions allows inserting a row with empty string thread_key", async () => {
@@ -793,4 +818,163 @@ describe("runMigrations on Postgres — chat_sessions schema", () => {
     expect(row?.thread_key).toBe("");
     expect(row?.session_id).toBe("sess-001");
   });
+
+  it("chat_sessions allows the same workspace and thread for different runtimes", async () => {
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "runtime-workspace", thread_key: "", runtime: "sdk", session_id: "sess-sdk" })
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "runtime-workspace", thread_key: "", runtime: "aisdk", session_id: "sess-ai" })
+      .execute();
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["runtime", "session_id"])
+      .where("workspace_key", "=", "runtime-workspace")
+      .orderBy("runtime", "asc")
+      .execute();
+
+    expect(rows).toEqual([
+      { runtime: "aisdk", session_id: "sess-ai" },
+      { runtime: "sdk", session_id: "sess-sdk" },
+    ]);
+  });
+
+  it("allows archived duplicates while enforcing one active row", async () => {
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "archive-workspace", thread_key: "thread-1", runtime: "aisdk", session_id: "sess-1" })
+      .execute();
+    await db
+      .updateTable("chat_sessions")
+      .set({ archived_at: "2026-07-01T00:00:00.000Z" })
+      .where("session_id", "=", "sess-1")
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "archive-workspace", thread_key: "thread-1", runtime: "aisdk", session_id: "sess-2" })
+      .execute();
+    await db
+      .updateTable("chat_sessions")
+      .set({ archived_at: "2026-07-02T00:00:00.000Z" })
+      .where("session_id", "=", "sess-2")
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({
+        workspace_key: "archive-workspace",
+        thread_key: "thread-1",
+        runtime: "aisdk",
+        session_id: "sess-active",
+      })
+      .execute();
+
+    await sql`SAVEPOINT duplicate_active_session`.execute(db);
+    await expect(
+      db
+        .insertInto("chat_sessions")
+        .values({
+          workspace_key: "archive-workspace",
+          thread_key: "thread-1",
+          runtime: "aisdk",
+          session_id: "sess-active-2",
+        })
+        .execute(),
+    ).rejects.toThrow();
+    await sql`ROLLBACK TO SAVEPOINT duplicate_active_session`.execute(db);
+    await sql`RELEASE SAVEPOINT duplicate_active_session`.execute(db);
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["session_id", "archived_at"])
+      .where("workspace_key", "=", "archive-workspace")
+      .orderBy("id", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { session_id: "sess-1", archived_at: "2026-07-01T00:00:00.000Z" },
+      { session_id: "sess-2", archived_at: "2026-07-02T00:00:00.000Z" },
+      { session_id: "sess-active", archived_at: null },
+    ]);
+  });
+});
+
+describe("runMigrations on Postgres — chat_session runtime down migration", () => {
+  it("134 down drops archived rows and restores pre-archive uniqueness", async () => {
+    const db = await createTestPgDb();
+    try {
+      await db
+        .insertInto("chat_sessions")
+        .values({ workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-old" })
+        .execute();
+      await db
+        .updateTable("chat_sessions")
+        .set({ archived_at: "2026-07-01T00:00:00.000Z" })
+        .where("session_id", "=", "sess-old")
+        .execute();
+      await db
+        .insertInto("chat_sessions")
+        .values({ workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-active" })
+        .execute();
+
+      await expect(chatSessionArchiveMigration.down(db as Kysely<unknown>)).resolves.not.toThrow();
+
+      const archivedAtColumns = await sql<{ column_name: string }>`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'chat_sessions'
+          AND column_name = 'archived_at'
+      `.execute(db);
+      expect(archivedAtColumns.rows).toEqual([]);
+
+      const rows = await db
+        .selectFrom("chat_sessions")
+        .select(["workspace_key", "thread_key", "runtime", "session_id"])
+        .where("workspace_key", "=", "down-archive")
+        .execute();
+      expect(rows).toEqual([
+        { workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-active" },
+      ]);
+    } finally {
+      await db.destroy();
+    }
+  }, 30000);
+
+  it("keeps the sdk row when dual runtime rows share a workspace and thread", async () => {
+    const db = await createTestPgDb();
+    try {
+      await db
+        .insertInto("chat_sessions")
+        .values({ workspace_key: "down-workspace", thread_key: "", runtime: "sdk", session_id: "sess-sdk" })
+        .execute();
+      await db
+        .insertInto("chat_sessions")
+        .values({ workspace_key: "down-workspace", thread_key: "", runtime: "aisdk", session_id: "sess-ai" })
+        .execute();
+
+      await expect(chatSessionArchiveMigration.down(db as Kysely<unknown>)).resolves.not.toThrow();
+      await expect(chatSessionRuntimeMigration.down(db as Kysely<unknown>)).resolves.not.toThrow();
+
+      const rows = await sql<{ workspace_key: string; thread_key: string; session_id: string }>`
+        SELECT workspace_key, thread_key, session_id
+        FROM chat_sessions
+        WHERE workspace_key = 'down-workspace'
+        ORDER BY session_id ASC
+      `.execute(db);
+      expect(rows.rows).toEqual([{ workspace_key: "down-workspace", thread_key: "", session_id: "sess-sdk" }]);
+
+      const runtimeColumns = await sql<{ column_name: string }>`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'chat_sessions'
+          AND column_name = 'runtime'
+      `.execute(db);
+      expect(runtimeColumns.rows).toEqual([]);
+    } finally {
+      await db.destroy();
+    }
+  }, 30000);
 });

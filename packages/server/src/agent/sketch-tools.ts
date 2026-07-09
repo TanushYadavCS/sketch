@@ -31,9 +31,9 @@ export { IntegrationConnectionCollector };
 export { AutomationArtifactCollector };
 export type { SketchMcpDeps };
 
-export function createSketchMcpServer(deps: SketchMcpDeps) {
+export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
   const absWorkspace = resolve(deps.workspaceDir);
-  const tools = [
+  return [
     createSendFileToChatTool(deps, absWorkspace),
     createReadChatHistoryTool(deps),
     createSearchChatHistoryTool(deps),
@@ -80,6 +80,8 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
     ...createSearchTools(deps),
     createListTasksTool(deps),
   ];
+}
 
-  return createSdkMcpServer({ name: "sketch", tools });
+export function createSketchMcpServer(deps: SketchMcpDeps) {
+  return createSdkMcpServer({ name: "sketch", tools: createSketchMcpToolDefinitions(deps) });
 }

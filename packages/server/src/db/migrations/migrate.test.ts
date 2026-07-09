@@ -21,8 +21,10 @@ import * as m113 from "./113-indexed-file-all-day-flag";
 import * as m116 from "./116-connector-credential-source";
 import * as m119 from "./119-agent-outputs-source-scope";
 import * as m120 from "./120-agent-output-period-key";
+import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
+import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 127;
+const EXPECTED_MIGRATION_COUNT = 130;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -193,6 +195,9 @@ describe("runMigrations — full sequence", () => {
     expect(names[124]).toBe("129-container-name-qualification");
     expect(names[125]).toBe("130-entity-provenance-tier");
     expect(names[126]).toBe("131-trunk-name-embeddings");
+    expect(names[127]).toBe("132-agent-messages");
+    expect(names[128]).toBe("133-chat-session-runtime");
+    expect(names[129]).toBe("134-chat-session-archived-at");
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {
@@ -569,6 +574,168 @@ describe("runMigrations — full sequence", () => {
     }
   });
 
+  it("creates agent_messages and evolves chat_sessions for runtime-scoped sessions", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const agentMessageColumns = await sql<{ name: string; notnull: number }>`PRAGMA table_info(agent_messages)`.execute(
+      db,
+    );
+    expect(agentMessageColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "id", notnull: 0 }),
+        expect.objectContaining({ name: "session_id", notnull: 1 }),
+        expect.objectContaining({ name: "seq", notnull: 1 }),
+        expect.objectContaining({ name: "role", notnull: 1 }),
+        expect.objectContaining({ name: "content", notnull: 1 }),
+        expect.objectContaining({ name: "created_at", notnull: 1 }),
+      ]),
+    );
+
+    const chatSessionColumns = await sql<{ name: string; notnull: number; dflt_value: string | null }>`
+      PRAGMA table_info(chat_sessions)
+    `.execute(db);
+    expect(chatSessionColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "runtime", notnull: 1, dflt_value: "'sdk'" }),
+        expect.objectContaining({ name: "archived_at", notnull: 0 }),
+      ]),
+    );
+
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "workspace-1", thread_key: "", runtime: "sdk", session_id: "sess-sdk" })
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "workspace-1", thread_key: "", runtime: "aisdk", session_id: "sess-ai" })
+      .execute();
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["runtime", "session_id"])
+      .where("workspace_key", "=", "workspace-1")
+      .orderBy("runtime", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { runtime: "aisdk", session_id: "sess-ai" },
+      { runtime: "sdk", session_id: "sess-sdk" },
+    ]);
+  });
+
+  it("allows archived chat_session duplicates while enforcing one active row on SQLite", async () => {
+    await runMigrations(db, { quiet: true });
+
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "archive-workspace", thread_key: "thread-1", runtime: "aisdk", session_id: "sess-1" })
+      .execute();
+    await db
+      .updateTable("chat_sessions")
+      .set({ archived_at: "2026-07-01T00:00:00.000Z" })
+      .where("session_id", "=", "sess-1")
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "archive-workspace", thread_key: "thread-1", runtime: "aisdk", session_id: "sess-2" })
+      .execute();
+    await db
+      .updateTable("chat_sessions")
+      .set({ archived_at: "2026-07-02T00:00:00.000Z" })
+      .where("session_id", "=", "sess-2")
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({
+        workspace_key: "archive-workspace",
+        thread_key: "thread-1",
+        runtime: "aisdk",
+        session_id: "sess-active",
+      })
+      .execute();
+
+    await expect(
+      db
+        .insertInto("chat_sessions")
+        .values({
+          workspace_key: "archive-workspace",
+          thread_key: "thread-1",
+          runtime: "aisdk",
+          session_id: "sess-active-2",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["session_id", "archived_at"])
+      .where("workspace_key", "=", "archive-workspace")
+      .orderBy("id", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { session_id: "sess-1", archived_at: "2026-07-01T00:00:00.000Z" },
+      { session_id: "sess-2", archived_at: "2026-07-02T00:00:00.000Z" },
+      { session_id: "sess-active", archived_at: null },
+    ]);
+  });
+
+  it("134 down drops archived rows and restores the pre-archive SQLite uniqueness", async () => {
+    await runMigrations(db, { quiet: true });
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-old" })
+      .execute();
+    await db
+      .updateTable("chat_sessions")
+      .set({ archived_at: "2026-07-01T00:00:00.000Z" })
+      .where("session_id", "=", "sess-old")
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-active" })
+      .execute();
+
+    await expect(chatSessionArchiveMigration.down(db as Kysely<unknown>)).resolves.not.toThrow();
+
+    const columns = await sql<{ name: string }>`PRAGMA table_info(chat_sessions)`.execute(db);
+    expect(columns.rows.map((row) => row.name)).not.toContain("archived_at");
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["workspace_key", "thread_key", "runtime", "session_id"])
+      .where("workspace_key", "=", "down-archive")
+      .execute();
+    expect(rows).toEqual([
+      { workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-active" },
+    ]);
+  });
+
+  it("133 down keeps the sdk chat_session row when dual runtime rows share a workspace and thread", async () => {
+    await runMigrations(db, { quiet: true });
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "down-workspace", thread_key: "", runtime: "sdk", session_id: "sess-sdk" })
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "down-workspace", thread_key: "", runtime: "aisdk", session_id: "sess-ai" })
+      .execute();
+
+    await expect(chatSessionRuntimeMigration.down(db as Kysely<unknown>)).resolves.not.toThrow();
+
+    const rows = await sql<{ workspace_key: string; thread_key: string; session_id: string }>`
+      SELECT workspace_key, thread_key, session_id
+      FROM chat_sessions
+      WHERE workspace_key = 'down-workspace'
+      ORDER BY session_id ASC
+    `.execute(db);
+    expect(rows.rows).toEqual([{ workspace_key: "down-workspace", thread_key: "", session_id: "sess-sdk" }]);
+
+    const runtimeColumns = await sql<{ name: string }>`
+      PRAGMA table_info(chat_sessions)
+    `.execute(db);
+    expect(runtimeColumns.rows.map((row) => row.name)).not.toContain("runtime");
+  });
+
   it("running migrations twice is idempotent (only applies each migration once)", async () => {
     await runMigrations(db, { quiet: true });
     await runMigrations(db, { quiet: true });
@@ -674,7 +841,21 @@ describe("runMigrations — incremental upgrade", () => {
         '117-conversation-message-window-index',
         '118-whatsapp-window-keepalives',
         '119-agent-outputs-source-scope',
-        '120-agent-output-period-key'
+        '120-agent-output-period-key',
+        '121-tasks',
+        '122-tasks-owner',
+        '123-sub-entities',
+        '124-tasks-assignee-name',
+        '125-milestone-series-and-value-signature',
+        '126-work-cycles',
+        '127-work-cycles-connector',
+        '128-work-cycles-connector-key',
+        '129-container-name-qualification',
+        '130-entity-provenance-tier',
+        '131-trunk-name-embeddings',
+        '132-agent-messages',
+        '133-chat-session-runtime',
+        '134-chat-session-archived-at'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -693,6 +874,20 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "118-whatsapp-window-keepalives" },
       { name: "119-agent-outputs-source-scope" },
       { name: "120-agent-output-period-key" },
+      { name: "121-tasks" },
+      { name: "122-tasks-owner" },
+      { name: "123-sub-entities" },
+      { name: "124-tasks-assignee-name" },
+      { name: "125-milestone-series-and-value-signature" },
+      { name: "126-work-cycles" },
+      { name: "127-work-cycles-connector" },
+      { name: "128-work-cycles-connector-key" },
+      { name: "129-container-name-qualification" },
+      { name: "130-entity-provenance-tier" },
+      { name: "131-trunk-name-embeddings" },
+      { name: "132-agent-messages" },
+      { name: "133-chat-session-runtime" },
+      { name: "134-chat-session-archived-at" },
     ]);
 
     // runMigrations() always migrates to latest, so recovering 107-120 above
