@@ -325,7 +325,7 @@ vi.mock("../files", async (importOriginal) => {
 });
 
 vi.mock("../agent/sessions", () => ({
-  deleteSessionId: vi.fn().mockResolvedValue(undefined),
+  archiveRuntimeSessions: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe("whatsapp/adapter", () => {
@@ -958,7 +958,7 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
     });
 
-    it("resets the current DM session on /new", async () => {
+    it("archives the current DM session on /new", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
@@ -976,7 +976,8 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "u1");
+      expect(sessions.archiveRuntimeSessions).toHaveBeenCalledWith(deps.db, "u1");
+      expect(deps.repos.conversations.advanceWatermarkToCurrentMax).toHaveBeenCalledWith(1);
       expect(deps.runAgent).not.toHaveBeenCalled();
       expect(mock.sendText).toHaveBeenCalledWith(
         "1234567890@s.whatsapp.net",
@@ -2130,7 +2131,7 @@ describe("whatsapp/adapter", () => {
       expect(mock.sendText).toHaveBeenCalledWith("group@g.us", PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE);
     });
 
-    it("resets the current group session on /new", async () => {
+    it("archives the current group session on /new", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();
       wireWhatsAppHandlers(mock as never, deps);
@@ -2151,7 +2152,7 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "wa-group-group@g.us");
+      expect(sessions.archiveRuntimeSessions).toHaveBeenCalledWith(deps.db, "wa-group-group@g.us");
       expect(deps.repos.conversations.advanceWatermarkToCurrentMax).toHaveBeenCalledWith(1);
       expect(deps.runAgent).not.toHaveBeenCalled();
       expect(mock.sendText).toHaveBeenCalledWith(

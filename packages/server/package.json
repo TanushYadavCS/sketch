@@ -1,6 +1,6 @@
 {
   "name": "@sketch/server",
-  "version": "0.46.0",
+  "version": "1.0.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -16,6 +16,12 @@
     "test:watch": "vitest --project unit --project unit-isolated"
   },
   "dependencies": {
+    "@ai-sdk/amazon-bedrock": "^5.0.10",
+    "@ai-sdk/anthropic": "^4.0.7",
+    "@ai-sdk/google-vertex": "^5.0.10",
+    "@ai-sdk/mcp": "^2.0.7",
+    "@ai-sdk/openai-compatible": "^3.0.5",
+    "@anthropic-ai/bedrock-sdk": "^0.26.4",
     "@anthropic-ai/claude-agent-sdk": "^0.2.118",
     "@anthropic-ai/sdk": "^0.78.0",
     "@google/genai": "^1.47.0",
@@ -31,7 +37,9 @@
     "@posthog/ai": "^7.12.3",
     "@sketch/shared": "workspace:*",
     "@slack/bolt": "^4.6.0",
+    "@vscode/ripgrep": "^1.18.0",
     "@whiskeysockets/baileys": "7.0.0-rc.9",
+    "ai": "^7.0.14",
     "better-sqlite3": "^12.6.2",
     "croner": "^10.0.1",
     "dotenv": "^17.3.1",
@@ -60,8 +68,8 @@
     "@types/nodemailer": "^7.0.11",
     "@types/pdf-parse": "^1.1.5",
     "@types/pg": "^8.20.0",
-    "@vitest/coverage-v8": "4.0.18",
     "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "4.0.18",
     "tsdown": "^0.14.0",
     "tsx": "^4.19.0",
     "vitest": "^4.0.18"

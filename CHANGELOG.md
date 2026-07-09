@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [1.0.0] -- 2026-07-09
+
+- Introduces an in-process AI agent runtime (`AGENT_RUNTIME=aisdk`) built on Vercel AI SDK v7, replacing the per-query subprocess model to reduce memory usage from ~1 GiB per concurrent user to ~0.3 MiB. Provides full tool parity, workspace isolation, and operational compatibility with the existing SDK runtime, enabled via feature flag for easy rollback.
+- Fixes a fragile migration recovery test (`migrate.test.ts`) that was incorrectly modeling an impossible database state and silently failing in CI under machine contention. The test now accurately simulates the 107-120 migration ledger gap without being affected by future migration additions.
+- The release-cut workflow now supports major version bumps (`vX.0.0`), in addition to the existing minor and patch options.
+
+## [0.47.0] -- 2026-07-08
+
+- Managed member deletion now cleanly removes platform tenant membership before local user removal, blocking local deletion if platform cleanup fails to prevent membership drift.
+- CI introduces a one-click release cut workflow with changelog generation, beta build support for feature branches, and version reporting in the `/api/health` endpoint.
+- Fixes changelog source parsing in the release workflow to handle JSON arrays correctly, preventing failures with multi-line PR content.
+
 ## [0.46.0] -- 2026-07-06
 
 - Context graph moves from gated implementation to a broader GA-ready surface: entity dedup now uses birth gates, structural provenance tiers, embedding/adjudication passes, connector-aware hierarchy, task/commitment/decision/feature/work-cycle sub-entities, and a Your Org review surface for inspecting and correcting product/project/team structure.

@@ -15,6 +15,11 @@ import type { Kysely } from "kysely";
 import { removeReservedAgentEnv } from "../agent/environment";
 import { buildPlatformFormattingLines, buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
+import type { AgentRuntimeProviderFactoryConfig } from "../agent/runtime/contracts";
+import { runAgentRuntimeCore } from "../agent/runtime/core";
+import { createAgentRuntimeWorkspaceToolScopePolicy } from "../agent/runtime/path-guard";
+import { createAgentRuntimeProvider } from "../agent/runtime/provider";
+import { createAgentRuntimeWorkspaceTools } from "../agent/runtime/workspace-tools";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
@@ -33,7 +38,13 @@ export interface ExecuteAutomationParams {
   triggerData?: unknown;
   db: Kysely<DB>;
   logger: Logger;
-  config: { DATA_DIR: string; BASE_URL?: string; PORT: number; CLAUDE_CONFIG_DIR: string };
+  config: {
+    DATA_DIR: string;
+    BASE_URL?: string;
+    PORT: number;
+    CLAUDE_CONFIG_DIR: string;
+    AGENT_RUNTIME?: "sdk" | "aisdk";
+  };
   runsRepo: ReturnType<typeof createAutomationRunsRepository>;
   stepContentRepo: ReturnType<typeof createAutomationStepContentRepository>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
@@ -48,6 +59,7 @@ export interface ExecuteAutomationParams {
   onEvent?: (event: AutomationExecutionEvent) => Promise<void>;
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
+  loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
 }
 
 export type AutomationExecutionEvent =
@@ -452,6 +464,7 @@ async function executeWorkflowStep(params: {
       outputPlatform: resolveWorkflowDelivery(task).platform,
       recordWorkflowStep: runtimeParams.recordWorkflowStep,
       limitAgentExecution: runtimeParams.limitAgentExecution,
+      loadAgentRuntimeProviderConfig: runtimeParams.loadAgentRuntimeProviderConfig,
     });
   }
 
@@ -830,6 +843,7 @@ interface AgentStepParams {
   outputPlatform: "slack" | "whatsapp";
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
+  loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
 }
 
 /**
@@ -843,6 +857,10 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
 
   if (step.agentMode !== "light") {
     return executeSketchAgentStep(params);
+  }
+
+  if (params.config.AGENT_RUNTIME === "aisdk") {
+    return executeAiSdkLightAgentStep(params);
   }
 
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
@@ -949,6 +967,77 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
   // raw string both renders cleanly in Slack/WhatsApp and makes the run log
   // readable (no `{ "response": "..." }` wrapper in stored step_outputs).
   return lastText;
+}
+
+async function executeAiSdkLightAgentStep(params: AgentStepParams): Promise<unknown> {
+  const { prompt, step, input, task, logger, workspaceDir, outputPlatform, recordWorkflowStep } = params;
+  const providerConfig = await params.loadAgentRuntimeProviderConfig?.();
+  if (!providerConfig) {
+    throw new Error("AI SDK agent runtime is enabled but no LLM provider configuration is available");
+  }
+
+  const userMessage = `${prompt}\n\nInput:\n${JSON.stringify(input, null, 2)}`;
+  const systemPromptLines = [
+    "You are a workflow step in an automation. Complete the task described below and return a concise result. Do not ask questions — work with what you have.",
+    "",
+    "The text you return is delivered directly to the user's chat channel. Format it for that channel:",
+    "",
+    ...buildPlatformFormattingLines(outputPlatform),
+  ];
+  const provider = createAgentRuntimeProvider({
+    ...providerConfig,
+    modelId: step.agentModel ?? providerConfig.modelId,
+  });
+  const scope = await createAgentRuntimeWorkspaceToolScopePolicy({
+    workspaceRoot: workspaceDir,
+    orgClaudeDir: params.config.CLAUDE_CONFIG_DIR,
+  });
+  const tools = createAgentRuntimeWorkspaceTools({ scope, logger });
+  const limitAgentExecution = params.limitAgentExecution ?? (<T>(work: () => Promise<T>) => work());
+
+  const result = await limitAgentExecution(() =>
+    runAgentRuntimeCore({
+      provider,
+      prompt: userMessage,
+      systemPrompt: systemPromptLines.join("\n"),
+      tools,
+      maxTurns: 10,
+      persistSession: false,
+    }),
+  );
+
+  if (recordWorkflowStep) {
+    const firstModel = Object.keys(result.usage.byModel)[0] ?? provider.modelId;
+    await recordWorkflowStep(
+      {
+        platform: outputPlatform,
+        contextType: "scheduled_task",
+        userId: task.created_by,
+        workspaceKey: resolveWorkspaceKey(task),
+      },
+      {
+        model: firstModel,
+        inputTokens: result.usage.totalInputTokens,
+        outputTokens: result.usage.totalOutputTokens,
+        cacheReadTokens: result.usage.totalCacheReadTokens,
+        cacheCreationTokens: result.usage.totalCacheWriteTokens,
+        sdkCostUsd: result.cost.totalUsd,
+      },
+    );
+  }
+
+  logger.info(
+    {
+      stepId: step.id,
+      responseLength: result.finalText.length,
+      runtime: "aisdk",
+      stopReason: result.stopReason,
+      numTurns: result.num_turns,
+    },
+    "Automation agent: AI SDK light step completed",
+  );
+
+  return result.finalText;
 }
 
 async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown> {

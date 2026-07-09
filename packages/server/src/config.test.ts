@@ -36,6 +36,15 @@ describe("configSchema", () => {
         expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(4);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
         expect(result.data.VISION_ENABLED).toBe(false);
+        expect(result.data.AGENT_RUNTIME).toBe("sdk");
+      }
+    });
+
+    it("parses the AI SDK agent runtime flag", () => {
+      const result = configSchema.safeParse({ AGENT_RUNTIME: "aisdk" });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.AGENT_RUNTIME).toBe("aisdk");
       }
     });
 
@@ -233,6 +242,11 @@ describe("configSchema", () => {
 
     it("rejects invalid managed WhatsApp platform URLs", () => {
       const result = configSchema.safeParse({ MANAGED_WHATSAPP_PLATFORM_URL: "not-a-url" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects invalid agent runtime values", () => {
+      const result = configSchema.safeParse({ AGENT_RUNTIME: "other" });
       expect(result.success).toBe(false);
     });
   });

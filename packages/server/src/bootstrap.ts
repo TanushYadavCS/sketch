@@ -10,6 +10,7 @@ import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/env
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
+import { resolveAgentRuntimeProviderConfigFromSettings } from "./agent/runtime/provider";
 import { createAgentOutputDeliveryService } from "./agents/output-delivery";
 import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
@@ -203,6 +204,10 @@ export async function createServer(config: Config, options?: CreateServerOptions
       settingsEncryptionKey: params.settingsEncryptionKey ?? config.ENCRYPTION_KEY,
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,
+      agentRuntime: params.agentRuntime ?? config.AGENT_RUNTIME,
+      loadAgentRuntimeProviderConfig:
+        params.loadAgentRuntimeProviderConfig ??
+        (async () => resolveAgentRuntimeProviderConfigFromSettings(await settingsRepo.get())),
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,

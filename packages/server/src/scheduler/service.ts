@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import { Cron } from "croner";
 import type { Kysely } from "kysely";
 import type { McpServerConfig, runAgent } from "../agent/runner";
+import { resolveAgentRuntimeProviderConfigFromSettings } from "../agent/runtime/provider";
 import type { Config } from "../config";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -204,6 +205,8 @@ export class TaskScheduler {
       sendMessage: sendMessage ?? undefined,
       recordWorkflowStep: this.deps.recordWorkflowStep,
       limitAgentExecution: this.deps.limitAgentExecution,
+      loadAgentRuntimeProviderConfig: async () =>
+        resolveAgentRuntimeProviderConfigFromSettings(await this.deps.settingsRepo.get()),
     });
 
     const now = new Date().toISOString();
@@ -513,6 +516,8 @@ export class TaskScheduler {
       sendDm: this.deps.sendDm,
       recordWorkflowStep: this.deps.recordWorkflowStep,
       limitAgentExecution: this.deps.limitAgentExecution,
+      loadAgentRuntimeProviderConfig: async () =>
+        resolveAgentRuntimeProviderConfigFromSettings(await this.deps.settingsRepo.get()),
       stepId,
       input: options.input,
       useLatestUpstreamOutput: options.useLatestUpstreamOutput,

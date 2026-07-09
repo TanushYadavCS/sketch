@@ -356,7 +356,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     "/api/agent-environment-variables",
     agentEnvironmentRoutes(agentEnvVars, { users, channels, whatsappGroups, getSlack: deps?.getSlack, logger }),
   );
-  app.route("/api/agent-sessions", agentSessionRoutes());
+  app.route("/api/agent-sessions", agentSessionRoutes(db, { logger }));
   app.route(
     "/api/workflows",
     workflowRoutes({
