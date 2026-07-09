@@ -209,5 +209,14 @@ describe("Settings repository", () => {
       await db.updateTable("settings").set({ org_name: "Bypass" }).where("id", "=", "default").execute();
       expect((await settings.get())?.org_name).toBeNull();
     });
+
+    it("shares cache invalidation across repository instances for the same db", async () => {
+      const other = createSettingsRepository(db);
+      await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      expect((await other.get())?.admin_can_read_all_files).toBe(0);
+
+      await settings.update({ adminCanReadAllFiles: true });
+      expect((await other.get())?.admin_can_read_all_files).toBe(1);
+    });
   });
 });
