@@ -116,6 +116,7 @@ export interface ResolvedAgentConfig {
   sources: AgentSourceConfig[];
   routes: ResolvedRoute[];
   configuredRoutes: AgentRoute[];
+  createTasks: boolean;
 }
 
 export interface AgentSectionView {
@@ -142,6 +143,7 @@ export interface AgentConfigView {
   sources: AgentSourceConfig[];
   routes: AgentConfigRouteView[];
   sections: AgentSectionView[];
+  createTasks: boolean;
 }
 
 export interface AgentRouteOwnerView {
@@ -204,6 +206,7 @@ export interface AgentConfigUpdatePatch {
   deliveryModel?: AgentDeliveryModel;
   sources?: AgentSourceConfig[];
   routes?: AgentConfigRouteView[];
+  createTasks?: boolean;
 }
 
 export class AgentDeliveryTargetError extends Error {}
@@ -855,6 +858,7 @@ export class AgentRunService {
       sources,
       routes,
       configuredRoutes,
+      createTasks: prefs.createTasks ?? false,
     };
   }
 
@@ -906,6 +910,7 @@ export class AgentRunService {
       sourceConfig: def.sourceConfig ?? null,
       sources,
       routes,
+      createTasks: viewerConfig.createTasks,
       sections: def.sections.map((section) => ({
         key: section.key,
         title: section.title,
@@ -1032,6 +1037,7 @@ export class AgentRunService {
       sourceConfig: def.sourceConfig ?? null,
       sources: config.sources,
       routes: config.configuredRoutes,
+      createTasks: config.createTasks,
       sections: def.sections.map((section) => ({
         key: section.key,
         title: section.title,
@@ -1117,6 +1123,7 @@ export class AgentRunService {
       patch.deliveryModel !== undefined ||
       patch.sources !== undefined ||
       patch.routes !== undefined ||
+      patch.createTasks !== undefined ||
       maxItemsPerSection !== undefined
     ) {
       const sections: Record<string, boolean> = { ...current.enabledSections };
@@ -1157,6 +1164,7 @@ export class AgentRunService {
                 ...(patch.focus !== undefined ? { focus } : {}),
                 ...(maxItemsPerSection !== undefined ? { maxItemsPerSection } : {}),
               }));
+      const createTasks = patch.createTasks !== undefined ? patch.createTasks : current.createTasks;
       prefs = {
         sections,
         focus,
@@ -1164,6 +1172,7 @@ export class AgentRunService {
         deliveryModel,
         sources,
         routes,
+        createTasks,
       };
     }
 
@@ -2057,6 +2066,7 @@ export class AgentRunService {
                 firstRunLookbackHours,
                 floorWindowToPeriod: output.trigger_type === "manual",
                 deliveryPlatform: deliveryPlatformForRoute(scope.route, scope.sources),
+                createTasks: config.createTasks,
               },
             })
           : Promise.resolve({}),
@@ -2072,6 +2082,7 @@ export class AgentRunService {
         maxItemsPerSection: routeMaxItemsPerSection,
         focus: routeFocus,
         sources: scope.sources,
+        createTasks: config.createTasks,
         sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious),
         previousDayOutput: this.formatOutputForContext(previousDay),
         ...definitionContext,
@@ -2096,6 +2107,7 @@ export class AgentRunService {
         expectedOutputDate: output.output_date,
         expectedTimezone: output.timezone,
         runtimeContext,
+        createTasks: config.createTasks,
         onSaved: () => {
           saved = true;
         },
@@ -2299,6 +2311,7 @@ export class AgentRunService {
       expectedOutputDate: string;
       expectedTimezone: string;
       runtimeContext: Record<string, unknown>;
+      createTasks: boolean;
       onSaved: () => void;
     },
   ): AgentOutputWriter {
@@ -2316,20 +2329,26 @@ export class AgentRunService {
         if (payload.timezone !== params.expectedTimezone) {
           throw new Error(`Timezone mismatch: expected ${params.expectedTimezone}, got ${payload.timezone}`);
         }
-        const sectionKeys = new Set(def.sections.map((s) => s.key));
+        const visibleSectionKeys = new Set(def.sections.map((s) => s.key));
+        const internalSectionKeys = new Set(def.internalOutputSections ?? []);
         const filtered = payload.items.filter(
-          (item) => sectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey),
+          (item) =>
+            (visibleSectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey)) ||
+            internalSectionKeys.has(item.sectionKey),
         );
         const reconciled = def.reconcileItems
           ? await def.reconcileItems({ db: this.deps.db, items: filtered, runtimeContext: params.runtimeContext })
           : filtered;
-        const items = await def.enrichItems(this.deps.db, reconciled);
-        await this.validateItemRefs(def, items);
+        const itemsForHooks = await def.enrichItems(this.deps.db, reconciled);
+        const visibleItems = itemsForHooks.filter(
+          (item) => visibleSectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey),
+        );
+        await this.validateItemRefs(def, itemsForHooks);
         await this.repo.completeOutput({
           outputId: params.outputId,
           masthead: payload.masthead,
           rawPayload: rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext),
-          items,
+          items: visibleItems,
         });
         if (def.onOutputSaved) {
           await def.onOutputSaved({
@@ -2338,7 +2357,8 @@ export class AgentRunService {
             logger: this.deps.logger,
             userId: params.userId,
             outputId: params.outputId,
-            items,
+            items: itemsForHooks,
+            createTasks: params.createTasks,
           });
         }
         params.onSaved();

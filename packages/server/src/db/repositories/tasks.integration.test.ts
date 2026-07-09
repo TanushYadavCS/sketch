@@ -122,13 +122,10 @@ describe("createTaskRepository postgres", () => {
     ]);
   });
 
-  it("materializes llm corroboration mint and structural collation on postgres", async () => {
+  it("marks legacy llm task facts materialized without minting tasks on postgres", async () => {
     await seedPgUser(db, "pg-llm-u1", "pg-llm-u1@example.com");
-    await seedPgProject(db, "pg-llm-project", "PG LLM Project");
-    await seedPgProjectRef(db, "pg-llm-project", "linear", "pg-llm-project");
     await seedPgIndexedFileForUser(db, "pg-llm-file-1", "pg-llm-u1");
     await seedPgIndexedFileForUser(db, "pg-llm-file-2", "pg-llm-u1");
-    await seedPgIndexedFileForUser(db, "pg-llm-file-3", "pg-llm-u1");
 
     await seedPgLlmFact({
       db,
@@ -150,71 +147,26 @@ describe("createTaskRepository postgres", () => {
       hasOwnerVerbObject: false,
       corroborationKey: "send pricing deck|global",
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), {
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), {
       llmTaskCorroborationThreshold: 2,
     });
 
-    const minted = await db.selectFrom("tasks").selectAll().where("provenance", "=", "llm").execute();
-    const mintedEvidence = await db
-      .selectFrom("task_evidence")
-      .selectAll()
-      .where("kind", "=", "file")
-      .orderBy("ref_id", "asc")
+    const rows = await db.selectFrom("tasks").selectAll().execute();
+    const evidence = await db.selectFrom("task_evidence").selectAll().execute();
+    const facts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["id", "materialized_at"])
+      .where("fact_type", "=", "llm_task")
+      .orderBy("id", "asc")
       .execute();
-    expect(minted).toHaveLength(1);
-    expect(minted[0]).toMatchObject({
-      source: "llm",
-      status_authority: "local",
-      created_by_user_id: "pg-llm-u1",
-    });
-    expect(mintedEvidence.map((row) => row.ref_id)).toEqual(["pg-llm-file-1", "pg-llm-file-2"]);
 
-    const repo = createTaskRepository(db);
-    const structural = await repo.upsertTask({
-      parentEntityId: "pg-llm-project",
-      parentSourceRef: "linear:pg-llm-project",
-      parentName: "PG LLM Project",
-      source: "linear",
-      externalRef: "SKE-PG-LLM",
-      title: "Ship Slack capture",
-      status: "open",
-      statusRaw: "Todo",
-      statusAuthority: "external",
-      assigneeEntityId: null,
-      priority: null,
-      dueAt: null,
-      provenance: "structural",
-      sourceTaskId: "pg-llm-structural",
-    });
-    await seedPgLlmFact({
-      db,
-      fileId: "pg-llm-file-3",
-      connectorConfigId: "connector-pg-llm-file-3",
-      ownerUserId: "pg-llm-u1",
-      candidateId: "pg-collate-1",
-      title: "Ship Slack capture",
-      hasOwnerVerbObject: false,
-      corroborationKey: "ship slack capture|linear:pg-llm-project",
-      parentRef: { source: "linear", sourceId: "pg-llm-project" },
-      entityIds: ["pg-llm-project"],
-    });
-    await materializeUnmaterializedFacts(db, createTestLogger(), {
-      llmTaskCorroborationThreshold: 2,
-    });
-
-    const rows = await db.selectFrom("tasks").selectAll().orderBy("source", "asc").execute();
-    const structuralEvidence = await db
-      .selectFrom("task_evidence")
-      .selectAll()
-      .where("task_id", "=", structural.taskId)
-      .orderBy("kind", "asc")
-      .execute();
-    expect(rows).toHaveLength(2);
-    expect(rows.find((row) => row.id === structural.taskId)).toMatchObject({
-      provenance: "structural",
-      status_authority: "external",
-    });
-    expect(structuralEvidence.map((row) => row.kind).sort()).toEqual(["entity", "fact", "file"]);
+    expect(summary).toMatchObject({ factsRead: 2, skipped: 2, materialized: 2 });
+    expect(rows).toHaveLength(0);
+    expect(evidence).toHaveLength(0);
+    expect(facts).toEqual([
+      expect.objectContaining({ materialized_at: expect.any(String) }),
+      expect.objectContaining({ materialized_at: expect.any(String) }),
+    ]);
   });
 });
 
@@ -240,20 +192,6 @@ async function seedPgProject(db: Kysely<DB>, id: string, name: string): Promise<
       ai_brief: null,
       deleted_at: null,
       merged_into_entity_id: null,
-    })
-    .execute();
-}
-
-async function seedPgProjectRef(db: Kysely<DB>, entityId: string, source: string, sourceId: string): Promise<void> {
-  await db
-    .insertInto("entity_source_refs")
-    .values({
-      id: `${source}-${sourceId}`,
-      entity_id: entityId,
-      source,
-      source_id: sourceId,
-      source_url: null,
-      last_seen_at: new Date().toISOString(),
     })
     .execute();
 }

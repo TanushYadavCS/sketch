@@ -14,7 +14,14 @@
  */
 import { EntityMergeDialog } from "@/components/entity-merge-dialog";
 import { EntityShareDialog } from "@/components/entity-share-dialog";
-import type { EntityDetail, EntityRelationEvidenceRow, EntityRelationView, EntityRelationsResponse } from "@/lib/api";
+import type {
+  EntityDetail,
+  EntityRelationEvidenceRow,
+  EntityRelationView,
+  EntityRelationsResponse,
+  EntityTask,
+  TaskStatus,
+} from "@/lib/api";
 import { api } from "@/lib/api";
 import { EntityAvatar, EntityChip, entityAccent, useEntityUi } from "@/lib/entity-ui";
 import {
@@ -23,6 +30,7 @@ import {
   CaretDownIcon,
   CaretRightIcon,
   GlobeIcon,
+  LockIcon,
   ShareNetworkIcon,
   SpinnerGapIcon,
   TrashIcon,
@@ -40,6 +48,7 @@ import {
 } from "@sketch/ui/components/alert-dialog";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { cn } from "@sketch/ui/lib/utils";
@@ -55,6 +64,13 @@ const CONFIDENCE_LABEL: Record<string, string> = {
   INFERRED: "INFERRED",
   AMBIGUOUS: "AMBIGUOUS",
 };
+
+const TASK_STATUS_OPTIONS: Array<{ value: TaskStatus; label: string }> = [
+  { value: "open", label: "Open" },
+  { value: "in_progress", label: "In progress" },
+  { value: "done", label: "Done" },
+  { value: "dropped", label: "Dropped" },
+];
 
 function formatRelationVerb(type: string): string {
   return type.replace(/_/g, " ");
@@ -150,6 +166,7 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack, onOpenEn
 
   const { entity } = profileQuery.data;
   const accent = entityAccent({ id: entity.id, name: entity.name, sourceType: entity.sourceType });
+  const isProject = entity.sourceType === "project";
 
   return (
     <>
@@ -163,6 +180,7 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack, onOpenEn
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
         <SummaryBlock entity={entity} accent={accent} />
+        {isProject ? <TaskPanel entityId={entity.id} accent={accent} /> : null}
         <DrawerTabs
           entityId={entity.id}
           sourceType={entity.sourceType}
@@ -417,6 +435,292 @@ function IdentityChips({ entity }: { entity: EntityDetail }) {
         <span className="text-[11px] text-muted-foreground">Also: {aliases.join(", ")}</span>
       ) : null}
     </>
+  );
+}
+
+function formatTaskStatus(status: string): string {
+  return TASK_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status.replace(/_/g, " ");
+}
+
+function formatTaskCount(status: TaskStatus, count: number): string {
+  return `${count} ${formatTaskStatus(status).toLowerCase()}`;
+}
+
+function formatTaskSectionLabel(tasks: EntityTask[]): string {
+  if (tasks.length === 0) return "Tasks";
+  const counts = new Map<TaskStatus, number>(TASK_STATUS_OPTIONS.map((option) => [option.value, 0]));
+  for (const task of tasks) counts.set(task.status, (counts.get(task.status) ?? 0) + 1);
+  const editableCount = tasks.filter((task) => task.canEditStatus).length;
+  const parts = [
+    `${tasks.length} total`,
+    ...TASK_STATUS_OPTIONS.flatMap((option) => {
+      const count = counts.get(option.value) ?? 0;
+      return count > 0 ? [formatTaskCount(option.value, count)] : [];
+    }),
+  ];
+  parts.push(editableCount > 0 ? `${editableCount} editable` : "Monitoring only");
+  return `Tasks · ${parts.join(" · ")}`;
+}
+
+function taskStatusTone(status: TaskStatus): string {
+  switch (status) {
+    case "in_progress":
+      return "border-amber-500/40 text-amber-600 dark:border-amber-500/30 dark:text-amber-400";
+    case "done":
+      return "border-emerald-500/40 text-emerald-600 dark:border-emerald-500/30 dark:text-emerald-400";
+    case "dropped":
+      return "text-muted-foreground line-through";
+    default:
+      return "text-muted-foreground";
+  }
+}
+
+function taskPriorityTone(priority: string): string {
+  switch (priority) {
+    case "high":
+      return "border-amber-500/40 text-amber-600 dark:border-amber-500/30 dark:text-amber-400";
+    case "medium":
+      return "border-sky-500/40 text-sky-600 dark:border-sky-500/30 dark:text-sky-400";
+    case "low":
+      return "text-muted-foreground";
+    default:
+      return "text-muted-foreground";
+  }
+}
+
+function PriorityBadge({ priority }: { priority: string }) {
+  return (
+    <Badge variant="outline" className={cn("text-[10px] uppercase tracking-wider", taskPriorityTone(priority))}>
+      {formatTitleCase(priority)}
+    </Badge>
+  );
+}
+
+function TaskStatusPill({ status }: { status: TaskStatus }) {
+  return (
+    <Badge variant="outline" className={cn("max-w-full truncate text-[10px] sm:max-w-40", taskStatusTone(status))}>
+      {formatTaskStatus(status)}
+    </Badge>
+  );
+}
+
+function MetaSeparator() {
+  return (
+    <span aria-hidden className="text-muted-foreground/40">
+      ·
+    </span>
+  );
+}
+
+function formatTitleCase(value: string): string {
+  return value
+    .replace(/[_-]/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function formatProviderName(source: string): string {
+  if (source === "clickup") return "ClickUp";
+  if (source === "linear") return "Linear";
+  return formatTitleCase(source);
+}
+
+function formatTaskSource(task: EntityTask): string {
+  if (task.provenance === "summary") return "From Summarizer";
+  if (task.provenance === "brief") return "From Daily Brief";
+  if (task.externalRef) return `${formatProviderName(task.source)} ${task.externalRef}`;
+  return formatProviderName(task.source);
+}
+
+function taskAssigneeMeta(
+  task: EntityTask,
+): { kind: "assigned"; label: string } | { kind: "proposed"; label: string } | null {
+  if (task.assigneeName) return { kind: "assigned", label: `Assigned to ${task.assigneeName}` };
+  if (task.assigneeEntityId) return { kind: "assigned", label: "Assigned" };
+  if (task.proposedAssigneeName) return { kind: "proposed", label: `Mentioned: ${task.proposedAssigneeName}` };
+  return null;
+}
+
+function taskCreatorLabel(task: EntityTask): string | null {
+  if (task.isOwnedByViewer) return "Created by you";
+  if (task.createdByUserName) return `Created by ${task.createdByUserName}`;
+  if (task.createdByUserEmail) return `Created by ${task.createdByUserEmail}`;
+  if (task.createdByUserId) return "Created by another user";
+  return null;
+}
+
+function taskReadonlyCopy(task: EntityTask): { label: string; detail: string | null } {
+  if (task.readonlyReason === "not_owner") {
+    return {
+      label: "Read-only for you",
+      detail: "Admins can monitor this task. Only the creator or assignee can update status.",
+    };
+  }
+  const source = formatProviderName(task.source);
+  if (task.readonlyReason === "external_authority") {
+    if (task.source !== "linear" && task.source !== "clickup") {
+      return {
+        label: "Read-only",
+        detail: "Status is managed outside this task view.",
+      };
+    }
+    return {
+      label: `Managed in ${source}`,
+      detail: `Status changes happen in ${source}.`,
+    };
+  }
+  return { label: "Read-only", detail: null };
+}
+
+function TaskPanel({ entityId, accent }: { entityId: string; accent: string }) {
+  const queryClient = useQueryClient();
+  const tasksQuery = useQuery({
+    queryKey: ["entity-drawer", "tasks", entityId],
+    queryFn: () => api.entities.tasks(entityId),
+  });
+  const updateMutation = useMutation({
+    mutationFn: ({ taskId, status }: { taskId: string; status: TaskStatus }) =>
+      api.entities.updateTaskStatus(entityId, taskId, status),
+    onSuccess: ({ task }) => {
+      queryClient.setQueryData<{ tasks: EntityTask[] }>(["entity-drawer", "tasks", entityId], (current) => ({
+        tasks: (current?.tasks ?? []).map((item) => (item.id === task.id ? task : item)),
+      }));
+      toast.success("Task status updated");
+    },
+    onError: (err: Error) => {
+      toast.error(err.message);
+    },
+  });
+
+  if (tasksQuery.isLoading) {
+    return (
+      <SectionCard accent={accent} label="Tasks">
+        <div className="space-y-2">
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-14 w-full" />
+        </div>
+      </SectionCard>
+    );
+  }
+
+  const tasks = tasksQuery.data?.tasks ?? [];
+  if (tasksQuery.isError) {
+    return (
+      <SectionCard accent={accent} label="Tasks">
+        <div className="flex items-center justify-between gap-3 rounded-md border border-dashed px-3 py-2">
+          <p className="text-xs text-muted-foreground">Couldn’t load project tasks.</p>
+          <Button type="button" variant="outline" size="sm" onClick={() => void tasksQuery.refetch()}>
+            Retry
+          </Button>
+        </div>
+      </SectionCard>
+    );
+  }
+
+  return (
+    <SectionCard accent={accent} label={formatTaskSectionLabel(tasks)}>
+      {tasks.length === 0 ? (
+        <div className="rounded-md border border-dashed px-3 py-3">
+          <p className="text-xs font-medium">No project tasks yet.</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Summarizer action items will appear here when they are linked to this project.
+          </p>
+        </div>
+      ) : (
+        <div className="divide-y">
+          {tasks.map((task) => {
+            const assignee = taskAssigneeMeta(task);
+            const creator = taskCreatorLabel(task);
+            const readonly = taskReadonlyCopy(task);
+            const externalStatus = Boolean(task.statusRaw && task.statusAuthority === "external");
+            return (
+              <fieldset
+                key={task.id}
+                aria-label={`${task.title} task`}
+                className={cn(
+                  "grid min-w-0 grid-cols-1 gap-2 border-0 p-0 py-3 sm:grid-cols-[minmax(0,1fr)_10rem] sm:items-start sm:gap-4",
+                  !task.canEditStatus && "rounded-l-sm border-l border-l-dashed border-l-border/60 pl-3",
+                )}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="break-words text-sm font-medium leading-snug">{task.title}</div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] text-muted-foreground">
+                    <span className="font-mono uppercase tracking-wider">{formatTaskSource(task)}</span>
+                    {task.priority ? (
+                      <>
+                        <MetaSeparator />
+                        <PriorityBadge priority={task.priority} />
+                      </>
+                    ) : null}
+                    {assignee ? (
+                      assignee.kind === "assigned" ? (
+                        <>
+                          <MetaSeparator />
+                          <span>{assignee.label}</span>
+                        </>
+                      ) : (
+                        <>
+                          <MetaSeparator />
+                          <span className="font-medium text-foreground/80">Needs assignee</span>
+                          <MetaSeparator />
+                          <span>{assignee.label}</span>
+                        </>
+                      )
+                    ) : null}
+                    {creator ? (
+                      <>
+                        <MetaSeparator />
+                        <span>{creator}</span>
+                      </>
+                    ) : null}
+                    {externalStatus ? (
+                      <>
+                        <MetaSeparator />
+                        <span>External status: {task.statusRaw}</span>
+                        <span className="sr-only">{task.statusRaw}</span>
+                      </>
+                    ) : null}
+                  </div>
+                  {!task.canEditStatus ? (
+                    <div className="mt-1.5 flex items-start gap-1 text-[10px]">
+                      <LockIcon size={11} aria-hidden className="mt-px shrink-0 text-muted-foreground/70" />
+                      <div className="space-y-0.5">
+                        <div className="font-medium text-foreground/70">{readonly.label}</div>
+                        {readonly.detail ? <div className="text-muted-foreground">{readonly.detail}</div> : null}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="flex shrink-0 items-start sm:justify-end">
+                  {task.canEditStatus ? (
+                    <Select
+                      value={task.status}
+                      onValueChange={(value) => updateMutation.mutate({ taskId: task.id, status: value as TaskStatus })}
+                      disabled={updateMutation.isPending}
+                    >
+                      <SelectTrigger aria-label={`${task.title} status`} className="h-8 w-full text-xs sm:w-40">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {TASK_STATUS_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <TaskStatusPill status={task.status} />
+                  )}
+                </div>
+              </fieldset>
+            );
+          })}
+        </div>
+      )}
+    </SectionCard>
   );
 }
 

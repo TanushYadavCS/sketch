@@ -1,10 +1,11 @@
 import type { Kysely, Selectable } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AgentSourceConfig } from "../../db/repositories/agent-outputs";
+import type { AgentOutputItemInput, AgentSourceConfig } from "../../db/repositories/agent-outputs";
 import type { DB, UsersTable } from "../../db/schema";
-import { createTestDb } from "../../test-utils";
+import { createTestConfig, createTestDb, createTestLogger } from "../../test-utils";
 import {
   CONVERSATION_SUMMARY_AGENT_KEY,
+  CONVERSATION_SUMMARY_MAX_MESSAGES_PER_SOURCE,
   buildConversationSummaryRuntimeContext,
   conversationSummaryDefinition,
 } from "./conversation-summary";
@@ -64,6 +65,41 @@ function source(): AgentSourceConfig {
   };
 }
 
+async function seedProject(db: Kysely<DB>, id: string, name: string): Promise<void> {
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "project",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ai_brief: null,
+      deleted_at: null,
+      merged_into_entity_id: null,
+    })
+    .execute();
+}
+
+function outputItem(overrides: Partial<AgentOutputItemInput> = {}): AgentOutputItemInput {
+  return {
+    sectionKey: "highlights",
+    title: "Output item",
+    summary: "Output item summary.",
+    priority: "medium",
+    label: "highlight",
+    knowledgeRefs: { entityIds: [], fileIds: [] },
+    sortOrder: 0,
+    ...overrides,
+  };
+}
+
 describe("conversationSummaryDefinition", () => {
   it("is registered as a source-configurable summarizer", () => {
     expect(conversationSummaryDefinition.key).toBe(CONVERSATION_SUMMARY_AGENT_KEY);
@@ -72,6 +108,220 @@ describe("conversationSummaryDefinition", () => {
       supportsWhatsAppGroups: true,
     });
     expect(conversationSummaryDefinition.requiresKnowledgeRefs).toBe(false);
+  });
+
+  it("carries parent hints from the same output into promoted action-item tasks", async () => {
+    const db = await createTestDb();
+    try {
+      await seedUser(db);
+      await seedProject(db, "project-x", "Project X");
+
+      await conversationSummaryDefinition.onOutputSaved?.({
+        db,
+        config: createTestConfig(),
+        logger: createTestLogger(),
+        userId: "user-1",
+        outputId: "summary-output",
+        createTasks: true,
+        items: [
+          outputItem({
+            sectionKey: "highlights",
+            title: "Project X task QA kicked off",
+            summary: "Project X is the parent for this QA run. parentEntityId: project-x.",
+            label: "highlight",
+            structuredPayload: { sourceLabels: ["#summary-room"] },
+          }),
+          outputItem({
+            sectionKey: "action_items",
+            title: "Apeksha: prepare Project X onboarding checklist",
+            summary: "Apeksha owns the onboarding checklist for Project X.",
+            label: "action_item",
+            structuredPayload: { sourceLabels: ["#summary-room"], messageIds: [101, 102], owner: "Apeksha" },
+          }),
+        ],
+      });
+
+      const task = await db.selectFrom("tasks").selectAll().where("source", "=", "summary").executeTakeFirstOrThrow();
+      const evidence = await db
+        .selectFrom("task_evidence")
+        .selectAll()
+        .where("task_id", "=", task.id)
+        .orderBy("ref_id", "asc")
+        .execute();
+
+      expect(task).toMatchObject({
+        parent_entity_id: "project-x",
+        parent_name: "Project X",
+        title: "Apeksha: prepare Project X onboarding checklist",
+        status: "open",
+        status_authority: "local",
+      });
+      expect(evidence).toEqual([
+        { task_id: task.id, kind: "conversation_message", ref_id: "101" },
+        { task_id: task.id, kind: "conversation_message", ref_id: "102" },
+      ]);
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("does not apply an output-level parent hint when multiple parents are present", async () => {
+    const db = await createTestDb();
+    try {
+      await seedUser(db);
+      await seedProject(db, "project-x", "Project X");
+      await seedProject(db, "project-y", "Project Y");
+
+      await conversationSummaryDefinition.onOutputSaved?.({
+        db,
+        config: createTestConfig(),
+        logger: createTestLogger(),
+        userId: "user-1",
+        outputId: "multi-parent-output",
+        createTasks: true,
+        items: [
+          outputItem({
+            sectionKey: "highlights",
+            title: "Project X update",
+            summary: "Project X parentEntityId: project-x.",
+            label: "highlight",
+          }),
+          outputItem({
+            sectionKey: "decisions",
+            title: "Project Y update",
+            summary: "Project Y parentEntityId: project-y.",
+            label: "decision",
+          }),
+          outputItem({
+            sectionKey: "action_items",
+            title: "Tanush: follow up on the ambiguous project note",
+            summary: "The project was not explicit on this action item.",
+            label: "action_item",
+            structuredPayload: { sourceLabels: ["#summary-room"] },
+          }),
+        ],
+      });
+
+      const task = await db.selectFrom("tasks").selectAll().where("source", "=", "summary").executeTakeFirstOrThrow();
+
+      expect(task).toMatchObject({
+        parent_entity_id: null,
+        parent_name: null,
+        title: "Tanush: follow up on the ambiguous project note",
+      });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("promotes extraction-only task candidates as summary tasks", async () => {
+    const db = await createTestDb();
+    try {
+      await seedUser(db);
+
+      await conversationSummaryDefinition.onOutputSaved?.({
+        db,
+        config: createTestConfig(),
+        logger: createTestLogger(),
+        userId: "user-1",
+        outputId: "summary-output",
+        createTasks: true,
+        items: [
+          outputItem({
+            sectionKey: "task_candidates",
+            title: "Mina: send the launch checklist",
+            summary: "Mina committed to send the launch checklist.",
+            priority: "high",
+            label: "action_item",
+            structuredPayload: { sourceLabels: ["#summary-room"], messageIds: [201, 202], owner: "Mina" },
+          }),
+        ],
+      });
+
+      const task = await db.selectFrom("tasks").selectAll().where("source", "=", "summary").executeTakeFirstOrThrow();
+      const evidence = await db
+        .selectFrom("task_evidence")
+        .select(["kind", "ref_id"])
+        .where("task_id", "=", task.id)
+        .orderBy("ref_id", "asc")
+        .execute();
+
+      expect(task).toMatchObject({
+        title: "Mina: send the launch checklist",
+        priority: "high",
+        provenance: "summary",
+        status: "open",
+        status_authority: "local",
+      });
+      expect(evidence).toEqual([
+        { kind: "conversation_message", ref_id: "201" },
+        { kind: "conversation_message", ref_id: "202" },
+      ]);
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("promotes task candidates instead of visible action items when both are present", async () => {
+    const db = await createTestDb();
+    try {
+      await seedUser(db);
+      await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
+
+      await conversationSummaryDefinition.onOutputSaved?.({
+        db,
+        config: createTestConfig(),
+        logger: createTestLogger(),
+        userId: "user-1",
+        outputId: "summary-output",
+        createTasks: true,
+        items: [
+          outputItem({
+            sectionKey: "action_items",
+            title: "Vedant to integrate Aimfox into the LinkedIn Workflow",
+            summary: "Vedant owns the Aimfox integration.",
+            label: "action_item",
+            structuredPayload: { parentName: "LinkedIn Workflow", messageIds: [301] },
+          }),
+          outputItem({
+            sectionKey: "task_candidates",
+            title: "Integrate Aimfox into LinkedIn Workflow",
+            summary: "Vedant owns the Aimfox integration.",
+            label: "action_item",
+            structuredPayload: { messageIds: [301], owner: "Vedant" },
+          }),
+          outputItem({
+            sectionKey: "task_candidates",
+            title: "Build LinkedIn scraper using Bright Data",
+            summary: "Tanush is working on the scraper.",
+            label: "action_item",
+            structuredPayload: { messageIds: [302], owner: "Tanush" },
+          }),
+        ],
+      });
+
+      const tasks = await db.selectFrom("tasks").selectAll().orderBy("title", "asc").execute();
+
+      expect(tasks.map((task) => task.title)).toEqual([
+        "Build LinkedIn scraper using Bright Data",
+        "Integrate Aimfox into LinkedIn Workflow",
+      ]);
+      expect(tasks).toEqual([
+        expect.objectContaining({ parent_entity_id: "linkedin-workflow-connect" }),
+        expect.objectContaining({ parent_entity_id: "linkedin-workflow-connect" }),
+      ]);
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("instructs the model to emit extraction-only task candidates when task creation is enabled", () => {
+    const instructions = conversationSummaryDefinition.buildInstructions();
+
+    expect(instructions).toContain("task_candidates");
+    expect(instructions).toContain("createTasks");
+    expect(instructions).toContain("messageIds");
+    expect(instructions).toContain("Do not limit task_candidates to maxItemsPerSection");
   });
 });
 
@@ -123,6 +373,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
         sources: [source()],
         sourceKey: "slack:channel:C_SUMMARY",
         deliveryPlatform: "whatsapp",
+        createTasks: false,
       },
     });
 
@@ -140,6 +391,51 @@ describe("buildConversationSummaryRuntimeContext", () => {
         messages: [expect.objectContaining({ text: "Launch decision is ready" })],
       }),
     ]);
+  });
+
+  it("keeps the newest capped messages in chronological order when a source is truncated", async () => {
+    const conversationId = await seedConversation(db);
+    const firstReceivedAt = new Date("2026-07-01T00:00:00.000Z").getTime();
+    const totalMessages = CONVERSATION_SUMMARY_MAX_MESSAGES_PER_SOURCE + 5;
+    for (let index = 0; index < totalMessages; index += 1) {
+      await seedMessage(db, conversationId, {
+        id: `m-${String(index).padStart(3, "0")}`,
+        text: `message ${String(index).padStart(3, "0")}`,
+        receivedAt: new Date(firstReceivedAt + index * 60_000).toISOString(),
+      });
+    }
+
+    const context = await buildConversationSummaryRuntimeContext({
+      db,
+      user,
+      outputDate: "2026-07-01",
+      timezone: "UTC",
+      now: NOW,
+      adminCanReadAllFiles: false,
+      contentUserEmails: ["user@example.com"],
+      agentConfig: {
+        enabledSections: {},
+        maxItemsPerSection: 5,
+        focus: null,
+        delivery: null,
+        sources: [source()],
+        sourceKey: "slack:channel:C_SUMMARY",
+        createTasks: false,
+      },
+    });
+
+    const [summarySource] = context.summarySources as Array<{
+      messageCount: number;
+      truncated: boolean;
+      messages: Array<{ text: string }>;
+    }>;
+
+    expect(summarySource).toMatchObject({
+      messageCount: CONVERSATION_SUMMARY_MAX_MESSAGES_PER_SOURCE,
+      truncated: true,
+    });
+    expect(summarySource.messages[0]).toMatchObject({ text: "message 005" });
+    expect(summarySource.messages.at(-1)).toMatchObject({ text: "message 304" });
   });
 
   it("uses the previous summary window end as the next window start", async () => {
@@ -197,6 +493,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
         delivery: null,
         sources: [source()],
         sourceKey: "slack:channel:C_SUMMARY",
+        createTasks: false,
       },
     });
 
@@ -260,6 +557,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
         sourceKey: "slack:channel:C_SUMMARY",
         firstRunLookbackHours: 168,
         floorWindowToPeriod: true,
+        createTasks: false,
       },
     });
 

@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 127;
+const EXPECTED_MIGRATION_COUNT = 128;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -183,6 +183,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[124]).toBe("129-container-name-qualification");
     expect(names[125]).toBe("130-entity-provenance-tier");
     expect(names[126]).toBe("131-trunk-name-embeddings");
+    expect(names[127]).toBe("132-tasks-proposed-assignee");
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {
@@ -617,28 +618,19 @@ describe("runMigrations — incremental upgrade", () => {
 
     await sql`
       DELETE FROM kysely_migration
-      WHERE name IN (
-        '107-scheduled-task-builder-revisions',
-        '108-scheduled-task-origin-chat',
-        '109-scheduled-task-origin-message-id',
-        '110-google-calendar-provider-file-scope',
-        '111-settings-embedding-provider',
-        '112-agent-output-structured-payload',
-        '113-indexed-file-all-day-flag',
-        '114-agent-output-deliveries',
-        '115-whatsapp-template-mappings-and-provider-events',
-        '116-connector-credential-source',
-        '117-conversation-message-window-index',
-        '118-whatsapp-window-keepalives',
-        '119-agent-outputs-source-scope',
-        '120-agent-output-period-key'
-      )
+      WHERE name >= '107-scheduled-task-builder-revisions'
     `.execute(db);
     await sql`DROP TABLE agent_output_deliveries`.execute(db);
     await sql`DROP TABLE whatsapp_template_mappings`.execute(db);
     await sql`DROP TABLE whatsapp_provider_events`.execute(db);
     await sql`DROP INDEX idx_conversation_messages_window`.execute(db);
     await sql`DROP TABLE whatsapp_window_keepalives`.execute(db);
+    await sql`DROP TABLE IF EXISTS task_cycle_memberships`.execute(db);
+    await sql`DROP TABLE IF EXISTS work_cycles`.execute(db);
+    await sql`DROP TABLE IF EXISTS sub_entity_evidence`.execute(db);
+    await sql`DROP TABLE IF EXISTS sub_entities`.execute(db);
+    await sql`DROP TABLE IF EXISTS task_evidence`.execute(db);
+    await sql`DROP TABLE IF EXISTS tasks`.execute(db);
 
     await expect(runMigrations(db, { quiet: true })).resolves.not.toThrow();
 

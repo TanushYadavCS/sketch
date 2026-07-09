@@ -40,6 +40,7 @@ export interface AgentOutputSavedArgs {
   userId: string;
   outputId: string;
   items: AgentOutputItemInput[];
+  createTasks: boolean;
 }
 
 export type AgentStoredItem = AgentStoredItemRow;
@@ -100,6 +101,7 @@ export interface AgentRuntimeContextParams {
     firstRunLookbackHours?: number;
     floorWindowToPeriod?: boolean;
     deliveryPlatform?: "slack" | "whatsapp" | null;
+    createTasks: boolean;
   };
 }
 
@@ -118,6 +120,8 @@ export interface AgentDefinition {
   category: string;
   defaults: AgentDefaults;
   sections: AgentSectionDef[];
+  /** Section keys accepted from the model for hooks but not persisted as visible output items. */
+  internalOutputSections?: readonly string[];
   sourceConfig?: AgentSourceConfigDef;
   allowedTools: string[];
   /** Allowed range for the per-section item cap; surfaced to the config editor. */

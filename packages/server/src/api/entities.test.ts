@@ -5,6 +5,7 @@ import { hashPassword } from "../auth/password";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import { createSettingsRepository } from "../db/repositories/settings";
+import { createTaskRepository } from "../db/repositories/tasks";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { beginPendingRebuild, endRecreateLock, isRecreateActive } from "../entities/recreate-state";
@@ -107,6 +108,108 @@ async function seedConnectorFile(db: Kysely<DB>, ownerId: string) {
       source: "google_drive",
       content_hash: "hash-2",
       is_archived: 0,
+      synced_at: now,
+    })
+    .execute();
+}
+
+async function seedTaskProject(db: Kysely<DB>): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id: "task-project",
+      name: "Task Project",
+      source_type: "project",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+      ai_brief: null,
+      share_with_everyone: 1,
+      deleted_at: null,
+      merged_into_entity_id: null,
+    })
+    .execute();
+}
+
+async function seedTaskPerson(db: Kysely<DB>, id: string, name: string, email: string): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "person",
+      subtype: null,
+      aliases: JSON.stringify([email]),
+      metadata: JSON.stringify({ email }),
+      source_ref_id: null,
+      status: "confirmed",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+      ai_brief: null,
+      share_with_everyone: 1,
+      deleted_at: null,
+      merged_into_entity_id: null,
+    })
+    .execute();
+}
+
+async function seedPrivateDeclaredTaskProject(db: Kysely<DB>): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id: "private-declared-task-project",
+      name: "Project Tirios",
+      source_type: "project",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+      ai_brief: null,
+      share_with_everyone: 0,
+      deleted_at: null,
+      merged_into_entity_id: null,
+    })
+    .execute();
+}
+
+async function seedTaskEvidenceFile(db: Kysely<DB>, ownerId: string): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .insertInto("connector_configs")
+    .values({
+      id: "task-connector",
+      connector_type: "google_drive",
+      auth_type: "oauth",
+      credentials: "{}",
+      created_by: ownerId,
+    })
+    .execute();
+  await db
+    .insertInto("indexed_files")
+    .values({
+      id: "task-file-1",
+      connector_config_id: "task-connector",
+      provider_file_id: "task-file-1",
+      file_name: "Task evidence",
+      file_type: "doc",
+      content_category: "document",
+      source: "google_drive",
+      content_hash: "task-hash",
+      is_archived: 0,
+      share_with_everyone: 1,
       synced_at: now,
     })
     .execute();
@@ -752,6 +855,406 @@ describe("POST /api/entities/resets", () => {
     expect(body.entitiesDeleted).toBe(1);
     const remaining = await db.selectFrom("entities").select("id").execute();
     expect(remaining).toHaveLength(1);
+  });
+});
+
+describe("GET/PATCH /api/entities/:id/tasks", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let adminCookie: string;
+  let adminId: string;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    const admin = await seedAdmin(db);
+    adminId = admin.id;
+    app = createApp(db, config, { logger });
+    adminCookie = await login(app);
+    await seedTaskProject(db);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("returns task DTOs, includes user-owned local tasks without file evidence, and patches local status", async () => {
+    const repo = createTaskRepository(db);
+    const local = await repo.upsertTask({
+      parentEntityId: "task-project",
+      parentSourceRef: null,
+      parentName: "Task Project",
+      source: "summary",
+      externalRef: null,
+      title: "Send launch notes",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-task-1",
+      createdByUserId: adminId,
+    });
+    const structural = await repo.upsertTask({
+      parentEntityId: "task-project",
+      parentSourceRef: "linear:task-project",
+      parentName: "Task Project",
+      source: "linear",
+      externalRef: "SKE-1",
+      title: "External task",
+      status: "in_progress",
+      statusRaw: "In Review",
+      statusAuthority: "external",
+      assigneeEntityId: null,
+      priority: null,
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "linear-task-1",
+    });
+    await seedTaskEvidenceFile(db, adminId);
+    await repo.upsertEvidence(structural.taskId, "file", "task-file-1");
+
+    const listRes = await app.request("/api/entities/task-project/tasks", { headers: { Cookie: adminCookie } });
+    const listBody = (await listRes.json()) as { tasks: Array<Record<string, unknown>> };
+    const localDto = listBody.tasks.find((task) => task.id === local.taskId);
+    const structuralDto = listBody.tasks.find((task) => task.id === structural.taskId);
+
+    expect(listRes.status).toBe(200);
+    expect(localDto).toMatchObject({
+      id: local.taskId,
+      title: "Send launch notes",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      provenance: "summary",
+      createdByUserName: "admin",
+      createdByUserEmail: ADMIN_EMAIL,
+      isOwnedByViewer: true,
+      readonlyReason: null,
+      canEditStatus: true,
+    });
+    expect(structuralDto).toMatchObject({
+      id: structural.taskId,
+      source: "linear",
+      externalRef: "SKE-1",
+      status: "in_progress",
+      statusRaw: "In Review",
+      statusAuthority: "external",
+      createdByUserName: null,
+      createdByUserEmail: null,
+      isOwnedByViewer: false,
+      readonlyReason: "external_authority",
+      canEditStatus: false,
+    });
+    expect(localDto).not.toHaveProperty("status_raw");
+
+    const patchRes = await app.request(`/api/entities/task-project/tasks/${local.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "done" }),
+    });
+    const patchBody = (await patchRes.json()) as { task: Record<string, unknown> };
+
+    expect(patchRes.status).toBe(200);
+    expect(patchBody.task).toMatchObject({
+      id: local.taskId,
+      status: "done",
+      statusRaw: "done",
+      createdByUserName: "admin",
+      isOwnedByViewer: true,
+      readonlyReason: null,
+      canEditStatus: true,
+    });
+  });
+
+  it("lets admins read project-local summary tasks from other users without status edit access", async () => {
+    const member = await seedMember(db);
+    const repo = createTaskRepository(db);
+    const local = await repo.upsertTask({
+      parentEntityId: "task-project",
+      parentSourceRef: null,
+      parentName: "Task Project",
+      source: "summary",
+      externalRef: null,
+      title: "Confirm vendor onboarding copy",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-task-member-1",
+      createdByUserId: member.id,
+    });
+
+    const listRes = await app.request("/api/entities/task-project/tasks", { headers: { Cookie: adminCookie } });
+    const listBody = (await listRes.json()) as { tasks: Array<Record<string, unknown>> };
+    const localDto = listBody.tasks.find((task) => task.id === local.taskId);
+    const patchRes = await app.request(`/api/entities/task-project/tasks/${local.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "done" }),
+    });
+
+    expect(listRes.status).toBe(200);
+    expect(localDto).toMatchObject({
+      id: local.taskId,
+      title: "Confirm vendor onboarding copy",
+      createdByUserId: member.id,
+      createdByUserName: "member",
+      createdByUserEmail: member.email,
+      isOwnedByViewer: false,
+      readonlyReason: "not_owner",
+      canEditStatus: false,
+    });
+    expect(patchRes.status).toBe(403);
+  });
+
+  it("lets assigned members read and patch their assigned Sketch-native tasks", async () => {
+    const member = await seedMember(db);
+    await seedTaskPerson(db, "person-member", "Assigned Member", member.email);
+    const memberCookie = await loginAs(app, member.email);
+    const repo = createTaskRepository(db);
+    const assigned = await repo.upsertTask({
+      parentEntityId: "task-project",
+      parentSourceRef: null,
+      parentName: "Task Project",
+      source: "summary",
+      externalRef: null,
+      title: "Integrate Aimfox",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: "person-member",
+      assigneeName: "Assigned Member",
+      priority: "high",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-task-assigned-member",
+      createdByUserId: adminId,
+    });
+
+    const listRes = await app.request("/api/entities/task-project/tasks", { headers: { Cookie: memberCookie } });
+    const listBody = (await listRes.json()) as { tasks: Array<Record<string, unknown>> };
+    const assignedDto = listBody.tasks.find((task) => task.id === assigned.taskId);
+    const patchRes = await app.request(`/api/entities/task-project/tasks/${assigned.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "in_progress" }),
+    });
+    const patchBody = (await patchRes.json()) as { task: Record<string, unknown> };
+
+    expect(listRes.status).toBe(200);
+    expect(assignedDto).toMatchObject({
+      id: assigned.taskId,
+      title: "Integrate Aimfox",
+      createdByUserId: adminId,
+      isOwnedByViewer: false,
+      assigneeEntityId: "person-member",
+      assigneeName: "Assigned Member",
+      readonlyReason: null,
+      canEditStatus: true,
+    });
+    expect(patchRes.status).toBe(200);
+    expect(patchBody.task).toMatchObject({
+      id: assigned.taskId,
+      status: "in_progress",
+      statusRaw: "in_progress",
+      isOwnedByViewer: false,
+      assigneeEntityId: "person-member",
+      readonlyReason: null,
+      canEditStatus: true,
+    });
+  });
+
+  it("resolves assignee edit permission through member provider emails", async () => {
+    const member = await seedMember(db);
+    await db
+      .insertInto("user_provider_identities")
+      .values({
+        id: "provider-member-secondary",
+        user_id: member.id,
+        provider: "google",
+        provider_user_id: "google-member-secondary",
+        provider_email: "member.secondary@test.com",
+      })
+      .execute();
+    await seedTaskPerson(db, "person-member-secondary", "Assigned Secondary Member", "member.secondary@test.com");
+    const memberCookie = await loginAs(app, member.email);
+    const repo = createTaskRepository(db);
+    const assigned = await repo.upsertTask({
+      parentEntityId: "task-project",
+      parentSourceRef: null,
+      parentName: "Task Project",
+      source: "summary",
+      externalRef: null,
+      title: "Deliver dashboard designs",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: "person-member-secondary",
+      assigneeName: "Assigned Secondary Member",
+      priority: "high",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-task-assigned-provider-email",
+      createdByUserId: adminId,
+    });
+
+    const listRes = await app.request("/api/entities/task-project/tasks", { headers: { Cookie: memberCookie } });
+    const listBody = (await listRes.json()) as { tasks: Array<Record<string, unknown>> };
+    const assignedDto = listBody.tasks.find((task) => task.id === assigned.taskId);
+    const patchRes = await app.request(`/api/entities/task-project/tasks/${assigned.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "done" }),
+    });
+    const patchBody = (await patchRes.json()) as { task: Record<string, unknown> };
+
+    expect(listRes.status).toBe(200);
+    expect(assignedDto).toMatchObject({
+      id: assigned.taskId,
+      readonlyReason: null,
+      canEditStatus: true,
+    });
+    expect(patchRes.status).toBe(200);
+    expect(patchBody.task).toMatchObject({
+      id: assigned.taskId,
+      status: "done",
+      statusRaw: "done",
+      assigneeEntityId: "person-member-secondary",
+      readonlyReason: null,
+      canEditStatus: true,
+    });
+  });
+
+  it("returns proposed assignees without granting assignee edit permission", async () => {
+    const member = await seedMember(db);
+    await seedTaskPerson(db, "person-member", "Vedant", member.email);
+    const memberCookie = await loginAs(app, member.email);
+    const repo = createTaskRepository(db);
+    const proposed = await repo.upsertTask({
+      parentEntityId: "task-project",
+      parentSourceRef: null,
+      parentName: "Task Project",
+      source: "summary",
+      externalRef: null,
+      title: "Vedant: test summarizer task creation",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      proposedAssigneeName: "Vedant",
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-task-proposed-assignee",
+      createdByUserId: adminId,
+    });
+
+    const adminListRes = await app.request("/api/entities/task-project/tasks", { headers: { Cookie: adminCookie } });
+    const adminListBody = (await adminListRes.json()) as { tasks: Array<Record<string, unknown>> };
+    const proposedDto = adminListBody.tasks.find((task) => task.id === proposed.taskId);
+    const memberListRes = await app.request("/api/entities/task-project/tasks", { headers: { Cookie: memberCookie } });
+    const memberListBody = (await memberListRes.json()) as { tasks: Array<Record<string, unknown>> };
+    const patchRes = await app.request(`/api/entities/task-project/tasks/${proposed.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "done" }),
+    });
+
+    expect(adminListRes.status).toBe(200);
+    expect(proposedDto).toMatchObject({
+      id: proposed.taskId,
+      assigneeEntityId: null,
+      assigneeName: null,
+      proposedAssigneeName: "Vedant",
+      readonlyReason: null,
+      canEditStatus: true,
+    });
+    expect(memberListRes.status).toBe(200);
+    expect(memberListBody.tasks.some((task) => task.id === proposed.taskId)).toBe(false);
+    expect(patchRes.status).toBe(403);
+  });
+
+  it("returns summary tasks for a private declared project that is visible in the drawer profile", async () => {
+    const member = await seedMember(db);
+    await seedPrivateDeclaredTaskProject(db);
+    const repo = createTaskRepository(db);
+    const local = await repo.upsertTask({
+      parentEntityId: "private-declared-task-project",
+      parentSourceRef: null,
+      parentName: "Project Tirios",
+      source: "summary",
+      externalRef: null,
+      title: "Vedant: set up automation for Ritesh (Project Tirios)",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: null,
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-task-private-declared-project",
+      createdByUserId: member.id,
+    });
+
+    const profileRes = await app.request("/api/entities/private-declared-task-project", {
+      headers: { Cookie: adminCookie },
+    });
+    const tasksRes = await app.request("/api/entities/private-declared-task-project/tasks", {
+      headers: { Cookie: adminCookie },
+    });
+    const tasksBody = (await tasksRes.json()) as { tasks: Array<Record<string, unknown>> };
+
+    expect(profileRes.status).toBe(200);
+    expect(tasksRes.status).toBe(200);
+    expect(tasksBody.tasks).toHaveLength(1);
+    expect(tasksBody.tasks[0]).toMatchObject({
+      id: local.taskId,
+      title: "Vedant: set up automation for Ritesh (Project Tirios)",
+      createdByUserId: member.id,
+      isOwnedByViewer: false,
+      readonlyReason: "not_owner",
+      canEditStatus: false,
+    });
+  });
+
+  it("rejects external status edits and invalid local statuses", async () => {
+    const repo = createTaskRepository(db);
+    const structural = await repo.upsertTask({
+      parentEntityId: "task-project",
+      parentSourceRef: "linear:task-project",
+      parentName: "Task Project",
+      source: "linear",
+      externalRef: "SKE-1",
+      title: "External task",
+      status: "open",
+      statusRaw: "Todo",
+      statusAuthority: "external",
+      assigneeEntityId: null,
+      priority: null,
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "linear-task-1",
+    });
+
+    const invalid = await app.request(`/api/entities/task-project/tasks/${structural.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "closed" }),
+    });
+    const forbidden = await app.request(`/api/entities/task-project/tasks/${structural.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "done" }),
+    });
+
+    expect(invalid.status).toBe(400);
+    expect(forbidden.status).toBe(403);
   });
 });
 

@@ -15,7 +15,7 @@ const STATUS_TYPE_MAP: Record<string, Record<string, TaskStatus>> = {
   },
   clickup: {
     open: "open",
-    custom: "open",
+    custom: "in_progress",
     closed: "done",
     done: "done",
   },
@@ -80,7 +80,7 @@ export async function materializeStructuralTask(
 }
 
 function normalizeStatus(source: string, statusType: string): TaskStatus {
-  return STATUS_TYPE_MAP[source]?.[statusType] ?? "open";
+  return STATUS_TYPE_MAP[source]?.[statusType] ?? "in_progress";
 }
 
 function resolveProject(

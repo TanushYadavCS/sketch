@@ -18,7 +18,7 @@ import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
 
-const EXPECTED_MIGRATION_COUNT = 127;
+const EXPECTED_MIGRATION_COUNT = 128;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -160,6 +160,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[124]).toBe("129-container-name-qualification");
     expect(names[125]).toBe("130-entity-provenance-tier");
     expect(names[126]).toBe("131-trunk-name-embeddings");
+    expect(names[127]).toBe("132-tasks-proposed-assignee");
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {

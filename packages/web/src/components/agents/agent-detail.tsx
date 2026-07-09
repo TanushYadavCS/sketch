@@ -347,6 +347,10 @@ function SummariserIndex({
         <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/85">{agent.description}</p>
       </div>
 
+      <div className="rounded-lg border-[0.5px] border-border bg-card px-4 dark:bg-[#111110]">
+        <TaskCreationToggleRow agentKey={agentKey} enabled={agent.createTasks} onChanged={onChanged} />
+      </div>
+
       <div className="overflow-hidden rounded-lg border-[0.5px] border-border bg-card">
         <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
           <div className="flex items-baseline gap-2">
@@ -419,6 +423,44 @@ function SummariserIndex({
         onCreated={onChanged}
       />
     </div>
+  );
+}
+
+function TaskCreationToggleRow({
+  agentKey,
+  enabled,
+  onChanged,
+}: {
+  agentKey: string;
+  enabled: boolean;
+  onChanged: () => void;
+}) {
+  const mutation = useMutation({
+    mutationFn: (next: boolean) => api.agents.updateConfig(agentKey, { createTasks: next }),
+    onSuccess: onChanged,
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to update task writing"),
+  });
+
+  return (
+    <Row label="Tasks">
+      <span className="flex items-center justify-between gap-3">
+        <span className="min-w-0 space-y-0.5 leading-relaxed">
+          <span className="block text-[12.5px] font-medium text-foreground/85">
+            Create project tasks from action items
+          </span>
+          <span className="block text-[11.5px] text-muted-foreground">
+            Tasks appear on linked projects. Task owners can update status; admins can monitor progress.
+          </span>
+        </span>
+        <Switch
+          checked={enabled}
+          disabled={mutation.isPending}
+          onCheckedChange={(checked) => mutation.mutate(checked)}
+          aria-label="Create project tasks from action items"
+          className="data-[state=checked]:bg-emerald-500"
+        />
+      </span>
+    </Row>
   );
 }
 

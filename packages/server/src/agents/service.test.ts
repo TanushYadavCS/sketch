@@ -31,6 +31,7 @@ describe("Daily Brief durable-task hooks", () => {
     await seedIndexedFile(db, "brief-file-1", user.id);
     await seedCompletedOutput(db, user.id, OUTPUT_DATE);
     await seedCompletedOutput(db, user.id, PREVIOUS_DATE);
+    const tasksWithToggle = await runAndCapture(db, user.id, "2026-06-16", [], { createTasks: true });
 
     const taskRepo = createTaskRepository(db);
     await taskRepo.promoteBriefTask({
@@ -45,9 +46,13 @@ describe("Daily Brief durable-task hooks", () => {
     });
 
     const before = await countTasks(db);
-    const run = await runAndCapture(db, user.id, OUTPUT_DATE, [
-      briefItem({ title: "Brand new follow-up", knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] } }),
-    ]);
+    const run = await runAndCapture(
+      db,
+      user.id,
+      OUTPUT_DATE,
+      [briefItem({ title: "Brand new follow-up", knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] } })],
+      { createTasks: true },
+    );
     const after = await countTasks(db);
 
     expect((run.context.openDurableTasks as Array<{ title: string }>).map((task) => task.title)).toEqual([
@@ -56,6 +61,7 @@ describe("Daily Brief durable-task hooks", () => {
     expect(priorTitles(run.context.sameDayPreviousOutput)).toEqual(["Open prior todo"]);
     expect(priorTitles(run.context.previousDayOutput)).toEqual(["Open prior todo"]);
     expect(run.instructions).toContain("openDurableTasks");
+    expect(tasksWithToggle.context.createTasks).toBe(true);
     expect(after).toBeGreaterThan(before);
   });
 });
@@ -65,6 +71,7 @@ async function runAndCapture(
   userId: string,
   outputDate: string,
   items: AgentOutputItemInput[],
+  configPatch: { createTasks?: boolean } = {},
 ): Promise<{ context: Record<string, unknown>; instructions: string }> {
   const queued: Array<() => Promise<void>> = [];
   const capturedParams: RunAgentParams[] = [];
@@ -95,6 +102,9 @@ async function runAndCapture(
     outputDate,
     triggerType: "manual",
   });
+  if (Object.keys(configPatch).length > 0) {
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, userId, configPatch);
+  }
   if (!row) throw new Error("Expected a running output");
   await queued.at(-1)?.();
   const params = capturedParams[0];
