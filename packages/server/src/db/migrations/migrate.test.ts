@@ -9,8 +9,18 @@
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { runMigrations } from "../migrate";
+import { createMigrator, runMigrations } from "../migrate";
 import type { DB } from "../schema";
+import * as m107 from "./107-scheduled-task-builder-revisions";
+import * as m108 from "./108-scheduled-task-origin-chat";
+import * as m109 from "./109-scheduled-task-origin-message-id";
+import * as m110 from "./110-google-calendar-provider-file-scope";
+import * as m111 from "./111-settings-embedding-provider";
+import * as m112 from "./112-agent-output-structured-payload";
+import * as m113 from "./113-indexed-file-all-day-flag";
+import * as m116 from "./116-connector-credential-source";
+import * as m119 from "./119-agent-outputs-source-scope";
+import * as m120 from "./120-agent-output-period-key";
 
 const EXPECTED_MIGRATION_COUNT = 127;
 
@@ -613,32 +623,38 @@ describe("runMigrations — incremental upgrade", () => {
   });
 
   it("finishes the scheduled task revision migration when its columns already exist", async () => {
-    await runMigrations(db, { quiet: true });
+    /**
+     * Models a real incident: migrations 107-120 ran their DDL but the ledger
+     * writes for some of them were lost, so on restart Kysely found the
+     * columns/tables already present. 107-116/119/120 guard their DDL via
+     * introspection (safe to run twice); 114/115/117/118 unconditionally
+     * CREATE TABLE/INDEX (not safe to run twice) and were never hardened for
+     * this recovery because they were part of the same incident's fix, not
+     * its cause — see migrate.ts's per-migration up() implementations.
+     *
+     * Reproducing this by deleting kysely_migration rows after a full
+     * migrateToLatest() only stayed a valid Kysely ledger state while 120 was
+     * the tail of the migration list; Kysely's ensureMigrationsInOrder always
+     * requires the executed set to be a prefix of the full sorted migration
+     * list, and once migrations landed after 120 the surviving executed set
+     * (…106, 121+) stopped being a prefix.
+     *
+     * Instead, build the DB to migration 106 via the real migrator (matching
+     * reality: 106 genuinely ran and got recorded), then call the 10 guarded
+     * migrations' up() directly — bypassing the ledger entirely — to apply
+     * their DDL without recording them as executed. The 4 unguarded
+     * migrations are left untouched (genuinely pending). This never touches
+     * anything past 120 and never depends on the Migrator/ledger for the
+     * simulated range, so it can't be destabilized by any migration landing
+     * after 120, no matter how many more are added.
+     */
+    const migrator = createMigrator(db);
+    const { error: upTo106Error } = await migrator.migrateTo("106-agents");
+    if (upTo106Error) throw upTo106Error;
 
-    await sql`
-      DELETE FROM kysely_migration
-      WHERE name IN (
-        '107-scheduled-task-builder-revisions',
-        '108-scheduled-task-origin-chat',
-        '109-scheduled-task-origin-message-id',
-        '110-google-calendar-provider-file-scope',
-        '111-settings-embedding-provider',
-        '112-agent-output-structured-payload',
-        '113-indexed-file-all-day-flag',
-        '114-agent-output-deliveries',
-        '115-whatsapp-template-mappings-and-provider-events',
-        '116-connector-credential-source',
-        '117-conversation-message-window-index',
-        '118-whatsapp-window-keepalives',
-        '119-agent-outputs-source-scope',
-        '120-agent-output-period-key'
-      )
-    `.execute(db);
-    await sql`DROP TABLE agent_output_deliveries`.execute(db);
-    await sql`DROP TABLE whatsapp_template_mappings`.execute(db);
-    await sql`DROP TABLE whatsapp_provider_events`.execute(db);
-    await sql`DROP INDEX idx_conversation_messages_window`.execute(db);
-    await sql`DROP TABLE whatsapp_window_keepalives`.execute(db);
+    for (const guarded of [m107, m108, m109, m110, m111, m112, m113, m116, m119, m120]) {
+      await guarded.up(db as Kysely<unknown>);
+    }
 
     await expect(runMigrations(db, { quiet: true })).resolves.not.toThrow();
 
@@ -678,5 +694,10 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "119-agent-outputs-source-scope" },
       { name: "120-agent-output-period-key" },
     ]);
+
+    // runMigrations() always migrates to latest, so recovering 107-120 above
+    // should also carry cleanly through every migration added after it.
+    const allRows = await sql<{ name: string }>`SELECT name FROM kysely_migration`.execute(db);
+    expect(allRows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
   });
 });

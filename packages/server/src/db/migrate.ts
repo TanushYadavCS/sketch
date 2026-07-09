@@ -133,8 +133,13 @@ import * as m130 from "./migrations/130-entity-provenance-tier";
 import * as m131 from "./migrations/131-trunk-name-embeddings";
 import type { DB } from "./schema";
 
-export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
-  const migrator = new Migrator({
+/**
+ * Builds the Migrator against the full static migration map. Exported (not just
+ * used internally by runMigrations) so tests can drive migrateTo() directly for
+ * partial up/down sequencing without hand-maintaining a duplicate migration list.
+ */
+export function createMigrator(db: Kysely<DB>): Migrator {
+  return new Migrator({
     db,
     provider: {
       async getMigrations() {
@@ -270,7 +275,10 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
       },
     },
   });
+}
 
+export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
+  const migrator = createMigrator(db);
   const { error, results } = await migrator.migrateToLatest();
 
   for (const result of results ?? []) {
