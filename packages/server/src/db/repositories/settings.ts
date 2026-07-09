@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
-import type { Kysely } from "kysely";
+import type { Kysely, Selectable } from "kysely";
 import { decrypt, encrypt } from "../../auth/encryption";
-import type { DB } from "../schema";
+import type { DB, SettingsTable } from "../schema";
 
 export interface OrgContext {
   description?: string;
@@ -86,16 +86,101 @@ function decryptSettingsRow<T extends Record<string, unknown>>(row: T, encryptio
   return row;
 }
 
-export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string) {
+/** Default process-local TTL for settings.get(). Writes always invalidate immediately. */
+export const DEFAULT_SETTINGS_CACHE_TTL_MS = 30_000;
+
+export interface SettingsRepositoryOptions {
+  /**
+   * Max age for a successful get() cache entry. Primary freshness is write
+   * invalidation on create/ensure/update; TTL is a safety net only.
+   * Set to 0 to disable TTL expiry (still invalidates on writes).
+   */
+  cacheTtlMs?: number;
+  /** Clock for TTL checks — injectable for tests. */
+  now?: () => number;
+}
+
+type SettingsRow = Selectable<SettingsTable>;
+
+/**
+ * Singleton settings row repository with a process-local get() cache.
+ *
+ * Auth middleware, adapters, and agent runtime all call get() frequently for a
+ * single-row document. Cache hits avoid repeated SELECT + decrypt on the hot
+ * path. Mutations (create / ensure / ensureSketchApiKey / update) bust the
+ * cache so jwt_secret, onboarding, and authz flags stay correct after writes.
+ *
+ * Not distributed: multi-instance deployments only see writes on the instance
+ * that performed them until TTL expiry.
+ */
+export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string, options?: SettingsRepositoryOptions) {
+  const cacheTtlMs = options?.cacheTtlMs ?? DEFAULT_SETTINGS_CACHE_TTL_MS;
+  const now = options?.now ?? Date.now;
+
+  let cache: { value: SettingsRow | null; expiresAt: number } | null = null;
+  let generation = 0;
+  let inflight: Promise<SettingsRow | null> | null = null;
+
+  function invalidateCache(): void {
+    cache = null;
+    generation += 1;
+    inflight = null;
+  }
+
+  function cloneRow(row: SettingsRow): SettingsRow {
+    return { ...row };
+  }
+
+  function readCache(): SettingsRow | null | undefined {
+    if (!cache) return undefined;
+    if (cacheTtlMs > 0 && now() >= cache.expiresAt) {
+      cache = null;
+      return undefined;
+    }
+    return cache.value === null ? null : cloneRow(cache.value);
+  }
+
+  function writeCache(value: SettingsRow | null, generationAtLoad: number): void {
+    if (generationAtLoad !== generation) return;
+    cache = {
+      value: value === null ? null : cloneRow(value),
+      expiresAt: cacheTtlMs > 0 ? now() + cacheTtlMs : Number.POSITIVE_INFINITY,
+    };
+  }
+
+  async function loadFromDb(): Promise<SettingsRow | null> {
+    const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirst();
+    if (!row) return null;
+    return decryptSettingsRow(row, encryptionKey);
+  }
+
   return {
     async get() {
-      const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirst();
-      if (!row) return null;
-      return decryptSettingsRow(row, encryptionKey);
+      const hit = readCache();
+      if (hit !== undefined) return hit;
+
+      if (inflight) {
+        const shared = await inflight;
+        return shared === null ? null : cloneRow(shared);
+      }
+
+      const generationAtLoad = generation;
+      const pending = loadFromDb().then((loaded) => {
+        writeCache(loaded, generationAtLoad);
+        return loaded;
+      });
+      inflight = pending;
+      try {
+        const loaded = await pending;
+        return loaded === null ? null : cloneRow(loaded);
+      } finally {
+        if (inflight === pending) inflight = null;
+      }
     },
 
     async create(data: { adminEmail?: string; adminPasswordHash?: string; orgName?: string; botName?: string } = {}) {
       await db.insertInto("settings").values(buildSettingsInsert(encryptionKey, data)).execute();
+      invalidateCache();
 
       return db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
     },
@@ -107,8 +192,11 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
         .onConflict((oc) => oc.column("id").doNothing())
         .execute();
 
+      invalidateCache();
       const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
-      return decryptSettingsRow(row, encryptionKey);
+      const decrypted = decryptSettingsRow(row, encryptionKey);
+      writeCache(decrypted, generation);
+      return cloneRow(decrypted);
     },
 
     async ensureSketchApiKey(generateApiKey: () => string) {
@@ -126,8 +214,10 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
         .where("sketch_api_key", "is", null)
         .execute();
 
+      invalidateCache();
       const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
       const decrypted = decryptSettingsRow(row, encryptionKey);
+      writeCache(decrypted, generation);
       if (!decrypted.sketch_api_key) {
         throw new Error("Sketch API key could not be ensured");
       }
@@ -220,6 +310,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
       }
 
       await db.updateTable("settings").set(updates).where("id", "=", "default").execute();
+      invalidateCache();
     },
   };
 }

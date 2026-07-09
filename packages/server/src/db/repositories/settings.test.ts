@@ -145,4 +145,69 @@ describe("Settings repository", () => {
     expect(row?.aws_secret_access_key).toBeNull();
     expect(row?.aws_region).toBeNull();
   });
+
+  describe("get() cache", () => {
+    it("serves the cached row until a repository write invalidates", async () => {
+      await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      expect((await settings.get())?.org_name).toBeNull();
+
+      await db.updateTable("settings").set({ org_name: "Bypass" }).where("id", "=", "default").execute();
+      expect((await settings.get())?.org_name).toBeNull();
+
+      await settings.update({ orgName: "ViaRepo" });
+      expect((await settings.get())?.org_name).toBe("ViaRepo");
+    });
+
+    it("invalidates a cached null after create()", async () => {
+      expect(await settings.get()).toBeNull();
+
+      await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      const row = await settings.get();
+      expect(row?.admin_email).toBe("a@b.com");
+    });
+
+    it("returns defensive copies so callers cannot poison the cache", async () => {
+      await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      const first = await settings.get();
+      expect(first).not.toBeNull();
+      if (!first) return;
+      first.org_name = "mutated";
+
+      expect((await settings.get())?.org_name).toBeNull();
+    });
+
+    it("refreshes after TTL without a repository write", async () => {
+      let nowMs = 1_000;
+      settings = createSettingsRepository(db, undefined, {
+        cacheTtlMs: 100,
+        now: () => nowMs,
+      });
+
+      await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      expect((await settings.get())?.org_name).toBeNull();
+
+      await db.updateTable("settings").set({ org_name: "AfterTtl" }).where("id", "=", "default").execute();
+      expect((await settings.get())?.org_name).toBeNull();
+
+      nowMs += 101;
+      expect((await settings.get())?.org_name).toBe("AfterTtl");
+    });
+
+    it("update() with empty data does not invalidate", async () => {
+      await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      expect((await settings.get())?.org_name).toBeNull();
+
+      await db.updateTable("settings").set({ org_name: "StillCached" }).where("id", "=", "default").execute();
+      await settings.update({});
+      expect((await settings.get())?.org_name).toBeNull();
+    });
+
+    it("ensure() returns fresh data and repopulates the cache", async () => {
+      const ensured = await settings.ensure();
+      expect(ensured.jwt_secret).toBeTruthy();
+
+      await db.updateTable("settings").set({ org_name: "Bypass" }).where("id", "=", "default").execute();
+      expect((await settings.get())?.org_name).toBeNull();
+    });
+  });
 });
