@@ -8,9 +8,11 @@ on:
         description: "Version bump to apply from the latest v* tag"
         required: true
         type: choice
+        default: patch
         options:
           - patch
           - minor
+          - major
       dry_run:
         description: "Preview the release version and changelog without mutating main"
         required: false
@@ -79,6 +81,11 @@ jobs:
               ;;
             minor)
               minor=$((minor + 1))
+              patch=0
+              ;;
+            major)
+              major=$((major + 1))
+              minor=0
               patch=0
               ;;
             *)
