@@ -507,9 +507,17 @@ const LOOKBACK_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "30", label: "Last 30 days" },
   { value: "90", label: "Last 90 days" },
   { value: "180", label: "Last 6 months" },
-  { value: "365", label: "Last 12 months" },
-  { value: "3650", label: "All available" },
+  { value: "365", label: "Last 1 year" },
+  { value: "730", label: "Last 2 years" },
+  { value: "1095", label: "Last 3 years" },
 ];
+
+const EMAIL_MAX_LOOKBACK_DAYS = 1095;
+
+function normalizeEmailLookbackDays(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 90;
+  return Math.max(1, Math.min(Math.floor(value), EMAIL_MAX_LOOKBACK_DAYS));
+}
 
 function EmailScopeEditor({
   connectorId,
@@ -519,7 +527,7 @@ function EmailScopeEditor({
   scopeConfig: Record<string, unknown>;
 }) {
   const queryClient = useQueryClient();
-  const currentDays = typeof scopeConfig.initialDays === "number" ? scopeConfig.initialDays : 90;
+  const currentDays = normalizeEmailLookbackDays(scopeConfig.initialDays);
   const currentQuery = typeof scopeConfig.query === "string" ? scopeConfig.query : "";
   const [days, setDays] = useState(String(currentDays));
   const [query, setQuery] = useState(currentQuery);
