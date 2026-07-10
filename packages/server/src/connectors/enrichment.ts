@@ -141,6 +141,19 @@ function contentVersionMatches(row: FileContentVersion | undefined, version: Fil
   return version.content !== null || row.sourceUpdatedAt === version.sourceUpdatedAt;
 }
 
+/**
+ * Fetch a single file's `content` column by id.
+ *
+ * The pending-files batch query deliberately omits `content` so that a run
+ * spanning thousands of files (paced by multi-hour LLM calls) never pins every
+ * document body in heap at once. Each file's body is instead read just-in-time
+ * here, kept resident only while that one file is being enriched, then released.
+ */
+async function fetchFileContent(db: Kysely<DB>, fileId: string): Promise<string | null> {
+  const row = await db.selectFrom("indexed_files").select("content").where("id", "=", fileId).executeTakeFirst();
+  return row?.content ?? null;
+}
+
 async function ensureFileFresh(db: Kysely<DB>, fileId: string, version: FileContentVersion): Promise<void> {
   const row = await db
     .selectFrom("indexed_files")
@@ -473,7 +486,6 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       "file_name",
       "file_type",
       "content_category",
-      "content",
       "content_hash",
       "source",
       "source_path",
@@ -546,7 +558,8 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       );
       break;
     }
-    const file = pendingFiles[idx];
+    const fileMeta = pendingFiles[idx];
+    const file = { ...fileMeta, content: await fetchFileContent(db, fileMeta.id) };
     const fileVersion = contentVersionOf(file);
     const fileStart = Date.now();
     try {

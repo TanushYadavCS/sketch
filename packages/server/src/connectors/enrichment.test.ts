@@ -260,6 +260,40 @@ describe("runEnrichment — batch chunk insert", () => {
     }
   });
 
+  it("processes every pending file with its own content fetched lazily", async () => {
+    const files = [
+      { id: randomUUID(), marker: "ALPHAMARKER" },
+      { id: randomUUID(), marker: "BRAVOMARKER" },
+      { id: randomUUID(), marker: "CHARLIEMARKER" },
+    ];
+    for (const f of files) {
+      await seedFile(db, f.id, `${f.marker} document body ${"word ".repeat(30).trim()}`, {
+        fileName: `${f.marker}.txt`,
+      });
+      await db.updateTable("indexed_files").set({ embedding_status: "pending" }).where("id", "=", f.id).execute();
+    }
+
+    const result = await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null });
+
+    expect(result.filesProcessed).toBe(files.length);
+    for (const f of files) {
+      const chunks = await db
+        .selectFrom("document_chunks")
+        .select("content")
+        .where("indexed_file_id", "=", f.id)
+        .execute();
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.map((c) => c.content).join(" ")).toContain(f.marker);
+
+      const status = await db
+        .selectFrom("indexed_files")
+        .select("embedding_status")
+        .where("id", "=", f.id)
+        .executeTakeFirstOrThrow();
+      expect(status.embedding_status).toBe("done");
+    }
+  });
+
   it("runs smart enrichment for short calendar event documents", async () => {
     const fileId = randomUUID();
     await seedFile(db, fileId, "Planning review with Jane Doe from Acme about pricing next steps tomorrow morning.", {
