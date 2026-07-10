@@ -22,6 +22,7 @@ import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { PRODUCT_MATCH_TARGET_PROVENANCE_TIERS } from "../entities/provenance";
 import { yieldToEventLoop } from "../lib/event-loop";
+import { heapStats, heapUsedMb } from "../lib/heap";
 import { chunkText } from "./chunking";
 import { type DocumentFactContext, emitDocumentDerivedFacts, sortDocumentParentRefs } from "./document-facts";
 import { ensureEmailThreadSummary, rebuildEmailThreadSummary } from "./email/thread-summary";
@@ -403,10 +404,12 @@ export interface EnrichmentResult {
  */
 export async function runEnrichment(deps: EnrichmentDeps): Promise<EnrichmentResult> {
   activeEnrichmentRuns++;
+  const startHeapMb = heapUsedMb();
   try {
     return await runEnrichmentInner(deps);
   } finally {
     activeEnrichmentRuns--;
+    deps.logger.info(heapStats(startHeapMb), "Enrichment run finished");
   }
 }
 

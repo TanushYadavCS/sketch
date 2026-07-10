@@ -27,6 +27,7 @@ import {
   cleanupIntegrationAccess,
   startIntegrationAccess,
 } from "../integrations/wrapper";
+import { heapStats, heapUsedMb } from "../lib/heap";
 import type { LocalClaudeSessionService } from "../local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "../local-devices/gateway";
 import type { Logger } from "../logger";
@@ -703,6 +704,7 @@ export function replaySdkStreamMessages(messages: readonly unknown[]): SdkStream
 
 async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult> {
   const { userMessage, workspaceDir, userName, logger } = params;
+  const startHeapMb = heapUsedMb();
   const isFresh = params.sessionMode === "fresh";
   const shouldPersistSession = params.persistSession ?? !isFresh;
   const persistTranscript = shouldPersistSession || Boolean(params.resumeSessionId);
@@ -1023,6 +1025,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
         pendingIntegrationConnections: drainedToolEffects.pendingIntegrationConnections.length,
         automationArtifacts: drainedToolEffects.automationArtifacts.length,
         runtime: "aisdk",
+        ...heapStats(startHeapMb),
       },
       "Agent run completed",
     );
@@ -1081,6 +1084,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
 
 async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentResult> {
   const { userMessage, workspaceDir, userName, logger } = params;
+  const startHeapMb = heapUsedMb();
   const isFresh = params.sessionMode === "fresh";
   const shouldPersistSession = params.persistSession ?? !isFresh;
   let shouldArchiveStoredSessionOnResumeFailure = false;
@@ -1420,6 +1424,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
       pendingUploads: pendingUploads.length,
       pendingIntegrationConnections: pendingIntegrationConnections.length,
       automationArtifacts: automationArtifacts.length,
+      ...heapStats(startHeapMb),
     },
     "Agent run completed",
   );

@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { DB } from "../db/schema";
 import { yieldToEventLoop } from "../lib/event-loop";
+import { heapStats, heapUsedMb } from "../lib/heap";
 import { materializeCommitment } from "./materialize-commitment";
 import { materializeContactPointFact } from "./materialize-contact-points";
 import { materializeDecision } from "./materialize-decision";
@@ -233,6 +234,7 @@ async function materializeUnmaterializedFactsInner(
   logger: Logger,
   opts: MaterializeUnmaterializedOptions,
 ): Promise<MaterializeFactsSummary> {
+  const startHeapMb = heapUsedMb();
   const summary: MaterializeFactsSummary = {
     factsRead: 0,
     entitiesCreated: 0,
@@ -310,7 +312,7 @@ async function materializeUnmaterializedFactsInner(
   }
 
   await cleanupEmptyRelationships(db);
-  logger.info({ summary }, "Source-fact materialization complete");
+  logger.info({ summary, ...heapStats(startHeapMb) }, "Source-fact materialization complete");
   return summary;
 }
 
