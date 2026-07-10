@@ -4,7 +4,7 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import type { DB } from "../db/schema";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { heapStats, heapUsedMb } from "../lib/heap";
-import { DEFAULT_FACT_BATCH_SIZE, forEachFactBatch } from "./fact-batches";
+import { DEFAULT_FACT_BATCH_SIZE, type FactBatchCursor, forEachFactBatch } from "./fact-batches";
 import { materializeCommitment } from "./materialize-commitment";
 import { materializeContactPointFact } from "./materialize-contact-points";
 import { materializeDecision } from "./materialize-decision";
@@ -53,16 +53,17 @@ const FACT_REPLAY_ORDER_RANK = new Map<string, number>(FACT_REPLAY_ORDER.map((t,
 
 /**
  * Fetch one keyset page of facts for a backlog-scoped pass. Rows are bounded by
- * `id > cursor`, ordered by `id` ascending, and capped at `limit` so the caller
- * holds at most one page (including `raw` payloads) at a time. Iterating the
- * fact types in `FACT_REPLAY_ORDER` and paging each by `id` preserves the
- * single-pass ordering guarantee (types are processed in rank order) while
- * imposing a deterministic intra-type order where the single pass left DB order
- * unspecified.
+ * `(created_at, id) > cursor`, ordered by `created_at` then `id` ascending, and
+ * capped at `limit` so the caller holds at most one page (including `raw`
+ * payloads) at a time. Types are processed in `FACT_REPLAY_ORDER` rank order;
+ * within a type, `created_at` keeps facts in the chronological order the
+ * pre-batching whole-table load produced in practice — sub-entity supersession
+ * dedups a same-valued observation into its predecessor only when facts arrive
+ * oldest-first — and `id` breaks same-timestamp ties deterministically.
  */
 function fetchFactBatch(
   db: Kysely<DB>,
-  cursor: string,
+  cursor: FactBatchCursor,
   limit: number,
   filter: {
     factType?: string;
@@ -75,7 +76,13 @@ function fetchFactBatch(
     .selectFrom("indexed_file_facts")
     .selectAll()
     .where("deleted_at", "is", null)
-    .where("id", ">", cursor)
+    .where((eb) =>
+      eb.or([
+        eb("created_at", ">", cursor.createdAt),
+        eb.and([eb("created_at", "=", cursor.createdAt), eb("id", ">", cursor.id)]),
+      ]),
+    )
+    .orderBy("created_at", "asc")
     .orderBy("id", "asc")
     .limit(limit);
   if (filter.onlyUnmaterialized) query = query.where("materialized_at", "is", null);

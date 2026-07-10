@@ -297,11 +297,17 @@ async function buildActiveLlmFileCounts(db: Kysely<DB>): Promise<Map<string, num
     (cursor, limit) =>
       db
         .selectFrom("indexed_file_facts")
-        .select(["id", "indexed_file_id", "subject_name", "raw"])
+        .select(["id", "created_at", "indexed_file_id", "subject_name", "raw"])
         .where("fact_type", "=", "llm_extracted")
         .where("deleted_at", "is", null)
         .where("subject_name", "is not", null)
-        .where("id", ">", cursor)
+        .where((eb) =>
+          eb.or([
+            eb("created_at", ">", cursor.createdAt),
+            eb.and([eb("created_at", "=", cursor.createdAt), eb("id", ">", cursor.id)]),
+          ]),
+        )
+        .orderBy("created_at", "asc")
         .orderBy("id", "asc")
         .limit(limit)
         .execute(),
