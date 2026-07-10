@@ -4,12 +4,11 @@ import {
   MicrosoftGraphError,
   createMicrosoftGraphClient,
   ensureValidMicrosoftToken,
-  extractVttSpeakers,
   isMicrosoftTokenExpired,
-  parseVttToTranscript,
+  parseVtt,
   refreshMicrosoftTokens,
 } from "./microsoft-graph";
-import { runWithConcurrency } from "./sync-utils";
+import { streamWithConcurrency } from "./sync-utils";
 import type { Connector, ConnectorCredentials, OAuthCredentials, SourceItemRemovalRecord, SyncedItem } from "./types";
 
 export const TEAMS_MICROSOFT_SCOPE =
@@ -17,6 +16,15 @@ export const TEAMS_MICROSOFT_SCOPE =
 
 const DEFAULT_INITIAL_LOOKBACK_DAYS = 365;
 const DEFAULT_MAX_INFLIGHT = 4;
+/**
+ * Per-run cap on the number of meetings fetched/parsed, mirroring Outlook's
+ * `maxMessages`. Each meeting yields a multi-MB VTT transcript, so an uncapped
+ * initial backfill of a 365-day window could buffer an unbounded corpus through
+ * the single shared event loop. 500 matches Outlook's default and comfortably
+ * covers a typical tenant's incremental window; the initial full sync keeps the
+ * 500 most-recent meetings and recovers older ones only on a cursor reset.
+ */
+const DEFAULT_MAX_MEETINGS = 500;
 const DEFAULT_PROCESSING_LAG_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_PENDING_TRANSCRIPT_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -96,6 +104,7 @@ interface TeamsCursor {
 interface TeamsConnectorOptions {
   initialLookbackDays?: number;
   maxInflight?: number;
+  maxMeetings?: number;
   processingLagMs?: number;
   pendingTranscriptRetryMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -262,6 +271,15 @@ function graphDateTime(value: string | null | undefined): string | null {
 
 function contentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+/**
+ * Epoch millis a meeting sorts by when the per-run cap keeps the most recent
+ * meetings. Falls back to the end time, then 0 so undated events sort last.
+ */
+function eventStartMs(event: TeamsCalendarEvent): number {
+  const iso = graphDateTime(event.start?.dateTime) ?? graphDateTime(event.end?.dateTime);
+  return iso ? new Date(iso).getTime() : 0;
 }
 
 function isTeamsEvent(event: TeamsCalendarEvent): boolean {
@@ -456,7 +474,7 @@ export function teamsMeetingToSyncedItems(params: {
   const sourceUpdatedAt = graphDateTime(params.event.lastModifiedDateTime) ?? sourceCreatedAt;
 
   return params.transcripts.flatMap(({ transcript, vtt }) => {
-    const transcriptText = parseVttToTranscript(vtt);
+    const { transcript: transcriptText, speakers } = parseVtt(vtt);
     if (!transcriptText) return [];
 
     const content = `# ${meetingTitle}\n\n${transcriptText}`;
@@ -464,7 +482,7 @@ export function teamsMeetingToSyncedItems(params: {
       event: params.event,
       onlineMeeting: params.onlineMeeting,
       transcript,
-      speakerNames: extractVttSpeakers(vtt),
+      speakerNames: speakers,
       ownerEmail: params.ownerEmail,
     });
 
@@ -583,6 +601,7 @@ export async function validateTeamsCredentials(credentials: ConnectorCredentials
 
 export function createTeamsConnector(options: TeamsConnectorOptions = {}): Connector {
   const maxInflight = options.maxInflight ?? envPositiveInt("TEAMS_MAX_INFLIGHT", DEFAULT_MAX_INFLIGHT, 16);
+  const maxMeetings = options.maxMeetings ?? envPositiveInt("TEAMS_MAX_MEETINGS", DEFAULT_MAX_MEETINGS, 5000);
   const initialLookbackDays =
     options.initialLookbackDays ?? envPositiveInt("TEAMS_INITIAL_LOOKBACK_DAYS", DEFAULT_INITIAL_LOOKBACK_DAYS, 3650);
   const processingLagMs =
@@ -615,6 +634,7 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
       const now = new Date().toISOString();
       const initialDays = parsePositiveInt(scopeConfig.initialDays, initialLookbackDays, 3650);
       const runMaxInflight = parsePositiveInt(scopeConfig.maxInflight, maxInflight, 16);
+      const runMaxMeetings = parsePositiveInt(scopeConfig.maxMeetings, maxMeetings, 5000);
       const parsedCursor = parseCursor(cursor);
       const windowStart = new Date(Date.now() - initialDays * 24 * 60 * 60 * 1000).toISOString();
       const pendingRetryCutoff = new Date(Date.now() - pendingTranscriptRetryMs).toISOString();
@@ -630,21 +650,28 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
       nextCursor = null;
 
       const events = (await listCalendarEvents(graph, since, now)).filter(isTeamsEvent);
-      const itemGroups: SyncedItem[][] = new Array(events.length).fill(null).map(() => []);
       const currentEventKeys = new Set<string>();
+      for (const event of events) {
+        const eventKey = meetingObservationKey(event);
+        if (eventKey) currentEventKeys.add(eventKey);
+      }
+
+      /**
+       * Fetch/parse only the most-recent {@link runMaxMeetings} meetings, but
+       * record every in-window meeting key above first: a meeting dropped by the
+       * cap must not be treated as a calendar deletion by the removal sweep
+       * below, and its prior observation stays untouched until it re-enters the
+       * cap on a later run (or a cursor reset).
+       */
+      const processableEvents = [...events].sort((a, b) => eventStartMs(b) - eventStartMs(a)).slice(0, runMaxMeetings);
+
       const inspectedEventKeys = new Set<string>();
       const removalRecords: SourceItemRemovalRecord[] = [];
 
-      await runWithConcurrency(
-        events.map((event, index) => ({ event, index })),
-        runMaxInflight,
-        async ({ event, index }) => {
-          const eventKey = meetingObservationKey(event);
-          if (eventKey) currentEventKeys.add(eventKey);
-          const result = await syncMeeting(graph, event, ownerEmail ?? null, logger);
-          itemGroups[index] = result.items;
-          if (!eventKey || !result.inspected) return;
-
+      const syncMeetingStreaming = async (event: TeamsCalendarEvent): Promise<SyncedItem[]> => {
+        const eventKey = meetingObservationKey(event);
+        const result = await syncMeeting(graph, event, ownerEmail ?? null, logger);
+        if (eventKey && result.inspected) {
           inspectedEventKeys.add(eventKey);
           const previousTranscriptIds = new Set(observations[eventKey]?.transcriptIds ?? []);
           const currentTranscriptIds = new Set(result.transcriptIds);
@@ -663,8 +690,19 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
           } else {
             delete observations[eventKey];
           }
-        },
-      );
+        }
+        return result.items;
+      };
+
+      /**
+       * Stream each meeting's items out as its worker settles instead of
+       * buffering the whole transcript corpus (all VTT content across the
+       * window) before the first yield. Removal bookkeeping and cursor advance
+       * still run after the concurrent phase drains, exactly as before.
+       */
+      for await (const items of streamWithConcurrency(processableEvents, runMaxInflight, syncMeetingStreaming)) {
+        for (const item of items) yield item;
+      }
 
       for (const [eventKey, observation] of Object.entries(observations)) {
         if (currentEventKeys.has(eventKey) || inspectedEventKeys.has(eventKey)) continue;
@@ -686,10 +724,6 @@ export function createTeamsConnector(options: TeamsConnectorOptions = {}): Conne
         syncWindowStart: windowStart,
         observedMeetings: observations,
       };
-
-      for (const group of itemGroups) {
-        for (const item of group) yield item;
-      }
     },
 
     async getCursor() {

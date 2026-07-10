@@ -105,3 +105,56 @@ export async function runWithConcurrency<T>(
   }
   await Promise.all(workers);
 }
+
+/**
+ * Bounded-concurrency async generator: runs `worker` over `items` with at most
+ * `limit` in flight and yields each worker's result as soon as that worker
+ * settles, instead of buffering the whole result set before the first yield.
+ *
+ * This exists for connectors whose per-item payload is large (e.g. Teams meeting
+ * transcripts): the single shared event loop must not hold the entire corpus in
+ * memory before the sync pipeline consumes the first item. Results are yielded
+ * in completion order, not input order.
+ *
+ * Error semantics differ from {@link runWithConcurrency}: a rejected worker is
+ * surfaced by throwing out of the generator (aborting the run), matching the
+ * fail-the-run behavior connectors relied on when a non-recoverable upstream
+ * error propagated out of the concurrent phase. Workers that must be isolated
+ * should catch their own recoverable errors before returning.
+ */
+export async function* streamWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>,
+): AsyncGenerator<R> {
+  if (items.length === 0) return;
+  const queue = [...items];
+  const boundedLimit = Math.max(1, Math.min(limit, queue.length));
+  type Settled = { id: symbol; ok: true; value: R } | { id: symbol; ok: false; error: unknown };
+  const executing = new Map<symbol, Promise<Settled>>();
+
+  const launch = (item: T): void => {
+    const id = Symbol();
+    executing.set(
+      id,
+      worker(item).then(
+        (value): Settled => ({ id, ok: true, value }),
+        (error): Settled => ({ id, ok: false, error }),
+      ),
+    );
+  };
+
+  for (let i = 0; i < boundedLimit; i++) {
+    const item = queue.shift();
+    if (item !== undefined) launch(item);
+  }
+
+  while (executing.size > 0) {
+    const settled = await Promise.race(executing.values());
+    executing.delete(settled.id);
+    const next = queue.shift();
+    if (next !== undefined) launch(next);
+    if (!settled.ok) throw settled.error;
+    yield settled.value;
+  }
+}
