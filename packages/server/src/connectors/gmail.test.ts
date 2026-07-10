@@ -175,6 +175,48 @@ describe("Gmail connector", () => {
     ]);
   });
 
+  it("caps initial lookback queries at three years", async () => {
+    const connector = createGmailConnector();
+    let initialQuery: string | null = null;
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+      const path = url.pathname;
+      const q = url.searchParams.get("q");
+
+      if (path === "/gmail/v1/users/me/profile") {
+        return jsonResponse({ historyId: "history-start" });
+      }
+
+      if (path === "/gmail/v1/users/me/messages" && q?.startsWith("newer_than")) {
+        initialQuery = q;
+        return jsonResponse({ messages: [] });
+      }
+
+      if (path === "/gmail/v1/users/me/messages" && q?.startsWith("in:sent")) {
+        return jsonResponse({ messages: [] });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const credentials = validCredentials();
+    const items: EmailSyncedItem[] = [];
+    for await (const item of connector.sync({
+      connectorConfigId: "connector-gmail",
+      credentials,
+      scopeConfig: { initialDays: 3650, maxMessages: 10, maxReciprocitySent: 10 },
+      cursor: null,
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    })) {
+      items.push(item as EmailSyncedItem);
+    }
+
+    expect(items).toEqual([]);
+    expect(initialQuery).toBe("newer_than:1095d (in:inbox OR in:sent)");
+  });
+
   it("returns the history id snapshotted before incremental message processing", async () => {
     const connector = createGmailConnector();
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
@@ -332,6 +374,67 @@ describe("Gmail connector", () => {
       pageToken: "page-2",
     });
     expect(nextCursor.reciprocityEmails).toContain("jane@example.com");
+  });
+
+  it("normalizes legacy list cursor lookback queries before continuing", async () => {
+    const connector = createGmailConnector();
+    let continuedQuery: string | null = null;
+    let continuedPageToken: string | null = null;
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+      const path = url.pathname;
+
+      if (path === "/gmail/v1/users/me/messages") {
+        continuedQuery = url.searchParams.get("q");
+        continuedPageToken = url.searchParams.get("pageToken");
+        return jsonResponse({ messages: [{ id: "legacy-page" }], nextPageToken: "page-3" });
+      }
+
+      if (path.endsWith("/messages/legacy-page")) {
+        return jsonResponse(
+          gmailMessage("legacy-page", {
+            from: "Owner <owner@canvasx.ai>",
+            to: "Jane Doe <jane@example.com>",
+            labels: ["SENT"],
+          }),
+        );
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const credentials = validCredentials();
+    const items: EmailSyncedItem[] = [];
+    for await (const item of connector.sync({
+      connectorConfigId: "connector-gmail",
+      credentials,
+      scopeConfig: { maxMessages: 1 },
+      cursor: JSON.stringify({
+        mode: "list",
+        historyId: "history-start",
+        query: "newer_than:3650d (in:inbox OR in:sent)",
+        pageToken: "page-2",
+      }),
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    })) {
+      items.push(item as EmailSyncedItem);
+    }
+
+    const nextCursor = JSON.parse(
+      (await connector.getCursor({ credentials, scopeConfig: {}, currentCursor: null, logger })) ?? "{}",
+    );
+
+    expect(items).toHaveLength(1);
+    expect(continuedQuery).toBe("newer_than:1095d (in:inbox OR in:sent)");
+    expect(continuedPageToken).toBe("page-2");
+    expect(nextCursor).toMatchObject({
+      mode: "list",
+      historyId: "history-start",
+      query: "newer_than:1095d (in:inbox OR in:sent)",
+      pageToken: "page-3",
+    });
   });
 
   it("streams full bodies one page at a time instead of buffering the whole corpus", async () => {
