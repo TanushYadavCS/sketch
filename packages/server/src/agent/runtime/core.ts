@@ -22,6 +22,7 @@ import type {
 } from "./contracts";
 import { AgentRuntimeProviderError, isRuntimeAbortError } from "./errors";
 import { createAgentRuntimeSessionId } from "./ids";
+import { capPersistedRuntimeMessages } from "./persisted-content";
 import { computeRuntimeCost } from "./pricing";
 import type { AgentRuntimeProvider } from "./provider";
 import { emptyRuntimeUsage, extractRuntimeModelUsage, mergeRuntimeUsageByModel, usageForModel } from "./usage";
@@ -307,7 +308,7 @@ export async function runAgentRuntimeCore(params: RunAgentRuntimeCoreParams): Pr
   if (params.persistSession && params.sessionStore && responseMessages.length > 0) {
     await params.sessionStore.appendTransactional(
       sessionId,
-      toPersistedMessages({ currentUserMessage, responseMessages }),
+      capPersistedRuntimeMessages(toPersistedMessages({ currentUserMessage, responseMessages })),
     );
   }
   const usage = await usageFromResult({

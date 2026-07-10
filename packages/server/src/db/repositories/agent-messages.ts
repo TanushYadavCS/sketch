@@ -102,5 +102,37 @@ export function createAgentMessagesRepository(db: Kysely<DB>) {
         .execute();
       return rows.map(toRow);
     },
+
+    /**
+     * Loads only rows after a seq boundary, ordered by seq. Passing 0 is equivalent to loadBySession.
+     * The AI SDK runtime turn path uses this to skip re-parsing the replaced prefix behind a compaction marker.
+     */
+    async loadBySessionSince(sessionId: string, sinceSeqExclusive: number): Promise<AgentMessageRow[]> {
+      const rows = await db
+        .selectFrom("agent_messages")
+        .selectAll()
+        .where("session_id", "=", sessionId)
+        .where("seq", ">", sinceSeqExclusive)
+        .orderBy("seq", "asc")
+        .execute();
+      return rows.map(toRow);
+    },
+
+    /**
+     * Returns rows whose serialized content contains a literal substring, ordered by seq descending.
+     * Used to locate the latest compaction marker cheaply without loading the whole transcript. The
+     * `%substring%` pattern is portable across SQLite and Postgres; underscores in the substring only
+     * widen matching, so callers must validate each candidate rather than trust the match alone.
+     */
+    async loadContentMatching(sessionId: string, substring: string): Promise<AgentMessageRow[]> {
+      const rows = await db
+        .selectFrom("agent_messages")
+        .selectAll()
+        .where("session_id", "=", sessionId)
+        .where("content", "like", `%${substring}%`)
+        .orderBy("seq", "desc")
+        .execute();
+      return rows.map(toRow);
+    },
   };
 }
