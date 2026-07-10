@@ -64,6 +64,31 @@ const MAX_CONTENT_BYTES = 512 * 1024; // 512 KB — ~128K tokens, safe for LLM e
 /** Max file size to attempt download: 200MB. */
 const MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 
+/**
+ * Max file size to attempt binary extraction: 25MB.
+ *
+ * Binary extractors (`extractTextFromBinary`) run synchronously on the shared
+ * event loop and allocate several transient copies of the input. A large XLSX
+ * can stall the loop for seconds and spike memory to multiples of the file
+ * size, so we skip anything above this cap rather than degrade the whole
+ * process (which also serves HTTP + Slack + agent runs).
+ */
+const MAX_EXTRACT_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Byte ceiling for streamed text/export downloads.
+ *
+ * `truncateAndHash` trims whitespace then slices the string to
+ * `MAX_CONTENT_BYTES` *characters*. Reading 4× `MAX_CONTENT_BYTES` of raw
+ * response bytes guarantees enough decoded characters survive to produce output
+ * byte-identical to consuming the whole body: even worst-case UTF-8 (4 bytes
+ * per character) yields at least `MAX_CONTENT_BYTES` characters, and realistic
+ * text (~1 byte per character) yields far more, so the post-trim slice is
+ * unaffected. This lets us stop pulling and cancel the body stream early on
+ * arbitrarily large Docs/Sheets exports instead of materializing them whole.
+ */
+const MAX_READ_BYTES = 4 * MAX_CONTENT_BYTES;
+
 /** Files per page when listing. */
 const PAGE_SIZE = 100;
 
@@ -113,10 +138,47 @@ function assertOAuth(credentials: ConnectorCredentials): asserts credentials is 
   }
 }
 
+/**
+ * Read a response body as text, stopping once `maxBytes` of raw body bytes have
+ * been pulled, then cancel the underlying stream.
+ *
+ * Decoding is streamed so multi-byte characters split across chunks are handled
+ * correctly. We stop as soon as the accumulated byte count exceeds the ceiling
+ * (at most one chunk beyond it) and cancel the reader so the connection is not
+ * drained for a document we will truncate anyway.
+ */
+async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
+  const body = response.body;
+  if (!body) return response.text();
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytesRead = 0;
+
+  try {
+    while (bytesRead <= maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytesRead += value.byteLength;
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+
+  text += decoder.decode();
+  return text;
+}
+
 async function driveRequest(
   path: string,
   accessToken: DriveTokenSource,
-  opts?: { params?: Record<string, string>; responseType?: "json" | "text" | "buffer" },
+  opts?: {
+    params?: Record<string, string>;
+    responseType?: "json" | "text" | "bounded-text" | "buffer";
+    maxBytes?: number;
+  },
   attempt = 1,
   tokenRefreshed = false,
 ): Promise<unknown> {
@@ -184,6 +246,7 @@ async function driveRequest(
   }
 
   if (opts?.responseType === "text") return response.text();
+  if (opts?.responseType === "bounded-text") return readBoundedText(response, opts.maxBytes ?? MAX_READ_BYTES);
   if (opts?.responseType === "buffer") return response.arrayBuffer();
   return response.json();
 }
@@ -239,7 +302,8 @@ function inferFileType(mimeType: string): string | null {
   return null;
 }
 
-async function fetchFileContent(
+/** Exported for testing. */
+export async function fetchFileContent(
   file: DriveFile,
   accessToken: DriveTokenSource,
   logger: Logger,
@@ -251,7 +315,7 @@ async function fetchFileContent(
     if (exportInfo) {
       const text = (await driveRequest(`/files/${file.id}/export`, accessToken, {
         params: { mimeType: exportInfo.exportMime },
-        responseType: "text",
+        responseType: "bounded-text",
       })) as string;
 
       return truncateAndHash(text, file, logger);
@@ -267,7 +331,7 @@ async function fetchFileContent(
 
       const text = (await driveRequest(`/files/${file.id}`, accessToken, {
         params: { alt: "media", supportsAllDrives: "true" },
-        responseType: "text",
+        responseType: "bounded-text",
       })) as string;
 
       return truncateAndHash(text, file, logger);
@@ -276,7 +340,7 @@ async function fetchFileContent(
     // 3. Binary documents (PDF, DOCX, XLSX, PPTX) — download as buffer, then extract
     if (BINARY_EXTRACTABLE_MIMES.has(file.mimeType)) {
       const sizeBytes = file.size ? Number.parseInt(file.size, 10) : 0;
-      if (sizeBytes > MAX_DOWNLOAD_BYTES) {
+      if (sizeBytes > MAX_EXTRACT_BYTES) {
         logger.debug({ fileId: file.id, size: sizeBytes }, "Skipping binary download (too large)");
         return null;
       }
