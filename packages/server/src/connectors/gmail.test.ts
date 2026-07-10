@@ -155,12 +155,16 @@ describe("Gmail connector", () => {
     const messageRequests = fetchSpy.mock.calls
       .map(([input]) => new URL(input.toString()))
       .filter((url) => url.pathname.includes("/gmail/v1/users/me/messages/"));
-    const retainedRequest = messageRequests.find((url) => url.pathname.endsWith("/messages/retained"));
-    const bulkRequest = messageRequests.find((url) => url.pathname.endsWith("/messages/bulk"));
+    const formatsFor = (id: string): string[] =>
+      messageRequests
+        .filter((url) => url.pathname.endsWith(`/messages/${id}`))
+        .map((url) => url.searchParams.get("format") ?? "full");
+    expect(formatsFor("retained")).toContain("metadata");
+    expect(formatsFor("retained")).toContain("full");
+    expect(formatsFor("bulk")).toContain("metadata");
+    expect(formatsFor("bulk")).toContain("full");
+    expect(formatsFor("sent")).toEqual(["metadata"]);
     const sentRequest = messageRequests.find((url) => url.pathname.endsWith("/messages/sent"));
-    expect(retainedRequest?.searchParams.get("format")).toBe("full");
-    expect(bulkRequest?.searchParams.get("format")).toBe("full");
-    expect(sentRequest?.searchParams.get("format")).toBe("metadata");
     expect(sentRequest?.searchParams.getAll("metadataHeaders")).toEqual([
       "From",
       "To",
@@ -328,6 +332,107 @@ describe("Gmail connector", () => {
       pageToken: "page-2",
     });
     expect(nextCursor.reciprocityEmails).toContain("jane@example.com");
+  });
+
+  it("streams full bodies one page at a time instead of buffering the whole corpus", async () => {
+    const connector = createGmailConnector();
+    const total = 150;
+    const refs = Array.from({ length: total }, (_, index) => ({ id: `msg-${index}` }));
+    const fullFetched: string[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+      const path = url.pathname;
+      const q = url.searchParams.get("q");
+
+      if (path === "/gmail/v1/users/me/profile") {
+        return jsonResponse({ historyId: "history-start" });
+      }
+      if (path === "/gmail/v1/users/me/messages" && q?.startsWith("newer_than")) {
+        return jsonResponse({ messages: refs });
+      }
+      if (path === "/gmail/v1/users/me/messages" && q?.startsWith("in:sent")) {
+        return jsonResponse({ messages: [] });
+      }
+
+      const match = path.match(/\/messages\/(msg-\d+)$/);
+      if (match) {
+        if (url.searchParams.get("format") === "full") {
+          fullFetched.push(match[1]);
+        }
+        return jsonResponse(
+          gmailMessage(match[1], {
+            from: "Owner <owner@canvasx.ai>",
+            to: `Recipient ${match[1]} <${match[1]}@example.com>`,
+            labels: ["SENT"],
+          }),
+        );
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const iterator = connector
+      .sync({
+        connectorConfigId: "connector-gmail",
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 90, maxMessages: 200, maxReciprocitySent: 10 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      })
+      [Symbol.asyncIterator]();
+
+    const first = await iterator.next();
+    expect(first.done).toBe(false);
+
+    const firstPageIds = new Set(refs.slice(0, 100).map((ref) => ref.id));
+    const secondPageIds = new Set(refs.slice(100).map((ref) => ref.id));
+    expect(fullFetched.length).toBe(100);
+    expect(fullFetched.every((id) => firstPageIds.has(id))).toBe(true);
+    expect(fullFetched.some((id) => secondPageIds.has(id))).toBe(false);
+
+    const collected: EmailSyncedItem[] = [first.value as EmailSyncedItem];
+    for (let next = await iterator.next(); !next.done; next = await iterator.next()) {
+      collected.push(next.value as EmailSyncedItem);
+    }
+    expect(collected).toHaveLength(total);
+    expect(fullFetched.length).toBe(total);
+  });
+
+  it("produces a stable content hash for a normalized message", async () => {
+    const connector = createGmailConnector();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+      const path = url.pathname;
+
+      if (path === "/gmail/v1/users/me/profile") {
+        return jsonResponse({ historyId: "history-after-run" });
+      }
+      if (path === "/gmail/v1/users/me/history") {
+        return jsonResponse({ history: [{ messagesAdded: [{ message: { id: "retained" } }] }] });
+      }
+      if (path.endsWith("/messages/retained")) {
+        return jsonResponse(gmailMessage("retained", { body: "Deterministic body for hashing" }));
+      }
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items: EmailSyncedItem[] = [];
+    for await (const item of connector.sync({
+      connectorConfigId: "connector-gmail",
+      credentials: validCredentials(),
+      scopeConfig: {},
+      cursor: JSON.stringify({ historyId: "history-old", reciprocityEmails: ["jane@example.com"] }),
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    })) {
+      items.push(item as EmailSyncedItem);
+    }
+
+    expect(items).toHaveLength(1);
+    expect(items[0].contentHash).toEqual(expect.any(String));
+    expect(items[0].content).toContain("Deterministic body for hashing");
   });
 });
 
