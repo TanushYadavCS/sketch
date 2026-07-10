@@ -97,6 +97,8 @@ const MICROSOFT_OAUTH_CONNECTORS = new Set<ConnectorType>(["outlook", "teams"]);
 const ZOHO_SCOPE = "ZohoCRM.modules.ALL,ZohoCRM.users.READ,ZohoCRM.org.READ,ZohoCRM.settings.READ";
 const MICROSOFT_GRAPH_ADMIN_CONSENT_SCOPE = "https://graph.microsoft.com/.default";
 
+const REQUEST_TIMEOUT_MS = 30_000;
+
 /** In-memory nonce store. Entries expire after 10 minutes. */
 const pendingStates = new Map<
   string,
@@ -418,6 +420,7 @@ export function oauthRoutes(
           redirect_uri: redirectUri,
           grant_type: "authorization_code",
         }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
 
       if (!tokenRes.ok) {
@@ -443,6 +446,7 @@ export function oauthRoutes(
       // Fetch Google user info to get email
       const userInfoRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
         headers: { Authorization: `Bearer ${tokenData.access_token}` },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
       const userInfo = userInfoRes.ok
         ? ((await userInfoRes.json()) as { email?: string; id?: string })
@@ -768,6 +772,7 @@ export function oauthRoutes(
           grant_type: "authorization_code",
           scope,
         }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
 
       if (!tokenRes.ok) {
@@ -995,6 +1000,7 @@ export function oauthRoutes(
           redirect_uri: redirectUri,
           grant_type: "authorization_code",
         }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
 
       if (!tokenRes.ok) {
@@ -1122,6 +1128,7 @@ async function fetchZohoCurrentUserHint(credentials: OAuthCredentials, logger: L
   try {
     const res = await fetch(`${credentials.api_domain}/crm/v6/users?type=CurrentUser`, {
       headers: { Authorization: `Zoho-oauthtoken ${credentials.access_token}` },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!res.ok) return null;
     const body = (await res.json()) as { users?: Array<{ email?: string; full_name?: string; id?: string }> };

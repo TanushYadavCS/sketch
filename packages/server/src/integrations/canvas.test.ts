@@ -45,6 +45,7 @@ describe("CanvasProvider", () => {
         "Content-Type": "application/json",
         "X-User-Email": "priya@example.com",
       },
+      signal: expect.any(AbortSignal),
     });
     expect(connections[0]).toMatchObject({
       id: "secrets:owner-1:github:github",
@@ -79,6 +80,7 @@ describe("CanvasProvider", () => {
         "X-User-Email": "priya@example.com",
         "X-User-Name": "Priya Shah",
       },
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -309,6 +311,7 @@ describe("CanvasProvider", () => {
           "X-User-Email": "priya@example.com",
         },
         body: JSON.stringify({ accessLevel: "organization" }),
+        signal: expect.any(AbortSignal),
       },
     );
   });
@@ -390,6 +393,7 @@ describe("CanvasProvider", () => {
         publicKeyId: "key-1",
         accountId: "secrets:user-1:microsoft:microsoft-teams-oauth",
       }),
+      signal: expect.any(AbortSignal),
     });
     expect(result).toMatchObject({
       connectorType: "teams",

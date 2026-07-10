@@ -288,6 +288,7 @@ describe("CanvasProvider.initiateConnection", () => {
         app_slug: "google-calendar-oauth",
         callback_url: "https://sketch.example.com/integrations/callback",
       }),
+      signal: expect.any(AbortSignal),
     });
   });
 });
