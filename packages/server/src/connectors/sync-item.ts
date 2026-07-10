@@ -37,6 +37,21 @@ export interface ProcessSyncedItemParams {
   encryptionKey?: string;
 }
 
+/**
+ * Preload the content-hash map used for change detection during a sync.
+ *
+ * Scoped by `(connector_config_id = X OR provider_message_id IS NULL)` rather
+ * than a blanket `connector_config_id = X`. Files keyed by provider_message_id
+ * (and connector-scoped provider_file_id types) are only ever looked up under
+ * the current config, so those rows are safely limited to this config — the big
+ * win, since it drops every other config's message corpus that the old query
+ * loaded and then discarded. But non-scoped provider_file_id sources (e.g.
+ * google_drive) are deduped globally on `(source, provider_file_id)` and shared
+ * across configs by `upsertFile`; a row first indexed by another config must
+ * still resolve here, so those (provider_message_id IS NULL) rows are retained.
+ * This keeps the map identical to the previous in-memory filter while shrinking
+ * the loaded corpus for the high-volume message-based connectors.
+ */
 export async function loadExistingContentHashes(
   db: Kysely<DB>,
   connectorType: ConnectorType,
@@ -58,6 +73,7 @@ export async function loadExistingContentHashes(
     ])
     .where("source", "=", connectorType)
     .where("is_archived", "=", 0)
+    .where((eb) => eb.or([eb("connector_config_id", "=", connectorConfigId), eb("provider_message_id", "is", null)]))
     .execute();
   for (const f of existingFiles) {
     const identity = getSyncIdentity({

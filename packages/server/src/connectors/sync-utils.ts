@@ -1,6 +1,51 @@
+import { yieldToEventLoop } from "../lib/event-loop";
 import type { ConnectorCredentials } from "./types";
 
 export const MAX_ERROR_MESSAGE_LENGTH = 500;
+
+/**
+ * Default batch size for splitting id/key lists that feed SQL `IN (...)` clauses.
+ * SQLite caps a prepared statement at 32,766 bound variables, and whole-run sync
+ * accumulators (created file ids, seen identity keys) can hold 100k+ entries on an
+ * initial full sync. 500 stays well under the limit while keeping each synchronous
+ * better-sqlite3 prepare cheap.
+ */
+export const IN_CLAUSE_CHUNK_SIZE = 500;
+
+/**
+ * Split an array into fixed-size chunks (the last chunk holds the remainder).
+ * Callers feed each chunk to a separate query so a large id/key set never
+ * overflows SQLite's bound-variable limit in a single `IN (...)`.
+ */
+export function chunk<T>(items: readonly T[], size: number): T[][] {
+  if (!Number.isInteger(size) || size <= 0) {
+    throw new Error(`chunk size must be a positive integer, got ${size}`);
+  }
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/**
+ * Run `handler` over `items` in `IN_CLAUSE_CHUNK_SIZE` batches, yielding to the
+ * event loop *between* batches (never after the last). Only a genuinely long,
+ * multi-batch loop pays the yield; a single-batch call — the common small sync —
+ * runs straight through. The yield keeps synchronous better-sqlite3 queries from
+ * starving the HTTP server during a large sweep.
+ */
+export async function forEachChunk<T>(
+  items: readonly T[],
+  handler: (batch: T[]) => Promise<void>,
+  size: number = IN_CLAUSE_CHUNK_SIZE,
+): Promise<void> {
+  const batches = chunk(items, size);
+  for (let i = 0; i < batches.length; i++) {
+    await handler(batches[i]);
+    if (i < batches.length - 1) await yieldToEventLoop();
+  }
+}
 
 /**
  * Extract a useful error message from fetch/network errors.
