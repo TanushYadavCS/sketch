@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [1.0.1] -- 2026-07-10
+
+- Automatically derives Node.js heap size from container memory limits at startup to prevent out-of-memory crashes in environments like Fargate, respecting any explicit `--max-old-space-size` override.
+- Adds per-phase heap and RSS sampling to key process completion logs for memory growth observability.
+- Fixes enrichment jobs that previously loaded all pending file content into memory, now fetching each file just-in-time to reduce heap usage from gigabytes to a single document's size.
+- Enforces a global streaming request body limit before buffering to reject oversized payloads early and prevent transient memory spikes from large uploads.
+- Caps Google Drive binary file extraction and truncates text downloads to prevent excessive memory use during sync, skipping oversized binaries.
+- Introduces a per-message aggregate size budget for inline image attachments to bound base64-encoded content memory usage during agent runs, with skipped images available for the agent to read via tools.
+- Chunks large database sync operations to avoid hitting SQLite's bound variable limit and scopes content-hash preloading to the current connector config to reduce memory pressure.
+
 ## [1.0.0] -- 2026-07-09
 
 - Introduces an in-process AI agent runtime (`AGENT_RUNTIME=aisdk`) built on Vercel AI SDK v7, replacing the per-query subprocess model to reduce memory usage from ~1 GiB per concurrent user to ~0.3 MiB. Provides full tool parity, workspace isolation, and operational compatibility with the existing SDK runtime, enabled via feature flag for easy rollback.
