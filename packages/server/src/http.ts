@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { type Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { getCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import type { Kysely } from "kysely";
@@ -127,8 +128,37 @@ interface AppDeps {
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
+/**
+ * App-level request body ceiling, enforced before any handler buffers a body.
+ *
+ * The upload routes (`/api/workspace/files`, `/api/web-chat/attachments`,
+ * `/api/web-chat/transcribe`) call `parseBody()` then `Buffer.from(arrayBuffer())`,
+ * each holding a full copy of the payload in memory, and only check
+ * `MAX_FILE_SIZE_MB` / `MAX_UPLOAD_SIZE_MB` afterwards. Without an upstream
+ * guard an authenticated client could POST a multi-GB body and transiently pin
+ * roughly twice its size in RAM, matching an observed production OOM.
+ *
+ * The ceiling is derived from the largest configured upload limit plus a 10%
+ * margin for multipart framing overhead, so this coarse guard trips only on
+ * egregiously oversized bodies while the finer-grained per-route checks (which
+ * return the friendlier `FILE_TOO_LARGE`) still fire for uploads slightly over
+ * their own limit rather than being shadowed.
+ */
+function resolveBodyLimitBytes(config: Config): number {
+  const maxUploadMb = Math.max(config.MAX_FILE_SIZE_MB, config.MAX_UPLOAD_SIZE_MB);
+  return Math.ceil(maxUploadMb * 1.1 * 1024 * 1024);
+}
+
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const app = new Hono();
+  app.use(
+    "*",
+    bodyLimit({
+      maxSize: resolveBodyLimitBytes(config),
+      onError: (c) =>
+        c.json({ error: { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the maximum allowed size" } }, 413),
+    }),
+  );
   const settings = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);

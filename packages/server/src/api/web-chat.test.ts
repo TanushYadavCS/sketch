@@ -1026,6 +1026,32 @@ describe("web chat API", () => {
     });
   });
 
+  it("rejects oversized attachment uploads with a 413 envelope before buffering", async () => {
+    await seedAdmin(db);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    // 70MB exceeds the streaming body-limit ceiling, so it is rejected while
+    // streaming, before the handler buffers it into memory.
+    const oversized = new Uint8Array(70 * 1024 * 1024);
+    const form = new FormData();
+    form.append("file", new File([oversized], "big.bin", { type: "application/octet-stream" }));
+
+    const res = await app.request("/api/web-chat/attachments", {
+      method: "POST",
+      headers: { Cookie: cookie },
+      body: form,
+    });
+
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("PAYLOAD_TOO_LARGE");
+  });
+
   it("rejects web chat attachments outside the user's workspace", async () => {
     await seedAdmin(db);
     const runAgent = vi.fn().mockResolvedValue(makeAgentResult());

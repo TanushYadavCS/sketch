@@ -409,8 +409,9 @@ describe("Workspace API", () => {
       const app = createApp(db, config);
       const cookie = await getMemberCookie(db, user.id);
 
-      // Create a large file (60MB to exceed default 50MB limit)
-      const largeContent = new Uint8Array(60 * 1024 * 1024);
+      // 52MB exceeds the 50MB app-level limit (FILE_TOO_LARGE) while staying
+      // under the coarser streaming body-limit ceiling, so the per-route check runs.
+      const largeContent = new Uint8Array(52 * 1024 * 1024);
       const formData = new FormData();
       formData.append("file", new Blob([largeContent], { type: "application/octet-stream" }), "large.bin");
 
@@ -423,6 +424,29 @@ describe("Workspace API", () => {
       expect(res.status).toBe(413);
       const body = await res.json();
       expect(body.error.code).toBe("FILE_TOO_LARGE");
+    });
+
+    it("rejects bodies over the streaming limit with a 413 envelope before buffering", async () => {
+      await seedAdmin(db);
+      const user = await createMember(db);
+      const app = createApp(db, config);
+      const cookie = await getMemberCookie(db, user.id);
+
+      // 70MB exceeds the streaming body-limit ceiling (~55MB for a 50MB config),
+      // so it is rejected while streaming, before the handler buffers it.
+      const oversized = new Uint8Array(70 * 1024 * 1024);
+      const formData = new FormData();
+      formData.append("file", new Blob([oversized], { type: "application/octet-stream" }), "oversized.bin");
+
+      const res = await app.request("/api/workspace/files?path=oversized.bin", {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: formData,
+      });
+
+      expect(res.status).toBe(413);
+      const body = await res.json();
+      expect(body.error.code).toBe("PAYLOAD_TOO_LARGE");
     });
   });
 
