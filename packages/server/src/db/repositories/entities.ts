@@ -7,6 +7,7 @@ import { normalizeEntityMatchName } from "../../entities/match-normalize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../../entities/profile-facts";
 import type { ProvenanceTier } from "../../entities/provenance";
 import { resolveLiveEntity, resolveLiveEntityId, resolveSourceRefToLiveEntityId } from "../../entities/redirect";
+import { yieldToEventLoop } from "../../lib/event-loop";
 import { parseTimestampMs } from "../../timestamps";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable, EntityContactPointsTable } from "../schema";
@@ -16,6 +17,15 @@ const SYSTEM_ENTITY_SOURCE_TYPES = ["clickup_workspace", "clickup_space"];
 const PROTECTED_ENTITY_SOURCES = ["team", "team_directory"];
 const HOTNESS_WINDOW_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Entities processed per `recomputeHotnessBatch` page when recomputing the
+ * whole corpus. better-sqlite3 is synchronous, so a batch of this size runs as
+ * one uninterrupted block; the caller yields to the event loop between batches
+ * (see {@link yieldToEventLoop}) so a 10k+ entity recompute after every sync
+ * cannot stall incoming HTTP requests for seconds.
+ */
+const HOTNESS_RECOMPUTE_BATCH_SIZE = 500;
 const CANONICAL_TIMESTAMP_LIKE = "____-__-__T__:__:__.___Z";
 const TIMESTAMP_DIGIT_POSITIONS = [1, 2, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19, 21, 22, 23];
 
@@ -1059,17 +1069,28 @@ export function createEntityRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    /**
+     * Recompute hotness for every live, non-archived entity. Runs after every
+     * connector sync, so it pages through the corpus via `recomputeHotnessBatch`
+     * (identical filter, id-ordered cursor) and yields to the event loop between
+     * batches instead of looping the whole table with zero yields. The processed
+     * set and per-entity scores are identical to updating each id in one pass;
+     * only the loop is chunked so it no longer blocks the shared event loop.
+     */
     async recomputeAllHotness() {
-      const entities = await db
-        .selectFrom("entities")
-        .select("id")
-        .where("status", "!=", "archived")
-        .where(whereLiveEntity())
-        .execute();
-      for (const entity of entities) {
-        await this.updateHotness(entity.id);
+      let cursor: string | null = null;
+      let total = 0;
+      for (;;) {
+        const { processed, nextCursor, done } = await this.recomputeHotnessBatch({
+          cursor,
+          limit: HOTNESS_RECOMPUTE_BATCH_SIZE,
+        });
+        total += processed;
+        if (done) break;
+        cursor = nextCursor;
+        await yieldToEventLoop();
       }
-      return entities.length;
+      return total;
     },
 
     async recomputeHotnessBatch(opts: { cursor?: string | null; limit: number }) {
