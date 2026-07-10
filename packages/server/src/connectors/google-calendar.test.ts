@@ -495,6 +495,159 @@ describe("Google Calendar connector", () => {
     expect(requests.some((url) => url.pathname === "/calendar/v3/calendars/primary/events")).toBe(false);
   });
 
+  it("yields page-one events before fetching the next page", async () => {
+    const connector = createGoogleCalendarConnector();
+    const eventPageTokens: Array<string | null> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/primary/events") {
+        const pageToken = url.searchParams.get("pageToken");
+        eventPageTokens.push(pageToken);
+        if (!pageToken) {
+          return jsonResponse({
+            items: [calendarEvent("p1-a"), calendarEvent("p1-b")],
+            nextPageToken: "page-2",
+          });
+        }
+        return jsonResponse({ items: [calendarEvent("p2-a")], nextSyncToken: "sync-primary-1" });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const iterator = connector.sync({
+      credentials: validCredentials(),
+      scopeConfig: {},
+      cursor: null,
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    });
+
+    const first = await iterator.next();
+    expect(first.value?.providerFileId).toBe("primary:p1-a");
+    expect(eventPageTokens).toEqual([null]);
+
+    const second = await iterator.next();
+    expect(second.value?.providerFileId).toBe("primary:p1-b");
+    expect(eventPageTokens).toEqual([null]);
+
+    const third = await iterator.next();
+    expect(third.value?.providerFileId).toBe("primary:p2-a");
+    expect(eventPageTokens).toEqual([null, "page-2"]);
+
+    await iterator.return?.(undefined);
+  });
+
+  it("commits the sync token only after the final page is streamed", async () => {
+    const connector = createGoogleCalendarConnector();
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/primary/events") {
+        const pageToken = url.searchParams.get("pageToken");
+        if (!pageToken) {
+          return jsonResponse({ items: [calendarEvent("p1-a")], nextPageToken: "page-2" });
+        }
+        return jsonResponse({ items: [calendarEvent("p2-a")], nextSyncToken: "sync-primary-final" });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const readCursor = async () =>
+      JSON.parse(
+        (await connector.getCursor({
+          credentials: validCredentials(),
+          scopeConfig: {},
+          currentCursor: null,
+          logger,
+        })) ?? "null",
+      );
+
+    const iterator = connector.sync({
+      credentials: validCredentials(),
+      scopeConfig: {},
+      cursor: null,
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    });
+
+    await iterator.next();
+    expect(await readCursor()).toBeNull();
+
+    const drained: SyncedItem[] = [];
+    for await (const item of iterator) drained.push(item);
+
+    const cursor = await readCursor();
+    expect(cursor.calendars).toEqual({ primary: "sync-primary-final" });
+    expect(drained.map((item) => item.providerFileId)).toEqual(["primary:p2-a"]);
+  });
+
+  it("streams multiple calendars in order and accumulates every sync token", async () => {
+    const connector = createGoogleCalendarConnector();
+    const teamCalendar = { id: "team", summary: "Team", accessRole: "reader" as const };
+    const eventCalendarIds: string[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [primaryCalendar, teamCalendar] });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/primary/events") {
+        eventCalendarIds.push("primary");
+        return jsonResponse({ items: [calendarEvent("primary-1")], nextSyncToken: "sync-primary-1" });
+      }
+
+      if (url.pathname === "/calendar/v3/calendars/team/events") {
+        eventCalendarIds.push("team");
+        return jsonResponse({ items: [calendarEvent("team-1")], nextSyncToken: "sync-team-1" });
+      }
+
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const iterator = connector.sync({
+      credentials: validCredentials(),
+      scopeConfig: {},
+      cursor: null,
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    });
+
+    const first = await iterator.next();
+    expect(first.value?.providerFileId).toBe("primary:primary-1");
+    expect(eventCalendarIds).toEqual(["primary"]);
+
+    const drained: SyncedItem[] = [first.value as SyncedItem];
+    for await (const item of iterator) drained.push(item);
+
+    expect(drained.map((item) => item.providerFileId)).toEqual(["primary:primary-1", "team:team-1"]);
+    expect(eventCalendarIds).toEqual(["primary", "team"]);
+
+    const cursor = JSON.parse(
+      (await connector.getCursor({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        currentCursor: null,
+        logger,
+      })) ?? "{}",
+    );
+    expect(cursor.calendars).toEqual({ primary: "sync-primary-1", team: "sync-team-1" });
+  });
+
   it("uses syncToken for incremental sync and removes cancelled events", async () => {
     const connector = createGoogleCalendarConnector();
     const removals: SourceItemRemovalRecord[] = [];
