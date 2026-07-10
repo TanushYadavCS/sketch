@@ -4,6 +4,7 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import type { DB } from "../db/schema";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { heapStats, heapUsedMb } from "../lib/heap";
+import { DEFAULT_FACT_BATCH_SIZE, forEachFactBatch } from "./fact-batches";
 import { materializeCommitment } from "./materialize-commitment";
 import { materializeContactPointFact } from "./materialize-contact-points";
 import { materializeDecision } from "./materialize-decision";
@@ -47,6 +48,42 @@ const FACT_REPLAY_ORDER = [
   "milestone",
   "llm_task",
 ] as const;
+
+const FACT_REPLAY_ORDER_RANK = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
+
+/**
+ * Fetch one keyset page of facts for a backlog-scoped pass. Rows are bounded by
+ * `id > cursor`, ordered by `id` ascending, and capped at `limit` so the caller
+ * holds at most one page (including `raw` payloads) at a time. Iterating the
+ * fact types in `FACT_REPLAY_ORDER` and paging each by `id` preserves the
+ * single-pass ordering guarantee (types are processed in rank order) while
+ * imposing a deterministic intra-type order where the single pass left DB order
+ * unspecified.
+ */
+function fetchFactBatch(
+  db: Kysely<DB>,
+  cursor: string,
+  limit: number,
+  filter: {
+    factType?: string;
+    factTypesIn?: readonly string[];
+    factTypesNotIn?: readonly string[];
+    onlyUnmaterialized: boolean;
+  },
+): Promise<IndexedFileFactRow[]> {
+  let query = db
+    .selectFrom("indexed_file_facts")
+    .selectAll()
+    .where("deleted_at", "is", null)
+    .where("id", ">", cursor)
+    .orderBy("id", "asc")
+    .limit(limit);
+  if (filter.onlyUnmaterialized) query = query.where("materialized_at", "is", null);
+  if (filter.factType) query = query.where("fact_type", "=", filter.factType);
+  if (filter.factTypesIn) query = query.where("fact_type", "in", [...filter.factTypesIn]);
+  if (filter.factTypesNotIn) query = query.where("fact_type", "not in", [...filter.factTypesNotIn]);
+  return query.execute();
+}
 
 export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
   if (fact.fact_type === "structural_seed") {
@@ -184,22 +221,25 @@ export async function replaySourceFacts(
     birthGateDryRun: opts.birthGateDryRun,
     embeddingProvider: opts.embeddingProvider,
   });
-  const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
-  const facts = (await db.selectFrom("indexed_file_facts").selectAll().where("deleted_at", "is", null).execute())
-    .filter((f) => orderRank.has(f.fact_type))
-    .sort((a, b) => (orderRank.get(a.fact_type) ?? 0) - (orderRank.get(b.fact_type) ?? 0));
-
-  summary.factsRead = facts.length;
-
-  for (const fact of facts) {
-    try {
-      const result = await materializeFromFact(deps, fact);
-      accumulate(summary, result);
-    } catch (err) {
-      logger.warn({ err, factId: fact.id, factType: fact.fact_type }, "Replay failed for fact");
-      summary.skipped++;
-    }
-    await yieldToEventLoop();
+  const batchSize = opts.batchSize && opts.batchSize > 0 ? Math.floor(opts.batchSize) : DEFAULT_FACT_BATCH_SIZE;
+  for (const factType of FACT_REPLAY_ORDER) {
+    await forEachFactBatch(
+      (cursor, limit) => fetchFactBatch(db, cursor, limit, { factType, onlyUnmaterialized: false }),
+      async (facts) => {
+        for (const fact of facts) {
+          summary.factsRead++;
+          try {
+            const result = await materializeFromFact(deps, fact);
+            accumulate(summary, result);
+          } catch (err) {
+            logger.warn({ err, factId: fact.id, factType: fact.fact_type }, "Replay failed for fact");
+            summary.skipped++;
+          }
+          await yieldToEventLoop();
+        }
+      },
+      batchSize,
+    );
   }
 
   logger.info({ summary }, "Source-fact replay complete");
@@ -259,26 +299,23 @@ async function materializeUnmaterializedFactsInner(
     birthGateDryRun: opts.birthGateDryRun,
     embeddingProvider: opts.embeddingProvider,
   });
-  const orderRank = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
-  let factsQuery = db
+  const factTypesFilter = opts.factTypes && opts.factTypes.length > 0 ? opts.factTypes : null;
+
+  let countQuery = db
     .selectFrom("indexed_file_facts")
-    .selectAll()
+    .select((eb) => eb.fn.countAll().as("count"))
     .where("deleted_at", "is", null)
     .where("materialized_at", "is", null);
-  if (opts.factTypes && opts.factTypes.length > 0) {
-    factsQuery = factsQuery.where("fact_type", "in", opts.factTypes);
+  if (factTypesFilter) {
+    countQuery = countQuery.where("fact_type", "in", factTypesFilter);
   }
-  const facts = (await factsQuery.execute()).sort(
-    (a, b) =>
-      (orderRank.get(a.fact_type) ?? Number.MAX_SAFE_INTEGER) - (orderRank.get(b.fact_type) ?? Number.MAX_SAFE_INTEGER),
-  );
+  const total = Number((await countQuery.executeTakeFirst())?.count ?? 0);
+  let completed = 0;
+  opts.onProgress?.({ phase: "materialize", completed: 0, total });
 
-  summary.factsRead = facts.length;
-  opts.onProgress?.({ phase: "materialize", completed: 0, total: facts.length });
-
-  for (let i = 0; i < facts.length; i++) {
+  const processFact = async (fact: IndexedFileFactRow): Promise<void> => {
     if (opts.shouldCancel?.()) throw new Error("Re-enrich stopped");
-    const fact = facts[i];
+    summary.factsRead++;
     try {
       const result = await materializeFromFact(deps, fact);
       accumulate(summary, result);
@@ -307,8 +344,41 @@ async function materializeUnmaterializedFactsInner(
       summary.skipped++;
       summary.deferred++;
     }
-    opts.onProgress?.({ phase: "materialize", completed: i + 1, total: facts.length });
+    completed++;
+    opts.onProgress?.({ phase: "materialize", completed, total });
     await yieldToEventLoop();
+  };
+
+  const batchSize = opts.batchSize && opts.batchSize > 0 ? Math.floor(opts.batchSize) : DEFAULT_FACT_BATCH_SIZE;
+  const knownTypes = FACT_REPLAY_ORDER.filter((t) => !factTypesFilter || factTypesFilter.includes(t));
+  for (const factType of knownTypes) {
+    await forEachFactBatch(
+      (cursor, limit) => fetchFactBatch(db, cursor, limit, { factType, onlyUnmaterialized: true }),
+      async (facts) => {
+        for (const fact of facts) await processFact(fact);
+      },
+      batchSize,
+    );
+  }
+
+  /**
+   * Facts whose type is absent from `FACT_REPLAY_ORDER` are processed last,
+   * matching the single-pass tail where unrecognized types sorted to the end and
+   * fell through to a `skipped: unknown_fact_type` result (kept unmaterialized).
+   */
+  const unknownRequested = factTypesFilter?.filter((t) => !FACT_REPLAY_ORDER_RANK.has(t)) ?? null;
+  if (unknownRequested === null || unknownRequested.length > 0) {
+    await forEachFactBatch(
+      (cursor, limit) =>
+        fetchFactBatch(db, cursor, limit, {
+          ...(unknownRequested ? { factTypesIn: unknownRequested } : { factTypesNotIn: FACT_REPLAY_ORDER }),
+          onlyUnmaterialized: true,
+        }),
+      async (facts) => {
+        for (const fact of facts) await processFact(fact);
+      },
+      batchSize,
+    );
   }
 
   await cleanupEmptyRelationships(db);
