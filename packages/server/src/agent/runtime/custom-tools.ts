@@ -1,7 +1,11 @@
 import { resolve } from "node:path";
 import { type JSONValue, type Tool, type ToolSet, tool } from "ai";
 import { z } from "zod/v4";
-import { type IntegrationProgressEventLike, collectIntegrationCardsFromProgressEvents } from "../../integrations/cards";
+import {
+  type IntegrationProgressEventLike,
+  collectIntegrationCardsFromProgressEvents,
+  projectToolResultForProgressLog,
+} from "../../integrations/cards";
 import { AuxCostCollector, sumAuxCost } from "../aux-cost";
 import type { RunAgentParams } from "../runner";
 import {
@@ -115,7 +119,7 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
         kind: "tool_result",
         toolName: event.name,
         input: event.input,
-        output: event.error ? event.error : event.result,
+        output: projectToolResultForProgressLog(event.error ? event.error : event.result),
         isError: event.error !== undefined,
       });
     },
