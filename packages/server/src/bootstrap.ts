@@ -201,6 +201,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
         maxRetries: config.GEMINI_MAX_RETRIES,
       },
       openRouterApiKey: params.openRouterApiKey ?? config.OPENROUTER_API_KEY,
+      maxAttachmentTotalBytes: params.maxAttachmentTotalBytes ?? config.MAX_ATTACHMENT_TOTAL_MB * 1024 * 1024,
       settingsEncryptionKey: params.settingsEncryptionKey ?? config.ENCRYPTION_KEY,
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,

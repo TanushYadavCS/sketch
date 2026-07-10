@@ -22,6 +22,7 @@ export const configSchema = z.object({
   // Files
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(50),
+  MAX_ATTACHMENT_TOTAL_MB: z.coerce.number().default(30),
 
   // Feature flags
   BIRTH_GATE_DRY_RUN: z

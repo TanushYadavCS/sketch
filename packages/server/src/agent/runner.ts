@@ -279,6 +279,12 @@ export interface RunAgentParams {
   onTextDelta?: (delta: string) => Promise<void>;
   onSessionId?: (sessionId: string) => Promise<void>;
   attachments?: Attachment[];
+  /**
+   * Per-message aggregate cap (bytes) on image attachments embedded inline as
+   * base64. Injected from config.MAX_ATTACHMENT_TOTAL_MB in bootstrap; when
+   * omitted the content builders fall back to DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES.
+   */
+  maxAttachmentTotalBytes?: number;
   threadTs?: string;
   resumeSessionId?: string;
   abortController?: AbortController;
@@ -784,7 +790,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
   const promptContent =
     images.length > 0 && visionConfig
       ? userMessage + formatAttachmentsForPrompt(attachments, { visionAnalysisEnabled: visualAnalysisAllowed })
-      : await buildAgentRuntimeUserContent(userMessage, attachments);
+      : await buildAgentRuntimeUserContent(userMessage, attachments, params.maxAttachmentTotalBytes);
   const promptMode = Array.isArray(promptContent) ? "multimodal" : "text";
 
   logger.debug(
@@ -1156,7 +1162,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
   );
 
   if (hasImages && !useVisionToolForImages) {
-    const content = await buildMultimodalContent(userMessage, attachments);
+    const content = await buildMultimodalContent(userMessage, attachments, params.maxAttachmentTotalBytes);
     prompt = (async function* () {
       yield {
         type: "user" as const,

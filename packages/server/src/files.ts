@@ -33,6 +33,12 @@ export interface AudioTranscription {
 
 export interface AttachmentPromptOptions {
   visionAnalysisEnabled?: boolean;
+  /**
+   * localPaths of image attachments that were saved to the workspace but skipped
+   * for inline base64 embedding because the per-message aggregate budget was
+   * exhausted. Each is annotated with a note so the agent knows to Read it instead.
+   */
+  oversizedInlineImagePaths?: ReadonlySet<string>;
 }
 
 function sanitizeFilename(name: string): string {
@@ -128,7 +134,11 @@ export function formatAttachmentsForPrompt(attachments: Attachment[], options: A
       if (options.visionAnalysisEnabled && isImageAttachment(a)) {
         visionHint = ` hint="Use ${VISUAL_ANALYSIS_AGENT_TOOL_NAME} with this path to understand the image."`;
       }
-      return `<file name="${a.originalName}" path="${a.localPath}" mime="${a.mimeType}" size="${a.sizeBytes}"${visionHint} />`;
+      let oversizedNote = "";
+      if (options.oversizedInlineImagePaths?.has(a.localPath)) {
+        oversizedNote = ` note="${OVERSIZED_INLINE_IMAGE_NOTE}"`;
+      }
+      return `<file name="${a.originalName}" path="${a.localPath}" mime="${a.mimeType}" size="${a.sizeBytes}"${visionHint}${oversizedNote} />`;
     })
     .join("\n");
   return `\n\n<attachments>\n${files}\n</attachments>${formatAudioTranscriptionsForPrompt(attachments)}`;
@@ -194,18 +204,68 @@ export function splitAttachments(attachments: Attachment[]): { images: Attachmen
 }
 
 /**
+ * Fallback per-message aggregate cap (bytes) on inline image content when no
+ * explicit budget is supplied. Mirrors the MAX_ATTACHMENT_TOTAL_MB default (30MB)
+ * so callers that skip the config wiring still get a bounded resident footprint.
+ */
+export const DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES = 30 * 1024 * 1024;
+
+const OVERSIZED_INLINE_IMAGE_NOTE =
+  "Saved to the workspace but too large to view inline; use the Read tool with this path to inspect it.";
+
+/**
+ * Partitions image attachments into those to embed inline and those to skip,
+ * bounded by an aggregate byte budget over their raw file sizes.
+ *
+ * Each embedded image is base64-encoded (~1.33x on the wire) and held resident
+ * for the entire agent run, so an unbounded set of large images can pin hundreds
+ * of MB per run. Selection is greedy in input order and deterministic: an image
+ * is embedded only if it fits within the remaining budget, otherwise it is
+ * skipped. Skipped images stay saved to the workspace and are surfaced in the
+ * textual attachment listing so the agent can still Read them via tools.
+ */
+export function selectImagesWithinBudget(
+  images: Attachment[],
+  maxTotalBytes: number,
+): { embed: Attachment[]; skipped: Attachment[] } {
+  const embed: Attachment[] = [];
+  const skipped: Attachment[] = [];
+  let total = 0;
+  for (const img of images) {
+    if (total + img.sizeBytes <= maxTotalBytes) {
+      embed.push(img);
+      total += img.sizeBytes;
+    } else {
+      skipped.push(img);
+    }
+  }
+  return { embed, skipped };
+}
+
+/**
  * Builds a multimodal content array for the SDK's SDKUserMessage.message.content.
  * Text prompt + non-image attachment XML go into a text block. Each image attachment
- * becomes a base64 ImageBlockParam for native Claude vision.
+ * within the aggregate byte budget becomes a base64 ImageBlockParam for native Claude
+ * vision; images beyond the budget are not embedded (to bound resident memory) but are
+ * still listed in the text block with a note so the agent can Read them via tools.
  */
-export async function buildMultimodalContent(textPrompt: string, attachments: Attachment[]): Promise<ContentBlock[]> {
+export async function buildMultimodalContent(
+  textPrompt: string,
+  attachments: Attachment[],
+  maxImageTotalBytes: number = DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES,
+): Promise<ContentBlock[]> {
   const { images, nonImages } = splitAttachments(attachments);
+  const { embed, skipped } = selectImagesWithinBudget(images, maxImageTotalBytes);
   const blocks: ContentBlock[] = [];
 
-  const text = textPrompt + formatAttachmentsForPrompt(nonImages);
+  const text =
+    textPrompt +
+    formatAttachmentsForPrompt([...nonImages, ...skipped], {
+      oversizedInlineImagePaths: new Set(skipped.map((a) => a.localPath)),
+    });
   blocks.push({ type: "text", text });
 
-  for (const img of images) {
+  for (const img of embed) {
     const data = await readFile(img.localPath);
     blocks.push({
       type: "image",
