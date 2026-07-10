@@ -16,7 +16,7 @@ import { createScheduledTaskRepository } from "../db/repositories/scheduled-task
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
 import { QueueManager } from "../queue";
-import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import { createTestConfig, createTestDb, createTestLogger, flush } from "../test-utils";
 import { WHATSAPP_TEXT_LIMIT } from "../whatsapp/chunking";
 import type { ExecuteAutomationParams } from "../workflows/runtime";
 import { TaskScheduler } from "./service";
@@ -1130,6 +1130,81 @@ describe("executeTask() queue key derivation", () => {
     await scheduler.executeTask(row as ScheduledTaskRow);
 
     expect(getQueueSpy).toHaveBeenCalledWith(`task-${row.id}`);
+  });
+});
+
+describe("executeTask() single-flight guard", () => {
+  it("skips a scheduled firing while the previous run is still in flight, then accepts again once it completes", async () => {
+    const captured: Array<() => Promise<void>> = [];
+    const gatedQueue = {
+      enqueue: (work: () => Promise<void>) => {
+        captured.push(work);
+        return true;
+      },
+      isIdle: () => captured.length === 0,
+    };
+    const queueManager = { getQueue: () => gatedQueue } as unknown as QueueManager;
+    const deps = buildDeps(db, { queueManager });
+    const warnSpy = vi.spyOn(deps.logger, "warn");
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      schedule_type: "interval",
+      schedule_value: "60",
+      platform: "slack",
+      context_type: "dm",
+      created_by: "U_SINGLE_FLIGHT",
+    });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await scheduler.executeTask(row as ScheduledTaskRow);
+
+    expect(captured).toHaveLength(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: row.id }),
+      expect.stringContaining("still in flight"),
+    );
+
+    await captured[0]();
+    await flush();
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    expect(captured).toHaveLength(2);
+  });
+
+  it("clears the in-flight guard when the queue sheds the run, so the next firing is not wedged", async () => {
+    const captured: Array<() => Promise<void>> = [];
+    let shedNext = true;
+    const gatedQueue = {
+      enqueue: (work: () => Promise<void>) => {
+        if (shedNext) return false;
+        captured.push(work);
+        return true;
+      },
+      isIdle: () => captured.length === 0,
+    };
+    const queueManager = { getQueue: () => gatedQueue } as unknown as QueueManager;
+    const deps = buildDeps(db, { queueManager });
+    const errorSpy = vi.spyOn(deps.logger, "error");
+    const scheduler = new TaskScheduler(deps as never);
+
+    const row = await repo.add({
+      ...baseTaskFields,
+      schedule_type: "interval",
+      schedule_value: "60",
+      platform: "slack",
+      context_type: "dm",
+      created_by: "U_SHED_RECOVERY",
+    });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await flush();
+    expect(errorSpy).toHaveBeenCalledWith(expect.objectContaining({ taskId: row.id }), "Automation execution failed");
+
+    shedNext = false;
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    expect(captured).toHaveLength(1);
   });
 });
 

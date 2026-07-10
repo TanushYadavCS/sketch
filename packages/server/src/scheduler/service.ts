@@ -68,6 +68,7 @@ export interface TaskSchedulerDeps {
 
 export class TaskScheduler {
   private cronInstances: Map<string, Cron> = new Map();
+  private inflightTaskRuns: Set<string> = new Set();
   private repo: ReturnType<typeof createScheduledTaskRepository>;
   private deliveryCapture: ReturnType<typeof createWorkflowDeliveryCapture>;
   private conversations: ReturnType<typeof createConversationRepository>;
@@ -171,10 +172,30 @@ export class TaskScheduler {
     }
   }
 
+  /**
+   * Fired by the cron/interval scheduler. Single-flight per task: if the
+   * previous scheduled run is still queued or running, the new firing is
+   * skipped instead of piling onto the queue. This prevents unbounded run and
+   * memory growth when an interval fires faster than its agent run completes.
+   * Manual triggers (executeTaskById/enqueueTaskById) are deliberate and stay
+   * outside this guard; they still serialize behind the same queue key.
+   */
   async executeTask(task: ScheduledTaskRow): Promise<void> {
-    this.enqueueTaskRun(task, () => this.getRunnableTask(task.id, false)).catch((err) => {
-      this.deps.logger.error({ err, taskId: task.id }, "Automation execution failed");
-    });
+    if (this.inflightTaskRuns.has(task.id)) {
+      this.deps.logger.warn(
+        { taskId: task.id, scheduleType: task.schedule_type },
+        "TaskScheduler: previous scheduled run still in flight, skipping this firing",
+      );
+      return;
+    }
+    this.inflightTaskRuns.add(task.id);
+    this.enqueueTaskRun(task, () => this.getRunnableTask(task.id, false))
+      .catch((err) => {
+        this.deps.logger.error({ err, taskId: task.id }, "Automation execution failed");
+      })
+      .finally(() => {
+        this.inflightTaskRuns.delete(task.id);
+      });
   }
 
   private async executeTaskNow(task: ScheduledTaskRow): Promise<AutomationExecutionResult> {
@@ -230,7 +251,7 @@ export class TaskScheduler {
   ): Promise<AutomationExecutionResult | null> {
     const queueKey = this.getQueueKey(task);
     return new Promise<AutomationExecutionResult | null>((resolve, reject) => {
-      this.deps.queueManager.getQueue(queueKey).enqueue(async () => {
+      const accepted = this.deps.queueManager.getQueue(queueKey).enqueue(async () => {
         try {
           const current = await getTask();
           if (!current) {
@@ -242,6 +263,9 @@ export class TaskScheduler {
           reject(err);
         }
       });
+      if (!accepted) {
+        reject(new Error(`Task ${task.id} run shed: queue ${queueKey} backlog is full`));
+      }
     });
   }
 
