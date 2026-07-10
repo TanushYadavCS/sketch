@@ -4,7 +4,8 @@
  *  - Summary block lazy-loads the Gemini narrative; renders the WHAT line as a fallback
  *    when no cached brief exists.
  *  - Timeline and Relationships are tabs; Timeline is the default; switching surfaces
- *    the Relationships pane with AMBIGUOUS pinned to the top.
+ *    the Relationships pane with AMBIGUOUS pinned to the top. Projects also expose
+ *    Tasks and Scope tabs; tasks render only under the Tasks tab.
  *  - clicking a related entity pill pushes a new drawer level and shows a Back chip.
  */
 import { EntityUiProvider, useEntityUi } from "@/lib/entity-ui";
@@ -332,10 +333,10 @@ describe("EntityDrawer", () => {
               createdByUserName: "Apeksha Reviewer",
               createdByUserEmail: "apeksha.qa@sketch.local",
               isOwnedByViewer: false,
-              readonlyReason: "not_owner",
+              readonlyReason: null,
               completedAt: null,
               updatedAt: "2026-05-01T00:00:00.000Z",
-              canEditStatus: false,
+              canEditStatus: true,
             },
             {
               id: "task-external",
@@ -360,33 +361,6 @@ describe("EntityDrawer", () => {
               createdByUserEmail: null,
               isOwnedByViewer: false,
               readonlyReason: "external_authority",
-              completedAt: null,
-              updatedAt: "2026-05-01T00:00:00.000Z",
-              canEditStatus: false,
-            },
-            {
-              id: "task-proposed",
-              parentEntityId: "e-atlas",
-              parentSourceRef: null,
-              parentName: "Project Atlas",
-              source: "summary",
-              externalRef: null,
-              title: "Vedant to draft onboarding notes for the new hire",
-              status: "open",
-              statusRaw: "action_item",
-              statusAuthority: "local",
-              assigneeEntityId: null,
-              assigneeName: null,
-              proposedAssigneeName: "Vedant",
-              priority: "medium",
-              dueAt: null,
-              provenance: "summary",
-              sourceTaskId: "summary-3",
-              createdByUserId: "u2",
-              createdByUserName: "Apeksha Reviewer",
-              createdByUserEmail: "apeksha.qa@sketch.local",
-              isOwnedByViewer: false,
-              readonlyReason: "not_owner",
               completedAt: null,
               updatedAt: "2026-05-01T00:00:00.000Z",
               canEditStatus: false,
@@ -432,41 +406,32 @@ describe("EntityDrawer", () => {
     renderWithProviders(<DrawerHarness initialId="e-atlas" />);
 
     await screen.findByRole("heading", { name: /Project Atlas/ });
-    expect(await screen.findByText("Tasks · 4 total · 2 open · 2 in progress · 1 editable")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Tasks/ }));
+    expect(await screen.findByText("3 total · 1 open · 2 in progress · 2 editable")).toBeInTheDocument();
     const editableTask = screen.getByRole("group", {
       name: "Tanush: verify Stripe webhook events hitting staging before cutover green task",
     });
-    const assignedReadonlyTask = screen.getByRole("group", { name: "Confirm vendor onboarding copy task" });
-    const proposedReadonlyTask = screen.getByRole("group", {
-      name: "Vedant to draft onboarding notes for the new hire task",
-    });
+    const adminEditableTask = screen.getByRole("group", { name: "Confirm vendor onboarding copy task" });
     expect(
       screen.getByText("Tanush: verify Stripe webhook events hitting staging before cutover green"),
     ).not.toHaveClass("truncate");
     expect(within(editableTask).getAllByText("In progress")).toHaveLength(1);
     expect(screen.getByText("Confirm vendor onboarding copy")).toBeInTheDocument();
     expect(screen.getByText("Review ClickUp import")).toBeInTheDocument();
-    expect(screen.getAllByText("From Summarizer")).toHaveLength(3);
+    expect(screen.getAllByText("From Summarizer")).toHaveLength(2);
     expect(screen.getByText("Assigned to Tanush Yadav")).toBeInTheDocument();
     expect(within(editableTask).getByText("Created by you")).toBeInTheDocument();
-    expect(within(assignedReadonlyTask).getByText("Assigned to Vedant QA")).toBeInTheDocument();
-    expect(within(assignedReadonlyTask).getByText("Created by Apeksha Reviewer")).toBeInTheDocument();
-    expect(screen.getByText("Vedant to draft onboarding notes for the new hire")).toBeInTheDocument();
-    expect(within(proposedReadonlyTask).getByText("Needs assignee")).toBeInTheDocument();
-    expect(within(proposedReadonlyTask).getByText("Mentioned: Vedant")).toBeInTheDocument();
-    expect(within(proposedReadonlyTask).getByText("Created by Apeksha Reviewer")).toBeInTheDocument();
+    expect(within(adminEditableTask).getByText("Assigned to Vedant QA")).toBeInTheDocument();
+    expect(within(adminEditableTask).getByText("Created by Apeksha Reviewer")).toBeInTheDocument();
+    expect(screen.queryByText("Vedant to draft onboarding notes for the new hire")).not.toBeInTheDocument();
+    expect(screen.queryByText("Mentioned: Vedant")).not.toBeInTheDocument();
     expect(screen.queryByText("Assigned to Vedant")).not.toBeInTheDocument();
     expect(screen.queryByText("Owned by you")).not.toBeInTheDocument();
     expect(screen.queryByText("Owned by Vedant QA")).not.toBeInTheDocument();
-    expect(within(assignedReadonlyTask).getByText("Read-only for you")).toBeInTheDocument();
-    expect(within(proposedReadonlyTask).getByText("Read-only for you")).toBeInTheDocument();
-    expect(
-      within(proposedReadonlyTask).getByText(
-        "Admins can monitor this task. Only the creator or assignee can update status.",
-      ),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Managed in ClickUp")).toBeInTheDocument();
-    expect(screen.getByText("External status: In Review")).toBeInTheDocument();
+    expect(screen.queryByText("Read-only for you")).not.toBeInTheDocument();
+    expect(screen.queryByText("Needs assignee")).not.toBeInTheDocument();
+    expect(screen.queryByText("Managed in ClickUp")).not.toBeInTheDocument();
+    expect(screen.queryByText("External status: In Review")).not.toBeInTheDocument();
     expect(screen.getByText("In Review")).toBeInTheDocument();
     expect(screen.getByText("High")).toBeInTheDocument();
     expect(screen.getAllByText("In progress")).toHaveLength(2);
@@ -479,9 +444,11 @@ describe("EntityDrawer", () => {
   });
 
   it("renders a stable empty task state for projects", async () => {
+    const user = userEvent.setup();
     renderWithProviders(<DrawerHarness initialId="e-atlas" />);
 
     await screen.findByRole("heading", { name: /Project Atlas/ });
+    await user.click(screen.getByRole("button", { name: /Tasks/ }));
 
     expect(await screen.findByText("No project tasks yet.")).toBeInTheDocument();
     expect(

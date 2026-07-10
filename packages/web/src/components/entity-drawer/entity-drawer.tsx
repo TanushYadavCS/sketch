@@ -7,7 +7,7 @@
  *   2. Summary block — Gemini narrative + up to 3 top learned-fact bullets.
  *      Falls back to the deterministic WHAT line when the brief is cold and
  *      there are no facts yet.
- *   3. Tabs — Timeline (default) | Relationships.
+ *   3. Tabs — Timeline (default) | Relationships | Tasks (projects only) | Scope (projects only).
  *
  * Driven by EntityUiProvider's stack. Each level renders independently —
  * pushing a related entity pushes a new id onto the stack; Back chip pops.
@@ -30,7 +30,6 @@ import {
   CaretDownIcon,
   CaretRightIcon,
   GlobeIcon,
-  LockIcon,
   ShareNetworkIcon,
   SpinnerGapIcon,
   TrashIcon,
@@ -166,7 +165,6 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack, onOpenEn
 
   const { entity } = profileQuery.data;
   const accent = entityAccent({ id: entity.id, name: entity.name, sourceType: entity.sourceType });
-  const isProject = entity.sourceType === "project";
 
   return (
     <>
@@ -180,7 +178,6 @@ function EntityDrawerBody({ entityId, stackDepth, previousName, onBack, onOpenEn
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
         <SummaryBlock entity={entity} accent={accent} />
-        {isProject ? <TaskPanel entityId={entity.id} accent={accent} /> : null}
         <DrawerTabs
           entityId={entity.id}
           sourceType={entity.sourceType}
@@ -446,8 +443,8 @@ function formatTaskCount(status: TaskStatus, count: number): string {
   return `${count} ${formatTaskStatus(status).toLowerCase()}`;
 }
 
-function formatTaskSectionLabel(tasks: EntityTask[]): string {
-  if (tasks.length === 0) return "Tasks";
+function formatTasksSummaryLine(tasks: EntityTask[]): string {
+  if (tasks.length === 0) return "No tasks";
   const counts = new Map<TaskStatus, number>(TASK_STATUS_OPTIONS.map((option) => [option.value, 0]));
   for (const task of tasks) counts.set(task.status, (counts.get(task.status) ?? 0) + 1);
   const editableCount = tasks.filter((task) => task.canEditStatus).length;
@@ -458,8 +455,8 @@ function formatTaskSectionLabel(tasks: EntityTask[]): string {
       return count > 0 ? [formatTaskCount(option.value, count)] : [];
     }),
   ];
-  parts.push(editableCount > 0 ? `${editableCount} editable` : "Monitoring only");
-  return `Tasks · ${parts.join(" · ")}`;
+  parts.push(editableCount > 0 ? `${editableCount} editable` : "monitoring only");
+  return parts.join(" · ");
 }
 
 function taskStatusTone(status: TaskStatus): string {
@@ -551,40 +548,30 @@ function taskCreatorLabel(task: EntityTask): string | null {
   return null;
 }
 
-function taskReadonlyCopy(task: EntityTask): { label: string; detail: string | null } {
-  if (task.readonlyReason === "not_owner") {
-    return {
-      label: "Read-only for you",
-      detail: "Admins can monitor this task. Only the creator or assignee can update status.",
-    };
-  }
-  const source = formatProviderName(task.source);
-  if (task.readonlyReason === "external_authority") {
-    if (task.source !== "linear" && task.source !== "clickup") {
-      return {
-        label: "Read-only",
-        detail: "Status is managed outside this task view.",
-      };
-    }
-    return {
-      label: `Managed in ${source}`,
-      detail: `Status changes happen in ${source}.`,
-    };
-  }
-  return { label: "Read-only", detail: null };
+function externalStatusValue(task: EntityTask): string | null {
+  if (task.statusRaw && task.statusAuthority === "external") return task.statusRaw;
+  return null;
 }
 
-function TaskPanel({ entityId, accent }: { entityId: string; accent: string }) {
+interface TasksPanelProps {
+  entityId: string;
+  tasksQuery: ReturnType<typeof useQuery<Awaited<ReturnType<typeof api.entities.tasks>>>>;
+}
+
+/**
+ * TasksPanel — the project-only Tasks tab body. Renders a compact,
+ * hairline-divided list of project tasks with inline status controls for
+ * editable (local/owned) tasks and a passive status pill for read-only /
+ * external-authority tasks. No big read-only instruction block — the source
+ * line and external status already carry that context.
+ */
+function TasksPanel({ entityId, tasksQuery }: TasksPanelProps) {
   const queryClient = useQueryClient();
-  const tasksQuery = useQuery({
-    queryKey: ["entity-drawer", "tasks", entityId],
-    queryFn: () => api.entities.tasks(entityId),
-  });
   const updateMutation = useMutation({
     mutationFn: ({ taskId, status }: { taskId: string; status: TaskStatus }) =>
       api.entities.updateTaskStatus(entityId, taskId, status),
     onSuccess: ({ task }) => {
-      queryClient.setQueryData<{ tasks: EntityTask[] }>(["entity-drawer", "tasks", entityId], (current) => ({
+      queryClient.setQueryData<{ tasks: EntityTask[] }>(tasksKey(entityId), (current) => ({
         tasks: (current?.tasks ?? []).map((item) => (item.id === task.id ? task : item)),
       }));
       toast.success("Task status updated");
@@ -596,131 +583,124 @@ function TaskPanel({ entityId, accent }: { entityId: string; accent: string }) {
 
   if (tasksQuery.isLoading) {
     return (
-      <SectionCard accent={accent} label="Tasks">
-        <div className="space-y-2">
-          <Skeleton className="h-14 w-full" />
-          <Skeleton className="h-14 w-full" />
-        </div>
-      </SectionCard>
+      <div className="space-y-2">
+        <Skeleton className="h-4 w-40" />
+        <Skeleton className="h-14 w-full" />
+        <Skeleton className="h-14 w-full" />
+      </div>
+    );
+  }
+
+  if (tasksQuery.isError) {
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-dashed px-3 py-2">
+        <p className="text-xs text-muted-foreground">Couldn’t load project tasks.</p>
+        <Button type="button" variant="outline" size="sm" onClick={() => void tasksQuery.refetch()}>
+          Retry
+        </Button>
+      </div>
     );
   }
 
   const tasks = tasksQuery.data?.tasks ?? [];
-  if (tasksQuery.isError) {
+  if (tasks.length === 0) {
     return (
-      <SectionCard accent={accent} label="Tasks">
-        <div className="flex items-center justify-between gap-3 rounded-md border border-dashed px-3 py-2">
-          <p className="text-xs text-muted-foreground">Couldn’t load project tasks.</p>
-          <Button type="button" variant="outline" size="sm" onClick={() => void tasksQuery.refetch()}>
-            Retry
-          </Button>
-        </div>
-      </SectionCard>
+      <div className="rounded-md border border-dashed px-3 py-3">
+        <p className="text-xs font-medium">No project tasks yet.</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Summarizer action items will appear here when they are linked to this project.
+        </p>
+      </div>
     );
   }
 
   return (
-    <SectionCard accent={accent} label={formatTaskSectionLabel(tasks)}>
-      {tasks.length === 0 ? (
-        <div className="rounded-md border border-dashed px-3 py-3">
-          <p className="text-xs font-medium">No project tasks yet.</p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Summarizer action items will appear here when they are linked to this project.
-          </p>
+    <div className="space-y-2">
+      <p className="font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+        {formatTasksSummaryLine(tasks)}
+      </p>
+      <div>
+        {tasks.map((task) => (
+          <TaskRow
+            key={task.id}
+            task={task}
+            disabled={updateMutation.isPending}
+            onStatusChange={(status) => updateMutation.mutate({ taskId: task.id, status })}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface TaskRowProps {
+  task: EntityTask;
+  disabled: boolean;
+  onStatusChange: (status: TaskStatus) => void;
+}
+
+function TaskRow({ task, disabled, onStatusChange }: TaskRowProps) {
+  const assignee = taskAssigneeMeta(task);
+  const creator = taskCreatorLabel(task);
+  const externalStatus = externalStatusValue(task);
+  return (
+    <fieldset
+      aria-label={`${task.title} task`}
+      className="grid min-w-0 grid-cols-1 gap-1.5 border-0 border-b p-0 py-2 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_10rem] sm:items-start sm:gap-3"
+    >
+      <div className="min-w-0">
+        <div className="break-words text-sm font-medium leading-snug">{task.title}</div>
+        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] text-muted-foreground">
+          <span className="font-mono uppercase tracking-wider">{formatTaskSource(task)}</span>
+          {task.priority ? (
+            <>
+              <MetaSeparator />
+              <PriorityBadge priority={task.priority} />
+            </>
+          ) : null}
+          {assignee ? (
+            <>
+              <MetaSeparator />
+              <span>{assignee.label}</span>
+            </>
+          ) : null}
+          {creator ? (
+            <>
+              <MetaSeparator />
+              <span>{creator}</span>
+            </>
+          ) : null}
+          {externalStatus ? (
+            <>
+              <MetaSeparator />
+              <span>{externalStatus}</span>
+            </>
+          ) : null}
         </div>
-      ) : (
-        <div className="divide-y">
-          {tasks.map((task) => {
-            const assignee = taskAssigneeMeta(task);
-            const creator = taskCreatorLabel(task);
-            const readonly = taskReadonlyCopy(task);
-            const externalStatus = Boolean(task.statusRaw && task.statusAuthority === "external");
-            return (
-              <fieldset
-                key={task.id}
-                aria-label={`${task.title} task`}
-                className={cn(
-                  "grid min-w-0 grid-cols-1 gap-2 border-0 p-0 py-3 sm:grid-cols-[minmax(0,1fr)_10rem] sm:items-start sm:gap-4",
-                  !task.canEditStatus && "rounded-l-sm border-l border-l-dashed border-l-border/60 pl-3",
-                )}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="break-words text-sm font-medium leading-snug">{task.title}</div>
-                  <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] text-muted-foreground">
-                    <span className="font-mono uppercase tracking-wider">{formatTaskSource(task)}</span>
-                    {task.priority ? (
-                      <>
-                        <MetaSeparator />
-                        <PriorityBadge priority={task.priority} />
-                      </>
-                    ) : null}
-                    {assignee ? (
-                      assignee.kind === "assigned" ? (
-                        <>
-                          <MetaSeparator />
-                          <span>{assignee.label}</span>
-                        </>
-                      ) : (
-                        <>
-                          <MetaSeparator />
-                          <span className="font-medium text-foreground/80">Needs assignee</span>
-                          <MetaSeparator />
-                          <span>{assignee.label}</span>
-                        </>
-                      )
-                    ) : null}
-                    {creator ? (
-                      <>
-                        <MetaSeparator />
-                        <span>{creator}</span>
-                      </>
-                    ) : null}
-                    {externalStatus ? (
-                      <>
-                        <MetaSeparator />
-                        <span>External status: {task.statusRaw}</span>
-                        <span className="sr-only">{task.statusRaw}</span>
-                      </>
-                    ) : null}
-                  </div>
-                  {!task.canEditStatus ? (
-                    <div className="mt-1.5 flex items-start gap-1 text-[10px]">
-                      <LockIcon size={11} aria-hidden className="mt-px shrink-0 text-muted-foreground/70" />
-                      <div className="space-y-0.5">
-                        <div className="font-medium text-foreground/70">{readonly.label}</div>
-                        {readonly.detail ? <div className="text-muted-foreground">{readonly.detail}</div> : null}
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-                <div className="flex shrink-0 items-start sm:justify-end">
-                  {task.canEditStatus ? (
-                    <Select
-                      value={task.status}
-                      onValueChange={(value) => updateMutation.mutate({ taskId: task.id, status: value as TaskStatus })}
-                      disabled={updateMutation.isPending}
-                    >
-                      <SelectTrigger aria-label={`${task.title} status`} className="h-8 w-full text-xs sm:w-40">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {TASK_STATUS_OPTIONS.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  ) : (
-                    <TaskStatusPill status={task.status} />
-                  )}
-                </div>
-              </fieldset>
-            );
-          })}
-        </div>
-      )}
-    </SectionCard>
+      </div>
+      <div className="flex shrink-0 items-start">
+        {task.canEditStatus ? (
+          <Select
+            value={task.status}
+            onValueChange={(value) => onStatusChange(value as TaskStatus)}
+            disabled={disabled}
+          >
+            <SelectTrigger aria-label={`${task.title} status`} className="h-8 w-full text-xs sm:w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TASK_STATUS_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <TaskStatusPill status={task.status} />
+        )}
+      </div>
+    </fieldset>
   );
 }
 
@@ -771,12 +751,21 @@ interface DrawerTabsProps {
   relationsLoading: boolean;
 }
 
+function tasksKey(entityId: string): unknown[] {
+  return ["entity-drawer", "tasks", entityId];
+}
+
 function DrawerTabs({ entityId, sourceType, relations, relationsLoading }: DrawerTabsProps) {
   const isProject = sourceType === "project";
-  const [tab, setTab] = useState<"timeline" | "relationships" | "scope">("timeline");
+  const [tab, setTab] = useState<"timeline" | "relationships" | "tasks" | "scope">("timeline");
   const timelineQuery = useQuery({
     queryKey: ["entity-drawer", "timeline", entityId],
     queryFn: () => api.entities.timeline(entityId),
+  });
+  const tasksQuery = useQuery({
+    queryKey: tasksKey(entityId),
+    queryFn: () => api.entities.tasks(entityId),
+    enabled: isProject,
   });
 
   const timelineCount = timelineQuery.data?.totalCount ?? 0;
@@ -787,6 +776,8 @@ function DrawerTabs({ entityId, sourceType, relations, relationsLoading }: Drawe
       : null;
   const relationsCount = relations?.totalCount ?? 0;
   const relationsHint = relations?.truncated ? `${relationsCount}+` : relationsCount > 0 ? `${relationsCount}` : null;
+  const tasksCount = tasksQuery.data?.tasks.length ?? 0;
+  const tasksHint = tasksCount > 0 ? `${tasksCount}` : null;
 
   return (
     <div className="mt-5">
@@ -804,11 +795,16 @@ function DrawerTabs({ entityId, sourceType, relations, relationsLoading }: Drawe
           hint={relationsHint}
         />
         {isProject ? (
+          <TabButton active={tab === "tasks"} onClick={() => setTab("tasks")} label="Tasks" hint={tasksHint} />
+        ) : null}
+        {isProject ? (
           <TabButton active={tab === "scope"} onClick={() => setTab("scope")} label="Scope" hint={null} />
         ) : null}
       </div>
       {tab === "scope" && isProject ? (
         <ScopePanel entityId={entityId} />
+      ) : tab === "tasks" && isProject ? (
+        <TasksPanel entityId={entityId} tasksQuery={tasksQuery} />
       ) : tab === "timeline" ? (
         <TimelinePanel timelineQuery={timelineQuery} />
       ) : (

@@ -272,6 +272,27 @@ async function seedEntity(db: Kysely<DB>, params: { id: string; name: string; ho
     .execute();
 }
 
+async function seedPersonEntity(db: Kysely<DB>, params: { id: string; name: string; email: string }): Promise<void> {
+  const now = NOW.toISOString();
+  await db
+    .insertInto("entities")
+    .values({
+      id: params.id,
+      name: params.name,
+      source_type: "person",
+      subtype: null,
+      aliases: JSON.stringify([params.email]),
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      hotness: 0,
+      created_at: now,
+      updated_at: now,
+      ai_brief: null,
+    })
+    .execute();
+}
+
 async function seedMention(
   db: Kysely<DB>,
   params: { id: string; entityId: string; fileId: string; mentionedAt?: string },
@@ -812,7 +833,8 @@ describe("AgentRunService", () => {
   it("defaults agent task creation off and passes the toggle through runtime context", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const user = await users.create({ name: "Agent User", email: "user@example.com", emailVerified: true });
+    await seedPersonEntity(db, { id: "person-agent-user", name: "Agent User", email: "user@example.com" });
     await seedIndexedFile(db, { id: "brief-file", providerUrl: null });
     const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
       if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
@@ -829,7 +851,12 @@ describe("AgentRunService", () => {
           masthead: { title: "Daily Brief", summary: "Summary" },
           items: [],
         },
-        items: [briefItem({ knowledgeRefs: { entityIds: [], fileIds: ["brief-file"] } })],
+        items: [
+          briefItem({
+            structuredPayload: { assigneeName: "Agent User" },
+            knowledgeRefs: { entityIds: [], fileIds: ["brief-file"] },
+          }),
+        ],
       });
       return {
         messageSent: true,
@@ -911,6 +938,8 @@ describe("AgentRunService", () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
     const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
+    await users.create({ name: "Mina", email: "mina@example.com", emailVerified: true });
+    await seedPersonEntity(db, { id: "person-mina", name: "Mina", email: "mina@example.com" });
     const source = slackSource("C_TASKS", "tasks");
     const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
       if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");

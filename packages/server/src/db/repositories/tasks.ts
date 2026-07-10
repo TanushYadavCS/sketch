@@ -52,6 +52,7 @@ export interface PromoteBriefTaskInput {
 
 export type PromoteBriefTaskResult =
   | { status: "skipped"; reason: "missing_file_id" }
+  | { status: "skipped"; reason: "ineligible_assignee" }
   | { status: "collated"; taskId: string }
   | { status: "upserted"; taskId: string; created: boolean };
 
@@ -61,6 +62,7 @@ export interface PromoteSummaryTaskInput {
 }
 
 export type PromoteSummaryTaskResult =
+  | { status: "skipped"; reason: "ineligible_assignee" }
   | { status: "collated"; taskId: string }
   | { status: "upserted"; taskId: string; created: boolean };
 
@@ -68,6 +70,7 @@ export interface UpdateLocalTaskStatusInput {
   taskId: string;
   userId: string;
   assigneeEntityIds?: string[];
+  canEditAllLocalTasks?: boolean;
   status: TaskStatus;
 }
 
@@ -187,10 +190,15 @@ export function createTaskRepository(db: Kysely<DB>) {
         }
       }
 
+      const assignee = await resolveSummaryTaskAssignee(db, input.todo);
+      if (!assignee.entityId || !assignee.name) return { status: "skipped", reason: "ineligible_assignee" };
+
       const result = await upsertBriefTask(db, {
         userId: input.userId,
         parentEntityId: parent?.id ?? null,
         parentKey,
+        assigneeEntityId: assignee.entityId,
+        assigneeName: assignee.name,
         todo: input.todo,
         normalizedTitle,
       });
@@ -219,6 +227,8 @@ export function createTaskRepository(db: Kysely<DB>) {
       }
 
       const assignee = await resolveSummaryTaskAssignee(db, input.item);
+      if (!assignee.entityId || !assignee.name) return { status: "skipped", reason: "ineligible_assignee" };
+
       const result = await upsertSummaryTask(db, {
         userId: input.userId,
         parentEntityId: parent?.id ?? null,
@@ -227,7 +237,7 @@ export function createTaskRepository(db: Kysely<DB>) {
         parentKey,
         assigneeEntityId: assignee.entityId,
         assigneeName: assignee.name,
-        proposedAssigneeName: assignee.proposedName,
+        proposedAssigneeName: null,
         item: input.item,
         normalizedTitle,
       });
@@ -378,7 +388,7 @@ export function createTaskRepository(db: Kysely<DB>) {
         .executeTakeFirst();
       if (
         !existing ||
-        !canEditLocalTask(existing, input.userId, input.assigneeEntityIds ?? []) ||
+        !canEditLocalTask(existing, input.userId, input.assigneeEntityIds ?? [], input.canEditAllLocalTasks === true) ||
         existing.status_authority !== "local" ||
         (existing.provenance !== "brief" && existing.provenance !== "summary")
       ) {
@@ -508,6 +518,8 @@ async function upsertBriefTask(
     userId: string;
     parentEntityId: string | null;
     parentKey: string;
+    assigneeEntityId: string;
+    assigneeName: string;
     todo: AgentOutputItemInput;
     normalizedTitle: string;
   },
@@ -539,8 +551,8 @@ async function upsertBriefTask(
     status,
     status_raw: statusRaw,
     status_authority: statusAuthority,
-    assignee_entity_id: null,
-    assignee_name: null,
+    assignee_entity_id: input.assigneeEntityId,
+    assignee_name: input.assigneeName,
     proposed_assignee_name: null,
     priority: input.todo.priority,
     due_at: null,
@@ -1013,7 +1025,13 @@ function visibleTaskQuery(
     );
 }
 
-function canEditLocalTask(task: Selectable<TasksTable>, userId: string, assigneeEntityIds: string[]): boolean {
+function canEditLocalTask(
+  task: Selectable<TasksTable>,
+  userId: string,
+  assigneeEntityIds: string[],
+  canEditAllLocalTasks = false,
+): boolean {
+  if (canEditAllLocalTasks) return true;
   if (task.created_by_user_id === userId) return true;
   return Boolean(task.assignee_entity_id && assigneeEntityIds.includes(task.assignee_entity_id));
 }

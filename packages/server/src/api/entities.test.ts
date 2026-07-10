@@ -968,7 +968,7 @@ describe("GET/PATCH /api/entities/:id/tasks", () => {
     });
   });
 
-  it("lets admins read project-local summary tasks from other users without status edit access", async () => {
+  it("lets admins read and patch project-local summary tasks from other users", async () => {
     const member = await seedMember(db);
     const repo = createTaskRepository(db);
     const local = await repo.upsertTask({
@@ -997,6 +997,7 @@ describe("GET/PATCH /api/entities/:id/tasks", () => {
       headers: { Cookie: adminCookie, "Content-Type": "application/json" },
       body: JSON.stringify({ status: "done" }),
     });
+    const patchBody = (await patchRes.json()) as { task: Record<string, unknown> };
 
     expect(listRes.status).toBe(200);
     expect(localDto).toMatchObject({
@@ -1006,10 +1007,18 @@ describe("GET/PATCH /api/entities/:id/tasks", () => {
       createdByUserName: "member",
       createdByUserEmail: member.email,
       isOwnedByViewer: false,
-      readonlyReason: "not_owner",
-      canEditStatus: false,
+      readonlyReason: null,
+      canEditStatus: true,
     });
-    expect(patchRes.status).toBe(403);
+    expect(patchRes.status).toBe(200);
+    expect(patchBody.task).toMatchObject({
+      id: local.taskId,
+      status: "done",
+      statusRaw: "done",
+      isOwnedByViewer: false,
+      readonlyReason: null,
+      canEditStatus: true,
+    });
   });
 
   it("lets assigned members read and patch their assigned Sketch-native tasks", async () => {
@@ -1218,8 +1227,8 @@ describe("GET/PATCH /api/entities/:id/tasks", () => {
       title: "Vedant: set up automation for Ritesh (Project Tirios)",
       createdByUserId: member.id,
       isOwnedByViewer: false,
-      readonlyReason: "not_owner",
-      canEditStatus: false,
+      readonlyReason: null,
+      canEditStatus: true,
     });
   });
 

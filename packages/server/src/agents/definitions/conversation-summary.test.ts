@@ -13,8 +13,46 @@ import {
 const NOW = new Date("2026-07-01T18:00:00.000Z");
 
 async function seedUser(db: Kysely<DB>): Promise<Selectable<UsersTable>> {
-  await db.insertInto("users").values({ id: "user-1", name: "Summary User", email: "user@example.com" }).execute();
+  await db
+    .insertInto("users")
+    .values({
+      id: "user-1",
+      name: "Summary User",
+      email: "user@example.com",
+      email_verified_at: NOW.toISOString(),
+    })
+    .execute();
   return db.selectFrom("users").selectAll().where("id", "=", "user-1").executeTakeFirstOrThrow();
+}
+
+async function seedAssignablePerson(db: Kysely<DB>, id: string, name: string): Promise<void> {
+  const email = `${id}@example.com`;
+  await db
+    .insertInto("users")
+    .values({
+      id: `user-${id}`,
+      name,
+      email,
+      email_verified_at: NOW.toISOString(),
+    })
+    .execute();
+  await db
+    .insertInto("entities")
+    .values({
+      id: `person-${id}`,
+      name,
+      source_type: "person",
+      subtype: null,
+      aliases: JSON.stringify([email]),
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: NOW.toISOString(),
+      updated_at: NOW.toISOString(),
+      ai_brief: null,
+    })
+    .execute();
 }
 
 async function seedConversation(db: Kysely<DB>): Promise<number> {
@@ -114,6 +152,7 @@ describe("conversationSummaryDefinition", () => {
     const db = await createTestDb();
     try {
       await seedUser(db);
+      await seedAssignablePerson(db, "apeksha", "Apeksha");
       await seedProject(db, "project-x", "Project X");
 
       await conversationSummaryDefinition.onOutputSaved?.({
@@ -169,6 +208,7 @@ describe("conversationSummaryDefinition", () => {
     const db = await createTestDb();
     try {
       await seedUser(db);
+      await seedAssignablePerson(db, "tanush", "Tanush");
       await seedProject(db, "project-x", "Project X");
       await seedProject(db, "project-y", "Project Y");
 
@@ -197,7 +237,7 @@ describe("conversationSummaryDefinition", () => {
             title: "Tanush: follow up on the ambiguous project note",
             summary: "The project was not explicit on this action item.",
             label: "action_item",
-            structuredPayload: { sourceLabels: ["#summary-room"] },
+            structuredPayload: { sourceLabels: ["#summary-room"], owner: "Tanush" },
           }),
         ],
       });
@@ -218,6 +258,7 @@ describe("conversationSummaryDefinition", () => {
     const db = await createTestDb();
     try {
       await seedUser(db);
+      await seedAssignablePerson(db, "mina", "Mina");
 
       await conversationSummaryDefinition.onOutputSaved?.({
         db,
@@ -266,6 +307,8 @@ describe("conversationSummaryDefinition", () => {
     const db = await createTestDb();
     try {
       await seedUser(db);
+      await seedAssignablePerson(db, "vedant", "Vedant");
+      await seedAssignablePerson(db, "tanush", "Tanush");
       await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
 
       await conversationSummaryDefinition.onOutputSaved?.({

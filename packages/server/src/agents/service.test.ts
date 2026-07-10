@@ -27,7 +27,12 @@ describe("Daily Brief durable-task hooks", () => {
 
   it("surfaces open durable tasks, scrubs completed prior todos, and promotes emitted todos", async () => {
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Daily Brief User", email: "brief-owner@example.com" });
+    const user = await users.create({
+      name: "Daily Brief User",
+      email: "brief-owner@example.com",
+      emailVerified: true,
+    });
+    await seedAssignablePerson(db, "person-brief-owner", "Daily Brief User", "brief-owner@example.com");
     await seedIndexedFile(db, "brief-file-1", user.id);
     await seedCompletedOutput(db, user.id, OUTPUT_DATE);
     await seedCompletedOutput(db, user.id, PREVIOUS_DATE);
@@ -36,12 +41,20 @@ describe("Daily Brief durable-task hooks", () => {
     const taskRepo = createTaskRepository(db);
     await taskRepo.promoteBriefTask({
       userId: user.id,
-      todo: briefItem({ title: "Open durable task", label: "todo" }),
+      todo: briefItem({
+        title: "Open durable task",
+        label: "todo",
+        structuredPayload: { assigneeName: "Daily Brief User" },
+      }),
       knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] },
     });
     await taskRepo.promoteBriefTask({
       userId: user.id,
-      todo: briefItem({ title: "Done durable task", label: "done" }),
+      todo: briefItem({
+        title: "Done durable task",
+        label: "done",
+        structuredPayload: { assigneeName: "Daily Brief User" },
+      }),
       knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] },
     });
 
@@ -50,7 +63,13 @@ describe("Daily Brief durable-task hooks", () => {
       db,
       user.id,
       OUTPUT_DATE,
-      [briefItem({ title: "Brand new follow-up", knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] } })],
+      [
+        briefItem({
+          title: "Brand new follow-up",
+          structuredPayload: { assigneeName: "Daily Brief User" },
+          knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] },
+        }),
+      ],
       { createTasks: true },
     );
     const after = await countTasks(db);
@@ -191,6 +210,26 @@ async function seedIndexedFile(db: Kysely<DB>, id: string, userId: string): Prom
       source_created_at: null,
       synced_at: new Date().toISOString(),
       embedding_status: "pending",
+    })
+    .execute();
+}
+
+async function seedAssignablePerson(db: Kysely<DB>, id: string, name: string, email: string): Promise<void> {
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "person",
+      subtype: null,
+      aliases: JSON.stringify([email]),
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ai_brief: null,
     })
     .execute();
 }

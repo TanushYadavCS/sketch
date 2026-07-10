@@ -21,11 +21,13 @@ function canEditTaskStatus(
   task: Selectable<TasksTable>,
   userId: string | undefined,
   assigneeEntityIds: string[] = [],
+  canEditAllLocalTasks = false,
 ): boolean {
   const isCreator = Boolean(userId && task.created_by_user_id === userId);
   const isAssignee = Boolean(task.assignee_entity_id && assigneeEntityIds.includes(task.assignee_entity_id));
+  const isAdminEditable = canEditAllLocalTasks && task.status_authority === "local";
   return (
-    (isCreator || isAssignee) &&
+    (isCreator || isAssignee || isAdminEditable) &&
     task.status_authority === "local" &&
     (task.provenance === "brief" || task.provenance === "summary")
   );
@@ -37,8 +39,9 @@ function readonlyReason(
   task: Selectable<TasksTable>,
   userId: string | undefined,
   assigneeEntityIds: string[] = [],
+  canEditAllLocalTasks = false,
 ): "not_owner" | "external_authority" | null {
-  if (canEditTaskStatus(task, userId, assigneeEntityIds)) return null;
+  if (canEditTaskStatus(task, userId, assigneeEntityIds, canEditAllLocalTasks)) return null;
   if (task.status_authority === "external" || task.provenance === "structural") return "external_authority";
   if (task.provenance === "brief" || task.provenance === "summary") return "not_owner";
   return "external_authority";
@@ -56,6 +59,7 @@ function toTaskDto(
   userId: string | undefined,
   creators: Map<string, TaskCreator> = new Map(),
   assigneeEntityIds: string[] = [],
+  canEditAllLocalTasks = false,
 ) {
   const creator = task.created_by_user_id ? (creators.get(task.created_by_user_id) ?? null) : null;
   const isOwnedByViewer = Boolean(userId && task.created_by_user_id === userId);
@@ -81,10 +85,10 @@ function toTaskDto(
     createdByUserName: creator?.name ?? null,
     createdByUserEmail: creator?.email ?? null,
     isOwnedByViewer,
-    readonlyReason: readonlyReason(task, userId, assigneeEntityIds),
+    readonlyReason: readonlyReason(task, userId, assigneeEntityIds, canEditAllLocalTasks),
     completedAt: task.completed_at,
     updatedAt: task.updated_at,
-    canEditStatus: canEditTaskStatus(task, userId, assigneeEntityIds),
+    canEditStatus: canEditTaskStatus(task, userId, assigneeEntityIds, canEditAllLocalTasks),
   };
 }
 
@@ -121,16 +125,19 @@ export function createTaskRoutes(db: Kysely<DB>) {
     }
     const limit = parseTaskLimit(c.req.query("limit"));
     const assigneeEntityIds = await loadViewerPersonEntityIds(entityRepo, userRepo, userId, taskViewer.email);
+    const canEditAllLocalTasks = isAdmin(c);
     const tasks = await taskRepo.listTasksByParent(entity.id, {
       viewer: taskViewer,
       userId,
       assigneeEntityIds,
-      canReadAllLocalTasks: isAdmin(c),
+      canReadAllLocalTasks: canEditAllLocalTasks,
       status: status as TaskStatus | undefined,
       limit,
     });
     const creators = await loadTaskCreators(db, tasks);
-    return c.json({ tasks: tasks.map((task) => toTaskDto(task, userId, creators, assigneeEntityIds)) });
+    return c.json({
+      tasks: tasks.map((task) => toTaskDto(task, userId, creators, assigneeEntityIds, canEditAllLocalTasks)),
+    });
   });
 
   routes.patch("/:id/tasks/:taskId", async (c) => {
@@ -153,18 +160,20 @@ export function createTaskRoutes(db: Kysely<DB>) {
       return c.json({ error: { code: "NOT_FOUND", message: "Task not found" } }, 404);
     }
     const assigneeEntityIds = await loadViewerPersonEntityIds(entityRepo, userRepo, userId, getContentViewer(c).email);
-    if (!canEditTaskStatus(task, userId, assigneeEntityIds)) {
+    const canEditAllLocalTasks = isAdmin(c);
+    if (!canEditTaskStatus(task, userId, assigneeEntityIds, canEditAllLocalTasks)) {
       return c.json({ error: { code: "FORBIDDEN", message: "Task status is read-only" } }, 403);
     }
     const updated = await taskRepo.updateLocalTaskStatus({
       taskId: task.id,
       userId,
       assigneeEntityIds,
+      canEditAllLocalTasks,
       status: body.status as TaskStatus,
     });
     if (!updated) return c.json({ error: { code: "FORBIDDEN", message: "Task status is read-only" } }, 403);
     const creators = await loadTaskCreators(db, [updated]);
-    return c.json({ task: toTaskDto(updated, userId, creators, assigneeEntityIds) });
+    return c.json({ task: toTaskDto(updated, userId, creators, assigneeEntityIds, canEditAllLocalTasks) });
   });
 
   return routes;

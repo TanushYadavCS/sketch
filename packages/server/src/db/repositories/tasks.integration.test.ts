@@ -65,18 +65,19 @@ describe("createTaskRepository postgres", () => {
 
   it("promotes brief tasks and collates with structural tasks on postgres", async () => {
     await seedPgUser(db, "pg-brief-u1", "pg-u1@example.com");
+    await seedPgPerson(db, "pg-person-u1", "PG Brief Owner", "pg-u1@example.com");
     await seedPgProject(db, "pg-project-x", "PG Project X");
     await seedPgIndexedFile(db, "pg-brief-file-1");
     const repo = createTaskRepository(db);
 
     const first = await repo.promoteBriefTask({
       userId: "pg-brief-u1",
-      todo: pgBriefTodo(),
+      todo: pgBriefTodo({ structuredPayload: { assigneeName: "PG Brief Owner" } }),
       knowledgeRefs: { entityIds: ["pg-project-x"], fileIds: ["pg-brief-file-1"] },
     });
     const second = await repo.promoteBriefTask({
       userId: "pg-brief-u1",
-      todo: pgBriefTodo({ label: "in_progress" }),
+      todo: pgBriefTodo({ label: "in_progress", structuredPayload: { assigneeName: "PG Brief Owner" } }),
       knowledgeRefs: { entityIds: ["pg-project-x"], fileIds: ["pg-brief-file-1"] },
     });
     await db.deleteFrom("task_evidence").execute();
@@ -171,7 +172,7 @@ describe("createTaskRepository postgres", () => {
 });
 
 async function seedPgUser(db: Kysely<DB>, id: string, email: string): Promise<void> {
-  await db.insertInto("users").values({ id, name: id, email }).execute();
+  await db.insertInto("users").values({ id, name: id, email, email_verified_at: new Date().toISOString() }).execute();
 }
 
 async function seedPgProject(db: Kysely<DB>, id: string, name: string): Promise<void> {
@@ -183,6 +184,28 @@ async function seedPgProject(db: Kysely<DB>, id: string, name: string): Promise<
       source_type: "project",
       subtype: null,
       aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ai_brief: null,
+      deleted_at: null,
+      merged_into_entity_id: null,
+    })
+    .execute();
+}
+
+async function seedPgPerson(db: Kysely<DB>, id: string, name: string, email: string): Promise<void> {
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "person",
+      subtype: null,
+      aliases: JSON.stringify([email]),
       metadata: null,
       source_ref_id: null,
       status: "active",

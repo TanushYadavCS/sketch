@@ -57,25 +57,27 @@ describe("createTaskRepository sqlite", () => {
   });
 
   it("promotes brief tasks with stable owner identity, read isolation, and a fileId gate", async () => {
-    await seedUser(db, "brief-u1", "u1@example.com");
-    await seedUser(db, "brief-u2", "u2@example.com");
+    await seedUser(db, "brief-u1", "u1@example.com", { emailVerified: true });
+    await seedUser(db, "brief-u2", "u2@example.com", { emailVerified: true });
+    await seedPerson(db, "person-u1", "Brief Owner One", ["u1@example.com"]);
+    await seedPerson(db, "person-u2", "Brief Owner Two", ["u2@example.com"]);
     await seedProject(db, "project-x", "Project X");
     await seedIndexedFile(db, "brief-file-1");
     const repo = createTaskRepository(db);
 
     const first = await repo.promoteBriefTask({
       userId: "brief-u1",
-      todo: briefTodo({ label: "todo" }),
+      todo: briefTodo({ label: "todo", structuredPayload: { assigneeName: "Brief Owner One" } }),
       knowledgeRefs: { entityIds: ["project-x"], fileIds: ["brief-file-1"] },
     });
     const second = await repo.promoteBriefTask({
       userId: "brief-u1",
-      todo: briefTodo({ label: "in_progress" }),
+      todo: briefTodo({ label: "in_progress", structuredPayload: { assigneeName: "Brief Owner One" } }),
       knowledgeRefs: { entityIds: ["project-x"], fileIds: ["brief-file-1"] },
     });
     const otherUser = await repo.promoteBriefTask({
       userId: "brief-u2",
-      todo: briefTodo({ label: "todo" }),
+      todo: briefTodo({ label: "todo", structuredPayload: { assigneeName: "Brief Owner Two" } }),
       knowledgeRefs: { entityIds: ["project-x"], fileIds: ["brief-file-1"] },
     });
     const skipped = await repo.promoteBriefTask({
@@ -141,6 +143,8 @@ describe("createTaskRepository sqlite", () => {
           status_raw: "todo",
           status_authority: "local",
           created_by_user_id: "brief-u1",
+          assignee_entity_id: "person-u1",
+          assignee_name: "Brief Owner One",
           parent_entity_id: "project-x",
         }),
         expect.objectContaining({
@@ -149,6 +153,8 @@ describe("createTaskRepository sqlite", () => {
           status: "open",
           status_authority: "local",
           created_by_user_id: "brief-u2",
+          assignee_entity_id: "person-u2",
+          assignee_name: "Brief Owner Two",
           parent_entity_id: "project-x",
         }),
       ]),
@@ -167,7 +173,8 @@ describe("createTaskRepository sqlite", () => {
   });
 
   it("collates brief todos into structural tasks and keeps orphan expiry off brief tasks", async () => {
-    await seedUser(db, "brief-u1", "u1@example.com");
+    await seedUser(db, "brief-u1", "u1@example.com", { emailVerified: true });
+    await seedPerson(db, "person-u1", "Brief Owner One", ["u1@example.com"]);
     await seedProject(db, "project-x", "Project X");
     await seedIndexedFile(db, "brief-file-1");
     const repo = createTaskRepository(db);
@@ -204,7 +211,10 @@ describe("createTaskRepository sqlite", () => {
       .executeTakeFirstOrThrow();
     const brief = await repo.promoteBriefTask({
       userId: "brief-u1",
-      todo: briefTodo({ title: "Follow up on launch note" }),
+      todo: briefTodo({
+        title: "Follow up on launch note",
+        structuredPayload: { assigneeName: "Brief Owner One" },
+      }),
       knowledgeRefs: { entityIds: ["project-x"], fileIds: ["brief-file-1"] },
     });
     await repo.expireOrphanedTasks();
@@ -238,8 +248,36 @@ describe("createTaskRepository sqlite", () => {
     expect(briefRow.valid_to).toBeNull();
   });
 
+  it("skips Brief tasks without an eligible internal assignee", async () => {
+    await seedUser(db, "brief-u1", "u1@example.com");
+    await seedProject(db, "project-x", "Project X");
+    await seedIndexedFile(db, "brief-file-1");
+    const repo = createTaskRepository(db);
+
+    const missingAssignee = await repo.promoteBriefTask({
+      userId: "brief-u1",
+      todo: briefTodo({ title: "Document Sketch acceptance criteria" }),
+      knowledgeRefs: { entityIds: ["project-x"], fileIds: ["brief-file-1"] },
+    });
+    const graphOnlyAssignee = await repo.promoteBriefTask({
+      userId: "brief-u1",
+      todo: briefTodo({
+        title: "Review Sketch dashboard copy",
+        structuredPayload: { assigneeName: "Vedant" },
+      }),
+      knowledgeRefs: { entityIds: ["project-x"], fileIds: ["brief-file-1"] },
+    });
+
+    const rows = await db.selectFrom("tasks").selectAll().where("source", "=", "brief").execute();
+
+    expect(missingAssignee).toEqual({ status: "skipped", reason: "ineligible_assignee" });
+    expect(graphOnlyAssignee).toEqual({ status: "skipped", reason: "ineligible_assignee" });
+    expect(rows).toHaveLength(0);
+  });
+
   it("promotes Summarizer action items idempotently and collates them into structural tasks", async () => {
-    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
+    await seedPerson(db, "person-summary", "Summary Owner", ["summary@example.com"]);
     await seedProject(db, "project-x", "Project X");
     const repo = createTaskRepository(db);
 
@@ -247,7 +285,11 @@ describe("createTaskRepository sqlite", () => {
       userId: "summary-u1",
       item: summaryAction({
         title: "Send launch notes",
-        structuredPayload: { parentEntityId: "project-x", messageIds: ["message-1", "message-2"] },
+        structuredPayload: {
+          assigneeName: "Summary Owner",
+          parentEntityId: "project-x",
+          messageIds: ["message-1", "message-2"],
+        },
         knowledgeRefs: { entityIds: ["project-x"], fileIds: [] },
       }),
     });
@@ -255,7 +297,11 @@ describe("createTaskRepository sqlite", () => {
       userId: "summary-u1",
       item: summaryAction({
         title: "Send launch notes",
-        structuredPayload: { parentEntityId: "project-x", messageIds: ["message-2"] },
+        structuredPayload: {
+          assigneeName: "Summary Owner",
+          parentEntityId: "project-x",
+          messageIds: ["message-2"],
+        },
         knowledgeRefs: { entityIds: ["project-x"], fileIds: [] },
       }),
     });
@@ -307,6 +353,8 @@ describe("createTaskRepository sqlite", () => {
       status: "open",
       status_authority: "local",
       created_by_user_id: "summary-u1",
+      assignee_entity_id: "person-summary",
+      assignee_name: "Summary Owner",
       parent_entity_id: "project-x",
     });
     expect(evidence).toEqual([
@@ -321,7 +369,8 @@ describe("createTaskRepository sqlite", () => {
   });
 
   it("links Summarizer tasks to one unambiguous project with a qualified name", async () => {
-    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
+    await seedPerson(db, "person-summary", "Summary Owner", ["summary@example.com"]);
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     const repo = createTaskRepository(db);
 
@@ -329,7 +378,11 @@ describe("createTaskRepository sqlite", () => {
       userId: "summary-u1",
       item: summaryAction({
         title: "Vedant to integrate Aimfox into the LinkedIn Workflow",
-        structuredPayload: { parentName: "LinkedIn Workflow", messageIds: ["message-1"] },
+        structuredPayload: {
+          assigneeName: "Summary Owner",
+          parentName: "LinkedIn Workflow",
+          messageIds: ["message-1"],
+        },
       }),
     });
 
@@ -347,7 +400,7 @@ describe("createTaskRepository sqlite", () => {
   });
 
   it("resolves Summarizer assignees only when a matched person belongs to an eligible team user", async () => {
-    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
     await seedUser(db, "vedant-user", "vedant@canvasx.ai", { name: "Vedant", emailVerified: true });
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     await seedPerson(db, "person-vedant", "Vedant", ["vedant@canvasx.ai"]);
@@ -380,7 +433,7 @@ describe("createTaskRepository sqlite", () => {
   });
 
   it("resolves Summarizer assignees through provider email identities", async () => {
-    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
     await seedUser(db, "vedant-user", "vedant.primary@example.com", { name: "Vedant Primary" });
     await seedProviderIdentity(db, "vedant-user", "google", "vedant@canvasx.ai");
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
@@ -414,7 +467,7 @@ describe("createTaskRepository sqlite", () => {
   });
 
   it("resolves Summarizer assignees when a Slack hint confirms the eligible user identity", async () => {
-    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
     await seedUser(db, "vedant-user", "vedant@canvasx.ai", {
       name: "Vedant",
       emailVerified: true,
@@ -451,7 +504,7 @@ describe("createTaskRepository sqlite", () => {
     });
   });
 
-  it("keeps unverified user-email matches proposed instead of assigning them", async () => {
+  it("skips Summarizer tasks when the matched user email is unverified", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedUser(db, "vedant-user", "vedant@canvasx.ai", { name: "Vedant" });
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
@@ -470,21 +523,18 @@ describe("createTaskRepository sqlite", () => {
       }),
     });
 
-    const task = await db
+    const rows = await db
       .selectFrom("tasks")
       .selectAll()
-      .where("id", "=", result.status === "upserted" ? result.taskId : "")
-      .executeTakeFirstOrThrow();
+      .where("source", "=", "summary")
+      .where("title", "=", "Vedant to test summarizer task creation")
+      .execute();
 
-    expect(task).toMatchObject({
-      assignee_entity_id: null,
-      assignee_name: null,
-      proposed_assignee_name: "Vedant",
-      parent_entity_id: "linkedin-workflow-connect",
-    });
+    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
+    expect(rows).toHaveLength(0);
   });
 
-  it("keeps graph-only Summarizer assignees proposed instead of assigning them", async () => {
+  it("skips graph-only Summarizer assignees instead of minting tasks", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     await seedPerson(db, "person-vedant", "Vedant", ["vedant@canvasx.ai"]);
@@ -502,21 +552,18 @@ describe("createTaskRepository sqlite", () => {
       }),
     });
 
-    const task = await db
+    const rows = await db
       .selectFrom("tasks")
       .selectAll()
-      .where("id", "=", result.status === "upserted" ? result.taskId : "")
-      .executeTakeFirstOrThrow();
+      .where("source", "=", "summary")
+      .where("title", "=", "Vedant to test summarizer task creation")
+      .execute();
 
-    expect(task).toMatchObject({
-      assignee_entity_id: null,
-      assignee_name: null,
-      proposed_assignee_name: "Vedant",
-      parent_entity_id: "linkedin-workflow-connect",
-    });
+    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
+    expect(rows).toHaveLength(0);
   });
 
-  it("keeps same-name roster users proposed when no verified identity links to the person", async () => {
+  it("skips same-name roster users when no verified identity links to the person", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedUser(db, "vedant-user", "vedant@canvasx.ai", { name: "Vedant", emailVerified: true });
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
@@ -535,21 +582,18 @@ describe("createTaskRepository sqlite", () => {
       }),
     });
 
-    const task = await db
+    const rows = await db
       .selectFrom("tasks")
       .selectAll()
-      .where("id", "=", result.status === "upserted" ? result.taskId : "")
-      .executeTakeFirstOrThrow();
+      .where("source", "=", "summary")
+      .where("title", "=", "Vedant to test summarizer task creation")
+      .execute();
 
-    expect(task).toMatchObject({
-      assignee_entity_id: null,
-      assignee_name: null,
-      proposed_assignee_name: "Vedant",
-      parent_entity_id: "linkedin-workflow-connect",
-    });
+    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
+    expect(rows).toHaveLength(0);
   });
 
-  it("keeps Summarizer assignee text when a person name is ambiguous", async () => {
+  it("skips Summarizer task creation when a person name is ambiguous", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     await seedPerson(db, "person-apeksha-1", "Apeksha", ["apeksha@canvasx.ai"]);
@@ -568,20 +612,18 @@ describe("createTaskRepository sqlite", () => {
       }),
     });
 
-    const task = await db
+    const rows = await db
       .selectFrom("tasks")
       .selectAll()
-      .where("id", "=", result.status === "upserted" ? result.taskId : "")
-      .executeTakeFirstOrThrow();
+      .where("source", "=", "summary")
+      .where("title", "=", "Apeksha to deliver dashboard designs")
+      .execute();
 
-    expect(task).toMatchObject({
-      assignee_entity_id: null,
-      assignee_name: null,
-      proposed_assignee_name: "Apeksha",
-    });
+    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
+    expect(rows).toHaveLength(0);
   });
 
-  it("keeps raw text-only Summarizer assignees proposed instead of assigning them", async () => {
+  it("skips raw text-only Summarizer assignees instead of minting tasks", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     const repo = createTaskRepository(db);
@@ -598,22 +640,47 @@ describe("createTaskRepository sqlite", () => {
       }),
     });
 
-    const task = await db
+    const rows = await db
       .selectFrom("tasks")
       .selectAll()
-      .where("id", "=", result.status === "upserted" ? result.taskId : "")
-      .executeTakeFirstOrThrow();
+      .where("source", "=", "summary")
+      .where("title", "=", "Roopak to review backend task extraction logic")
+      .execute();
 
-    expect(task).toMatchObject({
-      assignee_entity_id: null,
-      assignee_name: null,
-      proposed_assignee_name: "Roopak",
-      parent_entity_id: "linkedin-workflow-connect",
+    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
+    expect(rows).toHaveLength(0);
+  });
+
+  it("skips Summarizer action items with no internal assignee", async () => {
+    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
+    const repo = createTaskRepository(db);
+
+    const result = await repo.promoteSummaryTask({
+      userId: "summary-u1",
+      item: summaryAction({
+        title: "Document acceptance criteria for Sketch task assignment",
+        structuredPayload: {
+          parentName: "LinkedIn Workflow",
+          messageIds: ["message-no-assignee"],
+        },
+      }),
     });
+
+    const rows = await db
+      .selectFrom("tasks")
+      .selectAll()
+      .where("source", "=", "summary")
+      .where("title", "=", "Document acceptance criteria for Sketch task assignment")
+      .execute();
+
+    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
+    expect(rows).toHaveLength(0);
   });
 
   it("leaves Summarizer task parents unlinked when qualified project names are ambiguous", async () => {
-    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
+    await seedPerson(db, "person-summary", "Summary Owner", ["summary@example.com"]);
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     await seedProject(db, "linkedin-workflow-dashboard", "Linkedin Workflow Dashboard");
     const repo = createTaskRepository(db);
@@ -622,7 +689,11 @@ describe("createTaskRepository sqlite", () => {
       userId: "summary-u1",
       item: summaryAction({
         title: "Vedant to integrate Aimfox into the LinkedIn Workflow",
-        structuredPayload: { parentName: "LinkedIn Workflow", messageIds: ["message-1"] },
+        structuredPayload: {
+          assigneeName: "Summary Owner",
+          parentName: "LinkedIn Workflow",
+          messageIds: ["message-1"],
+        },
       }),
     });
 
@@ -639,7 +710,8 @@ describe("createTaskRepository sqlite", () => {
   });
 
   it("reanchors a previous null-parent Summarizer task when a rerun adds a parent", async () => {
-    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
+    await seedPerson(db, "person-summary", "Summary Owner", ["summary@example.com"]);
     await seedProject(db, "project-x", "Project X");
     const repo = createTaskRepository(db);
 
@@ -647,14 +719,14 @@ describe("createTaskRepository sqlite", () => {
       userId: "summary-u1",
       item: summaryAction({
         title: "Confirm Atlas launch checklist",
-        structuredPayload: { messageIds: [101] },
+        structuredPayload: { assigneeName: "Summary Owner", messageIds: [101] },
       }),
     });
     const second = await repo.promoteSummaryTask({
       userId: "summary-u1",
       item: summaryAction({
         title: "Confirm Atlas launch checklist",
-        structuredPayload: { parentEntityId: "project-x", messageIds: [102] },
+        structuredPayload: { assigneeName: "Summary Owner", parentEntityId: "project-x", messageIds: [102] },
       }),
     });
 
@@ -686,7 +758,8 @@ describe("createTaskRepository sqlite", () => {
   });
 
   it("reuses a reanchored Summarizer task when a rerun resolves the parent key", async () => {
-    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
+    await seedPerson(db, "person-summary", "Summary Owner", ["summary@example.com"]);
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     const repo = createTaskRepository(db);
     const legacy = await repo.upsertTask({
@@ -712,7 +785,11 @@ describe("createTaskRepository sqlite", () => {
       userId: "summary-u1",
       item: summaryAction({
         title: "Integrate Aimfox into LinkedIn Workflow",
-        structuredPayload: { parentName: "LinkedIn Workflow", messageIds: ["message-2"] },
+        structuredPayload: {
+          assigneeName: "Summary Owner",
+          parentName: "LinkedIn Workflow",
+          messageIds: ["message-2"],
+        },
       }),
     });
 
@@ -733,14 +810,15 @@ describe("createTaskRepository sqlite", () => {
   });
 
   it("preserves existing local status when an agent observes the same task again", async () => {
-    await seedUser(db, "brief-u1", "u1@example.com");
+    await seedUser(db, "brief-u1", "u1@example.com", { emailVerified: true });
+    await seedPerson(db, "person-u1", "Brief Owner One", ["u1@example.com"]);
     await seedProject(db, "project-x", "Project X");
     await seedIndexedFile(db, "brief-file-1");
     const repo = createTaskRepository(db);
 
     const first = await repo.promoteBriefTask({
       userId: "brief-u1",
-      todo: briefTodo({ label: "todo" }),
+      todo: briefTodo({ label: "todo", structuredPayload: { assigneeName: "Brief Owner One" } }),
       knowledgeRefs: { entityIds: ["project-x"], fileIds: ["brief-file-1"] },
     });
     const taskId = first.status === "upserted" ? first.taskId : "";
@@ -758,7 +836,7 @@ describe("createTaskRepository sqlite", () => {
 
     await repo.promoteBriefTask({
       userId: "brief-u1",
-      todo: briefTodo({ label: "in_progress" }),
+      todo: briefTodo({ label: "in_progress", structuredPayload: { assigneeName: "Brief Owner One" } }),
       knowledgeRefs: { entityIds: ["project-x"], fileIds: ["brief-file-1"] },
     });
 
@@ -820,6 +898,12 @@ describe("createTaskRepository sqlite", () => {
       userId: "summary-u2",
       status: "dropped",
     });
+    const adminUpdate = await repo.updateLocalTaskStatus({
+      taskId: local.taskId,
+      userId: "summary-u2",
+      status: "in_progress",
+      canEditAllLocalTasks: true,
+    });
     const externalUpdate = await repo.updateLocalTaskStatus({
       taskId: external.taskId,
       userId: "summary-u1",
@@ -835,6 +919,13 @@ describe("createTaskRepository sqlite", () => {
       completed_at: expect.any(String),
     });
     expect(otherUserUpdate).toBeNull();
+    expect(adminUpdate).toMatchObject({
+      id: local.taskId,
+      status: "in_progress",
+      status_raw: "in_progress",
+      status_authority: "local",
+      completed_at: null,
+    });
     expect(externalUpdate).toBeNull();
   });
 
