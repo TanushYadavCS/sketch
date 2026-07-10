@@ -959,6 +959,7 @@ export interface TasksTable {
   status_authority: string;
   assignee_entity_id: string | null;
   assignee_name: string | null;
+  proposed_assignee_name: string | null;
   priority: string | null;
   due_at: string | null;
   provenance: string;

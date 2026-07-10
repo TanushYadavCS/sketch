@@ -30,7 +30,7 @@ export async function handleListTasks(
   const repo = createTaskRepository(deps.db);
   const opts = {
     viewer,
-    viewerUserId: deps.currentUserId,
+    userId: deps.currentUserId ?? null,
     status: status as TaskStatus | undefined,
     limit: Math.min(limit ?? 50, 100),
   };

@@ -165,7 +165,7 @@ describe("structural task materialization", () => {
     await db.destroy();
   });
 
-  it("mirrors status, falls unknown types back to open, and resolves ClickUp folder and folderless parents", async () => {
+  it("mirrors status, treats unknown and ClickUp custom statuses as in progress, and resolves ClickUp parents", async () => {
     await seedBase(db, "linear");
     const linearProject = await seedProject(db, { name: "Sketch OSS", source: "linear", sourceId: "proj-1" });
     await upsertTaskFact(db, {
@@ -209,7 +209,8 @@ describe("structural task materialization", () => {
       status_raw: "Done",
       parent_entity_id: linearProject.id,
     });
-    expect(byId.get("task-unknown")).toMatchObject({ status: "open", status_raw: "Needs Design" });
+    expect(byId.get("task-unknown")).toMatchObject({ status: "in_progress", status_raw: "Needs Design" });
+    expect(byId.get("cu-list-task")).toMatchObject({ status: "in_progress", status_raw: "In Progress" });
     expect(byId.get("cu-folder-task")?.parent_source_ref).toBe("clickup:folder-1");
     expect(byId.get("cu-list-task")?.parent_source_ref).toBe("clickup:list-1");
     expect(byId.get("cu-folder-task")?.parent_source_ref).not.toContain("space");

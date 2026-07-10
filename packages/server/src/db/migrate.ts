@@ -134,6 +134,8 @@ import * as m131 from "./migrations/131-trunk-name-embeddings";
 import * as m132 from "./migrations/132-agent-messages";
 import * as m133 from "./migrations/133-chat-session-runtime";
 import * as m134 from "./migrations/134-chat-session-archived-at";
+import * as m135 from "./migrations/135-tasks-proposed-assignee";
+import * as m136 from "./migrations/136-retire-unassigned-agent-tasks";
 import type { DB } from "./schema";
 
 /**
@@ -277,6 +279,8 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "132-agent-messages": m132,
           "133-chat-session-runtime": m133,
           "134-chat-session-archived-at": m134,
+          "135-tasks-proposed-assignee": m135,
+          "136-retire-unassigned-agent-tasks": m136,
         };
       },
     },

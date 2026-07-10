@@ -275,6 +275,43 @@ export const handlers = [
     return HttpResponse.json({ members: [], truncated: false });
   }),
 
+  http.get("/api/entities/:id/tasks", () => {
+    return HttpResponse.json({ tasks: [] });
+  }),
+
+  http.patch("/api/entities/:id/tasks/:taskId", async ({ params, request }) => {
+    const body = (await request.json()) as { status?: string };
+    return HttpResponse.json({
+      task: {
+        id: params.taskId,
+        parentEntityId: params.id,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: "Updated task",
+        status: body.status ?? "open",
+        statusRaw: body.status ?? "open",
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        proposedAssigneeName: null,
+        priority: null,
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: String(params.taskId),
+        createdByUserId: "u1",
+        createdByUserName: "Alice Smith",
+        createdByUserEmail: "alice@example.com",
+        isOwnedByViewer: true,
+        readonlyReason: null,
+        completedAt: body.status === "done" ? new Date().toISOString() : null,
+        updatedAt: new Date().toISOString(),
+        canEditStatus: true,
+      },
+    });
+  }),
+
   http.put("/api/entities/:id/members/:fileId", () => {
     return HttpResponse.json({ ok: true });
   }),

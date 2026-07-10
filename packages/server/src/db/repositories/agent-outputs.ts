@@ -132,6 +132,7 @@ export interface AgentUserPrefs {
   deliveryModel?: AgentDeliveryModel;
   sources?: AgentSourceConfig[];
   routes?: AgentRoute[];
+  createTasks?: boolean;
 }
 
 export interface AgentUserConfig {

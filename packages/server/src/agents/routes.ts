@@ -473,6 +473,7 @@ function parseConfigPatch(body: Record<string, unknown>, def: AgentDefinition) {
     deliveryModel?: AgentDeliveryModel;
     sources?: AgentSourceConfig[];
     routes?: AgentRoute[];
+    createTasks?: boolean;
   } = {};
   if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
   if (typeof body.scheduleHour === "number" && Number.isInteger(body.scheduleHour)) {
@@ -503,6 +504,7 @@ function parseConfigPatch(body: Record<string, unknown>, def: AgentDefinition) {
   const routes = parseRoutes(body.routes, def);
   assertRoutesReferenceSources(routes, sources);
   if (routes !== undefined) patch.routes = routes;
+  if (typeof body.createTasks === "boolean") patch.createTasks = body.createTasks;
   return patch;
 }
 

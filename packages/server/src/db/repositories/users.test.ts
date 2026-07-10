@@ -359,6 +359,46 @@ describe("remove()", () => {
     expect(found).toBeUndefined();
   });
 
+  it("preserves created tasks when deleting a user", async () => {
+    const created = await users.create({ name: "Task Creator", slackUserId: "U014" });
+    await db
+      .insertInto("tasks")
+      .values({
+        id: "task-created-by-user",
+        parent_entity_id: null,
+        parent_source_ref: null,
+        parent_name: null,
+        source: "summary",
+        external_ref: null,
+        title: "Follow up from summarizer",
+        normalized_title: "follow up from summarizer",
+        status: "open",
+        status_raw: "Open",
+        status_authority: "local",
+        assignee_entity_id: null,
+        assignee_name: null,
+        proposed_assignee_name: null,
+        priority: null,
+        due_at: null,
+        provenance: "summary",
+        source_task_id: "summary-task-created-by-user",
+        created_by_user_id: created.id,
+        status_changed_at: null,
+        completed_at: null,
+        valid_from: null,
+        valid_to: null,
+        milestone_series_key: null,
+      })
+      .execute();
+
+    await users.remove(created.id);
+
+    const task = await db.selectFrom("tasks").selectAll().where("id", "=", "task-created-by-user").executeTakeFirst();
+    const found = await users.findById(created.id);
+    expect(found).toBeUndefined();
+    expect(task).toMatchObject({ title: "Follow up from summarizer", created_by_user_id: null });
+  });
+
   it("does not throw on non-existent id", async () => {
     await expect(users.remove("nonexistent-id")).resolves.not.toThrow();
   });
