@@ -40,6 +40,7 @@ export function createWhatsAppConnector(): Connector {
     type: "whatsapp",
     perUserAuth: false,
     requiresOAuthClientSetup: false,
+    syncIsCompleteSnapshot: false,
 
     async validateCredentials(credentials: ConnectorCredentials): Promise<void> {
       assertSystemCredentials(credentials);

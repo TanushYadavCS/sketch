@@ -2,7 +2,13 @@ import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import { QueueManager } from "../queue";
 import { createTestLogger } from "../test-utils";
-import { WATI_WEBHOOK_QUEUE_KEY, extractWebhookToken, isValidWebhookToken, watiWebhookRoutes } from "./wati-webhook";
+import {
+  WATI_WEBHOOK_QUEUE_KEY,
+  extractWebhookToken,
+  isValidWebhookToken,
+  watiWebhookQueueKey,
+  watiWebhookRoutes,
+} from "./wati-webhook";
 
 function createTestApp(
   handleWebhook = vi.fn(async () => [
@@ -46,6 +52,19 @@ describe("watiWebhookRoutes", () => {
     expect(getQueue).toHaveBeenCalledWith(WATI_WEBHOOK_QUEUE_KEY);
     expect(queue.enqueue).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(handleWebhook).toHaveBeenCalledWith({ eventType: "message" }));
+  });
+
+  it("routes traffic to a per-conversation queue key so one chat cannot block others", async () => {
+    const { app, getQueue } = createTestApp();
+
+    const res = await app.request("/whatsapp/wati/events?token=secret-token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventType: "message", waId: "15551234567", conversationId: "conv-42" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(getQueue).toHaveBeenCalledWith(`${WATI_WEBHOOK_QUEUE_KEY}:conv-42`);
   });
 
   it("accepts bearer-token authenticated webhook payloads when headers are available", async () => {
@@ -145,5 +164,22 @@ describe("Wati webhook token helpers", () => {
     expect(isValidWebhookToken("secret-token", "secret-token")).toBe(true);
     expect(isValidWebhookToken("wrong", "secret-token")).toBe(false);
     expect(isValidWebhookToken(null, "secret-token")).toBe(false);
+  });
+});
+
+describe("watiWebhookQueueKey", () => {
+  it("prefers conversationId, then ticketId, then waId", () => {
+    expect(watiWebhookQueueKey({ conversationId: "conv-1", ticketId: "t-1", waId: "15550001111" })).toBe(
+      `${WATI_WEBHOOK_QUEUE_KEY}:conv-1`,
+    );
+    expect(watiWebhookQueueKey({ ticketId: "t-1", waId: "15550001111" })).toBe(`${WATI_WEBHOOK_QUEUE_KEY}:t-1`);
+    expect(watiWebhookQueueKey({ waId: "15550001111" })).toBe(`${WATI_WEBHOOK_QUEUE_KEY}:15550001111`);
+  });
+
+  it("falls back to the global key when no conversation identifier is present", () => {
+    expect(watiWebhookQueueKey({ eventType: "message" })).toBe(WATI_WEBHOOK_QUEUE_KEY);
+    expect(watiWebhookQueueKey({ waId: "   " })).toBe(WATI_WEBHOOK_QUEUE_KEY);
+    expect(watiWebhookQueueKey(null)).toBe(WATI_WEBHOOK_QUEUE_KEY);
+    expect(watiWebhookQueueKey("not-an-object")).toBe(WATI_WEBHOOK_QUEUE_KEY);
   });
 });

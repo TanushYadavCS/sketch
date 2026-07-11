@@ -426,6 +426,7 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
 
       expect(result.itemsCreated).toBe(1);
       expect(slice.indexed_file_id).toBe(file.id);
+      expect(JSON.parse(slice.roster_snapshot).participants).toHaveLength(2);
       expect(file.provider_file_id).toBe(seeded.sliceId);
       expect(file.source).toBe("whatsapp");
       expect(file.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
@@ -452,6 +453,31 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       expect(items.map((item) => item.providerFileId).sort()).toEqual(
         [oldUnlinked.sliceId, recentLinked.sliceId].sort(),
       );
+    });
+
+    it("does not archive old linked slices when a partial sync emits newer slices", async () => {
+      const config = await seedConnectorConfig(db);
+      const oldLinked = await seedSlice(db, { verdict: "kept", salienceSignals: SALIENCE_SIGNALS });
+      const recentUnlinked = await seedSlice(db, { verdict: "kept", salienceSignals: SALIENCE_SIGNALS });
+      await setSliceWindow(db, oldLinked.sliceId, "2020-01-01T09:00:00.000Z", "2020-01-01T09:01:00.000Z");
+      await setSliceWindow(
+        db,
+        recentUnlinked.sliceId,
+        new Date(Date.now() - 60_000).toISOString(),
+        new Date().toISOString(),
+      );
+      const oldFileId = await linkSliceToIndexedFile(db, config.id, oldLinked.sliceId);
+
+      const result = await runConnectorSync(db, config.id, createTestLogger());
+      const oldFile = await db
+        .selectFrom("indexed_files")
+        .select(["is_archived"])
+        .where("id", "=", oldFileId)
+        .executeTakeFirstOrThrow();
+
+      expect(result.itemsCreated).toBe(1);
+      expect(result.itemsArchived).toBe(0);
+      expect(oldFile.is_archived).toBe(0);
     });
 
     it("stops emissions for disabled groups while retaining previously indexed rows", async () => {

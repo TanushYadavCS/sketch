@@ -528,6 +528,13 @@ async function syncedItemForKeptSlice(
   logger: Logger,
 ): Promise<{ item: SyncedItem | null; skippedNoScope: boolean }> {
   const rendered = await renderSlice(db, context, logger);
+  if (rendered.serializedRosterSnapshot !== context.slice.roster_snapshot) {
+    await db
+      .updateTable("conversation_slices")
+      .set({ roster_snapshot: rendered.serializedRosterSnapshot })
+      .where("id", "=", context.slice.id)
+      .execute();
+  }
   if (rendered.teammateEmails.length === 0) {
     await archiveLinkedSliceFileIfPresent(db, context);
     logger.warn(

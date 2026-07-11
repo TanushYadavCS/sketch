@@ -10,6 +10,7 @@ import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/env
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
+import { resolveAgentRuntimeProviderConfigFromSettings } from "./agent/runtime/provider";
 import { createAgentOutputDeliveryService } from "./agents/output-delivery";
 import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
@@ -200,9 +201,14 @@ export async function createServer(config: Config, options?: CreateServerOptions
         maxRetries: config.GEMINI_MAX_RETRIES,
       },
       openRouterApiKey: params.openRouterApiKey ?? config.OPENROUTER_API_KEY,
+      maxAttachmentTotalBytes: params.maxAttachmentTotalBytes ?? config.MAX_ATTACHMENT_TOTAL_MB * 1024 * 1024,
       settingsEncryptionKey: params.settingsEncryptionKey ?? config.ENCRYPTION_KEY,
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,
+      agentRuntime: params.agentRuntime ?? config.AGENT_RUNTIME,
+      loadAgentRuntimeProviderConfig:
+        params.loadAgentRuntimeProviderConfig ??
+        (async () => resolveAgentRuntimeProviderConfigFromSettings(await settingsRepo.get())),
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,
@@ -242,7 +248,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   }
 
   // 6. Queue manager
-  const queueManager = new QueueManager();
+  const queueManager = new QueueManager({ logger });
 
   // 7. Slack infrastructure
   const userCache = new UserCache();

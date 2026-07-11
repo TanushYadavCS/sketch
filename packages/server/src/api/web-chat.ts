@@ -16,7 +16,7 @@ import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } from "../agent/runner";
-import { deleteSessionId } from "../agent/sessions";
+import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
 import { TOOL_PROGRESS_OPTIONS, type ToolProgressCommand } from "../commands";
@@ -1290,7 +1290,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     await rm(transcriptPath);
     await rm(legacyWebChatTranscriptPath(workspaceDir, conversationId), { force: true });
     await removeEmptyLegacyWebChatTranscriptDir(workspaceDir);
-    await deleteSessionId(deps.db, currentUser.id, conversationId);
+    await archiveRuntimeSessions(deps.db, currentUser.id, conversationId);
     return c.json({ success: true });
   });
 

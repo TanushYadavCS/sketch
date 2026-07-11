@@ -156,6 +156,17 @@ describe("Outlook connector", () => {
       if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages/delta") {
         return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/sent-delta-1" });
       }
+      if (url.pathname === "/v1.0/me/messages/inbox-1") {
+        return jsonResponse(outlookMessage("inbox-1"));
+      }
+      if (url.pathname === "/v1.0/me/messages/sent-1") {
+        return jsonResponse(
+          outlookMessage("sent-1", {
+            from: { name: "Owner", address: "owner@canvasx.ai" },
+            to: [{ name: "Jane Doe", address: "jane@example.com" }],
+          }),
+        );
+      }
       throw new Error(`unexpected fetch ${url.toString()}`);
     });
 
@@ -254,6 +265,17 @@ describe("Outlook connector", () => {
       }
       if (url.pathname === "/v1.0/me/mailFolders/inbox/messages/delta") {
         return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/inbox-delta-new" });
+      }
+      if (url.pathname === "/v1.0/me/messages/inbox-after-410") {
+        return jsonResponse(outlookMessage("inbox-after-410"));
+      }
+      if (url.pathname === "/v1.0/me/messages/sent-2") {
+        return jsonResponse(
+          outlookMessage("sent-2", {
+            from: { name: "Owner", address: "owner@canvasx.ai" },
+            to: [{ name: "Jane Doe", address: "jane@example.com" }],
+          }),
+        );
       }
       throw new Error(`unexpected fetch ${url.toString()}`);
     });
@@ -490,6 +512,236 @@ describe("Outlook connector", () => {
     } finally {
       await db.destroy();
     }
+  });
+
+  it("streams full bodies one page at a time so page 1 is emitted before page 2 is fetched", async () => {
+    const connector = createOutlookConnector();
+    const bodyFetches: string[] = [];
+    const sent = Array.from({ length: 60 }, (_, index) =>
+      outlookMessage(`sent-${index}`, {
+        from: { name: "Owner", address: "owner@canvasx.ai" },
+        to: [{ name: `R${index}`, address: `r${index}@example.com` }],
+        sentDateTime: new Date(Date.UTC(2026, 1, 4, 10, 0, index)).toISOString(),
+        receivedDateTime: new Date(Date.UTC(2026, 1, 4, 10, 0, index)).toISOString(),
+      }),
+    );
+    const byId = new Map(sent.map((message) => [message.id, message]));
+    mockGraphFetch((url) => {
+      if (url.pathname === "/v1.0/me/mailFolders/inbox/messages") {
+        return jsonResponse({ value: [] });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages") {
+        return jsonResponse({ value: sent });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/inbox/messages/delta") {
+        return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/inbox-delta" });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages/delta") {
+        return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/sent-delta" });
+      }
+      const match = url.pathname.match(/^\/v1\.0\/me\/messages\/(.+)$/);
+      if (match) {
+        const id = decodeURIComponent(match[1]);
+        const message = byId.get(id);
+        if (message) {
+          bodyFetches.push(id);
+          return jsonResponse(message);
+        }
+      }
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const iterator = connector.sync({
+      connectorConfigId: "connector-outlook",
+      credentials: validCredentials(),
+      scopeConfig: { initialDays: 90, maxMessages: 120 },
+      cursor: null,
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    });
+
+    const first = await iterator.next();
+    expect(first.done).toBe(false);
+    expect(bodyFetches).toHaveLength(50);
+
+    const items = first.value ? [first.value] : [];
+    for (let next = await iterator.next(); !next.done; next = await iterator.next()) {
+      items.push(next.value);
+    }
+    expect(items).toHaveLength(60);
+    expect(bodyFetches).toHaveLength(60);
+  });
+
+  it("gates inbound-only senders using reciprocity built from the address-only pass", async () => {
+    const connector = createOutlookConnector();
+    const suppressed: Array<{ providerFileId: string; reason: string }> = [];
+    const inboxAlice = outlookMessage("inbox-alice", {
+      from: { name: "Alice", address: "alice@example.com" },
+      to: [{ name: "Owner", address: "owner@canvasx.ai" }],
+    });
+    const inboxBob = outlookMessage("inbox-bob", {
+      from: { name: "Bob", address: "bob@example.com" },
+      to: [{ name: "Owner", address: "owner@canvasx.ai" }],
+      conversationId: "conversation-bob",
+    });
+    const sentAlice = outlookMessage("sent-alice", {
+      from: { name: "Owner", address: "owner@canvasx.ai" },
+      to: [{ name: "Alice", address: "alice@example.com" }],
+    });
+    const byId = new Map([inboxAlice, inboxBob, sentAlice].map((message) => [message.id, message]));
+    mockGraphFetch((url) => {
+      if (url.pathname === "/v1.0/me/mailFolders/inbox/messages") {
+        return jsonResponse({ value: [inboxAlice, inboxBob] });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages") {
+        return jsonResponse({ value: [sentAlice] });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/inbox/messages/delta") {
+        return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/inbox-delta" });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages/delta") {
+        return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/sent-delta" });
+      }
+      const match = url.pathname.match(/^\/v1\.0\/me\/messages\/(.+)$/);
+      if (match) {
+        const message = byId.get(decodeURIComponent(match[1]));
+        if (message) return jsonResponse(message);
+      }
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        connectorConfigId: "connector-outlook",
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 90, maxMessages: 10 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+        onEmailSuppressed: async (record) => {
+          suppressed.push({ providerFileId: record.providerFileId, reason: record.reason });
+        },
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId).sort()).toEqual(["inbox-alice", "sent-alice"]);
+    expect(suppressed).toContainEqual({ providerFileId: "inbox-bob", reason: "inbound_only" });
+
+    const cursor = JSON.parse(
+      (await connector.getCursor({
+        credentials: validCredentials(),
+        scopeConfig: {},
+        currentCursor: null,
+        logger,
+      })) ?? "{}",
+    ) as { reciprocityEmails?: string[] };
+    expect(cursor.reciprocityEmails).toContain("alice@example.com");
+  });
+
+  it("keeps the maxMessages cap after the streaming refactor", async () => {
+    const connector = createOutlookConnector();
+    const bodyFetches: string[] = [];
+    const sent = Array.from({ length: 5 }, (_, index) =>
+      outlookMessage(`cap-${index}`, {
+        from: { name: "Owner", address: "owner@canvasx.ai" },
+        to: [{ name: `R${index}`, address: `r${index}@example.com` }],
+        sentDateTime: new Date(Date.UTC(2026, 1, 4, 10, 0, index)).toISOString(),
+        receivedDateTime: new Date(Date.UTC(2026, 1, 4, 10, 0, index)).toISOString(),
+      }),
+    );
+    const byId = new Map(sent.map((message) => [message.id, message]));
+    mockGraphFetch((url) => {
+      if (url.pathname === "/v1.0/me/mailFolders/inbox/messages") {
+        return jsonResponse({ value: [] });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages") {
+        return jsonResponse({ value: [...sent].reverse() });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/inbox/messages/delta") {
+        return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/inbox-delta" });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages/delta") {
+        return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/sent-delta" });
+      }
+      const match = url.pathname.match(/^\/v1\.0\/me\/messages\/(.+)$/);
+      if (match) {
+        const id = decodeURIComponent(match[1]);
+        const message = byId.get(id);
+        if (message) {
+          bodyFetches.push(id);
+          return jsonResponse(message);
+        }
+      }
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        connectorConfigId: "connector-outlook",
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 90, maxMessages: 3 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId).sort()).toEqual(["cap-2", "cap-3", "cap-4"]);
+    expect(bodyFetches.sort()).toEqual(["cap-2", "cap-3", "cap-4"]);
+  });
+
+  it("produces content and hash byte-identical to normalizing the full message directly", async () => {
+    const connector = createOutlookConnector();
+    const inboxFull = outlookMessage("inbox-hash", {
+      from: { name: "Jane Doe", address: "jane@example.com" },
+      to: [{ name: "Owner", address: "owner@canvasx.ai" }],
+      subject: "Quarterly numbers",
+      body: "<p>Here are the <b>numbers</b>.</p>",
+      bodyType: "html",
+    });
+    const sentJane = outlookMessage("sent-jane", {
+      from: { name: "Owner", address: "owner@canvasx.ai" },
+      to: [{ name: "Jane Doe", address: "jane@example.com" }],
+    });
+    const byId = new Map([inboxFull, sentJane].map((message) => [message.id, message]));
+    mockGraphFetch((url) => {
+      if (url.pathname === "/v1.0/me/mailFolders/inbox/messages") {
+        return jsonResponse({ value: [inboxFull] });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages") {
+        return jsonResponse({ value: [sentJane] });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/inbox/messages/delta") {
+        return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/inbox-delta" });
+      }
+      if (url.pathname === "/v1.0/me/mailFolders/sentitems/messages/delta") {
+        return jsonResponse({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/sent-delta" });
+      }
+      const match = url.pathname.match(/^\/v1\.0\/me\/messages\/(.+)$/);
+      if (match) {
+        const message = byId.get(decodeURIComponent(match[1]));
+        if (message) return jsonResponse(message);
+      }
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    const items = await drain(
+      connector.sync({
+        connectorConfigId: "connector-outlook",
+        credentials: validCredentials(),
+        scopeConfig: { initialDays: 90, maxMessages: 10 },
+        cursor: null,
+        logger,
+        ownerEmail: "owner@canvasx.ai",
+      }),
+    );
+
+    const emitted = items.find((item) => item.providerFileId === "inbox-hash");
+    const normalized = toNormalizedOutlookEmail(inboxFull, "owner@canvasx.ai", "inbox");
+    if (!normalized) throw new Error("normalization failed");
+    const expected = emailToSyncedItem("connector-outlook", normalized, createSeedGate(normalized, new Set()));
+    expect(emitted?.content).toBe(expected.content);
+    expect(emitted?.contentHash).toBe(expected.contentHash);
   });
 });
 

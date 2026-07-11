@@ -49,6 +49,7 @@ export const BASELINE_RECENCY_WINDOW_DAYS = 30;
 export const MIN_VERBATIM_NAME_LENGTH = 4;
 export const MAX_PERSON_ANCHORS = 5;
 export const HUB_PERSON_DEGREE_CAP = 30;
+export const ADJACENCY_MAX_ANCHOR_FILES = 500;
 export const BASELINE_ALWAYS_INCLUDE_CAP = 50;
 export const PENDING_PROPOSAL_MIN_OCCURRENCE = 1;
 const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
@@ -214,27 +215,69 @@ async function loadNonHubPersonIds(deps: FileScopeDeps, personIds: string[]): Pr
  * Top adjacent entities for an anchor, by recency-weighted co-occurrence.
  * Decay: weight = exp(-ageDays / 60). Floor: total score >= 0.5. System
  * source types are excluded. Sorted by score desc.
+ *
+ * Degree bounding: the org's own company anchor is mentioned in nearly every
+ * file, so an unbounded `entity_mentions` self-join can materialize 10^5-10^6
+ * pair rows on this per-file hot path. Two guards keep Node's working set
+ * bounded without changing results for typical anchors:
+ *   1. The anchor is capped to its `maxAnchorFiles` most-recent files inside
+ *      SQL (ORDER BY file date DESC, LIMIT), so a hub anchor contributes at
+ *      most that many files instead of its full history.
+ *   2. Co-mentions are aggregated per (other entity, file) in the query — Node
+ *      receives one bounded row per co-mentioned entity per retained file with
+ *      the paired mention counts, never the raw pair cross-product.
+ * The decay kernel makes files older than a few half-lives contribute ~nothing,
+ * so trimming the oldest files past the cap leaves the surfaced top entities
+ * unchanged for typical anchors and only bounds pathological high-degree ones
+ * (the org's own company), which still surface their strongest — most recent —
+ * co-mentions rather than an arbitrary truncation. Unlike hub persons (dropped
+ * as anchors upstream in `loadNonHubPersonIds`), a company anchor is the core
+ * of the file's context and cannot be dropped, so it is bounded here instead.
+ * The exp() decay stays in TypeScript so the query is portable (SQLite + PG).
  */
-export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string): Promise<AdjacencyEntry[]> {
+export async function adjacencyForAnchor(
+  deps: FileScopeDeps,
+  anchorId: string,
+  maxAnchorFiles: number = ADJACENCY_MAX_ANCHOR_FILES,
+): Promise<AdjacencyEntry[]> {
   const systemTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
+  const fileDate = sql<string>`COALESCE(ifile.source_updated_at, ifile.source_created_at)`;
   const rows = await deps.db
-    .selectFrom("entity_mentions as em1")
-    .innerJoin("entity_mentions as em2", (join) =>
-      join.onRef("em2.indexed_file_id", "=", "em1.indexed_file_id").on("em2.entity_id", "!=", anchorId),
+    .with("anchor_files", (qb) =>
+      qb
+        .selectFrom("entity_mentions as em1")
+        .innerJoin("indexed_files as ifile", "ifile.id", "em1.indexed_file_id")
+        .select((eb) => [
+          eb.ref("em1.indexed_file_id").as("fid"),
+          fileDate.as("file_date"),
+          eb.fn.count<number>("em1.id").as("anchor_count"),
+        ])
+        .where("em1.entity_id", "=", anchorId)
+        .where("em1.confidence", "=", "EXTRACTED")
+        .where(sql<boolean>`COALESCE(ifile.source_updated_at, ifile.source_created_at) IS NOT NULL`)
+        .groupBy(["em1.indexed_file_id", fileDate])
+        .orderBy(fileDate, "desc")
+        .limit(maxAnchorFiles),
     )
-    .innerJoin("indexed_files as if", "if.id", "em1.indexed_file_id")
+    .selectFrom("anchor_files as af")
+    .innerJoin("entity_mentions as em2", (join) =>
+      join
+        .onRef("em2.indexed_file_id", "=", "af.fid")
+        .on("em2.entity_id", "!=", anchorId)
+        .on("em2.confidence", "=", "EXTRACTED"),
+    )
     .innerJoin("entities as e", "e.id", "em2.entity_id")
     .select((eb) => [
       eb.ref("em2.entity_id").as("other_id"),
       eb.ref("e.name").as("other_name"),
       eb.ref("e.source_type").as("other_source_type"),
-      sql<string | null>`COALESCE("if".source_updated_at, "if".source_created_at)`.as("file_date"),
+      eb.ref("af.file_date").as("file_date"),
+      eb.ref("af.anchor_count").as("anchor_count"),
+      eb.fn.count<number>("em2.id").as("other_count"),
     ])
-    .where("em1.entity_id", "=", anchorId)
-    .where("em1.confidence", "=", "EXTRACTED")
-    .where("em2.confidence", "=", "EXTRACTED")
     .where("e.source_type", "not in", systemTypes.length > 0 ? systemTypes : [""])
     .where(whereLiveEntity("e"))
+    .groupBy(["em2.entity_id", "e.name", "e.source_type", "af.file_date", "af.anchor_count"])
     .execute();
 
   const now = deps.now ? deps.now() : Date.now();
@@ -245,6 +288,7 @@ export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string):
     if (!t || Number.isNaN(t)) continue;
     const ageDays = Math.max(0, (now - t) / DAY_MS);
     const weight = Math.exp(-ageDays / HALF_LIFE_DAYS);
+    const pairCount = Number(row.anchor_count) * Number(row.other_count);
     const prev = scores.get(row.other_id) ?? {
       id: row.other_id,
       name: row.other_name,
@@ -254,8 +298,8 @@ export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string):
       lastSeen: 0,
       recentlyActive: false,
     };
-    prev.score += weight;
-    prev.mentionCount += 1;
+    prev.score += weight * pairCount;
+    prev.mentionCount += pairCount;
     prev.lastSeen = Math.max(prev.lastSeen, t);
     scores.set(row.other_id, prev);
   }
@@ -469,6 +513,28 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Baseline entries mentioned verbatim in the file, capped at
+ * BASELINE_ALWAYS_INCLUDE_CAP. Sorting by hotness up front and stopping once
+ * the cap is met bounds the per-entity RegExp scans over `content`: on files
+ * that name-drop a large slice of the baseline (e.g. the org's own catalog) we
+ * stop after the top-cap matches instead of compiling and scanning a regex for
+ * every candidate. The result is identical to filter-then-sort-then-slice
+ * because the sort (hotness desc, then name asc) is a total order.
+ */
+function collectVerbatimAlwaysInclude(candidates: KnownEntityForPrompt[], content: string): KnownEntityForPrompt[] {
+  const byHotness = [...candidates].sort((a, b) => {
+    const hotness = Number(b.hotness ?? 0) - Number(a.hotness ?? 0);
+    return hotness !== 0 ? hotness : a.name.localeCompare(b.name);
+  });
+  const alwaysInclude: KnownEntityForPrompt[] = [];
+  for (const entity of byHotness) {
+    if (alwaysInclude.length >= BASELINE_ALWAYS_INCLUDE_CAP) break;
+    if (hasVerbatimMention(content, entity)) alwaysInclude.push(entity);
+  }
+  return alwaysInclude;
+}
+
 function hasVerbatimMention(content: string, entity: KnownEntityForPrompt): boolean {
   if (!content) return false;
   const names = [entity.name, ...(entity.aliases ?? [])].filter(
@@ -534,13 +600,7 @@ async function rankBaselineKnownEntities(
   if (scoredCandidates.length === 0) return legacy;
 
   const cap = opts.baselineRelevanceCap ?? BASELINE_RELEVANCE_CAP;
-  const alwaysInclude = scoredCandidates
-    .filter((entity) => hasVerbatimMention(fileContent, entity))
-    .sort((a, b) => {
-      const hotness = Number(b.hotness ?? 0) - Number(a.hotness ?? 0);
-      return hotness !== 0 ? hotness : a.name.localeCompare(b.name);
-    })
-    .slice(0, BASELINE_ALWAYS_INCLUDE_CAP);
+  const alwaysInclude = collectVerbatimAlwaysInclude(scoredCandidates, fileContent);
   const alwaysIds = new Set(alwaysInclude.map((entity) => entity.id));
   const candidates = scoredCandidates.filter((entity) => !alwaysIds.has(entity.id));
   const candidateIds = candidates.flatMap((entity) => (entity.id ? [entity.id] : []));

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
 import { normalizeContactPointValue } from "../db/repositories/entities";
 import { createUserRepository } from "../db/repositories/users";
@@ -217,7 +217,7 @@ export function createWhatsAppIdentityResolutionService(db: Kysely<DB>) {
     const rows = await db
       .selectFrom("users")
       .select(["id", "name", "whatsapp_number"])
-      .where("whatsapp_number", "is not", null)
+      .where("whatsapp_number", "in", phones)
       .orderBy("name", "asc")
       .orderBy("id", "asc")
       .execute();
@@ -303,6 +303,7 @@ export function createWhatsAppIdentityResolutionService(db: Kysely<DB>) {
       .selectFrom("whatsapp_group_member_labels")
       .select(["phone_e164", "display_name", "company_name"])
       .where("group_jid", "=", groupJid)
+      .where("phone_e164", "in", phones)
       .orderBy("display_name", "asc")
       .orderBy("phone_e164", "asc")
       .execute();
@@ -322,13 +323,18 @@ export function createWhatsAppIdentityResolutionService(db: Kysely<DB>) {
 }
 
 async function loadPushNamesBySenderJid(db: Kysely<DB>, conversationId: number): Promise<Map<string, string>> {
-  const rows = await db
+  const ranked = db
     .selectFrom("conversation_messages")
     .select(["sender_jid", "sender_name", "received_at", "id"])
+    .select(
+      sql<number>`row_number() over (partition by sender_jid order by received_at desc, id desc)`.as("sender_rank"),
+    )
     .where("conversation_id", "=", conversationId)
-    .where("is_bot", "=", 0)
-    .orderBy("received_at", "asc")
-    .orderBy("id", "asc")
+    .where("is_bot", "=", 0);
+  const rows = await db
+    .selectFrom(ranked.as("ranked_messages"))
+    .select(["sender_jid", "sender_name"])
+    .where("sender_rank", "=", 1)
     .execute();
 
   const out = new Map<string, string>();

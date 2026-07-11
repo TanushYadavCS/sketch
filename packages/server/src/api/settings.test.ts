@@ -4,9 +4,12 @@
  * Verifies GET /api/settings/search does not return the raw gemini_api_key —
  * should return geminiApiKeyConfigured (boolean) instead.
  */
+import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../auth/password";
+import type { EmbeddingProvider } from "../connectors/embeddings/types";
+import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -30,6 +33,41 @@ async function seedAdmin(db: Kysely<DB>, email = "admin@test.com", password = "t
     authRole: "admin",
   });
   await settings.update({ onboardingCompletedAt: new Date().toISOString() });
+}
+
+async function seedPendingFile(db: Kysely<DB>, fileId: string, content: string): Promise<void> {
+  await db
+    .insertInto("connector_configs")
+    .values({
+      id: "conn-1",
+      connector_type: "google_drive",
+      auth_type: "oauth",
+      credentials: "{}",
+      created_by: "admin",
+    })
+    .onConflict((oc) => oc.doNothing())
+    .execute();
+  await db
+    .insertInto("indexed_files")
+    .values({
+      id: fileId,
+      connector_config_id: "conn-1",
+      provider_file_id: fileId,
+      file_name: "test.txt",
+      file_type: "text",
+      content_category: "document",
+      source: "google_drive",
+      source_path: "My Drive",
+      provider_url: null,
+      content,
+      summary: null,
+      context_note: null,
+      access_scope_id: null,
+      embedding_status: "pending",
+      source_updated_at: new Date().toISOString(),
+      synced_at: new Date().toISOString(),
+    })
+    .execute();
 }
 
 async function loginAdmin(app: ReturnType<typeof createApp>) {
@@ -291,6 +329,48 @@ describe("Settings API — security", () => {
 
       const decrypted = await encryptedSettings.get();
       expect(decrypted?.sketch_api_key).toBe(body.apiKey);
+    });
+  });
+
+  describe("POST /api/settings/search/enrichments — concurrency guard", () => {
+    it("returns 409 while an enrichment run is already active", async () => {
+      const app = createApp(db, config, { logger });
+      const adminCookie = await loginAdmin(app);
+
+      const fileId = randomUUID();
+      await seedPendingFile(db, fileId, `document body ${"word ".repeat(40).trim()}`);
+
+      let releaseEmbed: (() => void) | undefined;
+      const embedGate = new Promise<void>((resolve) => {
+        releaseEmbed = resolve;
+      });
+      const embeddingProvider: EmbeddingProvider = {
+        name: "blocking-test",
+        dimensions: 1,
+        supportsImages: false,
+        embedTexts: async (texts) => {
+          await embedGate;
+          return texts.map(() => [0.1]);
+        },
+      };
+
+      const runPromise = runEnrichment({ db, logger, embeddingProvider, fileIds: [fileId] });
+      try {
+        expect(isEnrichmentActive()).toBe(true);
+
+        const res = await app.request("/api/settings/search/enrichments", {
+          method: "POST",
+          headers: { Cookie: adminCookie },
+        });
+        expect(res.status).toBe(409);
+        const body = await res.json();
+        expect(body.error.code).toBe("CONFLICT");
+      } finally {
+        releaseEmbed?.();
+        await runPromise;
+      }
+
+      expect(isEnrichmentActive()).toBe(false);
     });
   });
 

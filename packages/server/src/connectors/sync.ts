@@ -20,6 +20,7 @@ import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
+import { heapStats, heapUsedMb } from "../lib/heap";
 import { resolveConnectorCredentials } from "./credential-providers";
 import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
@@ -191,6 +192,7 @@ export async function runConnectorSync(
   const ownerEmail = owner?.email ?? null;
 
   const syncLogger = logger.child({ connectorId: config.id, type: config.connector_type });
+  const startHeapMb = heapUsedMb();
   syncLogger.info("Starting sync");
 
   await repo.updateConfig(config.id, { syncStatus: "syncing", errorMessage: null });
@@ -403,7 +405,7 @@ export async function runConnectorSync(
       }
     }
 
-    if (!config.sync_cursor && seenSyncIdentityKeys.size > 0) {
+    if (connector.syncIsCompleteSnapshot !== false && !config.sync_cursor && seenSyncIdentityKeys.size > 0) {
       const reconcileResult = await reconcileConnectorSync({
         db,
         factRepo,
@@ -468,6 +470,7 @@ export async function runConnectorSync(
         updated: result.itemsUpdated,
         archived: result.itemsArchived,
         errors: result.errors.length,
+        ...heapStats(startHeapMb),
       },
       "Sync complete",
     );
@@ -476,7 +479,7 @@ export async function runConnectorSync(
   } catch (err) {
     activeSyncs.delete(config.id);
     const message = extractErrorMessage(err);
-    syncLogger.error({ err }, "Sync failed");
+    syncLogger.error({ err, ...heapStats(startHeapMb) }, "Sync failed");
 
     await repo.updateConfig(config.id, {
       syncStatus: "error",

@@ -510,6 +510,13 @@ function sanitizeWhatsAppHistoryDisplayName(value: string): string {
     .trim();
 }
 
+function sanitizeWhatsAppHistoryText(value: string): string {
+  return stripPersonalNumberTokens(value)
+    .replace(LOCAL_PATH_PATTERN, "[file]")
+    .replace(/\s{2,}/gu, " ")
+    .trim();
+}
+
 function renderAttachmentPlaceholder(attachment: Attachment): string {
   const mimeType = attachment.mimeType.toLowerCase();
   if (mimeType.startsWith("image/")) return "[image]";
@@ -535,7 +542,7 @@ export function renderWhatsAppGroupHistoryMessages(
       id: message.id,
       timestamp: message.providerTimestamp ?? message.receivedAt,
       sender: sender.length > 0 ? sender : safeSenderFallback(message),
-      text: message.text,
+      text: sanitizeWhatsAppHistoryText(message.text),
       ...(attachments.length > 0 ? { attachments } : {}),
     };
   });

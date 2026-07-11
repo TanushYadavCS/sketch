@@ -294,7 +294,7 @@ vi.mock("../agent/workspace", () => ({
 vi.mock("../agent/sessions", () => ({
   getSessionId: vi.fn().mockResolvedValue(undefined),
   saveSessionId: vi.fn().mockResolvedValue(undefined),
-  deleteSessionId: vi.fn().mockResolvedValue(undefined),
+  archiveRuntimeSessions: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Stub slack API for validateSlackTokens
@@ -624,7 +624,7 @@ describe("slack/adapter", () => {
       ]);
     });
 
-    it("treats leading-space /new as a reset command in Slack DMs", async () => {
+    it("treats leading-space /new as an archive command in Slack DMs", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { dm } = getHandlers();
@@ -633,7 +633,8 @@ describe("slack/adapter", () => {
       await dm({ text: " /new", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
       await flush();
 
-      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "u1");
+      expect(sessions.archiveRuntimeSessions).toHaveBeenCalledWith(deps.db, "u1");
+      expect(deps.repos.conversations.advanceWatermarkToCurrentMax).toHaveBeenCalledWith(1);
       expect(deps.runAgent).not.toHaveBeenCalled();
       expect(mockBotInstance.postMessage).toHaveBeenCalledWith(
         "D1",
@@ -1134,7 +1135,7 @@ describe("slack/adapter", () => {
       );
     });
 
-    it("resets the current thread when a channel mention sends /new", async () => {
+    it("archives the current thread when a channel mention sends /new", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { mention } = getHandlers();
@@ -1150,7 +1151,7 @@ describe("slack/adapter", () => {
       });
       await flush();
 
-      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "channel-C1", "0.9");
+      expect(sessions.archiveRuntimeSessions).toHaveBeenCalledWith(deps.db, "channel-C1", "0.9");
       expect(deps.repos.conversations.advanceCursorToCurrentMax).toHaveBeenCalledWith(
         expect.objectContaining({
           conversationId: 1,
@@ -1320,7 +1321,7 @@ describe("slack/adapter", () => {
       });
       await flush();
 
-      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "agent-agent-1/channel-C1", "0.9");
+      expect(sessions.archiveRuntimeSessions).toHaveBeenCalledWith(deps.db, "agent-agent-1/channel-C1", "0.9");
       expect(deps.runAgent).not.toHaveBeenCalled();
     });
 

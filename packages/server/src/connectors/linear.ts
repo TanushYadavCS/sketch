@@ -361,6 +361,7 @@ async function refreshLinearToken(credentials: OAuthCredentials): Promise<OAuthC
       client_id: credentials.client_id,
       client_secret: credentials.client_secret,
     }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {

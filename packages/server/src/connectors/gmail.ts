@@ -21,7 +21,10 @@ const DEFAULT_INITIAL_DAYS = 90;
 const DEFAULT_MAX_MESSAGES = 500;
 const DEFAULT_RECIPROCITY_DAYS = 365;
 const DEFAULT_MAX_RECIPROCITY_SENT = 250;
+const GMAIL_MAX_LOOKBACK_DAYS = 1095;
 const MESSAGE_FETCH_CONCURRENCY = 12;
+const MESSAGE_PAGE_SIZE = 100;
+const RECIPROCITY_METADATA_HEADERS = ["From", "To", "Cc", "Message-ID", "Subject", "Date"];
 
 type GmailTokenSource = string | AccessTokenProvider;
 
@@ -75,6 +78,14 @@ function assertOAuth(credentials: ConnectorCredentials): asserts credentials is 
 function parsePositiveInt(value: unknown, fallback: number, max: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.max(1, Math.min(Math.floor(value), max));
+}
+
+function normalizeLookbackQuery(query: string): string {
+  return query.replace(/\bnewer_than:(\d+)d\b/gi, (match, rawDays: string) => {
+    const days = Number.parseInt(rawDays, 10);
+    if (!Number.isFinite(days) || days <= GMAIL_MAX_LOOKBACK_DAYS) return match;
+    return `newer_than:${GMAIL_MAX_LOOKBACK_DAYS}d`;
+  });
 }
 
 function parseCursor(cursor: string | null): GmailCursor | null {
@@ -327,7 +338,7 @@ async function loadRecentSentMessages(
   scopeConfig: Record<string, unknown>,
   logger: Logger,
 ): Promise<NormalizedEmail[]> {
-  const days = parsePositiveInt(scopeConfig.reciprocityDays, DEFAULT_RECIPROCITY_DAYS, 3650);
+  const days = parsePositiveInt(scopeConfig.reciprocityDays, DEFAULT_RECIPROCITY_DAYS, GMAIL_MAX_LOOKBACK_DAYS);
   const maxMessages = parsePositiveInt(scopeConfig.maxReciprocitySent, DEFAULT_MAX_RECIPROCITY_SENT, 2000);
   const { refs, nextPageToken } = await listMessageRefs(accessToken, { q: `in:sent newer_than:${days}d` }, maxMessages);
   if (nextPageToken) {
@@ -342,17 +353,89 @@ async function loadRecentSentMessages(
   });
 }
 
-function mergeReciprocity(
-  base: ReadonlySet<string>,
-  emails: NormalizedEmail[],
-  recentSent: NormalizedEmail[] = [],
-): Set<string> {
-  const reciprocity = new Set(base);
-  const ownerEmail = emails[0]?.ownerEmail ?? recentSent[0]?.ownerEmail ?? null;
-  for (const email of updateReciprocitySet([...recentSent, ...emails], ownerEmail)) {
+function dedupeMessageRefs(refs: GmailMessageRef[]): GmailMessageRef[] {
+  const seen = new Set<string>();
+  const unique: GmailMessageRef[] = [];
+  for (const ref of refs) {
+    if (!ref.id || seen.has(ref.id)) continue;
+    seen.add(ref.id);
+    unique.push(ref);
+  }
+  return unique;
+}
+
+function* chunkMessageRefs(refs: GmailMessageRef[], size: number): Generator<GmailMessageRef[]> {
+  for (let index = 0; index < refs.length; index += size) {
+    yield refs.slice(index, index + size);
+  }
+}
+
+/**
+ * Fold a set of messages into a reciprocity set. Metadata-format normalization is
+ * sufficient because {@link updateReciprocitySet} only reads folder + To/Cc headers
+ * of SENT messages, so bodies never need to be resident to compute reciprocity.
+ */
+function accumulateReciprocity(reciprocity: Set<string>, messages: NormalizedEmail[], ownerEmail: string | null): void {
+  for (const email of updateReciprocitySet(messages, ownerEmail)) {
     reciprocity.add(email);
   }
+}
+
+/**
+ * Build the full-mailbox reciprocity set from a metadata-only pass over the corpus.
+ *
+ * Suppression of inbound-only mail requires the complete reciprocity set before the
+ * first item is emitted, so this must complete before the streaming body pass. It
+ * fetches ADDRESSES/HEADERS ONLY (no bodies), streaming one page at a time so peak
+ * residency stays at a single page instead of the whole corpus. The metadata scan
+ * covers the exact capped ref set (not a separate `in:sent` query) so continuation
+ * runs — where the `recentSent` bootstrap is skipped — still credit reciprocity from
+ * sent messages appearing on later pages.
+ */
+async function buildFullMailboxReciprocity(
+  accessToken: GmailTokenSource,
+  refs: GmailMessageRef[],
+  ownerEmail: string | null,
+  scopeConfig: Record<string, unknown>,
+  logger: Logger,
+  baseReciprocity: ReadonlySet<string>,
+  bootstrapReciprocity: boolean,
+): Promise<Set<string>> {
+  const reciprocity = new Set(baseReciprocity);
+  if (bootstrapReciprocity) {
+    accumulateReciprocity(
+      reciprocity,
+      await loadRecentSentMessages(accessToken, ownerEmail, scopeConfig, logger),
+      ownerEmail,
+    );
+  }
+  for (const chunk of chunkMessageRefs(refs, MESSAGE_PAGE_SIZE)) {
+    const metadata = await getNormalizedMessages(accessToken, chunk, ownerEmail, logger, {
+      format: "metadata",
+      metadataHeaders: RECIPROCITY_METADATA_HEADERS,
+    });
+    accumulateReciprocity(reciprocity, metadata, ownerEmail);
+  }
   return reciprocity;
+}
+
+/**
+ * Fetch full bodies one page at a time and emit each item as it is normalized.
+ * Peak residency is a single page of full messages, never the whole corpus.
+ */
+async function* streamMailboxItems(
+  connectorConfigId: string,
+  accessToken: GmailTokenSource,
+  refs: GmailMessageRef[],
+  reciprocity: ReadonlySet<string>,
+  ownerEmail: string | null,
+  logger: Logger,
+  onEmailSuppressed: ((record: SuppressedEmailRecord) => Promise<void>) | undefined,
+): AsyncGenerator<ReturnType<typeof emailToSyncedItem>> {
+  for (const chunk of chunkMessageRefs(refs, MESSAGE_PAGE_SIZE)) {
+    const emails = await getNormalizedMessages(accessToken, chunk, ownerEmail, logger);
+    yield* emitFilteredEmails(connectorConfigId, emails, reciprocity, onEmailSuppressed);
+  }
 }
 
 async function* emitFilteredEmails(
@@ -388,23 +471,29 @@ async function* syncFullMailbox(
   setNextCursor: (cursor: GmailCursor) => void,
   opts?: { query?: string; pageToken?: string; bootstrapReciprocity?: boolean },
 ) {
-  const initialDays = parsePositiveInt(scopeConfig.initialDays, DEFAULT_INITIAL_DAYS, 3650);
+  const initialDays = parsePositiveInt(scopeConfig.initialDays, DEFAULT_INITIAL_DAYS, GMAIL_MAX_LOOKBACK_DAYS);
   const maxMessages = parsePositiveInt(scopeConfig.maxMessages, DEFAULT_MAX_MESSAGES, 5000);
-  const query =
+  const query = normalizeLookbackQuery(
     opts?.query ??
-    (typeof scopeConfig.query === "string" && scopeConfig.query.trim()
-      ? scopeConfig.query.trim()
-      : `newer_than:${initialDays}d (in:inbox OR in:sent)`);
+      (typeof scopeConfig.query === "string" && scopeConfig.query.trim()
+        ? scopeConfig.query.trim()
+        : `newer_than:${initialDays}d (in:inbox OR in:sent)`),
+  );
   const { refs, nextPageToken } = await listMessageRefs(
     accessToken,
     { q: query, pageToken: opts?.pageToken ?? "" },
     maxMessages,
   );
-  const emails = await getNormalizedMessages(accessToken, refs, ownerEmail, logger);
-  const recentSent = opts?.bootstrapReciprocity
-    ? await loadRecentSentMessages(accessToken, ownerEmail, scopeConfig, logger)
-    : [];
-  const reciprocity = mergeReciprocity(baseReciprocity, emails, recentSent);
+  const uniqueRefs = dedupeMessageRefs(refs);
+  const reciprocity = await buildFullMailboxReciprocity(
+    accessToken,
+    uniqueRefs,
+    ownerEmail,
+    scopeConfig,
+    logger,
+    baseReciprocity,
+    opts?.bootstrapReciprocity ?? false,
+  );
 
   if (nextPageToken) {
     logger.warn(
@@ -416,7 +505,15 @@ async function* syncFullMailbox(
     setNextCursor(withReciprocity({ mode: "history", historyId }, reciprocity));
   }
 
-  yield* emitFilteredEmails(connectorConfigId, emails, reciprocity, onEmailSuppressed);
+  yield* streamMailboxItems(
+    connectorConfigId,
+    accessToken,
+    uniqueRefs,
+    reciprocity,
+    ownerEmail,
+    logger,
+    onEmailSuppressed,
+  );
 }
 
 async function listHistoryMessageRefs(accessToken: GmailTokenSource, historyId: string): Promise<GmailMessageRef[]> {
@@ -472,9 +569,24 @@ async function* syncIncrementalMailbox(
     );
     return null;
   }
-  const emails = await getNormalizedMessages(accessToken, refs, ownerEmail, logger);
-  const reciprocity = mergeReciprocity(cursorReciprocity(cursor), emails);
-  yield* emitFilteredEmails(connectorConfigId, emails, reciprocity, onEmailSuppressed);
+  const uniqueRefs = dedupeMessageRefs(refs);
+  const reciprocity = new Set(cursorReciprocity(cursor));
+  for (const chunk of chunkMessageRefs(uniqueRefs, MESSAGE_PAGE_SIZE)) {
+    const metadata = await getNormalizedMessages(accessToken, chunk, ownerEmail, logger, {
+      format: "metadata",
+      metadataHeaders: RECIPROCITY_METADATA_HEADERS,
+    });
+    accumulateReciprocity(reciprocity, metadata, ownerEmail);
+  }
+  yield* streamMailboxItems(
+    connectorConfigId,
+    accessToken,
+    uniqueRefs,
+    reciprocity,
+    ownerEmail,
+    logger,
+    onEmailSuppressed,
+  );
   return reciprocity;
 }
 

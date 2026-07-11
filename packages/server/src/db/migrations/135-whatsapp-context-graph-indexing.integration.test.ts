@@ -97,7 +97,7 @@ async function runSchemaSmoke(db: Kysely<DB>): Promise<void> {
   expect(Number(sliceCount.count)).toBe(1);
 }
 
-describe("132-whatsapp-context-graph-indexing migration sqlite", () => {
+describe("135-whatsapp-context-graph-indexing migration sqlite", () => {
   let db!: Kysely<DB>;
 
   afterEach(async () => {
@@ -110,7 +110,7 @@ describe("132-whatsapp-context-graph-indexing migration sqlite", () => {
   });
 });
 
-describe("132-whatsapp-context-graph-indexing migration postgres", () => {
+describe("135-whatsapp-context-graph-indexing migration postgres", () => {
   let db!: Kysely<DB>;
 
   afterEach(async () => {

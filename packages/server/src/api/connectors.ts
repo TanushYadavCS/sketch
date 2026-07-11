@@ -336,6 +336,16 @@ function defaultAuthTypeForConnector(connectorType: ConnectorType): AuthType {
   }
 }
 
+function authTypeForBrowse(connectorType: ConnectorType, credentials: Record<string, unknown>): AuthType {
+  const fallback = defaultAuthTypeForConnector(connectorType);
+  if (fallback === "system") return fallback;
+  const requested = credentials.type;
+  if (typeof requested === "string" && VALID_AUTH_TYPES.includes(requested as (typeof VALID_AUTH_TYPES)[number])) {
+    return requested as AuthType;
+  }
+  return fallback;
+}
+
 export function connectorRoutes(
   connectorRepo: ConnectorRepo,
   db: Kysely<DB>,
@@ -1418,7 +1428,7 @@ export function connectorRoutes(
     try {
       const credentials = {
         ...parsed.data.credentials,
-        type: defaultAuthTypeForConnector(connectorType),
+        type: authTypeForBrowse(connectorType, parsed.data.credentials),
       } as ConnectorCredentials;
       await connector.validateCredentials(credentials);
       const result = await connector.browse({ db, credentials, logger });

@@ -6,6 +6,7 @@ import { createEntityRepository } from "../db/repositories/entities";
 import type { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { cleanupEmptyRelationships, cleanupRelationshipEvidenceForFacts } from "../entities/materialize";
+import { forEachChunk } from "./sync-utils";
 import type { ConnectorType } from "./types";
 
 type IndexedFileFactRepository = ReturnType<typeof createIndexedFileFactRepository>;
@@ -91,7 +92,9 @@ export async function reconcileConnectorSync({
 
   if (reconcileResult.affectedIndexedFileIds.length > 0) {
     await deleteMaterializedFactMentions(db, connectorType, reconcileResult.affectedIndexedFileIds);
-    await factRepo.clearMaterializedAtForActiveFacts(reconcileResult.affectedIndexedFileIds);
+    await forEachChunk(reconcileResult.affectedIndexedFileIds, (batch) =>
+      factRepo.clearMaterializedAtForActiveFacts(batch),
+    );
   }
 
   return { itemsArchived, affectedIndexedFileIds: reconcileResult.affectedIndexedFileIds, reconciled: true };
@@ -108,15 +111,15 @@ export async function removeConnectorSourceItems({
 }: RemoveConnectorSourceItemsParams): Promise<{ itemsDeleted: number; affectedIndexedFileIds: string[] }> {
   const fileIdSet = new Set<string>();
 
-  if (providerFileIds.length > 0) {
+  await forEachChunk(providerFileIds, async (batch) => {
     const rows = await db
       .selectFrom("indexed_files")
       .select("id")
       .where("connector_config_id", "=", connectorConfigId)
-      .where("provider_file_id", "in", providerFileIds)
+      .where("provider_file_id", "in", batch)
       .execute();
     for (const row of rows) fileIdSet.add(row.id);
-  }
+  });
 
   for (const prefix of [...new Set(providerFileIdPrefixes)].filter((value) => value.length > 0)) {
     const pattern = `${escapeLike(prefix)}%`;
@@ -129,15 +132,15 @@ export async function removeConnectorSourceItems({
     for (const row of rows) fileIdSet.add(row.id);
   }
 
-  if (providerMessageIds.length > 0) {
+  await forEachChunk(providerMessageIds, async (batch) => {
     const rows = await db
       .selectFrom("indexed_files")
       .select("id")
       .where("connector_config_id", "=", connectorConfigId)
-      .where("provider_message_id", "in", providerMessageIds)
+      .where("provider_message_id", "in", batch)
       .execute();
     for (const row of rows) fileIdSet.add(row.id);
-  }
+  });
 
   if (sourceCreatedBefore) {
     const rows = await db
@@ -152,29 +155,44 @@ export async function removeConnectorSourceItems({
   const indexedFileIds = [...fileIdSet];
   if (indexedFileIds.length === 0) return { itemsDeleted: 0, affectedIndexedFileIds: [] };
 
-  await db.transaction().execute(async (trx) => {
-    const factRows = await trx
-      .selectFrom("indexed_file_facts")
-      .select("id")
-      .where("indexed_file_id", "in", indexedFileIds)
-      .where("deleted_at", "is", null)
-      .execute();
-    const factIds = factRows.map((row) => row.id);
-
-    if (factIds.length > 0) {
-      await cleanupRelationshipEvidenceForFacts(trx as unknown as Kysely<DB>, factIds);
-      await cleanupEmptyRelationships(trx as unknown as Kysely<DB>);
-      const now = new Date().toISOString();
-      await trx
-        .updateTable("indexed_file_facts")
-        .set({ indexed_file_id: null, deleted_at: now, materialized_at: null, updated_at: now })
-        .where("id", "in", factIds)
+  /**
+   * Delete one file-id chunk per transaction rather than one transaction over
+   * every id. A single transaction across the whole removal would overflow
+   * SQLite's bound-variable limit on a large prune (e.g. an initial calendar
+   * scope change). Each id's removal is idempotent, so committing chunks
+   * independently is safe: a crash mid-sweep leaves already-removed ids gone and
+   * the remaining ids reconciled on the next sync. Fact ids inside a chunk are
+   * themselves re-chunked because a 500-file chunk can carry more than 500 facts.
+   */
+  await forEachChunk(indexedFileIds, async (fileIdBatch) => {
+    await db.transaction().execute(async (trx) => {
+      const factRows = await trx
+        .selectFrom("indexed_file_facts")
+        .select("id")
+        .where("indexed_file_id", "in", fileIdBatch)
+        .where("deleted_at", "is", null)
         .execute();
-    }
+      const factIds = factRows.map((row) => row.id);
 
-    await deleteMaterializedFactMentions(trx as unknown as Kysely<DB>, connectorType, indexedFileIds);
-    await trx.deleteFrom("entity_mentions").where("indexed_file_id", "in", indexedFileIds).execute();
-    await trx.deleteFrom("indexed_files").where("id", "in", indexedFileIds).execute();
+      if (factIds.length > 0) {
+        await forEachChunk(factIds, async (factBatch) => {
+          await cleanupRelationshipEvidenceForFacts(trx as unknown as Kysely<DB>, factBatch);
+        });
+        await cleanupEmptyRelationships(trx as unknown as Kysely<DB>);
+        const now = new Date().toISOString();
+        await forEachChunk(factIds, async (factBatch) => {
+          await trx
+            .updateTable("indexed_file_facts")
+            .set({ indexed_file_id: null, deleted_at: now, materialized_at: null, updated_at: now })
+            .where("id", "in", factBatch)
+            .execute();
+        });
+      }
+
+      await deleteMaterializedFactMentions(trx as unknown as Kysely<DB>, connectorType, fileIdBatch);
+      await trx.deleteFrom("entity_mentions").where("indexed_file_id", "in", fileIdBatch).execute();
+      await trx.deleteFrom("indexed_files").where("id", "in", fileIdBatch).execute();
+    });
   });
 
   return { itemsDeleted: indexedFileIds.length, affectedIndexedFileIds: indexedFileIds };
@@ -199,10 +217,12 @@ async function deleteMaterializedFactMentions(
     "assignee",
     "parent_entity",
   ];
-  await db
-    .deleteFrom("entity_mentions")
-    .where("indexed_file_id", "in", indexedFileIds)
-    .where("confidence", "=", "EXTRACTED")
-    .where("source", "in", sources)
-    .execute();
+  await forEachChunk(indexedFileIds, async (batch) => {
+    await db
+      .deleteFrom("entity_mentions")
+      .where("indexed_file_id", "in", batch)
+      .where("confidence", "=", "EXTRACTED")
+      .where("source", "in", sources)
+      .execute();
+  });
 }

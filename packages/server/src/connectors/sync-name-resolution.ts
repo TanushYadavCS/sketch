@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { createAmbiguityAwareMap, normalizeName } from "./name-normalize";
+import { forEachChunk } from "./sync-utils";
 import type { NameResolution, NameResolver } from "./types";
 
 /**
@@ -42,17 +43,24 @@ function parseAliases(aliases: string | null): string[] {
  * sync run, preserving the previous dispatcher semantics.
  */
 export async function buildSyncNameResolver(db: Kysely<DB>): Promise<NameResolver> {
-  const allEntities = await db.selectFrom("entities").selectAll().where(whereLiveEntity()).execute();
+  const personRows = await db
+    .selectFrom("entities")
+    .select(["id", "name", "aliases", "metadata"])
+    .where(whereLiveEntity())
+    .where("source_type", "=", "person")
+    .execute();
   const personEmailByName = createAmbiguityAwareMap<string, { email: string; entityId: string }>();
-  for (const p of allEntities.filter((e) => e.source_type === "person")) {
-    const email = readPersonEmail(p.metadata);
-    if (!email) continue;
-    const value = { email, entityId: p.id };
-    personEmailByName.add(normalizeName(p.name), value);
-    for (const alias of parseAliases(p.aliases)) {
-      personEmailByName.add(normalizeName(alias), value);
+  await forEachChunk(personRows, async (batch) => {
+    for (const p of batch) {
+      const email = readPersonEmail(p.metadata);
+      if (!email) continue;
+      const value = { email, entityId: p.id };
+      personEmailByName.add(normalizeName(p.name), value);
+      for (const alias of parseAliases(p.aliases)) {
+        personEmailByName.add(normalizeName(alias), value);
+      }
     }
-  }
+  });
 
   const userEmailByName = createAmbiguityAwareMap<string, string>();
   const userRows = await db

@@ -34,10 +34,20 @@ export function createWhatsAppIdentityCandidateRepository(db: Kysely<DB>) {
         .onConflict((oc) =>
           oc.columns(["group_jid", "candidate_ref"]).doUpdateSet({
             participant_jid_ref: input.participantJidRef,
-            display_name: input.displayName ?? null,
+            display_name: sql`COALESCE(excluded.display_name, whatsapp_identity_candidates.display_name)`,
             kept_slice_count: sql<number>`${sql.ref("whatsapp_identity_candidates.kept_slice_count")} + 1`,
-            last_seen_at: input.seenAt,
-            last_slice_id: input.sliceId,
+            first_seen_at: sql`CASE
+              WHEN excluded.first_seen_at < whatsapp_identity_candidates.first_seen_at THEN excluded.first_seen_at
+              ELSE whatsapp_identity_candidates.first_seen_at
+            END`,
+            last_seen_at: sql`CASE
+              WHEN excluded.last_seen_at > whatsapp_identity_candidates.last_seen_at THEN excluded.last_seen_at
+              ELSE whatsapp_identity_candidates.last_seen_at
+            END`,
+            last_slice_id: sql`CASE
+              WHEN excluded.last_seen_at >= whatsapp_identity_candidates.last_seen_at THEN excluded.last_slice_id
+              ELSE whatsapp_identity_candidates.last_slice_id
+            END`,
             updated_at: now,
           }),
         )

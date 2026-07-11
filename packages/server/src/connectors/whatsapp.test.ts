@@ -21,6 +21,7 @@ describe("createWhatsAppConnector", () => {
   it("accepts only system credentials", async () => {
     const connector = createWhatsAppConnector();
 
+    expect(connector.syncIsCompleteSnapshot).toBe(false);
     await expect(connector.validateCredentials({ type: "system" })).resolves.toBeUndefined();
     await expect(connector.validateCredentials({ type: "api_key", api_key: "secret" })).rejects.toThrow(
       "WhatsApp connector requires system credentials",

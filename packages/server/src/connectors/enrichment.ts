@@ -22,6 +22,7 @@ import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { PRODUCT_MATCH_TARGET_PROVENANCE_TIERS } from "../entities/provenance";
 import { yieldToEventLoop } from "../lib/event-loop";
+import { heapStats, heapUsedMb } from "../lib/heap";
 import { chunkText } from "./chunking";
 import { type DocumentFactContext, emitDocumentDerivedFacts, sortDocumentParentRefs } from "./document-facts";
 import { ensureEmailThreadSummary, rebuildEmailThreadSummary } from "./email/thread-summary";
@@ -138,6 +139,19 @@ function contentVersionMatches(row: FileContentVersion | undefined, version: Fil
   if (version.contentHash !== null) return true;
   if (row.content !== version.content) return false;
   return version.content !== null || row.sourceUpdatedAt === version.sourceUpdatedAt;
+}
+
+/**
+ * Fetch a single file's `content` column by id.
+ *
+ * The pending-files batch query deliberately omits `content` so that a run
+ * spanning thousands of files (paced by multi-hour LLM calls) never pins every
+ * document body in heap at once. Each file's body is instead read just-in-time
+ * here, kept resident only while that one file is being enriched, then released.
+ */
+async function fetchFileContent(db: Kysely<DB>, fileId: string): Promise<string | null> {
+  const row = await db.selectFrom("indexed_files").select("content").where("id", "=", fileId).executeTakeFirst();
+  return row?.content ?? null;
 }
 
 async function ensureFileFresh(db: Kysely<DB>, fileId: string, version: FileContentVersion): Promise<void> {
@@ -403,10 +417,12 @@ export interface EnrichmentResult {
  */
 export async function runEnrichment(deps: EnrichmentDeps): Promise<EnrichmentResult> {
   activeEnrichmentRuns++;
+  const startHeapMb = heapUsedMb();
   try {
     return await runEnrichmentInner(deps);
   } finally {
     activeEnrichmentRuns--;
+    deps.logger.info(heapStats(startHeapMb), "Enrichment run finished");
   }
 }
 
@@ -470,7 +486,6 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       "file_name",
       "file_type",
       "content_category",
-      "content",
       "content_hash",
       "source",
       "source_path",
@@ -543,7 +558,8 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       );
       break;
     }
-    const file = pendingFiles[idx];
+    const fileMeta = pendingFiles[idx];
+    const file = { ...fileMeta, content: await fetchFileContent(db, fileMeta.id) };
     const fileVersion = contentVersionOf(file);
     const fileStart = Date.now();
     try {

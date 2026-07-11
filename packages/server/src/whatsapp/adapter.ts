@@ -15,7 +15,7 @@ import {
   type RunAgentResult,
   canUseVisualAnalysisTool,
 } from "../agent/runner";
-import { deleteSessionId } from "../agent/sessions";
+import { archiveRuntimeSessions } from "../agent/sessions";
 import { ensureAgentSubWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
 import { appendAutomationBuilderLinks } from "../automation/artifact-links";
 import { getNewSessionConfirmation, parseSketchCommand } from "../commands";
@@ -445,6 +445,30 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     const existingCheckpoint = await backfillCheckpoints.getBackfillCheckpoint(groupJid);
     const completeCheckpointKey =
       existingCheckpoint?.status === "complete" ? existingCheckpoint.last_fetched_key : null;
+    const usersByPhone = new Map<string, { id: string; name: string } | undefined>();
+    let workspaceDirPromise: Promise<string> | null = null;
+
+    const resolveUserByPhone = async (phoneE164: string | null) => {
+      if (!phoneE164) return undefined;
+      if (usersByPhone.has(phoneE164)) return usersByPhone.get(phoneE164);
+      const user = await repos.users.findByWhatsappNumber(phoneE164);
+      const resolved = user ? { id: user.id, name: user.name } : undefined;
+      usersByPhone.set(phoneE164, resolved);
+      return resolved;
+    };
+
+    const resolveWorkspaceDir = () => {
+      workspaceDirPromise ??= (async () => {
+        const existingGroup = await repos.whatsappGroups.getByJid(groupJid);
+        const boundAgent = existingGroup?.agent_user_id
+          ? await repos.users.findById(existingGroup.agent_user_id)
+          : null;
+        return boundAgent
+          ? ensureAgentSubWorkspace(config, boundAgent.id, `whatsappgroup-${groupJid}`)
+          : ensureGroupWorkspace(config, groupJid);
+      })();
+      return workspaceDirPromise;
+    };
 
     if (
       completeCheckpointKey &&
@@ -492,14 +516,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         continue;
       }
 
-      const user = message.senderPhoneE164
-        ? await repos.users.findByWhatsappNumber(message.senderPhoneE164)
-        : undefined;
-      const existingGroup = await repos.whatsappGroups.getByJid(groupJid);
-      const boundAgent = existingGroup?.agent_user_id ? await repos.users.findById(existingGroup.agent_user_id) : null;
-      const workspaceDir = boundAgent
-        ? await ensureAgentSubWorkspace(config, boundAgent.id, `whatsappgroup-${groupJid}`)
-        : await ensureGroupWorkspace(config, groupJid);
+      const user = await resolveUserByPhone(message.senderPhoneE164);
+      const workspaceDir = await resolveWorkspaceDir();
       try {
         const capture = await captureUserMessage({
           message,
@@ -640,7 +658,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         const dmWorkspaceKeyEarly = fallbackAgentEarly ? `agent-${fallbackAgentEarly.id}/${user.id}` : user.id;
         const dmConversation = await getOrCreateConversationForMessage(message, user.name);
         if (command === "new_session") {
-          await deleteSessionId(db, dmWorkspaceKeyEarly);
+          await archiveRuntimeSessions(db, dmWorkspaceKeyEarly);
           await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
           await whatsapp.sendText(replyTarget, getNewSessionConfirmation());
           return;
@@ -892,7 +910,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         : `wa-group-${groupJid}`;
       const groupConversation = await getOrCreateConversationForMessage(message);
       if (command === "new_session") {
-        await deleteSessionId(db, groupWorkspaceKey);
+        await archiveRuntimeSessions(db, groupWorkspaceKey);
         await repos.conversations.advanceWatermarkToCurrentMax(groupConversation.id);
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupTarget, message);
         await onFinalMessage(getNewSessionConfirmation());

@@ -1,5 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { ChannelQueue, QueueManager } from "./queue";
+import { ChannelQueue, MAX_QUEUE_DEPTH, QueueManager } from "./queue";
+
+/**
+ * Creates a work function whose completion is controlled by an external
+ * resolver, so tests can hold a queue busy while asserting backlog behavior.
+ */
+function createGatedWork(): { work: () => Promise<void>; release: () => void } {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { work: () => gate, release };
+}
 
 /**
  * Helper that creates a delayed work function.
@@ -62,6 +74,30 @@ describe("ChannelQueue", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(true).toBe(true);
   });
+
+  it("sheds work once the backlog reaches the depth cap", async () => {
+    const warn = vi.fn();
+    const queue = new ChannelQueue({ logger: { warn } as never, key: "ch-cap" });
+
+    const running = createGatedWork();
+    expect(queue.enqueue(running.work)).toBe(true);
+
+    for (let i = 0; i < MAX_QUEUE_DEPTH; i++) {
+      expect(queue.enqueue(async () => {})).toBe(true);
+    }
+
+    expect(queue.enqueue(async () => {})).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ queueKey: "ch-cap", depth: MAX_QUEUE_DEPTH, cap: MAX_QUEUE_DEPTH }),
+      expect.stringContaining("shedding"),
+    );
+
+    running.release();
+    await vi.waitFor(() => expect(queue.isIdle()).toBe(true));
+
+    expect(queue.enqueue(async () => {})).toBe(true);
+  });
 });
 
 describe("QueueManager", () => {
@@ -107,5 +143,56 @@ describe("QueueManager", () => {
 
     expect(startA.time).toBeLessThan(endB.time);
     expect(startB.time).toBeLessThan(endA.time);
+  });
+
+  it("evicts a queue once it drains to empty", async () => {
+    const manager = new QueueManager();
+    manager.getQueue("ch-drain").enqueue(async () => {});
+
+    expect(manager.size()).toBe(1);
+    await vi.waitFor(() => expect(manager.size()).toBe(0));
+  });
+
+  it("returns a fresh instance after a drained queue is evicted", async () => {
+    const manager = new QueueManager();
+    const first = manager.getQueue("ch-recycle");
+    first.enqueue(async () => {});
+    await vi.waitFor(() => expect(manager.size()).toBe(0));
+
+    const second = manager.getQueue("ch-recycle");
+    expect(second).not.toBe(first);
+    expect(manager.size()).toBe(1);
+  });
+
+  it("does not evict a queue that receives new work while draining", async () => {
+    const manager = new QueueManager();
+    const order: number[] = [];
+    let secondEnqueued = false;
+
+    manager.getQueue("ch-race").enqueue(async () => {
+      order.push(1);
+      manager.getQueue("ch-race").enqueue(async () => {
+        order.push(2);
+      });
+      secondEnqueued = true;
+    });
+
+    await vi.waitFor(() => expect(secondEnqueued).toBe(true));
+    expect(manager.size()).toBe(1);
+
+    await vi.waitFor(() => expect(order).toEqual([1, 2]));
+    await vi.waitFor(() => expect(manager.size()).toBe(0));
+  });
+
+  it("keeps the same live instance across enqueue while draining", async () => {
+    const manager = new QueueManager();
+    const running = createGatedWork();
+    const instance = manager.getQueue("ch-stable");
+    instance.enqueue(running.work);
+
+    expect(manager.getQueue("ch-stable")).toBe(instance);
+
+    running.release();
+    await vi.waitFor(() => expect(manager.size()).toBe(0));
   });
 });

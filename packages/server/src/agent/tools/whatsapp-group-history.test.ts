@@ -58,6 +58,7 @@ describe("WhatsAppGroupHistory renderer", () => {
   it("renders safe sender names and type-only attachments without metadata leaks", () => {
     const rendered = renderWhatsAppGroupHistoryMessages(rosterSnapshot(), [
       message({
+        text: "Call +15550000001 or open /tmp/raw-message.txt before Monday.",
         attachments: [
           {
             originalName: "15550000001-secret-photo.jpg",
@@ -92,7 +93,7 @@ describe("WhatsAppGroupHistory renderer", () => {
     expect(rendered).toEqual([
       expect.objectContaining({
         sender: "Tara Teammate",
-        text: "Project Atlas starts Monday.",
+        text: "Call or open [file] before Monday.",
         attachments: ["[image]"],
       }),
       expect.objectContaining({

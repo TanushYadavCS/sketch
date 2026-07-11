@@ -102,17 +102,14 @@ interface ParsedCursorState {
   needsFullReset: boolean;
 }
 
-interface CalendarEventCollection {
-  items: SyncedItem[];
-  removals: SourceItemRemovalRecord[];
+/**
+ * Outcome of streaming a single calendar. Items are yielded incrementally as
+ * each page is normalized, so only the sync-token state and the expired signal
+ * flow back to the caller here. The token is never persisted inside the stream:
+ * the caller commits it once, at the end of the whole run.
+ */
+interface CalendarStreamOutcome {
   nextSyncToken: string | null;
-  expired: boolean;
-}
-
-interface CalendarSetCollection {
-  items: SyncedItem[];
-  removals: SourceItemRemovalRecord[];
-  cursor: GoogleCalendarCursor;
   expired: boolean;
 }
 
@@ -706,17 +703,29 @@ async function listCalendars(accessToken: GoogleCalendarTokenSource): Promise<Go
   return calendars;
 }
 
-async function collectEventsForCalendar(params: {
+/**
+ * Streams one calendar's events page by page. Peak residency is a single page
+ * of raw events plus the recurring-series dedup map, which holds at most one
+ * SyncedItem per distinct recurring series (not one per expanded instance), so
+ * a 730-day daily series collapses to a single resident entry rather than ~730.
+ *
+ * Non-recurring events are yielded as each page is normalized. Recurring series
+ * are collapsed to their best instance and flushed once the calendar is fully
+ * paged, because picking the best instance requires seeing every page. Cancelled
+ * and declined events, plus unreadable-calendar prunes, are emitted through
+ * onSourceItemRemoved as they are discovered. The sync token is returned (never
+ * persisted here) so the caller commits it once, at the end of the run.
+ */
+async function* streamEventsForCalendar(params: {
   accessToken: GoogleCalendarTokenSource;
   calendar: GoogleCalendarListEntry;
   syncToken: string | null;
   scopeConfig: Record<string, unknown>;
   ownerEmail: string | null | undefined;
   logger: Logger;
-}): Promise<CalendarEventCollection> {
-  const items: SyncedItem[] = [];
+  onSourceItemRemoved?: (record: SourceItemRemovalRecord) => Promise<void>;
+}): AsyncGenerator<SyncedItem, CalendarStreamOutcome> {
   const recurringItems = new Map<string, { event: GoogleCalendarEvent; item: SyncedItem }>();
-  const removals: SourceItemRemovalRecord[] = [];
   const seenPageTokens = new Set<string>();
   let pageToken: string | undefined;
   let nextSyncToken: string | null = null;
@@ -749,24 +758,18 @@ async function collectEventsForCalendar(params: {
     } catch (err) {
       if (params.syncToken && err instanceof GoogleCalendarApiError && (err.status === 410 || err.status === 400)) {
         params.logger.warn({ calendarId: params.calendar.id, err }, "Google Calendar sync token expired");
-        return { items: [], removals: [], nextSyncToken: null, expired: true };
+        return { nextSyncToken: null, expired: true };
       }
       if (err instanceof GoogleCalendarApiError && (err.status === 403 || err.status === 404)) {
         params.logger.warn(
           { calendarId: params.calendar.id, status: err.status },
           "Pruning unreadable Google Calendar",
         );
-        return {
-          items: [],
-          removals: [
-            {
-              providerFileIdPrefix: `${params.calendar.id}:`,
-              reason: "google_calendar_calendar_unreadable",
-            },
-          ],
-          nextSyncToken: null,
-          expired: false,
-        };
+        await params.onSourceItemRemoved?.({
+          providerFileIdPrefix: `${params.calendar.id}:`,
+          reason: "google_calendar_calendar_unreadable",
+        });
+        return { nextSyncToken: null, expired: false };
       }
       throw err;
     }
@@ -774,7 +777,7 @@ async function collectEventsForCalendar(params: {
     for (const event of result.items ?? []) {
       if (!event.id) continue;
       if (event.status === "cancelled") {
-        removals.push({
+        await params.onSourceItemRemoved?.({
           providerFileId: providerFileIdForEvent(params.calendar.id, event.id),
           reason: "google_calendar_event_cancelled",
         });
@@ -782,7 +785,7 @@ async function collectEventsForCalendar(params: {
       }
       if (ownerDeclinedEvent(event)) {
         if (!recurringSeriesKey(event)) {
-          removals.push({
+          await params.onSourceItemRemoved?.({
             providerFileId: providerFileIdForEvent(params.calendar.id, event.id),
             reason: "google_calendar_event_declined",
           });
@@ -791,15 +794,16 @@ async function collectEventsForCalendar(params: {
       }
 
       const item = eventToSyncedItem(event, params.calendar, params.ownerEmail);
+      if (!item) continue;
       const seriesKey = recurringSeriesKey(event);
-      if (item && seriesKey) {
+      if (seriesKey) {
         const providerFileId = providerFileIdForSyncedEvent(params.calendar.id, event);
         const existing = recurringItems.get(providerFileId);
         if (!existing || recurringCandidateIsBetter(event, existing.event, nowMs)) {
           recurringItems.set(providerFileId, { event, item });
         }
-      } else if (item) {
-        items.push(item);
+      } else {
+        yield item;
       }
     }
 
@@ -817,12 +821,22 @@ async function collectEventsForCalendar(params: {
     params.logger.warn({ calendarId: params.calendar.id }, "Google Calendar response did not include nextSyncToken");
   }
 
-  items.push(...[...recurringItems.values()].map(({ item }) => item));
+  for (const { item } of recurringItems.values()) {
+    yield item;
+  }
 
-  return { items, removals, nextSyncToken: nextSyncToken ?? params.syncToken, expired: false };
+  return { nextSyncToken: nextSyncToken ?? params.syncToken, expired: false };
 }
 
-async function collectCalendarSet(params: {
+/**
+ * Streams every selected calendar in turn, delegating to streamEventsForCalendar
+ * so only one page is resident at a time. Per-calendar sync tokens accumulate
+ * into `cursor` (the caller commits it once the run finishes) and removals are
+ * emitted through onSourceItemRemoved as they surface. Returns true as soon as a
+ * calendar reports an expired token so the caller can wipe and re-run in full
+ * mode.
+ */
+async function* streamCalendarSet(params: {
   accessToken: GoogleCalendarTokenSource;
   calendars: GoogleCalendarListEntry[];
   previousCursor: GoogleCalendarCursor | null;
@@ -830,35 +844,29 @@ async function collectCalendarSet(params: {
   scopeConfig: Record<string, unknown>;
   ownerEmail: string | null | undefined;
   logger: Logger;
-}): Promise<CalendarSetCollection> {
+  cursor: GoogleCalendarCursor;
+  onSourceItemRemoved?: (record: SourceItemRemovalRecord) => Promise<void>;
+}): AsyncGenerator<SyncedItem, boolean> {
   const hasCalendarSelection = hasOwn(params.scopeConfig, "calendarIds");
   const selectedCalendarIds = new Set(parseStringArray(params.scopeConfig.calendarIds));
-  const items: SyncedItem[] = [];
-  const removals: SourceItemRemovalRecord[] = [];
-  const cursor: GoogleCalendarCursor = {
-    version: CURSOR_VERSION,
-    calendars: {},
-    lastSyncedAt: new Date().toISOString(),
-  };
 
   for (const calendar of params.calendars) {
     if (hasCalendarSelection && !selectedCalendarIds.has(calendar.id)) continue;
     const syncToken = params.useSyncTokens ? (params.previousCursor?.calendars[calendar.id] ?? null) : null;
-    const result = await collectEventsForCalendar({
+    const outcome = yield* streamEventsForCalendar({
       accessToken: params.accessToken,
       calendar,
       syncToken,
       scopeConfig: params.scopeConfig,
       ownerEmail: params.ownerEmail,
       logger: params.logger,
+      onSourceItemRemoved: params.onSourceItemRemoved,
     });
-    if (result.expired) return { items: [], removals: [], cursor, expired: true };
-    items.push(...result.items);
-    removals.push(...result.removals);
-    if (result.nextSyncToken) cursor.calendars[calendar.id] = result.nextSyncToken;
+    if (outcome.expired) return true;
+    if (outcome.nextSyncToken) params.cursor.calendars[calendar.id] = outcome.nextSyncToken;
   }
 
-  return { items, removals, cursor, expired: false };
+  return false;
 }
 
 function calendarBrowseResult(calendars: GoogleCalendarListEntry[]): BrowseResult {
@@ -900,7 +908,32 @@ export function createGoogleCalendarConnector(): Connector {
       const parsedCursor = parseCursor(cursor);
       nextCursor = null;
 
-      let collection = await collectCalendarSet({
+      /**
+       * A cursor-version upgrade needs the old rows gone before the full re-sync
+       * repopulates them. It is known up front (an unusable cursor forces a full
+       * sync, so it can never race the expired-token path below) and must fire
+       * before any item is yielded, so the wipe happens here rather than after
+       * collection.
+       */
+      if (parsedCursor.needsFullReset) {
+        await onSourceItemRemoved?.({
+          sourceCreatedBefore: FULL_WIPE_SOURCE_CREATED_BEFORE,
+          reason: "google_calendar_recurring_dedup_upgrade",
+        });
+      }
+
+      /**
+       * Accumulated across the whole run and only assigned to `nextCursor` at the
+       * end, so getCursor persists the sync token exactly once, after the last
+       * page of the last calendar is processed.
+       */
+      const runCursor: GoogleCalendarCursor = {
+        version: CURSOR_VERSION,
+        calendars: {},
+        lastSyncedAt: new Date().toISOString(),
+      };
+
+      const expired = yield* streamCalendarSet({
         accessToken,
         calendars,
         previousCursor: parsedCursor.cursor,
@@ -908,14 +941,18 @@ export function createGoogleCalendarConnector(): Connector {
         scopeConfig,
         ownerEmail,
         logger,
+        cursor: runCursor,
+        onSourceItemRemoved,
       });
 
-      if (collection.expired) {
+      if (expired) {
         await onSourceItemRemoved?.({
           sourceCreatedBefore: FULL_WIPE_SOURCE_CREATED_BEFORE,
           reason: "google_calendar_sync_token_expired",
         });
-        collection = await collectCalendarSet({
+        runCursor.calendars = {};
+        runCursor.lastSyncedAt = new Date().toISOString();
+        yield* streamCalendarSet({
           accessToken,
           calendars,
           previousCursor: null,
@@ -923,24 +960,12 @@ export function createGoogleCalendarConnector(): Connector {
           scopeConfig,
           ownerEmail,
           logger,
+          cursor: runCursor,
+          onSourceItemRemoved,
         });
       }
 
-      if (parsedCursor.needsFullReset && !collection.expired) {
-        await onSourceItemRemoved?.({
-          sourceCreatedBefore: FULL_WIPE_SOURCE_CREATED_BEFORE,
-          reason: "google_calendar_recurring_dedup_upgrade",
-        });
-      }
-
-      for (const removal of collection.removals) {
-        await onSourceItemRemoved?.(removal);
-      }
-
-      nextCursor = collection.cursor;
-      for (const item of collection.items) {
-        yield item;
-      }
+      nextCursor = runCursor;
     },
 
     async getCursor({ currentCursor }) {

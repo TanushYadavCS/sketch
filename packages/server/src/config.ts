@@ -22,6 +22,7 @@ export const configSchema = z.object({
   // Files
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(50),
+  MAX_ATTACHMENT_TOTAL_MB: z.coerce.number().default(30),
 
   // Feature flags
   BIRTH_GATE_DRY_RUN: z
@@ -47,6 +48,7 @@ export const configSchema = z.object({
   FEATURE_ARCHIVE_MAX_PER_RUN: z.coerce.number().int().min(1).default(1000),
   GEMINI_MAX_RPM: z.coerce.number().int().min(1).default(60),
   GEMINI_MAX_RETRIES: z.coerce.number().int().min(0).default(4),
+  AGENT_RUNTIME: z.enum(["sdk", "aisdk"]).default("sdk"),
 
   // Sync reconciliation
   SYNC_ALLOW_LARGE_RECONCILE: z

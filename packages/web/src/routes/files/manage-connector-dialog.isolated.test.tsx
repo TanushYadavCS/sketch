@@ -180,6 +180,35 @@ describe("ManageConnectorDialog connector capabilities", () => {
     expect(list).toHaveClass("max-h-72", "overflow-y-auto");
   });
 
+  it("offers Gmail lookback windows up to three years", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/connectors/:id/suppressed-emails", () =>
+        HttpResponse.json({ countsByReason: {}, recent: [], total: 0, hasMore: false }),
+      ),
+      http.get("/api/connectors/:id/email-threads", () => HttpResponse.json({ threads: [], total: 0, hasMore: false })),
+    );
+
+    renderWithProviders(
+      <ManageConnectorDialog
+        definition={gmail}
+        connector={connector({ connectorType: "gmail", authType: "oauth", scopeConfig: { initialDays: 180 } })}
+        open
+        onOpenChange={() => {}}
+        onDisconnected={() => {}}
+        onReconnect={() => {}}
+      />,
+    );
+
+    await user.click(await screen.findByRole("combobox", { name: /Lookback window/i }));
+
+    expect(await screen.findByRole("option", { name: "Last 1 year" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Last 2 years" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Last 3 years" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Last 12 months" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "All available" })).not.toBeInTheDocument();
+  });
+
   it("saves Google Calendar scope as selected calendarIds", async () => {
     const user = userEvent.setup();
     let patchedBody: unknown;

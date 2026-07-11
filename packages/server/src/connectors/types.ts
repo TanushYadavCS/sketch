@@ -428,6 +428,9 @@ export interface Connector {
    */
   readonly requiresOAuthClientSetup: boolean;
 
+  /** Whether one sync enumerates the complete source corpus for stale-file reconciliation. */
+  readonly syncIsCompleteSnapshot?: boolean;
+
   /**
    * File types that should be promoted to entities during sync.
    * e.g. Linear returns ["project"] — synced Linear projects become entities.

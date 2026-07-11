@@ -4,8 +4,13 @@
  * Security: folderId injection guard
  * Quality: resolveFolderPath max depth, fileToSyncedItem mimeType field
  */
+import { createHash } from "node:crypto";
+import type { Logger } from "pino";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { fileToSyncedItem, listFolderContents, resolveFolderPath } from "./google-drive";
+import { fetchFileContent, fileToSyncedItem, listFolderContents, resolveFolderPath } from "./google-drive";
+
+/** Minimal logger stub — fetchFileContent only calls debug/warn/info. */
+const testLogger = { debug: () => {}, warn: () => {}, info: () => {} } as unknown as Logger;
 
 // Prevent any real HTTP calls. If validation is missing, the fetch mock will be
 // called with the injected query string — which itself is the failure signal.
@@ -162,5 +167,98 @@ describe("resolveFolderPath — max depth guard", () => {
     const segments = path.split(" / ");
     // "My Drive" is always first, then up to 20 folder names
     expect(segments.length).toBeLessThanOrEqual(21);
+  });
+});
+
+describe("fetchFileContent — download caps", () => {
+  it("skips a binary file whose declared size exceeds the extraction cap", async () => {
+    fetchSpy.mockReset();
+    fetchSpy.mockImplementation(async () => {
+      throw new Error("fetch should not be called for oversized binary");
+    });
+
+    const file = {
+      id: "big-xlsx",
+      name: "huge.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      size: String(30 * 1024 * 1024),
+    };
+
+    const result = await fetchFileContent(file, "access-token", testLogger);
+    expect(result).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("still skips a native text file whose declared size exceeds the download cap", async () => {
+    fetchSpy.mockReset();
+    fetchSpy.mockImplementation(async () => {
+      throw new Error("fetch should not be called for oversized text");
+    });
+
+    const file = {
+      id: "big-txt",
+      name: "huge.txt",
+      mimeType: "text/plain",
+      size: String(201 * 1024 * 1024),
+    };
+
+    const result = await fetchFileContent(file, "access-token", testLogger);
+    expect(result).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("produces content and hash identical to whole-body reads for a small exported doc", async () => {
+    fetchSpy.mockReset();
+    fetchSpy.mockImplementation(async () => new Response("  Hello world  ", { status: 200 }));
+
+    const file = {
+      id: "doc-small",
+      name: "Small Doc",
+      mimeType: "application/vnd.google-apps.document",
+    };
+
+    const result = await fetchFileContent(file, "access-token", testLogger);
+    expect(result).not.toBeNull();
+    // truncateAndHash trims whitespace; bounded read consumes the whole small body,
+    // so the output is byte-identical to reading response.text() in full.
+    expect(result?.content).toBe("Hello world");
+    expect(result?.hash).toBe(createHash("sha256").update("Hello world").digest("hex"));
+  });
+
+  it("stops reading and cancels the stream for an oversized exported doc", async () => {
+    let pullCount = 0;
+    let cancelled = false;
+    const chunk = new Uint8Array(512 * 1024).fill(0x61);
+
+    fetchSpy.mockReset();
+    fetchSpy.mockImplementation(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pullCount++;
+          if (pullCount > 200) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(chunk);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      return new Response(stream, { status: 200 });
+    });
+
+    const file = {
+      id: "doc-huge",
+      name: "Huge Sheet",
+      mimeType: "application/vnd.google-apps.spreadsheet",
+    };
+
+    const result = await fetchFileContent(file, "access-token", testLogger);
+    expect(result).not.toBeNull();
+    // MAX_READ_BYTES is 2MB (4 × 512KB). With 512KB chunks the reader crosses the
+    // ceiling after ~5 pulls, then cancels — nowhere near the 200-chunk source.
+    expect(pullCount).toBeLessThanOrEqual(6);
+    expect(cancelled).toBe(true);
   });
 });
