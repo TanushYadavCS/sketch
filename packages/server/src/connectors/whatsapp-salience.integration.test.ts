@@ -9,6 +9,7 @@ import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger, createTestPgDb } from "../test-utils";
+import { runEnrichment } from "./enrichment";
 import type { GeminiGenerator } from "./gemini-generate";
 import { runConnectorSync } from "./sync";
 import { createWhatsAppConnector } from "./whatsapp";
@@ -232,6 +233,12 @@ async function linkSliceToIndexedFile(db: Kysely<DB>, connectorConfigId: string,
   return fileId;
 }
 
+async function activeFacts(db: Kysely<DB>, fileId?: string) {
+  let query = db.selectFrom("indexed_file_facts").selectAll().where("deleted_at", "is", null);
+  if (fileId) query = query.where("indexed_file_id", "=", fileId);
+  return query.orderBy("subject_name", "asc").execute();
+}
+
 function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
   describe(label, () => {
     let db: Kysely<DB>;
@@ -285,9 +292,7 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       expect(firstItems[0]?.content).toContain("WhatsApp roster:");
       expect(firstItems[0]?.content).toContain("Tara Teammate:");
       expect(firstItems[0]?.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
-      expect(firstItems[0]?.entitySeeds).toEqual([
-        expect.objectContaining({ name: "Project Atlas", sourceType: "project" }),
-      ]);
+      expect(firstItems[0]?.entitySeeds).toBeUndefined();
       expect(firstItems[0]?.personSeeds).toBeUndefined();
       expect(firstItems[0]?.attendees).toBeUndefined();
       expect(candidates).toHaveLength(1);
@@ -297,6 +302,162 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
         last_slice_id: seeded.sliceId,
       });
       expect(candidates[0]?.candidate_ref).not.toMatch(RAW_IDENTIFIER_PATTERN);
+    });
+
+    it("emits zero structural_seed facts for a kept slice with salience structural entities", async () => {
+      const seeded = await seedSlice(db, {
+        verdict: "kept",
+        salienceSignals: JSON.stringify({
+          signals: ["decision", "named_entity"],
+          entities: [
+            { name: "ClickUp", type: "product" },
+            { name: "WATI", type: "product" },
+            { name: "Sketch", type: "product" },
+            { name: "Jarvis", type: "product" },
+          ],
+        }),
+        text: "ClickUp and WATI should feed Sketch and Jarvis followups.",
+      });
+      const config = await seedConnectorConfig(db);
+
+      const result = await runConnectorSync(db, config.id, createTestLogger());
+      const slice = await db
+        .selectFrom("conversation_slices")
+        .selectAll()
+        .where("id", "=", seeded.sliceId)
+        .executeTakeFirstOrThrow();
+      const facts = await activeFacts(db, slice.indexed_file_id ?? undefined);
+
+      expect(result.itemsCreated).toBe(1);
+      expect(slice.indexed_file_id).not.toBeNull();
+      expect(facts.filter((fact) => fact.fact_type === "structural_seed")).toHaveLength(0);
+    });
+
+    it("creates WhatsApp slice entities through sync plus v13 enrichment, not salience seeds", async () => {
+      const seeded = await seedSlice(db, {
+        verdict: "kept",
+        salienceSignals: JSON.stringify({
+          signals: ["decision", "named_entity"],
+          entities: [
+            { name: "ClickUp", type: "product" },
+            { name: "WATI", type: "product" },
+            { name: "Sketch", type: "product" },
+            { name: "Jarvis", type: "product" },
+          ],
+        }),
+        text: "Use ClickUp and WATI as tools while Sketch and Jarvis stay product workstreams.",
+      });
+      const config = await seedConnectorConfig(db);
+      const syncResult = await runConnectorSync(db, config.id, createTestLogger());
+      const slice = await db
+        .selectFrom("conversation_slices")
+        .selectAll()
+        .where("id", "=", seeded.sliceId)
+        .executeTakeFirstOrThrow();
+      if (!slice.indexed_file_id) throw new Error("expected linked WhatsApp slice file");
+
+      const generator = {
+        generate: async () => "ClickUp and WATI support Sketch and Jarvis workstreams.",
+        generateJSON: async <T>(_prompt: string, opts?: { label?: string }) => {
+          if (opts?.label?.startsWith("extractEntities")) {
+            return {
+              mentions: [
+                { mention: "ClickUp", type: "tool", variations: [], confidence: 0.95 },
+                { mention: "WATI", type: "tool", variations: [], confidence: 0.95 },
+                { mention: "Sketch", type: "product", variations: [], confidence: 0.94 },
+                { mention: "Jarvis", type: "product", variations: [], confidence: 0.94 },
+              ],
+              relations: [],
+            } as T;
+          }
+          return {} as T;
+        },
+      } as GeminiGenerator;
+
+      const enrichResult = await runEnrichment({
+        db,
+        logger: createTestLogger(),
+        embeddingProvider: null,
+        generator,
+        fileIds: [slice.indexed_file_id],
+      });
+      const facts = await activeFacts(db, slice.indexed_file_id);
+      const structuralFacts = facts.filter((fact) => fact.fact_type === "structural_seed");
+      const llmFacts = facts.filter((fact) => fact.fact_type === "llm_extracted");
+      const llmTypesByName = new Map(
+        llmFacts.map((fact) => [fact.subject_name, JSON.parse(fact.raw ?? "{}").type as string]),
+      );
+
+      expect(syncResult.itemsCreated).toBe(1);
+      expect(enrichResult.filesProcessed).toBe(1);
+      expect(structuralFacts).toHaveLength(0);
+      expect(llmTypesByName).toEqual(
+        new Map([
+          ["ClickUp", "tool"],
+          ["Jarvis", "product"],
+          ["Sketch", "product"],
+          ["WATI", "tool"],
+        ]),
+      );
+      expect(new Set(llmFacts.map((fact) => fact.subject_name)).size).toBe(llmFacts.length);
+    });
+
+    it("keeps gate, scoping, privacy, roster, and zero-task behavior unchanged", async () => {
+      const kept = await seedSlice(db, { text: "We decided Project Atlas starts Monday with 0 tasks assigned." });
+      const dropped = await seedSlice(db, { text: "haha okay" });
+      const unscoped = await seedSlice(db, {
+        teammate: false,
+        verdict: "kept",
+        salienceSignals: JSON.stringify({
+          signals: ["decision", "named_entity"],
+          entities: [{ name: "Project Atlas", type: "project" }],
+        }),
+      });
+      const calls: string[] = [];
+      const generator: FakeGenerator = {
+        calls,
+        async generate() {
+          return "";
+        },
+        async generateJSON<T>(prompt: string) {
+          calls.push(prompt);
+          const salient = prompt.includes("Project Atlas");
+          return (
+            salient
+              ? {
+                  salient: true,
+                  signals: ["decision", "named_entity"],
+                  entities: [{ name: "Project Atlas", type: "project" }],
+                }
+              : { salient: false, signals: [], entities: [] }
+          ) as T;
+        },
+      };
+
+      const items = await collectWhatsAppItems(db, generator);
+      const keptSlice = await db
+        .selectFrom("conversation_slices")
+        .selectAll()
+        .where("id", "=", kept.sliceId)
+        .executeTakeFirstOrThrow();
+      const droppedSlice = await db
+        .selectFrom("conversation_slices")
+        .selectAll()
+        .where("id", "=", dropped.sliceId)
+        .executeTakeFirstOrThrow();
+      const unscopedItems = await collectEmittedWhatsAppItems(db);
+
+      expect(generator.calls).toHaveLength(2);
+      expect(keptSlice.salience_verdict).toBe("kept");
+      expect(keptSlice.salience_signals).toContain("Project Atlas");
+      expect(droppedSlice.salience_verdict).toBe("dropped");
+      expect(items.map((item) => item.providerFileId)).toEqual([kept.sliceId]);
+      expect(unscopedItems.map((item) => item.providerFileId)).not.toContain(unscoped.sliceId);
+      expect(items[0]?.accessScope?.memberEmails).toEqual([kept.teammateEmail]);
+      expect(items[0]?.content).toContain("WhatsApp roster:");
+      expect(items[0]?.content).toContain("Tara Teammate:");
+      expect(items[0]?.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
+      await expect(db.selectFrom("tasks").selectAll().execute()).resolves.toEqual([]);
     });
 
     it("persists a dropped verdict and emits no item", async () => {
