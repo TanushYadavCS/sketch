@@ -3,6 +3,7 @@ import { streamSSE } from "hono/streaming";
 import type { Kysely } from "kysely";
 import { z } from "zod";
 import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
+import { resolveAgentRuntimeProviderConfigFromSettings } from "../agent/runtime/provider";
 import type { Config } from "../config";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -318,6 +319,10 @@ async function executeWorkflowRun(params: ExecuteWorkflowRunParams) {
     sendMessage: delivery.sendMessage,
     onEvent,
     limitAgentExecution: deps.limitAgentExecution,
+    loadAgentRuntimeProviderConfig: async () =>
+      resolveAgentRuntimeProviderConfigFromSettings(
+        await createSettingsRepository(deps.db, deps.config.ENCRYPTION_KEY).get(),
+      ),
   });
 
   return {

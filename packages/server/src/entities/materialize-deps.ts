@@ -8,6 +8,7 @@ import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { DB } from "../db/schema";
 import { personScopeKey, personScopeKeyId } from "./affiliations";
+import { DEFAULT_FACT_BATCH_SIZE, forEachFactBatch } from "./fact-batches";
 import { type MentionType, normalizeMentionType } from "./graph";
 import { normalizeEntityMatchName } from "./match-normalize";
 import { parseAliasesString, readJsonObject, readPersonEmailFromMetadata } from "./materialize-json";
@@ -173,29 +174,44 @@ async function buildPersonScopeKeys(db: Kysely<DB>, persons: EntityRow[]): Promi
   return new Map([...scopeKeys].map(([entityId, keys]) => [entityId, [...keys]]));
 }
 
+/**
+ * Scan `llm_extracted` facts for a third-party (company/tool) mention matching
+ * `name`. Keyset-paginated by `id` so only one page of `raw` payloads is held at
+ * once, with an early return on the first match. The single-pass version loaded
+ * every `llm_extracted` fact (including `raw`) on every call; iteration order was
+ * DB-unspecified then and is deterministic (ascending `id`) now.
+ */
 async function findLlmExtractedThirdPartyMention(
   db: Kysely<DB>,
   name: string,
 ): Promise<{ type: Extract<ProposeEntityType, "company" | "tool">; name: string } | null> {
-  const rows = await db
-    .selectFrom("indexed_file_facts")
-    .select(["subject_name", "raw"])
-    .where("source", "=", "llm_extraction")
-    .where("fact_type", "=", "llm_extracted")
-    .where("deleted_at", "is", null)
-    .where("subject_name", "is not", null)
-    .execute();
-  for (const row of rows) {
-    const raw = readJsonObject(row.raw);
-    const rawType = typeof raw.type === "string" ? raw.type.trim().toLowerCase() : "";
-    if (rawType !== "company" && rawType !== "tool") continue;
-    const mention = typeof raw.mention === "string" ? raw.mention : row.subject_name;
-    if (!mention) continue;
-    if (normalizeEntityMatchName(rawType, mention) === normalizeEntityMatchName(rawType, name)) {
-      return { type: rawType, name: mention };
+  let cursor = "";
+  for (;;) {
+    const rows = await db
+      .selectFrom("indexed_file_facts")
+      .select(["id", "subject_name", "raw"])
+      .where("source", "=", "llm_extraction")
+      .where("fact_type", "=", "llm_extracted")
+      .where("deleted_at", "is", null)
+      .where("subject_name", "is not", null)
+      .where("id", ">", cursor)
+      .orderBy("id", "asc")
+      .limit(DEFAULT_FACT_BATCH_SIZE)
+      .execute();
+    if (rows.length === 0) return null;
+    for (const row of rows) {
+      const raw = readJsonObject(row.raw);
+      const rawType = typeof raw.type === "string" ? raw.type.trim().toLowerCase() : "";
+      if (rawType !== "company" && rawType !== "tool") continue;
+      const mention = typeof raw.mention === "string" ? raw.mention : row.subject_name;
+      if (!mention) continue;
+      if (normalizeEntityMatchName(rawType, mention) === normalizeEntityMatchName(rawType, name)) {
+        return { type: rawType, name: mention };
+      }
     }
+    cursor = rows[rows.length - 1].id;
+    if (rows.length < DEFAULT_FACT_BATCH_SIZE) return null;
   }
-  return null;
 }
 
 function isNameDedupEntityType(entityType: ProposeEntityType): entityType is NameDedupEntityType {
@@ -269,26 +285,46 @@ function llmFileCountKey(normalizedName: string, mentionType: MentionType): stri
   return `${mentionType}\u0000${normalizedName}`;
 }
 
+/**
+ * Count distinct source files per (name, mention-type) across `llm_extracted`
+ * facts. Keyset-paginated by `id` so only one page of `raw` payloads is held at
+ * once; the result is order-independent, so streaming yields the same Map the
+ * single whole-table load produced.
+ */
 async function buildActiveLlmFileCounts(db: Kysely<DB>): Promise<Map<string, number>> {
-  const rows = await db
-    .selectFrom("indexed_file_facts")
-    .select(["indexed_file_id", "subject_name", "raw"])
-    .where("fact_type", "=", "llm_extracted")
-    .where("deleted_at", "is", null)
-    .where("subject_name", "is not", null)
-    .execute();
   const filesByName = new Map<string, Set<string>>();
-  for (const row of rows) {
-    if (!row.indexed_file_id || !row.subject_name) continue;
-    const mentionType = normalizeMentionType(readJsonObject(row.raw).type);
-    if (!mentionType) continue;
-    const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
-    if (!normalizedName) continue;
-    const key = llmFileCountKey(normalizedName, mentionType);
-    const files = filesByName.get(key);
-    if (files) files.add(row.indexed_file_id);
-    else filesByName.set(key, new Set([row.indexed_file_id]));
-  }
+  await forEachFactBatch(
+    (cursor, limit) =>
+      db
+        .selectFrom("indexed_file_facts")
+        .select(["id", "created_at", "indexed_file_id", "subject_name", "raw"])
+        .where("fact_type", "=", "llm_extracted")
+        .where("deleted_at", "is", null)
+        .where("subject_name", "is not", null)
+        .where((eb) =>
+          eb.or([
+            eb("created_at", ">", cursor.createdAt),
+            eb.and([eb("created_at", "=", cursor.createdAt), eb("id", ">", cursor.id)]),
+          ]),
+        )
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
+        .limit(limit)
+        .execute(),
+    async (rows) => {
+      for (const row of rows) {
+        if (!row.indexed_file_id || !row.subject_name) continue;
+        const mentionType = normalizeMentionType(readJsonObject(row.raw).type);
+        if (!mentionType) continue;
+        const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
+        if (!normalizedName) continue;
+        const key = llmFileCountKey(normalizedName, mentionType);
+        const files = filesByName.get(key);
+        if (files) files.add(row.indexed_file_id);
+        else filesByName.set(key, new Set([row.indexed_file_id]));
+      }
+    },
+  );
   return new Map([...filesByName.entries()].map(([key, files]) => [key, files.size]));
 }
 
@@ -418,6 +454,8 @@ export async function buildMaterializeDeps(
   for (const f of allFiles) fileToConnector.set(f.id, f.connector_config_id);
   const allConfigs = await db.selectFrom("connector_configs").select(["id", "created_by"]).execute();
   for (const c of allConfigs) connectorOwners.set(c.id, c.created_by);
+  const allUsers = await db.selectFrom("users").select("id").execute();
+  const knownUserIds = new Set(allUsers.map((u) => u.id));
 
   return {
     db,
@@ -445,16 +483,20 @@ export async function buildMaterializeDeps(
         .where("id", "=", indexedFileId)
         .executeTakeFirst()
         .then((row) => row ?? null),
+    /**
+     * Resolves the owning user for a fact, falling back to the connector's
+     * owner. Only ids present in `users` are returned: legacy auth wrote
+     * sentinel strings ('admin', 'sketch-api-key') as owners, and a user row
+     * can be deleted after facts referenced it; passing either through would
+     * fail the owner foreign key on every table the materializers write to.
+     */
     resolveOwner: (fact: IndexedFileFactRow) => {
-      if (fact.created_by_user_id) return fact.created_by_user_id;
-      const indexedFileId = fact.indexed_file_id;
-      if (!indexedFileId) return null;
-      if (indexedFileId) {
-        const cfg = fileToConnector.get(indexedFileId);
-        if (cfg) {
-          const owner = connectorOwners.get(cfg);
-          if (owner) return owner;
-        }
+      if (fact.created_by_user_id && knownUserIds.has(fact.created_by_user_id)) return fact.created_by_user_id;
+      const connectorId =
+        fact.connector_config_id ?? (fact.indexed_file_id ? fileToConnector.get(fact.indexed_file_id) : undefined);
+      if (connectorId) {
+        const owner = connectorOwners.get(connectorId);
+        if (owner && knownUserIds.has(owner)) return owner;
       }
       return null;
     },

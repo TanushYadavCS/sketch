@@ -131,10 +131,25 @@ import * as m128 from "./migrations/128-work-cycles-connector-key";
 import * as m129 from "./migrations/129-container-name-qualification";
 import * as m130 from "./migrations/130-entity-provenance-tier";
 import * as m131 from "./migrations/131-trunk-name-embeddings";
+import * as m132 from "./migrations/132-agent-messages";
+import * as m133 from "./migrations/133-chat-session-runtime";
+import * as m134 from "./migrations/134-chat-session-archived-at";
+import * as m135 from "./migrations/135-whatsapp-context-graph-indexing";
+import * as m136 from "./migrations/136-whatsapp-slice-denoised-message-ids";
+import * as m137 from "./migrations/137-whatsapp-group-participants";
+import * as m138 from "./migrations/138-whatsapp-identity-candidates";
+import * as m139 from "./migrations/139-tasks-proposed-assignee";
+import * as m140 from "./migrations/140-retire-unassigned-agent-tasks";
+import * as m141 from "./migrations/141-fact-materialization-quarantine";
 import type { DB } from "./schema";
 
-export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
-  const migrator = new Migrator({
+/**
+ * Builds the Migrator against the full static migration map. Exported (not just
+ * used internally by runMigrations) so tests can drive migrateTo() directly for
+ * partial up/down sequencing without hand-maintaining a duplicate migration list.
+ */
+export function createMigrator(db: Kysely<DB>): Migrator {
+  return new Migrator({
     db,
     provider: {
       async getMigrations() {
@@ -266,11 +281,24 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "129-container-name-qualification": m129,
           "130-entity-provenance-tier": m130,
           "131-trunk-name-embeddings": m131,
+          "132-agent-messages": m132,
+          "133-chat-session-runtime": m133,
+          "134-chat-session-archived-at": m134,
+          "135-whatsapp-context-graph-indexing": m135,
+          "136-whatsapp-slice-denoised-message-ids": m136,
+          "137-whatsapp-group-participants": m137,
+          "138-whatsapp-identity-candidates": m138,
+          "139-tasks-proposed-assignee": m139,
+          "140-retire-unassigned-agent-tasks": m140,
+          "141-fact-materialization-quarantine": m141,
         };
       },
     },
   });
+}
 
+export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
+  const migrator = createMigrator(db);
   const { error, results } = await migrator.migrateToLatest();
 
   for (const result of results ?? []) {

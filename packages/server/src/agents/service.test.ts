@@ -8,6 +8,7 @@ import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import type { QueueManager } from "../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import { CONVERSATION_SUMMARY_AGENT_KEY, CONVERSATION_SUMMARY_AGENT_VERSION } from "./definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION } from "./definitions/daily-brief";
 import { AgentRunService } from "./service";
 
@@ -27,27 +28,51 @@ describe("Daily Brief durable-task hooks", () => {
 
   it("surfaces open durable tasks, scrubs completed prior todos, and promotes emitted todos", async () => {
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Daily Brief User", email: "brief-owner@example.com" });
+    const user = await users.create({
+      name: "Daily Brief User",
+      email: "brief-owner@example.com",
+      emailVerified: true,
+    });
+    await seedAssignablePerson(db, "person-brief-owner", "Daily Brief User", "brief-owner@example.com");
     await seedIndexedFile(db, "brief-file-1", user.id);
     await seedCompletedOutput(db, user.id, OUTPUT_DATE);
     await seedCompletedOutput(db, user.id, PREVIOUS_DATE);
+    const tasksWithToggle = await runAndCapture(db, user.id, "2026-06-16", [], { createTasks: true });
 
     const taskRepo = createTaskRepository(db);
     await taskRepo.promoteBriefTask({
       userId: user.id,
-      todo: briefItem({ title: "Open durable task", label: "todo" }),
+      todo: briefItem({
+        title: "Open durable task",
+        label: "todo",
+        structuredPayload: { assigneeName: "Daily Brief User" },
+      }),
       knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] },
     });
     await taskRepo.promoteBriefTask({
       userId: user.id,
-      todo: briefItem({ title: "Done durable task", label: "done" }),
+      todo: briefItem({
+        title: "Done durable task",
+        label: "done",
+        structuredPayload: { assigneeName: "Daily Brief User" },
+      }),
       knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] },
     });
 
     const before = await countTasks(db);
-    const run = await runAndCapture(db, user.id, OUTPUT_DATE, [
-      briefItem({ title: "Brand new follow-up", knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] } }),
-    ]);
+    const run = await runAndCapture(
+      db,
+      user.id,
+      OUTPUT_DATE,
+      [
+        briefItem({
+          title: "Brand new follow-up",
+          structuredPayload: { assigneeName: "Daily Brief User" },
+          knowledgeRefs: { entityIds: [], fileIds: ["brief-file-1"] },
+        }),
+      ],
+      { createTasks: true },
+    );
     const after = await countTasks(db);
 
     expect((run.context.openDurableTasks as Array<{ title: string }>).map((task) => task.title)).toEqual([
@@ -56,7 +81,105 @@ describe("Daily Brief durable-task hooks", () => {
     expect(priorTitles(run.context.sameDayPreviousOutput)).toEqual(["Open prior todo"]);
     expect(priorTitles(run.context.previousDayOutput)).toEqual(["Open prior todo"]);
     expect(run.instructions).toContain("openDurableTasks");
+    expect(tasksWithToggle.context.createTasks).toBe(true);
     expect(after).toBeGreaterThan(before);
+  });
+
+  it("adds recent Summarizer outputs and user-owned summary tasks to Daily Brief context without replaying old summaries", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Daily Brief User",
+      email: "brief-owner@example.com",
+      emailVerified: true,
+    });
+    await seedAssignablePerson(db, "person-brief-owner", "Daily Brief User", "brief-owner@example.com");
+    await seedIndexedFile(db, "brief-file-1", user.id);
+    await seedCompletedOutput(db, user.id, OUTPUT_DATE, { generatedAt: "2026-06-15T08:00:00.000Z" });
+    const oldSummaryId = await seedSummaryOutput(db, user.id, {
+      generatedAt: "2026-06-15T07:00:00.000Z",
+      title: "Old chat action",
+    });
+    const recentSummaryId = await seedSummaryOutput(db, user.id, {
+      generatedAt: "2026-06-15T09:00:00.000Z",
+      title: "Recent chat action",
+    });
+    const taskRepo = createTaskRepository(db);
+    const summaryTask = await taskRepo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Recent chat action",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-recent-chat-action",
+      createdByUserId: user.id,
+    });
+
+    const run = await runAndCapture(db, user.id, OUTPUT_DATE, [], { createTasks: false });
+
+    expect(run.context.recentSummaries as Array<{ outputId: string; actionItems: Array<{ title: string }> }>).toEqual([
+      {
+        outputId: recentSummaryId,
+        generatedAt: "2026-06-15T09:00:00.000Z",
+        summaryWindow: { start: "2026-06-15T08:00:00.000Z", end: "2026-06-15T09:00:00.000Z" },
+        actionItems: [
+          {
+            id: expect.any(String),
+            title: "Recent chat action",
+            summary: "Recent chat action summary",
+            priority: "high",
+            sourceLabels: ["#launch"],
+            messageIds: ["message-recent-chat-action"],
+          },
+        ],
+      },
+    ]);
+    expect(JSON.stringify(run.context.recentSummaries)).not.toContain(oldSummaryId);
+    expect(run.context.summaryTasks).toEqual([
+      {
+        id: summaryTask.taskId,
+        title: "Recent chat action",
+        status: "open",
+        statusRaw: "action_item",
+        provenance: "summary",
+        parentEntityId: null,
+        updatedAt: expect.any(String),
+      },
+    ]);
+    expect(run.instructions).toContain("summaryTasks");
+    expect(run.instructions).toContain("recentSummaries");
+  });
+
+  it("keeps create-tasks disabled for Brief writes while allowing genuinely new Brief tasks when enabled", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Daily Brief User",
+      email: "brief-owner@example.com",
+      emailVerified: true,
+    });
+    await seedAssignablePerson(db, "person-brief-owner", "Daily Brief User", "brief-owner@example.com");
+    await seedProject(db, "project-x", "Project X");
+    await seedIndexedFile(db, "brief-file-1", user.id);
+    const todo = briefItem({
+      title: "New Brief-only follow-up",
+      structuredPayload: { assigneeName: "Daily Brief User" },
+      knowledgeRefs: { entityIds: ["project-x"], fileIds: ["brief-file-1"] },
+    });
+
+    await runAndCapture(db, user.id, OUTPUT_DATE, [todo], { createTasks: false });
+    const afterDisabled = await countTasks(db);
+    await runAndCapture(db, user.id, "2026-06-16", [todo], { createTasks: true });
+    const afterEnabled = await countTasks(db);
+
+    expect(afterDisabled).toBe(0);
+    expect(afterEnabled).toBe(1);
   });
 });
 
@@ -65,6 +188,7 @@ async function runAndCapture(
   userId: string,
   outputDate: string,
   items: AgentOutputItemInput[],
+  configPatch: { createTasks?: boolean } = {},
 ): Promise<{ context: Record<string, unknown>; instructions: string }> {
   const queued: Array<() => Promise<void>> = [];
   const capturedParams: RunAgentParams[] = [];
@@ -95,6 +219,9 @@ async function runAndCapture(
     outputDate,
     triggerType: "manual",
   });
+  if (Object.keys(configPatch).length > 0) {
+    await service.updateConfigForUser(DAILY_BRIEF_AGENT_KEY, userId, configPatch);
+  }
   if (!row) throw new Error("Expected a running output");
   await queued.at(-1)?.();
   const params = capturedParams[0];
@@ -128,7 +255,12 @@ function createPausedQueueManager(tasks: Array<() => Promise<void>>): QueueManag
   } as unknown as QueueManager;
 }
 
-async function seedCompletedOutput(db: Kysely<DB>, userId: string, outputDate: string): Promise<void> {
+async function seedCompletedOutput(
+  db: Kysely<DB>,
+  userId: string,
+  outputDate: string,
+  opts: { generatedAt?: string } = {},
+): Promise<void> {
   const repo = createAgentOutputRepository(db);
   const running = await repo.createRunning({
     agentKey: DAILY_BRIEF_AGENT_KEY,
@@ -147,6 +279,64 @@ async function seedCompletedOutput(db: Kysely<DB>, userId: string, outputDate: s
       briefItem({ title: "Open prior todo", label: "todo", sortOrder: 1 }),
     ],
   });
+  if (opts.generatedAt) {
+    await db
+      .updateTable("agent_outputs")
+      .set({ generated_at: opts.generatedAt, updated_at: opts.generatedAt })
+      .where("id", "=", running.row.id)
+      .execute();
+  }
+}
+
+async function seedSummaryOutput(
+  db: Kysely<DB>,
+  userId: string,
+  params: { generatedAt: string; title: string },
+): Promise<string> {
+  const repo = createAgentOutputRepository(db);
+  const outputDate = params.generatedAt.slice(0, 10);
+  const running = await repo.createRunning({
+    agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+    agentVersion: CONVERSATION_SUMMARY_AGENT_VERSION,
+    userId,
+    outputDate,
+    periodKey: outputDate,
+    sourceKey: "slack:channel:C_LAUNCH",
+    sourceLabel: "#launch",
+    timezone: "UTC",
+    triggerType: "manual",
+  });
+  await repo.completeOutput({
+    outputId: running.row.id,
+    masthead: { title: "Conversation Summary", summary: "Summary" },
+    rawPayload: {
+      outputDate,
+      timezone: "UTC",
+      summaryWindow: { start: "2026-06-15T08:00:00.000Z", end: params.generatedAt },
+      items: [],
+    },
+    items: [
+      {
+        sectionKey: "action_items",
+        title: params.title,
+        summary: `${params.title} summary`,
+        priority: "high",
+        label: "action_item",
+        knowledgeRefs: { entityIds: [], fileIds: [] },
+        structuredPayload: {
+          sourceLabels: ["#launch"],
+          messageIds: [`message-${params.title.toLowerCase().replaceAll(" ", "-")}`],
+        },
+        sortOrder: 0,
+      },
+    ],
+  });
+  await db
+    .updateTable("agent_outputs")
+    .set({ generated_at: params.generatedAt, updated_at: params.generatedAt })
+    .where("id", "=", running.row.id)
+    .execute();
+  return running.row.id;
 }
 
 async function seedIndexedFile(db: Kysely<DB>, id: string, userId: string): Promise<void> {
@@ -181,6 +371,46 @@ async function seedIndexedFile(db: Kysely<DB>, id: string, userId: string): Prom
       source_created_at: null,
       synced_at: new Date().toISOString(),
       embedding_status: "pending",
+    })
+    .execute();
+}
+
+async function seedAssignablePerson(db: Kysely<DB>, id: string, name: string, email: string): Promise<void> {
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "person",
+      subtype: null,
+      aliases: JSON.stringify([email]),
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ai_brief: null,
+    })
+    .execute();
+}
+
+async function seedProject(db: Kysely<DB>, id: string, name: string): Promise<void> {
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "project",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ai_brief: null,
     })
     .execute();
 }

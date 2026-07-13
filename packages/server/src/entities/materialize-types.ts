@@ -58,7 +58,6 @@ export interface MaterializeDeps {
     synced_at: string;
   } | null>;
   llmPromotionThreshold: number;
-  countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
   llmTaskCorroborationThreshold: number;
   featureAutoMintThreshold: number;
   birthGateTypes: Set<ProposeEntityType>;
@@ -66,6 +65,7 @@ export interface MaterializeDeps {
   structuralAutoBirthTypes: Set<ProposeEntityType>;
   birthGateDryRun: boolean;
   embeddingProvider: EmbeddingProvider | null;
+  countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
 }
 
 export type MaterializeResult =
@@ -99,6 +99,12 @@ export interface ReplaySourceFactsOptions {
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   embeddingProvider?: EmbeddingProvider | null;
+  /**
+   * Rows fetched per keyset page. Bounds peak heap: only one page of facts
+   * (including their `raw` payloads) is held at a time. Defaults to
+   * `DEFAULT_FACT_BATCH_SIZE`.
+   */
+  batchSize?: number;
 }
 
 export interface MaterializeProgress {
@@ -117,6 +123,12 @@ export interface MaterializeUnmaterializedOptions {
   birthGateDryRun?: boolean;
   embeddingProvider?: EmbeddingProvider | null;
   factTypes?: IndexedFileFactType[];
+  /**
+   * Rows fetched per keyset page. Bounds peak heap: only one page of facts
+   * (including their `raw` payloads) is held at a time. Defaults to
+   * `DEFAULT_FACT_BATCH_SIZE`.
+   */
+  batchSize?: number;
   /**
    * Fires before processing each fact with `completed = index, total = facts.length`
    * and after the loop with `completed = total`. Used by the reset/reenrich job

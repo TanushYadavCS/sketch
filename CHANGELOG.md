@@ -2,6 +2,45 @@
 
 All notable changes to this project are documented here.
 
+## [1.1.0] -- 2026-07-13
+
+- Indexes opted-in WhatsApp group conversations into the context graph with gap-watermark chunking, LLM salience gating, identity resolution, and access-scoped privacy controls.
+- Gates structured task creation for Summarizer and Daily Brief via agent writers, disabling enrichment-driven task minting and preserving UI status editing for Sketch-native tasks.
+- Daily Brief now consumes completed Summarizer outputs and recent tasks to inform briefs without re-deriving action items, collating against existing tasks to reduce duplicates.
+- Fixes duplicate and mis-typed WhatsApp entity extraction by letting v13 own all entity typing and removing redundant salience seeding.
+- Repairs sentinel fact owners and introduces a quarantine mechanism for fact materializations that fail after multiple attempts, eliminating persistent foreign key errors and reducing sweep churn.
+
+## [1.0.2] -- 2026-07-10
+
+- Streams Gmail sync in two passes (address-only reciprocity then paged body fetches) to bound peak residency to one page instead of the full 5,000-message corpus.
+- Streams Google Calendar sync per page instead of materializing the entire 730-day expanded event set before the first yield.
+- Streams Teams transcripts per meeting with bounded concurrency, adds a `maxMeetings` cap, and eliminates double VTT parsing.
+- Streams Outlook bodies per page with an address-only reciprocity pass, mirroring the Gmail two-pass shape to avoid materializing the full `NormalizedEmail[]` array.
+- Bounds company-anchor adjacency queries with a file-recency cap to prevent self-join blowup on high-degree entities during enrichment.
+- Keyset-pages source-fact materialization by chronological order (`created_at`, `id`) instead of loading the entire backlog into memory, reducing peak heap from corpus-proportional to batch-sized.
+- Pages post-sync sweeps (hotness recomputation, domain promotions, name resolver) to yield to the event loop and avoid multi-second stalls on large corpora.
+- Caps tool output retained in agent progress-log cards to 30k characters to prevent large results from persisting in memory for the run's lifetime.
+- Loads only post-compaction-marker transcript rows in the AI SDK runtime instead of re-parsing the full history every turn, and truncates large persisted outputs over 128 KB.
+- Adds outbound HTTP timeouts via `AbortSignal.timeout` to previously unbounded fetches (Slack, OAuth, Gemini, Canvas) to prevent hung upstreams from wedging queue slots.
+- Guards scheduler re-entrancy with per-task single-flight, caps queue backlog at 50 items per key, and evicts drained queues to prevent unbounded growth.
+- Moves Drive binary parsing (XLSX, PDF, DOCX, PPTX) to a capped worker-thread pool to keep the shared event loop responsive during concurrent syncs.
+
+## [1.0.1] -- 2026-07-10
+
+- Automatically derives Node.js heap size from container memory limits at startup to prevent out-of-memory crashes in environments like Fargate, respecting any explicit `--max-old-space-size` override.
+- Adds per-phase heap and RSS sampling to key process completion logs for memory growth observability.
+- Fixes enrichment jobs that previously loaded all pending file content into memory, now fetching each file just-in-time to reduce heap usage from gigabytes to a single document's size.
+- Enforces a global streaming request body limit before buffering to reject oversized payloads early and prevent transient memory spikes from large uploads.
+- Caps Google Drive binary file extraction and truncates text downloads to prevent excessive memory use during sync, skipping oversized binaries.
+- Introduces a per-message aggregate size budget for inline image attachments to bound base64-encoded content memory usage during agent runs, with skipped images available for the agent to read via tools.
+- Chunks large database sync operations to avoid hitting SQLite's bound variable limit and scopes content-hash preloading to the current connector config to reduce memory pressure.
+
+## [1.0.0] -- 2026-07-09
+
+- Introduces an in-process AI agent runtime (`AGENT_RUNTIME=aisdk`) built on Vercel AI SDK v7, replacing the per-query subprocess model to reduce memory usage from ~1 GiB per concurrent user to ~0.3 MiB. Provides full tool parity, workspace isolation, and operational compatibility with the existing SDK runtime, enabled via feature flag for easy rollback.
+- Fixes a fragile migration recovery test (`migrate.test.ts`) that was incorrectly modeling an impossible database state and silently failing in CI under machine contention. The test now accurately simulates the 107-120 migration ledger gap without being affected by future migration additions.
+- The release-cut workflow now supports major version bumps (`vX.0.0`), in addition to the existing minor and patch options.
+
 ## [0.47.0] -- 2026-07-08
 
 - Managed member deletion now cleanly removes platform tenant membership before local user removal, blocking local deletion if platform cleanup fails to prevent membership drift.

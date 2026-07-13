@@ -185,12 +185,26 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
     .execute();
 
   result.scanned = candidates.length;
-  const allEntities = (await db
+  if (candidates.length === 0) {
+    return result;
+  }
+
+  /**
+   * The company-promotion flow only ever consults `lookup.listByType("company")`
+   * (the email fast-path is person-only; `evidenceDomain`, name-dedup, and
+   * embedding hooks are all absent from `makeLookup`). Loading only live company
+   * rows instead of every live entity of every type preserves the fuzzy ranker's
+   * inputs exactly while cutting the per-sync corpus scan to the fraction that
+   * can actually match. When there are no candidates the scan is skipped
+   * entirely.
+   */
+  const companyEntities = (await db
     .selectFrom("entities")
     .selectAll()
     .where(whereLiveEntity())
+    .where("source_type", "=", "company")
     .execute()) as Selectable<EntitiesTable>[];
-  const lookup = makeLookup(allEntities);
+  const lookup = makeLookup(companyEntities);
 
   for (const candidate of candidates) {
     const domain = candidate.domain;

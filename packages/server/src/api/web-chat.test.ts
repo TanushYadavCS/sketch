@@ -1026,6 +1026,32 @@ describe("web chat API", () => {
     });
   });
 
+  it("rejects oversized attachment uploads with a 413 envelope before buffering", async () => {
+    await seedAdmin(db);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    // 70MB exceeds the streaming body-limit ceiling, so it is rejected while
+    // streaming, before the handler buffers it into memory.
+    const oversized = new Uint8Array(70 * 1024 * 1024);
+    const form = new FormData();
+    form.append("file", new File([oversized], "big.bin", { type: "application/octet-stream" }));
+
+    const res = await app.request("/api/web-chat/attachments", {
+      method: "POST",
+      headers: { Cookie: cookie },
+      body: form,
+    });
+
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("PAYLOAD_TOO_LARGE");
+  });
+
   it("rejects web chat attachments outside the user's workspace", async () => {
     await seedAdmin(db);
     const runAgent = vi.fn().mockResolvedValue(makeAgentResult());
@@ -1905,7 +1931,7 @@ describe("web chat API", () => {
     });
   });
 
-  it("deletes a persisted web chat conversation and its agent session", async () => {
+  it("deletes a persisted web chat conversation and archives its agent session", async () => {
     const admin = await seedAdmin(db);
     const transcriptDir = join(dataDir, "web-chat", admin.id);
     await mkdir(transcriptDir, { recursive: true });
@@ -1936,6 +1962,13 @@ describe("web chat API", () => {
     await expect(res.json()).resolves.toEqual({ success: true });
     await expect(readFile(join(transcriptDir, "chat-alpha.json"), "utf-8")).rejects.toThrow();
     await expect(getSessionId(db, admin.id, "chat-alpha")).resolves.toBeUndefined();
+    const session = await db
+      .selectFrom("chat_sessions")
+      .select(["session_id", "archived_at"])
+      .where("workspace_key", "=", admin.id)
+      .where("thread_key", "=", "chat-alpha")
+      .executeTakeFirstOrThrow();
+    expect(session).toEqual({ session_id: "sess-alpha", archived_at: expect.any(String) });
     await expect(conversations.json()).resolves.toEqual({ conversations: [] });
   });
 

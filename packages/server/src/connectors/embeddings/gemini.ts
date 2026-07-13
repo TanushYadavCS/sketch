@@ -17,6 +17,8 @@ const GEMINI_BATCH_URL =
 /** Gemini embedding-2-preview outputs 3072 dimensions by default. */
 const DIMENSIONS = 3072;
 
+const REQUEST_TIMEOUT_MS = 30_000;
+
 const BATCH_SIZE = 25;
 
 export function createGeminiEmbeddingProvider(apiKey: string, options?: GeminiClientOptions): EmbeddingProvider {
@@ -28,6 +30,7 @@ export function createGeminiEmbeddingProvider(apiKey: string, options?: GeminiCl
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
 
         if (res.ok) return res.json();
@@ -117,6 +120,7 @@ async function requestQueryEmbedding(apiKey: string, query: string, options?: Ge
           content: { parts: [{ text: query }] },
           taskType: "RETRIEVAL_QUERY",
         }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
 
       if (res.ok) return res.json();

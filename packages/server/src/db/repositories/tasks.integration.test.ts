@@ -65,18 +65,19 @@ describe("createTaskRepository postgres", () => {
 
   it("promotes brief tasks and collates with structural tasks on postgres", async () => {
     await seedPgUser(db, "pg-brief-u1", "pg-u1@example.com");
+    await seedPgPerson(db, "pg-person-u1", "PG Brief Owner", "pg-u1@example.com");
     await seedPgProject(db, "pg-project-x", "PG Project X");
     await seedPgIndexedFile(db, "pg-brief-file-1");
     const repo = createTaskRepository(db);
 
     const first = await repo.promoteBriefTask({
       userId: "pg-brief-u1",
-      todo: pgBriefTodo(),
+      todo: pgBriefTodo({ structuredPayload: { assigneeName: "PG Brief Owner" } }),
       knowledgeRefs: { entityIds: ["pg-project-x"], fileIds: ["pg-brief-file-1"] },
     });
     const second = await repo.promoteBriefTask({
       userId: "pg-brief-u1",
-      todo: pgBriefTodo({ label: "in_progress" }),
+      todo: pgBriefTodo({ label: "in_progress", structuredPayload: { assigneeName: "PG Brief Owner" } }),
       knowledgeRefs: { entityIds: ["pg-project-x"], fileIds: ["pg-brief-file-1"] },
     });
     await db.deleteFrom("task_evidence").execute();
@@ -122,13 +123,63 @@ describe("createTaskRepository postgres", () => {
     ]);
   });
 
-  it("materializes llm corroboration mint and structural collation on postgres", async () => {
+  it("prefers project-specific summary tasks over parentless summary tasks when collating Brief todos on postgres", async () => {
+    await seedPgUser(db, "pg-summary-u1", "pg-summary@example.com");
+    await seedPgPerson(db, "pg-person-summary", "PG Summary Owner", "pg-summary@example.com");
+    await seedPgProject(db, "pg-project-summary", "PG Project Summary");
+    const repo = createTaskRepository(db);
+    const parentless = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Send launch notes",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "pg-summary-global",
+      createdByUserId: "pg-summary-u1",
+    });
+    const projectSpecific = await repo.upsertTask({
+      parentEntityId: "pg-project-summary",
+      parentSourceRef: null,
+      parentName: "PG Project Summary",
+      source: "summary",
+      externalRef: null,
+      title: "Send launch notes",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "pg-summary-project",
+      createdByUserId: "pg-summary-u1",
+    });
+
+    const collated = await repo.promoteBriefTask({
+      userId: "pg-summary-u1",
+      todo: pgBriefTodo({
+        title: "Send launch notes",
+        structuredPayload: { assigneeName: "PG Summary Owner" },
+      }),
+      knowledgeRefs: { entityIds: ["pg-project-summary"], fileIds: [] },
+    });
+
+    expect(collated).toEqual({ status: "collated", taskId: projectSpecific.taskId });
+    expect(collated).not.toEqual({ status: "collated", taskId: parentless.taskId });
+  });
+
+  it("marks legacy llm task facts materialized without minting tasks on postgres", async () => {
     await seedPgUser(db, "pg-llm-u1", "pg-llm-u1@example.com");
-    await seedPgProject(db, "pg-llm-project", "PG LLM Project");
-    await seedPgProjectRef(db, "pg-llm-project", "linear", "pg-llm-project");
     await seedPgIndexedFileForUser(db, "pg-llm-file-1", "pg-llm-u1");
     await seedPgIndexedFileForUser(db, "pg-llm-file-2", "pg-llm-u1");
-    await seedPgIndexedFileForUser(db, "pg-llm-file-3", "pg-llm-u1");
 
     await seedPgLlmFact({
       db,
@@ -150,76 +201,31 @@ describe("createTaskRepository postgres", () => {
       hasOwnerVerbObject: false,
       corroborationKey: "send pricing deck|global",
     });
-    await materializeUnmaterializedFacts(db, createTestLogger(), {
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), {
       llmTaskCorroborationThreshold: 2,
     });
 
-    const minted = await db.selectFrom("tasks").selectAll().where("provenance", "=", "llm").execute();
-    const mintedEvidence = await db
-      .selectFrom("task_evidence")
-      .selectAll()
-      .where("kind", "=", "file")
-      .orderBy("ref_id", "asc")
+    const rows = await db.selectFrom("tasks").selectAll().execute();
+    const evidence = await db.selectFrom("task_evidence").selectAll().execute();
+    const facts = await db
+      .selectFrom("indexed_file_facts")
+      .select(["id", "materialized_at"])
+      .where("fact_type", "=", "llm_task")
+      .orderBy("id", "asc")
       .execute();
-    expect(minted).toHaveLength(1);
-    expect(minted[0]).toMatchObject({
-      source: "llm",
-      status_authority: "local",
-      created_by_user_id: "pg-llm-u1",
-    });
-    expect(mintedEvidence.map((row) => row.ref_id)).toEqual(["pg-llm-file-1", "pg-llm-file-2"]);
 
-    const repo = createTaskRepository(db);
-    const structural = await repo.upsertTask({
-      parentEntityId: "pg-llm-project",
-      parentSourceRef: "linear:pg-llm-project",
-      parentName: "PG LLM Project",
-      source: "linear",
-      externalRef: "SKE-PG-LLM",
-      title: "Ship Slack capture",
-      status: "open",
-      statusRaw: "Todo",
-      statusAuthority: "external",
-      assigneeEntityId: null,
-      priority: null,
-      dueAt: null,
-      provenance: "structural",
-      sourceTaskId: "pg-llm-structural",
-    });
-    await seedPgLlmFact({
-      db,
-      fileId: "pg-llm-file-3",
-      connectorConfigId: "connector-pg-llm-file-3",
-      ownerUserId: "pg-llm-u1",
-      candidateId: "pg-collate-1",
-      title: "Ship Slack capture",
-      hasOwnerVerbObject: false,
-      corroborationKey: "ship slack capture|linear:pg-llm-project",
-      parentRef: { source: "linear", sourceId: "pg-llm-project" },
-      entityIds: ["pg-llm-project"],
-    });
-    await materializeUnmaterializedFacts(db, createTestLogger(), {
-      llmTaskCorroborationThreshold: 2,
-    });
-
-    const rows = await db.selectFrom("tasks").selectAll().orderBy("source", "asc").execute();
-    const structuralEvidence = await db
-      .selectFrom("task_evidence")
-      .selectAll()
-      .where("task_id", "=", structural.taskId)
-      .orderBy("kind", "asc")
-      .execute();
-    expect(rows).toHaveLength(2);
-    expect(rows.find((row) => row.id === structural.taskId)).toMatchObject({
-      provenance: "structural",
-      status_authority: "external",
-    });
-    expect(structuralEvidence.map((row) => row.kind).sort()).toEqual(["entity", "fact", "file"]);
+    expect(summary).toMatchObject({ factsRead: 2, skipped: 2, materialized: 2 });
+    expect(rows).toHaveLength(0);
+    expect(evidence).toHaveLength(0);
+    expect(facts).toEqual([
+      expect.objectContaining({ materialized_at: expect.any(String) }),
+      expect.objectContaining({ materialized_at: expect.any(String) }),
+    ]);
   });
 });
 
 async function seedPgUser(db: Kysely<DB>, id: string, email: string): Promise<void> {
-  await db.insertInto("users").values({ id, name: id, email }).execute();
+  await db.insertInto("users").values({ id, name: id, email, email_verified_at: new Date().toISOString() }).execute();
 }
 
 async function seedPgProject(db: Kysely<DB>, id: string, name: string): Promise<void> {
@@ -244,16 +250,24 @@ async function seedPgProject(db: Kysely<DB>, id: string, name: string): Promise<
     .execute();
 }
 
-async function seedPgProjectRef(db: Kysely<DB>, entityId: string, source: string, sourceId: string): Promise<void> {
+async function seedPgPerson(db: Kysely<DB>, id: string, name: string, email: string): Promise<void> {
   await db
-    .insertInto("entity_source_refs")
+    .insertInto("entities")
     .values({
-      id: `${source}-${sourceId}`,
-      entity_id: entityId,
-      source,
-      source_id: sourceId,
-      source_url: null,
-      last_seen_at: new Date().toISOString(),
+      id,
+      name,
+      source_type: "person",
+      subtype: null,
+      aliases: JSON.stringify([email]),
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ai_brief: null,
+      deleted_at: null,
+      merged_into_entity_id: null,
     })
     .execute();
 }

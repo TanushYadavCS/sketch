@@ -56,6 +56,10 @@ WORKDIR /app
 # Copy only the bundled output and production node_modules
 COPY --from=build /app/pruned/node_modules ./node_modules
 COPY --from=build /app/packages/server/dist ./dist
+COPY --chmod=755 docker-entrypoint.sh ./docker-entrypoint.sh
+
+# Verify vendored ripgrep is present and executable in the runtime image.
+RUN node --input-type=module -e "import { rgPath } from '@vscode/ripgrep'; import { execFileSync } from 'node:child_process'; console.log(execFileSync(rgPath, ['--version'], { encoding: 'utf8' }).split('\n')[0]);"
 
 RUN printf '%s\n' '#!/bin/sh' 'exec /app/node_modules/.bin/md-to-pdf "$@"' > /usr/local/bin/md-to-pdf \
   && printf '%s\n' '#!/bin/sh' 'exec /app/node_modules/.bin/md2pdf "$@"' > /usr/local/bin/md2pdf \
@@ -75,4 +79,4 @@ EXPOSE 3000
 
 USER 1000
 
-ENTRYPOINT ["node", "dist/index.js"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

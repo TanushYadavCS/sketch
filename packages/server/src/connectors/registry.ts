@@ -22,6 +22,7 @@ import { createNotionConnector } from "./notion";
 import { createOtterConnector } from "./otter";
 import { createOutlookConnector } from "./outlook";
 import { createTeamsConnector } from "./teams";
+import { createWhatsAppConnector } from "./whatsapp";
 import { createZohoCrmConnector } from "./zoho-crm";
 
 export const connectorFactories: Record<ConnectorType, () => Connector> = {
@@ -36,6 +37,7 @@ export const connectorFactories: Record<ConnectorType, () => Connector> = {
   fireflies: createFirefliesConnector,
   otter: createOtterConnector,
   zoho_crm: createZohoCrmConnector,
+  whatsapp: createWhatsAppConnector,
 };
 
 export const VALID_CONNECTOR_TYPES: ConnectorType[] = Object.keys(connectorFactories) as ConnectorType[];

@@ -4,7 +4,7 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
 import type { Config } from "../config";
-import { runEnrichment } from "../connectors/enrichment";
+import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
 import {
   createEnrichmentEmbeddingProvider,
   createEnrichmentGenerator,
@@ -147,6 +147,10 @@ export function settingsRoutes(
     const row = await settings.get();
     if (row?.enrichment_enabled === 0) {
       return c.json({ error: { code: "DISABLED", message: "Enrichment is disabled" } }, 400);
+    }
+
+    if (isEnrichmentActive()) {
+      return c.json({ error: { code: "CONFLICT", message: "An enrichment run is already in progress" } }, 409);
     }
 
     const openRouterConfig = resolveOpenRouterEnrichmentConfig(row, config?.OPENROUTER_API_KEY);

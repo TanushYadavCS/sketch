@@ -16,7 +16,7 @@
  * promotion sweep must refuse a personal-provider candidate outright.
  */
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sweepDomainPromotions } from "../connectors/smart-enrichment";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
@@ -208,6 +208,38 @@ describe("ELP-02: affiliation inference", () => {
       .where("domain", "=", "gmail.com")
       .executeTakeFirstOrThrow();
     expect(candidate.promoted_entity_id).toBeNull();
+  });
+
+  it("skips the entity-corpus load entirely when there are no promotion candidates", async () => {
+    // Live entities that the pre-fix sweep would have loaded unconditionally.
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertEntity({ name: "Existing Co", sourceType: "company", status: "confirmed" });
+    await entityRepo.upsertPersonEntity({
+      name: "Existing Person",
+      email: "person@existing.com",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "existing-person",
+    });
+
+    const selectedTables: string[] = [];
+    const originalSelectFrom = db.selectFrom.bind(db);
+    const spy = vi.spyOn(db, "selectFrom").mockImplementation(((table: Parameters<typeof db.selectFrom>[0]) => {
+      selectedTables.push(String(table));
+      return originalSelectFrom(table);
+    }) as typeof db.selectFrom);
+
+    try {
+      const result = await sweepDomainPromotions(db, createTestLogger());
+      expect(result.scanned).toBe(0);
+      expect(result.promoted).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The zero-candidate early return must never touch the entities table.
+    expect(selectedTables).toContain("entity_candidates");
+    expect(selectedTables).not.toContain("entities");
   });
 
   it("a single demo prospect promotes the company immediately (threshold=1) with a works_at edge", async () => {

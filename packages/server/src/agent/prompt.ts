@@ -468,6 +468,7 @@ export function buildSystemContext(params: {
     'For wider Slack channel, WhatsApp group, Slack DM, or WhatsApp DM memory, use SearchChatHistory with scope: "conversation". This is how you discover ambient Slack messages that were stored but not inlined.',
     "SearchChatHistory is scoped to the active chat conversation. It is not org-wide knowledge search and does not replace the existing Search tool for indexed docs, tasks, meetings, or connector data.",
     "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory around that row id.",
+    "For indexed WhatsApp group slices found through Search, use WhatsAppGroupHistory with the sliceId when the user needs the exact raw group messages before, during, or after the slice. WhatsAppGroupHistory can include adjacent dropped banter that was intentionally not indexed, and it is access-scoped server-side.",
   );
 
   sections.push(

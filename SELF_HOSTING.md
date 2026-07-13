@@ -40,6 +40,8 @@ LLM credentials, Slack tokens, and WhatsApp pairing are configured through the w
 
 ## Production Deployment
 
+The agent runtime's Grep and Glob tools use the ripgrep binary vendored through npm via `@vscode/ripgrep`. `pnpm install` selects the right platform build automatically, and `node_modules` must remain on disk next to the built `dist/`; do not deploy `dist/` alone.
+
 ### systemd Service
 
 Create `/etc/systemd/system/sketch.service`:

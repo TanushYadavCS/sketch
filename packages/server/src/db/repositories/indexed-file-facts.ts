@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import type { IndexedFileFactRaw, LlmTaskCandidate, LlmTaskFactRaw } from "../../connectors/types";
 import type { DB } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
@@ -641,21 +641,35 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         deleted_at: null,
         content_hash: input.contentHash ?? null,
         materialized_at: null,
+        materialization_attempts: 0,
         updated_at: now,
       };
 
       if (legacyFactKey !== factKey) {
         const existing = await db
           .selectFrom("indexed_file_facts")
-          .select("id")
+          .select(["id", "content_hash", "materialization_attempts"])
           .where("fact_key", "=", legacyFactKey)
           .executeTakeFirst();
         if (existing) {
-          await db.updateTable("indexed_file_facts").set(values).where("id", "=", existing.id).execute();
+          const attempts = existing.content_hash === values.content_hash ? existing.materialization_attempts : 0;
+          await db
+            .updateTable("indexed_file_facts")
+            .set({ ...values, materialization_attempts: attempts })
+            .where("id", "=", existing.id)
+            .execute();
           return;
         }
       }
 
+      /**
+       * Re-syncs re-emit facts for unchanged items, so the failed-attempt
+       * counter must survive same-content upserts or the quarantine cap in
+       * materialize-replay.ts would be reset before every sweep and never
+       * engage. The counter only resets when content_hash actually changes.
+       * The null-safe equality is spelled out because SQLite's `IS` and
+       * Postgres' `IS NOT DISTINCT FROM` don't share a syntax.
+       */
       await db
         .insertInto("indexed_file_facts")
         .values({
@@ -665,6 +679,14 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         .onConflict((oc) =>
           oc.column("fact_key").doUpdateSet({
             ...values,
+            materialization_attempts: sql<number>`
+              CASE
+                WHEN indexed_file_facts.content_hash = excluded.content_hash
+                  OR (indexed_file_facts.content_hash IS NULL AND excluded.content_hash IS NULL)
+                THEN indexed_file_facts.materialization_attempts
+                ELSE 0
+              END
+            `,
           }),
         )
         .execute();
@@ -833,7 +855,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
       if (indexedFileIds.length === 0) return;
       await db
         .updateTable("indexed_file_facts")
-        .set({ materialized_at: null, updated_at: new Date().toISOString() })
+        .set({ materialized_at: null, materialization_attempts: 0, updated_at: new Date().toISOString() })
         .where("indexed_file_id", "in", indexedFileIds)
         .where("deleted_at", "is", null)
         .execute();

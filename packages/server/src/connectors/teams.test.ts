@@ -468,6 +468,90 @@ describe("Teams connector", () => {
       },
     ]);
   });
+
+  it("streams meeting items instead of fetching the whole corpus before the first yield", async () => {
+    const connector = createTeamsConnector({ maxInflight: 1, processingLagMs: 0, retryBaseMs: 0 });
+    const sequence: string[] = [];
+    mockGoodMeetings(sequence, ["recent", "middle", "old"]);
+
+    const received: string[] = [];
+    for await (const item of connector.sync({
+      credentials: validCredentials(),
+      scopeConfig: { initialDays: 7 },
+      cursor: null,
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    })) {
+      if (received.length === 0) sequence.push("yield:first");
+      received.push(item.providerFileId);
+    }
+
+    expect([...received].sort()).toEqual(["transcript-middle", "transcript-old", "transcript-recent"]);
+    // The old buffered path fetched every meeting before yielding anything, so
+    // the oldest meeting's lookup preceded the first yield. Streaming (with a
+    // single in-flight worker) yields the first item before the last meeting is
+    // ever fetched.
+    expect(sequence.indexOf("yield:first")).toBeLessThan(sequence.indexOf("onlineMeetings:old"));
+  });
+
+  it("caps meetings per run to the most recent maxMeetings and never fetches older ones", async () => {
+    const connector = createTeamsConnector({ maxInflight: 2, processingLagMs: 0, retryBaseMs: 0 });
+    const sequence: string[] = [];
+    mockGoodMeetings(sequence, ["recent", "old"]);
+
+    const received: string[] = [];
+    for await (const item of connector.sync({
+      credentials: validCredentials(),
+      scopeConfig: { initialDays: 7, maxMeetings: 1 },
+      cursor: null,
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    })) {
+      received.push(item.providerFileId);
+    }
+    const advancedCursor = await connector.getCursor({
+      credentials: validCredentials(),
+      scopeConfig: {},
+      currentCursor: null,
+      logger,
+    });
+
+    expect(received).toEqual(["transcript-recent"]);
+    expect(sequence).not.toContain("onlineMeetings:old");
+    expect(JSON.parse(advancedCursor ?? "{}").lastSyncedAt).toEqual(expect.any(String));
+  });
+
+  it("aborts the run when a meeting fails with a non-skippable Graph error", async () => {
+    const connector = createTeamsConnector({ maxInflight: 1, processingLagMs: 0, retryBaseMs: 0 });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1.0/me/calendarView") {
+        return jsonResponse({
+          value: [teamsEvent("event-fail", "Boom", "https://teams.microsoft.com/l/meetup-join/fail")],
+        });
+      }
+      if (url.pathname === "/v1.0/me/onlineMeetings") {
+        return jsonResponse({ value: [{ id: "meeting-fail", subject: "Boom" }] });
+      }
+      if (url.pathname === "/v1.0/me/onlineMeetings/meeting-fail/transcripts") {
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    await expect(
+      drain(
+        connector.sync({
+          credentials: validCredentials(),
+          scopeConfig: { initialDays: 7 },
+          cursor: null,
+          logger,
+          ownerEmail: "owner@canvasx.ai",
+        }),
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 function validCredentials(): OAuthCredentials {
@@ -596,6 +680,56 @@ function mockTeamsGraphWithoutTranscripts() {
 
     throw new Error(`unexpected fetch ${url.toString()}`);
   });
+}
+
+/**
+ * Mock a set of resolvable Teams meetings, each with its own transcript. `keys`
+ * are ordered oldest-last (index 0 is the most recent); each key's start time is
+ * spaced one hour apart so the per-run cap and processing order are
+ * deterministic. Every `/onlineMeetings` lookup is appended to `sequence` as
+ * `onlineMeetings:<key>` so tests can observe fetch order relative to yields.
+ */
+function mockGoodMeetings(sequence: string[], keys: string[]) {
+  const events = keys.map((key, index) => ({
+    ...teamsEvent(`event-${key}`, `${key} sync`, `https://teams.microsoft.com/l/meetup-join/${key}`),
+    start: { dateTime: new Date(Date.now() - (index + 1) * 60 * 60_000).toISOString(), timeZone: "UTC" },
+    end: { dateTime: new Date(Date.now() - (index + 1) * 60 * 60_000 + 30 * 60_000).toISOString(), timeZone: "UTC" },
+  }));
+  const keyForJoin = (value: string): string | undefined => keys.find((key) => value.includes(key));
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+    const url = new URL(input.toString());
+
+    if (url.pathname === "/v1.0/me/calendarView") {
+      return jsonResponse({ value: events });
+    }
+
+    if (url.pathname === "/v1.0/me/onlineMeetings") {
+      const key = keyForJoin(url.searchParams.get("$filter") ?? "") ?? "unknown";
+      sequence.push(`onlineMeetings:${key}`);
+      return jsonResponse({
+        value: [{ id: `meeting-${key}`, subject: key, joinWebUrl: `https://teams.microsoft.com/l/meetup-join/${key}` }],
+      });
+    }
+
+    const listMatch = url.pathname.match(/\/onlineMeetings\/meeting-([^/]+)\/(transcripts|recordings)$/);
+    if (listMatch) {
+      const key = listMatch[1];
+      if (listMatch[2] === "recordings") return jsonResponse({ value: [] });
+      return jsonResponse({ value: [{ id: `transcript-${key}`, createdDateTime: new Date().toISOString() }] });
+    }
+
+    const contentMatch = url.pathname.match(/\/transcripts\/transcript-([^/]+)\/content$/);
+    if (contentMatch) {
+      return new Response(
+        ["WEBVTT", "", "00:00:00.000 --> 00:00:02.000", `<v Jane Doe>Recap ${contentMatch[1]}.</v>`].join("\n"),
+      );
+    }
+
+    throw new Error(`unexpected fetch ${url.toString()}`);
+  });
+
+  return events;
 }
 
 function teamsEvent(id: string, subject: string, joinUrl: string) {

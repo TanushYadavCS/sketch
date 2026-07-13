@@ -1,0 +1,197 @@
+{
+  "source": "real_claude_agent_sdk_bedrock",
+  "recorderRunId": "<RECORDER_RUN_ID>",
+  "handAuthored": false,
+  "modelId": "us.anthropic.claude-sonnet-4-6",
+  "thrownError": {
+    "name": "Error",
+    "message": "Claude Code process aborted by user"
+  },
+  "messages": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "<WORKSPACE_DIR>",
+      "session_id": "<SESSION_ID_1>",
+      "tools": [
+        "mcp__claude_ai_Canva__authenticate",
+        "mcp__claude_ai_Canva__complete_authentication",
+        "mcp__claude_ai_Gmail__authenticate",
+        "mcp__claude_ai_Gmail__complete_authentication",
+        "mcp__claude_ai_Google_Calendar__authenticate",
+        "mcp__claude_ai_Google_Calendar__complete_authentication",
+        "mcp__claude_ai_Google_Drive__authenticate",
+        "mcp__claude_ai_Google_Drive__complete_authentication",
+        "mcp__claude_ai_Linear__create_attachment",
+        "mcp__claude_ai_Linear__create_attachment_from_upload",
+        "mcp__claude_ai_Linear__create_issue_label",
+        "mcp__claude_ai_Linear__delete_attachment",
+        "mcp__claude_ai_Linear__delete_comment",
+        "mcp__claude_ai_Linear__delete_status_update",
+        "mcp__claude_ai_Linear__extract_images",
+        "mcp__claude_ai_Linear__get_agent_skill",
+        "mcp__claude_ai_Linear__get_attachment",
+        "mcp__claude_ai_Linear__get_diff",
+        "mcp__claude_ai_Linear__get_diff_threads",
+        "mcp__claude_ai_Linear__get_document",
+        "mcp__claude_ai_Linear__get_issue",
+        "mcp__claude_ai_Linear__get_issue_status",
+        "mcp__claude_ai_Linear__get_milestone",
+        "mcp__claude_ai_Linear__get_project",
+        "mcp__claude_ai_Linear__get_release",
+        "mcp__claude_ai_Linear__get_release_note",
+        "mcp__claude_ai_Linear__get_status_updates",
+        "mcp__claude_ai_Linear__get_team",
+        "mcp__claude_ai_Linear__get_user",
+        "mcp__claude_ai_Linear__list_agent_skills",
+        "mcp__claude_ai_Linear__list_comments",
+        "mcp__claude_ai_Linear__list_cycles",
+        "mcp__claude_ai_Linear__list_diffs",
+        "mcp__claude_ai_Linear__list_documents",
+        "mcp__claude_ai_Linear__list_issue_labels",
+        "mcp__claude_ai_Linear__list_issue_statuses",
+        "mcp__claude_ai_Linear__list_issues",
+        "mcp__claude_ai_Linear__list_milestones",
+        "mcp__claude_ai_Linear__list_project_labels",
+        "mcp__claude_ai_Linear__list_projects",
+        "mcp__claude_ai_Linear__list_release_notes",
+        "mcp__claude_ai_Linear__list_release_pipelines",
+        "mcp__claude_ai_Linear__list_releases",
+        "mcp__claude_ai_Linear__list_teams",
+        "mcp__claude_ai_Linear__list_users",
+        "mcp__claude_ai_Linear__prepare_attachment_upload",
+        "mcp__claude_ai_Linear__save_comment",
+        "mcp__claude_ai_Linear__save_document",
+        "mcp__claude_ai_Linear__save_issue",
+        "mcp__claude_ai_Linear__save_milestone",
+        "mcp__claude_ai_Linear__save_project",
+        "mcp__claude_ai_Linear__save_release",
+        "mcp__claude_ai_Linear__save_release_note",
+        "mcp__claude_ai_Linear__save_status_update",
+        "mcp__claude_ai_Linear__search_documentation",
+        "mcp__claude_ai_Raindrop__create_bookmarks",
+        "mcp__claude_ai_Raindrop__create_collections",
+        "mcp__claude_ai_Raindrop__create_highlight",
+        "mcp__claude_ai_Raindrop__delete_bookmarks",
+        "mcp__claude_ai_Raindrop__delete_collections",
+        "mcp__claude_ai_Raindrop__delete_highlights",
+        "mcp__claude_ai_Raindrop__delete_tags",
+        "mcp__claude_ai_Raindrop__fetch_bookmark_content",
+        "mcp__claude_ai_Raindrop__fetch_current_user",
+        "mcp__claude_ai_Raindrop__fetch_popular_keywords",
+        "mcp__claude_ai_Raindrop__find_bookmarks",
+        "mcp__claude_ai_Raindrop__find_collections",
+        "mcp__claude_ai_Raindrop__find_highlights",
+        "mcp__claude_ai_Raindrop__find_misplaced_bookmarks",
+        "mcp__claude_ai_Raindrop__find_mistagged_bookmarks",
+        "mcp__claude_ai_Raindrop__find_tags",
+        "mcp__claude_ai_Raindrop__merge_collections",
+        "mcp__claude_ai_Raindrop__update_bookmarks",
+        "mcp__claude_ai_Raindrop__update_collections",
+        "mcp__claude_ai_Raindrop__update_highlight",
+        "mcp__claude_ai_Raindrop__update_tags",
+        "mcp__claude_ai_Sketch_Canvas_AI__authenticate",
+        "mcp__claude_ai_Sketch_Canvas_AI__complete_authentication"
+      ],
+      "mcp_servers": [
+        {
+          "name": "claude.ai Linear",
+          "status": "connected"
+        },
+        {
+          "name": "claude.ai Sketch Canvas AI",
+          "status": "needs-auth"
+        },
+        {
+          "name": "claude.ai Raindrop",
+          "status": "connected"
+        },
+        {
+          "name": "claude.ai Canva",
+          "status": "needs-auth"
+        },
+        {
+          "name": "claude.ai Google Calendar",
+          "status": "needs-auth"
+        },
+        {
+          "name": "claude.ai Gmail",
+          "status": "needs-auth"
+        },
+        {
+          "name": "claude.ai Google Drive",
+          "status": "needs-auth"
+        }
+      ],
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "permissionMode": "default",
+      "slash_commands": [
+        "update-config",
+        "debug",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "loop",
+        "claude-api",
+        "clear",
+        "compact",
+        "context",
+        "heapdump",
+        "init",
+        "review",
+        "security-review",
+        "usage",
+        "insights",
+        "team-onboarding"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.118",
+      "output_style": "default",
+      "agents": ["claude-code-guide", "Explore", "general-purpose", "Plan", "statusline-setup"],
+      "skills": ["update-config", "debug", "simplify", "batch", "fewer-permission-prompts", "loop", "claude-api"],
+      "plugins": [],
+      "uuid": "<UUID_1>",
+      "memory_paths": {
+        "auto": "<HOME>/.claude/projects/-private-var-folders-d8-z3vkr3g103bb7kmx-rrqn0p40000gn-T-sketch-sdk-abort-run-Uj7lqX/memory/"
+      },
+      "fast_mode_state": "off"
+    },
+    {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting",
+      "uuid": "<UUID_2>",
+      "session_id": "<SESSION_ID_1>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_start",
+        "message": {
+          "model": "claude-sonnet-4-6",
+          "id": "msg_bdrk_01JVifXJxGjR3jvzgFpnGCMT",
+          "type": "message",
+          "role": "assistant",
+          "content": [],
+          "stop_reason": null,
+          "stop_sequence": null,
+          "stop_details": null,
+          "usage": {
+            "input_tokens": 3,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 21026,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1
+          }
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_3>",
+      "ttft_ms": 1946
+    }
+  ]
+}

@@ -13,6 +13,8 @@ import { z } from "zod";
 import type { CredentialEnvelope } from "../connectors/credential-envelope";
 import type { BrokerSpec, IntegrationProvider, IntegrationUserOrgRole } from "./types";
 
+const REQUEST_TIMEOUT_MS = 30_000;
+
 type CanvasAccountResponse = {
   id: string;
   source?: "canvas_user_secrets" | "pipedream" | string;
@@ -211,7 +213,10 @@ export class CanvasProvider implements IntegrationProvider {
       if (after) url.searchParams.set("after", after);
     }
 
-    const res = await fetch(url.toString(), { headers: this.headers() });
+    const res = await fetch(url.toString(), {
+      headers: this.headers(),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
     if (!res.ok) {
       throw new Error(`Canvas listApps failed: ${res.status} ${res.statusText}`);
     }
@@ -260,6 +265,7 @@ export class CanvasProvider implements IntegrationProvider {
       method: "POST",
       headers: this.headers(userEmail, true, userName, userOrgRole),
       body: JSON.stringify({ app_slug: appId, callback_url: callbackUrl }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -280,6 +286,7 @@ export class CanvasProvider implements IntegrationProvider {
   async listConnections(userEmail: string, userName?: string): Promise<IntegrationConnection[]> {
     const res = await fetch(`${this.apiUrl}/api/pipedream/accounts`, {
       headers: this.headers(userEmail, true, userName),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -327,6 +334,7 @@ export class CanvasProvider implements IntegrationProvider {
     const res = await fetch(`${this.apiUrl}/api/pipedream/accounts/${connectionId}`, {
       method: "DELETE",
       headers: this.headers(userEmail, false, userName),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -344,6 +352,7 @@ export class CanvasProvider implements IntegrationProvider {
       method: "PATCH",
       headers: this.headers(userEmail, true, userName),
       body: JSON.stringify({ accessLevel }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -369,6 +378,7 @@ export class CanvasProvider implements IntegrationProvider {
         ...(params.publicKeyId ? { publicKeyId: params.publicKeyId } : {}),
         ...(params.accountId ? { accountId: params.accountId } : {}),
       }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {

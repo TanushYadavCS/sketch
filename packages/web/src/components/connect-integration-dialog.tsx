@@ -315,13 +315,36 @@ export function ConnectIntegrationDialog({
         return;
       }
 
+      if (integration.authType === "system" && integration.scopeType === "flat") {
+        const scopeConfig = { [integration.scopeConfigKey ?? "rootPages"]: [] };
+        const result = await api.integrations.connect({
+          connectorType: integration.type,
+          authType: integration.authType,
+          credentials,
+          scopeConfig,
+        });
+        setManagedConnectorId(result.connector.id);
+        const browseResult = await api.integrations.browseExisting(result.connector.id);
+        if (browseResult.type === "flat") {
+          const scopedResult = browseResult as BrowseResultWithScope;
+          setGenericBrowseData(browseResult);
+          setSelectedGenericIds(
+            computeSelectedFromScope(scopedResult, scopedResult.scopeConfig ?? scopeConfig, integration.scopeConfigKey),
+          );
+          setStep("generic-scope");
+          return { deferredScope: true };
+        }
+        throw new Error("Scope browsing is not available for this connector.");
+      }
+
       await api.integrations.connect({
         connectorType: integration.type,
         authType: integration.authType,
         credentials,
       });
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
+      if (result && typeof result === "object" && "deferredScope" in result) return;
       // For Notion/ClickUp, success means we loaded the scope picker — don't close
       if (integration?.type === "notion" || integration?.type === "clickup") return;
       toast.success(`${integration?.name} connected successfully.`);
@@ -392,7 +415,7 @@ export function ConnectIntegrationDialog({
     mutationFn: async () => {
       if (!integration || !genericBrowseData) throw new Error("No scope selection available");
       const scopeConfig = buildScopeFromSelection(genericBrowseData, selectedGenericIds, integration.scopeConfigKey);
-      if (useCanvasCredentialFlow) {
+      if (useCanvasCredentialFlow || managedConnectorId) {
         if (!managedConnectorId) throw new Error("No managed connector selected");
         return api.integrations.updateScope(managedConnectorId, scopeConfig);
       }
@@ -472,6 +495,11 @@ export function ConnectIntegrationDialog({
     setGenericBrowseData(null);
     setSelectedGenericIds(new Set());
     onOpenChange(false);
+  };
+
+  const closeSystemConnectorAfterCreate = () => {
+    resetAndClose();
+    onConnected();
   };
 
   const canvasConnectMutation = useMutation({
@@ -663,7 +691,8 @@ export function ConnectIntegrationDialog({
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!next) resetAndClose();
+        if (!next && integration.authType === "system" && managedConnectorId) closeSystemConnectorAfterCreate();
+        else if (!next) resetAndClose();
         else onOpenChange(next);
       }}
     >
@@ -1051,14 +1080,16 @@ export function ConnectIntegrationDialog({
               ))}
             </ol>
 
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" size="sm" asChild>
-                <a href={integration.credentialUrl} target="_blank" rel="noopener noreferrer">
-                  Get credentials
-                  <ArrowSquareOutIcon className="size-3.5" />
-                </a>
-              </Button>
-            </div>
+            {integration.credentialUrl && (
+              <div className="flex items-center gap-2">
+                <Button variant="ghost" size="sm" asChild>
+                  <a href={integration.credentialUrl} target="_blank" rel="noopener noreferrer">
+                    Get credentials
+                    <ArrowSquareOutIcon className="size-3.5" />
+                  </a>
+                </Button>
+              </div>
+            )}
 
             <div className="space-y-3">
               {integration.authFields.map((field) => (
@@ -1137,11 +1168,17 @@ export function ConnectIntegrationDialog({
             <DialogFooter>
               <Button
                 variant="outline"
-                onClick={() => setStep("credentials")}
+                onClick={() => {
+                  if (integration.authType === "system" && managedConnectorId) {
+                    closeSystemConnectorAfterCreate();
+                    return;
+                  }
+                  setStep("credentials");
+                }}
                 disabled={connectWithGenericScopeMutation.isPending}
               >
-                <ArrowLeftIcon size={14} />
-                Back
+                {integration.authType === "system" && managedConnectorId ? null : <ArrowLeftIcon size={14} />}
+                {integration.authType === "system" && managedConnectorId ? "Close" : "Back"}
               </Button>
               <Button
                 onClick={() => connectWithGenericScopeMutation.mutate()}

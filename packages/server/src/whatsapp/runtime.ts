@@ -80,7 +80,11 @@ export function createWhatsAppRuntime(config: WhatsAppRuntimeConfig): WhatsAppRu
     return config.groupProviderId !== WHATSAPP_NONE_PROVIDER_ID && message.providerId === config.groupProviderId;
   };
 
-  const emptyHistoryResult = (): WhatsAppHistorySyncResult => ({ persisted: 0, skippedOld: 0, skippedDup: 0 });
+  const emptyHistoryResult = (): WhatsAppHistorySyncResult => ({
+    persisted: 0,
+    skippedOld: 0,
+    skippedDup: 0,
+  });
 
   return {
     get isConnected() {
@@ -101,10 +105,10 @@ export function createWhatsAppRuntime(config: WhatsAppRuntimeConfig): WhatsAppRu
 
     onHistoryMessages(handler) {
       for (const provider of config.inboundProviders) {
-        provider.onHistoryMessages?.(async (messages) => {
+        provider.onHistoryMessages?.(async (messages, metadata) => {
           const filtered = messages.filter(shouldHandleInboundMessage);
           if (filtered.length === 0) return emptyHistoryResult();
-          return handler(filtered);
+          return handler(filtered, metadata);
         });
       }
     },

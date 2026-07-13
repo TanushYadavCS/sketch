@@ -332,6 +332,7 @@ export function createUserRepository(db: UserDb): UserRepository {
         .where("whatsapp_fallback_agent_id", "=", id)
         .execute();
       invalidateSettingsCache(db);
+      await db.updateTable("tasks").set({ created_by_user_id: null }).where("created_by_user_id", "=", id).execute();
       return db.deleteFrom("users").where("id", "=", id).execute();
     },
 

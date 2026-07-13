@@ -20,6 +20,7 @@ import { inferAffiliationFromEmail } from "../entities/affiliations";
 import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
+import { heapStats, heapUsedMb } from "../lib/heap";
 import { resolveConnectorCredentials } from "./credential-providers";
 import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
@@ -127,9 +128,15 @@ export async function runConnectorSync(
       | "OUTLOOK_MAX_INFLIGHT"
       | "TEAMS_INITIAL_LOOKBACK_DAYS"
       | "TEAMS_MAX_INFLIGHT"
+      | "WHATSAPP_SLICE_GAP_MINUTES"
+      | "WHATSAPP_SLICE_MAX_AGE_MINUTES"
+      | "WHATSAPP_SLICE_MAX_MESSAGES"
+      | "WHATSAPP_SALIENCE_BATCH_LIMIT"
+      | "WHATSAPP_EMISSION_REFRESH_DAYS"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"
+      | "OPENROUTER_API_KEY"
     >
   >,
 ): Promise<SyncResult> {
@@ -171,11 +178,21 @@ export async function runConnectorSync(
             initialDays: storedScopeConfig.initialDays ?? appConfig?.TEAMS_INITIAL_LOOKBACK_DAYS,
             maxInflight: storedScopeConfig.maxInflight ?? appConfig?.TEAMS_MAX_INFLIGHT,
           }
-        : storedScopeConfig;
+        : config.connector_type === "whatsapp"
+          ? {
+              ...storedScopeConfig,
+              sliceGapMinutes: storedScopeConfig.sliceGapMinutes ?? appConfig?.WHATSAPP_SLICE_GAP_MINUTES,
+              sliceMaxAgeMinutes: storedScopeConfig.sliceMaxAgeMinutes ?? appConfig?.WHATSAPP_SLICE_MAX_AGE_MINUTES,
+              sliceMaxMessages: storedScopeConfig.sliceMaxMessages ?? appConfig?.WHATSAPP_SLICE_MAX_MESSAGES,
+              salienceBatchLimit: storedScopeConfig.salienceBatchLimit ?? appConfig?.WHATSAPP_SALIENCE_BATCH_LIMIT,
+              emissionRefreshDays: storedScopeConfig.emissionRefreshDays ?? appConfig?.WHATSAPP_EMISSION_REFRESH_DAYS,
+            }
+          : storedScopeConfig;
   const owner = await userRepo.findById(config.created_by);
   const ownerEmail = owner?.email ?? null;
 
   const syncLogger = logger.child({ connectorId: config.id, type: config.connector_type });
+  const startHeapMb = heapUsedMb();
   syncLogger.info("Starting sync");
 
   await repo.updateConfig(config.id, { syncStatus: "syncing", errorMessage: null });
@@ -247,8 +264,21 @@ export async function runConnectorSync(
             maxRetries: appConfig?.GEMINI_MAX_RETRIES,
           })
         : undefined;
+    const salienceOpenRouterConfig = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
+    const salienceGenerator =
+      settings?.enrichment_enabled !== 0
+        ? createEnrichmentGenerator({
+            geminiApiKey: settings?.gemini_api_key,
+            geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
+            geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+            openRouterApiKey: salienceOpenRouterConfig.openRouterApiKey,
+            openRouterModel: salienceOpenRouterConfig.openRouterModel,
+            logger: syncLogger,
+          })
+        : null;
 
     for await (const item of connector.sync({
+      db,
       connectorConfigId: config.id,
       credentials,
       accessTokenProvider: resolvedCredentials.accessTokenProvider,
@@ -257,6 +287,7 @@ export async function runConnectorSync(
       logger: syncLogger,
       ownerEmail,
       resolveNameToEmail,
+      salienceGenerator,
       onEntitySeed: async (seed) => {
         await factRepo.upsertFact({
           ...factContext,
@@ -319,6 +350,10 @@ export async function runConnectorSync(
           continue;
         }
 
+        if (connectorType === "whatsapp") {
+          await linkWhatsAppSliceIndexedFile(db, item.providerFileId, itemResult.indexedFileId, syncLogger);
+        }
+
         affectedIndexedFileIds.add(itemResult.indexedFileId);
         for (const groupId of itemResult.rollupGroupIds) dirtyCrmRollupGroupIds.add(groupId);
 
@@ -370,7 +405,7 @@ export async function runConnectorSync(
       }
     }
 
-    if (!config.sync_cursor && seenSyncIdentityKeys.size > 0) {
+    if (connector.syncIsCompleteSnapshot !== false && !config.sync_cursor && seenSyncIdentityKeys.size > 0) {
       const reconcileResult = await reconcileConnectorSync({
         db,
         factRepo,
@@ -435,6 +470,7 @@ export async function runConnectorSync(
         updated: result.itemsUpdated,
         archived: result.itemsArchived,
         errors: result.errors.length,
+        ...heapStats(startHeapMb),
       },
       "Sync complete",
     );
@@ -443,7 +479,7 @@ export async function runConnectorSync(
   } catch (err) {
     activeSyncs.delete(config.id);
     const message = extractErrorMessage(err);
-    syncLogger.error({ err }, "Sync failed");
+    syncLogger.error({ err, ...heapStats(startHeapMb) }, "Sync failed");
 
     await repo.updateConfig(config.id, {
       syncStatus: "error",
@@ -502,6 +538,22 @@ async function refreshCrmRollupsForSync(params: {
   }
 }
 
+async function linkWhatsAppSliceIndexedFile(
+  db: Kysely<DB>,
+  sliceId: string,
+  indexedFileId: string,
+  logger: Logger,
+): Promise<void> {
+  const result = await db
+    .updateTable("conversation_slices")
+    .set({ indexed_file_id: indexedFileId })
+    .where("id", "=", sliceId)
+    .executeTakeFirst();
+  if (Number(result.numUpdatedRows ?? 0) === 0) {
+    logger.warn({ sliceId, indexedFileId }, "WhatsApp synced item did not match a conversation slice");
+  }
+}
+
 export interface SyncSchedulerDeps {
   /** Download image from Google Drive for embedding. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
@@ -524,6 +576,8 @@ export interface SyncSchedulerDeps {
       | "OUTLOOK_MAX_INFLIGHT"
       | "TEAMS_INITIAL_LOOKBACK_DAYS"
       | "TEAMS_MAX_INFLIGHT"
+      | "WHATSAPP_SALIENCE_BATCH_LIMIT"
+      | "WHATSAPP_EMISSION_REFRESH_DAYS"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"

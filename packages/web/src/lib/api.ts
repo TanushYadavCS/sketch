@@ -235,7 +235,15 @@ export interface WhatsAppGroupInfo {
   name: string;
   description: string | null;
   agent_user_id: string | null;
+  index_enabled?: number;
   updated_at: string;
+}
+
+export interface WhatsAppGroupMemberLabel {
+  id: string;
+  maskedPhone: string;
+  displayName: string;
+  companyName: string | null;
 }
 
 export interface SetupStatus {
@@ -245,6 +253,7 @@ export interface SetupStatus {
   orgName: string | null;
   botName: string;
   slackConnected: boolean;
+  whatsappConnected?: boolean;
   llmConnected: boolean;
   llmProvider: LlmProvider | null;
   managedUrl?: string;
@@ -517,6 +526,36 @@ export interface EntityRelationEvidenceResponse {
   visibleCount: number;
   totalCount: number;
   truncated: boolean;
+}
+
+export type TaskStatus = "open" | "in_progress" | "done" | "dropped";
+
+export interface EntityTask {
+  id: string;
+  parentEntityId: string | null;
+  parentSourceRef: string | null;
+  parentName: string | null;
+  source: string;
+  externalRef: string | null;
+  title: string;
+  status: TaskStatus;
+  statusRaw: string | null;
+  statusAuthority: string;
+  assigneeEntityId: string | null;
+  assigneeName: string | null;
+  proposedAssigneeName: string | null;
+  priority: string | null;
+  dueAt: string | null;
+  provenance: "structural" | "brief" | "summary";
+  sourceTaskId: string | null;
+  createdByUserId: string | null;
+  createdByUserName: string | null;
+  createdByUserEmail: string | null;
+  isOwnedByViewer: boolean;
+  readonlyReason: "not_owner" | "external_authority" | null;
+  completedAt: string | null;
+  updatedAt: string;
+  canEditStatus: boolean;
 }
 
 export interface EntityTimelineItem {
@@ -1195,6 +1234,7 @@ export interface AgentConfig {
   sources: AgentSourceConfig[];
   routes: AgentRoute[];
   sections: AgentSectionConfig[];
+  createTasks: boolean;
 }
 
 /** Generic output item for any prebuilt agent. `sectionKey` is whatever the agent defines. */
@@ -1251,6 +1291,7 @@ export interface AgentConfigPatch {
   delivery?: AgentDeliveryConfig | null;
   sources?: AgentSourceConfig[];
   routes?: AgentRoute[];
+  createTasks?: boolean;
 }
 
 export interface AgentOutputsResponse {
@@ -1529,6 +1570,23 @@ export const api = {
     },
     listWhatsAppGroups() {
       return request<{ groups: WhatsAppGroupInfo[] }>("/api/channels/whatsapp/groups");
+    },
+    listWhatsAppGroupMemberLabels(groupJid: string) {
+      return request<{ labels: WhatsAppGroupMemberLabel[] }>(
+        `/api/channels/whatsapp/groups/${encodeURIComponent(groupJid)}/member-labels`,
+      );
+    },
+    replaceWhatsAppGroupMemberLabels(
+      groupJid: string,
+      labels: Array<{ id?: string; phoneE164?: string; displayName: string; companyName?: string | null }>,
+    ) {
+      return request<{ labels: WhatsAppGroupMemberLabel[] }>(
+        `/api/channels/whatsapp/groups/${encodeURIComponent(groupJid)}/member-labels`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ labels }),
+        },
+      );
     },
     disconnectSlack() {
       return request<{ success: boolean }>("/api/channels/slack", { method: "DELETE" });
@@ -2369,6 +2427,19 @@ export const api = {
     },
     timeline(id: string) {
       return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
+    },
+    tasks(id: string, opts?: { status?: TaskStatus; limit?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.status) params.set("status", opts.status);
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return request<{ tasks: EntityTask[] }>(`/api/entities/${id}/tasks${qs ? `?${qs}` : ""}`);
+    },
+    updateTaskStatus(id: string, taskId: string, status: TaskStatus) {
+      return request<{ task: EntityTask }>(`/api/entities/${id}/tasks/${taskId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
     },
     listBindings(id: string, effective = true) {
       return request<{ bindings: EntityBinding[]; children: GroupedProjectChild[] }>(

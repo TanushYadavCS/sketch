@@ -6,22 +6,32 @@ import {
   createAgentOutputRepository,
 } from "../../db/repositories/agent-outputs";
 import { type StoredConversationMessage, createConversationRepository } from "../../db/repositories/conversations";
+import { createTaskRepository } from "../../db/repositories/tasks";
 import type { DB } from "../../db/schema";
-import type { AgentApiItem, AgentDefinition, AgentRuntimeContextParams, AgentStoredItem } from "../types";
+import type {
+  AgentApiItem,
+  AgentDefinition,
+  AgentOutputSavedArgs,
+  AgentRuntimeContextParams,
+  AgentStoredItem,
+} from "../types";
 
 export const CONVERSATION_SUMMARY_AGENT_KEY = "conversation_summary";
 export const CONVERSATION_SUMMARY_AGENT_VERSION = "2026-07-conversation-summary-v1";
 export const CONVERSATION_SUMMARY_FIRST_RUN_LOOKBACK_HOURS = 24;
 export const CONVERSATION_SUMMARY_MAX_MESSAGES_PER_SOURCE = 300;
 export const CONVERSATION_SUMMARY_MAX_SOURCES = 12;
+export const CONVERSATION_SUMMARY_TASK_CANDIDATE_LIMIT = 25;
 
 const CONVERSATION_SUMMARY_ALLOWED_TOOLS = ["mcp__sketch__WriteAgentOutput"];
+const CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION = "task_candidates";
 
 const SECTION_LABELS = {
   highlights: ["highlight"],
   decisions: ["decision"],
   action_items: ["action_item"],
   open_questions: ["open_question"],
+  task_candidates: ["action_item"],
 } as const satisfies Record<string, readonly string[]>;
 
 type ConversationRow = {
@@ -223,6 +233,13 @@ export async function buildConversationSummaryRuntimeContext(
       firstRunFallbackHours: fallbackHours,
     },
     deliveryPlatform: params.agentConfig?.deliveryPlatform ?? null,
+    taskExtraction: {
+      createTasks: params.agentConfig?.createTasks ?? false,
+      sectionKey: CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION,
+      visibleSectionKey: "action_items",
+      maxCandidates: CONVERSATION_SUMMARY_TASK_CANDIDATE_LIMIT,
+      label: "action_item",
+    },
     summarySources,
   };
 }
@@ -236,21 +253,34 @@ const CONVERSATION_SUMMARY_INSTRUCTIONS = [
   "",
   "Output shape:",
   "- Pass a flat `items` array. Every item carries a `sectionKey` field.",
-  "- Emit items only for section keys listed in the runtime context `sections` field.",
+  "- Emit visible summary items only for section keys listed in the runtime context `sections` field.",
+  "- If runtime context `taskExtraction.createTasks` is true, also emit internal `task_candidates` items for task creation. Do not emit `task_candidates` when createTasks is false.",
   "- Use empty knowledgeRefs arrays unless a runtime message explicitly provides a valid Sketch entity or file id.",
   "- Put sourceLabels and messageIds in structuredPayload when useful, e.g. { sourceLabels: ['#sales'], messageIds: [12, 13] }.",
+  "- When action_items belong to an explicit project or parent from the messages, copy parentEntityId, parentSourceRef, or parentName into each action item's structuredPayload. Prefer parentEntityId when present.",
+  "- When task_candidates belong to an explicit project or parent from the messages, copy parentEntityId, parentSourceRef, or parentName into each task candidate's structuredPayload. Prefer parentEntityId when present.",
   "",
   "Sections:",
   "- highlights: important updates, context changes, status shifts, and notable activity.",
   "- decisions: explicit or strongly implied decisions, owners, and dates when present.",
   "- action_items: concrete follow-ups, asks, blockers, or owners that need action.",
   "- open_questions: unresolved questions, risks, or unclear next steps.",
+  "- task_candidates: internal extraction-only items for all concrete tasks that should be created from the source messages.",
   "",
   "Labels:",
   "- highlights.label must be: highlight.",
   "- decisions.label must be: decision.",
   "- action_items.label must be: action_item.",
   "- open_questions.label must be: open_question.",
+  "- task_candidates.label must be: action_item.",
+  "",
+  "Task extraction:",
+  "- When taskExtraction.createTasks is true, emit one task_candidates item for every distinct concrete follow-up, owner commitment, ask, blocker, or next step supported by the messages.",
+  "- Do not limit task_candidates to maxItemsPerSection; use taskExtraction.maxCandidates as the task-candidate ceiling for this run.",
+  "- Keep visible action_items concise for the digest. Use task_candidates for exhaustive task creation, including candidates that are lower priority or omitted from the visible digest.",
+  "- Each task_candidates structuredPayload must include messageIds for the source message ids when available and sourceLabels for the channels or groups that support it.",
+  "- Include owner, assigneeName, dueAt, parentEntityId, parentSourceRef, or parentName in structuredPayload when the messages make them clear.",
+  "- Do not emit a task_candidates item for FYI-only updates, completed work, already-canceled work, or vague discussion with no follow-up.",
   "",
   "Rules:",
   "- Respect `summaryWindow.start` and `summaryWindow.end`; summarize only messages in that window.",
@@ -293,6 +323,88 @@ function displayRefFromPayload(payload: AgentStructuredPayload | null): string |
   return `${labels[0]} +${labels.length - 1}`;
 }
 
+type SummaryParentHint = {
+  parentEntityId?: string;
+  parentSourceRef?: string;
+  parentName?: string;
+};
+
+const SUMMARY_PARENT_KEYS = ["parentEntityId", "parentSourceRef", "parentName"] as const;
+
+function cleanParentHintText(value: string): string | null {
+  let text = value.trim();
+  while (/^[`"'([{]/.test(text)) text = text.slice(1).trim();
+  while (/[`"')}\].]$/.test(text)) text = text.slice(0, -1).trim();
+  return text.length > 0 ? text : null;
+}
+
+function readStructuredParentHint(payload: AgentStructuredPayload | null | undefined): SummaryParentHint | null {
+  const record = asRecord(payload);
+  if (!record) return null;
+  const hint: SummaryParentHint = {};
+  for (const key of SUMMARY_PARENT_KEYS) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) hint[key] = value.trim();
+  }
+  return Object.keys(hint).length > 0 ? hint : null;
+}
+
+function readTextParentHint(item: AgentOutputItemInput): SummaryParentHint | null {
+  const text = [item.title, item.summary, item.actionPrompt].filter(Boolean).join("\n");
+  const hint: SummaryParentHint = {};
+  for (const key of ["parentEntityId", "parentSourceRef"] as const) {
+    const match = text.match(new RegExp(`${key}\\s*[:=]\\s*([^\\s,;]+)`, "i"));
+    const value = match?.[1] ? cleanParentHintText(match[1]) : null;
+    if (value) hint[key] = value;
+  }
+  return Object.keys(hint).length > 0 ? hint : null;
+}
+
+function mergeParentHints(base: SummaryParentHint, next: SummaryParentHint | null): SummaryParentHint {
+  if (!next) return base;
+  return {
+    parentEntityId: base.parentEntityId ?? next.parentEntityId,
+    parentSourceRef: base.parentSourceRef ?? next.parentSourceRef,
+    parentName: base.parentName ?? next.parentName,
+  };
+}
+
+function parentHintSignature(hint: SummaryParentHint): string | null {
+  if (hint.parentEntityId) return `entity:${hint.parentEntityId}`;
+  if (hint.parentSourceRef) return `source:${hint.parentSourceRef}`;
+  if (hint.parentName) return `name:${hint.parentName.toLowerCase()}`;
+  return null;
+}
+
+function collectOutputParentHint(items: AgentOutputItemInput[]): SummaryParentHint | null {
+  let hint: SummaryParentHint = {};
+  const signatures = new Set<string>();
+  for (const item of items) {
+    for (const itemHint of [readStructuredParentHint(item.structuredPayload), readTextParentHint(item)]) {
+      if (!itemHint) continue;
+      const signature = parentHintSignature(itemHint);
+      if (signature) signatures.add(signature);
+      if (signatures.size > 1) return null;
+      hint = mergeParentHints(hint, itemHint);
+    }
+  }
+  return Object.keys(hint).length > 0 ? hint : null;
+}
+
+function withParentHint(item: AgentOutputItemInput, hint: SummaryParentHint | null): AgentOutputItemInput {
+  if (!hint) return item;
+  const structuredPayload = { ...(asRecord(item.structuredPayload) ?? {}) };
+  const mergedHint = mergeParentHints(readStructuredParentHint(item.structuredPayload) ?? {}, hint);
+  for (const key of SUMMARY_PARENT_KEYS) {
+    const value = mergedHint[key];
+    if (value) structuredPayload[key] = value;
+  }
+  return {
+    ...item,
+    structuredPayload,
+  };
+}
+
 async function enrichItems(_db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]> {
   return items.map((item) => ({
     ...item,
@@ -301,6 +413,24 @@ async function enrichItems(_db: Kysely<DB>, items: AgentOutputItemInput[]): Prom
     actionType: item.actionType ?? "chat",
     actionLabel: item.actionLabel?.trim() || "Discuss with Sketch",
   }));
+}
+
+async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
+  if (!args.createTasks) return;
+  const taskRepo = createTaskRepository(args.db);
+  const parentHint = collectOutputParentHint(args.items);
+  const taskCandidateItems = args.items.filter(
+    (item) => item.sectionKey === CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION,
+  );
+  const actionItems = args.items.filter((item) => item.sectionKey === "action_items");
+  const promotableItems = taskCandidateItems.length > 0 ? taskCandidateItems : actionItems;
+  for (const item of promotableItems) {
+    try {
+      await taskRepo.promoteSummaryTask({ userId: args.userId, item: withParentHint(item, parentHint) });
+    } catch (err) {
+      args.logger.warn({ err, outputId: args.outputId, userId: args.userId }, "Summarizer: task promotion failed");
+    }
+  }
 }
 
 function toApiItem(item: AgentStoredItem): AgentApiItem {
@@ -342,6 +472,7 @@ export const conversationSummaryDefinition: AgentDefinition = {
     { key: "action_items", title: "Action items", enabledByDefault: true, labels: SECTION_LABELS.action_items },
     { key: "open_questions", title: "Open questions", enabledByDefault: true, labels: SECTION_LABELS.open_questions },
   ],
+  internalOutputSections: [CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION],
   sourceConfig: {
     maxSources: CONVERSATION_SUMMARY_MAX_SOURCES,
     supportsSlackChannels: true,
@@ -353,5 +484,6 @@ export const conversationSummaryDefinition: AgentDefinition = {
   buildInstructions,
   buildRuntimeContext: buildConversationSummaryRuntimeContext,
   enrichItems,
+  onOutputSaved,
   toApiItem,
 };

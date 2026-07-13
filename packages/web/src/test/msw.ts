@@ -14,6 +14,7 @@ export const handlers = [
       orgName: null,
       botName: "Sketch",
       slackConnected: false,
+      whatsappConnected: false,
       llmConnected: false,
       llmProvider: null,
     });
@@ -98,6 +99,24 @@ export const handlers = [
 
   http.get("/api/channels/whatsapp/groups", () => {
     return HttpResponse.json({ groups: [] });
+  }),
+
+  http.get("/api/channels/whatsapp/groups/:jid/member-labels", () => {
+    return HttpResponse.json({ labels: [] });
+  }),
+
+  http.put("/api/channels/whatsapp/groups/:jid/member-labels", async ({ request }) => {
+    const body = (await request.json()) as {
+      labels?: Array<{ id?: string; phoneE164?: string; displayName: string; companyName?: string | null }>;
+    };
+    return HttpResponse.json({
+      labels: (body.labels ?? []).map((label, index) => ({
+        id: label.id ?? `label-${index}`,
+        maskedPhone: label.phoneE164 ? `**${label.phoneE164.replace(/\D/gu, "").slice(-2)}` : "**67",
+        displayName: label.displayName,
+        companyName: label.companyName ?? null,
+      })),
+    });
   }),
 
   http.delete("/api/channels/whatsapp/pair", () => {
@@ -273,6 +292,43 @@ export const handlers = [
 
   http.get("/api/entities/:id/members", () => {
     return HttpResponse.json({ members: [], truncated: false });
+  }),
+
+  http.get("/api/entities/:id/tasks", () => {
+    return HttpResponse.json({ tasks: [] });
+  }),
+
+  http.patch("/api/entities/:id/tasks/:taskId", async ({ params, request }) => {
+    const body = (await request.json()) as { status?: string };
+    return HttpResponse.json({
+      task: {
+        id: params.taskId,
+        parentEntityId: params.id,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: "Updated task",
+        status: body.status ?? "open",
+        statusRaw: body.status ?? "open",
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        proposedAssigneeName: null,
+        priority: null,
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: String(params.taskId),
+        createdByUserId: "u1",
+        createdByUserName: "Alice Smith",
+        createdByUserEmail: "alice@example.com",
+        isOwnedByViewer: true,
+        readonlyReason: null,
+        completedAt: body.status === "done" ? new Date().toISOString() : null,
+        updatedAt: new Date().toISOString(),
+        canEditStatus: true,
+      },
+    });
   }),
 
   http.put("/api/entities/:id/members/:fileId", () => {

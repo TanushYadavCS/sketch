@@ -110,6 +110,7 @@ describe("connector credential providers", () => {
         "X-User-Org-Role": "member",
       },
       body: JSON.stringify({ connectorType: "gmail", publicKeyId: "key-1" }),
+      signal: expect.any(AbortSignal),
     });
     expect(credentials).toEqual({
       type: "oauth",

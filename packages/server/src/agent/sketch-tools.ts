@@ -21,6 +21,7 @@ import {
 } from "./tools/types";
 import { createSendFileToChatTool } from "./tools/upload";
 import { createVisualAnalysisTool } from "./tools/visual-analysis";
+import { createWhatsAppGroupHistoryTool } from "./tools/whatsapp-group-history";
 
 export { handleResolveInboxWorkflow, handleUpdateInboxWorkflow } from "./tools/inbox-workflows";
 export { handleSearchUsers, handleSendMessageToUser, handleSendMessageToUsers } from "./tools/messaging";
@@ -31,12 +32,13 @@ export { IntegrationConnectionCollector };
 export { AutomationArtifactCollector };
 export type { SketchMcpDeps };
 
-export function createSketchMcpServer(deps: SketchMcpDeps) {
+export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
   const absWorkspace = resolve(deps.workspaceDir);
-  const tools = [
+  return [
     createSendFileToChatTool(deps, absWorkspace),
     createReadChatHistoryTool(deps),
     createSearchChatHistoryTool(deps),
+    createWhatsAppGroupHistoryTool(deps),
     createProviderConfigTool(deps),
     createSearchDeliveryTargetsTool(deps),
     createLocalRunCommandTool(deps),
@@ -80,6 +82,8 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
     ...createSearchTools(deps),
     createListTasksTool(deps),
   ];
+}
 
-  return createSdkMcpServer({ name: "sketch", tools });
+export function createSketchMcpServer(deps: SketchMcpDeps) {
+  return createSdkMcpServer({ name: "sketch", tools: createSketchMcpToolDefinitions(deps) });
 }

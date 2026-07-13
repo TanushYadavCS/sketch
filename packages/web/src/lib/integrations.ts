@@ -19,7 +19,8 @@ export type IntegrationType =
   | "linear"
   | "fireflies"
   | "otter"
-  | "zoho_crm";
+  | "zoho_crm"
+  | "whatsapp";
 
 export type AuthFieldType = "text" | "password" | "textarea" | "file";
 
@@ -79,7 +80,7 @@ export interface IntegrationDefinition {
   /** Hex color for the icon background. */
   color: string;
   /** Auth type for the connect dialog. */
-  authType: "api_key" | "oauth" | "service_account";
+  authType: "api_key" | "oauth" | "service_account" | "system";
   /** If true, uses OAuth redirect flow instead of manual credential entry. */
   oauthRedirect?: boolean;
   /** Fields shown in the connect dialog. */
@@ -100,6 +101,8 @@ export interface IntegrationDefinition {
   scopeItemNoun?: string;
   /** Scope config key for flat generic pickers. Defaults to rootPages. */
   scopeConfigKey?: string;
+  /** Allows saving an explicitly empty scope selection. */
+  allowEmptyScopeSelection?: boolean;
   /**
    * true  = each user holds their own credential row (per-user); any authenticated user can add it.
    * false = a single org-wide credential drives sync for everyone (admin-only).
@@ -460,6 +463,25 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Sketch validates the Otter session and syncs recent owned and shared transcripts",
     ],
     perUserAuth: true,
+    requiresOAuthClientSetup: false,
+  },
+  {
+    type: "whatsapp",
+    name: "WhatsApp Groups",
+    description: "Opt in captured group conversations for indexing",
+    category: "Communication",
+    color: "#25D366",
+    authType: "system",
+    authFields: [],
+    scopeLabel: "groups",
+    scopeType: "flat",
+    scopeItemNoun: "groups",
+    scopeConfigKey: "groupJids",
+    allowEmptyScopeSelection: true,
+    itemNoun: "slices",
+    credentialUrl: "",
+    connectSteps: ["Raw group capture stays on. Choose which groups Sketch should index and surface."],
+    perUserAuth: false,
     requiresOAuthClientSetup: false,
   },
   {

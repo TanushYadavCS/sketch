@@ -20,13 +20,18 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
-import { type IntegrationProgressEventLike, collectIntegrationCardsFromProgressEvents } from "../integrations/cards";
+import {
+  type IntegrationProgressEventLike,
+  collectIntegrationCardsFromProgressEvents,
+  projectToolResultForProgressLog,
+} from "../integrations/cards";
 import type { IntegrationProvider } from "../integrations/types";
 import {
   type IntegrationAccessResult,
   cleanupIntegrationAccess,
   startIntegrationAccess,
 } from "../integrations/wrapper";
+import { heapStats, heapUsedMb } from "../lib/heap";
 import type { LocalClaudeSessionService } from "../local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "../local-devices/gateway";
 import type { Logger } from "../logger";
@@ -41,7 +46,39 @@ import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
 import { createCanUseTool } from "./permissions";
 import { type ResponseSurface, buildSystemContext } from "./prompt";
-import { deleteSessionId, getSessionId, saveSessionId } from "./sessions";
+import { createDefaultAgentRuntimeCompactionProvider } from "./runtime/compaction";
+import type {
+  AgentRuntimeHarnessExtensions,
+  AgentRuntimeKind,
+  AgentRuntimeProviderFactoryConfig,
+  AgentRuntimeWorkspaceToolName,
+} from "./runtime/contracts";
+import { runAgentRuntimeCore } from "./runtime/core";
+import {
+  createAgentRuntimeCustomToolEffects,
+  createDefaultAgentRuntimeCustomToolProvider,
+} from "./runtime/custom-tools";
+import { createAgentRuntimeSessionId } from "./runtime/ids";
+import { createDefaultAgentRuntimeMcpToolProvider } from "./runtime/mcp-tools";
+import { buildAgentRuntimeUserContent } from "./runtime/messages";
+import { createAgentRuntimeWorkspaceToolScopePolicy } from "./runtime/path-guard";
+import { type AgentRuntimeProvider, createAgentRuntimeProvider } from "./runtime/provider";
+import { createDbAgentRuntimeSessionStore } from "./runtime/session-store";
+import {
+  createDefaultAgentRuntimeSkillsProvider,
+  loadAgentRuntimeClaudeMdContext,
+  prependClaudeMdContext,
+} from "./runtime/skills";
+import { createAgentRuntimeWorkspaceTools } from "./runtime/workspace-tools";
+import {
+  archiveSdkSessionId,
+  assertSessionIdBelongsToRuntimeWorkspace,
+  getSessionId,
+  getSessionIdForRuntime,
+  isArchivedRuntimeSessionId,
+  saveSessionId,
+  saveSessionIdForRuntime,
+} from "./sessions";
 import {
   AutomationArtifactCollector,
   IntegrationConnectionCollector,
@@ -60,6 +97,8 @@ export interface ToolCallRecord {
   skillName: string | null;
   startedAt: number;
   endedAt: number;
+  success?: boolean;
+  errorMessage?: string;
 }
 
 interface CanUseToolTiming {
@@ -84,6 +123,82 @@ export interface RunTrace {
   progressEvents: ProgressEvent[];
   finalText: string | null;
   automationArtifacts: AutomationArtifact[];
+}
+
+export interface SdkToolStartMapping {
+  toolUseId: string | null;
+  toolName: string;
+  skillName: string | null;
+  input: Record<string, unknown>;
+  startedAt: number;
+}
+
+export interface SdkToolEndMapping {
+  toolUseId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  output: unknown;
+  isError: boolean;
+  endedAt: number;
+}
+
+export interface SdkResultUsageMapping {
+  sessionId: string;
+  sdkCostUsd: number;
+  durationApiMs: number;
+  numTurns: number;
+  stopReason: string | null;
+  errorSubtype: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  webSearchRequests: number;
+  webFetchRequests: number;
+  model: string | null;
+}
+
+export interface SdkStreamMessageEffects {
+  sessionIds: string[];
+  textDeltas: string[];
+  progressEvents: ProgressEvent[];
+  toolStarts: SdkToolStartMapping[];
+  toolEnds: SdkToolEndMapping[];
+  resultUsage: SdkResultUsageMapping | null;
+}
+
+export interface SdkStreamMappingState {
+  sessionId: string;
+  sdkCostUsd: number;
+  durationApiMs: number;
+  numTurns: number;
+  stopReason: string | null;
+  errorSubtype: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  webSearchRequests: number;
+  webFetchRequests: number;
+  model: string | null;
+  toolCalls: ToolCallRecord[];
+  progressEvents: ProgressEvent[];
+  integrationProgressEvents: IntegrationProgressEventLike[];
+  currentTextSuffix: string[];
+  pendingToolCalls: ToolCallRecord[];
+  toolUsesById: Map<string, { toolName: string; input: Record<string, unknown>; toolCall: ToolCallRecord }>;
+}
+
+export interface SdkStreamReplayResult {
+  sessionIds: string[];
+  textDeltas: string[];
+  toolStarts: SdkToolStartMapping[];
+  toolEnds: SdkToolEndMapping[];
+  progressEvents: ProgressEvent[];
+  integrationProgressEvents: IntegrationProgressEventLike[];
+  finalText: string | null;
+  usage: SdkResultUsageMapping | null;
+  toolCalls: ToolCallRecord[];
 }
 
 /**
@@ -168,6 +283,12 @@ export interface RunAgentParams {
   onTextDelta?: (delta: string) => Promise<void>;
   onSessionId?: (sessionId: string) => Promise<void>;
   attachments?: Attachment[];
+  /**
+   * Per-message aggregate cap (bytes) on image attachments embedded inline as
+   * base64. Injected from config.MAX_ATTACHMENT_TOTAL_MB in bootstrap; when
+   * omitted the content builders fall back to DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES.
+   */
+  maxAttachmentTotalBytes?: number;
   threadTs?: string;
   resumeSessionId?: string;
   abortController?: AbortController;
@@ -242,9 +363,38 @@ export interface RunAgentParams {
     currentMessageId?: number;
     providerThreadId?: string | null;
   };
+  agentRuntime?: AgentRuntimeKind;
+  loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
+  agentRuntimeProvider?: AgentRuntimeProvider;
+  agentRuntimeExtensions?: AgentRuntimeHarnessExtensions;
 }
 
 const DEFAULT_RUN_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"];
+const AGENT_RUNTIME_WORKSPACE_TOOL_NAMES: readonly AgentRuntimeWorkspaceToolName[] = [
+  "Bash",
+  "Read",
+  "Write",
+  "Edit",
+  "Glob",
+  "Grep",
+];
+
+function resolveSdkBuiltInTools(agentAllowedTools?: string[] | null): readonly string[] {
+  return agentAllowedTools
+    ? AGENT_BUILT_IN_TOOL_NAMES.filter((name) => agentAllowedTools.includes(name))
+    : DEFAULT_RUN_TOOLS;
+}
+
+/**
+ * The AI SDK runtime owns only workspace tools directly. WebSearch/WebFetch are intentionally excluded from the
+ * aisdk allowlist; web access is delivered through Canvas CLI/MCP rather than native runtime tools.
+ */
+function resolveAgentRuntimeWorkspaceToolNames(
+  agentAllowedTools?: string[] | null,
+): readonly AgentRuntimeWorkspaceToolName[] {
+  const sdkTools = new Set(resolveSdkBuiltInTools(agentAllowedTools));
+  return AGENT_RUNTIME_WORKSPACE_TOOL_NAMES.filter((name) => sdkTools.has(name));
+}
 
 export function canUseVisualAnalysisTool(
   visionConfig: VisionConfig | null,
@@ -292,18 +442,669 @@ export function extractAssistantTextDelta(message: unknown): string | null {
   return delta.text ? delta.text : null;
 }
 
-export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> {
+export function createSdkStreamMappingState(): SdkStreamMappingState {
+  return {
+    sessionId: "",
+    sdkCostUsd: 0,
+    durationApiMs: 0,
+    numTurns: 0,
+    stopReason: null,
+    errorSubtype: null,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    webSearchRequests: 0,
+    webFetchRequests: 0,
+    model: null,
+    toolCalls: [],
+    progressEvents: [],
+    integrationProgressEvents: [],
+    currentTextSuffix: [],
+    pendingToolCalls: [],
+    toolUsesById: new Map(),
+  };
+}
+
+function emptySdkStreamMessageEffects(): SdkStreamMessageEffects {
+  return {
+    sessionIds: [],
+    textDeltas: [],
+    progressEvents: [],
+    toolStarts: [],
+    toolEnds: [],
+    resultUsage: null,
+  };
+}
+
+export function finishPendingSdkToolCalls(state: SdkStreamMappingState, endedAt: number): void {
+  for (const tc of state.pendingToolCalls) {
+    tc.endedAt = endedAt;
+  }
+  state.pendingToolCalls = [];
+}
+
+function pushIntermediateText(state: SdkStreamMappingState, effects: SdkStreamMessageEffects, text: string): void {
+  const event: IntermediateTextProgressEvent = { kind: "intermediate_text", text };
+  state.progressEvents.push(event);
+  effects.progressEvents.push(event);
+}
+
+function flushSdkIntermediateText(state: SdkStreamMappingState, effects: SdkStreamMessageEffects): void {
+  if (state.currentTextSuffix.length === 0) return;
+  const text = state.currentTextSuffix.join("\n\n");
+  state.currentTextSuffix.length = 0;
+  pushIntermediateText(state, effects, text);
+}
+
+function stringifyToolErrorContent(content: unknown): string | undefined {
+  if (typeof content === "string") return content.slice(0, 500);
+  if (content === undefined || content === null) return undefined;
+
+  try {
+    return JSON.stringify(content).slice(0, 500);
+  } catch {
+    return String(content).slice(0, 500);
+  }
+}
+
+export function extractSdkResultUsage(message: unknown): SdkResultUsageMapping | null {
+  if (!message || typeof message !== "object") return null;
+  const resultMsg = message as Record<string, unknown>;
+  if (resultMsg.type !== "result") return null;
+
+  const usage = resultMsg.usage as Record<string, unknown> | undefined;
+  const serverToolUse = usage?.server_tool_use as Record<string, number> | undefined;
+  const modelKeys = Object.keys((resultMsg as Record<string, unknown>).modelUsage ?? {});
+
+  return {
+    sessionId: typeof resultMsg.session_id === "string" ? resultMsg.session_id : "",
+    sdkCostUsd: (resultMsg.total_cost_usd as number) ?? 0,
+    durationApiMs: (resultMsg.duration_api_ms as number) ?? 0,
+    numTurns: (resultMsg.num_turns as number) ?? 0,
+    stopReason: (resultMsg.stop_reason as string) ?? null,
+    errorSubtype: resultMsg.subtype !== "success" ? ((resultMsg.subtype as string) ?? null) : null,
+    inputTokens: (usage?.input_tokens as number) ?? 0,
+    outputTokens: (usage?.output_tokens as number) ?? 0,
+    cacheReadTokens: (usage?.cache_read_input_tokens as number) ?? 0,
+    cacheCreationTokens: (usage?.cache_creation_input_tokens as number) ?? 0,
+    webSearchRequests: serverToolUse?.web_search_requests ?? 0,
+    webFetchRequests: serverToolUse?.web_fetch_requests ?? 0,
+    model: modelKeys.length > 0 ? modelKeys[0] : null,
+  };
+}
+
+/**
+ * Pure SDK-message mapping shared by the live runner and golden fixture tests.
+ * Callback delivery stays outside this function so replay tests can assert the
+ * exact event sequence without spawning the Claude Agent SDK.
+ */
+export function applySdkStreamMessageMapping(
+  state: SdkStreamMappingState,
+  message: unknown,
+  now = Date.now(),
+): SdkStreamMessageEffects {
+  const effects = emptySdkStreamMessageEffects();
+  finishPendingSdkToolCalls(state, now);
+
+  if (!message || typeof message !== "object") return effects;
+  const msg = message as Record<string, unknown>;
+
+  if (msg.type === "system" && msg.subtype === "init" && typeof msg.session_id === "string") {
+    state.sessionId = msg.session_id;
+    effects.sessionIds.push(msg.session_id);
+  }
+
+  const delta = extractAssistantTextDelta(message);
+  if (delta) {
+    effects.textDeltas.push(delta);
+  }
+
+  if (msg.type === "assistant") {
+    const inner = msg.message as Record<string, unknown> | undefined;
+    const content = inner?.content;
+    if (Array.isArray(content)) {
+      const hasToolUse = content.some(
+        (block) => block && typeof block === "object" && "type" in block && block.type === "tool_use",
+      );
+
+      if (hasToolUse) {
+        flushSdkIntermediateText(state, effects);
+        const inlineText = extractAssistantText(message);
+        if (inlineText) {
+          pushIntermediateText(state, effects, inlineText);
+        }
+
+        for (const block of content) {
+          if (!block || typeof block !== "object" || !("type" in block) || block.type !== "tool_use") continue;
+
+          const toolBlock = block as { id?: unknown; name: string; input?: Record<string, unknown> };
+          const name = toolBlock.name;
+          const input = toolBlock.input ?? {};
+          const skillName = name === "Skill" && typeof input?.skill === "string" ? input.skill : null;
+          const toolUseId = typeof toolBlock.id === "string" ? toolBlock.id : null;
+          const tc: ToolCallRecord = {
+            toolName: name,
+            skillName,
+            startedAt: now,
+            endedAt: 0,
+          };
+          state.toolCalls.push(tc);
+          state.pendingToolCalls.push(tc);
+
+          const event: ToolUseProgressEvent = { kind: "tool_use", toolName: name, input };
+          state.integrationProgressEvents.push(event);
+          state.progressEvents.push(event);
+          effects.progressEvents.push(event);
+          effects.toolStarts.push({ toolUseId, toolName: name, skillName, input, startedAt: now });
+
+          if (toolUseId) {
+            state.toolUsesById.set(toolUseId, { toolName: name, input, toolCall: tc });
+          }
+        }
+      } else {
+        const text = extractAssistantText(message);
+        if (text) {
+          state.currentTextSuffix.push(text);
+        }
+      }
+    }
+  }
+
+  if (msg.type === "user") {
+    const inner = msg.message as Record<string, unknown> | undefined;
+    const content = inner?.content;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!block || typeof block !== "object" || !("type" in block) || block.type !== "tool_result") continue;
+
+        const toolResult = block as { tool_use_id?: unknown; content?: unknown; is_error?: unknown };
+        const toolUseId = typeof toolResult.tool_use_id === "string" ? toolResult.tool_use_id : null;
+        const toolUse = toolUseId ? state.toolUsesById.get(toolUseId) : null;
+        if (!toolUse || !toolUseId) continue;
+        toolUse.toolCall.success = toolResult.is_error !== true;
+        if (toolResult.is_error === true) {
+          toolUse.toolCall.errorMessage = stringifyToolErrorContent(toolResult.content);
+        }
+
+        const resultEvent = {
+          kind: "tool_result",
+          toolName: toolUse.toolName,
+          input: toolUse.input,
+          output: projectToolResultForProgressLog(toolResult.content),
+          isError: toolResult.is_error === true,
+        };
+        state.integrationProgressEvents.push(resultEvent);
+        effects.toolEnds.push({
+          toolUseId,
+          toolName: toolUse.toolName,
+          input: toolUse.input,
+          output: toolResult.content,
+          isError: toolResult.is_error === true,
+          endedAt: now,
+        });
+      }
+    }
+  }
+
+  const resultUsage = extractSdkResultUsage(message);
+  if (resultUsage) {
+    state.sessionId = resultUsage.sessionId;
+    state.sdkCostUsd = resultUsage.sdkCostUsd;
+    state.durationApiMs = resultUsage.durationApiMs;
+    state.numTurns = resultUsage.numTurns;
+    state.stopReason = resultUsage.stopReason;
+    state.errorSubtype = resultUsage.errorSubtype;
+    state.inputTokens = resultUsage.inputTokens;
+    state.outputTokens = resultUsage.outputTokens;
+    state.cacheReadTokens = resultUsage.cacheReadTokens;
+    state.cacheCreationTokens = resultUsage.cacheCreationTokens;
+    state.webSearchRequests = resultUsage.webSearchRequests;
+    state.webFetchRequests = resultUsage.webFetchRequests;
+    state.model = resultUsage.model;
+    effects.sessionIds.push(resultUsage.sessionId);
+    effects.resultUsage = resultUsage;
+  }
+
+  return effects;
+}
+
+export function getSdkStreamFinalText(state: SdkStreamMappingState): string | null {
+  return state.currentTextSuffix.length > 0 ? state.currentTextSuffix.join("\n\n") : null;
+}
+
+export function replaySdkStreamMessages(messages: readonly unknown[]): SdkStreamReplayResult {
+  const state = createSdkStreamMappingState();
+  const sessionIds: string[] = [];
+  const textDeltas: string[] = [];
+  const toolStarts: SdkToolStartMapping[] = [];
+  const toolEnds: SdkToolEndMapping[] = [];
+  let notifiedSessionId = "";
+  let usage: SdkResultUsageMapping | null = null;
+
+  messages.forEach((message, index) => {
+    const effects = applySdkStreamMessageMapping(state, message, index + 1);
+    for (const sessionId of effects.sessionIds) {
+      if (!sessionId || sessionId === notifiedSessionId) continue;
+      notifiedSessionId = sessionId;
+      sessionIds.push(sessionId);
+    }
+    textDeltas.push(...effects.textDeltas);
+    toolStarts.push(...effects.toolStarts);
+    toolEnds.push(...effects.toolEnds);
+    if (effects.resultUsage) {
+      usage = effects.resultUsage;
+    }
+  });
+
+  finishPendingSdkToolCalls(state, messages.length + 1);
+
+  return {
+    sessionIds,
+    textDeltas,
+    toolStarts,
+    toolEnds,
+    progressEvents: state.progressEvents,
+    integrationProgressEvents: state.integrationProgressEvents,
+    finalText: getSdkStreamFinalText(state),
+    usage,
+    toolCalls: state.toolCalls,
+  };
+}
+
+async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult> {
   const { userMessage, workspaceDir, userName, logger } = params;
+  const startHeapMb = heapUsedMb();
   const isFresh = params.sessionMode === "fresh";
   const shouldPersistSession = params.persistSession ?? !isFresh;
-  let shouldDeleteStoredSessionOnResumeFailure = false;
+  const persistTranscript = shouldPersistSession || Boolean(params.resumeSessionId);
+  const absWorkspace = resolve(workspaceDir);
+  const requestedResumeSessionId = params.resumeSessionId;
+  let sessionId = requestedResumeSessionId;
+  let usedExistingSession = sessionId !== undefined;
+  let requestedArchivedSession = false;
+
+  if (requestedResumeSessionId) {
+    await assertSessionIdBelongsToRuntimeWorkspace(params.db, params.workspaceKey, requestedResumeSessionId, "aisdk");
+    if (await isArchivedRuntimeSessionId(params.db, params.workspaceKey, requestedResumeSessionId, "aisdk")) {
+      sessionId = undefined;
+      usedExistingSession = false;
+      requestedArchivedSession = true;
+    }
+  }
+
+  if (!isFresh && !sessionId && !requestedArchivedSession) {
+    sessionId = await getSessionIdForRuntime(params.db, params.workspaceKey, params.threadTs, "aisdk");
+    usedExistingSession = sessionId !== undefined;
+  }
+
+  if (!sessionId) {
+    sessionId = createAgentRuntimeSessionId();
+  }
+
+  if (persistTranscript && !requestedArchivedSession) {
+    await saveSessionIdForRuntime(params.db, params.workspaceKey, sessionId, params.threadTs, "aisdk");
+    /**
+     * Re-assert AFTER the save, not only before the run: two workspaces racing the same explicit session id
+     * can both pass the pre-run assert before either saves. The post-save check catches the loser so a
+     * cross-workspace mapping never survives to mix transcripts.
+     */
+    if (sessionId === requestedResumeSessionId) {
+      await assertSessionIdBelongsToRuntimeWorkspace(params.db, params.workspaceKey, sessionId, "aisdk");
+    }
+  }
+
+  const indexedSources = await listIndexedSourcesForPrompt(params.db).catch((err) => {
+    logger.warn({ err }, "Failed to list indexed sources for prompt");
+    return [];
+  });
+  const transcriptionSettings = params.loadTranscriptionSettings
+    ? await params.loadTranscriptionSettings().catch((err) => {
+        logger.warn({ err }, "Failed to load transcription settings");
+        return null;
+      })
+    : null;
+  const transcriptionConfig = resolveTranscriptionConfig(transcriptionSettings);
+  const visionConfig = params.visionConfig ?? resolveVisionConfig(process.env, transcriptionSettings);
+  const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, params.agentAllowedTools);
+  const attachments = params.attachments ?? [];
+  const images = attachments.filter(isImageAttachment);
+  const nonImages = attachments.filter((attachment) => !isImageAttachment(attachment));
+  const baseSystemAppend = buildSystemContext({
+    platform: params.responseSurface ?? params.platform,
+    deliveryPlatform: params.responseSurface === "web" && params.taskContext ? params.platform : undefined,
+    orgName: params.orgName,
+    orgDescription: params.orgDescription,
+    botName: params.botName,
+    indexedSources,
+    agentInstructions: params.agentInstructions,
+    visionAnalysisEnabled: visualAnalysisAllowed,
+  });
+  const claudeMdContext = await loadAgentRuntimeClaudeMdContext({
+    orgClaudeDir: params.claudeConfigDir,
+    workspaceDir: absWorkspace,
+    order: ["org", "workspace"],
+    logger: params.logger,
+  });
+  const systemAppend = prependClaudeMdContext({
+    claudeMdContext: claudeMdContext.appendedSystemContext,
+    systemContext: baseSystemAppend,
+  });
+
+  const promptContent =
+    images.length > 0 && visionConfig
+      ? userMessage + formatAttachmentsForPrompt(attachments, { visionAnalysisEnabled: visualAnalysisAllowed })
+      : await buildAgentRuntimeUserContent(userMessage, attachments, params.maxAttachmentTotalBytes);
+  const promptMode = Array.isArray(promptContent) ? "multimodal" : "text";
+
+  logger.debug(
+    {
+      totalAttachments: attachments.length,
+      imageCount: images.length,
+      nonImageCount: nonImages.length,
+      images: images.map((attachment) => ({ name: attachment.originalName, mime: attachment.mimeType })),
+      promptMode,
+      runtime: "aisdk",
+    },
+    "Prompt mode selected",
+  );
+
+  let provider = params.agentRuntimeProvider;
+  if (!provider) {
+    const providerConfig = await params.loadAgentRuntimeProviderConfig?.();
+    if (!providerConfig) {
+      throw new Error("AI SDK agent runtime is enabled but no LLM provider configuration is available");
+    }
+    provider = createAgentRuntimeProvider({
+      ...providerConfig,
+      modelId: params.model ?? providerConfig.modelId,
+    });
+  }
+  const blockedReadPaths = new Set<string>();
+  if (images.length > 0 && visionConfig && visualAnalysisAllowed) {
+    for (const image of images) {
+      blockedReadPaths.add(image.localPath);
+    }
+  }
+  if (visualAnalysisAllowed) {
+    for (const path of params.blockedReadPaths ?? []) {
+      blockedReadPaths.add(path);
+    }
+  }
+
+  const scope = await createAgentRuntimeWorkspaceToolScopePolicy({
+    workspaceRoot: absWorkspace,
+    orgClaudeDir: params.claudeConfigDir,
+    blockedReadPaths: blockedReadPaths.size > 0 ? Array.from(blockedReadPaths) : undefined,
+    blockImageReads: visualAnalysisAllowed,
+  });
+
+  let integrationAccess: IntegrationAccessResult = { envVars: {}, runtimePaths: [], cleanup: async () => {} };
+  if (params.loadIntegrationProvider && params.claudeConfigDir) {
+    integrationAccess = await startIntegrationAccess({
+      userEmail: params.userEmail ?? null,
+      claudeConfigDir: params.claudeConfigDir,
+      workspaceDir,
+      loadIntegrationProvider: params.loadIntegrationProvider,
+      logger,
+    });
+    logger.info(
+      {
+        integrationEnvKeys: Object.keys(integrationAccess.envVars),
+        runtimePaths: integrationAccess.runtimePaths,
+      },
+      "Integration access resolved",
+    );
+    logger.debug({ userEmail: params.userEmail }, "Integration access resolved (user context)");
+  }
+
+  try {
+    const workspaceTools = createAgentRuntimeWorkspaceTools({
+      scope,
+      env: {
+        ...integrationAccess.envVars,
+        ...params.agentEnv,
+      },
+      toolNames: resolveAgentRuntimeWorkspaceToolNames(params.agentAllowedTools),
+      logger,
+    });
+    const customToolEffects = createAgentRuntimeCustomToolEffects();
+    const customToolsProvider =
+      params.agentRuntimeExtensions?.customTools ??
+      createDefaultAgentRuntimeCustomToolProvider({
+        effects: customToolEffects,
+        transcriptionEnabled: Boolean(transcriptionConfig),
+        visionAnalysisEnabled: visualAnalysisAllowed,
+        visionConfig,
+      });
+    const customTools = await customToolsProvider.createTools(params);
+    const mcpToolsProvider = params.agentRuntimeExtensions?.mcpTools ?? createDefaultAgentRuntimeMcpToolProvider();
+    const mcpTools = await mcpToolsProvider.createTools(params);
+    const skillsProvider = params.agentRuntimeExtensions?.skills ?? createDefaultAgentRuntimeSkillsProvider();
+    const skillTools = await skillsProvider.createSkillTool(params);
+    const tools = { ...workspaceTools, ...customTools, ...mcpTools, ...skillTools };
+    const baseSessionStore = createDbAgentRuntimeSessionStore(params.db);
+    const sessionStore = {
+      ...baseSessionStore,
+      load: async (id: string) => {
+        try {
+          return await baseSessionStore.load(id);
+        } catch (err) {
+          logger.warn({ err, sessionId: id }, "AI SDK runtime session load failed; starting with fresh history");
+          return [];
+        }
+      },
+    };
+    const currentUserMessage = { role: "user" as const, content: promptContent };
+    const compactionProvider =
+      params.agentRuntimeExtensions?.compaction ??
+      (persistTranscript
+        ? createDefaultAgentRuntimeCompactionProvider({
+            provider,
+            sessionStore,
+            systemPrompt: systemAppend,
+            currentUserMessage,
+            tools,
+            abortSignal: params.abortController?.signal,
+          })
+        : undefined);
+
+    const toolCalls: ToolCallRecord[] = [];
+    const progressEvents: ProgressEvent[] = [];
+    let trailingText = "";
+    let notifiedSessionId = "";
+
+    const notifySessionId = async (nextSessionId: string) => {
+      if (!nextSessionId || nextSessionId === notifiedSessionId) return;
+      notifiedSessionId = nextSessionId;
+      try {
+        await params.onSessionId?.(nextSessionId);
+      } catch (err) {
+        logger.warn({ err }, "Failed to deliver session id notification");
+      }
+    };
+
+    const flushIntermediateText = async () => {
+      if (!trailingText.trim()) return;
+      const event: IntermediateTextProgressEvent = { kind: "intermediate_text", text: trailingText };
+      progressEvents.push(event);
+      trailingText = "";
+      try {
+        await params.onProgressEvent(event);
+      } catch (err) {
+        logger.warn({ err }, "Failed to deliver agent progress event");
+      }
+    };
+
+    const runtimeResult = await (async () => {
+      try {
+        return await runAgentRuntimeCore({
+          provider,
+          prompt: promptContent,
+          systemPrompt: systemAppend,
+          tools,
+          maxTurns: params.maxTurns ?? 100,
+          persistSession: persistTranscript,
+          sessionId,
+          sessionStore,
+          compaction: compactionProvider,
+          abortSignal: params.abortController?.signal,
+          logger,
+          events: {
+            onSessionId: async (nextSessionId) => {
+              sessionId = nextSessionId;
+              await notifySessionId(nextSessionId);
+            },
+            onTextDelta: async (delta) => {
+              trailingText += delta;
+              if (params.onTextDelta) {
+                try {
+                  await params.onTextDelta(delta);
+                } catch (err) {
+                  logger.warn({ err }, "Failed to deliver assistant text delta");
+                }
+              }
+            },
+            onToolStart: async (event) => {
+              customToolEffects.onToolStart(event);
+              await flushIntermediateText();
+              const startedAt = Date.now();
+              const toolCall: ToolCallRecord = {
+                toolName: event.name,
+                skillName: event.name === "Skill" && typeof event.input.skill === "string" ? event.input.skill : null,
+                startedAt,
+                endedAt: 0,
+              };
+              toolCalls.push(toolCall);
+              const progressEvent: ToolUseProgressEvent = {
+                kind: "tool_use",
+                toolName: event.name,
+                input: event.input,
+              };
+              progressEvents.push(progressEvent);
+              try {
+                await params.onProgressEvent(progressEvent);
+              } catch (err) {
+                logger.warn({ err }, "Failed to deliver agent progress event");
+              }
+            },
+            onToolEnd: async (event) => {
+              customToolEffects.onToolEnd(event);
+              for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
+                const toolCall = toolCalls[index];
+                if (toolCall.toolName !== event.name || toolCall.endedAt !== 0) continue;
+                toolCall.endedAt = Date.now();
+                toolCall.success = event.error === undefined;
+                if (event.error) toolCall.errorMessage = event.error.message;
+                break;
+              }
+            },
+          },
+        });
+      } finally {
+        try {
+          await mcpToolsProvider.close?.();
+        } catch (err) {
+          logger.warn({ err }, "Failed to close integration MCP tools");
+        }
+      }
+    })();
+
+    for (const toolCall of toolCalls) {
+      if (toolCall.endedAt === 0) toolCall.endedAt = Date.now();
+    }
+
+    const finalText = trailingText.trim() ? trailingText : null;
+    try {
+      await customToolEffects.collectIntegrationCards(params);
+    } catch (err) {
+      logger.warn({ err }, "Failed to resolve integration cards from agent progress");
+    }
+    const drainedToolEffects = customToolEffects.drain(params);
+    const auxLlmCalls = [...(params.seedAuxCalls ?? []), ...drainedToolEffects.auxLlmCalls];
+    const auxCostUsd = sumAuxCost(auxLlmCalls);
+    const firstModel = Object.keys(runtimeResult.usage.byModel)[0] ?? provider.modelId;
+
+    logger.info(
+      {
+        userId: userName,
+        sessionId,
+        sdkCostUsd: runtimeResult.cost.totalUsd,
+        auxCostUsd,
+        pendingUploads: drainedToolEffects.pendingUploads.length,
+        pendingIntegrationConnections: drainedToolEffects.pendingIntegrationConnections.length,
+        automationArtifacts: drainedToolEffects.automationArtifacts.length,
+        runtime: "aisdk",
+        ...heapStats(startHeapMb),
+      },
+      "Agent run completed",
+    );
+
+    return {
+      messageSent:
+        finalText !== null ||
+        drainedToolEffects.pendingIntegrationConnections.length > 0 ||
+        drainedToolEffects.automationArtifacts.length > 0,
+      sessionId,
+      costUsd: runtimeResult.cost.totalUsd,
+      auxCostUsd,
+      pendingUploads: drainedToolEffects.pendingUploads,
+      pendingIntegrationConnections: drainedToolEffects.pendingIntegrationConnections,
+      trace: {
+        progressEvents,
+        finalText,
+        automationArtifacts: drainedToolEffects.automationArtifacts,
+      },
+      rawUsage: {
+        model: firstModel,
+        inputTokens: runtimeResult.usage.totalInputTokens,
+        outputTokens: runtimeResult.usage.totalOutputTokens,
+        cacheReadTokens: runtimeResult.usage.totalCacheReadTokens,
+        cacheCreationTokens: runtimeResult.usage.totalCacheWriteTokens,
+        webSearchRequests: 0,
+        webFetchRequests: 0,
+        durationApiMs: runtimeResult.durations.providerMs,
+        numTurns: runtimeResult.num_turns,
+        stopReason: runtimeResult.stopReason,
+        errorSubtype: runtimeResult.stopReason === "error" ? "runtime_error" : null,
+        isResumedSession: usedExistingSession,
+        totalAttachments: attachments.length,
+        imageCount: images.length,
+        nonImageCount: nonImages.length,
+        mimeTypes: attachments.map((attachment) => attachment.mimeType),
+        fileSizes: attachments.map((attachment) => attachment.sizeBytes),
+        promptMode,
+        toolCalls,
+        auxLlmCalls,
+        sdkCostUsd: runtimeResult.cost.totalUsd,
+      },
+    };
+  } finally {
+    await cleanupIntegrationAccess(integrationAccess);
+  }
+}
+
+export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> {
+  if (params.agentRuntime === "aisdk") {
+    return runAgentWithAiSdk(params);
+  }
+
+  return runAgentWithClaudeSdk(params);
+}
+
+async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentResult> {
+  const { userMessage, workspaceDir, userName, logger } = params;
+  const startHeapMb = heapUsedMb();
+  const isFresh = params.sessionMode === "fresh";
+  const shouldPersistSession = params.persistSession ?? !isFresh;
+  let shouldArchiveStoredSessionOnResumeFailure = false;
   let existingSessionId: string | undefined;
   if (!isFresh) {
     if (params.resumeSessionId) {
       existingSessionId = params.resumeSessionId;
     } else {
       existingSessionId = await getSessionId(params.db, params.workspaceKey, params.threadTs);
-      shouldDeleteStoredSessionOnResumeFailure = existingSessionId !== undefined;
+      shouldArchiveStoredSessionOnResumeFailure = existingSessionId !== undefined;
     }
   }
   const absWorkspace = resolve(workspaceDir);
@@ -334,26 +1135,13 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     visionAnalysisEnabled: visualAnalysisAllowed,
   });
 
-  const sdkBuiltInTools = params.agentAllowedTools
-    ? AGENT_BUILT_IN_TOOL_NAMES.filter((name) => params.agentAllowedTools?.includes(name))
-    : DEFAULT_RUN_TOOLS;
+  const sdkBuiltInTools = resolveSdkBuiltInTools(params.agentAllowedTools);
 
+  const sdkStreamState = createSdkStreamMappingState();
   let sessionId = "";
-  let sdkCostUsd = 0;
-  let durationApiMs = 0;
-  let numTurns = 0;
-  let stopReason: string | null = null;
-  let errorSubtype: string | null = null;
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheCreationTokens = 0;
-  let webSearchRequests = 0;
-  let webFetchRequests = 0;
-  let model: string | null = null;
-  const toolCalls: ToolCallRecord[] = [];
-  const progressEvents: ProgressEvent[] = [];
-  const currentTextSuffix: string[] = [];
+  const toolCalls = sdkStreamState.toolCalls;
+  const progressEvents = sdkStreamState.progressEvents;
+  const currentTextSuffix = sdkStreamState.currentTextSuffix;
   let notifiedSessionId = "";
 
   const attachments = params.attachments ?? [];
@@ -378,7 +1166,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
   );
 
   if (hasImages && !useVisionToolForImages) {
-    const content = await buildMultimodalContent(userMessage, attachments);
+    const content = await buildMultimodalContent(userMessage, attachments, params.maxAttachmentTotalBytes);
     prompt = (async function* () {
       yield {
         type: "user" as const,
@@ -484,23 +1272,6 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     logger.debug({ userEmail: params.userEmail }, "Integration access resolved (user context)");
   }
 
-  let pendingToolCalls: ToolCallRecord[] = [];
-  const integrationProgressEvents: IntegrationProgressEventLike[] = [];
-  const toolUsesById = new Map<string, { toolName: string; input: Record<string, unknown> }>();
-
-  const flushIntermediateText = async () => {
-    if (currentTextSuffix.length === 0) return;
-    const text = currentTextSuffix.join("\n\n");
-    currentTextSuffix.length = 0;
-    const event: IntermediateTextProgressEvent = { kind: "intermediate_text", text };
-    progressEvents.push(event);
-    try {
-      await params.onProgressEvent(event);
-    } catch (err) {
-      logger.warn({ err }, "Failed to deliver intermediate progress text");
-    }
-  };
-
   /**
    * Runs a single SDK query() pass and processes its message stream. When the
    * caller skips the org config dir (e.g. the WhatsApp fallback agent for
@@ -547,20 +1318,15 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     });
 
     for await (const message of run) {
-      const now = Date.now();
-      for (const tc of pendingToolCalls) {
-        tc.endedAt = now;
-      }
-      pendingToolCalls = [];
+      const effects = applySdkStreamMessageMapping(sdkStreamState, message, Date.now());
 
-      if (message.type === "system" && message.subtype === "init") {
-        sessionId = message.session_id;
-        await notifySessionId(sessionId);
+      for (const nextSessionId of effects.sessionIds) {
+        sessionId = nextSessionId;
+        await notifySessionId(nextSessionId);
       }
 
-      if (message.type === "stream_event" && params.onTextDelta) {
-        const delta = extractAssistantTextDelta(message);
-        if (delta) {
+      if (params.onTextDelta) {
+        for (const delta of effects.textDeltas) {
           try {
             await params.onTextDelta(delta);
           } catch (err) {
@@ -569,101 +1335,12 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
         }
       }
 
-      if (message.type === "assistant") {
-        const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
-        const content = inner?.content;
-        if (Array.isArray(content)) {
-          const hasToolUse = content.some(
-            (block) => block && typeof block === "object" && "type" in block && block.type === "tool_use",
-          );
-
-          if (hasToolUse) {
-            await flushIntermediateText();
-            const inlineText = extractAssistantText(message);
-            if (inlineText) {
-              const textEvent: IntermediateTextProgressEvent = { kind: "intermediate_text", text: inlineText };
-              progressEvents.push(textEvent);
-              try {
-                await params.onProgressEvent(textEvent);
-              } catch (err) {
-                logger.warn({ err }, "Failed to deliver inline intermediate progress text");
-              }
-            }
-            for (const block of content) {
-              if (block && typeof block === "object" && "type" in block && block.type === "tool_use") {
-                const toolBlock = block as { id?: unknown; name: string; input?: Record<string, unknown> };
-                const name = toolBlock.name;
-                const input = toolBlock.input ?? {};
-                const tc: ToolCallRecord = {
-                  toolName: name,
-                  skillName: name === "Skill" && typeof input?.skill === "string" ? input.skill : null,
-                  startedAt: now,
-                  endedAt: 0,
-                };
-                toolCalls.push(tc);
-                pendingToolCalls.push(tc);
-                const event: ToolUseProgressEvent = { kind: "tool_use", toolName: name, input };
-                integrationProgressEvents.push(event);
-                if (typeof toolBlock.id === "string") {
-                  toolUsesById.set(toolBlock.id, { toolName: name, input });
-                }
-                progressEvents.push(event);
-                try {
-                  await params.onProgressEvent(event);
-                } catch (err) {
-                  logger.warn({ err }, "Failed to deliver tool progress");
-                }
-              }
-            }
-          } else {
-            const text = extractAssistantText(message);
-            if (text) {
-              currentTextSuffix.push(text);
-            }
-          }
+      for (const event of effects.progressEvents) {
+        try {
+          await params.onProgressEvent(event);
+        } catch (err) {
+          logger.warn({ err }, "Failed to deliver agent progress event");
         }
-      }
-
-      if (message.type === "user") {
-        const inner = (message as Record<string, unknown>).message as Record<string, unknown> | undefined;
-        const content = inner?.content;
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (!block || typeof block !== "object" || !("type" in block) || block.type !== "tool_result") continue;
-            const toolResult = block as { tool_use_id?: unknown; content?: unknown; is_error?: unknown };
-            const toolUse =
-              typeof toolResult.tool_use_id === "string" ? toolUsesById.get(toolResult.tool_use_id) : null;
-            if (!toolUse) continue;
-            integrationProgressEvents.push({
-              kind: "tool_result",
-              toolName: toolUse.toolName,
-              input: toolUse.input,
-              output: toolResult.content,
-              isError: toolResult.is_error === true,
-            });
-          }
-        }
-      }
-
-      if (message.type === "result") {
-        sessionId = message.session_id;
-        await notifySessionId(sessionId);
-        sdkCostUsd = message.total_cost_usd;
-        const resultMsg = message as Record<string, unknown>;
-        durationApiMs = (resultMsg.duration_api_ms as number) ?? 0;
-        numTurns = (resultMsg.num_turns as number) ?? 0;
-        stopReason = (resultMsg.stop_reason as string) ?? null;
-        errorSubtype = message.subtype !== "success" ? message.subtype : null;
-        const usage = message.usage as Record<string, unknown> | undefined;
-        inputTokens = (usage?.input_tokens as number) ?? 0;
-        outputTokens = (usage?.output_tokens as number) ?? 0;
-        cacheReadTokens = (usage?.cache_read_input_tokens as number) ?? 0;
-        cacheCreationTokens = (usage?.cache_creation_input_tokens as number) ?? 0;
-        const serverToolUse = usage?.server_tool_use as Record<string, number> | undefined;
-        webSearchRequests = serverToolUse?.web_search_requests ?? 0;
-        webFetchRequests = serverToolUse?.web_fetch_requests ?? 0;
-        const modelKeys = Object.keys((message as Record<string, unknown>).modelUsage ?? {});
-        model = modelKeys.length > 0 ? modelKeys[0] : null;
       }
     }
   };
@@ -692,13 +1369,14 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
           { err, workspaceKey: params.workspaceKey, threadKey: params.threadTs },
           "Agent resumed session failed before producing output; retrying with a fresh session",
         );
-        if (shouldDeleteStoredSessionOnResumeFailure) {
-          await deleteSessionId(params.db, params.workspaceKey, params.threadTs);
-          shouldDeleteStoredSessionOnResumeFailure = false;
+        if (shouldArchiveStoredSessionOnResumeFailure) {
+          await archiveSdkSessionId(params.db, params.workspaceKey, params.threadTs);
+          shouldArchiveStoredSessionOnResumeFailure = false;
         }
         resumeSessionId = undefined;
         usedExistingSession = false;
         sessionId = "";
+        sdkStreamState.sessionId = "";
         retriedFreshAfterResumeFailure = true;
       }
     }
@@ -707,10 +1385,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
       await saveSessionId(params.db, params.workspaceKey, sessionId, params.threadTs);
     }
   } finally {
-    const endNow = Date.now();
-    for (const tc of pendingToolCalls) {
-      tc.endedAt = endNow;
-    }
+    finishPendingSdkToolCalls(sdkStreamState, Date.now());
     await cleanupIntegrationAccess(integrationAccess);
   }
 
@@ -729,7 +1404,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
   if (params.contextType !== "scheduled_task") {
     try {
       await collectIntegrationCardsFromProgressEvents({
-        events: integrationProgressEvents,
+        events: sdkStreamState.integrationProgressEvents,
         loadIntegrationProvider: params.loadIntegrationProvider,
         collector: integrationConnectionCollector,
         userEmail: params.userEmail ?? null,
@@ -754,20 +1429,21 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     {
       userId: userName,
       sessionId,
-      sdkCostUsd,
+      sdkCostUsd: sdkStreamState.sdkCostUsd,
       auxCostUsd,
       pendingUploads: pendingUploads.length,
       pendingIntegrationConnections: pendingIntegrationConnections.length,
       automationArtifacts: automationArtifacts.length,
+      ...heapStats(startHeapMb),
     },
     "Agent run completed",
   );
-  const finalText = currentTextSuffix.length > 0 ? currentTextSuffix.join("\n\n") : null;
+  const finalText = getSdkStreamFinalText(sdkStreamState);
 
   return {
     messageSent: finalText !== null || pendingIntegrationConnections.length > 0 || automationArtifacts.length > 0,
     sessionId,
-    costUsd: sdkCostUsd,
+    costUsd: sdkStreamState.sdkCostUsd,
     auxCostUsd,
     pendingUploads,
     pendingIntegrationConnections,
@@ -777,17 +1453,17 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
       automationArtifacts,
     },
     rawUsage: {
-      model,
-      inputTokens,
-      outputTokens,
-      cacheReadTokens,
-      cacheCreationTokens,
-      webSearchRequests,
-      webFetchRequests,
-      durationApiMs,
-      numTurns,
-      stopReason,
-      errorSubtype,
+      model: sdkStreamState.model,
+      inputTokens: sdkStreamState.inputTokens,
+      outputTokens: sdkStreamState.outputTokens,
+      cacheReadTokens: sdkStreamState.cacheReadTokens,
+      cacheCreationTokens: sdkStreamState.cacheCreationTokens,
+      webSearchRequests: sdkStreamState.webSearchRequests,
+      webFetchRequests: sdkStreamState.webFetchRequests,
+      durationApiMs: sdkStreamState.durationApiMs,
+      numTurns: sdkStreamState.numTurns,
+      stopReason: sdkStreamState.stopReason,
+      errorSubtype: sdkStreamState.errorSubtype,
       isResumedSession: usedExistingSession,
       totalAttachments: attachments.length,
       imageCount: images.length,
@@ -797,7 +1473,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
       promptMode: hasImages && !useVisionToolForImages ? "multimodal" : "text",
       toolCalls,
       auxLlmCalls,
-      sdkCostUsd,
+      sdkCostUsd: sdkStreamState.sdkCostUsd,
     },
   };
 }

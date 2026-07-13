@@ -35,6 +35,7 @@ type ValidationCacheEntry = {
 const DEFAULT_MAX_RPM = 60;
 const DEFAULT_MAX_RETRIES = 4;
 const VALIDATION_TTL_MS = 10 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 30_000;
 const limiterByQuotaIdentity = new Map<string, Limiter>();
 const validationByQuotaIdentity = new Map<string, ValidationCacheEntry>();
 
@@ -106,6 +107,7 @@ async function validateGeminiKey(apiKey: string): Promise<"valid" | "invalid" | 
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
+      { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
     );
     if (res.ok) return "valid";
     if (res.status === 400 || res.status === 403) {
