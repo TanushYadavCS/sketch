@@ -13,6 +13,7 @@ const fireflies = getIntegration("fireflies") ?? null;
 const gmail = getIntegration("gmail") ?? null;
 const googleCalendar = getIntegration("google_calendar") ?? null;
 const otter = getIntegration("otter") ?? null;
+const whatsapp = getIntegration("whatsapp") ?? null;
 
 function connector(overrides: Partial<ConnectorConfig> = {}): ConnectorConfig {
   return {
@@ -261,6 +262,52 @@ describe("ManageConnectorDialog connector capabilities", () => {
     });
   });
 
+  it("blocks empty non-WhatsApp scope saves", async () => {
+    const user = userEvent.setup();
+    let patchCalls = 0;
+    server.use(
+      http.get("/api/connectors/:id/browse", () =>
+        HttpResponse.json({
+          type: "flat",
+          scopeConfig: { calendarIds: ["primary"] },
+          items: [{ id: "primary", name: "Work" }],
+        }),
+      ),
+      http.patch("/api/connectors/:id/scope", async () => {
+        patchCalls++;
+        return HttpResponse.json({
+          connector: {
+            id: "calendar-conn",
+            connectorType: "google_calendar",
+            scopeConfig: { calendarIds: [] },
+            syncStatus: "syncing",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <ManageConnectorDialog
+        definition={googleCalendar}
+        connector={connector({
+          id: "calendar-conn",
+          connectorType: "google_calendar",
+          authType: "oauth",
+          scopeConfig: { calendarIds: ["primary"] },
+          fileCount: 0,
+        })}
+        open
+        onOpenChange={() => {}}
+        onDisconnected={() => {}}
+        onReconnect={() => {}}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /Deselect all/i }));
+    expect(screen.getByRole("button", { name: /Save & re-sync \(0 calendars\)/i })).toBeDisabled();
+    expect(patchCalls).toBe(0);
+  });
+
   it("updates Otter email/password credentials without disconnecting", async () => {
     const user = userEvent.setup();
     let rotateBody: unknown;
@@ -291,5 +338,141 @@ describe("ManageConnectorDialog connector capabilities", () => {
     await waitFor(() => {
       expect(rotateBody).toEqual({ credentials: { email: "person@example.com", password: "new-password" } });
     });
+  });
+
+  it("saves an empty WhatsApp group selection through the generic scope editor", async () => {
+    const user = userEvent.setup();
+    let patchedBody: unknown;
+    server.use(
+      http.get("/api/connectors/:id/browse", () =>
+        HttpResponse.json({
+          type: "flat",
+          scopeConfig: { groupJids: ["deal@g.us"] },
+          items: [{ id: "deal@g.us", name: "Deal Room" }],
+        }),
+      ),
+      http.patch("/api/connectors/:id/scope", async ({ request }) => {
+        patchedBody = await request.json();
+        return HttpResponse.json({
+          connector: {
+            id: "whatsapp-conn",
+            connectorType: "whatsapp",
+            scopeConfig: { groupJids: [] },
+            syncStatus: "syncing",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <ManageConnectorDialog
+        definition={whatsapp}
+        connector={connector({
+          id: "whatsapp-conn",
+          connectorType: "whatsapp",
+          authType: "system",
+          scopeConfig: { groupJids: ["deal@g.us"] },
+          fileCount: 0,
+        })}
+        open
+        onOpenChange={() => {}}
+        onDisconnected={() => {}}
+        onReconnect={() => {}}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /Deal Room/i }));
+    await user.click(screen.getByRole("button", { name: /Save & re-sync \(0 groups\)/i }));
+
+    await waitFor(() => {
+      expect(patchedBody).toEqual({ scopeConfig: { groupJids: [] } });
+    });
+  });
+
+  it("edits WhatsApp member labels while keeping saved numbers masked", async () => {
+    const user = userEvent.setup();
+    let putBody: unknown;
+    server.use(
+      http.get("/api/connectors/:id/browse", () =>
+        HttpResponse.json({
+          type: "flat",
+          scopeConfig: { groupJids: ["deal@g.us"] },
+          items: [{ id: "deal@g.us", name: "Deal Room" }],
+        }),
+      ),
+      http.get("/api/channels/whatsapp/groups/:jid/member-labels", () =>
+        HttpResponse.json({
+          labels: [
+            {
+              id: "label-asha",
+              maskedPhone: "**67",
+              displayName: "Asha Mehta",
+              companyName: "Acme",
+            },
+          ],
+        }),
+      ),
+      http.put("/api/channels/whatsapp/groups/:jid/member-labels", async ({ request }) => {
+        putBody = await request.json();
+        return HttpResponse.json({
+          labels: [
+            {
+              id: "label-asha",
+              maskedPhone: "**67",
+              displayName: "Asha Mehta",
+              companyName: "Acme",
+            },
+            {
+              id: "label-ravi",
+              maskedPhone: "**21",
+              displayName: "Ravi Rao",
+              companyName: "Beta",
+            },
+          ],
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <ManageConnectorDialog
+        definition={whatsapp}
+        connector={connector({
+          id: "whatsapp-conn",
+          connectorType: "whatsapp",
+          authType: "system",
+          scopeConfig: { groupJids: ["deal@g.us"] },
+          fileCount: 0,
+        })}
+        open
+        onOpenChange={() => {}}
+        onDisconnected={() => {}}
+        onReconnect={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("**67")).toBeInTheDocument();
+    expect(screen.queryByText("+15551234567")).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Member phone number"), "+1 (555) 765-4321");
+    await user.type(screen.getByLabelText("Member display name"), "Ravi Rao");
+    await user.type(screen.getByLabelText("Member company"), "Beta");
+    await user.click(screen.getByRole("button", { name: /Add/i }));
+
+    expect(await screen.findByText("**21")).toBeInTheDocument();
+    expect(screen.queryByText("+15551234567")).not.toBeInTheDocument();
+    expect(screen.queryByText("+1 (555) 765-4321")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Save labels" }));
+
+    await waitFor(() => {
+      expect(putBody).toEqual({
+        labels: [
+          { id: "label-asha", displayName: "Asha Mehta", companyName: "Acme" },
+          { phoneE164: "+1 (555) 765-4321", displayName: "Ravi Rao", companyName: "Beta" },
+        ],
+      });
+    });
+    expect(await screen.findByText("**21")).toBeInTheDocument();
+    expect(screen.queryByText("+1 (555) 765-4321")).not.toBeInTheDocument();
   });
 });

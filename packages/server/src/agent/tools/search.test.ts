@@ -3,7 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { createTestDb } from "../../test-utils";
-import { handleGetEntityContext, handleGetFileContent, handleSearch, handleSearchEntities } from "./search";
+import {
+  handleGetEntityContext,
+  handleGetFileContent,
+  handleSearch,
+  handleSearchEntities,
+  searchToolSchema,
+} from "./search";
 import { UploadCollector } from "./types";
 
 let db: Kysely<DB>;
@@ -126,6 +132,10 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await db.destroy();
+});
+
+it("accepts WhatsApp as a search source filter", () => {
+  expect(searchToolSchema.source.safeParse("whatsapp").success).toBe(true);
 });
 
 function deps() {

@@ -350,12 +350,14 @@ export function GenericScopeEditor({
   scopeConfig,
   scopeConfigKey,
   noun = "items",
+  allowEmptySelection = false,
   onBrowsingChange,
 }: {
   connectorId: string;
   scopeConfig: Record<string, unknown>;
   scopeConfigKey?: string;
   noun?: string;
+  allowEmptySelection?: boolean;
   onBrowsingChange?: (browsing: boolean) => void;
 }) {
   const queryClient = useQueryClient();
@@ -490,7 +492,7 @@ export function GenericScopeEditor({
           size="sm"
           className="h-7 w-full gap-1.5 text-xs"
           onClick={() => saveMutation.mutate()}
-          disabled={saveMutation.isPending || effectiveIds.size === 0}
+          disabled={saveMutation.isPending || (!allowEmptySelection && effectiveIds.size === 0)}
         >
           {saveMutation.isPending ? (
             <>

@@ -6,6 +6,7 @@ import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
 import type { WhatsAppAdapterDeps } from "./adapter";
 import { wireWhatsAppHandlers } from "./adapter";
+import { encodeWhatsAppBackfillCheckpointKey } from "./backfill-checkpoint";
 import type { WhatsAppInboundMessage, WhatsAppTarget } from "./provider";
 
 // --- Fixtures ---
@@ -283,6 +284,15 @@ function makeDeps(overrides: Partial<WhatsAppAdapterDeps> = {}): WhatsAppAdapter
         find: vi.fn().mockResolvedValue(undefined),
         claimProviderConversationId: vi.fn().mockResolvedValue(conversationRow),
       } as unknown as WhatsAppAdapterDeps["repos"]["conversations"],
+      conversationSlices: {
+        getBackfillCheckpoint: vi.fn().mockResolvedValue(undefined),
+        setBackfillCheckpoint: vi.fn().mockImplementation(async (input) => ({
+          group_jid: input.groupJid,
+          last_fetched_key: input.lastFetchedKey ?? null,
+          status: input.status,
+          updated_at: new Date().toISOString(),
+        })),
+      } as unknown as WhatsAppAdapterDeps["repos"]["conversationSlices"],
     },
     queue: new QueueManager(),
     runAgent: vi.fn().mockResolvedValue({
@@ -464,6 +474,69 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.userMessage).toContain("hello");
       expect(agentCall.platform).toBe("whatsapp");
       expect(agentCall.userName).toBe("Alice");
+    });
+
+    it("masks personal DM provider conversation ids in reaction failure logs", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      mock.addReaction.mockRejectedValueOnce(new Error("reaction failed"));
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        kind: "dm" as const,
+        providerId: "wati",
+        providerMessageId: "wamid.reaction",
+        providerConversationId: "dm:+1234567890",
+        canonicalConversationId: "dm:+1234567890",
+        providerTimestamp: "2026-07-01T00:00:00.000Z",
+        senderName: "Alice",
+        senderProviderId: "1234567890",
+        senderPhoneE164: "+1234567890",
+        target: { kind: "dm" as const, phoneE164: "+1234567890" },
+        text: "hello",
+      });
+      await flush();
+
+      expect(deps.logger.debug).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerConversationId: "dm:+********90",
+          emoji: "👀",
+        }),
+        "Failed to update WhatsApp reaction",
+      );
+      expect(JSON.stringify(vi.mocked(deps.logger.debug).mock.calls)).not.toContain("+1234567890");
+    });
+
+    it("persists valid provider timestamps as received_at for live DM capture", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const providerTimestamp = new Date(Date.now() - 60_000).toISOString();
+
+      await handler({
+        kind: "dm" as const,
+        providerId: "wati",
+        providerMessageId: "wamid.timestamped",
+        providerConversationId: "wati-conversation-1",
+        canonicalConversationId: "dm:+1234567890",
+        providerTimestamp,
+        senderName: "Alice",
+        senderProviderId: "1234567890",
+        senderPhoneE164: "+1234567890",
+        target: { kind: "dm" as const, phoneE164: "+1234567890" },
+        text: "hello",
+      });
+      await flush();
+
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerMessageId: "wamid.timestamped",
+          providerTimestamp,
+          receivedAt: providerTimestamp,
+        }),
+      );
     });
 
     it("does not persist or run duplicate Wati DM retries", async () => {
@@ -1298,6 +1371,59 @@ describe("whatsapp/adapter", () => {
       expect(deps.runAgent).not.toHaveBeenCalled();
     });
 
+    it("ignores invalid provider timestamps for live group capture received_at", async () => {
+      const deps = makeDeps();
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+      const futureTimestamp = new Date(Date.now() + 49 * 60 * 60 * 1000).toISOString();
+
+      await handler({
+        kind: "group" as const,
+        providerId: "baileys",
+        providerMessageId: "future-timestamp",
+        providerConversationId: "group@g.us",
+        canonicalConversationId: "group:group@g.us",
+        providerTimestamp: futureTimestamp,
+        senderName: "Bob",
+        senderProviderId: "5555@s.whatsapp.net",
+        senderPhoneE164: "+5555",
+        target: { kind: "group" as const, groupId: "group@g.us" },
+        text: "random chat",
+        isMentioned: false,
+      });
+      await handler({
+        kind: "group" as const,
+        providerId: "baileys",
+        providerMessageId: "epoch-timestamp",
+        providerConversationId: "group@g.us",
+        canonicalConversationId: "group:group@g.us",
+        providerTimestamp: "1970-01-01T00:00:00.000Z",
+        senderName: "Bob",
+        senderProviderId: "5555@s.whatsapp.net",
+        senderPhoneE164: "+5555",
+        target: { kind: "group" as const, groupId: "group@g.us" },
+        text: "more chat",
+        isMentioned: false,
+      });
+
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerMessageId: "future-timestamp",
+          providerTimestamp: null,
+          receivedAt: undefined,
+        }),
+      );
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerMessageId: "epoch-timestamp",
+          providerTimestamp: null,
+          receivedAt: undefined,
+        }),
+      );
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
     it("persists recent group history with provider received_at and dedupes reruns", async () => {
       const deps = makeDeps();
       const insertMessage = vi.mocked(deps.repos.conversations.insertMessage);
@@ -1375,9 +1501,27 @@ describe("whatsapp/adapter", () => {
       wireWhatsAppHandlers(mock as never, deps);
       const historyHandler = getHistoryHandler();
 
-      await expect(historyHandler(batch)).resolves.toEqual({ persisted: 1, skippedOld: 1, skippedDup: 0 });
-      await expect(historyHandler(batch)).resolves.toEqual({ persisted: 0, skippedOld: 1, skippedDup: 1 });
+      await expect(historyHandler(batch)).resolves.toEqual({
+        persisted: 1,
+        skippedOld: 1,
+        skippedDup: 0,
+      });
+      await expect(historyHandler(batch)).resolves.toEqual({
+        persisted: 0,
+        skippedOld: 1,
+        skippedDup: 1,
+      });
 
+      const setBackfillCheckpoint = deps.repos.conversationSlices?.setBackfillCheckpoint;
+      if (!setBackfillCheckpoint) throw new Error("expected checkpoint repository");
+      expect(setBackfillCheckpoint).toHaveBeenCalledWith({
+        groupJid: "group@g.us",
+        lastFetchedKey: encodeWhatsAppBackfillCheckpointKey({
+          providerTimestamp: recentTimestamp,
+          providerMessageId: "history-recent",
+        }),
+        status: "in_progress",
+      });
       expect(persistedRows).toHaveLength(1);
       expect(persistedRows[0]).toEqual(
         expect.objectContaining({
@@ -1392,6 +1536,57 @@ describe("whatsapp/adapter", () => {
       );
       expect(deps.runAgent).not.toHaveBeenCalled();
       expect(mock.sendText).not.toHaveBeenCalled();
+    });
+
+    it("persists history messages that arrive at or before a complete checkpoint", async () => {
+      const deps = makeDeps();
+      const checkpointRepo = deps.repos.conversationSlices;
+      if (!checkpointRepo) throw new Error("expected checkpoint repository");
+      const completeCheckpointKey = encodeWhatsAppBackfillCheckpointKey({
+        providerTimestamp: "2026-07-07T09:05:00.000Z",
+        providerMessageId: "checkpoint",
+      });
+      vi.mocked(checkpointRepo.getBackfillCheckpoint).mockResolvedValue({
+        group_jid: "group@g.us",
+        last_fetched_key: completeCheckpointKey,
+        status: "complete",
+        updated_at: "2026-07-07T09:05:00.000Z",
+      });
+
+      const { mock, getHistoryHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const historyHandler = getHistoryHandler();
+
+      await expect(
+        historyHandler([
+          {
+            kind: "group",
+            providerId: "baileys",
+            providerMessageId: "history-not-yet-stored",
+            providerConversationId: "group@g.us",
+            canonicalConversationId: "group:group@g.us",
+            providerTimestamp: "2026-07-07T09:00:00.000Z",
+            senderName: "Bob",
+            senderProviderId: "5555@s.whatsapp.net",
+            senderPhoneE164: "+5555",
+            target: { kind: "group", groupId: "group@g.us" },
+            text: "missing replayed history",
+            isMentioned: false,
+          },
+        ]),
+      ).resolves.toEqual({
+        persisted: 1,
+        skippedOld: 0,
+        skippedDup: 0,
+      });
+
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ providerMessageId: "history-not-yet-stored" }),
+      );
+      expect(deps.logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ checkpointKey: completeCheckpointKey }),
+        "WhatsApp history group batch arrived at or before complete checkpoint",
+      );
     });
 
     it("uses user name from DB when available for stored passive group messages", async () => {
@@ -2230,6 +2425,10 @@ describe("whatsapp/adapter", () => {
         tool_progress: "friendly",
         reasoning_text: 0,
         agent_user_id: null,
+        index_enabled: 0,
+        slice_gap_minutes: null,
+        slice_max_age_minutes: null,
+        slice_max_messages: null,
         updated_at: "2025-01-01T00:00:00Z",
       });
       const { mock, getHandler } = createMockWhatsApp();
@@ -2374,6 +2573,10 @@ describe("whatsapp/adapter", () => {
         tool_progress: null,
         reasoning_text: null,
         agent_user_id: "agent-1",
+        index_enabled: 0,
+        slice_gap_minutes: null,
+        slice_max_age_minutes: null,
+        slice_max_messages: null,
         updated_at: "2025-01-01T00:00:00Z",
       });
       vi.mocked(deps.repos.users.findById).mockImplementation(async (id) =>
