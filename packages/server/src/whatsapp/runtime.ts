@@ -1,11 +1,14 @@
 import type { Logger } from "../logger";
 import {
   WHATSAPP_NONE_PROVIDER_ID,
+  type WhatsAppCapabilities,
   type WhatsAppDmProvider,
   type WhatsAppDmProviderId,
   type WhatsAppGroupMetadata,
   type WhatsAppGroupProvider,
   type WhatsAppGroupProviderId,
+  type WhatsAppHistoryMessagesHandler,
+  type WhatsAppHistorySyncResult,
   type WhatsAppInboundMessage,
   type WhatsAppInboundProvider,
   type WhatsAppMessageHandler,
@@ -13,11 +16,15 @@ import {
   type WhatsAppSendResult,
   type WhatsAppTarget,
 } from "./provider";
+import type { WhatsAppTemplateRequest } from "./templates";
 
 export interface WhatsAppRuntime {
   isConnected: boolean;
   onMessage(handler: WhatsAppMessageHandler): void;
+  onHistoryMessages(handler: WhatsAppHistoryMessagesHandler): void;
+  getCapabilities(target: WhatsAppTarget): WhatsAppCapabilities;
   sendText(target: WhatsAppTarget, text: string, options?: WhatsAppSendOptions): Promise<WhatsAppSendResult | null>;
+  sendTemplate(target: WhatsAppTarget, template: WhatsAppTemplateRequest): Promise<WhatsAppSendResult | null>;
   sendFile(target: WhatsAppTarget, filePath: string, mimeType: string, fileName: string): Promise<void>;
   startComposing(target: WhatsAppTarget): void;
   stopComposing(target: WhatsAppTarget): void;
@@ -73,6 +80,12 @@ export function createWhatsAppRuntime(config: WhatsAppRuntimeConfig): WhatsAppRu
     return config.groupProviderId !== WHATSAPP_NONE_PROVIDER_ID && message.providerId === config.groupProviderId;
   };
 
+  const emptyHistoryResult = (): WhatsAppHistorySyncResult => ({
+    persisted: 0,
+    skippedOld: 0,
+    skippedDup: 0,
+  });
+
   return {
     get isConnected() {
       const dmProvider = dmProviders.get(config.dmProviderId);
@@ -90,8 +103,34 @@ export function createWhatsAppRuntime(config: WhatsAppRuntimeConfig): WhatsAppRu
       }
     },
 
+    onHistoryMessages(handler) {
+      for (const provider of config.inboundProviders) {
+        provider.onHistoryMessages?.(async (messages, metadata) => {
+          const filtered = messages.filter(shouldHandleInboundMessage);
+          if (filtered.length === 0) return emptyHistoryResult();
+          return handler(filtered, metadata);
+        });
+      }
+    },
+
+    getCapabilities(target) {
+      return resolveProviderForTarget(target).capabilities;
+    },
+
     async sendText(target, text, options) {
       return resolveProviderForTarget(target).sendText(target, text, options);
+    },
+
+    async sendTemplate(target, template) {
+      const provider = resolveProviderForTarget(target);
+      if (provider.sendTemplate) return provider.sendTemplate(target, template);
+      if (provider.capabilities.templates) {
+        throw new Error(`WhatsApp provider ${provider.id} cannot send templates from this runtime`);
+      }
+      if (!template.fallbackText) {
+        throw new Error(`WhatsApp provider ${provider.id} does not support templates`);
+      }
+      return provider.sendText(target, template.fallbackText);
     },
 
     async sendFile(target, filePath, mimeType, fileName) {

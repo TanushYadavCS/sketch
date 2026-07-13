@@ -515,4 +515,99 @@ describe("createIndexedFileFactRepository", () => {
     });
     expect(result.skipped).toBeUndefined();
   });
+
+  describe("childTasksForParent", () => {
+    async function seedTaskFile(opts: {
+      fileId: string;
+      source: string;
+      parentSourceId: string;
+      name: string;
+      providerUrl?: string | null;
+      sourceUpdatedAt?: string;
+      factId?: string;
+    }): Promise<void> {
+      await db
+        .insertInto("connector_configs")
+        .values({
+          id: `cc-${opts.source}`,
+          connector_type: opts.source,
+          auth_type: "api_key",
+          credentials: "{}",
+          created_by: "user-1",
+        })
+        .onConflict((oc) => oc.column("id").doNothing())
+        .execute();
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: opts.fileId,
+          connector_config_id: `cc-${opts.source}`,
+          provider_file_id: `pf-${opts.fileId}`,
+          file_name: opts.name,
+          file_type: "issue",
+          content_category: "document",
+          source: opts.source,
+          provider_url: opts.providerUrl ?? null,
+          source_updated_at: opts.sourceUpdatedAt ?? "2026-01-01T00:00:00.000Z",
+          synced_at: "2026-01-01T00:00:00.000Z",
+        })
+        .onConflict((oc) => oc.column("id").doNothing())
+        .execute();
+      await db
+        .insertInto("indexed_file_facts")
+        .values({
+          id: opts.factId ?? `pf-fact-${opts.fileId}`,
+          indexed_file_id: opts.fileId,
+          source: opts.source,
+          fact_type: "parent_entity",
+          relation: "mentioned",
+          subject_source_id: opts.parentSourceId,
+          fact_key: `pk-${opts.factId ?? opts.fileId}`,
+        })
+        .execute();
+    }
+
+    it("returns the true distinct total while capping the list, and excludes other connectors", async () => {
+      const repo = createIndexedFileFactRepository(db);
+      for (let i = 0; i < 5; i++) {
+        await seedTaskFile({
+          fileId: `linear-task-${i}`,
+          source: "linear",
+          parentSourceId: "team-1",
+          name: `SKE-${i}`,
+          providerUrl: `https://linear.app/issue/${i}`,
+          sourceUpdatedAt: `2026-01-0${i + 1}T00:00:00.000Z`,
+        });
+      }
+      // A task with two parent_entity facts must count once (dedup by file).
+      await seedTaskFile({
+        fileId: "linear-task-0",
+        source: "linear",
+        parentSourceId: "team-1",
+        name: "SKE-0",
+        factId: "second-fact-for-0",
+      });
+      // Decoy: same parent id under a different connector must NOT leak in.
+      await seedTaskFile({
+        fileId: "clickup-task-x",
+        source: "clickup",
+        parentSourceId: "team-1",
+        name: "CU-x",
+      });
+
+      const result = await repo.childTasksForParent({ source: "linear", parentSourceId: "team-1", limit: 3 });
+
+      expect(result.total).toBe(5);
+      expect(result.tasks).toHaveLength(3);
+      expect(typeof result.total).toBe("number");
+      expect(result.tasks.map((t) => t.name)).not.toContain("CU-x");
+      expect(result.tasks[0]).toMatchObject({ source: "linear", providerUrl: expect.stringContaining("linear.app") });
+    });
+
+    it("returns an empty result for a parent with no child tasks", async () => {
+      const repo = createIndexedFileFactRepository(db);
+      const result = await repo.childTasksForParent({ source: "linear", parentSourceId: "nope", limit: 50 });
+      expect(result).toEqual({ tasks: [], total: 0 });
+    });
+  });
 });

@@ -45,6 +45,7 @@ import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
 import { cleanupEmptyRelationships, cleanupRelationshipEvidenceForFacts } from "../entities/materialize";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
+import { isEmailProviderName } from "../entities/validators";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { parseActionItemOwners } from "./participant-block";
 
@@ -146,6 +147,10 @@ export async function applyEngagementFloor(
     if (await domainsRepo.isPersonalOrShared(domain)) continue;
     const company = await domainsRepo.lookupCompanyByDomain(domain);
     if (!company) continue;
+    // Defends against a poisoned domain table: an LLM-minted webmail-brand
+    // company (e.g. "Gmail") can register gmail.com as a corporate domain, which
+    // would pass isPersonalOrShared and surface here as an engagement company.
+    if (isEmailProviderName(company.name)) continue;
     const dedupKey = `${name.toLowerCase()}|${company.id}`;
     if (seen.has(dedupKey)) continue;
     seen.add(dedupKey);

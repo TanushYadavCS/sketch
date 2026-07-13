@@ -1,5 +1,6 @@
 import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
+import type { EmbeddingProvider } from "../connectors/embeddings/types";
 import type { createEntityRepository } from "../db/repositories/entities";
 import type { EntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -7,6 +8,7 @@ import type { EntitySuppressionRepository } from "../db/repositories/entity-supp
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
 import type { MentionType } from "./graph";
+import type { CandidatePool } from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
 
 export interface ReplayFactsSummary {
@@ -32,8 +34,10 @@ export interface LookupIndex {
   entitiesByType: Map<ProposeEntityType, EntityRow[]>;
   byNormalizedName: Map<string, EntityRow[]>;
   byNormalizedAlias: Map<string, EntityRow[]>;
+  dedupPoolsByType: Map<ProposeEntityType, CandidatePool>;
   bySourceRef: Map<string, EntityRow>;
   companyIdsByDomain: Map<string, string[]>;
+  personScopeKeysByEntityId: Map<string, string[]>;
 }
 
 export interface MaterializeDeps {
@@ -48,7 +52,19 @@ export interface MaterializeDeps {
   readEmail: (entity: Entity) => string | null;
   onEntityResolved: (entity: Entity) => void | Promise<void>;
   resolveOwner: (fact: IndexedFileFactRow) => string | null;
+  getIndexedFileSourceTime: (indexedFileId: string) => Promise<{
+    source_created_at: string | null;
+    source_updated_at: string | null;
+    synced_at: string;
+  } | null>;
   llmPromotionThreshold: number;
+  llmTaskCorroborationThreshold: number;
+  featureAutoMintThreshold: number;
+  birthGateTypes: Set<ProposeEntityType>;
+  birthGateLiveTypes: Set<ProposeEntityType>;
+  structuralAutoBirthTypes: Set<ProposeEntityType>;
+  birthGateDryRun: boolean;
+  embeddingProvider: EmbeddingProvider | null;
   countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
 }
 
@@ -64,6 +80,11 @@ export type MaterializeResult =
       mentionsWritten: number;
       relationshipsWritten: number;
     }
+  | { kind: "task_materialized"; taskId: string; created: boolean }
+  | { kind: "commitment_materialized" }
+  | { kind: "feature_materialized" }
+  | { kind: "decision_materialized" }
+  | { kind: "milestone_materialized" }
   | { kind: "structural"; entity: EntityRow }
   | { kind: "skipped_missing_owner"; reason: string }
   | { kind: "deferred_below_threshold"; reason: string }
@@ -71,6 +92,19 @@ export type MaterializeResult =
 
 export interface ReplaySourceFactsOptions {
   llmPromotionThreshold?: number;
+  llmTaskCorroborationThreshold?: number;
+  featureAutoMintThreshold?: number;
+  birthGateTypes?: Set<ProposeEntityType>;
+  birthGateLiveTypes?: Set<ProposeEntityType>;
+  structuralAutoBirthTypes?: Set<ProposeEntityType>;
+  birthGateDryRun?: boolean;
+  embeddingProvider?: EmbeddingProvider | null;
+  /**
+   * Rows fetched per keyset page. Bounds peak heap: only one page of facts
+   * (including their `raw` payloads) is held at a time. Defaults to
+   * `DEFAULT_FACT_BATCH_SIZE`.
+   */
+  batchSize?: number;
 }
 
 export interface MaterializeProgress {
@@ -81,7 +115,20 @@ export interface MaterializeProgress {
 
 export interface MaterializeUnmaterializedOptions {
   llmPromotionThreshold?: number;
+  llmTaskCorroborationThreshold?: number;
+  featureAutoMintThreshold?: number;
+  birthGateTypes?: Set<ProposeEntityType>;
+  birthGateLiveTypes?: Set<ProposeEntityType>;
+  structuralAutoBirthTypes?: Set<ProposeEntityType>;
+  birthGateDryRun?: boolean;
+  embeddingProvider?: EmbeddingProvider | null;
   factTypes?: IndexedFileFactType[];
+  /**
+   * Rows fetched per keyset page. Bounds peak heap: only one page of facts
+   * (including their `raw` payloads) is held at a time. Defaults to
+   * `DEFAULT_FACT_BATCH_SIZE`.
+   */
+  batchSize?: number;
   /**
    * Fires before processing each fact with `completed = index, total = facts.length`
    * and after the loop with `completed = total`. Used by the reset/reenrich job

@@ -9,10 +9,22 @@
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { runMigrations } from "../migrate";
+import { createMigrator, runMigrations } from "../migrate";
 import type { DB } from "../schema";
+import * as m107 from "./107-scheduled-task-builder-revisions";
+import * as m108 from "./108-scheduled-task-origin-chat";
+import * as m109 from "./109-scheduled-task-origin-message-id";
+import * as m110 from "./110-google-calendar-provider-file-scope";
+import * as m111 from "./111-settings-embedding-provider";
+import * as m112 from "./112-agent-output-structured-payload";
+import * as m113 from "./113-indexed-file-all-day-flag";
+import * as m116 from "./116-connector-credential-source";
+import * as m119 from "./119-agent-outputs-source-scope";
+import * as m120 from "./120-agent-output-period-key";
+import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
+import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 110;
+const EXPECTED_MIGRATION_COUNT = 137;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -166,6 +178,163 @@ describe("runMigrations — full sequence", () => {
     expect(names[107]).toBe("112-agent-output-structured-payload");
     expect(names[108]).toBe("113-indexed-file-all-day-flag");
     expect(names[109]).toBe("114-agent-output-deliveries");
+    expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
+    expect(names[111]).toBe("116-connector-credential-source");
+    expect(names[112]).toBe("117-conversation-message-window-index");
+    expect(names[113]).toBe("118-whatsapp-window-keepalives");
+    expect(names[114]).toBe("119-agent-outputs-source-scope");
+    expect(names[115]).toBe("120-agent-output-period-key");
+    expect(names[116]).toBe("121-tasks");
+    expect(names[117]).toBe("122-tasks-owner");
+    expect(names[118]).toBe("123-sub-entities");
+    expect(names[119]).toBe("124-tasks-assignee-name");
+    expect(names[120]).toBe("125-milestone-series-and-value-signature");
+    expect(names[121]).toBe("126-work-cycles");
+    expect(names[122]).toBe("127-work-cycles-connector");
+    expect(names[123]).toBe("128-work-cycles-connector-key");
+    expect(names[124]).toBe("129-container-name-qualification");
+    expect(names[125]).toBe("130-entity-provenance-tier");
+    expect(names[126]).toBe("131-trunk-name-embeddings");
+    expect(names[127]).toBe("132-agent-messages");
+    expect(names[128]).toBe("133-chat-session-runtime");
+    expect(names[129]).toBe("134-chat-session-archived-at");
+    expect(names[130]).toBe("135-whatsapp-context-graph-indexing");
+    expect(names[131]).toBe("136-whatsapp-slice-denoised-message-ids");
+    expect(names[132]).toBe("137-whatsapp-group-participants");
+    expect(names[133]).toBe("138-whatsapp-identity-candidates");
+    expect(names[134]).toBe("139-tasks-proposed-assignee");
+    expect(names[135]).toBe("140-retire-unassigned-agent-tasks");
+    expect(names[136]).toBe("141-fact-materialization-quarantine");
+  });
+
+  it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {
+    const migrator = createMigrator(db);
+    const partial = await migrator.migrateTo("139-tasks-proposed-assignee");
+    expect(partial.error).toBeUndefined();
+
+    await sql`
+      INSERT INTO tasks
+        (id, source, title, normalized_title, status, status_authority, provenance, source_task_id, updated_at)
+      VALUES
+        ('summary-unassigned', 'summary', 'Summary unassigned', 'summary unassigned', 'open', 'local', 'summary', 'summary-unassigned', '2026-07-10T00:00:00.000Z'),
+        ('brief-unassigned', 'brief', 'Brief unassigned', 'brief unassigned', 'open', 'local', 'brief', 'brief-unassigned', '2026-07-10T00:00:00.000Z'),
+        ('structural-unassigned', 'linear', 'Linear unassigned', 'linear unassigned', 'open', 'external', 'structural', 'structural-unassigned', '2026-07-10T00:00:00.000Z')
+    `.execute(db);
+
+    const latest = await migrator.migrateToLatest();
+    expect(latest.error).toBeUndefined();
+
+    const rows = await sql<{ id: string; valid_to: string | null }>`
+      SELECT id, valid_to
+      FROM tasks
+      WHERE id IN ('summary-unassigned', 'brief-unassigned', 'structural-unassigned')
+      ORDER BY id ASC
+    `.execute(db);
+
+    expect(rows.rows).toEqual([
+      { id: "brief-unassigned", valid_to: expect.any(String) },
+      { id: "structural-unassigned", valid_to: null },
+      { id: "summary-unassigned", valid_to: expect.any(String) },
+    ]);
+  });
+
+  it("migration 141 reassigns sentinel connector and fact owners to the earliest admin user", async () => {
+    const migrator = createMigrator(db);
+    const partial = await migrator.migrateTo("140-retire-unassigned-agent-tasks");
+    expect(partial.error).toBeUndefined();
+
+    await sql`
+      INSERT INTO users (id, name, email, auth_role, created_at)
+      VALUES
+        ('member-1', 'Member', 'member@example.com', 'member', '2026-01-01T00:00:00.000Z'),
+        ('admin-late', 'Admin Late', 'admin-late@example.com', 'admin', '2026-03-01T00:00:00.000Z'),
+        ('admin-early', 'Admin Early', 'admin-early@example.com', 'admin', '2026-02-01T00:00:00.000Z')
+    `.execute(db);
+    await sql`
+      INSERT INTO connector_configs (id, connector_type, auth_type, credentials, scope_config, created_by)
+      VALUES
+        ('conn-admin', 'clickup', 'api_key', '{}', '{}', 'admin'),
+        ('conn-api-key', 'gmail', 'oauth', '{}', '{}', 'sketch-api-key'),
+        ('conn-owned', 'linear', 'api_key', '{}', '{}', 'member-1')
+    `.execute(db);
+    await sql`
+      INSERT INTO indexed_file_facts (id, source, fact_type, relation, fact_key, created_by_user_id)
+      VALUES
+        ('fact-admin', 'clickup', 'llm_task', 'mentioned', 'key-1', 'admin'),
+        ('fact-api-key', 'gmail', 'commitment', 'mentioned', 'key-2', 'sketch-api-key'),
+        ('fact-owned', 'linear', 'commitment', 'mentioned', 'key-3', 'member-1')
+    `.execute(db);
+
+    const latest = await migrator.migrateToLatest();
+    expect(latest.error).toBeUndefined();
+
+    const configs = await sql<{ id: string; created_by: string }>`
+      SELECT id, created_by FROM connector_configs ORDER BY id ASC
+    `.execute(db);
+    expect(configs.rows).toEqual([
+      { id: "conn-admin", created_by: "admin-early" },
+      { id: "conn-api-key", created_by: "admin-early" },
+      { id: "conn-owned", created_by: "member-1" },
+    ]);
+
+    const facts = await sql<{ id: string; created_by_user_id: string; materialization_attempts: number }>`
+      SELECT id, created_by_user_id, materialization_attempts FROM indexed_file_facts ORDER BY id ASC
+    `.execute(db);
+    expect(facts.rows).toEqual([
+      { id: "fact-admin", created_by_user_id: "admin-early", materialization_attempts: 0 },
+      { id: "fact-api-key", created_by_user_id: "admin-early", materialization_attempts: 0 },
+      { id: "fact-owned", created_by_user_id: "member-1", materialization_attempts: 0 },
+    ]);
+  });
+
+  it("creates the sub-entities table and current-row partial unique index", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const columns = await sql<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>`PRAGMA table_info(sub_entities)`.execute(db);
+    expect(columns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "parent_entity_id", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "parent_scope_key", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "kind", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "normalized_name", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "status_authority", type: "TEXT", notnull: 1, dflt_value: "'local'" }),
+        expect.objectContaining({ name: "source_fact_id", type: "TEXT", notnull: 0 }),
+      ]),
+    );
+
+    const indexes = await sql<{
+      name: string;
+      unique: number;
+      partial: number;
+    }>`PRAGMA index_list(sub_entities)`.execute(db);
+    expect(indexes.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "idx_sub_entities_current_scope_kind_name",
+          unique: 1,
+          partial: 1,
+        }),
+      ]),
+    );
+
+    const foreignKeys = await sql<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>`PRAGMA foreign_key_list(sub_entities)`.execute(db);
+    expect(foreignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: "entities", from: "parent_entity_id", to: "id", on_delete: "SET NULL" }),
+        expect.objectContaining({ table: "users", from: "created_by_user_id", to: "id" }),
+      ]),
+    );
+    expect(foreignKeys.rows.some((row) => row.from === "source_fact_id")).toBe(false);
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {
@@ -302,6 +471,11 @@ describe("runMigrations — full sequence", () => {
       PRAGMA table_info(indexed_files)
     `.execute(db);
     expect(columns.rows.map((row) => row.name)).toContain("rollup_group_id");
+
+    const connectorColumns = await sql<{ name: string }>`
+      PRAGMA table_info(connector_configs)
+    `.execute(db);
+    expect(connectorColumns.rows.map((row) => row.name)).toContain("credential_source");
   });
 
   it("creates CRM object summaries table", async () => {
@@ -476,6 +650,179 @@ describe("runMigrations — full sequence", () => {
     expect(result.rows).toHaveLength(1);
   });
 
+  it("creates WhatsApp provider event and template mapping tables", async () => {
+    await runMigrations(db, { quiet: true });
+
+    for (const table of ["whatsapp_provider_events", "whatsapp_template_mappings"]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
+  });
+
+  it("creates agent_messages and evolves chat_sessions for runtime-scoped sessions", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const agentMessageColumns = await sql<{ name: string; notnull: number }>`PRAGMA table_info(agent_messages)`.execute(
+      db,
+    );
+    expect(agentMessageColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "id", notnull: 0 }),
+        expect.objectContaining({ name: "session_id", notnull: 1 }),
+        expect.objectContaining({ name: "seq", notnull: 1 }),
+        expect.objectContaining({ name: "role", notnull: 1 }),
+        expect.objectContaining({ name: "content", notnull: 1 }),
+        expect.objectContaining({ name: "created_at", notnull: 1 }),
+      ]),
+    );
+
+    const chatSessionColumns = await sql<{ name: string; notnull: number; dflt_value: string | null }>`
+      PRAGMA table_info(chat_sessions)
+    `.execute(db);
+    expect(chatSessionColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "runtime", notnull: 1, dflt_value: "'sdk'" }),
+        expect.objectContaining({ name: "archived_at", notnull: 0 }),
+      ]),
+    );
+
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "workspace-1", thread_key: "", runtime: "sdk", session_id: "sess-sdk" })
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "workspace-1", thread_key: "", runtime: "aisdk", session_id: "sess-ai" })
+      .execute();
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["runtime", "session_id"])
+      .where("workspace_key", "=", "workspace-1")
+      .orderBy("runtime", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { runtime: "aisdk", session_id: "sess-ai" },
+      { runtime: "sdk", session_id: "sess-sdk" },
+    ]);
+  });
+
+  it("allows archived chat_session duplicates while enforcing one active row on SQLite", async () => {
+    await runMigrations(db, { quiet: true });
+
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "archive-workspace", thread_key: "thread-1", runtime: "aisdk", session_id: "sess-1" })
+      .execute();
+    await db
+      .updateTable("chat_sessions")
+      .set({ archived_at: "2026-07-01T00:00:00.000Z" })
+      .where("session_id", "=", "sess-1")
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "archive-workspace", thread_key: "thread-1", runtime: "aisdk", session_id: "sess-2" })
+      .execute();
+    await db
+      .updateTable("chat_sessions")
+      .set({ archived_at: "2026-07-02T00:00:00.000Z" })
+      .where("session_id", "=", "sess-2")
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({
+        workspace_key: "archive-workspace",
+        thread_key: "thread-1",
+        runtime: "aisdk",
+        session_id: "sess-active",
+      })
+      .execute();
+
+    await expect(
+      db
+        .insertInto("chat_sessions")
+        .values({
+          workspace_key: "archive-workspace",
+          thread_key: "thread-1",
+          runtime: "aisdk",
+          session_id: "sess-active-2",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["session_id", "archived_at"])
+      .where("workspace_key", "=", "archive-workspace")
+      .orderBy("id", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { session_id: "sess-1", archived_at: "2026-07-01T00:00:00.000Z" },
+      { session_id: "sess-2", archived_at: "2026-07-02T00:00:00.000Z" },
+      { session_id: "sess-active", archived_at: null },
+    ]);
+  });
+
+  it("134 down drops archived rows and restores the pre-archive SQLite uniqueness", async () => {
+    await runMigrations(db, { quiet: true });
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-old" })
+      .execute();
+    await db
+      .updateTable("chat_sessions")
+      .set({ archived_at: "2026-07-01T00:00:00.000Z" })
+      .where("session_id", "=", "sess-old")
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-active" })
+      .execute();
+
+    await expect(chatSessionArchiveMigration.down(db as Kysely<unknown>)).resolves.not.toThrow();
+
+    const columns = await sql<{ name: string }>`PRAGMA table_info(chat_sessions)`.execute(db);
+    expect(columns.rows.map((row) => row.name)).not.toContain("archived_at");
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["workspace_key", "thread_key", "runtime", "session_id"])
+      .where("workspace_key", "=", "down-archive")
+      .execute();
+    expect(rows).toEqual([
+      { workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-active" },
+    ]);
+  });
+
+  it("133 down keeps the sdk chat_session row when dual runtime rows share a workspace and thread", async () => {
+    await runMigrations(db, { quiet: true });
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "down-workspace", thread_key: "", runtime: "sdk", session_id: "sess-sdk" })
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "down-workspace", thread_key: "", runtime: "aisdk", session_id: "sess-ai" })
+      .execute();
+
+    await expect(chatSessionRuntimeMigration.down(db as Kysely<unknown>)).resolves.not.toThrow();
+
+    const rows = await sql<{ workspace_key: string; thread_key: string; session_id: string }>`
+      SELECT workspace_key, thread_key, session_id
+      FROM chat_sessions
+      WHERE workspace_key = 'down-workspace'
+      ORDER BY session_id ASC
+    `.execute(db);
+    expect(rows.rows).toEqual([{ workspace_key: "down-workspace", thread_key: "", session_id: "sess-sdk" }]);
+
+    const runtimeColumns = await sql<{ name: string }>`
+      PRAGMA table_info(chat_sessions)
+    `.execute(db);
+    expect(runtimeColumns.rows.map((row) => row.name)).not.toContain("runtime");
+  });
+
   it("running migrations twice is idempotent (only applies each migration once)", async () => {
     await runMigrations(db, { quiet: true });
     await runMigrations(db, { quiet: true });
@@ -530,22 +877,38 @@ describe("runMigrations — incremental upgrade", () => {
   });
 
   it("finishes the scheduled task revision migration when its columns already exist", async () => {
-    await runMigrations(db, { quiet: true });
+    /**
+     * Models a real incident: migrations 107-120 ran their DDL but the ledger
+     * writes for some of them were lost, so on restart Kysely found the
+     * columns/tables already present. 107-116/119/120 guard their DDL via
+     * introspection (safe to run twice); 114/115/117/118 unconditionally
+     * CREATE TABLE/INDEX (not safe to run twice) and were never hardened for
+     * this recovery because they were part of the same incident's fix, not
+     * its cause — see migrate.ts's per-migration up() implementations.
+     *
+     * Reproducing this by deleting kysely_migration rows after a full
+     * migrateToLatest() only stayed a valid Kysely ledger state while 120 was
+     * the tail of the migration list; Kysely's ensureMigrationsInOrder always
+     * requires the executed set to be a prefix of the full sorted migration
+     * list, and once migrations landed after 120 the surviving executed set
+     * (…106, 121+) stopped being a prefix.
+     *
+     * Instead, build the DB to migration 106 via the real migrator (matching
+     * reality: 106 genuinely ran and got recorded), then call the 10 guarded
+     * migrations' up() directly — bypassing the ledger entirely — to apply
+     * their DDL without recording them as executed. The 4 unguarded
+     * migrations are left untouched (genuinely pending). This never touches
+     * anything past 120 and never depends on the Migrator/ledger for the
+     * simulated range, so it can't be destabilized by any migration landing
+     * after 120, no matter how many more are added.
+     */
+    const migrator = createMigrator(db);
+    const { error: upTo106Error } = await migrator.migrateTo("106-agents");
+    if (upTo106Error) throw upTo106Error;
 
-    await sql`
-      DELETE FROM kysely_migration
-      WHERE name IN (
-        '107-scheduled-task-builder-revisions',
-        '108-scheduled-task-origin-chat',
-        '109-scheduled-task-origin-message-id',
-        '110-google-calendar-provider-file-scope',
-        '111-settings-embedding-provider',
-        '112-agent-output-structured-payload',
-        '113-indexed-file-all-day-flag',
-        '114-agent-output-deliveries'
-      )
-    `.execute(db);
-    await sql`DROP TABLE agent_output_deliveries`.execute(db);
+    for (const guarded of [m107, m108, m109, m110, m111, m112, m113, m116, m119, m120]) {
+      await guarded.up(db as Kysely<unknown>);
+    }
 
     await expect(runMigrations(db, { quiet: true })).resolves.not.toThrow();
 
@@ -559,7 +922,33 @@ describe("runMigrations — incremental upgrade", () => {
         '111-settings-embedding-provider',
         '112-agent-output-structured-payload',
         '113-indexed-file-all-day-flag',
-        '114-agent-output-deliveries'
+        '114-agent-output-deliveries',
+        '115-whatsapp-template-mappings-and-provider-events',
+        '116-connector-credential-source',
+        '117-conversation-message-window-index',
+        '118-whatsapp-window-keepalives',
+        '119-agent-outputs-source-scope',
+        '120-agent-output-period-key',
+        '121-tasks',
+        '122-tasks-owner',
+        '123-sub-entities',
+        '124-tasks-assignee-name',
+        '125-milestone-series-and-value-signature',
+        '126-work-cycles',
+        '127-work-cycles-connector',
+        '128-work-cycles-connector-key',
+        '129-container-name-qualification',
+        '130-entity-provenance-tier',
+        '131-trunk-name-embeddings',
+        '132-agent-messages',
+        '133-chat-session-runtime',
+        '134-chat-session-archived-at',
+        '135-whatsapp-context-graph-indexing',
+        '136-whatsapp-slice-denoised-message-ids',
+        '137-whatsapp-group-participants',
+        '138-whatsapp-identity-candidates',
+        '139-tasks-proposed-assignee',
+        '140-retire-unassigned-agent-tasks'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -572,6 +961,37 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "112-agent-output-structured-payload" },
       { name: "113-indexed-file-all-day-flag" },
       { name: "114-agent-output-deliveries" },
+      { name: "115-whatsapp-template-mappings-and-provider-events" },
+      { name: "116-connector-credential-source" },
+      { name: "117-conversation-message-window-index" },
+      { name: "118-whatsapp-window-keepalives" },
+      { name: "119-agent-outputs-source-scope" },
+      { name: "120-agent-output-period-key" },
+      { name: "121-tasks" },
+      { name: "122-tasks-owner" },
+      { name: "123-sub-entities" },
+      { name: "124-tasks-assignee-name" },
+      { name: "125-milestone-series-and-value-signature" },
+      { name: "126-work-cycles" },
+      { name: "127-work-cycles-connector" },
+      { name: "128-work-cycles-connector-key" },
+      { name: "129-container-name-qualification" },
+      { name: "130-entity-provenance-tier" },
+      { name: "131-trunk-name-embeddings" },
+      { name: "132-agent-messages" },
+      { name: "133-chat-session-runtime" },
+      { name: "134-chat-session-archived-at" },
+      { name: "135-whatsapp-context-graph-indexing" },
+      { name: "136-whatsapp-slice-denoised-message-ids" },
+      { name: "137-whatsapp-group-participants" },
+      { name: "138-whatsapp-identity-candidates" },
+      { name: "139-tasks-proposed-assignee" },
+      { name: "140-retire-unassigned-agent-tasks" },
     ]);
+
+    // runMigrations() always migrates to latest, so recovering 107-120 above
+    // should also carry cleanly through every migration added after it.
+    const allRows = await sql<{ name: string }>`SELECT name FROM kysely_migration`.execute(db);
+    expect(allRows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
   });
 });

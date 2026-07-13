@@ -327,7 +327,7 @@ export function GenericScopePicker({
   );
 }
 
-function getAllItemIds(data: BrowseResult): string[] {
+export function getAllItemIds(data: BrowseResult): string[] {
   switch (data.type) {
     case "flat":
       return data.items.map((i) => i.id);
@@ -350,12 +350,14 @@ export function GenericScopeEditor({
   scopeConfig,
   scopeConfigKey,
   noun = "items",
+  allowEmptySelection = false,
   onBrowsingChange,
 }: {
   connectorId: string;
   scopeConfig: Record<string, unknown>;
   scopeConfigKey?: string;
   noun?: string;
+  allowEmptySelection?: boolean;
   onBrowsingChange?: (browsing: boolean) => void;
 }) {
   const queryClient = useQueryClient();
@@ -451,6 +453,9 @@ export function GenericScopeEditor({
       </div>
     );
   }
+  const storedScope = browseData.scopeConfig ?? scopeConfig;
+  const hasNoSavedSelection =
+    !!scopeConfigKey && Object.prototype.hasOwnProperty.call(storedScope, scopeConfigKey) && initIds.size === 0;
 
   return (
     <div className="space-y-4">
@@ -467,6 +472,14 @@ export function GenericScopeEditor({
           {isCached ? "Refresh" : ""}
         </button>
       </div>
+      {hasNoSavedSelection && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+          <p className="text-xs font-medium text-foreground">No {noun} selected yet</p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            Choose at least one item to start syncing this connector.
+          </p>
+        </div>
+      )}
       <GenericScopePicker
         data={browseData}
         selectedIds={effectiveIds}
@@ -479,7 +492,7 @@ export function GenericScopeEditor({
           size="sm"
           className="h-7 w-full gap-1.5 text-xs"
           onClick={() => saveMutation.mutate()}
-          disabled={saveMutation.isPending || effectiveIds.size === 0}
+          disabled={saveMutation.isPending || (!allowEmptySelection && effectiveIds.size === 0)}
         >
           {saveMutation.isPending ? (
             <>
@@ -487,7 +500,7 @@ export function GenericScopeEditor({
               Saving...
             </>
           ) : (
-            `Save & re-sync (${effectiveIds.size} ${noun})`
+            `${hasNoSavedSelection ? "Start syncing" : "Save & re-sync"} (${effectiveIds.size} ${noun})`
           )}
         </Button>
       )}
@@ -502,7 +515,7 @@ export function GenericScopeEditor({
  * - nested: scopeConfig.spaces / group item IDs
  * - tree: scopeConfig.sharedDrives + scopeConfig.folders / scopeConfig.items
  */
-function computeSelectedFromScope(
+export function computeSelectedFromScope(
   data: BrowseResult,
   scope: Record<string, unknown>,
   flatScopeKey?: string,
@@ -549,7 +562,7 @@ function isString(value: unknown): value is string {
  * Build scope config from selected IDs + browse result shape.
  * Preserves the key names expected by each connector's sync().
  */
-function buildScopeFromSelection(
+export function buildScopeFromSelection(
   data: BrowseResult,
   selectedIds: Set<string>,
   flatScopeKey = "rootPages",

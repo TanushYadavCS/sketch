@@ -30,16 +30,50 @@ const RETRY_BASE_MS = 1000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 /**
- * Fireflies post-processes recordings into queryable transcripts for
- * ~15–45 min after a meeting ends. During that window the transcript
- * is invisible to the API. If we advance the cursor to `now`, a
- * transcript whose meeting `date` predates the cursor when it finally
- * becomes listable is filtered out by Fireflies' `fromDate` forever.
+ * Fireflies' GraphQL `fromDate` filters transcripts by meeting start time
+ * (`date`), NOT by when a transcript becomes listable. Two gaps follow:
  *
- * Lag the cursor by 2h so the next sync always re-queries the recent
- * window. Content-hash dedup makes re-fetches cheap.
+ *  1. Post-processing lag — a recording is queryable only ~15–45 min after
+ *     the meeting ends.
+ *  2. Late finalization — a transcript can be finalized or uploaded days
+ *     after the meeting (delayed processing, or a manual upload of an old
+ *     recording). It then carries an OLD meeting `date`, so once the stored
+ *     cursor's high-watermark has advanced past that date, the next
+ *     incremental sync's `fromDate` filters it out forever — it only
+ *     reappears on a full re-pull (cursor reset).
+ *
+ * Fix: on every incremental sync, look back {@link DEFAULT_INCREMENTAL_OVERLAP_MS}
+ * before the stored cursor instead of starting exactly at it. Content-hash
+ * dedup (`processSyncedItem` returns `kind: "unchanged"`) makes re-seeing an
+ * untouched transcript a cheap no-op, so a generous overlap is safe.
+ *
+ * The window is tunable per connector via `scopeConfig.incrementalOverlapDays`.
+ * Transcripts finalized later than the overlap window still need a cursor
+ * reset to recover.
  */
-const FIREFLIES_PROCESSING_LAG_MS = 2 * 60 * 60 * 1000;
+const DEFAULT_INCREMENTAL_OVERLAP_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Compute the `fromDate` to send for an incremental sync: the stored cursor
+ * shifted back by `overlapMs`. Returns `undefined` for a full sync (no cursor)
+ * so the API returns everything. A malformed cursor falls back to itself
+ * rather than silently widening to all-time.
+ */
+function incrementalFromDate(cursor: string | null, overlapMs: number): string | undefined {
+  if (!cursor) return undefined;
+  const ts = Date.parse(cursor);
+  if (Number.isNaN(ts)) return cursor;
+  return new Date(ts - overlapMs).toISOString();
+}
+
+/** Resolve the incremental overlap window, honoring a per-connector override. */
+function resolveOverlapMs(scopeConfig: Record<string, unknown> | undefined): number {
+  const days = scopeConfig?.incrementalOverlapDays;
+  if (typeof days === "number" && Number.isFinite(days) && days >= 0) {
+    return days * 24 * 60 * 60 * 1000;
+  }
+  return DEFAULT_INCREMENTAL_OVERLAP_MS;
+}
 
 interface FirefliesSpeaker {
   id: number;
@@ -464,7 +498,7 @@ async function fetchContactsMap(
 
 async function* syncTranscripts(
   apiKey: string,
-  sinceTimestamp: string | null,
+  fromDate: string | undefined,
   ownerEmail: string | null,
   resolveNameToEmail: NameResolver | undefined,
   logger: Logger,
@@ -475,13 +509,9 @@ async function* syncTranscripts(
 
   const { byEmail: contacts, byName: contactsByName } = await fetchContactsMap(apiKey, logger, firefliesRequest);
   logger.debug(
-    { contactsCount: contacts.size, contactsByNameCount: contactsByName.size, ownerEmail },
+    { contactsCount: contacts.size, contactsByNameCount: contactsByName.size, ownerEmail, fromDate },
     "Fireflies contacts directory loaded",
   );
-
-  // Pass fromDate to the API so it only returns transcripts newer than our cursor.
-  // Without this, a failed sync retries from the old cursor and re-fetches everything.
-  const fromDate = sinceTimestamp ?? undefined;
 
   let hasMore = true;
   while (hasMore) {
@@ -554,13 +584,17 @@ export function createFirefliesConnector(options: FirefliesConnectorOptions = {}
       await firefliesRequest(USER_QUERY, {}, apiKey, pino({ level: "silent" }));
     },
 
-    async *sync({ credentials, cursor, ownerEmail, resolveNameToEmail, logger }) {
+    async *sync({ credentials, cursor, scopeConfig, ownerEmail, resolveNameToEmail, logger }) {
       const apiKey = getApiKey(credentials);
-      yield* syncTranscripts(apiKey, cursor, ownerEmail ?? null, resolveNameToEmail, logger, firefliesRequest);
+      const fromDate = incrementalFromDate(cursor, resolveOverlapMs(scopeConfig));
+      yield* syncTranscripts(apiKey, fromDate, ownerEmail ?? null, resolveNameToEmail, logger, firefliesRequest);
     },
 
     async getCursor() {
-      return new Date(Date.now() - FIREFLIES_PROCESSING_LAG_MS).toISOString();
+      // Store the true high-watermark; the read-time overlap in `sync` re-scans
+      // the recent window to recover late-finalized transcripts (see
+      // DEFAULT_INCREMENTAL_OVERLAP_MS).
+      return new Date(Date.now()).toISOString();
     },
   };
 }

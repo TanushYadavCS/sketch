@@ -25,6 +25,11 @@ describe("Zoho CRM connector sync integration", () => {
     db = await createTestDb();
 
     await db
+      .insertInto("users")
+      .values({ id: "admin-user", name: "Connector Owner", email: "connector-owner@example.test" })
+      .execute();
+
+    await db
       .insertInto("connector_configs")
       .values({
         id: "zoho-crm-pr4",
@@ -459,6 +464,11 @@ describe("Zoho CRM connector sync integration", () => {
 
   it("force-requests parent-relation fields even when Zoho field discovery omits them", async () => {
     db = await createTestDb();
+
+    await db
+      .insertInto("users")
+      .values({ id: "admin-user", name: "Connector Owner", email: "connector-owner@example.test" })
+      .execute();
 
     await db
       .insertInto("connector_configs")

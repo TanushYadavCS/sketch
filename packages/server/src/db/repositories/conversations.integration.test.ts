@@ -37,6 +37,64 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       }
     });
 
+    it("finds the latest non-bot inbound WhatsApp DM for a recipient", async () => {
+      const repo = createConversationRepository(db);
+      await db.insertInto("users").values({ id: "user-window", name: "Window User" }).execute();
+      const dm = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "dm:+15551234567",
+      });
+      const group = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "group",
+        providerConversationId: "group@g.us",
+      });
+
+      await repo.insertMessage({
+        conversationId: dm.id,
+        providerMessageId: "user-match",
+        senderJid: "legacy-sender",
+        senderName: "Alice",
+        senderUserId: "user-window",
+        text: "user match",
+        receivedAt: "2026-07-03T08:00:00.000Z",
+      });
+      await repo.insertMessage({
+        conversationId: dm.id,
+        providerMessageId: "phone-match",
+        senderJid: "15551234567@s.whatsapp.net",
+        senderName: "Alice",
+        text: "phone match",
+        receivedAt: "2026-07-03T09:00:00.000Z",
+      });
+      await repo.insertMessage({
+        conversationId: dm.id,
+        providerMessageId: "bot-latest",
+        senderJid: "bot",
+        senderName: "Sketch",
+        isBot: true,
+        text: "bot",
+        receivedAt: "2026-07-03T10:00:00.000Z",
+      });
+      await repo.insertMessage({
+        conversationId: group.id,
+        providerMessageId: "group-latest",
+        senderJid: "15551234567@s.whatsapp.net",
+        senderName: "Alice",
+        text: "group",
+        receivedAt: "2026-07-03T11:00:00.000Z",
+      });
+
+      const withPhone = await repo.findLatestInboundWhatsAppDmFromRecipient({
+        recipientUserId: "user-window",
+        phoneE164: "+15551234567",
+      });
+      const byUserOnly = await repo.findLatestInboundWhatsAppDmFromRecipient({ recipientUserId: "user-window" });
+
+      expect(withPhone?.providerMessageId).toBe("phone-match");
+      expect(byUserOnly?.providerMessageId).toBe("user-match");
+    });
     it("deduplicates provider messages by conversation, provider id, sender, and bot side", async () => {
       const repo = createConversationRepository(db);
       const conversation = await repo.getOrCreate({
@@ -411,6 +469,84 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       const updated = await repo.advanceWatermarkToCurrentMax(conversation.id);
 
       expect(updated.last_seen_message_id).toBe(message.row.id);
+    });
+
+    it("merges legacy conversation rows into an existing canonical provider id", async () => {
+      const repo = createConversationRepository(db);
+      const legacy = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "wati-conversation-1",
+      });
+      const canonicalRef = {
+        platform: "whatsapp",
+        kind: "dm",
+        providerConversationId: "dm:+1234567890",
+      };
+      const canonical = await repo.getOrCreate(canonicalRef);
+      const legacyMessage = await repo.insertMessage({
+        conversationId: legacy.id,
+        providerMessageId: "legacy-1",
+        senderJid: "1234567890",
+        senderName: "Alice",
+        text: "old context",
+      });
+      await repo.insertMessage({
+        conversationId: legacy.id,
+        providerMessageId: "duplicate",
+        senderJid: "1234567890",
+        senderName: "Alice",
+        text: "legacy duplicate",
+      });
+      const canonicalMessage = await repo.insertMessage({
+        conversationId: canonical.id,
+        providerMessageId: "canonical-1",
+        senderJid: "1234567890",
+        senderName: "Alice",
+        text: "new context",
+      });
+      await repo.insertMessage({
+        conversationId: canonical.id,
+        providerMessageId: "duplicate",
+        senderJid: "1234567890",
+        senderName: "Alice",
+        text: "canonical duplicate",
+      });
+      await repo.updateWatermark(legacy.id, legacyMessage.row.id);
+      await repo.updateWatermark(canonical.id, canonicalMessage.row.id);
+      await repo.updateCursor({
+        conversationId: legacy.id,
+        scopeType: "whatsapp_dm",
+        scopeKey: "default",
+        messageId: legacyMessage.row.id,
+      });
+      await repo.updateCursor({
+        conversationId: canonical.id,
+        scopeType: "whatsapp_dm",
+        scopeKey: "default",
+        messageId: canonicalMessage.row.id,
+      });
+
+      const claimed = await repo.claimProviderConversationId(legacy.id, canonicalRef, "Alice");
+
+      expect(claimed.id).toBe(canonical.id);
+      expect(claimed.provider_conversation_id).toBe("dm:+1234567890");
+      expect(claimed.last_seen_message_id).toBe(legacyMessage.row.id);
+      const legacyRow = await db.selectFrom("conversations").selectAll().where("id", "=", legacy.id).executeTakeFirst();
+      expect(legacyRow).toBeUndefined();
+      const messages = await repo.listMessages(canonical.id, { includeBotMessages: true });
+      expect(messages.messages.map((message) => message.providerMessageId).sort()).toEqual([
+        "canonical-1",
+        "duplicate",
+        "legacy-1",
+      ]);
+      expect(messages.messages.every((message) => message.conversationId === canonical.id)).toBe(true);
+      const cursor = await repo.getCursor({
+        conversationId: canonical.id,
+        scopeType: "whatsapp_dm",
+        scopeKey: "default",
+      });
+      expect(cursor?.last_seen_message_id).toBe(legacyMessage.row.id);
     });
 
     it("filters backlog by Slack thread id and stores thread metadata", async () => {

@@ -17,7 +17,7 @@ import {
 } from "@sketch/shared";
 /**
  * AddMemberDialog — create a new human member or AI agent.
- * Human members require a name + email; agents require only a name.
+ * Human members require a name, email, and WhatsApp number; agents require only a name.
  * The toggle between Human/Agent changes which fields are shown and
  * which schema is used for validation.
  */
@@ -40,12 +40,10 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { z } from "zod";
 
-const optionalPhone = z.literal("").or(whatsappNumberSchema);
-
 const addMemberSchema = z.object({
   name: z.string().min(1),
   email: emailSchema,
-  whatsappNumber: optionalPhone,
+  whatsappNumber: whatsappNumberSchema,
 });
 
 const addAgentSchema = z.object({
@@ -161,7 +159,7 @@ export function AddMemberDialog({
           <DialogDescription>
             {memberType === "agent"
               ? "Add an AI agent to your team. Agents have no messaging channels."
-              : "Add a new team member. Name and email are required."}
+              : "Add a new team member. Name, email, and WhatsApp number are required."}
           </DialogDescription>
         </DialogHeader>
 

@@ -18,7 +18,9 @@ export type IntegrationType =
   | "notion"
   | "linear"
   | "fireflies"
-  | "zoho_crm";
+  | "otter"
+  | "zoho_crm"
+  | "whatsapp";
 
 export type AuthFieldType = "text" | "password" | "textarea" | "file";
 
@@ -78,7 +80,7 @@ export interface IntegrationDefinition {
   /** Hex color for the icon background. */
   color: string;
   /** Auth type for the connect dialog. */
-  authType: "api_key" | "oauth" | "service_account";
+  authType: "api_key" | "oauth" | "service_account" | "system";
   /** If true, uses OAuth redirect flow instead of manual credential entry. */
   oauthRedirect?: boolean;
   /** Fields shown in the connect dialog. */
@@ -99,6 +101,8 @@ export interface IntegrationDefinition {
   scopeItemNoun?: string;
   /** Scope config key for flat generic pickers. Defaults to rootPages. */
   scopeConfigKey?: string;
+  /** Allows saving an explicitly empty scope selection. */
+  allowEmptyScopeSelection?: boolean;
   /**
    * true  = each user holds their own credential row (per-user); any authenticated user can add it.
    * false = a single org-wide credential drives sync for everyone (admin-only).
@@ -424,6 +428,60 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Paste the key below",
     ],
     perUserAuth: true,
+    requiresOAuthClientSetup: false,
+  },
+  {
+    type: "otter",
+    name: "Otter",
+    description: "Meeting transcripts from Otter",
+    category: "Meetings",
+    color: "#1264FF",
+    authType: "api_key",
+    authFields: [
+      {
+        key: "email",
+        label: "Otter email",
+        type: "text",
+        placeholder: "you@example.com",
+        helpText: "Use the email address on the Otter account that can access the transcripts.",
+      },
+      {
+        key: "password",
+        label: "Otter password",
+        type: "password",
+        placeholder: "Otter password",
+        helpText: "If this account uses Google or SSO sign-in, create or reset an Otter password in Otter first.",
+      },
+    ],
+    scopeLabel: "meetings",
+    scopeType: "none",
+    itemNoun: "transcripts",
+    credentialUrl: "https://help.otter.ai/hc/en-us/articles/360047845154-Change-or-reset-your-password",
+    connectSteps: [
+      "Enter the Otter email and password for the account that owns or can access the transcripts",
+      "If the account uses Google or SSO sign-in, create or reset an Otter password first",
+      "Sketch validates the Otter session and syncs recent owned and shared transcripts",
+    ],
+    perUserAuth: true,
+    requiresOAuthClientSetup: false,
+  },
+  {
+    type: "whatsapp",
+    name: "WhatsApp Groups",
+    description: "Opt in captured group conversations for indexing",
+    category: "Communication",
+    color: "#25D366",
+    authType: "system",
+    authFields: [],
+    scopeLabel: "groups",
+    scopeType: "flat",
+    scopeItemNoun: "groups",
+    scopeConfigKey: "groupJids",
+    allowEmptyScopeSelection: true,
+    itemNoun: "slices",
+    credentialUrl: "",
+    connectSteps: ["Raw group capture stays on. Choose which groups Sketch should index and surface."],
+    perUserAuth: false,
     requiresOAuthClientSetup: false,
   },
   {

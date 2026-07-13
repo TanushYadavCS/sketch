@@ -6,11 +6,12 @@ export function healthRoutes(db: Kysely<DB>) {
   const routes = new Hono();
 
   routes.get("/", async (c) => {
+    const version = process.env.SKETCH_VERSION || "dev";
     try {
       await db.selectFrom("users").select("id").limit(1).execute();
-      return c.json({ status: "ok", db: "ok", uptime: process.uptime() });
+      return c.json({ status: "ok", db: "ok", uptime: process.uptime(), version });
     } catch {
-      return c.json({ status: "error", db: "error" }, 500);
+      return c.json({ status: "error", db: "error", version }, 500);
     }
   });
 

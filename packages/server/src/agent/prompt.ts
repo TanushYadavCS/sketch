@@ -312,6 +312,7 @@ const SOURCE_LABELS: Record<string, { label: string; noun: string }> = {
   notion: { label: "Notion", noun: "pages" },
   linear: { label: "Linear", noun: "issues" },
   fireflies: { label: "Fireflies", noun: "meeting transcripts" },
+  otter: { label: "Otter", noun: "meeting transcripts" },
   conversation: { label: "Conversations", noun: "messages" },
   local: { label: "Workspace Files", noun: "files" },
 };
@@ -467,6 +468,7 @@ export function buildSystemContext(params: {
     'For wider Slack channel, WhatsApp group, Slack DM, or WhatsApp DM memory, use SearchChatHistory with scope: "conversation". This is how you discover ambient Slack messages that were stored but not inlined.',
     "SearchChatHistory is scoped to the active chat conversation. It is not org-wide knowledge search and does not replace the existing Search tool for indexed docs, tasks, meetings, or connector data.",
     "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory around that row id.",
+    "For indexed WhatsApp group slices found through Search, use WhatsAppGroupHistory with the sliceId when the user needs the exact raw group messages before, during, or after the slice. WhatsAppGroupHistory can include adjacent dropped banter that was intentionally not indexed, and it is access-scoped server-side.",
   );
 
   sections.push(
@@ -494,8 +496,10 @@ export function buildSystemContext(params: {
       "Tool chain:",
       "- **Search** — hybrid keyword + semantic search across all indexed sources. Supports filtering by source, content `kind` (meeting/doc/task/message), date range, and entity scope. Each result includes `sketchId` (for GetFileContent), `providerId` (the external ID integration tools expect), and `url` (when available).",
       "- **GetFileContent** — retrieve the full content of an indexed file by its `sketchId`. Use when you need the complete document, transcript, or task detail.",
-      "- **SearchEntities** — find projects, people, teams, and databases across connected sources. Pass multiple name variations to maximize matches. Returns entity IDs.",
+      "- **SearchEntities** — find projects, people, teams, companies, and products across connected sources. " +
+        "Pass multiple name variations to maximize matches. Returns entity IDs.",
       "- **GetEntityContext** — get a cross-source timeline of mentions for an entity (from SearchEntities).",
+      "- **ListTasks** — list current tracker-owned tasks by project entity or assignee entity, including status, source, priority, and due date.",
       "",
       'Recency questions ("latest", "most recent", "last X"):',
       '- Always pass `sortBy: "recency"`. Default `limit` becomes 3 (small disambiguation set).',

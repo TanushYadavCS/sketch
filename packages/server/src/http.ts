@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { type Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { getCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import type { Kysely } from "kysely";
@@ -23,6 +24,7 @@ import { localClaudeSessionEventRoutes } from "./api/local-claude-sessions";
 import { localDeviceRoutes } from "./api/local-devices";
 import { mcpServerRoutes } from "./api/mcp-servers";
 import { createAuthMiddleware } from "./api/middleware";
+import { productRoutes } from "./api/products";
 import { createProjectRoutes } from "./api/projects";
 import { providerIdentityRoutes } from "./api/provider-identities";
 import { scheduledTaskRoutes } from "./api/scheduled-tasks";
@@ -36,6 +38,7 @@ import { oauthRoutes } from "./api/oauth";
 import { systemRoutes } from "./api/system";
 import { usageRoutes } from "./api/usage";
 import { userRoutes } from "./api/users";
+import { watiWebhookRoutes } from "./api/wati-webhook";
 import { webChatRoutes } from "./api/web-chat";
 import { whatsappRoutes } from "./api/whatsapp";
 import { workflowRoutes } from "./api/workflows";
@@ -54,6 +57,7 @@ import { createInboxMessagesRepository } from "./db/repositories/inbox-messages"
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createProviderIdentityRepository } from "./db/repositories/provider-identities";
 import { createSettingsRepository } from "./db/repositories/settings";
+import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
 
 import type { McpServerConfig, RunAgentParams, RunAgentResult } from "./agent/runner";
 import { agentRoutes, dailyBriefRoutes } from "./agents/routes";
@@ -69,6 +73,7 @@ import type { IntegrationProvider } from "./integrations/types";
 import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-dispatcher";
 import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
+import { registerManagedTenantMember, removeManagedTenantMember } from "./managed-members";
 import { createManagedLoginUrl } from "./managed-url";
 import { mcpOAuthRoutes } from "./mcp/oauth/routes";
 import { mountPublicMcpServer } from "./mcp/server/transport";
@@ -77,11 +82,17 @@ import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
 import type { WhatsAppBot } from "./whatsapp/bot";
 import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
+import type { ManagedWhatsAppProvider } from "./whatsapp/providers/managed";
+import type { WatiWhatsAppProvider } from "./whatsapp/providers/wati";
 import type { WhatsAppRuntime } from "./whatsapp/runtime";
+import { buildMagicLinkTemplate } from "./whatsapp/templates";
+import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
 
 interface AppDeps {
   whatsapp?: WhatsAppBot;
   whatsappRuntime?: WhatsAppRuntime;
+  watiWebhook?: WatiWhatsAppProvider;
+  managedWhatsapp?: ManagedWhatsAppProvider;
   getSlack?: () => SlackBot | null;
   logger?: Logger;
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
@@ -97,9 +108,19 @@ interface AppDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: QueueManager;
-  sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
+  sendDm?: (params: {
+    userId: string;
+    platform: string;
+    message: string;
+    template?: WhatsAppTemplateRequest;
+    senderUserId?: string;
+    storeInInbox?: boolean;
+    inboxKind?: string;
+    inboxMetadata?: Record<string, unknown> | null;
+  }) => Promise<{
     channelId: string;
     messageRef: string;
+    inboxMessageId?: string;
   }>;
   localDeviceGateway?: LocalDeviceGateway;
   localClaudeSessionService?: LocalClaudeSessionService;
@@ -107,13 +128,43 @@ interface AppDeps {
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
+/**
+ * App-level request body ceiling, enforced before any handler buffers a body.
+ *
+ * The upload routes (`/api/workspace/files`, `/api/web-chat/attachments`,
+ * `/api/web-chat/transcribe`) call `parseBody()` then `Buffer.from(arrayBuffer())`,
+ * each holding a full copy of the payload in memory, and only check
+ * `MAX_FILE_SIZE_MB` / `MAX_UPLOAD_SIZE_MB` afterwards. Without an upstream
+ * guard an authenticated client could POST a multi-GB body and transiently pin
+ * roughly twice its size in RAM, matching an observed production OOM.
+ *
+ * The ceiling is derived from the largest configured upload limit plus a 10%
+ * margin for multipart framing overhead, so this coarse guard trips only on
+ * egregiously oversized bodies while the finer-grained per-route checks (which
+ * return the friendlier `FILE_TOO_LARGE`) still fire for uploads slightly over
+ * their own limit rather than being shadowed.
+ */
+function resolveBodyLimitBytes(config: Config): number {
+  const maxUploadMb = Math.max(config.MAX_FILE_SIZE_MB, config.MAX_UPLOAD_SIZE_MB);
+  return Math.ceil(maxUploadMb * 1.1 * 1024 * 1024);
+}
+
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const app = new Hono();
+  app.use(
+    "*",
+    bodyLimit({
+      maxSize: resolveBodyLimitBytes(config),
+      onError: (c) =>
+        c.json({ error: { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the maximum allowed size" } }, 413),
+    }),
+  );
   const settings = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
   const whatsappGroups = createWhatsAppGroupRepository(db);
   const conversations = createConversationRepository(db);
+  const whatsappTemplateMappings = createWhatsAppTemplateMappingRepository(db);
   const inboxMessages = createInboxMessagesRepository(db);
   const connectors = createConnectorRepository(db, config.ENCRYPTION_KEY);
   const entityRepo = createEntityRepository(db);
@@ -193,6 +244,10 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     });
   }
 
+  if (deps?.watiWebhook && deps.queueManager) {
+    app.route("/whatsapp/wati", watiWebhookRoutes(deps.watiWebhook, deps.queueManager, logger));
+  }
+
   app.use(
     "/api/*",
     createAuthMiddleware(settings, {
@@ -251,13 +306,35 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       }
     }
 
-    if (deps?.whatsappRuntime && user.whatsapp_number) {
+    if (deps?.sendDm && user.whatsapp_number) {
       try {
-        const channelId = phoneE164ToWhatsAppJid(user.whatsapp_number);
         const text = `Here's your sign-in link for ${botName}:\n${magicLinkUrl}\n\nThis link expires in 15 minutes and can only be used once.`;
-        await deps.whatsappRuntime.sendText(
-          { kind: "dm", phoneE164: user.whatsapp_number, providerConversationId: channelId },
-          text,
+        await deps.sendDm({
+          userId: user.id,
+          platform: "whatsapp",
+          message: text,
+          template: buildMagicLinkTemplate({
+            recipientName: user.name,
+            botName,
+            magicLinkUrl,
+            fallbackText: text,
+          }),
+        });
+        channels.push("whatsapp");
+      } catch (err) {
+        logger.warn({ err }, "Failed to send magic link via WhatsApp");
+      }
+    } else if (deps?.whatsappRuntime && user.whatsapp_number) {
+      try {
+        const text = `Here's your sign-in link for ${botName}:\n${magicLinkUrl}\n\nThis link expires in 15 minutes and can only be used once.`;
+        await deps.whatsappRuntime.sendTemplate(
+          { kind: "dm", phoneE164: user.whatsapp_number },
+          buildMagicLinkTemplate({
+            recipientName: user.name,
+            botName,
+            magicLinkUrl,
+            fallbackText: text,
+          }),
         );
         channels.push("whatsapp");
       } catch (err) {
@@ -284,23 +361,33 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     "/api/setup",
     setupRoutes(settings, {
       managedUrl: config.MANAGED_URL,
-      experimentalFlag: config.EXPERIMENTAL_FLAG,
       onSlackTokensUpdated: deps?.onSlackTokensUpdated,
       onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
       userRepo: users,
+      whatsappConnected: () => Boolean(deps?.whatsappRuntime?.isConnected || deps?.whatsapp?.isConnected),
     }),
   );
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger, config));
   app.route("/api/skills", skillsRoutes(config));
   app.route(
     "/api/users",
-    userRoutes(users, { settings, db, logger, config, channels, whatsappGroups, getSlack: deps?.getSlack }),
+    userRoutes(users, {
+      settings,
+      db,
+      logger,
+      config,
+      channels,
+      whatsappGroups,
+      getSlack: deps?.getSlack,
+      registerManagedMember: (input) => registerManagedTenantMember(config, input),
+      removeManagedMember: (input) => removeManagedTenantMember(config, input),
+    }),
   );
   app.route(
     "/api/agent-environment-variables",
     agentEnvironmentRoutes(agentEnvVars, { users, channels, whatsappGroups, getSlack: deps?.getSlack, logger }),
   );
-  app.route("/api/agent-sessions", agentSessionRoutes());
+  app.route("/api/agent-sessions", agentSessionRoutes(db, { logger }));
   app.route(
     "/api/workflows",
     workflowRoutes({
@@ -388,6 +475,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     "/api/channels",
     channelRoutes({
       whatsapp: deps?.whatsapp,
+      watiProvider: deps?.watiWebhook,
+      whatsappTemplateMappings,
       getSlack: deps?.getSlack,
       whatsappGroups,
       onSlackDisconnect: deps?.onSlackDisconnect,
@@ -409,7 +498,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   }
   app.route("/api/entities", entityRoutes(db, { logger, config }));
   app.route("/api/projects", createProjectRoutes(db));
-  app.route("/api/entity-review", entityReviewRoutes(db));
+  app.route("/api/products", productRoutes(db));
+  app.route("/api/entity-review", entityReviewRoutes(db, { logger }));
   app.route("/api/api-tokens", apiTokenRoutes(db, { baseUrl: config.BASE_URL }));
   mountPublicMcpServer({
     app,
@@ -471,6 +561,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
             }
           : undefined,
         sendDm: deps?.sendDm,
+        managedWhatsappInbound: deps?.managedWhatsapp,
         whatsappStatus: whatsapp
           ? () => ({
               connected: whatsapp.isConnected,

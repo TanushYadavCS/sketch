@@ -44,6 +44,8 @@ function makeInboxMessagesRepoMock() {
   return {
     create: vi.fn(),
     listPendingForRecipient: vi.fn(),
+    hasPendingForRecipientByKind: vi.fn().mockResolvedValue(false),
+    listPendingForRecipientByKind: vi.fn().mockResolvedValue([{ id: "inbox-1" }]),
     markConsumed: vi.fn(),
     findById: vi.fn(),
     findUnresolvedByRecipientAndKind: vi.fn(),
@@ -107,6 +109,7 @@ describe("createSketchMcpServer", () => {
     const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
     expect(tools.ReadChatHistory).toBeDefined();
     expect(tools.SearchChatHistory).toBeDefined();
+    expect(tools.WhatsAppGroupHistory).toBeDefined();
   });
 
   it("does not expose integration card rendering tools", () => {
@@ -590,11 +593,16 @@ describe("handleSendMessageToUser", () => {
       },
     );
 
-    expect(sendDm).toHaveBeenCalledWith({
-      userId: "user-bob",
-      platform: "whatsapp",
-      message: "Need your latest update.",
-    });
+    expect(sendDm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "user-bob",
+        platform: "whatsapp",
+        message: "Need your latest update.",
+        senderUserId: "user-alice",
+        storeInInbox: true,
+        inboxKind: "note",
+      }),
+    );
     expect(createInboxMessage).toHaveBeenCalledWith({
       senderUserId: "user-alice",
       recipientUserId: "user-bob",
@@ -633,6 +641,28 @@ describe("handleSendMessageToUser", () => {
     expect(result.content[0].text).toBe("Error: user not found.");
   });
 
+  it("uses the parked WhatsApp inbox row when sendDm returns one", async () => {
+    const bob = makeUser({ id: "user-bob", name: "Bob", slack_user_id: null, whatsapp_number: "+1234567890" });
+    const sendDm = vi.fn().mockResolvedValue({
+      channelId: "dm:+1234567890",
+      messageRef: "wa-nudge-1",
+      inboxMessageId: "inbox-parked",
+    });
+    const createInboxMessage = vi.fn().mockResolvedValue({ id: "inbox-1" });
+
+    const result = await handleSendMessageToUser(
+      { recipientUserId: "user-bob", message: "Need your latest update." },
+      {
+        inboxMessagesRepo: { ...makeInboxMessagesRepoMock(), create: createInboxMessage },
+        userRepo: makeUserRepoMock({ findById: async (id: string) => (id === "user-bob" ? bob : undefined) }),
+        sendDm,
+        currentUserId: "user-alice",
+      },
+    );
+
+    expect(createInboxMessage).not.toHaveBeenCalled();
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ inboxMessageId: "inbox-parked", status: "sent" });
+  });
   it("rejects recipients with no connected channel", async () => {
     const charlie = makeUser({ id: "user-charlie", name: "Charlie", slack_user_id: null, whatsapp_number: null });
     const result = await handleSendMessageToUser(

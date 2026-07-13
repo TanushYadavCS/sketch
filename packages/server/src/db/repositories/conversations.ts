@@ -58,6 +58,13 @@ export interface ListConversationMessagesOptions {
   providerThreadId?: string | null;
 }
 
+export interface ListConversationMessagesInWindowOptions {
+  afterReceivedAt: string;
+  beforeReceivedAt: string;
+  limit?: number;
+  includeBotMessages?: boolean;
+}
+
 export interface SearchConversationMessagesOptions {
   query: string;
   afterMessageId?: number;
@@ -130,7 +137,151 @@ function rankedToStored(row: RankedConversationMessageRow): SearchConversationMe
   return { ...toStored(row), rank: Number(row.rank) };
 }
 
+function mergeSeenMessageId(left: number | null, right: number | null): number | null {
+  if (left === null || right === null) return null;
+  return Math.min(left, right);
+}
+function whatsappPhoneSenderCandidates(phoneE164?: string | null): string[] {
+  const phone = phoneE164?.trim();
+  if (!phone) return [];
+  const digits = phone.replace(/\D/gu, "");
+  return [phone, digits ? `${digits}@s.whatsapp.net` : null, digits || null, `wati:${phone}`].filter(
+    (value, index, values): value is string => Boolean(value) && values.indexOf(value) === index,
+  );
+}
+
 export function createConversationRepository(db: Kysely<DB>) {
+  async function mergeConversationRows(
+    sourceId: number,
+    target: ConversationRow,
+    displayName?: string | null,
+  ): Promise<ConversationRow> {
+    const now = new Date().toISOString();
+    const source = await db.selectFrom("conversations").selectAll().where("id", "=", sourceId).executeTakeFirst();
+    if (!source) return target;
+    if (source.id === target.id) {
+      if (displayName !== undefined && displayName !== target.display_name) {
+        await db
+          .updateTable("conversations")
+          .set({ display_name: displayName, updated_at: now })
+          .where("id", "=", target.id)
+          .execute();
+        return db.selectFrom("conversations").selectAll().where("id", "=", target.id).executeTakeFirstOrThrow();
+      }
+      return target;
+    }
+
+    const sourceMessages = await db
+      .selectFrom("conversation_messages")
+      .select(["id", "provider_message_id", "sender_jid", "is_bot"])
+      .where("conversation_id", "=", source.id)
+      .orderBy("id", "asc")
+      .execute();
+
+    for (const message of sourceMessages) {
+      const duplicate = await db
+        .selectFrom("conversation_messages")
+        .select("id")
+        .where("conversation_id", "=", target.id)
+        .where("provider_message_id", "=", message.provider_message_id)
+        .where("sender_jid", "=", message.sender_jid)
+        .where("is_bot", "=", message.is_bot)
+        .executeTakeFirst();
+
+      if (duplicate) {
+        await db.deleteFrom("conversation_messages").where("id", "=", message.id).execute();
+        continue;
+      }
+
+      try {
+        await db
+          .updateTable("conversation_messages")
+          .set({ conversation_id: target.id })
+          .where("id", "=", message.id)
+          .execute();
+      } catch {
+        const conflicting = await db
+          .selectFrom("conversation_messages")
+          .select("id")
+          .where("conversation_id", "=", target.id)
+          .where("provider_message_id", "=", message.provider_message_id)
+          .where("sender_jid", "=", message.sender_jid)
+          .where("is_bot", "=", message.is_bot)
+          .executeTakeFirst();
+        if (!conflicting) throw new Error("Failed to move legacy conversation message");
+        await db.deleteFrom("conversation_messages").where("id", "=", message.id).execute();
+      }
+    }
+
+    const sourceCursors = await db
+      .selectFrom("conversation_cursors")
+      .selectAll()
+      .where("conversation_id", "=", source.id)
+      .execute();
+
+    for (const cursor of sourceCursors) {
+      const existingCursor = await db
+        .selectFrom("conversation_cursors")
+        .selectAll()
+        .where("conversation_id", "=", target.id)
+        .where("scope_type", "=", cursor.scope_type)
+        .where("scope_key", "=", cursor.scope_key)
+        .executeTakeFirst();
+
+      if (existingCursor) {
+        await db
+          .updateTable("conversation_cursors")
+          .set({
+            last_seen_message_id: mergeSeenMessageId(existingCursor.last_seen_message_id, cursor.last_seen_message_id),
+            updated_at: now,
+          })
+          .where("id", "=", existingCursor.id)
+          .execute();
+        await db.deleteFrom("conversation_cursors").where("id", "=", cursor.id).execute();
+        continue;
+      }
+
+      try {
+        await db
+          .updateTable("conversation_cursors")
+          .set({ conversation_id: target.id, updated_at: now })
+          .where("id", "=", cursor.id)
+          .execute();
+      } catch {
+        const conflicting = await db
+          .selectFrom("conversation_cursors")
+          .selectAll()
+          .where("conversation_id", "=", target.id)
+          .where("scope_type", "=", cursor.scope_type)
+          .where("scope_key", "=", cursor.scope_key)
+          .executeTakeFirst();
+        if (!conflicting) throw new Error("Failed to move legacy conversation cursor");
+        await db
+          .updateTable("conversation_cursors")
+          .set({
+            last_seen_message_id: mergeSeenMessageId(conflicting.last_seen_message_id, cursor.last_seen_message_id),
+            updated_at: now,
+          })
+          .where("id", "=", conflicting.id)
+          .execute();
+        await db.deleteFrom("conversation_cursors").where("id", "=", cursor.id).execute();
+      }
+    }
+
+    await db
+      .updateTable("conversations")
+      .set({
+        ...(displayName !== undefined ? { display_name: displayName } : {}),
+        last_seen_message_id: mergeSeenMessageId(target.last_seen_message_id, source.last_seen_message_id),
+        updated_at: now,
+      })
+      .where("id", "=", target.id)
+      .execute();
+    await db.deleteFrom("conversations").where("id", "=", source.id).execute();
+
+    return db.selectFrom("conversations").selectAll().where("id", "=", target.id).executeTakeFirstOrThrow();
+  }
+
   return {
     async getOrCreate(ref: ConversationRef, displayName?: string | null): Promise<ConversationRow> {
       const existing = await db
@@ -191,6 +342,76 @@ export function createConversationRepository(db: Kysely<DB>) {
         .where("kind", "=", ref.kind)
         .where("provider_conversation_id", "=", ref.providerConversationId)
         .executeTakeFirst();
+    },
+
+    async findLatestInboundWhatsAppDmFromRecipient(params: {
+      recipientUserId: string;
+      phoneE164?: string | null;
+    }): Promise<StoredConversationMessage | undefined> {
+      const senderJids = whatsappPhoneSenderCandidates(params.phoneE164);
+      let query = db
+        .selectFrom("conversation_messages")
+        .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
+        .selectAll("conversation_messages")
+        .where("conversations.platform", "=", "whatsapp")
+        .where("conversations.kind", "=", "dm")
+        .where("conversation_messages.is_bot", "=", 0);
+
+      if (senderJids.length > 0) {
+        query = query.where(({ eb, or }) =>
+          or([
+            eb("conversation_messages.sender_user_id", "=", params.recipientUserId),
+            eb("conversation_messages.sender_jid", "in", senderJids),
+          ]),
+        );
+      } else {
+        query = query.where("conversation_messages.sender_user_id", "=", params.recipientUserId);
+      }
+
+      const row = await query
+        .orderBy("conversation_messages.received_at", "desc")
+        .orderBy("conversation_messages.id", "desc")
+        .executeTakeFirst();
+      return row ? toStored(row) : undefined;
+    },
+    async claimProviderConversationId(
+      id: number,
+      ref: ConversationRef,
+      displayName?: string | null,
+    ): Promise<ConversationRow> {
+      const now = new Date().toISOString();
+      const existing = await db
+        .selectFrom("conversations")
+        .selectAll()
+        .where("platform", "=", ref.platform)
+        .where("kind", "=", ref.kind)
+        .where("provider_conversation_id", "=", ref.providerConversationId)
+        .executeTakeFirst();
+      if (existing) return mergeConversationRows(id, existing, displayName);
+
+      try {
+        await db
+          .updateTable("conversations")
+          .set({
+            provider_conversation_id: ref.providerConversationId,
+            ...(displayName !== undefined ? { display_name: displayName } : {}),
+            updated_at: now,
+          })
+          .where("id", "=", id)
+          .execute();
+      } catch {
+        const row = await db
+          .selectFrom("conversations")
+          .selectAll()
+          .where("platform", "=", ref.platform)
+          .where("kind", "=", ref.kind)
+          .where("provider_conversation_id", "=", ref.providerConversationId)
+          .executeTakeFirst();
+        if (row) return mergeConversationRows(id, row, displayName);
+        throw new Error("Failed to claim conversation provider id");
+      }
+
+      return db.selectFrom("conversations").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
     },
 
     async findMessageByProviderMessageId(
@@ -271,6 +492,30 @@ export function createConversationRepository(db: Kysely<DB>) {
         messages,
         hasMore,
         nextCursor: hasMore ? visibleRows[visibleRows.length - 1]?.id : undefined,
+      };
+    },
+
+    async listMessagesInWindow(
+      conversationId: number,
+      options: ListConversationMessagesInWindowOptions,
+    ): Promise<{ messages: StoredConversationMessage[]; hasMore: boolean }> {
+      const limit = Math.max(1, Math.min(options.limit ?? 100, 500));
+      let query = db
+        .selectFrom("conversation_messages")
+        .selectAll()
+        .where("conversation_id", "=", conversationId)
+        .where("received_at", ">", options.afterReceivedAt)
+        .where("received_at", "<=", options.beforeReceivedAt);
+      if (!options.includeBotMessages) query = query.where("is_bot", "=", 0);
+      const rows = await query
+        .orderBy("received_at", "desc")
+        .orderBy("id", "desc")
+        .limit(limit + 1)
+        .execute();
+      const visibleRows = rows.slice(0, limit).reverse();
+      return {
+        messages: visibleRows.map(toStored),
+        hasMore: rows.length > limit,
       };
     },
 

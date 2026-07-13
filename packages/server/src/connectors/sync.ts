@@ -17,8 +17,11 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { inferAffiliationFromEmail } from "../entities/affiliations";
+import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
+import { heapStats, heapUsedMb } from "../lib/heap";
+import { resolveConnectorCredentials } from "./credential-providers";
 import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
 import {
@@ -41,13 +44,7 @@ import { getSyncIdentityForItem, syncIdentityKey } from "./sync-identity";
 import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
 import { buildSyncNameResolver } from "./sync-name-resolution";
 import { reconcileConnectorSync, removeConnectorSourceItems } from "./sync-reconcile";
-import {
-  extractErrorMessage,
-  parseCredentials,
-  runWithConcurrency,
-  serializeCredentials,
-  truncateErrorMessage,
-} from "./sync-utils";
+import { extractErrorMessage, runWithConcurrency, serializeCredentials, truncateErrorMessage } from "./sync-utils";
 import type { ConnectorCredentials, ConnectorType, SyncResult } from "./types";
 
 // ── Sync progress tracking (in-memory, ephemeral) ──────────────────────────
@@ -79,6 +76,7 @@ export async function seedTeamDirectoryEntities(db: Kysely<DB>, logger: Logger):
         subtype: "internal",
         source: "team",
         sourceId: user.id,
+        provenanceTier: "structural",
       });
       // Direct seed path: no file evidence available, so the helper can
       // only write a works_at edge when a corporate domain is already
@@ -123,13 +121,22 @@ export async function runConnectorSync(
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
       | "ENCRYPTION_KEY"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
+      | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
       | "OUTLOOK_INITIAL_LOOKBACK_DAYS"
       | "OUTLOOK_MAX_INFLIGHT"
       | "TEAMS_INITIAL_LOOKBACK_DAYS"
       | "TEAMS_MAX_INFLIGHT"
+      | "WHATSAPP_SLICE_GAP_MINUTES"
+      | "WHATSAPP_SLICE_MAX_AGE_MINUTES"
+      | "WHATSAPP_SLICE_MAX_MESSAGES"
+      | "WHATSAPP_SALIENCE_BATCH_LIMIT"
+      | "WHATSAPP_EMISSION_REFRESH_DAYS"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"
+      | "OPENROUTER_API_KEY"
     >
   >,
 ): Promise<SyncResult> {
@@ -155,13 +162,8 @@ export async function runConnectorSync(
     throw new Error(`Connector config not found: ${connectorConfigId}`);
   }
 
-  const connector = getConnector(config.connector_type as ConnectorType);
-  let credentials = await resolveConnectorCredentialsForSync({
-    db,
-    connectorType: config.connector_type as ConnectorType,
-    credentials: parseCredentials(config.credentials),
-    appConfig,
-  });
+  const connectorType = config.connector_type as ConnectorType;
+  const connector = getConnector(connectorType);
   const storedScopeConfig = JSON.parse(config.scope_config) as Record<string, unknown>;
   const scopeConfig =
     config.connector_type === "outlook"
@@ -176,11 +178,21 @@ export async function runConnectorSync(
             initialDays: storedScopeConfig.initialDays ?? appConfig?.TEAMS_INITIAL_LOOKBACK_DAYS,
             maxInflight: storedScopeConfig.maxInflight ?? appConfig?.TEAMS_MAX_INFLIGHT,
           }
-        : storedScopeConfig;
+        : config.connector_type === "whatsapp"
+          ? {
+              ...storedScopeConfig,
+              sliceGapMinutes: storedScopeConfig.sliceGapMinutes ?? appConfig?.WHATSAPP_SLICE_GAP_MINUTES,
+              sliceMaxAgeMinutes: storedScopeConfig.sliceMaxAgeMinutes ?? appConfig?.WHATSAPP_SLICE_MAX_AGE_MINUTES,
+              sliceMaxMessages: storedScopeConfig.sliceMaxMessages ?? appConfig?.WHATSAPP_SLICE_MAX_MESSAGES,
+              salienceBatchLimit: storedScopeConfig.salienceBatchLimit ?? appConfig?.WHATSAPP_SALIENCE_BATCH_LIMIT,
+              emissionRefreshDays: storedScopeConfig.emissionRefreshDays ?? appConfig?.WHATSAPP_EMISSION_REFRESH_DAYS,
+            }
+          : storedScopeConfig;
   const owner = await userRepo.findById(config.created_by);
   const ownerEmail = owner?.email ?? null;
 
   const syncLogger = logger.child({ connectorId: config.id, type: config.connector_type });
+  const startHeapMb = heapUsedMb();
   syncLogger.info("Starting sync");
 
   await repo.updateConfig(config.id, { syncStatus: "syncing", errorMessage: null });
@@ -197,7 +209,21 @@ export async function runConnectorSync(
   activeSyncs.set(config.id, progress);
 
   try {
-    if (credentials.type === "oauth" && connector.refreshTokens) {
+    const resolvedCredentials = await resolveConnectorCredentials({
+      db,
+      config,
+      appConfig: appConfig ?? {},
+      ownerEmail,
+      logger: syncLogger,
+    });
+    let credentials = await resolveConnectorCredentialsForSync({
+      db,
+      connectorType,
+      credentials: resolvedCredentials.credentials,
+      appConfig,
+    });
+
+    if (resolvedCredentials.credentialSource === "local" && credentials.type === "oauth" && connector.refreshTokens) {
       const refreshed = await connector.refreshTokens(credentials);
       if (refreshed) {
         credentials = refreshed;
@@ -220,8 +246,8 @@ export async function runConnectorSync(
     const seenSyncIdentityKeys = new Set<string>();
     const affectedIndexedFileIds = new Set<string>();
     const dirtyCrmRollupGroupIds = new Set<string>();
+    let syncReconciled = false;
 
-    const connectorType = config.connector_type as ConnectorType;
     const existingHashes = await loadExistingContentHashes(db, connectorType, config.id);
     const resolveNameToEmail = await buildSyncNameResolver(db);
     const syncRunId = randomUUID();
@@ -230,15 +256,38 @@ export async function runConnectorSync(
       createdByUserId: config.created_by,
       lastSeenSyncRunId: syncRunId,
     };
+    const settings = await createSettingsRepository(db, appConfig?.ENCRYPTION_KEY).get();
+    const llmTaskGenerator =
+      settings?.gemini_api_key && settings.enrichment_enabled !== 0
+        ? createGeminiGenerator(settings.gemini_api_key, {
+            maxRpm: appConfig?.GEMINI_MAX_RPM,
+            maxRetries: appConfig?.GEMINI_MAX_RETRIES,
+          })
+        : undefined;
+    const salienceOpenRouterConfig = resolveOpenRouterEnrichmentConfig(settings, appConfig?.OPENROUTER_API_KEY);
+    const salienceGenerator =
+      settings?.enrichment_enabled !== 0
+        ? createEnrichmentGenerator({
+            geminiApiKey: settings?.gemini_api_key,
+            geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
+            geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
+            openRouterApiKey: salienceOpenRouterConfig.openRouterApiKey,
+            openRouterModel: salienceOpenRouterConfig.openRouterModel,
+            logger: syncLogger,
+          })
+        : null;
 
     for await (const item of connector.sync({
+      db,
       connectorConfigId: config.id,
       credentials,
+      accessTokenProvider: resolvedCredentials.accessTokenProvider,
       scopeConfig,
       cursor: config.sync_cursor,
       logger: syncLogger,
       ownerEmail,
       resolveNameToEmail,
+      salienceGenerator,
       onEntitySeed: async (seed) => {
         await factRepo.upsertFact({
           ...factContext,
@@ -301,6 +350,10 @@ export async function runConnectorSync(
           continue;
         }
 
+        if (connectorType === "whatsapp") {
+          await linkWhatsAppSliceIndexedFile(db, item.providerFileId, itemResult.indexedFileId, syncLogger);
+        }
+
         affectedIndexedFileIds.add(itemResult.indexedFileId);
         for (const groupId of itemResult.rollupGroupIds) dirtyCrmRollupGroupIds.add(groupId);
 
@@ -309,6 +362,7 @@ export async function runConnectorSync(
         }
 
         await emitFactsForSyncedItem({
+          db,
           factRepo,
           connector,
           connectorType,
@@ -316,6 +370,8 @@ export async function runConnectorSync(
           item,
           indexedFileId: itemResult.indexedFileId,
           emitCorrespondentFacts: connector.emitsCorrespondentFacts ?? false,
+          contentChanged: itemResult.kind !== "unchanged",
+          generator: llmTaskGenerator,
         });
 
         if (itemResult.kind === "unchanged") {
@@ -349,7 +405,7 @@ export async function runConnectorSync(
       }
     }
 
-    if (!config.sync_cursor && seenSyncIdentityKeys.size > 0) {
+    if (connector.syncIsCompleteSnapshot !== false && !config.sync_cursor && seenSyncIdentityKeys.size > 0) {
       const reconcileResult = await reconcileConnectorSync({
         db,
         factRepo,
@@ -362,6 +418,7 @@ export async function runConnectorSync(
         encryptionKey: appConfig?.ENCRYPTION_KEY,
         logger: syncLogger,
       });
+      syncReconciled = reconcileResult.reconciled;
       result.itemsArchived = reconcileResult.itemsArchived;
       for (const indexedFileId of reconcileResult.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
     }
@@ -372,6 +429,10 @@ export async function runConnectorSync(
       affectedIndexedFileIds: [...affectedIndexedFileIds],
       coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
       floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
+      source: connectorType,
+      syncRunId,
+      connectorConfigId: config.id,
+      runCycleReconcile: syncReconciled,
     });
 
     if (connectorType === "zoho_crm") {
@@ -387,6 +448,7 @@ export async function runConnectorSync(
 
     result.newCursor = await connector.getCursor({
       credentials,
+      accessTokenProvider: resolvedCredentials.accessTokenProvider,
       scopeConfig,
       currentCursor: config.sync_cursor,
       logger: syncLogger,
@@ -408,6 +470,7 @@ export async function runConnectorSync(
         updated: result.itemsUpdated,
         archived: result.itemsArchived,
         errors: result.errors.length,
+        ...heapStats(startHeapMb),
       },
       "Sync complete",
     );
@@ -416,7 +479,7 @@ export async function runConnectorSync(
   } catch (err) {
     activeSyncs.delete(config.id);
     const message = extractErrorMessage(err);
-    syncLogger.error({ err }, "Sync failed");
+    syncLogger.error({ err, ...heapStats(startHeapMb) }, "Sync failed");
 
     await repo.updateConfig(config.id, {
       syncStatus: "error",
@@ -475,6 +538,22 @@ async function refreshCrmRollupsForSync(params: {
   }
 }
 
+async function linkWhatsAppSliceIndexedFile(
+  db: Kysely<DB>,
+  sliceId: string,
+  indexedFileId: string,
+  logger: Logger,
+): Promise<void> {
+  const result = await db
+    .updateTable("conversation_slices")
+    .set({ indexed_file_id: indexedFileId })
+    .where("id", "=", sliceId)
+    .executeTakeFirst();
+  if (Number(result.numUpdatedRows ?? 0) === 0) {
+    logger.warn({ sliceId, indexedFileId }, "WhatsApp synced item did not match a conversation slice");
+  }
+}
+
 export interface SyncSchedulerDeps {
   /** Download image from Google Drive for embedding. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
@@ -490,10 +569,15 @@ export interface SyncSchedulerDeps {
       | "FEATURE_ARCHIVE_MAX_PER_RUN"
       | "GEMINI_MAX_RPM"
       | "GEMINI_MAX_RETRIES"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PEM"
+      | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
+      | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
       | "OUTLOOK_INITIAL_LOOKBACK_DAYS"
       | "OUTLOOK_MAX_INFLIGHT"
       | "TEAMS_INITIAL_LOOKBACK_DAYS"
       | "TEAMS_MAX_INFLIGHT"
+      | "WHATSAPP_SALIENCE_BATCH_LIMIT"
+      | "WHATSAPP_EMISSION_REFRESH_DAYS"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"
@@ -507,7 +591,9 @@ const SYNC_CONCURRENCY = 4;
 const STALE_SYNCING_THRESHOLD_MS = 60 * 60 * 1000;
 const DEFAULT_SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const FEATURE_ARCHIVE_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const CO_MENTION_FULL_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 let lastFeatureArchiveSweepAt = 0;
+let lastCoMentionFullSweepAt = 0;
 
 async function resolveConnectorCredentialsForSync(params: {
   db: Kysely<DB>;
@@ -595,6 +681,18 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
       });
     } catch (err) {
       logger.error({ err }, "Feature archive sweep failed");
+    }
+  }
+
+  if (now - lastCoMentionFullSweepAt >= CO_MENTION_FULL_SWEEP_INTERVAL_MS) {
+    lastCoMentionFullSweepAt = now;
+    try {
+      await sweepCoMentionContributesTo(db, logger.child({ component: "co-mention-full-sweep" }), {
+        scope: { kind: "full" },
+        threshold: deps?.appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+      });
+    } catch (err) {
+      logger.error({ err }, "Co-mention full sweep failed");
     }
   }
 }

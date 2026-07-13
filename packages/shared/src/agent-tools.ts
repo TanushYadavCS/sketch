@@ -169,7 +169,7 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
   {
     name: "mcp__sketch__SearchEntities",
     label: "Search entities",
-    description: "Find projects, people, teams, and databases across connected sources.",
+    description: "Find projects, people, teams, companies, and products across connected sources.",
     category: "sketch",
   },
   {

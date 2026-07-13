@@ -1,4 +1,4 @@
-import type { OAuthCredentials } from "./types";
+import type { AccessTokenProvider, OAuthCredentials } from "./types";
 
 export const MICROSOFT_GRAPH_API = "https://graph.microsoft.com/v1.0";
 export const MICROSOFT_AUTHORITY_BASE = "https://login.microsoftonline.com";
@@ -21,6 +21,7 @@ export interface MicrosoftGraphRequestOptions {
   timeoutMs?: number;
   maxRetries?: number;
   retryBaseMs?: number;
+  accessTokenProvider?: AccessTokenProvider;
 }
 
 export interface MicrosoftGraphRequestResult<T> {
@@ -172,6 +173,19 @@ export async function microsoftGraphRequest<T = unknown>(
   pathOrUrl: string,
   opts: MicrosoftGraphRequestOptions = {},
 ): Promise<MicrosoftGraphRequestResult<T>> {
+  if (opts.accessTokenProvider) {
+    const token = await opts.accessTokenProvider();
+    return microsoftGraphRequestAttempt<T>(
+      {
+        ...credentials,
+        access_token: token.accessToken,
+        expires_at: token.expiresAt,
+      },
+      pathOrUrl,
+      opts,
+      1,
+    );
+  }
   const credentialsForAttempt = await ensureValidMicrosoftToken(credentials, opts);
   return microsoftGraphRequestAttempt<T>(credentialsForAttempt, pathOrUrl, opts, 1);
 }
@@ -216,6 +230,37 @@ export function extractVttSpeakers(vtt: string): string[] {
   return [...speakers.values()];
 }
 
+export interface ParsedVtt {
+  /** Speaker-labeled transcript text, one cue per line. */
+  transcript: string;
+  /** Distinct speaker display names, in first-seen order. */
+  speakers: string[];
+}
+
+/**
+ * Parse a VTT transcript a single time and derive both the speaker-labeled
+ * transcript text and the distinct speaker list from the same cue stream.
+ *
+ * Teams transcripts are multi-MB and parsing is fully synchronous, so deriving
+ * both outputs from one {@link parseVttCues} pass (rather than calling
+ * `parseVttToTranscript` and `extractVttSpeakers` separately) halves the CPU
+ * this blocks the shared event loop with per meeting.
+ */
+export function parseVtt(vtt: string): ParsedVtt {
+  const cues = parseVttCues(vtt);
+  const transcript = cues
+    .map((cue) => (cue.speaker ? `${cue.speaker}: ${cue.text}` : cue.text))
+    .join("\n")
+    .trim();
+  const speakers = new Map<string, string>();
+  for (const cue of cues) {
+    if (!cue.speaker) continue;
+    const key = normalizeSpeakerKey(cue.speaker);
+    if (key && !speakers.has(key)) speakers.set(key, cue.speaker);
+  }
+  return { transcript, speakers: [...speakers.values()] };
+}
+
 function parseVttCues(vtt: string): Array<{ speaker?: string; text: string }> {
   const blocks = vtt
     .replace(/^\uFEFF/, "")
@@ -256,6 +301,7 @@ async function microsoftGraphRequestAttempt<T>(
   pathOrUrl: string,
   opts: MicrosoftGraphRequestOptions,
   attempt: number,
+  tokenRefreshed = false,
 ): Promise<MicrosoftGraphRequestResult<T>> {
   const maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
   const fetchImpl = opts.fetchFn ?? fetch;
@@ -273,19 +319,36 @@ async function microsoftGraphRequestAttempt<T>(
   } catch (err) {
     if (attempt < maxRetries) {
       await sleepForAttempt(opts, attempt);
-      return microsoftGraphRequestAttempt(credentials, pathOrUrl, opts, attempt + 1);
+      return microsoftGraphRequestAttempt(credentials, pathOrUrl, opts, attempt + 1, tokenRefreshed);
     }
     throw err;
   }
 
   if (response.status === 401 && attempt < maxRetries) {
-    const refreshed = await refreshMicrosoftTokens(credentials, opts);
-    return microsoftGraphRequestAttempt(refreshed, pathOrUrl, opts, attempt + 1);
+    if (opts.accessTokenProvider) {
+      if (!tokenRefreshed) {
+        const token = await opts.accessTokenProvider({ forceRefresh: true });
+        return microsoftGraphRequestAttempt(
+          {
+            ...credentials,
+            access_token: token.accessToken,
+            expires_at: token.expiresAt,
+          },
+          pathOrUrl,
+          opts,
+          attempt + 1,
+          true,
+        );
+      }
+    } else {
+      const refreshed = await refreshMicrosoftTokens(credentials, opts);
+      return microsoftGraphRequestAttempt(refreshed, pathOrUrl, opts, attempt + 1, tokenRefreshed);
+    }
   }
 
   if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
     await sleepForRetry(response, opts, attempt);
-    return microsoftGraphRequestAttempt(credentials, pathOrUrl, opts, attempt + 1);
+    return microsoftGraphRequestAttempt(credentials, pathOrUrl, opts, attempt + 1, tokenRefreshed);
   }
 
   if (!response.ok) {

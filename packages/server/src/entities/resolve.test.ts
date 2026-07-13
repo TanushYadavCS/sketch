@@ -18,7 +18,7 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { materializeUnmaterializedFacts } from "./materialize";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
-import { ResolveError, confirmReview, rejectReview } from "./resolve";
+import { ResolveError, confirmReview, dismissReview, rejectReview } from "./resolve";
 
 const USER_ID = "user-1";
 
@@ -1157,5 +1157,198 @@ describe("rejectReview", () => {
       .execute();
     expect(e1Rejections).toHaveLength(1);
     expect(e2Rejections).toHaveLength(1);
+  });
+});
+
+describe("dismissReview", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  async function seedBirthRow(): Promise<string> {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_review_queue")
+      .values({
+        id,
+        proposed_name: "Canvasx",
+        normalized_name: normalizeName("Canvasx"),
+        entity_type: "team",
+        candidate_entity_id: null,
+        candidate_score: null,
+        candidate_reason: "birth-gated",
+        candidate_generated_at: now,
+        first_seen_at: now,
+        last_seen_at: now,
+        occurrence_count: 1,
+        status: "pending",
+        triggered_by_user_id: USER_ID,
+        source: "clickup",
+        source_id: "clickup:team:canvasx",
+      })
+      .execute();
+    return id;
+  }
+
+  async function countEntities(): Promise<number> {
+    const row = await db
+      .selectFrom("entities")
+      .select((eb) => eb.fn.countAll<number>().as("c"))
+      .executeTakeFirstOrThrow();
+    return Number(row.c);
+  }
+
+  it("marks the row dismissed and creates no entity", async () => {
+    const reviewId = await seedBirthRow();
+    const row = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("id", "=", reviewId)
+      .executeTakeFirstOrThrow();
+
+    const result = await dismissReview({ db, userId: USER_ID }, reviewId, {
+      candidateGeneratedAt: row.candidate_generated_at as string,
+    });
+
+    expect(result.idempotent).toBe(false);
+    expect(result.row.status).toBe("dismissed");
+    expect(result.row.resolved_entity_id).toBeNull();
+    expect(result.row.resolved_by).toBe(USER_ID);
+    expect(await countEntities()).toBe(0);
+  });
+
+  it("rejects confirm on an already-dismissed row and creates no entity", async () => {
+    const reviewId = await seedBirthRow();
+    const row = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("id", "=", reviewId)
+      .executeTakeFirstOrThrow();
+    await dismissReview({ db, userId: USER_ID }, reviewId, {
+      candidateGeneratedAt: row.candidate_generated_at as string,
+    });
+
+    await expect(
+      confirmReview({ db, userId: USER_ID }, reviewId, { candidateGeneratedAt: row.candidate_generated_at as string }),
+    ).rejects.toMatchObject({ code: "CANDIDATE_DRIFT" });
+    expect(await countEntities()).toBe(0);
+  });
+
+  it("rejects mergeInto (confirm-with-merge) on an already-dismissed row, linking nothing", async () => {
+    const reviewId = await seedBirthRow();
+    const row = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("id", "=", reviewId)
+      .executeTakeFirstOrThrow();
+    const existing = await createEntityRepository(db).createEntity({
+      name: "Canvas X Team",
+      sourceType: "team",
+      status: "confirmed",
+      provenanceTier: "structural",
+    });
+    await dismissReview({ db, userId: USER_ID }, reviewId, {
+      candidateGeneratedAt: row.candidate_generated_at as string,
+    });
+
+    await expect(
+      confirmReview({ db, userId: USER_ID }, reviewId, {
+        candidateGeneratedAt: row.candidate_generated_at as string,
+        mergeIntoEntityId: existing.id,
+      }),
+    ).rejects.toMatchObject({ code: "CANDIDATE_DRIFT" });
+    // Only the pre-existing entity remains; no link/merge created.
+    expect(await countEntities()).toBe(1);
+    const mentions = await db.selectFrom("entity_mentions").selectAll().where("entity_id", "=", existing.id).execute();
+    expect(mentions).toHaveLength(0);
+  });
+});
+
+describe("confirmReview — birth rename (nameOverride)", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  async function seedBirthRow(): Promise<string> {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entity_review_queue")
+      .values({
+        id,
+        proposed_name: "canvasx",
+        normalized_name: normalizeName("canvasx"),
+        entity_type: "team",
+        candidate_entity_id: null,
+        candidate_score: null,
+        candidate_reason: "birth-gated",
+        candidate_generated_at: now,
+        first_seen_at: now,
+        last_seen_at: now,
+        occurrence_count: 1,
+        status: "pending",
+        triggered_by_user_id: USER_ID,
+        source: "clickup",
+        source_id: "clickup:team:canvasx",
+      })
+      .execute();
+    return id;
+  }
+
+  it("creates the entity under the override name and keeps the original as an alias", async () => {
+    const reviewId = await seedBirthRow();
+    const row = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("id", "=", reviewId)
+      .executeTakeFirstOrThrow();
+
+    const result = await confirmReview({ db, userId: USER_ID }, reviewId, {
+      candidateGeneratedAt: row.candidate_generated_at as string,
+      nameOverride: "CanvasX",
+    });
+
+    const entity = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", result.targetEntityId)
+      .executeTakeFirstOrThrow();
+    expect(entity.name).toBe("CanvasX");
+    const aliases: string[] = JSON.parse(entity.aliases || "[]");
+    expect(aliases).toContain("canvasx");
+  });
+
+  it("falls back to proposed_name when nameOverride is blank", async () => {
+    const reviewId = await seedBirthRow();
+    const row = await db
+      .selectFrom("entity_review_queue")
+      .selectAll()
+      .where("id", "=", reviewId)
+      .executeTakeFirstOrThrow();
+
+    const result = await confirmReview({ db, userId: USER_ID }, reviewId, {
+      candidateGeneratedAt: row.candidate_generated_at as string,
+      nameOverride: "   ",
+    });
+
+    const entity = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", result.targetEntityId)
+      .executeTakeFirstOrThrow();
+    expect(entity.name).toBe("canvasx");
   });
 });

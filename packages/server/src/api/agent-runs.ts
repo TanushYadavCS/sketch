@@ -27,6 +27,7 @@ import type { WhatsAppBot } from "../whatsapp/bot";
 import { createWhatsAppMessageHandler } from "../whatsapp/message-handler";
 import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
+import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
 type ChannelRepo = ReturnType<typeof createChannelRepository>;
@@ -79,9 +80,19 @@ interface AgentRunRouteDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: QueueManager;
-  sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
+  sendDm?: (params: {
+    userId: string;
+    platform: string;
+    message: string;
+    template?: WhatsAppTemplateRequest;
+    senderUserId?: string;
+    storeInInbox?: boolean;
+    inboxKind?: string;
+    inboxMetadata?: Record<string, unknown> | null;
+  }) => Promise<{
     channelId: string;
     messageRef: string;
+    inboxMessageId?: string;
   }>;
 }
 
@@ -226,6 +237,9 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
               userId: target.id,
               platform: parsed.data.target.platform,
               message: parsed.data.message,
+              ...(parsed.data.target.platform === "whatsapp"
+                ? { senderUserId: requester.id, storeInInbox: true, inboxKind: "note" }
+                : {}),
             });
           }
           const deliveryTarget =
@@ -269,6 +283,9 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
               userId: target.id,
               platform: parsed.data.target.platform,
               message: finalText,
+              ...(parsed.data.target.platform === "whatsapp"
+                ? { senderUserId: requester.id, storeInInbox: true, inboxKind: "workflow_output" }
+                : {}),
             });
           }
 

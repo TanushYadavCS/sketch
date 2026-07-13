@@ -235,7 +235,15 @@ export interface WhatsAppGroupInfo {
   name: string;
   description: string | null;
   agent_user_id: string | null;
+  index_enabled?: number;
   updated_at: string;
+}
+
+export interface WhatsAppGroupMemberLabel {
+  id: string;
+  maskedPhone: string;
+  displayName: string;
+  companyName: string | null;
 }
 
 export interface SetupStatus {
@@ -245,9 +253,9 @@ export interface SetupStatus {
   orgName: string | null;
   botName: string;
   slackConnected: boolean;
+  whatsappConnected?: boolean;
   llmConnected: boolean;
   llmProvider: LlmProvider | null;
-  experimentalFlag?: boolean;
   managedUrl?: string;
 }
 
@@ -261,10 +269,16 @@ export interface EntityReviewQueueRow {
   candidate_score: number | null;
   candidate_reason: string | null;
   candidate_generated_at: string | null;
+  /** LLM-extraction origin (e.g. "fireflies"); null for structural seeds. */
+  source: string | null;
+  source_id: string | null;
+  /** Structural-seed origin (e.g. "clickup"); null for LLM extractions. */
+  seed_source: string | null;
+  seed_source_id: string | null;
   first_seen_at: string;
   last_seen_at: string;
   occurrence_count: number;
-  status: "pending" | "confirmed" | "rejected" | "confirming";
+  status: "pending" | "confirmed" | "rejected" | "confirming" | "dismissed";
   triggered_by_user_id: string;
   review_started_at: string | null;
   review_started_by: string | null;
@@ -312,9 +326,30 @@ export interface EntityReviewListResponse {
   total: number;
 }
 
+/** A product on the curated closed list (declared or human_confirmed). */
+export interface CuratedProduct {
+  id: string;
+  name: string;
+  aliases: string[];
+  hotness: number;
+  provenance_tier: string;
+}
+
+/** A tracker task/issue under a seed's parent project/team (review preview). */
+export interface ChildTask {
+  indexedFileId: string;
+  name: string;
+  fileType: string | null;
+  providerUrl: string | null;
+  source: string;
+}
+
 export interface EntityReviewDetailResponse {
   row: EntityReviewQueueRow;
   evidence: EntityReviewEvidenceRow[];
+  /** Present only for structural-seed rows: tasks under the parent. */
+  childTasks?: ChildTask[];
+  childTaskCount?: number;
 }
 
 export interface EntityReviewConfirmResult {
@@ -330,6 +365,11 @@ export interface EntityReviewRejectResult {
   targetEntityId: string;
   reResolvedToExisting: boolean;
   createdEntityId: string | null;
+  idempotent: boolean;
+}
+
+export interface EntityReviewDismissResult {
+  row: EntityReviewQueueRow;
   idempotent: boolean;
 }
 
@@ -381,7 +421,7 @@ export interface EntityListItem {
   updatedAt: string;
 }
 
-export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "system" | "other";
+export type DrawerEntityType = "person" | "company" | "product" | "project" | "team" | "tool" | "system" | "other";
 
 export interface EntityProfileSummary {
   identity: string;
@@ -486,6 +526,36 @@ export interface EntityRelationEvidenceResponse {
   visibleCount: number;
   totalCount: number;
   truncated: boolean;
+}
+
+export type TaskStatus = "open" | "in_progress" | "done" | "dropped";
+
+export interface EntityTask {
+  id: string;
+  parentEntityId: string | null;
+  parentSourceRef: string | null;
+  parentName: string | null;
+  source: string;
+  externalRef: string | null;
+  title: string;
+  status: TaskStatus;
+  statusRaw: string | null;
+  statusAuthority: string;
+  assigneeEntityId: string | null;
+  assigneeName: string | null;
+  proposedAssigneeName: string | null;
+  priority: string | null;
+  dueAt: string | null;
+  provenance: "structural" | "brief" | "summary";
+  sourceTaskId: string | null;
+  createdByUserId: string | null;
+  createdByUserName: string | null;
+  createdByUserEmail: string | null;
+  isOwnedByViewer: boolean;
+  readonlyReason: "not_owner" | "external_authority" | null;
+  completedAt: string | null;
+  updatedAt: string;
+  canEditStatus: boolean;
 }
 
 export interface EntityTimelineItem {
@@ -749,11 +819,22 @@ export type BrowseResult =
   | { type: "nested"; groups: BrowseNestedGroup[] }
   | { type: "tree"; items: BrowseTreeItem[]; groups?: BrowseNestedGroup[] };
 
+export type HierarchyTarget = "team" | "project" | "sprint" | "ignore";
+
+export interface HierarchyLevel {
+  key: string;
+  label: string;
+  allowedTargets: HierarchyTarget[];
+  default: HierarchyTarget;
+}
+
 export interface ConnectorConfig {
   id: string;
   connectorType: string;
   authType: string;
+  credentialSource?: "local" | "canvas";
   scopeConfig: Record<string, unknown>;
+  hierarchyLevels?: HierarchyLevel[] | null;
 
   syncStatus: "active" | "syncing" | "error" | "paused" | "pending" | "disabled";
   lastSyncedAt: string | null;
@@ -1034,6 +1115,9 @@ export interface AgentSummary {
   enabled: boolean;
   scheduleHour: number;
   scheduleMinute: number;
+  sourceConfig: AgentSourceConfigMeta | null;
+  sources: AgentSourceConfig[];
+  routes: AgentRoute[];
 }
 
 export interface AgentSectionConfig {
@@ -1048,6 +1132,89 @@ export interface AgentDeliveryConfig {
   targetType: "channel" | "dm" | "group";
   targetId: string;
   label: string | null;
+  mentions?: AgentDeliveryMention[];
+}
+
+export interface AgentCombinedDeliveryConfig extends AgentDeliveryConfig {
+  ackNonDm?: true;
+}
+
+export interface AgentDeliveryMention {
+  platform: "slack" | "whatsapp";
+  targetId: string;
+  label: string | null;
+}
+
+export interface AgentSourceConfig {
+  platform: "slack" | "whatsapp";
+  targetType: "channel" | "group";
+  targetId: string;
+  label: string | null;
+}
+
+export type AgentSourceKey = `${AgentSourceConfig["platform"]}:${AgentSourceConfig["targetType"]}:${string}`;
+
+export type AgentPerSourceDelivery =
+  | { kind: "self" }
+  | { kind: "off" }
+  | { kind: "target"; target: AgentDeliveryConfig };
+
+export type AgentDeliveryModel =
+  | {
+      mode: "per_source";
+      defaultRoute: "self" | "off";
+      perSource: Record<string, AgentPerSourceDelivery>;
+      combined: null;
+    }
+  | {
+      mode: "combined";
+      combined: AgentCombinedDeliveryConfig;
+    };
+
+export type AgentRouteDestination =
+  | { kind: "self" }
+  | { kind: "off" }
+  | { kind: "member"; platform: "slack" | "whatsapp"; memberUserId: string }
+  | { kind: "channel"; platform: "slack"; targetType: "channel"; targetId: string; label: string | null }
+  | { kind: "channel"; platform: "whatsapp"; targetType: "group"; targetId: string; label: string | null };
+
+export type AgentRouteFrequency = "daily" | "weekly" | "every_n_hours";
+
+export interface AgentRouteSchedule {
+  frequency: AgentRouteFrequency;
+  hour: number;
+  minute: number;
+  daysOfWeek?: number[];
+  intervalHours?: number;
+}
+
+export interface AgentRoute {
+  id: string;
+  sources: AgentSourceKey[];
+  focus: string | null;
+  sections: Record<string, boolean> | null;
+  maxItemsPerSection: number | null;
+  schedule: AgentRouteSchedule | null;
+  destination: AgentRouteDestination;
+  enabled: boolean;
+  owner?: {
+    userId: string;
+    name: string;
+    email: string | null;
+    authRole: string;
+  };
+}
+
+export interface AgentRouteMember {
+  userId: string;
+  name: string;
+  slackUserId: string;
+}
+
+export interface AgentSourceConfigMeta {
+  maxSources: number;
+  supportsSlackChannels: boolean;
+  supportsWhatsAppGroups: boolean;
 }
 
 export interface AgentConfig {
@@ -1063,7 +1230,11 @@ export interface AgentConfig {
   itemsPerSectionRange: { min: number; max: number };
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
+  sourceConfig: AgentSourceConfigMeta | null;
+  sources: AgentSourceConfig[];
+  routes: AgentRoute[];
   sections: AgentSectionConfig[];
+  createTasks: boolean;
 }
 
 /** Generic output item for any prebuilt agent. `sectionKey` is whatever the agent defines. */
@@ -1079,6 +1250,7 @@ export interface AgentOutputItem {
   actionLabel: string | null;
   actionPrompt: string | null;
   sourceUrl: string | null;
+  structuredPayload: Record<string, unknown> | null;
   knowledgeRefs: DailyBriefKnowledgeRefs;
   sortOrder: number;
 }
@@ -1088,6 +1260,8 @@ export interface AgentOutput {
   agentKey: string;
   userId: string;
   outputDate: string;
+  sourceKey: string;
+  sourceLabel: string | null;
   timezone: string;
   status: string;
   generatedAt: string | null;
@@ -1115,6 +1289,14 @@ export interface AgentConfigPatch {
   sections?: Record<string, boolean>;
   focus?: string | null;
   delivery?: AgentDeliveryConfig | null;
+  sources?: AgentSourceConfig[];
+  routes?: AgentRoute[];
+  createTasks?: boolean;
+}
+
+export interface AgentOutputsResponse {
+  outputs: AgentOutput[];
+  nextCursor: string | null;
 }
 
 export type WebChatMessagePart =
@@ -1227,11 +1409,32 @@ export const api = {
         body: JSON.stringify(patch),
       });
     },
-    run(agentKey: string) {
-      return request<{ generation: { id: string; status: string; outputDate: string } | null }>(
-        `/api/agents/${agentKey}/runs`,
-        { method: "POST", body: JSON.stringify({}) },
+    routeMembers(agentKey: string, sources: AgentSourceKey[], routeId?: string | null) {
+      return request<{ members: AgentRouteMember[] }>(`/api/agents/${agentKey}/route-members`, {
+        method: "POST",
+        body: JSON.stringify({ sources, ...(routeId ? { routeId } : {}) }),
+      });
+    },
+    whatsappDmMembers(agentKey: string) {
+      return request<{ members: Array<{ userId: string; name: string }> }>(
+        `/api/agents/${agentKey}/route-members/whatsapp`,
       );
+    },
+    run(agentKey: string, opts?: { routeId?: string }) {
+      return request<{
+        generation: { id: string; sourceKey: string; status: string; outputDate: string } | null;
+        generations: Array<{ id: string; sourceKey: string; status: string; outputDate: string }>;
+      }>(`/api/agents/${agentKey}/runs`, {
+        method: "POST",
+        body: JSON.stringify(opts?.routeId ? { routeId: opts.routeId } : {}),
+      });
+    },
+    outputs(agentKey: string, opts?: { limit?: number; cursor?: string | null }) {
+      const params = new URLSearchParams();
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.cursor) params.set("cursor", opts.cursor);
+      const qs = params.toString();
+      return request<AgentOutputsResponse>(`/api/agents/${agentKey}/outputs${qs ? `?${qs}` : ""}`);
     },
   },
   webChat: {
@@ -1369,6 +1572,23 @@ export const api = {
     listWhatsAppGroups() {
       return request<{ groups: WhatsAppGroupInfo[] }>("/api/channels/whatsapp/groups");
     },
+    listWhatsAppGroupMemberLabels(groupJid: string) {
+      return request<{ labels: WhatsAppGroupMemberLabel[] }>(
+        `/api/channels/whatsapp/groups/${encodeURIComponent(groupJid)}/member-labels`,
+      );
+    },
+    replaceWhatsAppGroupMemberLabels(
+      groupJid: string,
+      labels: Array<{ id?: string; phoneE164?: string; displayName: string; companyName?: string | null }>,
+    ) {
+      return request<{ labels: WhatsAppGroupMemberLabel[] }>(
+        `/api/channels/whatsapp/groups/${encodeURIComponent(groupJid)}/member-labels`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ labels }),
+        },
+      );
+    },
     disconnectSlack() {
       return request<{ success: boolean }>("/api/channels/slack", { method: "DELETE" });
     },
@@ -1502,6 +1722,41 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
+    credentialSource() {
+      return request<{
+        mode: "local" | "canvas";
+        canvasConfigured: boolean;
+        canvasCredentialImportConfigured: boolean;
+        publicKeyId: string | null;
+      }>("/api/connectors/credential-source");
+    },
+    canvasSuggestion(appId: string, accountId?: string | null, source?: string | null) {
+      const params = new URLSearchParams({ appId });
+      if (accountId) params.set("accountId", accountId);
+      if (source) params.set("source", source);
+      return request<{ suggestion: { connectorType: string; appId: string; accountId?: string } | null }>(
+        `/api/connectors/canvas/suggestions?${params.toString()}`,
+      );
+    },
+    canvasConnect(data: { connectorType: string; callbackUrl: string }) {
+      return request<{ redirectUrl: string }>("/api/connectors/canvas/connect", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    canvasImport(data: { connectorType: string; accountId?: string; scopeConfig?: Record<string, unknown> }) {
+      return request<{
+        connector: {
+          id: string;
+          connectorType: string;
+          syncStatus: string;
+          alreadyConnected?: boolean;
+        };
+      }>("/api/connectors/canvas/import", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
     disconnect(id: string) {
       return request<{ success: boolean }>(`/api/connectors/${id}`, { method: "DELETE" });
     },
@@ -1574,6 +1829,12 @@ export const api = {
       return request<{ ok: boolean }>(`/api/connectors/${id}/rotate-key`, {
         method: "POST",
         body: JSON.stringify({ api_key: apiKey }),
+      });
+    },
+    rotateCredentials(id: string, credentials: Record<string, unknown>) {
+      return request<{ ok: boolean }>(`/api/connectors/${id}/rotate-key`, {
+        method: "POST",
+        body: JSON.stringify({ credentials }),
       });
     },
     progress() {
@@ -2168,6 +2429,19 @@ export const api = {
     timeline(id: string) {
       return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
     },
+    tasks(id: string, opts?: { status?: TaskStatus; limit?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.status) params.set("status", opts.status);
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return request<{ tasks: EntityTask[] }>(`/api/entities/${id}/tasks${qs ? `?${qs}` : ""}`);
+    },
+    updateTaskStatus(id: string, taskId: string, status: TaskStatus) {
+      return request<{ task: EntityTask }>(`/api/entities/${id}/tasks/${taskId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+    },
     listBindings(id: string, effective = true) {
       return request<{ bindings: EntityBinding[]; children: GroupedProjectChild[] }>(
         `/api/entities/${id}/bindings${effective ? "?effective=true" : ""}`,
@@ -2365,21 +2639,33 @@ export const api = {
       return request<{ containers: BindableContainer[] }>("/api/projects/bindable-containers");
     },
   },
+  products: {
+    list() {
+      return request<{ products: CuratedProduct[] }>("/api/products");
+    },
+    create(body: { name: string; aliases?: string[] }) {
+      return request<{ entity: CuratedProduct }>("/api/products", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+  },
   entityReview: {
-    list(opts?: { limit?: number; offset?: number; search?: string }) {
+    list(opts?: { limit?: number; offset?: number; search?: string; types?: string[] }) {
       const params = new URLSearchParams();
       // `limit=0` is a meaningful value (count-only mode) — send it explicitly.
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
       if (opts?.offset) params.set("offset", String(opts.offset));
       const search = opts?.search?.trim();
       if (search) params.set("q", search);
+      if (opts?.types && opts.types.length > 0) params.set("types", opts.types.join(","));
       const qs = params.toString();
       return request<EntityReviewListResponse>(`/api/entity-review${qs ? `?${qs}` : ""}`);
     },
     get(id: string) {
       return request<EntityReviewDetailResponse>(`/api/entity-review/${id}`);
     },
-    confirm(id: string, body: { candidateGeneratedAt: string; mergeIntoEntityId?: string }) {
+    confirm(id: string, body: { candidateGeneratedAt: string; mergeIntoEntityId?: string; nameOverride?: string }) {
       return request<EntityReviewConfirmResult>(`/api/entity-review/${id}/confirm`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -2387,6 +2673,12 @@ export const api = {
     },
     reject(id: string, body: { candidateGeneratedAt: string; rejectAgainstEntityId?: string }) {
       return request<EntityReviewRejectResult>(`/api/entity-review/${id}/reject`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+    dismiss(id: string, body: { candidateGeneratedAt: string }) {
+      return request<EntityReviewDismissResult>(`/api/entity-review/${id}/dismiss`, {
         method: "POST",
         body: JSON.stringify(body),
       });

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Kysely } from "kysely";
-import type { IndexedFileFactRaw } from "../../connectors/types";
+import { type Kysely, sql } from "kysely";
+import type { IndexedFileFactRaw, LlmTaskCandidate, LlmTaskFactRaw } from "../../connectors/types";
 import type { DB } from "../schema";
+import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 
 export type IndexedFileFactType =
   | "attendee"
@@ -11,6 +12,12 @@ export type IndexedFileFactType =
   | "parent_entity"
   | "contact_point"
   | "structural_seed"
+  | "structural_task"
+  | "commitment"
+  | "feature"
+  | "milestone"
+  | "decision"
+  | "llm_task"
   | "person_seed"
   | "llm_extracted"
   | "llm_relation"
@@ -81,6 +88,8 @@ export interface ReconcileResult {
   skipped?: { reason: "delta_exceeds_threshold"; ratio: number; threshold: number };
 }
 
+const LLM_TASK_ID_SEPARATOR = "\u001f";
+
 function normalizeName(name: string | null | undefined): string {
   return (name ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -124,6 +133,49 @@ function rawEndpointIdentity(
 }
 
 export function buildIndexedFileFactKey(input: UpsertIndexedFileFactInput): string {
+  if (input.factType === "structural_task") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const task = isRecord(raw?.task) ? raw.task : undefined;
+    const sourceTaskId = typeof task?.sourceTaskId === "string" ? task.sourceTaskId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, sourceTaskId].join("|"))
+      .digest("hex");
+  }
+  if (input.factType === "commitment") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const commitmentId = typeof raw?.commitmentId === "string" ? raw.commitmentId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, commitmentId].join("|"))
+      .digest("hex");
+  }
+  if (input.factType === "feature") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const featureId = typeof raw?.featureId === "string" ? raw.featureId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, featureId].join("|"))
+      .digest("hex");
+  }
+  if (input.factType === "milestone") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const milestoneId = typeof raw?.milestoneId === "string" ? raw.milestoneId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, milestoneId].join("|"))
+      .digest("hex");
+  }
+  if (input.factType === "decision") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const decisionId = typeof raw?.decisionId === "string" ? raw.decisionId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, decisionId].join("|"))
+      .digest("hex");
+  }
+  if (input.factType === "llm_task") {
+    const raw = input.raw as Record<string, unknown> | undefined;
+    const candidateId = typeof raw?.candidateId === "string" ? raw.candidateId.trim().toLowerCase() : "";
+    return createHash("sha256")
+      .update([input.connectorConfigId ?? "", input.factType, input.source, candidateId].join("|"))
+      .digest("hex");
+  }
   const parts = [
     input.connectorConfigId ?? "",
     input.source,
@@ -182,6 +234,9 @@ function hasString(value: Record<string, unknown>, key: string): boolean {
 }
 
 function validateRaw(input: UpsertIndexedFileFactInput): string | null {
+  if (!input.raw && input.factType === "decision") {
+    throw new Error("decision facts require raw decision data");
+  }
   if (!input.raw) return null;
   if (!isRecord(input.raw)) {
     throw new Error("indexed_file_facts.raw must be an object");
@@ -231,6 +286,192 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
   } else if (input.factType === "structural_seed") {
     if (!hasString(raw, "sourceType") && (!hasString(raw, "providerFileId") || !hasString(raw, "fileType"))) {
       throw new Error("structural_seed facts require raw.sourceType or raw provider file metadata");
+    }
+  } else if (input.factType === "structural_task") {
+    if (!isRecord(raw.task) || !hasString(raw, "indexedFileId")) {
+      throw new Error("structural_task facts require raw.task and raw.indexedFileId");
+    }
+    const task = raw.task as Record<string, unknown>;
+    if (!hasString(task, "sourceTaskId") || !hasString(task, "title") || !hasString(task, "statusType")) {
+      throw new Error("structural_task facts require sourceTaskId, title, and statusType");
+    }
+  } else if (input.factType === "commitment") {
+    if (
+      !hasString(raw, "commitmentId") ||
+      !hasString(raw, "title") ||
+      !hasString(raw, "status") ||
+      !isRecord(raw.evidence)
+    ) {
+      throw new Error("commitment facts require commitmentId, title, status, and evidence");
+    }
+    if (raw.status !== "open" && raw.status !== "done" && raw.status !== "dropped") {
+      throw new Error("commitment status must be open, done, or dropped");
+    }
+    const evidence = raw.evidence as Record<string, unknown>;
+    if (!Array.isArray(evidence.fileIds) || !Array.isArray(evidence.entityIds)) {
+      throw new Error("commitment evidence requires fileIds and entityIds arrays");
+    }
+    if (raw.parentRef !== undefined && !isRecord(raw.parentRef)) {
+      throw new Error("commitment parentRef must be an object");
+    }
+    const parentRef = raw.parentRef as Record<string, unknown> | undefined;
+    if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
+      throw new Error("commitment parentRef requires source and sourceId");
+    }
+  } else if (input.factType === "feature") {
+    if (
+      !hasString(raw, "featureId") ||
+      !hasString(raw, "featureName") ||
+      !hasString(raw, "status") ||
+      !isRecord(raw.evidence)
+    ) {
+      throw new Error("feature facts require featureId, featureName, status, and evidence");
+    }
+    if (
+      raw.status !== "proposed" &&
+      raw.status !== "building" &&
+      raw.status !== "shipped" &&
+      raw.status !== "deprecated"
+    ) {
+      throw new Error("feature status must be proposed, building, shipped, or deprecated");
+    }
+    const evidence = raw.evidence as Record<string, unknown>;
+    if (!Array.isArray(evidence.fileIds) || !Array.isArray(evidence.entityIds)) {
+      throw new Error("feature evidence requires fileIds and entityIds arrays");
+    }
+    if (
+      !evidence.fileIds.every((id) => typeof id === "string") ||
+      !evidence.entityIds.every((id) => typeof id === "string")
+    ) {
+      throw new Error("feature evidence ids must be strings");
+    }
+    if (raw.parentProductRef !== undefined && !isRecord(raw.parentProductRef)) {
+      throw new Error("feature parentProductRef must be an object");
+    }
+    const parentProductRef = raw.parentProductRef as Record<string, unknown> | undefined;
+    if (parentProductRef && (!hasString(parentProductRef, "source") || !hasString(parentProductRef, "sourceId"))) {
+      throw new Error("feature parentProductRef requires source and sourceId");
+    }
+    for (const key of ["parentEntityId", "dueAt"]) {
+      if (raw[key] !== undefined && typeof raw[key] !== "string") {
+        throw new Error(`feature ${key} must be a string`);
+      }
+    }
+    if (raw.parentProductName !== undefined && typeof raw.parentProductName !== "string") {
+      throw new Error("feature parentProductName must be a string");
+    }
+  } else if (input.factType === "milestone") {
+    if (
+      !input.connectorConfigId?.trim() ||
+      !input.source.trim() ||
+      !hasString(raw, "milestoneId") ||
+      !hasString(raw, "milestoneName") ||
+      !hasString(raw, "status") ||
+      !hasString(raw, "dueAt") ||
+      !isRecord(raw.evidence)
+    ) {
+      throw new Error(
+        "milestone facts require connectorConfigId, source, milestoneId, milestoneName, status, dueAt, and evidence",
+      );
+    }
+    if (raw.status !== "planned" && raw.status !== "hit" && raw.status !== "missed") {
+      throw new Error("milestone status must be planned, hit, or missed");
+    }
+    if (Number.isNaN(Date.parse(String(raw.dueAt)))) {
+      throw new Error("milestone dueAt must be an ISO date");
+    }
+    const evidence = raw.evidence as Record<string, unknown>;
+    if (!Array.isArray(evidence.fileIds) || !Array.isArray(evidence.entityIds)) {
+      throw new Error("milestone evidence requires fileIds and entityIds arrays");
+    }
+    if (
+      !evidence.fileIds.every((id) => typeof id === "string") ||
+      !evidence.entityIds.every((id) => typeof id === "string")
+    ) {
+      throw new Error("milestone evidence ids must be strings");
+    }
+    if (raw.parentRef !== undefined && !isRecord(raw.parentRef)) {
+      throw new Error("milestone parentRef must be an object");
+    }
+    const parentRef = raw.parentRef as Record<string, unknown> | undefined;
+    if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
+      throw new Error("milestone parentRef requires source and sourceId");
+    }
+    for (const key of ["parentEntityId", "observedAt"]) {
+      if (raw[key] !== undefined && typeof raw[key] !== "string") {
+        throw new Error(`milestone ${key} must be a string`);
+      }
+    }
+  } else if (input.factType === "decision") {
+    if (
+      !input.connectorConfigId?.trim() ||
+      !input.source.trim() ||
+      !hasString(raw, "decisionId") ||
+      !hasString(raw, "topic") ||
+      !hasString(raw, "statement") ||
+      !isRecord(raw.evidence)
+    ) {
+      throw new Error("decision facts require connectorConfigId, source, decisionId, topic, statement, and evidence");
+    }
+    const evidence = raw.evidence as Record<string, unknown>;
+    if (!Array.isArray(evidence.fileIds) || !Array.isArray(evidence.entityIds)) {
+      throw new Error("decision evidence requires fileIds and entityIds arrays");
+    }
+    if (
+      !evidence.fileIds.every((id) => typeof id === "string") ||
+      !evidence.entityIds.every((id) => typeof id === "string")
+    ) {
+      throw new Error("decision evidence ids must be strings");
+    }
+    if (raw.parentRef !== undefined && !isRecord(raw.parentRef)) {
+      throw new Error("decision parentRef must be an object");
+    }
+    const parentRef = raw.parentRef as Record<string, unknown> | undefined;
+    if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
+      throw new Error("decision parentRef requires source and sourceId");
+    }
+    for (const key of ["parentEntityId", "decidedBy", "decidedAt", "rationale", "promptVersion"]) {
+      if (raw[key] !== undefined && typeof raw[key] !== "string") {
+        throw new Error(`decision ${key} must be a string`);
+      }
+    }
+  } else if (input.factType === "llm_task") {
+    if (
+      !hasString(raw, "candidateId") ||
+      !hasString(raw, "title") ||
+      typeof raw.hasOwnerVerbObject !== "boolean" ||
+      !hasString(raw, "corroborationKey") ||
+      !hasString(raw, "promptVersion") ||
+      !isRecord(raw.evidence)
+    ) {
+      throw new Error(
+        "llm_task facts require candidateId, title, hasOwnerVerbObject, corroborationKey, promptVersion, and evidence",
+      );
+    }
+    const evidence = raw.evidence as Record<string, unknown>;
+    if (!Array.isArray(evidence.fileIds) || !Array.isArray(evidence.entityIds)) {
+      throw new Error("llm_task evidence requires fileIds and entityIds arrays");
+    }
+    if (raw.owner !== undefined && !isRecord(raw.owner)) {
+      throw new Error("llm_task owner must be an object");
+    }
+    const owner = raw.owner as Record<string, unknown> | undefined;
+    if (
+      owner &&
+      ((owner.name !== undefined && typeof owner.name !== "string") ||
+        (owner.email !== undefined && typeof owner.email !== "string"))
+    ) {
+      throw new Error("llm_task owner name and email must be strings");
+    }
+    if (raw.parentRef !== undefined && !isRecord(raw.parentRef)) {
+      throw new Error("llm_task parentRef must be an object");
+    }
+    const parentRef = raw.parentRef as Record<string, unknown> | undefined;
+    if (parentRef && (!hasString(parentRef, "source") || !hasString(parentRef, "sourceId"))) {
+      throw new Error("llm_task parentRef requires source and sourceId");
+    }
+    if (raw.dueDate !== undefined && typeof raw.dueDate !== "string") {
+      throw new Error("llm_task dueDate must be a string");
     }
   } else if (input.factType === "person_seed") {
     if (!hasString(raw, "source") && !hasString(raw, "subtype")) {
@@ -290,6 +531,90 @@ function validateRaw(input: UpsertIndexedFileFactInput): string | null {
   return JSON.stringify(input.raw);
 }
 
+export interface UpsertLlmTaskFactInput {
+  indexedFileId: string;
+  connectorConfigId: string;
+  createdByUserId?: string | null;
+  lastSeenSyncRunId?: string | null;
+  contentHash?: string | null;
+  source: string;
+  candidate: LlmTaskCandidate;
+  candidateId?: string;
+  corroborationKey: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+  promptVersion: string;
+}
+
+export async function upsertLlmTaskFact(
+  db: Kysely<DB>,
+  input: UpsertLlmTaskFactInput,
+): Promise<{ emitted: boolean; factKey?: string; candidateId?: string }> {
+  const connectorConfigId = requireNonEmpty(input.connectorConfigId, "connectorConfigId");
+  const source = requireNonEmpty(input.source, "source");
+  const candidateId = requireNonEmpty(
+    input.candidateId ?? buildLlmTaskCandidateId(input.indexedFileId, input.candidate.title),
+    "candidateId",
+  );
+
+  const raw: LlmTaskFactRaw = {
+    candidateId,
+    title: input.candidate.title,
+    owner: input.candidate.owner,
+    dueDate: readOptionalDueDate(input.candidate.dueDate),
+    hasOwnerVerbObject: input.candidate.hasOwnerVerbObject,
+    corroborationKey: input.corroborationKey,
+    parentRef: input.parentRef,
+    parentEntityId: input.parentEntityId,
+    evidence: input.evidence,
+    sourceExcerpt: input.candidate.sourceExcerpt,
+    promptVersion: input.promptVersion,
+  };
+  const factInput: UpsertIndexedFileFactInput = {
+    indexedFileId: input.indexedFileId,
+    connectorConfigId,
+    createdByUserId: input.createdByUserId ?? null,
+    lastSeenSyncRunId: input.lastSeenSyncRunId ?? null,
+    contentHash: input.contentHash ?? null,
+    source,
+    factType: "llm_task",
+    relation: "mentioned",
+    subjectName: input.candidate.title,
+    subjectSource: source,
+    subjectSourceId: candidateId,
+    contextSnippet: input.candidate.sourceExcerpt ?? null,
+    raw,
+  };
+  await createIndexedFileFactRepository(db).upsertFact(factInput);
+  return { emitted: true, factKey: buildIndexedFileFactKey(factInput), candidateId };
+}
+
+function readOptionalDueDate(value: unknown): string | undefined {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
+}
+
+export function buildLlmTaskCandidateId(indexedFileId: string, title: string): string {
+  return createHash("sha256")
+    .update([indexedFileId, normalizeName(title)].join(LLM_TASK_ID_SEPARATOR))
+    .digest("hex");
+}
+
+function requireNonEmpty(value: string | null | undefined, name: string): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) throw new Error(`llm_task ${name} is required`);
+  return trimmed;
+}
+
+/** A tracker task/issue that sits under a parent project/team, for review preview. */
+export interface ChildTask {
+  indexedFileId: string;
+  name: string;
+  fileType: string | null;
+  providerUrl: string | null;
+  source: string;
+}
+
 export function createIndexedFileFactRepository(db: Kysely<DB>) {
   return {
     async upsertFact(input: UpsertIndexedFileFactInput): Promise<void> {
@@ -316,21 +641,35 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         deleted_at: null,
         content_hash: input.contentHash ?? null,
         materialized_at: null,
+        materialization_attempts: 0,
         updated_at: now,
       };
 
       if (legacyFactKey !== factKey) {
         const existing = await db
           .selectFrom("indexed_file_facts")
-          .select("id")
+          .select(["id", "content_hash", "materialization_attempts"])
           .where("fact_key", "=", legacyFactKey)
           .executeTakeFirst();
         if (existing) {
-          await db.updateTable("indexed_file_facts").set(values).where("id", "=", existing.id).execute();
+          const attempts = existing.content_hash === values.content_hash ? existing.materialization_attempts : 0;
+          await db
+            .updateTable("indexed_file_facts")
+            .set({ ...values, materialization_attempts: attempts })
+            .where("id", "=", existing.id)
+            .execute();
           return;
         }
       }
 
+      /**
+       * Re-syncs re-emit facts for unchanged items, so the failed-attempt
+       * counter must survive same-content upserts or the quarantine cap in
+       * materialize-replay.ts would be reset before every sweep and never
+       * engage. The counter only resets when content_hash actually changes.
+       * The null-safe equality is spelled out because SQLite's `IS` and
+       * Postgres' `IS NOT DISTINCT FROM` don't share a syntax.
+       */
       await db
         .insertInto("indexed_file_facts")
         .values({
@@ -340,6 +679,14 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         .onConflict((oc) =>
           oc.column("fact_key").doUpdateSet({
             ...values,
+            materialization_attempts: sql<number>`
+              CASE
+                WHEN indexed_file_facts.content_hash = excluded.content_hash
+                  OR (indexed_file_facts.content_hash IS NULL AND excluded.content_hash IS NULL)
+                THEN indexed_file_facts.materialization_attempts
+                ELSE 0
+              END
+            `,
           }),
         )
         .execute();
@@ -482,11 +829,33 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
       };
     },
 
+    async touchActiveFactsForFile(input: {
+      indexedFileId: string;
+      source: string;
+      factType: IndexedFileFactType;
+      lastSeenSyncRunId: string;
+      contentHash?: string | null;
+    }): Promise<number> {
+      const result = await db
+        .updateTable("indexed_file_facts")
+        .set({
+          last_seen_sync_run_id: input.lastSeenSyncRunId,
+          content_hash: input.contentHash ?? null,
+          updated_at: new Date().toISOString(),
+        })
+        .where("indexed_file_id", "=", input.indexedFileId)
+        .where("source", "=", input.source)
+        .where("fact_type", "=", input.factType)
+        .where("deleted_at", "is", null)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0);
+    },
+
     async clearMaterializedAtForActiveFacts(indexedFileIds: string[]): Promise<void> {
       if (indexedFileIds.length === 0) return;
       await db
         .updateTable("indexed_file_facts")
-        .set({ materialized_at: null, updated_at: new Date().toISOString() })
+        .set({ materialized_at: null, materialization_attempts: 0, updated_at: new Date().toISOString() })
         .where("indexed_file_id", "in", indexedFileIds)
         .where("deleted_at", "is", null)
         .execute();
@@ -521,6 +890,61 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         if (matched.length >= limit) return matched;
       }
       return matched;
+    },
+
+    /**
+     * Tasks/issues that sit directly under a tracker parent (project / team),
+     * for previewing a structural-seed review row. Joins `parent_entity` facts
+     * — each emitted by a child task file and keyed by the parent's tracker id —
+     * back to their `indexed_files`. Matches on BOTH `source` and the parent id
+     * so a numeric ClickUp id can't collide with a Linear UUID. Returns the true
+     * distinct `total` (count is independent of the capped list) and a list
+     * capped at `limit`, deterministically ordered (recency, then id).
+     */
+    async childTasksForParent(opts: {
+      source: string;
+      parentSourceId: string;
+      limit: number;
+      viewer?: FileViewer;
+    }): Promise<{ tasks: ChildTask[]; total: number }> {
+      let base = db
+        .selectFrom("indexed_file_facts as f")
+        .innerJoin("indexed_files as i", "i.id", "f.indexed_file_id")
+        .where("f.fact_type", "=", "parent_entity")
+        .where("f.source", "=", opts.source)
+        .where("f.subject_source_id", "=", opts.parentSourceId)
+        .where("f.deleted_at", "is", null);
+      if (opts.viewer && !opts.viewer.isAdmin) {
+        base = base.where(fileVisibilityPredicate(opts.viewer, "i"));
+      }
+
+      const countRow = await base
+        .select((eb) => eb.fn.count("f.indexed_file_id").distinct().as("c"))
+        .executeTakeFirst();
+
+      const rows = await base
+        .select([
+          "i.id as indexedFileId",
+          "i.file_name as name",
+          "i.file_type as fileType",
+          "i.provider_url as providerUrl",
+          "i.source as source",
+          "i.source_updated_at as sourceUpdatedAt",
+        ])
+        .distinct()
+        .orderBy("i.source_updated_at", "desc")
+        .orderBy("i.id", "asc")
+        .limit(opts.limit)
+        .execute();
+
+      const tasks: ChildTask[] = rows.map((r) => ({
+        indexedFileId: r.indexedFileId,
+        name: r.name,
+        fileType: r.fileType,
+        providerUrl: r.providerUrl,
+        source: r.source,
+      }));
+      return { tasks, total: Number(countRow?.c ?? 0) };
     },
   };
 }

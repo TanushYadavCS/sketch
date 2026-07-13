@@ -22,11 +22,12 @@ export const configSchema = z.object({
   // Files
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(50),
+  MAX_ATTACHMENT_TOTAL_MB: z.coerce.number().default(30),
 
   // Feature flags
-  EXPERIMENTAL_FLAG: z
+  BIRTH_GATE_DRY_RUN: z
     .enum(["true", "false", "1", "0"])
-    .default("false")
+    .default("true")
     .transform((v) => v === "true" || v === "1"),
   VISION_ENABLED: z
     .enum(["true", "false", "1", "0"])
@@ -38,6 +39,8 @@ export const configSchema = z.object({
 
   // Entity materialization
   LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),
+  LLM_TASK_CORROBORATION_THRESHOLD: z.coerce.number().int().min(1).default(2),
+  FEATURE_AUTO_MINT_THRESHOLD: z.coerce.number().int().min(1).default(1),
   CO_MENTION_CONTRIBUTES_TO_THRESHOLD: z.coerce.number().int().min(2).default(3),
   FLOOR_RETRY_MAX_FILES_PER_DOMAIN: z.coerce.number().int().min(1).default(5000),
   FEATURE_ARCHIVE_MIN_MENTIONS: z.coerce.number().int().min(1).default(2),
@@ -45,6 +48,7 @@ export const configSchema = z.object({
   FEATURE_ARCHIVE_MAX_PER_RUN: z.coerce.number().int().min(1).default(1000),
   GEMINI_MAX_RPM: z.coerce.number().int().min(1).default(60),
   GEMINI_MAX_RETRIES: z.coerce.number().int().min(0).default(4),
+  AGENT_RUNTIME: z.enum(["sdk", "aisdk"]).default("sdk"),
 
   // Sync reconciliation
   SYNC_ALLOW_LARGE_RECONCILE: z
@@ -60,6 +64,22 @@ export const configSchema = z.object({
   // WhatsApp providers
   WHATSAPP_DM_PROVIDER: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("baileys")),
   WHATSAPP_GROUP_PROVIDER: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("baileys")),
+  WATI_API_ENDPOINT: z.preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
+  WATI_ACCESS_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  WATI_WEBHOOK_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  WATI_CHANNEL_PHONE_NUMBER: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  MANAGED_WHATSAPP_PLATFORM_URL: z.preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
+  MANAGED_WHATSAPP_TENANT_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  WHATSAPP_HISTORY_LOOKBACK_DAYS: z.coerce.number().int().min(1).default(30),
+  WHATSAPP_SLICE_GAP_MINUTES: z.coerce.number().int().min(1).default(25),
+  WHATSAPP_SLICE_MAX_AGE_MINUTES: z.coerce.number().int().min(1).default(120),
+  WHATSAPP_SLICE_MAX_MESSAGES: z.coerce.number().int().min(1).default(50),
+  WHATSAPP_SALIENCE_BATCH_LIMIT: z.coerce.number().int().min(1).default(50),
+  WHATSAPP_EMISSION_REFRESH_DAYS: z.coerce.number().int().min(1).default(7),
+  WHATSAPP_WINDOW_KEEPALIVE_ENABLED: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
 
   // Security
   ENCRYPTION_KEY: z.string().optional(),
@@ -73,6 +93,10 @@ export const configSchema = z.object({
   // Managed mode
   MANAGED_URL: z.string().optional(),
   MANAGED_AUTH_SECRET: z.string().optional(),
+  CONNECTOR_CREDENTIAL_SOURCE: z.enum(["local", "canvas"]).default("local"),
+  CANVAS_CREDENTIAL_PRIVATE_KEY_PEM: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  CANVAS_CREDENTIAL_PRIVATE_KEY_PATH: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  CANVAS_CREDENTIAL_PUBLIC_KEY_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
 
   // Zoho CRM OAuth
   ZOHO_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
@@ -158,5 +182,29 @@ export function validateConfig(config: Config): void {
   if (config.SLACK_MODE === "http" && !config.SLACK_SIGNING_SECRET) {
     console.error("SLACK_MODE=http requires SLACK_SIGNING_SECRET");
     process.exit(1);
+  }
+  if (config.WHATSAPP_DM_PROVIDER === "wati") {
+    if (!config.WATI_API_ENDPOINT) {
+      console.error("WHATSAPP_DM_PROVIDER=wati requires WATI_API_ENDPOINT");
+      process.exit(1);
+    }
+    if (!config.WATI_ACCESS_TOKEN) {
+      console.error("WHATSAPP_DM_PROVIDER=wati requires WATI_ACCESS_TOKEN");
+      process.exit(1);
+    }
+    if (!config.WATI_WEBHOOK_TOKEN) {
+      console.error("WHATSAPP_DM_PROVIDER=wati requires WATI_WEBHOOK_TOKEN");
+      process.exit(1);
+    }
+  }
+  if (config.WHATSAPP_DM_PROVIDER === "managed") {
+    if (!config.MANAGED_WHATSAPP_PLATFORM_URL) {
+      console.error("WHATSAPP_DM_PROVIDER=managed requires MANAGED_WHATSAPP_PLATFORM_URL");
+      process.exit(1);
+    }
+    if (!config.MANAGED_WHATSAPP_TENANT_TOKEN) {
+      console.error("WHATSAPP_DM_PROVIDER=managed requires MANAGED_WHATSAPP_TENANT_TOKEN");
+      process.exit(1);
+    }
   }
 }

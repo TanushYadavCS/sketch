@@ -4,7 +4,9 @@ import { createEntityRepository, whereLiveEntity } from "../db/repositories/enti
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB, EntitiesTable } from "../db/schema";
+import { isPersonalOrSharedDomain, isWellKnownNonClientDomain } from "./personal-domains";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
+import { isEmailProviderName } from "./validators";
 
 export const DOMAIN_PROMOTION_THRESHOLD = 1;
 
@@ -183,17 +185,43 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
     .execute();
 
   result.scanned = candidates.length;
-  const allEntities = (await db
+  if (candidates.length === 0) {
+    return result;
+  }
+
+  /**
+   * The company-promotion flow only ever consults `lookup.listByType("company")`
+   * (the email fast-path is person-only; `evidenceDomain`, name-dedup, and
+   * embedding hooks are all absent from `makeLookup`). Loading only live company
+   * rows instead of every live entity of every type preserves the fuzzy ranker's
+   * inputs exactly while cutting the per-sync corpus scan to the fraction that
+   * can actually match. When there are no candidates the scan is skipped
+   * entirely.
+   */
+  const companyEntities = (await db
     .selectFrom("entities")
     .selectAll()
     .where(whereLiveEntity())
+    .where("source_type", "=", "company")
     .execute()) as Selectable<EntitiesTable>[];
-  const lookup = makeLookup(allEntities);
+  const lookup = makeLookup(companyEntities);
 
   for (const candidate of candidates) {
     const domain = candidate.domain;
     const proposedName = candidate.proposed_company_name ?? candidate.name;
     if (!domain || !proposedName) continue;
+    // Belt-and-suspenders: never mint or link a company for a consumer webmail /
+    // shared domain, even if a stale domain_observation candidate slipped through
+    // upstream. Guards both the domain (independent of the DB seed) and the
+    // provider brand name ("Gmail").
+    if (isPersonalOrSharedDomain(domain) || isEmailProviderName(proposedName)) {
+      logger.info({ domain, proposedName }, "Skipping personal/shared domain promotion");
+      continue;
+    }
+    if (isWellKnownNonClientDomain(domain)) {
+      logger.info({ domain, proposedName }, "Skipping well-known non-client (vendor/infra) domain promotion");
+      continue;
+    }
     const observedPeople = parseStringArray(candidate.observed_person_entity_ids);
     const evidenceFiles = parseStringArray(candidate.evidence_file_ids);
 
@@ -216,6 +244,7 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
       {
         entityRepo,
         reviewRepo: createEntityReviewRepo(db),
+        domainsRepo,
         lookup,
         readEmail,
       },
@@ -228,6 +257,7 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
         evidence: evidenceFiles.map((indexedFileId) => ({ indexedFileId, note: `domain_promotion:${domain}` })),
         triggeredByUserId: candidate.first_observed_by_user_id ?? "system",
         metadata: { origin: "domain_promotion", domain },
+        provenanceTier: "inferred",
       },
     );
 
@@ -235,6 +265,10 @@ export async function sweepDomainPromotions(db: Kysely<DB>, logger: Logger): Pro
       await attachDomainCandidate(db, proposal.reviewId, candidate.id);
       result.pendingFuzzy++;
       logger.info({ domain, proposedName, reviewId: proposal.reviewId }, "Domain candidate queued for review");
+      continue;
+    }
+    if (proposal.kind === "suppressed") {
+      logger.info({ domain, proposedName, reason: proposal.reason }, "Domain candidate proposal suppressed");
       continue;
     }
 

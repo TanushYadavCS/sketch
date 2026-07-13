@@ -2,13 +2,20 @@ import type { Kysely } from "kysely";
 import { createAgentOutputDeliveryRepository } from "../db/repositories/agent-output-deliveries";
 import type { AgentDeliveryConfig } from "../db/repositories/agent-outputs";
 import { createConversationRepository } from "../db/repositories/conversations";
+import { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
+import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { chunkText } from "../formatting/chunking";
 import type { Logger } from "../logger";
 import { createWorkflowDeliveryCapture } from "../scheduler/delivery-capture";
 import type { SlackBot } from "../slack/bot";
 import { WHATSAPP_TEXT_LIMIT } from "../whatsapp/chunking";
+import {
+  type ProactiveDeliveryTextSend,
+  ProactiveDeliveryTextSendError,
+  deliverProactiveDm,
+} from "../whatsapp/proactive-delivery";
 import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { isSlackDmChannelId, isSlackUserId } from "../workflows/delivery";
@@ -19,7 +26,7 @@ const SLACK_TEXT_LIMIT = 39_000;
 
 export interface AgentOutputDeliveryRequest {
   definition: AgentDefinition;
-  output: RenderableAgentOutput & { id: string };
+  output: RenderableAgentOutput & { id: string; userId: string; agentKey: string };
   delivery: AgentDeliveryConfig;
 }
 
@@ -37,8 +44,11 @@ export interface AgentOutputDeliveryDeps {
 
 export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps): AgentOutputDeliveryPublisher {
   const repo = createAgentOutputDeliveryRepository(deps.db);
+  const conversations = createConversationRepository(deps.db);
+  const inboxMessages = createInboxMessagesRepository(deps.db);
+  const users = createUserRepository(deps.db);
   const capture = createWorkflowDeliveryCapture({
-    conversations: createConversationRepository(deps.db),
+    conversations,
     settingsRepo: deps.settingsRepo,
     logger: deps.logger,
   });
@@ -64,11 +74,48 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
     return refs;
   }
 
-  async function sendWhatsApp(delivery: AgentDeliveryConfig, text: string): Promise<string[]> {
+  async function sendWhatsApp(
+    delivery: AgentDeliveryConfig,
+    output: RenderableAgentOutput & { id: string; userId: string; agentKey: string },
+    text: string,
+  ): Promise<string[]> {
     if (!deps.whatsapp.isConnected) throw new Error("WhatsApp is not connected.");
+    const target = whatsappTargetFromDeliveryTarget(delivery.targetId);
+
+    if (target.kind === "dm") {
+      const recipientUserId = delivery.recipientUserId ?? output.userId;
+      const recipient = await users.findById(recipientUserId);
+      try {
+        const result = await deliverProactiveDm({
+          target,
+          recipientUserId,
+          senderUserId: output.userId,
+          text,
+          whatsapp: deps.whatsapp,
+          conversations,
+          inboxMessages,
+          logger: deps.logger,
+          recipientName: delivery.label,
+          recipientPhoneE164: recipient?.whatsapp_number ?? target.phoneE164,
+          inboxMetadata: { source: "agent_output", outputId: output.id, agentKey: output.agentKey },
+        });
+        if (result.mode === "text") {
+          return captureWhatsAppDmTextSends(result.deliveryTarget, result.textSends);
+        }
+        const messageRef = result.sent?.providerMessageId;
+        return [messageRef ?? result.inboxMessageId].filter((ref): ref is string => Boolean(ref));
+      } catch (err) {
+        if (err instanceof ProactiveDeliveryTextSendError) {
+          await captureWhatsAppDmTextSends(err.deliveryTarget, err.textSends);
+          throw err.cause ?? err;
+        }
+        throw err;
+      }
+    }
+
     const refs: string[] = [];
     for (const chunk of chunkText(text, WHATSAPP_TEXT_LIMIT)) {
-      const sent = await deps.whatsapp.sendText(whatsappTargetFromDeliveryTarget(delivery.targetId), chunk);
+      const sent = await deps.whatsapp.sendText(target, chunk);
       const messageRef = sent?.providerMessageId;
       if (!messageRef) continue;
       refs.push(messageRef);
@@ -77,6 +124,25 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
         messageRef,
         providerTimestamp: sent.providerTimestamp,
         text: chunk,
+      });
+    }
+    return refs;
+  }
+
+  async function captureWhatsAppDmTextSends(
+    deliveryTarget: string,
+    textSends: ProactiveDeliveryTextSend[],
+  ): Promise<string[]> {
+    const refs: string[] = [];
+    for (const textSend of textSends) {
+      const messageRef = textSend.sent?.providerMessageId;
+      if (!messageRef) continue;
+      refs.push(messageRef);
+      await capture.captureWhatsApp({
+        deliveryTarget,
+        messageRef,
+        providerTimestamp: textSend.sent?.providerTimestamp ?? null,
+        text: textSend.text,
       });
     }
     return refs;
@@ -97,11 +163,12 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
           sections: params.definition.sections,
           output: params.output,
           platform: params.delivery.platform,
+          mentions: params.delivery.mentions,
         });
         const messageRefs =
           params.delivery.platform === "slack"
             ? await sendSlack(params.delivery, text)
-            : await sendWhatsApp(params.delivery, text);
+            : await sendWhatsApp(params.delivery, params.output, text);
         await repo.markSent(attempt.id, messageRefs);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

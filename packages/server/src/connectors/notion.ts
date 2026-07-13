@@ -747,6 +747,7 @@ async function refreshNotionToken(credentials: OAuthCredentials): Promise<OAuthC
       grant_type: "refresh_token",
       refresh_token: credentials.refresh_token,
     }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {

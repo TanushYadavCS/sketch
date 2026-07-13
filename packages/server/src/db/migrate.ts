@@ -114,10 +114,42 @@ import * as m111 from "./migrations/111-settings-embedding-provider";
 import * as m112 from "./migrations/112-agent-output-structured-payload";
 import * as m113 from "./migrations/113-indexed-file-all-day-flag";
 import * as m114 from "./migrations/114-agent-output-deliveries";
+import * as m115 from "./migrations/115-whatsapp-template-mappings-and-provider-events";
+import * as m116 from "./migrations/116-connector-credential-source";
+import * as m117 from "./migrations/117-conversation-message-window-index";
+import * as m118 from "./migrations/118-whatsapp-window-keepalives";
+import * as m119 from "./migrations/119-agent-outputs-source-scope";
+import * as m120 from "./migrations/120-agent-output-period-key";
+import * as m121 from "./migrations/121-tasks";
+import * as m122 from "./migrations/122-tasks-owner";
+import * as m123 from "./migrations/123-sub-entities";
+import * as m124 from "./migrations/124-tasks-assignee-name";
+import * as m125 from "./migrations/125-milestone-series-and-value-signature";
+import * as m126 from "./migrations/126-work-cycles";
+import * as m127 from "./migrations/127-work-cycles-connector";
+import * as m128 from "./migrations/128-work-cycles-connector-key";
+import * as m129 from "./migrations/129-container-name-qualification";
+import * as m130 from "./migrations/130-entity-provenance-tier";
+import * as m131 from "./migrations/131-trunk-name-embeddings";
+import * as m132 from "./migrations/132-agent-messages";
+import * as m133 from "./migrations/133-chat-session-runtime";
+import * as m134 from "./migrations/134-chat-session-archived-at";
+import * as m135 from "./migrations/135-whatsapp-context-graph-indexing";
+import * as m136 from "./migrations/136-whatsapp-slice-denoised-message-ids";
+import * as m137 from "./migrations/137-whatsapp-group-participants";
+import * as m138 from "./migrations/138-whatsapp-identity-candidates";
+import * as m139 from "./migrations/139-tasks-proposed-assignee";
+import * as m140 from "./migrations/140-retire-unassigned-agent-tasks";
+import * as m141 from "./migrations/141-fact-materialization-quarantine";
 import type { DB } from "./schema";
 
-export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
-  const migrator = new Migrator({
+/**
+ * Builds the Migrator against the full static migration map. Exported (not just
+ * used internally by runMigrations) so tests can drive migrateTo() directly for
+ * partial up/down sequencing without hand-maintaining a duplicate migration list.
+ */
+export function createMigrator(db: Kysely<DB>): Migrator {
+  return new Migrator({
     db,
     provider: {
       async getMigrations() {
@@ -232,11 +264,41 @@ export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean 
           "112-agent-output-structured-payload": m112,
           "113-indexed-file-all-day-flag": m113,
           "114-agent-output-deliveries": m114,
+          "115-whatsapp-template-mappings-and-provider-events": m115,
+          "116-connector-credential-source": m116,
+          "117-conversation-message-window-index": m117,
+          "118-whatsapp-window-keepalives": m118,
+          "119-agent-outputs-source-scope": m119,
+          "120-agent-output-period-key": m120,
+          "121-tasks": m121,
+          "122-tasks-owner": m122,
+          "123-sub-entities": m123,
+          "124-tasks-assignee-name": m124,
+          "125-milestone-series-and-value-signature": m125,
+          "126-work-cycles": m126,
+          "127-work-cycles-connector": m127,
+          "128-work-cycles-connector-key": m128,
+          "129-container-name-qualification": m129,
+          "130-entity-provenance-tier": m130,
+          "131-trunk-name-embeddings": m131,
+          "132-agent-messages": m132,
+          "133-chat-session-runtime": m133,
+          "134-chat-session-archived-at": m134,
+          "135-whatsapp-context-graph-indexing": m135,
+          "136-whatsapp-slice-denoised-message-ids": m136,
+          "137-whatsapp-group-participants": m137,
+          "138-whatsapp-identity-candidates": m138,
+          "139-tasks-proposed-assignee": m139,
+          "140-retire-unassigned-agent-tasks": m140,
+          "141-fact-materialization-quarantine": m141,
         };
       },
     },
   });
+}
 
+export async function runMigrations(db: Kysely<DB>, options?: { quiet?: boolean }): Promise<void> {
+  const migrator = createMigrator(db);
   const { error, results } = await migrator.migrateToLatest();
 
   for (const result of results ?? []) {

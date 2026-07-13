@@ -1,14 +1,16 @@
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
-import { type EnrichmentResult, isEnrichmentActive, linkEntitiesByDeterministicMatch } from "../connectors/enrichment";
+import { type EnrichmentResult, isEnrichmentActive } from "../connectors/enrichment";
 import { type DomainSweepResult, sweepDomainPromotions } from "../connectors/smart-enrichment";
 import { getSyncProgress, seedTeamDirectoryEntities } from "../connectors/sync";
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
+import { createTaskRepository } from "../db/repositories/tasks";
 import type { DB } from "../db/schema";
 import { sweepCoMentionContributesTo } from "./co-mention-sweep";
 import { type MaterializeFactsSummary, type MaterializeProgress, materializeUnmaterializedFacts } from "./materialize";
 import { isRecreateActive, withRecreateLock } from "./recreate-state";
+import { reconcileStructuralAssigneeContributesTo } from "./structural-assignee";
 
 export type { ReplayFactsSummary } from "./materialize";
 
@@ -60,10 +62,38 @@ async function countTable(db: Kysely<DB>, table: string): Promise<number> {
 }
 
 async function deleteTable(db: Kysely<DB>, table: string): Promise<number> {
+  if (table === "entities") return deleteRecreatableEntities(db);
   const count = await countTable(db, table);
   if (count === 0) return 0;
   try {
     await sql`DELETE FROM ${sql.raw(table)}`.execute(db);
+    return count;
+  } catch (err) {
+    if (isMissingTableError(err)) return 0;
+    throw err;
+  }
+}
+
+/**
+ * Reset preserves human-blessed entities: `declared` (added/declared via Your
+ * Org) and `human_confirmed` (approved from the review queue). Both encode an
+ * explicit operator decision that replay cannot reconstruct — approvals live in
+ * `entity_review_queue`, not in `indexed_file_facts`, so a deleted approved
+ * entity would never come back as approved. Only derived tiers (`structural`,
+ * `inferred`) are rebuilt from facts.
+ */
+const PRESERVED_RESET_TIERS = ["declared", "human_confirmed"];
+
+async function deleteRecreatableEntities(db: Kysely<DB>): Promise<number> {
+  try {
+    const before = await db
+      .selectFrom("entities")
+      .select(db.fn.countAll<number>().as("count"))
+      .where("provenance_tier", "not in", PRESERVED_RESET_TIERS)
+      .executeTakeFirst();
+    const count = Number(before?.count ?? 0);
+    if (count === 0) return 0;
+    await db.deleteFrom("entities").where("provenance_tier", "not in", PRESERVED_RESET_TIERS).execute();
     return count;
   } catch (err) {
     if (isMissingTableError(err)) return 0;
@@ -158,7 +188,7 @@ async function countActiveFacts(db: Kysely<DB>): Promise<number> {
 async function clearMaterializedFlags(db: Kysely<DB>): Promise<number> {
   const result = await db
     .updateTable("indexed_file_facts")
-    .set({ materialized_at: null })
+    .set({ materialized_at: null, materialization_attempts: 0 })
     .where("deleted_at", "is", null)
     .executeTakeFirst();
   return Number(result.numUpdatedRows ?? 0);
@@ -248,7 +278,7 @@ export async function resetDerivedEntityData(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phase 3 — Reset → materialize facts → deterministic substring linking.
+// Phase 3 — Reset → materialize facts → relationship sweeps.
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface RecreateSummary {
@@ -287,6 +317,7 @@ export interface RecreateDeps {
    * Production callers should pass `config.LLM_PROMOTION_THRESHOLD`.
    */
   llmPromotionThreshold?: number;
+  featureAutoMintThreshold?: number;
   coMentionContributesToThreshold?: number;
   /**
    * Restrict the materialize replay to a subset of fact types. Used by
@@ -322,16 +353,24 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
     if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     const replay = await materializeUnmaterializedFacts(db, logger, {
       llmPromotionThreshold: deps.llmPromotionThreshold,
+      featureAutoMintThreshold: deps.featureAutoMintThreshold,
       factTypes: deps.materializeFactTypes,
       onProgress: deps.onProgress,
       shouldCancel: deps.shouldCancel,
     });
 
     if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
-    // Domain promotions run between materialize and deterministic linking so
-    // any new company entity (and its `works_at` edges) is visible to the
-    // linker. Sweep also runs on every live sync — keep the two paths
-    // calling the same helper so recreate doesn't drift.
+    const taskRepo = createTaskRepository(db);
+    await taskRepo.reanchorNullParentTasks();
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
+    await taskRepo.expireOrphanedTasks();
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
+    await reconcileStructuralAssigneeContributesTo(db, logger.child({ component: "recreate-structural-assignee" }), {
+      scope: { kind: "full" },
+    });
+    if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
+    // Domain promotions run after materialize so any new company entity and
+    // its `works_at` edges are available before downstream sweeps.
     const domainSweep = await sweepDomainPromotions(db, logger.child({ component: "recreate-domain-sweep" }));
     if (deps.shouldCancel?.()) throw new Error("Re-enrich stopped");
     await fixupPreservedEntityDomainReferences(db, logger.child({ component: "recreate-domain-fixup" }));
@@ -352,11 +391,13 @@ export async function recreateEntityGraph(deps: RecreateDeps): Promise<RecreateS
       };
     }
 
-    const deterministic = await linkEntitiesByDeterministicMatch(
-      db,
-      logger.child({ component: "recreate-deterministic-linking" }),
-    );
-    return { reset, replay, domainSweep, enrichmentIterations: 1, enrichment: deterministic };
+    return {
+      reset,
+      replay,
+      domainSweep,
+      enrichmentIterations: 0,
+      enrichment: { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] },
+    };
   };
 
   return deps.lockAlreadyHeld ? run() : withRecreateLock(run);

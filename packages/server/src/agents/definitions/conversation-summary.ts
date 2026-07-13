@@ -1,0 +1,489 @@
+import type { Kysely } from "kysely";
+import {
+  type AgentOutputItemInput,
+  type AgentSourceConfig,
+  type AgentStructuredPayload,
+  createAgentOutputRepository,
+} from "../../db/repositories/agent-outputs";
+import { type StoredConversationMessage, createConversationRepository } from "../../db/repositories/conversations";
+import { createTaskRepository } from "../../db/repositories/tasks";
+import type { DB } from "../../db/schema";
+import type {
+  AgentApiItem,
+  AgentDefinition,
+  AgentOutputSavedArgs,
+  AgentRuntimeContextParams,
+  AgentStoredItem,
+} from "../types";
+
+export const CONVERSATION_SUMMARY_AGENT_KEY = "conversation_summary";
+export const CONVERSATION_SUMMARY_AGENT_VERSION = "2026-07-conversation-summary-v1";
+export const CONVERSATION_SUMMARY_FIRST_RUN_LOOKBACK_HOURS = 24;
+export const CONVERSATION_SUMMARY_MAX_MESSAGES_PER_SOURCE = 300;
+export const CONVERSATION_SUMMARY_MAX_SOURCES = 12;
+export const CONVERSATION_SUMMARY_TASK_CANDIDATE_LIMIT = 25;
+
+const CONVERSATION_SUMMARY_ALLOWED_TOOLS = ["mcp__sketch__WriteAgentOutput"];
+const CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION = "task_candidates";
+
+const SECTION_LABELS = {
+  highlights: ["highlight"],
+  decisions: ["decision"],
+  action_items: ["action_item"],
+  open_questions: ["open_question"],
+  task_candidates: ["action_item"],
+} as const satisfies Record<string, readonly string[]>;
+
+type ConversationRow = {
+  id: number;
+  display_name: string | null;
+};
+
+type LatestOutputRow = {
+  id: string;
+  generated_at: string | null;
+  raw_payload_json: string | null;
+  updated_at: string;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function sourceKind(source: AgentSourceConfig): "channel" | "group" {
+  return source.platform === "slack" ? "channel" : "group";
+}
+
+function sourceLabel(source: AgentSourceConfig, conversation: ConversationRow | undefined): string {
+  if (source.label) return source.label;
+  if (conversation?.display_name) return conversation.display_name;
+  if (source.platform === "slack") return source.targetId;
+  return source.targetId;
+}
+
+function fallbackWindowStart(now: Date, lookbackHours: number): string {
+  return new Date(now.getTime() - lookbackHours * 60 * 60 * 1000).toISOString();
+}
+
+async function findLatestCompletedOutput(
+  db: Kysely<DB>,
+  userId: string,
+  sourceKey: string,
+): Promise<LatestOutputRow | undefined> {
+  const latest = await createAgentOutputRepository(db).findLatestCompletedForScope(
+    CONVERSATION_SUMMARY_AGENT_KEY,
+    userId,
+    sourceKey,
+  );
+  if (!latest) return undefined;
+  return {
+    id: latest.output.id,
+    generated_at: latest.output.generated_at,
+    raw_payload_json: latest.output.raw_payload_json,
+    updated_at: latest.output.updated_at,
+  };
+}
+
+function summaryWindowEndFromRawPayload(rawPayloadJson: string | null): string | null {
+  if (!rawPayloadJson) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawPayloadJson);
+  } catch {
+    return null;
+  }
+
+  const payloadRecord = asRecord(payload);
+  const summaryWindow = asRecord(payloadRecord?.summaryWindow);
+  const end = summaryWindow?.end;
+  return typeof end === "string" && end.trim().length > 0 ? end : null;
+}
+
+function previousOutputWatermark(
+  previousOutput: LatestOutputRow | undefined,
+  now: Date,
+  firstRunLookbackHours: number,
+): string {
+  if (!previousOutput) return fallbackWindowStart(now, firstRunLookbackHours);
+  return (
+    summaryWindowEndFromRawPayload(previousOutput.raw_payload_json) ??
+    previousOutput.generated_at ??
+    previousOutput.updated_at
+  );
+}
+
+/**
+ * Resolves the window start. Scheduled runs stay strictly incremental — the
+ * previous run's watermark — so consecutive digests never overlap. A manual "run
+ * now" instead floors the window at the frequency period (now -
+ * firstRunLookbackHours): it always covers at least that period — a weekly run
+ * spans ~7 days — even when an earlier same-day run already advanced the
+ * watermark to "now", which is what a user expects when they trigger it by hand.
+ * The floor takes the earlier of watermark and period so it never skips older
+ * messages the watermark has not yet covered. `floored` reports whether the floor
+ * extended the window past the watermark, for payload observability only.
+ */
+function resolveWindowStart(
+  previousOutput: LatestOutputRow | undefined,
+  now: Date,
+  firstRunLookbackHours: number,
+  floorToPeriod: boolean,
+): { windowStart: string; floored: boolean } {
+  const watermark = previousOutputWatermark(previousOutput, now, firstRunLookbackHours);
+  if (!floorToPeriod || !previousOutput) return { windowStart: watermark, floored: false };
+  const floor = fallbackWindowStart(now, firstRunLookbackHours);
+  const windowStart = watermark < floor ? watermark : floor;
+  return { windowStart, floored: windowStart !== watermark };
+}
+
+function firstRunLookbackHours(params: AgentRuntimeContextParams): number {
+  const value = params.agentConfig?.firstRunLookbackHours;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : CONVERSATION_SUMMARY_FIRST_RUN_LOOKBACK_HOURS;
+}
+
+async function findConversation(db: Kysely<DB>, source: AgentSourceConfig): Promise<ConversationRow | undefined> {
+  return db
+    .selectFrom("conversations")
+    .select(["id", "display_name"])
+    .where("platform", "=", source.platform)
+    .where("kind", "=", sourceKind(source))
+    .where("provider_conversation_id", "=", source.targetId)
+    .executeTakeFirst();
+}
+
+function renderAttachment(attachment: StoredConversationMessage["attachments"][number]): Record<string, unknown> {
+  return {
+    name: attachment.originalName,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    transcription: attachment.transcription ?? null,
+  };
+}
+
+function renderMessage(message: StoredConversationMessage): Record<string, unknown> {
+  return {
+    id: message.id,
+    senderName: message.senderName,
+    senderUserId: message.senderUserId,
+    text: message.text,
+    attachments: message.attachments.map(renderAttachment),
+    isThreadReply: message.isThreadReply,
+    providerThreadId: message.providerThreadId,
+    providerTimestamp: message.providerTimestamp,
+    receivedAt: message.receivedAt,
+  };
+}
+
+export async function buildConversationSummaryRuntimeContext(
+  params: AgentRuntimeContextParams,
+): Promise<Record<string, unknown>> {
+  const sources = params.agentConfig?.sources ?? [];
+  const previousOutput = await findLatestCompletedOutput(
+    params.db,
+    params.user.id,
+    params.agentConfig?.sourceKey ?? "",
+  );
+  const windowEnd = params.now.toISOString();
+  const fallbackHours = firstRunLookbackHours(params);
+  const { windowStart, floored } = resolveWindowStart(
+    previousOutput,
+    params.now,
+    fallbackHours,
+    params.agentConfig?.floorWindowToPeriod ?? false,
+  );
+  const conversations = createConversationRepository(params.db);
+
+  const summarySources = await Promise.all(
+    sources.map(async (source) => {
+      const conversation = await findConversation(params.db, source);
+      const result = conversation
+        ? await conversations.listMessagesInWindow(conversation.id, {
+            afterReceivedAt: windowStart,
+            beforeReceivedAt: windowEnd,
+            limit: CONVERSATION_SUMMARY_MAX_MESSAGES_PER_SOURCE,
+            includeBotMessages: false,
+          })
+        : { messages: [], hasMore: false };
+
+      return {
+        platform: source.platform,
+        targetType: source.targetType,
+        targetId: source.targetId,
+        label: sourceLabel(source, conversation),
+        conversationId: conversation?.id ?? null,
+        messageCount: result.messages.length,
+        truncated: result.hasMore,
+        messages: result.messages.map(renderMessage),
+      };
+    }),
+  );
+
+  return {
+    summaryWindow: {
+      mode: !previousOutput
+        ? `first_run_last_${fallbackHours}h`
+        : floored
+          ? `floored_to_last_${fallbackHours}h`
+          : "since_last_successful_run",
+      start: windowStart,
+      end: windowEnd,
+      previousOutputId: previousOutput?.id ?? null,
+      firstRunFallbackHours: fallbackHours,
+    },
+    deliveryPlatform: params.agentConfig?.deliveryPlatform ?? null,
+    taskExtraction: {
+      createTasks: params.agentConfig?.createTasks ?? false,
+      sectionKey: CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION,
+      visibleSectionKey: "action_items",
+      maxCandidates: CONVERSATION_SUMMARY_TASK_CANDIDATE_LIMIT,
+      label: "action_item",
+    },
+    summarySources,
+  };
+}
+
+const CONVERSATION_SUMMARY_INSTRUCTIONS = [
+  "You are Sketch's Summarizer.",
+  "",
+  "Generate a concise summary from the configured Slack channels and WhatsApp groups in the runtime context.",
+  "The runtime context contains the complete source material available for this run. Do not use external knowledge or infer facts that are not supported by those messages.",
+  "Call WriteAgentOutput exactly once when the summary is ready.",
+  "",
+  "Output shape:",
+  "- Pass a flat `items` array. Every item carries a `sectionKey` field.",
+  "- Emit visible summary items only for section keys listed in the runtime context `sections` field.",
+  "- If runtime context `taskExtraction.createTasks` is true, also emit internal `task_candidates` items for task creation. Do not emit `task_candidates` when createTasks is false.",
+  "- Use empty knowledgeRefs arrays unless a runtime message explicitly provides a valid Sketch entity or file id.",
+  "- Put sourceLabels and messageIds in structuredPayload when useful, e.g. { sourceLabels: ['#sales'], messageIds: [12, 13] }.",
+  "- When action_items belong to an explicit project or parent from the messages, copy parentEntityId, parentSourceRef, or parentName into each action item's structuredPayload. Prefer parentEntityId when present.",
+  "- When task_candidates belong to an explicit project or parent from the messages, copy parentEntityId, parentSourceRef, or parentName into each task candidate's structuredPayload. Prefer parentEntityId when present.",
+  "",
+  "Sections:",
+  "- highlights: important updates, context changes, status shifts, and notable activity.",
+  "- decisions: explicit or strongly implied decisions, owners, and dates when present.",
+  "- action_items: concrete follow-ups, asks, blockers, or owners that need action.",
+  "- open_questions: unresolved questions, risks, or unclear next steps.",
+  "- task_candidates: internal extraction-only items for all concrete tasks that should be created from the source messages.",
+  "",
+  "Labels:",
+  "- highlights.label must be: highlight.",
+  "- decisions.label must be: decision.",
+  "- action_items.label must be: action_item.",
+  "- open_questions.label must be: open_question.",
+  "- task_candidates.label must be: action_item.",
+  "",
+  "Task extraction:",
+  "- When taskExtraction.createTasks is true, emit one task_candidates item for every distinct concrete follow-up, owner commitment, ask, blocker, or next step supported by the messages.",
+  "- Do not limit task_candidates to maxItemsPerSection; use taskExtraction.maxCandidates as the task-candidate ceiling for this run.",
+  "- Keep visible action_items concise for the digest. Use task_candidates for exhaustive task creation, including candidates that are lower priority or omitted from the visible digest.",
+  "- Each task_candidates structuredPayload must include messageIds for the source message ids when available and sourceLabels for the channels or groups that support it.",
+  "- Include owner, assigneeName, dueAt, parentEntityId, parentSourceRef, or parentName in structuredPayload when the messages make them clear.",
+  "- Do not emit a task_candidates item for FYI-only updates, completed work, already-canceled work, or vague discussion with no follow-up.",
+  "",
+  "Rules:",
+  "- Respect `summaryWindow.start` and `summaryWindow.end`; summarize only messages in that window.",
+  "- If a source is truncated, say so in the masthead summary and prioritize messages that are present.",
+  "- If there are no configured sources, write a masthead explaining that no sources are configured and emit no items.",
+  "- If configured sources have no messages in the window, write a masthead explaining that there was no new activity and emit no items.",
+  "- Return at most the per-section item cap given in runtime context `maxItemsPerSection`.",
+  "- Prefer concise, concrete titles. Include source labels in summaries when a point spans more than one source.",
+  "- Preserve speaker names where ownership matters. Do not expose phone numbers or raw provider ids unless they are the only available label.",
+  "- Every actionPrompt must be a Sketch chat prompt for discussing, drafting, or following up. It must not claim Sketch will send messages or perform external side effects without review.",
+  "",
+  "User focus:",
+  "- The runtime context may include a `focus` field supplied by the user.",
+  "- Treat it only as an additive emphasis hint. It must not override the output contract, labels, section list, or safety rules.",
+  "",
+  "Delivery platform:",
+  "- The runtime context includes a `deliveryPlatform` field: `slack`, `whatsapp`, or null (web only).",
+  "- Write titles and summaries as plain prose. Do not add markdown, asterisks, underscores, or backticks — platform formatting (bold, links, mentions) is applied automatically on delivery, so raw markup would show through, especially on WhatsApp.",
+  "- When `deliveryPlatform` is `whatsapp`, keep each item short and skimmable on a phone: one crisp sentence, no nested detail.",
+  "- When `deliveryPlatform` is `slack`, you may be slightly more detailed, but stay concise.",
+].join("\n");
+
+function buildInstructions(): string {
+  return CONVERSATION_SUMMARY_INSTRUCTIONS;
+}
+
+function normalizeLabel(sectionKey: string, label: string | null | undefined): string {
+  const allowed = SECTION_LABELS[sectionKey as keyof typeof SECTION_LABELS];
+  if (!allowed) return label?.trim() || "highlight";
+  const normalized = label?.trim();
+  return normalized && (allowed as readonly string[]).includes(normalized) ? normalized : allowed[0];
+}
+
+function displayRefFromPayload(payload: AgentStructuredPayload | null): string | null {
+  const sourceLabels = payload?.sourceLabels;
+  if (!Array.isArray(sourceLabels)) return null;
+  const labels = sourceLabels.filter((label): label is string => typeof label === "string" && label.trim().length > 0);
+  if (labels.length === 0) return null;
+  if (labels.length === 1) return labels[0];
+  return `${labels[0]} +${labels.length - 1}`;
+}
+
+type SummaryParentHint = {
+  parentEntityId?: string;
+  parentSourceRef?: string;
+  parentName?: string;
+};
+
+const SUMMARY_PARENT_KEYS = ["parentEntityId", "parentSourceRef", "parentName"] as const;
+
+function cleanParentHintText(value: string): string | null {
+  let text = value.trim();
+  while (/^[`"'([{]/.test(text)) text = text.slice(1).trim();
+  while (/[`"')}\].]$/.test(text)) text = text.slice(0, -1).trim();
+  return text.length > 0 ? text : null;
+}
+
+function readStructuredParentHint(payload: AgentStructuredPayload | null | undefined): SummaryParentHint | null {
+  const record = asRecord(payload);
+  if (!record) return null;
+  const hint: SummaryParentHint = {};
+  for (const key of SUMMARY_PARENT_KEYS) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) hint[key] = value.trim();
+  }
+  return Object.keys(hint).length > 0 ? hint : null;
+}
+
+function readTextParentHint(item: AgentOutputItemInput): SummaryParentHint | null {
+  const text = [item.title, item.summary, item.actionPrompt].filter(Boolean).join("\n");
+  const hint: SummaryParentHint = {};
+  for (const key of ["parentEntityId", "parentSourceRef"] as const) {
+    const match = text.match(new RegExp(`${key}\\s*[:=]\\s*([^\\s,;]+)`, "i"));
+    const value = match?.[1] ? cleanParentHintText(match[1]) : null;
+    if (value) hint[key] = value;
+  }
+  return Object.keys(hint).length > 0 ? hint : null;
+}
+
+function mergeParentHints(base: SummaryParentHint, next: SummaryParentHint | null): SummaryParentHint {
+  if (!next) return base;
+  return {
+    parentEntityId: base.parentEntityId ?? next.parentEntityId,
+    parentSourceRef: base.parentSourceRef ?? next.parentSourceRef,
+    parentName: base.parentName ?? next.parentName,
+  };
+}
+
+function parentHintSignature(hint: SummaryParentHint): string | null {
+  if (hint.parentEntityId) return `entity:${hint.parentEntityId}`;
+  if (hint.parentSourceRef) return `source:${hint.parentSourceRef}`;
+  if (hint.parentName) return `name:${hint.parentName.toLowerCase()}`;
+  return null;
+}
+
+function collectOutputParentHint(items: AgentOutputItemInput[]): SummaryParentHint | null {
+  let hint: SummaryParentHint = {};
+  const signatures = new Set<string>();
+  for (const item of items) {
+    for (const itemHint of [readStructuredParentHint(item.structuredPayload), readTextParentHint(item)]) {
+      if (!itemHint) continue;
+      const signature = parentHintSignature(itemHint);
+      if (signature) signatures.add(signature);
+      if (signatures.size > 1) return null;
+      hint = mergeParentHints(hint, itemHint);
+    }
+  }
+  return Object.keys(hint).length > 0 ? hint : null;
+}
+
+function withParentHint(item: AgentOutputItemInput, hint: SummaryParentHint | null): AgentOutputItemInput {
+  if (!hint) return item;
+  const structuredPayload = { ...(asRecord(item.structuredPayload) ?? {}) };
+  const mergedHint = mergeParentHints(readStructuredParentHint(item.structuredPayload) ?? {}, hint);
+  for (const key of SUMMARY_PARENT_KEYS) {
+    const value = mergedHint[key];
+    if (value) structuredPayload[key] = value;
+  }
+  return {
+    ...item,
+    structuredPayload,
+  };
+}
+
+async function enrichItems(_db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]> {
+  return items.map((item) => ({
+    ...item,
+    label: normalizeLabel(item.sectionKey, item.label),
+    displayRef: item.displayRef ?? displayRefFromPayload(item.structuredPayload ?? null),
+    actionType: item.actionType ?? "chat",
+    actionLabel: item.actionLabel?.trim() || "Discuss with Sketch",
+  }));
+}
+
+async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
+  if (!args.createTasks) return;
+  const taskRepo = createTaskRepository(args.db);
+  const parentHint = collectOutputParentHint(args.items);
+  const taskCandidateItems = args.items.filter(
+    (item) => item.sectionKey === CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION,
+  );
+  const actionItems = args.items.filter((item) => item.sectionKey === "action_items");
+  const promotableItems = taskCandidateItems.length > 0 ? taskCandidateItems : actionItems;
+  for (const item of promotableItems) {
+    try {
+      await taskRepo.promoteSummaryTask({ userId: args.userId, item: withParentHint(item, parentHint) });
+    } catch (err) {
+      args.logger.warn({ err, outputId: args.outputId, userId: args.userId }, "Summarizer: task promotion failed");
+    }
+  }
+}
+
+function toApiItem(item: AgentStoredItem): AgentApiItem {
+  return {
+    id: item.id,
+    sectionKey: item.section_key,
+    title: item.title,
+    summary: item.summary,
+    priority: item.priority,
+    label: normalizeLabel(item.section_key, item.label),
+    displayRef: item.display_ref ?? displayRefFromPayload(item.structuredPayload),
+    actionType: item.action_type,
+    actionLabel: item.action_label ?? "Discuss with Sketch",
+    actionPrompt: item.action_prompt,
+    sourceUrl: item.source_url,
+    structuredPayload: item.structuredPayload,
+    knowledgeRefs: item.knowledgeRefs,
+    sortOrder: item.sort_order,
+  };
+}
+
+export const conversationSummaryDefinition: AgentDefinition = {
+  key: CONVERSATION_SUMMARY_AGENT_KEY,
+  version: CONVERSATION_SUMMARY_AGENT_VERSION,
+  title: "Summarizer",
+  tagline: "Summarizes selected Slack channels and WhatsApp groups.",
+  description:
+    "Reads configured shared conversations and produces focused summaries with highlights, decisions, action items, and open questions.",
+  category: "Briefings",
+  defaults: {
+    enabled: false,
+    scheduleHour: 18,
+    scheduleMinute: 0,
+    maxItemsPerSection: 5,
+  },
+  sections: [
+    { key: "highlights", title: "Highlights", enabledByDefault: true, labels: SECTION_LABELS.highlights },
+    { key: "decisions", title: "Decisions", enabledByDefault: true, labels: SECTION_LABELS.decisions },
+    { key: "action_items", title: "Action items", enabledByDefault: true, labels: SECTION_LABELS.action_items },
+    { key: "open_questions", title: "Open questions", enabledByDefault: true, labels: SECTION_LABELS.open_questions },
+  ],
+  internalOutputSections: [CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION],
+  sourceConfig: {
+    maxSources: CONVERSATION_SUMMARY_MAX_SOURCES,
+    supportsSlackChannels: true,
+    supportsWhatsAppGroups: true,
+  },
+  allowedTools: CONVERSATION_SUMMARY_ALLOWED_TOOLS,
+  itemsPerSectionRange: { min: 1, max: 12 },
+  requiresKnowledgeRefs: false,
+  buildInstructions,
+  buildRuntimeContext: buildConversationSummaryRuntimeContext,
+  enrichItems,
+  onOutputSaved,
+  toApiItem,
+};

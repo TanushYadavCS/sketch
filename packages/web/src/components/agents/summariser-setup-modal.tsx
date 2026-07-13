@@ -1,0 +1,165 @@
+/**
+ * First-time setup for a new summariser, as a short four-step wizard: choose
+ * inputs, then delivery, then schedule, then content (sections + focus).
+ * Creating the first summariser also switches the agent on. Editing an existing
+ * summariser happens on its own config page, not here.
+ */
+import { ProgressIndicator } from "@/components/onboarding/progress-indicator";
+import { type AgentConfig, api } from "@/lib/api";
+import { Button } from "@sketch/ui/components/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@sketch/ui/components/dialog";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { toast } from "sonner";
+import {
+  DestinationField,
+  FocusField,
+  ScheduleField,
+  SectionsField,
+  SourcesField,
+  VolumeField,
+  routesToSources,
+  useRouteDraft,
+  useSourceOptions,
+} from "./summariser-shared";
+
+const STEPS = [
+  { title: "Inputs", hint: "Pick the conversations to summarise." },
+  { title: "Delivery", hint: "Choose where the summary goes." },
+  { title: "Schedule", hint: "Set when it runs and how much it includes." },
+  { title: "Content", hint: "Choose the sections and any focus." },
+];
+
+export function SummariserSetupModal({
+  agentKey,
+  open,
+  onClose,
+  onCreated,
+}: {
+  agentKey: string;
+  open: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const configQuery = useQuery({
+    queryKey: ["agents", "detail", agentKey],
+    queryFn: () => api.agents.get(agentKey),
+    enabled: open,
+  });
+  const agent = configQuery.data?.agent ?? null;
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogContent className="flex max-h-[85vh] flex-col gap-0 overflow-hidden sm:max-w-[520px]">
+        <DialogHeader>
+          <DialogTitle>New summariser</DialogTitle>
+          <DialogDescription>Set up a new summariser in four quick steps.</DialogDescription>
+        </DialogHeader>
+        {agent ? (
+          <SetupBody agentKey={agentKey} agent={agent} onClose={onClose} onCreated={onCreated} />
+        ) : (
+          <p className="px-1 py-10 text-center text-[13px] text-muted-foreground">Loading…</p>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SetupBody({
+  agentKey,
+  agent,
+  onClose,
+  onCreated,
+}: {
+  agentKey: string;
+  agent: AgentConfig;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [step, setStep] = useState(0);
+  const [maxStep, setMaxStep] = useState(0);
+  const controller = useRouteDraft(agent, null);
+  const { lookup } = useSourceOptions(agent);
+
+  const goToStep = (next: number) => {
+    setStep(next);
+    setMaxStep((prev) => Math.max(prev, next));
+  };
+
+  const create = useMutation({
+    mutationFn: () => {
+      const next = controller.build(null);
+      const routes = [...agent.routes, next];
+      return api.agents.updateConfig(agentKey, { enabled: true, sources: routesToSources(routes, lookup), routes });
+    },
+    onSuccess: () => {
+      onCreated();
+      toast.success("Summariser created");
+      onClose();
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to create"),
+  });
+
+  const inputsValid = controller.sources.length > 0;
+  const deliveryValid =
+    !(controller.destKind === "self" && controller.sources.length !== 1) &&
+    !(controller.destKind === "member" && !controller.memberUserId) &&
+    !(controller.destKind === "channel" && !controller.channelTarget);
+  const canAdvance = step === 0 ? inputsValid : step === 1 ? deliveryValid : step === 2 ? true : controller.isValid;
+  const isLast = step === STEPS.length - 1;
+
+  return (
+    <>
+      <div className="pt-3">
+        <ProgressIndicator
+          currentStep={step + 1}
+          maxStepReached={maxStep + 1}
+          steps={STEPS.map((s, i) => ({ number: i + 1, label: s.title }))}
+          onStepClick={(n) => setStep(n - 1)}
+        />
+      </div>
+      <div className="mt-3 px-1">
+        <h2 className="text-[15px] font-semibold text-foreground">{STEPS[step].title}</h2>
+        <p className="mt-0.5 text-[12.5px] text-muted-foreground">{STEPS[step].hint}</p>
+      </div>
+      <div className="mt-2 h-[340px] overflow-y-auto px-1 py-3">
+        {step === 0 ? (
+          <SourcesField agent={agent} controller={controller} />
+        ) : step === 1 ? (
+          <DestinationField agent={agent} agentKey={agentKey} controller={controller} />
+        ) : step === 2 ? (
+          <div className="space-y-6">
+            <ScheduleField controller={controller} />
+            <VolumeField agent={agent} controller={controller} />
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <SectionsField agent={agent} controller={controller} />
+            <FocusField controller={controller} />
+          </div>
+        )}
+      </div>
+      <DialogFooter>
+        <Button variant="ghost" size="sm" onClick={() => (step === 0 ? onClose() : setStep(step - 1))}>
+          {step === 0 ? "Cancel" : "Back"}
+        </Button>
+        {isLast ? (
+          <Button size="sm" disabled={!controller.isValid || create.isPending} onClick={() => create.mutate()}>
+            Create summariser
+          </Button>
+        ) : (
+          <Button size="sm" disabled={!canAdvance} onClick={() => goToStep(step + 1)}>
+            Next
+          </Button>
+        )}
+      </DialogFooter>
+    </>
+  );
+}

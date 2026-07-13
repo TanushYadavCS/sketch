@@ -36,10 +36,10 @@ export const searchToolSchema = {
     .enum(["meeting", "doc", "task", "message"])
     .optional()
     .describe(
-      "Semantic content kind. meeting=Fireflies, doc=Drive/Notion/ClickUp Docs/Linear projects, task=ClickUp tasks/Linear issues, message=conversation.",
+      "Semantic content kind. meeting=Fireflies, doc=Drive/Notion/ClickUp Docs/Linear projects, task=ClickUp tasks/Linear issues, message=conversation/WhatsApp.",
     ),
   source: z
-    .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "local"])
+    .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "whatsapp", "local"])
     .optional()
     .describe("Filter to a specific source. Omit to search all."),
   sortBy: z
@@ -51,7 +51,7 @@ export const searchToolSchema = {
   limit: z.number().optional().describe("Max results (default 10; default 3 when sortBy=recency)."),
 };
 
-export const searchEntitiesToolDescription = `Search for entities (projects, people, teams, databases) across all connected sources. Accepts multiple query variations to catch abbreviations and informal names. Returns matched entities with their type, status, and mention count.
+export const searchEntitiesToolDescription = `Search for entities (projects, people, teams, companies, products) across all connected sources. Accepts multiple query variations to catch abbreviations and informal names. Returns matched entities with their type, status, and mention count.
 
 Use this when the user asks about a project, person, or any named thing tracked across the org's tools. Pass multiple name variations (e.g. ["Beetu", "B2", "beetu app"]) to maximize matches.`;
 
@@ -93,7 +93,7 @@ type SearchEntitiesArgs = z.infer<z.ZodObject<typeof searchEntitiesToolSchema>>;
 type GetEntityContextArgs = z.infer<z.ZodObject<typeof getEntityContextToolSchema>>;
 type GetFileContentArgs = z.infer<z.ZodObject<typeof getFileContentToolSchema>>;
 
-async function resolveUserEmails(deps: SketchMcpDeps): Promise<string[]> {
+export async function resolveUserEmails(deps: SketchMcpDeps): Promise<string[]> {
   if (deps.publicMcp?.userEmails) return deps.publicMcp.userEmails;
   if (!deps.currentUserId || !deps.userRepo?.getAllEmailsForUser) return [];
   return deps.userRepo.getAllEmailsForUser(deps.currentUserId);

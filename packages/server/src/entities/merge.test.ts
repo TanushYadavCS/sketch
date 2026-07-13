@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
+import { buildMaterializeDeps } from "./materialize-deps";
 import { EntityMergeError, mergeEntities, unmergeEntities } from "./merge";
+import { proposeEntity } from "./propose";
 
 const USER_ID = "merge-user";
 
@@ -48,7 +50,13 @@ async function seedFile(db: Kysely<DB>, id: string): Promise<void> {
     .execute();
 }
 
-async function seedEntity(db: Kysely<DB>, id: string, name: string, sourceType = "person"): Promise<void> {
+async function seedEntity(
+  db: Kysely<DB>,
+  id: string,
+  name: string,
+  sourceType = "person",
+  provenanceTier = "inferred",
+): Promise<void> {
   await db
     .insertInto("entities")
     .values({
@@ -60,6 +68,7 @@ async function seedEntity(db: Kysely<DB>, id: string, name: string, sourceType =
       metadata: null,
       source_ref_id: null,
       status: "confirmed",
+      provenance_tier: provenanceTier,
       hotness: 0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -151,6 +160,17 @@ describe("entity merge core", () => {
       merged_into_entity_id: "survivor",
     });
     await expect(db.selectFrom("entities").selectAll().where(whereLiveEntity()).execute()).resolves.toHaveLength(2);
+  });
+
+  it("keeps the strongest provenance tier when merging declared and inferred entities", async () => {
+    await seedEntity(db, "survivor", "Alex", "person", "inferred");
+    await seedEntity(db, "loser", "Alex Product Owner", "person", "declared");
+
+    await mergeEntities(db, { survivorId: "survivor", loserId: "loser", userId: USER_ID });
+
+    await expect(
+      db.selectFrom("entities").select(["provenance_tier"]).where("id", "=", "survivor").executeTakeFirst(),
+    ).resolves.toEqual({ provenance_tier: "declared" });
   });
 
   it("unmerges re-pointed rows, collisions, self-loops, and relationship evidence", async () => {
@@ -387,6 +407,70 @@ describe("entity merge core", () => {
         expect.objectContaining({ id: "cp-loser", is_primary: 0 }),
       ]),
     );
+  });
+
+  it("carries loser names into survivor aliases, links future proposals, and reverses only recorded additions", async () => {
+    await seedEntity(db, "survivor", "Acme Corporation", "company");
+    await seedEntity(db, "loser", "Acme Corp", "company");
+    await db
+      .updateTable("entities")
+      .set({ aliases: JSON.stringify(["Acme Corporation Inc"]) })
+      .where("id", "=", "survivor")
+      .execute();
+    await db
+      .updateTable("entities")
+      .set({ aliases: JSON.stringify(["ACME Corp Ltd", "acmecorp"]) })
+      .where("id", "=", "loser")
+      .execute();
+
+    const result = await mergeEntities(db, { survivorId: "survivor", loserId: "loser", userId: USER_ID });
+
+    const mergedSurvivor = await db
+      .selectFrom("entities")
+      .select(["aliases"])
+      .where("id", "=", "survivor")
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(mergedSurvivor.aliases ?? "[]")).toEqual(["Acme Corporation Inc", "Acme Corp", "ACME Corp Ltd"]);
+
+    const ledger = await db
+      .selectFrom("entity_merges")
+      .select("moves")
+      .where("id", "=", result.mergeId)
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(ledger.moves)).toEqual(
+      expect.arrayContaining([
+        { kind: "alias_added", value: "Acme Corp", normalizedKey: "acmecorp" },
+        { kind: "alias_added", value: "ACME Corp Ltd", normalizedKey: "acmecorpltd" },
+      ]),
+    );
+
+    const deps = await buildMaterializeDeps(db);
+    const proposal = await proposeEntity(deps, {
+      name: "Acme Corp",
+      entityType: "company",
+      subtype: "external",
+      source: "test",
+      sourceId: "test:acme-corp",
+      evidence: [{ indexedFileId: "file-a" }],
+      triggeredByUserId: USER_ID,
+    });
+    expect(proposal.kind).toBe("linked");
+    if (proposal.kind !== "linked") throw new Error("expected linked proposal");
+    expect(proposal.entity.id).toBe("survivor");
+
+    await db
+      .updateTable("entities")
+      .set({ aliases: JSON.stringify(["Acme Corporation Inc", "Acme Corp", "ACME Corp Ltd", "Post Merge Alias"]) })
+      .where("id", "=", "survivor")
+      .execute();
+    await unmergeEntities(db, { mergeId: result.mergeId, userId: USER_ID });
+
+    const unmergedSurvivor = await db
+      .selectFrom("entities")
+      .select(["aliases"])
+      .where("id", "=", "survivor")
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(unmergedSurvivor.aliases ?? "[]")).toEqual(["Acme Corporation Inc", "Post Merge Alias"]);
   });
 
   it("does not steal source refs that moved after merge", async () => {

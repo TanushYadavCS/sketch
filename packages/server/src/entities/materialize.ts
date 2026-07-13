@@ -8,6 +8,7 @@ export {
   cleanupRelationshipEvidenceForFacts,
   materializeFromFact,
   materializeUnmaterializedFacts,
+  MAX_MATERIALIZATION_ATTEMPTS,
   replaySourceFacts,
   shouldMarkMaterialized,
 } from "./materialize-replay";

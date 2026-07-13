@@ -13,7 +13,11 @@ import { createEntitySuppressionRepository } from "../../db/repositories/entity-
 import { createEntityTimelineRepository } from "../../db/repositories/entity-timeline";
 import type { DB } from "../../db/schema";
 import { normalizeEntityMatchName } from "../../entities/materialize-deps";
-import { type EntityProfileFacts, SYSTEM_SOURCE_TYPES, mapSourceTypeToEntityType } from "../../entities/profile-facts";
+import {
+  type EntityProfileFacts,
+  HIDDEN_ENTITY_SOURCE_TYPES,
+  mapSourceTypeToEntityType,
+} from "../../entities/profile-facts";
 import { denyIfNotAdmin, getContentViewer, getFileViewer } from "../auth-helpers";
 import type { EntityRoutesDeps } from "./types";
 
@@ -285,6 +289,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       subtype: body.subtype,
       aliases: body.aliases,
       status: "confirmed",
+      provenanceTier: "declared",
     });
 
     return c.json({
@@ -308,7 +313,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
     const offset = Number(c.req.query("offset")) || 0;
     const includeSystem = c.req.query("includeSystem") === "true";
     const includeArchived = c.req.query("includeArchived") === "true";
-    const systemTypes = [...SYSTEM_SOURCE_TYPES];
+    const systemTypes = [...HIDDEN_ENTITY_SOURCE_TYPES];
     const viewer = getFileViewer(c);
 
     // For non-admin viewers, the mention_count and last_mention_at subqueries
@@ -437,7 +442,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
   routes.get("/graph", async (c) => {
     const limit = Math.min(Number(c.req.query("limit")) || 500, 1000);
     const includeSystem = c.req.query("includeSystem") === "true";
-    const systemTypes = [...SYSTEM_SOURCE_TYPES];
+    const systemTypes = [...HIDDEN_ENTITY_SOURCE_TYPES];
     const viewer = getFileViewer(c);
 
     let nodeQuery = db

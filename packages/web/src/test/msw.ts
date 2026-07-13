@@ -14,6 +14,7 @@ export const handlers = [
       orgName: null,
       botName: "Sketch",
       slackConnected: false,
+      whatsappConnected: false,
       llmConnected: false,
       llmProvider: null,
     });
@@ -100,6 +101,24 @@ export const handlers = [
     return HttpResponse.json({ groups: [] });
   }),
 
+  http.get("/api/channels/whatsapp/groups/:jid/member-labels", () => {
+    return HttpResponse.json({ labels: [] });
+  }),
+
+  http.put("/api/channels/whatsapp/groups/:jid/member-labels", async ({ request }) => {
+    const body = (await request.json()) as {
+      labels?: Array<{ id?: string; phoneE164?: string; displayName: string; companyName?: string | null }>;
+    };
+    return HttpResponse.json({
+      labels: (body.labels ?? []).map((label, index) => ({
+        id: label.id ?? `label-${index}`,
+        maskedPhone: label.phoneE164 ? `**${label.phoneE164.replace(/\D/gu, "").slice(-2)}` : "**67",
+        displayName: label.displayName,
+        companyName: label.companyName ?? null,
+      })),
+    });
+  }),
+
   http.delete("/api/channels/whatsapp/pair", () => {
     return HttpResponse.json({ success: true });
   }),
@@ -114,17 +133,38 @@ export const handlers = [
     });
   }),
 
+  http.get("/api/connectors/credential-source", () => {
+    return HttpResponse.json({
+      mode: "local",
+      canvasConfigured: false,
+      canvasCredentialImportConfigured: false,
+      publicKeyId: null,
+    });
+  }),
+
+  http.get("/api/connectors/canvas/suggestions", () => {
+    return HttpResponse.json({ suggestion: null });
+  }),
+
+  http.get("/api/mcp-servers", () => {
+    return HttpResponse.json({ servers: [] });
+  }),
+
+  http.get("/api/mcp-servers/:providerId/connections", () => {
+    return HttpResponse.json({ connections: [] });
+  }),
+
   http.get("/api/users", () => {
     return HttpResponse.json({
       users: [
         {
           id: "u1",
           name: "Alice Smith",
-          email: null,
-          email_verified_at: null,
+          email: "alice@example.com",
+          email_verified_at: "2026-01-01T00:00:00Z",
           auth_role: "member",
           slack_user_id: "U001",
-          whatsapp_number: null,
+          whatsapp_number: "+14155550101",
           description: null,
           type: "human",
           role: null,
@@ -138,11 +178,11 @@ export const handlers = [
         {
           id: "u2",
           name: "Bob Jones",
-          email: null,
-          email_verified_at: null,
+          email: "bob@example.com",
+          email_verified_at: "2026-01-02T00:00:00Z",
           auth_role: "admin",
           slack_user_id: null,
-          whatsapp_number: "+919876543210",
+          whatsapp_number: "+14155550102",
           description: null,
           type: "human",
           role: null,
@@ -159,9 +199,9 @@ export const handlers = [
 
   http.post("/api/users", async ({ request }) => {
     const body = (await request.json()) as { name?: string; email?: string; whatsappNumber?: string };
-    if (!body.name || (!body.email && !body.whatsappNumber)) {
+    if (!body.name || !body.email || !body.whatsappNumber) {
       return HttpResponse.json(
-        { error: { code: "VALIDATION_ERROR", message: "Name and either email or WhatsApp number required" } },
+        { error: { code: "VALIDATION_ERROR", message: "Name, email, and WhatsApp number required" } },
         { status: 400 },
       );
     }
@@ -252,6 +292,43 @@ export const handlers = [
 
   http.get("/api/entities/:id/members", () => {
     return HttpResponse.json({ members: [], truncated: false });
+  }),
+
+  http.get("/api/entities/:id/tasks", () => {
+    return HttpResponse.json({ tasks: [] });
+  }),
+
+  http.patch("/api/entities/:id/tasks/:taskId", async ({ params, request }) => {
+    const body = (await request.json()) as { status?: string };
+    return HttpResponse.json({
+      task: {
+        id: params.taskId,
+        parentEntityId: params.id,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: "Updated task",
+        status: body.status ?? "open",
+        statusRaw: body.status ?? "open",
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        proposedAssigneeName: null,
+        priority: null,
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: String(params.taskId),
+        createdByUserId: "u1",
+        createdByUserName: "Alice Smith",
+        createdByUserEmail: "alice@example.com",
+        isOwnedByViewer: true,
+        readonlyReason: null,
+        completedAt: body.status === "done" ? new Date().toISOString() : null,
+        updatedAt: new Date().toISOString(),
+        canEditStatus: true,
+      },
+    });
   }),
 
   http.put("/api/entities/:id/members/:fileId", () => {

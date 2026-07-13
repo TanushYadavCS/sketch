@@ -1,0 +1,1179 @@
+{
+  "source": "real_claude_agent_sdk_bedrock",
+  "recorderRunId": "<RECORDER_RUN_ID>",
+  "handAuthored": false,
+  "modelId": "us.anthropic.claude-sonnet-4-6",
+  "thrownError": null,
+  "messages": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "<WORKSPACE_DIR>",
+      "session_id": "<SESSION_ID_1>",
+      "tools": [
+        "Read",
+        "Write",
+        "mcp__claude_ai_Canva__authenticate",
+        "mcp__claude_ai_Canva__complete_authentication",
+        "mcp__claude_ai_Gmail__authenticate",
+        "mcp__claude_ai_Gmail__complete_authentication",
+        "mcp__claude_ai_Google_Calendar__authenticate",
+        "mcp__claude_ai_Google_Calendar__complete_authentication",
+        "mcp__claude_ai_Google_Drive__authenticate",
+        "mcp__claude_ai_Google_Drive__complete_authentication",
+        "mcp__claude_ai_Linear__create_attachment",
+        "mcp__claude_ai_Linear__create_attachment_from_upload",
+        "mcp__claude_ai_Linear__create_issue_label",
+        "mcp__claude_ai_Linear__delete_attachment",
+        "mcp__claude_ai_Linear__delete_comment",
+        "mcp__claude_ai_Linear__delete_status_update",
+        "mcp__claude_ai_Linear__extract_images",
+        "mcp__claude_ai_Linear__get_agent_skill",
+        "mcp__claude_ai_Linear__get_attachment",
+        "mcp__claude_ai_Linear__get_diff",
+        "mcp__claude_ai_Linear__get_diff_threads",
+        "mcp__claude_ai_Linear__get_document",
+        "mcp__claude_ai_Linear__get_issue",
+        "mcp__claude_ai_Linear__get_issue_status",
+        "mcp__claude_ai_Linear__get_milestone",
+        "mcp__claude_ai_Linear__get_project",
+        "mcp__claude_ai_Linear__get_release",
+        "mcp__claude_ai_Linear__get_release_note",
+        "mcp__claude_ai_Linear__get_status_updates",
+        "mcp__claude_ai_Linear__get_team",
+        "mcp__claude_ai_Linear__get_user",
+        "mcp__claude_ai_Linear__list_agent_skills",
+        "mcp__claude_ai_Linear__list_comments",
+        "mcp__claude_ai_Linear__list_cycles",
+        "mcp__claude_ai_Linear__list_diffs",
+        "mcp__claude_ai_Linear__list_documents",
+        "mcp__claude_ai_Linear__list_issue_labels",
+        "mcp__claude_ai_Linear__list_issue_statuses",
+        "mcp__claude_ai_Linear__list_issues",
+        "mcp__claude_ai_Linear__list_milestones",
+        "mcp__claude_ai_Linear__list_project_labels",
+        "mcp__claude_ai_Linear__list_projects",
+        "mcp__claude_ai_Linear__list_release_notes",
+        "mcp__claude_ai_Linear__list_release_pipelines",
+        "mcp__claude_ai_Linear__list_releases",
+        "mcp__claude_ai_Linear__list_teams",
+        "mcp__claude_ai_Linear__list_users",
+        "mcp__claude_ai_Linear__prepare_attachment_upload",
+        "mcp__claude_ai_Linear__save_comment",
+        "mcp__claude_ai_Linear__save_document",
+        "mcp__claude_ai_Linear__save_issue",
+        "mcp__claude_ai_Linear__save_milestone",
+        "mcp__claude_ai_Linear__save_project",
+        "mcp__claude_ai_Linear__save_release",
+        "mcp__claude_ai_Linear__save_release_note",
+        "mcp__claude_ai_Linear__save_status_update",
+        "mcp__claude_ai_Linear__search_documentation",
+        "mcp__claude_ai_Raindrop__create_bookmarks",
+        "mcp__claude_ai_Raindrop__create_collections",
+        "mcp__claude_ai_Raindrop__create_highlight",
+        "mcp__claude_ai_Raindrop__delete_bookmarks",
+        "mcp__claude_ai_Raindrop__delete_collections",
+        "mcp__claude_ai_Raindrop__delete_highlights",
+        "mcp__claude_ai_Raindrop__delete_tags",
+        "mcp__claude_ai_Raindrop__fetch_bookmark_content",
+        "mcp__claude_ai_Raindrop__fetch_current_user",
+        "mcp__claude_ai_Raindrop__fetch_popular_keywords",
+        "mcp__claude_ai_Raindrop__find_bookmarks",
+        "mcp__claude_ai_Raindrop__find_collections",
+        "mcp__claude_ai_Raindrop__find_highlights",
+        "mcp__claude_ai_Raindrop__find_misplaced_bookmarks",
+        "mcp__claude_ai_Raindrop__find_mistagged_bookmarks",
+        "mcp__claude_ai_Raindrop__find_tags",
+        "mcp__claude_ai_Raindrop__merge_collections",
+        "mcp__claude_ai_Raindrop__update_bookmarks",
+        "mcp__claude_ai_Raindrop__update_collections",
+        "mcp__claude_ai_Raindrop__update_highlight",
+        "mcp__claude_ai_Raindrop__update_tags",
+        "mcp__claude_ai_Sketch_Canvas_AI__authenticate",
+        "mcp__claude_ai_Sketch_Canvas_AI__complete_authentication"
+      ],
+      "mcp_servers": [
+        {
+          "name": "claude.ai Linear",
+          "status": "connected"
+        },
+        {
+          "name": "claude.ai Sketch Canvas AI",
+          "status": "needs-auth"
+        },
+        {
+          "name": "claude.ai Raindrop",
+          "status": "connected"
+        },
+        {
+          "name": "claude.ai Canva",
+          "status": "needs-auth"
+        },
+        {
+          "name": "claude.ai Google Calendar",
+          "status": "needs-auth"
+        },
+        {
+          "name": "claude.ai Gmail",
+          "status": "needs-auth"
+        },
+        {
+          "name": "claude.ai Google Drive",
+          "status": "needs-auth"
+        }
+      ],
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "permissionMode": "default",
+      "slash_commands": [
+        "update-config",
+        "debug",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "loop",
+        "claude-api",
+        "clear",
+        "compact",
+        "context",
+        "heapdump",
+        "init",
+        "review",
+        "security-review",
+        "usage",
+        "insights",
+        "team-onboarding"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.118",
+      "output_style": "default",
+      "agents": ["claude-code-guide", "Explore", "general-purpose", "Plan", "statusline-setup"],
+      "skills": ["update-config", "debug", "simplify", "batch", "fewer-permission-prompts", "loop", "claude-api"],
+      "plugins": [],
+      "uuid": "<UUID_1>",
+      "memory_paths": {
+        "auto": "<HOME>/.claude/projects/-private-var-folders-d8-z3vkr3g103bb7kmx-rrqn0p40000gn-T-sketch-sdk-tool-run-YODOYa/memory/"
+      },
+      "fast_mode_state": "off"
+    },
+    {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting",
+      "uuid": "<UUID_2>",
+      "session_id": "<SESSION_ID_1>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_start",
+        "message": {
+          "model": "claude-sonnet-4-6",
+          "id": "msg_bdrk_011DfidEhj42Dt1sZ5MbY11K",
+          "type": "message",
+          "role": "assistant",
+          "content": [],
+          "stop_reason": null,
+          "stop_sequence": null,
+          "stop_details": null,
+          "usage": {
+            "input_tokens": 3,
+            "cache_creation_input_tokens": 528,
+            "cache_read_input_tokens": 21457,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 528,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 3
+          }
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_3>",
+      "ttft_ms": 2226
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text",
+          "text": ""
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_4>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "I'll do"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_5>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " both"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_6>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " operations"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_7>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " simultaneously"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_8>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " since"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_9>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " the"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_10>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " read"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_11>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " depends"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_12>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " on the write."
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_13>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " Let me start with"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_14>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " the write"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_15>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " first"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_16>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": ","
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_17>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " then read."
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_18>"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-sonnet-4-6",
+        "id": "msg_bdrk_011DfidEhj42Dt1sZ5MbY11K",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "I'll do both operations simultaneously since the read depends on the write. Let me start with the write first, then read."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 3,
+          "cache_creation_input_tokens": 528,
+          "cache_read_input_tokens": 21457,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 528,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 3
+        },
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "<SESSION_ID_1>",
+      "uuid": "<UUID_19>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_20>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_use",
+          "id": "<TOOL_USE_ID_1>",
+          "name": "Write",
+          "input": {}
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_21>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": ""
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_22>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{\"file_"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_23>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "path\": \""
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_24>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "sdk-fixtu"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_25>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "re.txt\""
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_26>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": ", \"c"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_27>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "ontent\": \"f"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_28>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "ixture-"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_29>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "ok\"}"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_30>"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-sonnet-4-6",
+        "id": "msg_bdrk_011DfidEhj42Dt1sZ5MbY11K",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "<TOOL_USE_ID_1>",
+            "name": "Write",
+            "input": {
+              "file_path": "sdk-fixture.txt",
+              "content": "fixture-ok"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 3,
+          "cache_creation_input_tokens": 528,
+          "cache_read_input_tokens": 21457,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 528,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 3
+        },
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "<SESSION_ID_1>",
+      "uuid": "<UUID_31>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_32>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use",
+          "stop_sequence": null,
+          "stop_details": null
+        },
+        "usage": {
+          "input_tokens": 3,
+          "cache_creation_input_tokens": 528,
+          "cache_read_input_tokens": 21457,
+          "output_tokens": 102
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_33>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_stop",
+        "amazon-bedrock-invocationMetrics": {
+          "inputTokenCount": 3,
+          "outputTokenCount": 102,
+          "invocationLatency": 3686,
+          "firstByteLatency": 904,
+          "cacheReadInputTokenCount": 21457,
+          "cacheWriteInputTokenCount": 528
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_34>"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "<TOOL_USE_ID_1>",
+            "type": "tool_result",
+            "content": "File created successfully at: sdk-fixture.txt"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "<SESSION_ID_1>",
+      "uuid": "<UUID_35>",
+      "timestamp": "<TIMESTAMP>",
+      "tool_use_result": {
+        "type": "create",
+        "filePath": "sdk-fixture.txt",
+        "content": "fixture-ok",
+        "structuredPatch": [],
+        "originalFile": null,
+        "userModified": false
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting",
+      "uuid": "<UUID_36>",
+      "session_id": "<SESSION_ID_1>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_start",
+        "message": {
+          "model": "claude-sonnet-4-6",
+          "id": "msg_bdrk_01Q2NCrtGKAMChDN8A9BbqFo",
+          "type": "message",
+          "role": "assistant",
+          "content": [],
+          "stop_reason": null,
+          "stop_sequence": null,
+          "stop_details": null,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 126,
+            "cache_read_input_tokens": 21985,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 126,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 24
+          }
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_37>",
+      "ttft_ms": 1770
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "tool_use",
+          "id": "<TOOL_USE_ID_2>",
+          "name": "Read",
+          "input": {}
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_38>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": ""
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_39>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{\"fil"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_40>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "e_path\":"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_41>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": " \"sdk-fi"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_42>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "xture.txt\"}"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_43>"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-sonnet-4-6",
+        "id": "msg_bdrk_01Q2NCrtGKAMChDN8A9BbqFo",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "<TOOL_USE_ID_2>",
+            "name": "Read",
+            "input": {
+              "file_path": "sdk-fixture.txt"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 1,
+          "cache_creation_input_tokens": 126,
+          "cache_read_input_tokens": 21985,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 126,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 24
+        },
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "<SESSION_ID_1>",
+      "uuid": "<UUID_44>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_45>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use",
+          "stop_sequence": null,
+          "stop_details": null
+        },
+        "usage": {
+          "input_tokens": 1,
+          "cache_creation_input_tokens": 126,
+          "cache_read_input_tokens": 21985,
+          "output_tokens": 57
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_46>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_stop",
+        "amazon-bedrock-invocationMetrics": {
+          "inputTokenCount": 1,
+          "outputTokenCount": 57,
+          "invocationLatency": 1294,
+          "firstByteLatency": 1025,
+          "cacheReadInputTokenCount": 21985,
+          "cacheWriteInputTokenCount": 126
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_47>"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "<TOOL_USE_ID_2>",
+            "type": "tool_result",
+            "content": "1\tfixture-ok"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "<SESSION_ID_1>",
+      "uuid": "<UUID_48>",
+      "timestamp": "<TIMESTAMP>",
+      "tool_use_result": {
+        "type": "text",
+        "file": {
+          "filePath": "sdk-fixture.txt",
+          "content": "fixture-ok",
+          "numLines": 1,
+          "startLine": 1,
+          "totalLines": 1
+        }
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting",
+      "uuid": "<UUID_49>",
+      "session_id": "<SESSION_ID_1>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_start",
+        "message": {
+          "model": "claude-sonnet-4-6",
+          "id": "msg_bdrk_01T7aT2XU7spvhcXJFDCj2kU",
+          "type": "message",
+          "role": "assistant",
+          "content": [],
+          "stop_reason": null,
+          "stop_sequence": null,
+          "stop_details": null,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 74,
+            "cache_read_input_tokens": 22111,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 74,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1
+          }
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_50>",
+      "ttft_ms": 1500
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text",
+          "text": ""
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_51>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "Read"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_52>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " back"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_53>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": ":"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_54>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " fixture"
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_55>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "-ok."
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_56>"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-sonnet-4-6",
+        "id": "msg_bdrk_01T7aT2XU7spvhcXJFDCj2kU",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Read back: fixture-ok."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 1,
+          "cache_creation_input_tokens": 74,
+          "cache_read_input_tokens": 22111,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 74,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 1
+        },
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "<SESSION_ID_1>",
+      "uuid": "<UUID_57>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_58>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn",
+          "stop_sequence": null,
+          "stop_details": null
+        },
+        "usage": {
+          "input_tokens": 1,
+          "cache_creation_input_tokens": 74,
+          "cache_read_input_tokens": 22111,
+          "output_tokens": 10
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_59>"
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_stop",
+        "amazon-bedrock-invocationMetrics": {
+          "inputTokenCount": 1,
+          "outputTokenCount": 10,
+          "invocationLatency": 1161,
+          "firstByteLatency": 914,
+          "cacheReadInputTokenCount": 22111,
+          "cacheWriteInputTokenCount": 74
+        }
+      },
+      "session_id": "<SESSION_ID_1>",
+      "parent_tool_use_id": null,
+      "uuid": "<UUID_60>"
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false,
+      "api_error_status": null,
+      "duration_ms": 8710,
+      "duration_api_ms": 10379,
+      "num_turns": 3,
+      "result": "Read back: fixture-ok.",
+      "stop_reason": "end_turn",
+      "session_id": "<SESSION_ID_1>",
+      "total_cost_usd": 0.0262869,
+      "usage": {
+        "input_tokens": 5,
+        "cache_creation_input_tokens": 728,
+        "cache_read_input_tokens": 65553,
+        "output_tokens": 169,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 728
+        },
+        "inference_geo": "",
+        "iterations": [],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "us.anthropic.claude-sonnet-4-6": {
+          "inputTokens": 392,
+          "outputTokens": 181,
+          "cacheReadInputTokens": 65553,
+          "cacheCreationInputTokens": 728,
+          "webSearchRequests": 0,
+          "costUSD": 0.0262869,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000
+        }
+      },
+      "permission_denials": [],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "uuid": "<UUID_61>"
+    }
+  ]
+}

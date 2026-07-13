@@ -58,7 +58,7 @@ export interface SearchOptions {
   userEmails?: string[];
 }
 
-function fileAccessFilterSql(emailList: string[]) {
+export function fileAccessFilterSql(emailList: string[]) {
   const emailSql = sql.join(
     emailList.map((e) => sql`${e}`),
     sql`,`,
@@ -566,7 +566,7 @@ export type KindRule = { sources?: string[]; fileTypes?: string[] };
  * sweeps in tasks under `kind: "doc"` — so we discriminate on file_type too.
  */
 export const KIND_TO_RULES: Record<string, KindRule[]> = {
-  meeting: [{ sources: ["fireflies"] }],
+  meeting: [{ sources: ["fireflies", "otter"] }],
   doc: [
     { sources: ["google_drive"], fileTypes: ["document", "presentation"] },
     { sources: ["notion"], fileTypes: ["page"] },
@@ -577,7 +577,7 @@ export const KIND_TO_RULES: Record<string, KindRule[]> = {
     { sources: ["clickup"], fileTypes: ["task", "subtask"] },
     { sources: ["linear"], fileTypes: ["issue"] },
   ],
-  message: [{ sources: ["conversation"] }],
+  message: [{ sources: ["conversation", "whatsapp"] }],
 };
 
 /** Compile kind rules to a raw SQL fragment for the FTS / hybrid pipelines. */

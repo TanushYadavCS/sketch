@@ -1,5 +1,11 @@
+import type { Kysely } from "kysely";
+import { upsertCommitmentFact } from "../db/repositories/commitments";
+import { upsertDecisionFactsForFile } from "../db/repositories/decisions";
 import type { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
+import type { DB } from "../db/schema";
 import { normalizeRelationType } from "../entities/graph";
+import { emitDocumentDerivedFacts, sortDocumentParentRefs } from "./document-facts";
+import type { GeminiGenerator } from "./gemini-generate";
 import type { Connector, ConnectorType, SyncedItem } from "./types";
 
 type IndexedFileFactRepository = ReturnType<typeof createIndexedFileFactRepository>;
@@ -12,15 +18,19 @@ export interface SyncFactContext {
 
 interface EmitFactsForSyncedItemParams {
   factRepo: IndexedFileFactRepository;
+  db?: Kysely<DB>;
   connector: Connector;
   connectorType: ConnectorType;
   factContext: SyncFactContext;
   item: SyncedItem;
   indexedFileId: string;
   emitCorrespondentFacts?: boolean;
+  contentChanged?: boolean;
+  generator?: GeminiGenerator;
 }
 
 export async function emitFactsForSyncedItem({
+  db,
   factRepo,
   connector,
   connectorType,
@@ -28,6 +38,8 @@ export async function emitFactsForSyncedItem({
   item,
   indexedFileId,
   emitCorrespondentFacts = false,
+  contentChanged = false,
+  generator,
 }: EmitFactsForSyncedItemParams): Promise<void> {
   if (item.entitySeeds && item.entitySeeds.length > 0) {
     for (const seed of item.entitySeeds) {
@@ -188,6 +200,79 @@ export async function emitFactsForSyncedItem({
         contentHash: item.contentHash,
       });
     }
+  }
+
+  if (item.task) {
+    await factRepo.upsertFact({
+      ...factContext,
+      indexedFileId,
+      contentHash: item.contentHash,
+      source: connectorType,
+      factType: "structural_task",
+      relation: "mentioned",
+      subjectName: item.task.title,
+      subjectSource: connectorType,
+      subjectSourceId: item.task.sourceTaskId,
+      contextSnippet: item.sourcePath,
+      raw: { indexedFileId, task: item.task },
+    });
+  }
+
+  if (item.commitments && item.commitments.length > 0 && db) {
+    for (const commitment of item.commitments) {
+      await upsertCommitmentFact(db, {
+        indexedFileId,
+        connectorConfigId: factContext.connectorConfigId,
+        createdByUserId: factContext.createdByUserId,
+        lastSeenSyncRunId: factContext.lastSeenSyncRunId,
+        contentHash: item.contentHash,
+        source: connectorType,
+        commitmentId: commitment.commitmentId,
+        parentRef: commitment.parentRef,
+        parentEntityId: commitment.parentEntityId,
+        title: commitment.title,
+        status: commitment.status,
+        dueAt: commitment.dueAt,
+        evidence: commitment.evidence,
+        contextSnippet: item.sourcePath,
+      });
+    }
+  }
+
+  if (item.decisions && db) {
+    await upsertDecisionFactsForFile(db, {
+      indexedFileId,
+      connectorConfigId: factContext.connectorConfigId,
+      createdByUserId: factContext.createdByUserId,
+      lastSeenSyncRunId: factContext.lastSeenSyncRunId,
+      contentHash: item.contentHash,
+      source: connectorType,
+      decisions: item.decisions,
+      contextSnippet: item.sourcePath,
+    });
+  }
+
+  if (db) {
+    await emitDocumentDerivedFacts(
+      db,
+      {
+        indexedFileId,
+        source: connectorType,
+        content: item.content ?? "",
+        sourceDate: item.sourceCreatedAt ?? item.sourceUpdatedAt,
+        contentCategory: item.contentCategory,
+        fileType: item.fileType,
+        contentHash: item.contentHash,
+        connectorConfigId: factContext.connectorConfigId,
+        createdByUserId: factContext.createdByUserId,
+        lastSeenSyncRunId: factContext.lastSeenSyncRunId,
+        attendees: item.attendees ?? [],
+        parentRefs: sortDocumentParentRefs(
+          item.parentEntities?.map((parent) => ({ source: parent.source, sourceId: parent.sourceId })) ?? [],
+        ),
+      },
+      { contentChanged, generator },
+    );
   }
 
   if (item.authorEmail || item.authorName) {

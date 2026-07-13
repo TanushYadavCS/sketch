@@ -1,6 +1,7 @@
 import type { createConversationRepository } from "../db/repositories/conversations";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { Logger } from "../logger";
+import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 
 export interface WorkflowDeliveryCaptureDeps {
   conversations: ReturnType<typeof createConversationRepository>;
@@ -36,6 +37,16 @@ export function providerTimestampFromWhatsApp(message: { messageTimestamp?: unkn
 }
 
 export function createWorkflowDeliveryCapture(deps: WorkflowDeliveryCaptureDeps) {
+  function whatsappConversationRef(deliveryTarget: string) {
+    if (deliveryTarget.endsWith("@g.us")) {
+      return { platform: "whatsapp", kind: "group", providerConversationId: deliveryTarget };
+    }
+
+    const target = whatsappTargetFromDeliveryTarget(deliveryTarget);
+    const providerConversationId = target.kind === "dm" ? whatsappDeliveryTargetFromTarget(target) : target.groupId;
+    return { platform: "whatsapp", kind: "dm", providerConversationId };
+  }
+
   async function getBotName(): Promise<string> {
     try {
       const settings = await deps.settingsRepo.get();
@@ -73,11 +84,7 @@ export function createWorkflowDeliveryCapture(deps: WorkflowDeliveryCaptureDeps)
 
     async captureWhatsApp(params: WhatsAppDeliveryCaptureParams): Promise<void> {
       try {
-        const conversation = await deps.conversations.getOrCreate({
-          platform: "whatsapp",
-          kind: params.deliveryTarget.endsWith("@g.us") ? "group" : "dm",
-          providerConversationId: params.deliveryTarget,
-        });
+        const conversation = await deps.conversations.getOrCreate(whatsappConversationRef(params.deliveryTarget));
         await deps.conversations.insertMessage({
           conversationId: conversation.id,
           providerMessageId: params.messageRef,

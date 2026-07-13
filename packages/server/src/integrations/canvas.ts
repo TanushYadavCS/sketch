@@ -9,7 +9,11 @@
  */
 import { join } from "node:path";
 import type { IntegrationApp, IntegrationConnection, PageInfo } from "@sketch/shared";
+import { z } from "zod";
+import type { CredentialEnvelope } from "../connectors/credential-envelope";
 import type { BrokerSpec, IntegrationProvider, IntegrationUserOrgRole } from "./types";
+
+const REQUEST_TIMEOUT_MS = 30_000;
 
 type CanvasAccountResponse = {
   id: string;
@@ -31,6 +35,60 @@ type CanvasAccountResponse = {
   created_at?: string;
   connectedAt?: string;
 };
+
+export type CanvasSketchConnectorType =
+  | "google_drive"
+  | "google_calendar"
+  | "gmail"
+  | "outlook"
+  | "teams"
+  | "fireflies"
+  | "clickup"
+  | "notion"
+  | "linear";
+
+export interface CanvasConnectorCredentialResponse {
+  connectorType: CanvasSketchConnectorType;
+  provider: string;
+  credentialKind: "oauth_access_token" | "api_key";
+  expiresAt?: string;
+  envelope: CredentialEnvelope;
+}
+
+const credentialEnvelopeSchema = z.object({
+  version: z.literal(1),
+  algorithm: z.literal("RSA-OAEP-256+A256GCM"),
+  keyId: z.string().min(1),
+  encryptedKey: z.string().min(1),
+  iv: z.string().min(1),
+  tag: z.string().min(1),
+  ciphertext: z.string().min(1),
+});
+
+const canvasSketchConnectorTypeSchema = z.enum([
+  "google_drive",
+  "google_calendar",
+  "gmail",
+  "outlook",
+  "teams",
+  "fireflies",
+  "clickup",
+  "notion",
+  "linear",
+] satisfies [CanvasSketchConnectorType, ...CanvasSketchConnectorType[]]);
+
+const canvasConnectorCredentialResponseSchema = z.object({
+  connectorType: canvasSketchConnectorTypeSchema,
+  provider: z.string().min(1),
+  credentialKind: z.enum(["oauth_access_token", "api_key"]),
+  expiresAt: z.string().min(1).optional(),
+  envelope: credentialEnvelopeSchema,
+});
+
+const canvasCredentialMintResponseSchema = z.object({
+  success: z.literal(true),
+  data: canvasConnectorCredentialResponseSchema,
+});
 
 function hasCanvasAccessMetadata(account: CanvasAccountResponse): boolean {
   return (
@@ -123,7 +181,11 @@ export class CanvasProvider implements IntegrationProvider {
       error?: string | { code?: string; message?: string };
       message?: string;
     } | null;
-    const message = (typeof body?.error === "string" ? body.error : body?.error?.message) ?? body?.message ?? fallback;
+    const message =
+      (typeof body?.error === "object" ? body.error.message : undefined) ??
+      body?.message ??
+      (typeof body?.error === "string" ? body.error : undefined) ??
+      fallback;
     const code =
       (typeof body?.error === "object" ? body.error.code : undefined) ??
       (res.status === 401
@@ -151,7 +213,10 @@ export class CanvasProvider implements IntegrationProvider {
       if (after) url.searchParams.set("after", after);
     }
 
-    const res = await fetch(url.toString(), { headers: this.headers() });
+    const res = await fetch(url.toString(), {
+      headers: this.headers(),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
     if (!res.ok) {
       throw new Error(`Canvas listApps failed: ${res.status} ${res.statusText}`);
     }
@@ -200,6 +265,7 @@ export class CanvasProvider implements IntegrationProvider {
       method: "POST",
       headers: this.headers(userEmail, true, userName, userOrgRole),
       body: JSON.stringify({ app_slug: appId, callback_url: callbackUrl }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -220,6 +286,7 @@ export class CanvasProvider implements IntegrationProvider {
   async listConnections(userEmail: string, userName?: string): Promise<IntegrationConnection[]> {
     const res = await fetch(`${this.apiUrl}/api/pipedream/accounts`, {
       headers: this.headers(userEmail, true, userName),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -267,6 +334,7 @@ export class CanvasProvider implements IntegrationProvider {
     const res = await fetch(`${this.apiUrl}/api/pipedream/accounts/${connectionId}`, {
       method: "DELETE",
       headers: this.headers(userEmail, false, userName),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -284,6 +352,7 @@ export class CanvasProvider implements IntegrationProvider {
       method: "PATCH",
       headers: this.headers(userEmail, true, userName),
       body: JSON.stringify({ accessLevel }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -291,5 +360,35 @@ export class CanvasProvider implements IntegrationProvider {
     }
 
     return null;
+  }
+
+  async mintConnectorCredential(params: {
+    userEmail: string;
+    connectorType: CanvasSketchConnectorType;
+    publicKeyId?: string;
+    accountId?: string;
+    userName?: string;
+    userOrgRole?: IntegrationUserOrgRole;
+  }): Promise<CanvasConnectorCredentialResponse> {
+    const res = await fetch(`${this.apiUrl}/api/sketch/credentials/mint`, {
+      method: "POST",
+      headers: this.headers(params.userEmail, true, params.userName, params.userOrgRole),
+      body: JSON.stringify({
+        connectorType: params.connectorType,
+        ...(params.publicKeyId ? { publicKeyId: params.publicKeyId } : {}),
+        ...(params.accountId ? { accountId: params.accountId } : {}),
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      throw await this.parseError(res, `Canvas credential mint failed: ${res.status} ${res.statusText}`);
+    }
+
+    const parsed = canvasCredentialMintResponseSchema.safeParse(await res.json().catch(() => null));
+    if (!parsed.success) {
+      throw new Error("Canvas credential mint returned an invalid response");
+    }
+    return parsed.data.data;
   }
 }

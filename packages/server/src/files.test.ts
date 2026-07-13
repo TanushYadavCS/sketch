@@ -9,6 +9,7 @@ import {
   isAudioAttachment,
   isImageAttachment,
   mimeToExtension,
+  selectImagesWithinBudget,
   splitAttachments,
 } from "./files";
 import type { Attachment } from "./files";
@@ -57,6 +58,7 @@ describe("downloadSlackFile", () => {
     const [, init] = fetchSpy.mock.calls[0];
     const headers = init?.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer xoxb-token");
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("strips auth header when redirected to non-Slack CDN", async () => {
@@ -182,6 +184,17 @@ describe("formatAttachmentsForPrompt", () => {
 
     expect(result).not.toContain("mcp__sketch__VisualAnalysis");
     expect(result).toContain('<file name="b.png" path="/w/b.png" mime="image/png" size="2048" />');
+  });
+
+  it("annotates oversized inline images with a Read-it note", () => {
+    const result = formatAttachmentsForPrompt(
+      [{ originalName: "big.png", localPath: "/w/big.png", mimeType: "image/png", sizeBytes: 999 }],
+      { oversizedInlineImagePaths: new Set(["/w/big.png"]) },
+    );
+
+    expect(result).toContain('name="big.png"');
+    expect(result).toContain("too large to view inline");
+    expect(result).toContain("use the Read tool");
   });
 
   it("formats inline audio transcription blocks", () => {
@@ -376,6 +389,111 @@ describe("buildMultimodalContent", () => {
     expect(textBlock.text).toContain('name="data.csv"');
     expect(textBlock.text).not.toContain("photo.png");
     expect(blocks[1].type).toBe("image");
+  });
+
+  it("embeds every image when the total is within the aggregate budget", async () => {
+    const img1 = join(tmpDir, "a.png");
+    const img2 = join(tmpDir, "b.png");
+    await writeFile(img1, Buffer.from("aaaa"));
+    await writeFile(img2, Buffer.from("bbbb"));
+
+    const blocks = await buildMultimodalContent(
+      "two images",
+      [
+        { originalName: "a.png", localPath: img1, mimeType: "image/png", sizeBytes: 4 },
+        { originalName: "b.png", localPath: img2, mimeType: "image/png", sizeBytes: 4 },
+      ],
+      100,
+    );
+
+    expect(blocks).toHaveLength(3);
+    expect(blocks[1].type).toBe("image");
+    expect(blocks[2].type).toBe("image");
+    const textBlock = blocks[0] as { type: "text"; text: string };
+    expect(textBlock.text).not.toContain("too large to view inline");
+  });
+
+  it("skips images past the aggregate budget and notes them in the text block", async () => {
+    const img1 = join(tmpDir, "first.png");
+    const img2 = join(tmpDir, "second.png");
+    await writeFile(img1, Buffer.from("first-data"));
+    await writeFile(img2, Buffer.from("second-data"));
+
+    const blocks = await buildMultimodalContent(
+      "budget test",
+      [
+        { originalName: "first.png", localPath: img1, mimeType: "image/png", sizeBytes: 8 },
+        { originalName: "second.png", localPath: img2, mimeType: "image/png", sizeBytes: 8 },
+      ],
+      10,
+    );
+
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1].type).toBe("image");
+    const imgBlock = blocks[1] as { type: "image"; source: { data: string } };
+    expect(imgBlock.source.data).toBe(Buffer.from("first-data").toString("base64"));
+
+    const textBlock = blocks[0] as { type: "text"; text: string };
+    expect(textBlock.text).toContain('name="second.png"');
+    expect(textBlock.text).toContain("too large to view inline");
+    expect(textBlock.text).not.toContain('name="first.png"');
+  });
+
+  it("embeds a single image within the default budget as before", async () => {
+    const imgPath = join(tmpDir, "solo.png");
+    await writeFile(imgPath, Buffer.from("solo-image-data"));
+
+    const blocks = await buildMultimodalContent("one image", [
+      { originalName: "solo.png", localPath: imgPath, mimeType: "image/png", sizeBytes: 15 },
+    ]);
+
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1].type).toBe("image");
+    const textBlock = blocks[0] as { type: "text"; text: string };
+    expect(textBlock.text).toBe("one image");
+  });
+
+  it("skips a lone image that alone exceeds the budget and lists it with the note", async () => {
+    const imgPath = join(tmpDir, "huge.png");
+    await writeFile(imgPath, Buffer.from("huge-data"));
+
+    const blocks = await buildMultimodalContent(
+      "too big",
+      [{ originalName: "huge.png", localPath: imgPath, mimeType: "image/png", sizeBytes: 100 }],
+      10,
+    );
+
+    expect(blocks).toHaveLength(1);
+    const textBlock = blocks[0] as { type: "text"; text: string };
+    expect(textBlock.text).toContain('name="huge.png"');
+    expect(textBlock.text).toContain("too large to view inline");
+  });
+});
+
+describe("selectImagesWithinBudget", () => {
+  const img = (name: string, sizeBytes: number): Attachment => ({
+    originalName: name,
+    localPath: `/w/${name}`,
+    mimeType: "image/png",
+    sizeBytes,
+  });
+
+  it("embeds all images when they fit the budget", () => {
+    const { embed, skipped } = selectImagesWithinBudget([img("a", 10), img("b", 10)], 30);
+    expect(embed.map((a) => a.originalName)).toEqual(["a", "b"]);
+    expect(skipped).toHaveLength(0);
+  });
+
+  it("preserves input order and skips only the excess", () => {
+    const { embed, skipped } = selectImagesWithinBudget([img("a", 10), img("b", 10), img("c", 10)], 20);
+    expect(embed.map((a) => a.originalName)).toEqual(["a", "b"]);
+    expect(skipped.map((a) => a.originalName)).toEqual(["c"]);
+  });
+
+  it("skips a leading image too large to fit but keeps a later one that fits", () => {
+    const { embed, skipped } = selectImagesWithinBudget([img("big", 50), img("small", 5)], 10);
+    expect(embed.map((a) => a.originalName)).toEqual(["small"]);
+    expect(skipped.map((a) => a.originalName)).toEqual(["big"]);
   });
 });
 

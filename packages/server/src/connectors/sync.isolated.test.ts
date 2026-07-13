@@ -1262,6 +1262,10 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     // resolution improvements into entities.
     db = await createTestDb();
     await db
+      .insertInto("users")
+      .values({ id: "admin", name: "Connector Owner", email: "connector-owner@example.test" })
+      .execute();
+    await db
       .insertInto("connector_configs")
       .values({
         id: "connector-attendees-test",
@@ -1359,6 +1363,10 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
   it("materializes Google Calendar email-only attendees into graph relationships", async () => {
     db = await createTestDb();
     await db
+      .insertInto("users")
+      .values({ id: "admin", name: "Connector Owner", email: "connector-owner@example.test" })
+      .execute();
+    await db
       .insertInto("connector_configs")
       .values({
         id: "connector-calendar-graph-test",
@@ -1415,6 +1423,10 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
   it("writes author facts and materializes authored mentions", async () => {
     db = await createTestDb();
     await db
+      .insertInto("users")
+      .values({ id: "admin", name: "Connector Owner", email: "connector-owner@example.test" })
+      .execute();
+    await db
       .insertInto("connector_configs")
       .values({
         id: "connector-author-test",
@@ -1464,6 +1476,10 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
 
   it("skips file archival and preserves the graph when a full resync loses most facts", async () => {
     db = await createTestDb();
+    await db
+      .insertInto("users")
+      .values({ id: "admin", name: "Connector Owner", email: "connector-owner@example.test" })
+      .execute();
     const now = new Date().toISOString();
     await db
       .insertInto("connector_configs")
@@ -1530,7 +1546,8 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
       .selectFrom("entity_mentions")
       .select(db.fn.countAll<number>().as("count"))
       .executeTakeFirstOrThrow();
-    expect(Number(mentionsBefore.count)).toBe(100);
+    const mentionsBeforeCount = Number(mentionsBefore.count);
+    expect(mentionsBeforeCount).toBeGreaterThan(0);
 
     async function* mockGen() {
       yield {
@@ -1591,7 +1608,7 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
       .selectFrom("entity_mentions")
       .select(db.fn.countAll<number>().as("count"))
       .executeTakeFirstOrThrow();
-    expect(Number(mentionsAfter.count)).toBe(100);
+    expect(Number(mentionsAfter.count)).toBe(mentionsBeforeCount);
   });
 
   it("force override processes the large reconcile and tombstones facts", async () => {
@@ -2183,6 +2200,11 @@ describe("runConnectorSync — entity creation review queue (ECR-01)", () => {
   });
 
   async function seedConnector(testDb: Kysely<DB>, configId: string, createdBy = "user-1") {
+    await testDb
+      .insertInto("users")
+      .values({ id: createdBy, name: "Connector Owner", email: `${createdBy}@example.test` })
+      .onConflict((oc) => oc.doNothing())
+      .execute();
     await testDb
       .insertInto("connector_configs")
       .values({

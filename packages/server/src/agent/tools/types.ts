@@ -15,6 +15,7 @@ import type { TaskContext } from "../../scheduler/types";
 import type { SlackBot } from "../../slack/bot";
 import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
+import type { WhatsAppTemplateRequest } from "../../whatsapp/templates";
 import type { AuxCostCollector } from "../aux-cost";
 import type { AgentOutputWriter } from "./agent-output";
 
@@ -110,9 +111,19 @@ export interface SketchMcpDeps {
   workspaceKey?: string;
   originThreadTs?: string;
   activeQueueKey?: string;
-  sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
+  sendDm?: (params: {
+    userId: string;
+    platform: string;
+    message: string;
+    template?: WhatsAppTemplateRequest;
+    senderUserId?: string;
+    storeInInbox?: boolean;
+    inboxKind?: string;
+    inboxMetadata?: Record<string, unknown> | null;
+  }) => Promise<{
     channelId: string;
     messageRef: string;
+    inboxMessageId?: string;
   }>;
   enqueueMessage?: (params: { requesterUserId: string; message: string }) => Promise<void>;
   loadTranscriptionSettings?: () => Promise<TranscriptionSettings | null>;

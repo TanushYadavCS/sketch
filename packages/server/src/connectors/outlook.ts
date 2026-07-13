@@ -16,7 +16,7 @@ import {
   isMicrosoftTokenExpired,
   refreshMicrosoftTokens,
 } from "./microsoft-graph";
-import { runWithConcurrency } from "./sync-utils";
+import { chunk, runWithConcurrency } from "./sync-utils";
 import type {
   Connector,
   ConnectorCredentials,
@@ -31,6 +31,7 @@ const DEFAULT_INITIAL_DAYS = 365;
 const DEFAULT_MAX_MESSAGES = 500;
 const DEFAULT_MAX_INFLIGHT = 4;
 const PAGE_SIZE = 50;
+const BODY_PAGE_SIZE = 50;
 const RECIPROCITY_CURSOR_LIMIT = 5000;
 
 type GraphClient = ReturnType<typeof createMicrosoftGraphClient>;
@@ -94,6 +95,18 @@ const FOLDERS: FolderConfig[] = [
   { key: "sent", graphId: "sentitems", cursorKey: "sentDeltaLink", dateField: "sentDateTime" },
 ];
 
+interface FolderSyncResult {
+  folder: EmailFolder;
+  messages: OutlookMessage[];
+  cursorLink: string | null;
+  removedProviderFileIds: string[];
+}
+
+interface FolderStreamPlan {
+  folder: EmailFolder;
+  refs: string[];
+}
+
 const MESSAGE_SELECT = [
   "id",
   "internetMessageId",
@@ -110,6 +123,26 @@ const MESSAGE_SELECT = [
   "body",
   "bodyPreview",
   "internetMessageHeaders",
+].join(",");
+
+/**
+ * Address/metadata-only projection for the reciprocity pass. Excludes `body` and
+ * `internetMessageHeaders` (the two large per-message payloads) so pass 1 can page
+ * the whole corpus while holding only addresses, never bodies. Reciprocity itself
+ * reads only SENT `to`/`cc`, but the fuller address set keeps normalization and the
+ * missing-`internetMessageId` diagnostic identical to the body pass.
+ */
+const RECIPROCITY_SELECT = [
+  "id",
+  "internetMessageId",
+  "conversationId",
+  "sentDateTime",
+  "receivedDateTime",
+  "from",
+  "sender",
+  "toRecipients",
+  "ccRecipients",
+  "bccRecipients",
 ].join(",");
 
 function assertOAuth(credentials: ConnectorCredentials): asserts credentials is OAuthCredentials {
@@ -250,49 +283,135 @@ export function toNormalizedOutlookEmail(
   };
 }
 
-function hasFullMessageFields(message: OutlookMessage): boolean {
-  return Boolean(message.body && message.internetMessageHeaders !== undefined);
-}
-
-async function getMessage(graph: GraphClient, id: string): Promise<OutlookMessage> {
+async function getMessage(graph: GraphClient, id: string, select: string): Promise<OutlookMessage> {
   return graph.request<OutlookMessage>(`/me/messages/${encodeURIComponent(id)}`, {
-    params: { $select: MESSAGE_SELECT },
+    params: { $select: select },
   });
 }
 
-async function getNormalizedMessages(
+/**
+ * True when a page ref already carries the address/metadata projection inline, so
+ * reciprocity needs no extra fetch. LIST pages and delta cursors established with
+ * {@link RECIPROCITY_SELECT} include `internetMessageId`; legacy delta cursors were
+ * established with only `id`+date, so the property is absent and the ref must be
+ * enriched with a per-message metadata GET before it can seed reciprocity.
+ */
+function hasReciprocityFields(message: OutlookMessage): boolean {
+  return "internetMessageId" in message;
+}
+
+async function fetchMetadataRef(graph: GraphClient, id: string, logger: Logger): Promise<OutlookMessage | null> {
+  try {
+    return await getMessage(graph, id, RECIPROCITY_SELECT);
+  } catch (err) {
+    logger.warn({ err, providerFileId: id }, "Failed to fetch Outlook message metadata");
+    return null;
+  }
+}
+
+function accumulateReciprocity(reciprocity: Set<string>, messages: NormalizedEmail[], ownerEmail: string | null): void {
+  for (const email of updateReciprocitySet(messages, ownerEmail)) {
+    reciprocity.add(email);
+  }
+}
+
+/**
+ * Pass 1: fold the capped corpus into the reciprocity set from addresses only.
+ *
+ * Suppression of inbound-only mail needs the complete reciprocity set before the
+ * first item is emitted, so this runs to completion before the body pass. Peak
+ * residency is the ref list plus one address-only page; bodies are never resident.
+ * Each folder's normalized address stubs are folded into reciprocity (only SENT
+ * `to`/`cc` actually contribute), and the ids that survive to a real message are
+ * captured per folder so the body pass fetches exactly the same set the pre-refactor
+ * path would have normalized. Messages missing `internetMessageId` are diagnosed and
+ * excluded here — identical to the old single-fetch pass — so the body pass never
+ * fetches them.
+ */
+async function collectReciprocity(
   graph: GraphClient,
-  messages: OutlookMessage[],
+  folderResults: FolderSyncResult[],
+  ownerEmail: string | null,
+  base: ReadonlySet<string>,
+  logger: Logger,
+  onEmailSuppressed: ((record: SuppressedEmailRecord) => Promise<void>) | undefined,
+): Promise<{ reciprocity: Set<string>; plans: FolderStreamPlan[] }> {
+  const reciprocity = new Set(base);
+  const plans: FolderStreamPlan[] = [];
+  for (const result of folderResults) {
+    const metadata: NormalizedEmail[] = [];
+    const refs: string[] = [];
+    for (const ref of result.messages) {
+      const stub = hasReciprocityFields(ref) ? ref : await fetchMetadataRef(graph, ref.id, logger);
+      if (!stub) continue;
+      if (!stub.internetMessageId?.trim()) {
+        logger.warn(
+          { providerFileId: stub.id, folder: result.folder },
+          "Skipping Outlook message without internetMessageId",
+        );
+        await onEmailSuppressed?.({
+          providerFileId: stub.id,
+          providerMessageId: null,
+          threadId: stub.conversationId ?? null,
+          reason: "missing_internet_message_id",
+        });
+        continue;
+      }
+      const normalized = toNormalizedOutlookEmail(stub, ownerEmail, result.folder);
+      if (!normalized) continue;
+      metadata.push(normalized);
+      refs.push(stub.id);
+    }
+    accumulateReciprocity(reciprocity, metadata, ownerEmail);
+    plans.push({ folder: result.folder, refs });
+  }
+  return { reciprocity, plans };
+}
+
+async function fetchFullNormalized(
+  graph: GraphClient,
+  ids: string[],
   ownerEmail: string | null,
   folder: EmailFolder,
   maxInflight: number,
   logger: Logger,
-  onEmailSuppressed: ((record: SuppressedEmailRecord) => Promise<void>) | undefined,
 ): Promise<NormalizedEmail[]> {
-  const normalized: Array<NormalizedEmail | null> = new Array(messages.length).fill(null);
+  const normalized: Array<NormalizedEmail | null> = new Array(ids.length).fill(null);
   await runWithConcurrency(
-    messages.map((message, index) => ({ message, index })),
+    ids.map((id, index) => ({ id, index })),
     maxInflight,
-    async ({ message, index }) => {
+    async ({ id, index }) => {
       try {
-        const full = hasFullMessageFields(message) ? message : await getMessage(graph, message.id);
-        if (!full.internetMessageId?.trim()) {
-          logger.warn({ providerFileId: full.id, folder }, "Skipping Outlook message without internetMessageId");
-          await onEmailSuppressed?.({
-            providerFileId: full.id,
-            providerMessageId: null,
-            threadId: full.conversationId ?? null,
-            reason: "missing_internet_message_id",
-          });
-          return;
-        }
+        const full = await getMessage(graph, id, MESSAGE_SELECT);
         normalized[index] = toNormalizedOutlookEmail(full, ownerEmail, folder);
       } catch (err) {
-        logger.warn({ err, providerFileId: message.id, folder }, "Failed to fetch Outlook message");
+        logger.warn({ err, providerFileId: id, folder }, "Failed to fetch Outlook message");
       }
     },
   );
   return normalized.filter((message): message is NormalizedEmail => Boolean(message));
+}
+
+/**
+ * Pass 2: fetch full bodies one page at a time and emit each normalized item.
+ * Peak residency is a single page of full messages, never the whole corpus, which
+ * is the memory fix — the pre-refactor path materialized every raw message plus
+ * every normalized email before the first yield.
+ */
+async function* streamFolderItems(
+  connectorConfigId: string,
+  graph: GraphClient,
+  plan: FolderStreamPlan,
+  reciprocity: ReadonlySet<string>,
+  ownerEmail: string | null,
+  maxInflight: number,
+  logger: Logger,
+  onEmailSuppressed: ((record: SuppressedEmailRecord) => Promise<void>) | undefined,
+): AsyncGenerator<ReturnType<typeof emailToSyncedItem>> {
+  for (const page of chunk(plan.refs, BODY_PAGE_SIZE)) {
+    const emails = await fetchFullNormalized(graph, page, ownerEmail, plan.folder, maxInflight, logger);
+    yield* emitFilteredEmails(connectorConfigId, emails, reciprocity, onEmailSuppressed);
+  }
 }
 
 async function listFolderMessages(
@@ -313,7 +432,7 @@ async function listFolderMessages(
               $top: String(PAGE_SIZE),
               $filter: `${folder.dateField} ge ${since}`,
               $orderby: `${folder.dateField} desc`,
-              $select: MESSAGE_SELECT,
+              $select: RECIPROCITY_SELECT,
             },
           },
     );
@@ -371,7 +490,7 @@ async function establishFolderDeltaState(
         : {
             params: {
               $top: String(PAGE_SIZE),
-              $select: `id,${folder.dateField}`,
+              $select: RECIPROCITY_SELECT,
             },
           },
     );
@@ -404,12 +523,7 @@ async function syncFolder(
   since: string,
   maxMessages: number,
   logger: Logger,
-): Promise<{
-  folder: EmailFolder;
-  messages: OutlookMessage[];
-  cursorLink: string | null;
-  removedProviderFileIds: string[];
-}> {
+): Promise<FolderSyncResult> {
   const deltaLink = cursor?.[folder.cursorKey];
   if (deltaLink) {
     try {
@@ -451,19 +565,6 @@ async function emitWindowShrinkRemoval(
     return;
   }
   await onSourceItemRemoved?.({ sourceCreatedBefore: windowStart, reason: "outlook_sync_window_shrunk" });
-}
-
-function mergeReciprocity(
-  base: ReadonlySet<string>,
-  emails: NormalizedEmail[],
-  recentSent: NormalizedEmail[] = [],
-): Set<string> {
-  const reciprocity = new Set(base);
-  const ownerEmail = emails[0]?.ownerEmail ?? recentSent[0]?.ownerEmail ?? null;
-  for (const email of updateReciprocitySet([...recentSent, ...emails], ownerEmail)) {
-    reciprocity.add(email);
-  }
-  return reciprocity;
 }
 
 async function* emitFilteredEmails(
@@ -522,10 +623,13 @@ export function createOutlookConnector(): Connector {
       ownerEmail,
       onEmailSuppressed,
       onSourceItemRemoved,
+      accessTokenProvider,
     }) {
       assertOAuth(credentials);
-      const valid = await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
-      const graph = createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const valid = accessTokenProvider
+        ? credentials
+        : await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const graph = createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE, accessTokenProvider });
       const parsedCursor = parseCursor(cursor);
       const initialDays = parsePositiveInt(scopeConfig.initialDays, DEFAULT_INITIAL_DAYS, 3650);
       const maxMessages = parsePositiveInt(scopeConfig.maxMessages, DEFAULT_MAX_MESSAGES, 5000);
@@ -535,12 +639,7 @@ export function createOutlookConnector(): Connector {
       await emitWindowShrinkRemoval(parsedCursor, windowStart, onSourceItemRemoved);
       nextCursor = null;
 
-      const folderResults: Array<{
-        folder: EmailFolder;
-        messages: OutlookMessage[];
-        cursorLink: string | null;
-        removedProviderFileIds: string[];
-      }> = [];
+      const folderResults: FolderSyncResult[] = [];
       await runWithConcurrency(FOLDERS, Math.min(maxInflight, FOLDERS.length), async (folder) => {
         folderResults.push(await syncFolder(graph, folder, parsedCursor, since, maxMessages, logger));
       });
@@ -552,22 +651,15 @@ export function createOutlookConnector(): Connector {
         }
       }
 
-      const emails: NormalizedEmail[] = [];
-      for (const result of folderResults) {
-        emails.push(
-          ...(await getNormalizedMessages(
-            graph,
-            result.messages,
-            ownerEmail ?? null,
-            result.folder,
-            maxInflight,
-            logger,
-            onEmailSuppressed,
-          )),
-        );
-      }
+      const { reciprocity, plans } = await collectReciprocity(
+        graph,
+        folderResults,
+        ownerEmail ?? null,
+        cursorReciprocity(parsedCursor),
+        logger,
+        onEmailSuppressed,
+      );
 
-      const reciprocity = mergeReciprocity(cursorReciprocity(parsedCursor), emails);
       const cursorParts: Omit<OutlookCursor, "reciprocityEmails"> = {
         lastSyncedAt: new Date().toISOString(),
         syncWindowStart: windowStart,
@@ -578,15 +670,28 @@ export function createOutlookConnector(): Connector {
       };
       nextCursor = withReciprocity(cursorParts, reciprocity);
 
-      yield* emitFilteredEmails(connectorConfigId, emails, reciprocity, onEmailSuppressed);
+      for (const plan of plans) {
+        yield* streamFolderItems(
+          connectorConfigId,
+          graph,
+          plan,
+          reciprocity,
+          ownerEmail ?? null,
+          maxInflight,
+          logger,
+          onEmailSuppressed,
+        );
+      }
     },
 
-    async getCursor({ credentials, currentCursor, logger }) {
+    async getCursor({ credentials, accessTokenProvider, currentCursor, logger }) {
       assertOAuth(credentials);
       if (nextCursor) return serializeCursor(nextCursor);
 
-      const valid = await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
-      const graph = createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const valid = accessTokenProvider
+        ? credentials
+        : await ensureValidMicrosoftToken(credentials, { scope: OUTLOOK_MICROSOFT_SCOPE });
+      const graph = createMicrosoftGraphClient(valid, { scope: OUTLOOK_MICROSOFT_SCOPE, accessTokenProvider });
       const parsedCursor = parseCursor(currentCursor);
       const cursorParts: Omit<OutlookCursor, "reciprocityEmails"> = {
         lastSyncedAt: parsedCursor?.lastSyncedAt ?? new Date().toISOString(),

@@ -12,19 +12,25 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
+import { loadBaselineKnownEntities } from "./enrichment";
 import {
+  ADJACENCY_MAX_ANCHOR_FILES,
+  BASELINE_ALWAYS_INCLUDE_CAP,
   BASELINE_RELEVANCE_CAP,
   HALF_LIFE_DAYS,
+  HUB_PERSON_DEGREE_CAP,
   MAX_ANCHORS_PER_SIDE,
   MIN_SCORE,
+  PENDING_PROPOSAL_MIN_OCCURRENCE,
   PER_ANCHOR_INITIATIVE_CAP,
   PER_ANCHOR_TEAM_CAP,
   adjacencyForAnchor,
   buildFileScopedKnownEntities,
+  pendingProposalsForAnchor,
   resolveFileAnchors,
 } from "./file-scope-context";
 
@@ -76,7 +82,14 @@ async function seedFile(db: Kysely<DB>, id: string, sourceUpdatedAt: string | nu
 
 async function seedEntity(
   db: Kysely<DB>,
-  args: { id: string; name: string; sourceType: string; hotness?: number },
+  args: {
+    id: string;
+    name: string;
+    sourceType: string;
+    hotness?: number;
+    metadata?: Record<string, unknown>;
+    provenanceTier?: string;
+  },
 ): Promise<void> {
   const now = new Date().toISOString();
   await db
@@ -87,13 +100,30 @@ async function seedEntity(
       source_type: args.sourceType,
       subtype: null,
       aliases: null,
-      metadata: null,
+      metadata: args.metadata ? JSON.stringify(args.metadata) : null,
       source_ref_id: null,
       status: "confirmed",
+      provenance_tier: args.provenanceTier ?? "inferred",
       hotness: args.hotness ?? 0,
       created_at: now,
       updated_at: now,
       ai_brief: null,
+    })
+    .execute();
+}
+
+async function seedContactPoint(db: Kysely<DB>, args: { entityId: string; email: string }): Promise<void> {
+  await db
+    .insertInto("entity_contact_points")
+    .values({
+      id: randomUUID(),
+      entity_id: args.entityId,
+      kind: "email",
+      value: args.email.toLowerCase(),
+      display_value: args.email,
+      label: null,
+      is_primary: 1,
+      source: "test",
     })
     .execute();
 }
@@ -152,6 +182,83 @@ async function seedMention(
       mentioned_at: new Date().toISOString(),
     })
     .execute();
+}
+
+async function seedRelationship(
+  db: Kysely<DB>,
+  args: {
+    sourceEntityId: string;
+    targetEntityId: string;
+    relationshipType?: string;
+    confidence?: string;
+    confidenceScore?: number;
+    source?: string;
+    validFrom?: string;
+    validTo?: string | null;
+  },
+): Promise<void> {
+  await db
+    .insertInto("entity_relationships")
+    .values({
+      id: randomUUID(),
+      source_entity_id: args.sourceEntityId,
+      target_entity_id: args.targetEntityId,
+      relationship_type: args.relationshipType ?? "contributes_to",
+      confidence: args.confidence ?? "INFERRED",
+      confidence_score: args.confidenceScore ?? 0.9,
+      source: args.source ?? "test",
+      valid_from: args.validFrom ?? "",
+      valid_to: args.validTo ?? null,
+    })
+    .execute();
+}
+
+async function seedReviewProposal(
+  db: Kysely<DB>,
+  args: {
+    proposedName: string;
+    entityType: string;
+    evidenceFileIds: string[];
+    occurrenceCount?: number;
+    status?: string;
+  },
+): Promise<string> {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  await db
+    .insertInto("entity_review_queue")
+    .values({
+      id,
+      proposed_name: args.proposedName,
+      normalized_name: `${args.proposedName.toLowerCase()} ${id}`,
+      entity_type: args.entityType,
+      candidate_entity_id: null,
+      candidate_score: null,
+      candidate_reason: null,
+      candidate_generated_at: now,
+      first_seen_at: now,
+      last_seen_at: now,
+      occurrence_count: args.occurrenceCount ?? PENDING_PROPOSAL_MIN_OCCURRENCE,
+      status: args.status ?? "pending",
+      triggered_by_user_id: "admin-fsc",
+    })
+    .execute();
+
+  for (const fileId of args.evidenceFileIds) {
+    await db
+      .insertInto("entity_review_evidence")
+      .values({
+        id: randomUUID(),
+        review_id: id,
+        indexed_file_id: fileId,
+        source: "llm_extraction",
+        note: null,
+        seen_at: now,
+      })
+      .execute();
+  }
+
+  return id;
 }
 
 describe("file-scope-context", () => {
@@ -257,6 +364,151 @@ describe("file-scope-context", () => {
     expect((recent?.score ?? 0) > (older?.score ?? 0)).toBe(true);
   });
 
+  it("bounds a high-degree company anchor to its most-recent files and surfaces the strongest co-mentions", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const dayMs = 24 * 60 * 60 * 1000;
+    await seedEntity(db, { id: "ent-hub-co", name: "Hub Co", sourceType: "company", hotness: 0.9 });
+
+    const fileCap = 3;
+    const totalFiles = 6;
+    for (let i = 0; i < totalFiles; i++) {
+      const fileId = `file-hub-co-${i}`;
+      const projectId = `proj-hub-co-${i}`;
+      await seedFile(db, fileId, new Date(now - (i + 1) * dayMs).toISOString());
+      await seedEntity(db, { id: projectId, name: `Hub Project ${i}`, sourceType: "project", hotness: 0.5 });
+      await seedMention(db, { entityId: "ent-hub-co", fileId });
+      await seedMention(db, { entityId: projectId, fileId });
+    }
+
+    const adj = await adjacencyForAnchor({ db, now: () => now }, "ent-hub-co", fileCap);
+
+    expect(adj).toHaveLength(fileCap);
+    expect(adj.map((a) => a.id)).toEqual(["proj-hub-co-0", "proj-hub-co-1", "proj-hub-co-2"]);
+    expect(adj.map((a) => a.id)).not.toContain("proj-hub-co-5");
+    for (let i = 0; i < fileCap; i++) {
+      expect(adj[i]?.score).toBeCloseTo(Math.exp(-(i + 1) / HALF_LIFE_DAYS), 6);
+      expect(adj[i]?.mentionCount).toBe(1);
+    }
+  });
+
+  it("leaves adjacency identical for a sub-cap anchor whether or not the file cap binds", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const dayMs = 24 * 60 * 60 * 1000;
+    await seedEntity(db, { id: "ent-typical-co", name: "Typical Co", sourceType: "company", hotness: 0.9 });
+    await seedEntity(db, { id: "proj-a", name: "Project A", sourceType: "project", hotness: 0.5 });
+    await seedEntity(db, { id: "proj-b", name: "Project B", sourceType: "project", hotness: 0.5 });
+
+    const fileA = "file-typical-a";
+    const fileB1 = "file-typical-b1";
+    const fileB2 = "file-typical-b2";
+    await seedFile(db, fileA, new Date(now - 3 * dayMs).toISOString());
+    await seedFile(db, fileB1, new Date(now - 20 * dayMs).toISOString());
+    await seedFile(db, fileB2, new Date(now - 25 * dayMs).toISOString());
+    await seedMention(db, { entityId: "ent-typical-co", fileId: fileA });
+    await seedMention(db, { entityId: "proj-a", fileId: fileA });
+    for (const f of [fileB1, fileB2]) {
+      await seedMention(db, { entityId: "ent-typical-co", fileId: f });
+      await seedMention(db, { entityId: "proj-b", fileId: f });
+    }
+
+    const withDefaultCap = await adjacencyForAnchor({ db, now: () => now }, "ent-typical-co");
+    const withHugeCap = await adjacencyForAnchor({ db, now: () => now }, "ent-typical-co", 10_000);
+
+    expect(withDefaultCap).toEqual(withHugeCap);
+    expect(withDefaultCap.map((a) => a.id)).toEqual(["proj-b", "proj-a"]);
+    expect(withDefaultCap.find((a) => a.id === "proj-a")?.score).toBeCloseTo(Math.exp(-3 / HALF_LIFE_DAYS), 6);
+    expect(withDefaultCap.find((a) => a.id === "proj-b")?.mentionCount).toBe(2);
+    expect(ADJACENCY_MAX_ANCHOR_FILES).toBeGreaterThan(3);
+  });
+
+  it("keeps person-anchor adjacency unchanged under the file-window cap", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const dayMs = 24 * 60 * 60 * 1000;
+    await seedEntity(db, { id: "person-anchor-adj", name: "Anchor Person", sourceType: "person", hotness: 5 });
+    await seedEntity(db, {
+      id: "proj-person-recent",
+      name: "Recent Person Project",
+      sourceType: "project",
+      hotness: 1,
+    });
+    await seedEntity(db, { id: "proj-person-older", name: "Older Person Project", sourceType: "project", hotness: 1 });
+
+    const recentFile = "file-person-adj-recent";
+    const olderFile1 = "file-person-adj-older-1";
+    const olderFile2 = "file-person-adj-older-2";
+    const olderFile3 = "file-person-adj-older-3";
+    await seedFile(db, recentFile, new Date(now - 5 * dayMs).toISOString());
+    for (const f of [olderFile1, olderFile2, olderFile3]) {
+      await seedFile(db, f, new Date(now - 90 * dayMs).toISOString());
+    }
+    await seedMention(db, { entityId: "person-anchor-adj", fileId: recentFile });
+    await seedMention(db, { entityId: "proj-person-recent", fileId: recentFile });
+    for (const f of [olderFile1, olderFile2, olderFile3]) {
+      await seedMention(db, { entityId: "person-anchor-adj", fileId: f });
+      await seedMention(db, { entityId: "proj-person-older", fileId: f });
+    }
+
+    const adj = await adjacencyForAnchor({ db, now: () => now }, "person-anchor-adj");
+
+    expect(adj.map((a) => a.id)).toEqual(["proj-person-recent", "proj-person-older"]);
+    expect(adj.find((a) => a.id === "proj-person-recent")?.score).toBeCloseTo(Math.exp(-5 / HALF_LIFE_DAYS), 6);
+    expect(adj.find((a) => a.id === "proj-person-older")?.score).toBeCloseTo(3 * Math.exp(-90 / HALF_LIFE_DAYS), 6);
+    expect(adj.find((a) => a.id === "proj-person-older")?.mentionCount).toBe(3);
+  });
+
+  it("returns pending proposals scoped to evidence files that mention the anchor", async () => {
+    await seedEntity(db, { id: "ent-anchor-proposal", name: "Anchor Co", sourceType: "company" });
+    await seedEntity(db, { id: "ent-other-proposal", name: "Other Co", sourceType: "company" });
+    await seedFile(db, "file-anchor-proposal");
+    await seedFile(db, "file-unrelated-proposal");
+    await seedMention(db, { entityId: "ent-anchor-proposal", fileId: "file-anchor-proposal" });
+    await seedMention(db, { entityId: "ent-other-proposal", fileId: "file-unrelated-proposal" });
+
+    const matchingId = await seedReviewProposal(db, {
+      proposedName: "Tourism Dashboard",
+      entityType: "project",
+      evidenceFileIds: ["file-anchor-proposal"],
+    });
+    await seedReviewProposal(db, {
+      proposedName: "Unrelated Dashboard",
+      entityType: "project",
+      evidenceFileIds: ["file-unrelated-proposal"],
+    });
+
+    const proposals = await pendingProposalsForAnchor({ db }, "ent-anchor-proposal");
+
+    expect(proposals).toEqual([
+      {
+        id: matchingId,
+        name: "Tourism Dashboard",
+        type: "project",
+        score: PENDING_PROPOSAL_MIN_OCCURRENCE,
+      },
+    ]);
+  });
+
+  it("excludes below-threshold pending proposals and non-project/product proposal types", async () => {
+    await seedEntity(db, { id: "ent-anchor-noise", name: "Anchor Co", sourceType: "company" });
+    await seedFile(db, "file-anchor-noise");
+    await seedMention(db, { entityId: "ent-anchor-noise", fileId: "file-anchor-noise" });
+    await seedReviewProposal(db, {
+      proposedName: "Single Mention Dashboard",
+      entityType: "project",
+      evidenceFileIds: ["file-anchor-noise"],
+      occurrenceCount: PENDING_PROPOSAL_MIN_OCCURRENCE - 1,
+    });
+    await seedReviewProposal(db, {
+      proposedName: "Queued Company",
+      entityType: "company",
+      evidenceFileIds: ["file-anchor-noise"],
+      occurrenceCount: PENDING_PROPOSAL_MIN_OCCURRENCE,
+    });
+
+    const proposals = await pendingProposalsForAnchor({ db }, "ent-anchor-noise");
+
+    expect(proposals).toEqual([]);
+  });
+
   it("merges anchors + adjacency above the baseline; degrades to baseline-only when no anchors resolve", async () => {
     await seedEntity(db, { id: "ent-ow", name: "Oliver Wyman", sourceType: "company", hotness: 0.9 });
     await seedEntity(db, { id: "ent-visa", name: "Visa Data Integration", sourceType: "project", hotness: 0.5 });
@@ -296,6 +548,38 @@ describe("file-scope-context", () => {
 
     const degraded = await buildFileScopedKnownEntities({ db, now: () => now }, fileWithoutAnchor, baseline);
     expect(degraded.map((e) => e.name).sort()).toEqual(["Oliver Wyman", "Sketch"]);
+  });
+
+  it("adds novel pending proposals after confirmed known entities win duplicate keys", async () => {
+    await seedEntity(db, { id: "ent-pending-anchor", name: "Pending Anchor Co", sourceType: "company", hotness: 1 });
+    await seedDomain(db, { entityId: "ent-pending-anchor", domain: "pending-anchor.example", kind: "corporate" });
+    await seedFile(db, "file-pending-build");
+    await seedAttendeeFact(db, {
+      fileId: "file-pending-build",
+      name: "Anchor Person",
+      email: "person@pending-anchor.example",
+    });
+
+    const loadAdjacencyForAnchor = vi.fn(async () => []);
+    const loadPendingProposalsForAnchor = vi.fn(async () => [
+      { id: "pending-tourism", name: "Tourism Dashboard", type: "project" as const, score: 4 },
+      { id: "pending-maaden", name: "Maaden Dashboard", type: "project" as const, score: 3 },
+    ]);
+
+    const known = await buildFileScopedKnownEntities(
+      { db, loadAdjacencyForAnchor, loadPendingProposalsForAnchor },
+      "file-pending-build",
+      [{ name: "Tourism Dashboard", type: "project", description: "confirmed" }],
+    );
+
+    const tourismEntries = known.filter((entry) => entry.name === "Tourism Dashboard" && entry.type === "project");
+    expect(tourismEntries).toHaveLength(1);
+    expect(tourismEntries[0]).toMatchObject({ name: "Tourism Dashboard", type: "project", description: "confirmed" });
+    expect(known.find((entry) => entry.name === "Maaden Dashboard")).toMatchObject({
+      name: "Maaden Dashboard",
+      type: "project",
+      reviewId: "pending-maaden",
+    });
   });
 
   it("caps per-anchor initiatives and teams while preserving baseline", async () => {
@@ -359,9 +643,10 @@ describe("file-scope-context", () => {
 
     const promptFile = "file-baseline-overlap";
     const coMentionFile = "file-baseline-comention";
-    const recentDate = new Date(Date.UTC(2026, 4, 25)).toISOString();
-    await seedFile(db, promptFile, recentDate);
-    await seedFile(db, coMentionFile, recentDate);
+    const promptDate = new Date(Date.UTC(2026, 4, 25)).toISOString();
+    const staleOverlapDate = new Date(Date.UTC(2025, 4, 26)).toISOString();
+    await seedFile(db, promptFile, promptDate);
+    await seedFile(db, coMentionFile, staleOverlapDate);
     await seedAttendeeFact(db, {
       fileId: promptFile,
       name: "Anchor Person",
@@ -397,12 +682,318 @@ describe("file-scope-context", () => {
       { baselineRelevanceCap: 0 },
     );
 
-    expect(known).toContainEqual({
+    expect(known.find((entry) => entry.name === "Sketch")).toMatchObject({
       name: "Sketch",
       type: "product",
+      entityId: "baseline-sketch",
       description: undefined,
       mentionCount: undefined,
       recentlyActive: undefined,
     });
+  });
+
+  it("loadBaselineKnownEntities excludes inferred products while preserving declared products and teams", async () => {
+    await seedEntity(db, {
+      id: "baseline-product-inferred",
+      name: "Inferred Product",
+      sourceType: "product",
+      provenanceTier: "inferred",
+    });
+    await seedEntity(db, {
+      id: "baseline-product-declared",
+      name: "Declared Product",
+      sourceType: "product",
+      provenanceTier: "declared",
+    });
+    await seedEntity(db, {
+      id: "baseline-product-confirmed",
+      name: "Confirmed Product",
+      sourceType: "product",
+      provenanceTier: "human_confirmed",
+    });
+    await seedEntity(db, {
+      id: "baseline-team-inferred",
+      name: "Inferred Team",
+      sourceType: "team",
+      provenanceTier: "inferred",
+    });
+
+    const baseline = await loadBaselineKnownEntities(db);
+    const names = baseline.map((entry) => entry.name);
+
+    expect(names).not.toContain("Inferred Product");
+    expect(names).toEqual(expect.arrayContaining(["Declared Product", "Confirmed Product", "Inferred Team"]));
+  });
+
+  it("uses person anchors when company anchoring fails and skips ambiguous participant emails", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const promptFile = "file-person-anchor-prompt";
+    const aliceEvidenceFile = "file-person-anchor-alice-evidence";
+    const ambiguousEvidenceFile = "file-person-anchor-ambiguous-evidence";
+    await seedFile(db, promptFile, recentDate);
+    await seedFile(db, aliceEvidenceFile, recentDate);
+    await seedFile(db, ambiguousEvidenceFile, recentDate);
+
+    await seedEntity(db, { id: "person-alice", name: "Alice Internal", sourceType: "person", hotness: 5 });
+    await seedContactPoint(db, { entityId: "person-alice", email: "alice@internal.test" });
+    await seedEntity(db, { id: "project-alice", name: "Internal Atlas", sourceType: "project", hotness: 5 });
+    await seedEntity(db, { id: "person-ambiguous-a", name: "Ambiguous A", sourceType: "person", hotness: 10 });
+    await seedEntity(db, { id: "person-ambiguous-b", name: "Ambiguous B", sourceType: "person", hotness: 9 });
+    await seedContactPoint(db, { entityId: "person-ambiguous-a", email: "shared@internal.test" });
+    await seedContactPoint(db, { entityId: "person-ambiguous-b", email: "shared@internal.test" });
+    await seedEntity(db, { id: "project-ambiguous", name: "Ambiguous Project", sourceType: "project", hotness: 20 });
+
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Alice", email: "alice@internal.test" });
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Shared", email: "shared@internal.test" });
+    await seedMention(db, { entityId: "person-alice", fileId: aliceEvidenceFile });
+    await seedMention(db, { entityId: "project-alice", fileId: aliceEvidenceFile });
+    await seedMention(db, { entityId: "person-ambiguous-a", fileId: ambiguousEvidenceFile });
+    await seedMention(db, { entityId: "project-ambiguous", fileId: ambiguousEvidenceFile });
+
+    const personAnchored = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, [], "");
+
+    expect(personAnchored.find((entry) => entry.name === "Internal Atlas")).toMatchObject({
+      name: "Internal Atlas",
+      type: "project",
+      entityId: "project-alice",
+      mentionCount: 1,
+      recentlyActive: true,
+    });
+    expect(personAnchored.map((entry) => entry.name)).not.toContain("Alice Internal");
+    expect(personAnchored.map((entry) => entry.name)).not.toContain("Ambiguous Project");
+  });
+
+  it("prefers person contributes_to initiatives by tier before co-occurrence backfill", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const promptFile = "file-person-contributes-prompt";
+    const evidenceFile = "file-person-contributes-evidence";
+    await seedFile(db, promptFile, recentDate);
+    await seedFile(db, evidenceFile, recentDate);
+
+    await seedEntity(db, { id: "person-contributes", name: "Contributing Person", sourceType: "person", hotness: 5 });
+    await seedContactPoint(db, { entityId: "person-contributes", email: "contributor@internal.test" });
+    await seedEntity(db, { id: "project-structural", name: "Structural Project", sourceType: "project", hotness: 1 });
+    await seedEntity(db, { id: "product-comention", name: "Co Mention Product", sourceType: "product", hotness: 1 });
+    await seedEntity(db, { id: "project-adjacent", name: "Adjacent Project", sourceType: "project", hotness: 1 });
+    await seedEntity(db, { id: "project-manual", name: "Manual Decoy Project", sourceType: "project", hotness: 1 });
+
+    await seedAttendeeFact(db, {
+      fileId: promptFile,
+      name: "Contributor",
+      email: "contributor@internal.test",
+    });
+    await seedMention(db, { entityId: "person-contributes", fileId: evidenceFile });
+    await seedMention(db, { entityId: "project-adjacent", fileId: evidenceFile });
+    await seedRelationship(db, {
+      sourceEntityId: "person-contributes",
+      targetEntityId: "project-structural",
+      source: "structural_assignee",
+      confidenceScore: 0.7,
+    });
+    await seedRelationship(db, {
+      sourceEntityId: "person-contributes",
+      targetEntityId: "product-comention",
+      source: "co_mention",
+      confidenceScore: 0.99,
+    });
+    await seedRelationship(db, {
+      sourceEntityId: "person-contributes",
+      targetEntityId: "project-manual",
+      source: "manual",
+      confidenceScore: 1,
+    });
+
+    const known = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, [], "");
+
+    const initiatives = known
+      .filter((entry) => entry.type === "project" || entry.type === "product")
+      .map((entry) => entry.name);
+    expect(initiatives).toEqual(["Structural Project", "Co Mention Product", "Adjacent Project"]);
+    expect(initiatives).not.toContain("Manual Decoy Project");
+  });
+
+  it("preserves person co-occurrence recall when no contributes_to edges exist", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const promptFile = "file-person-recall-prompt";
+    const evidenceFile = "file-person-recall-evidence";
+    await seedFile(db, promptFile, recentDate);
+    await seedFile(db, evidenceFile, recentDate);
+
+    await seedEntity(db, { id: "person-recall", name: "Recall Person", sourceType: "person", hotness: 5 });
+    await seedContactPoint(db, { entityId: "person-recall", email: "recall@internal.test" });
+    await seedEntity(db, { id: "project-recall", name: "Recall Project", sourceType: "project", hotness: 1 });
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Recall", email: "recall@internal.test" });
+    await seedMention(db, { entityId: "person-recall", fileId: evidenceFile });
+    await seedMention(db, { entityId: "project-recall", fileId: evidenceFile });
+
+    const known = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, [], "");
+
+    expect(known.find((entry) => entry.name === "Recall Project")).toMatchObject({
+      name: "Recall Project",
+      type: "project",
+      entityId: "project-recall",
+      mentionCount: 1,
+      recentlyActive: true,
+    });
+  });
+
+  it("boosts overflow contributes_to baseline entries without wasting cap on injected entities", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const recentDate = new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString();
+    const promptFile = "file-person-baseline-overflow-prompt";
+    const coMentionFile = "file-person-baseline-comention";
+    const overflowSeenFile = "file-person-baseline-overflow-seen";
+    const injectedSeenFile = "file-person-baseline-injected-seen";
+    await seedFile(db, promptFile, recentDate);
+    await seedFile(db, coMentionFile, recentDate);
+    await seedFile(db, overflowSeenFile, recentDate);
+    await seedFile(db, injectedSeenFile, recentDate);
+
+    await seedEntity(db, { id: "person-baseline-overflow", name: "Overflow Person", sourceType: "person", hotness: 5 });
+    await seedContactPoint(db, { entityId: "person-baseline-overflow", email: "overflow@internal.test" });
+    await seedEntity(db, {
+      id: "project-cooccur-baseline",
+      name: "Cooccur Baseline Project",
+      sourceType: "project",
+      hotness: 10,
+    });
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Overflow", email: "overflow@internal.test" });
+    await seedMention(db, { entityId: "person-baseline-overflow", fileId: coMentionFile });
+    await seedMention(db, { entityId: "project-cooccur-baseline", fileId: coMentionFile });
+
+    for (let i = 0; i <= PER_ANCHOR_INITIATIVE_CAP; i++) {
+      const isOverflow = i === PER_ANCHOR_INITIATIVE_CAP;
+      const entityId = isOverflow ? "project-overflow-baseline" : `project-injected-baseline-${i}`;
+      const name = isOverflow ? "Overflow Baseline Project" : `Injected Baseline Project ${i}`;
+      await seedEntity(db, {
+        id: entityId,
+        name,
+        sourceType: "project",
+        hotness: i === 0 ? 100 : 10,
+      });
+      await seedRelationship(db, {
+        sourceEntityId: "person-baseline-overflow",
+        targetEntityId: entityId,
+        source: "structural_assignee",
+        confidenceScore: 1 - i * 0.01,
+      });
+    }
+
+    await seedMention(db, { entityId: "project-overflow-baseline", fileId: overflowSeenFile });
+    await seedMention(db, { entityId: "project-injected-baseline-0", fileId: injectedSeenFile });
+
+    const known = await buildFileScopedKnownEntities(
+      { db, now: () => now },
+      promptFile,
+      [
+        { id: "project-injected-baseline-0", name: "Injected Baseline Project 0", type: "project", hotness: 100 },
+        { id: "project-overflow-baseline", name: "Overflow Baseline Project", type: "project", hotness: 10 },
+        { id: "project-cooccur-baseline", name: "Cooccur Baseline Project", type: "project", hotness: 10 },
+      ],
+      "",
+      { baselineRelevanceCap: 1 },
+    );
+
+    const names = known.map((entry) => entry.name);
+    expect(names).toContain("Overflow Baseline Project");
+    expect(names).not.toContain("Cooccur Baseline Project");
+    expect(known.filter((entry) => entry.name === "Injected Baseline Project 0")).toHaveLength(1);
+  });
+
+  it("skips hub person anchors before adjacency while retaining low-degree person adjacency", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const promptFile = "file-hub-person-prompt";
+    const lowEvidenceFile = "file-low-person-evidence";
+    await seedFile(db, promptFile, recentDate);
+    await seedFile(db, lowEvidenceFile, recentDate);
+    await seedEntity(db, { id: "person-hub", name: "Hub Person", sourceType: "person", hotness: 100 });
+    await seedEntity(db, { id: "person-low", name: "Low Degree Person", sourceType: "person", hotness: 1 });
+    await seedContactPoint(db, { entityId: "person-hub", email: "hub@internal.test" });
+    await seedContactPoint(db, { entityId: "person-low", email: "low@internal.test" });
+    await seedEntity(db, { id: "project-low", name: "Low Degree Project", sourceType: "project", hotness: 5 });
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Hub", email: "hub@internal.test" });
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Low", email: "low@internal.test" });
+    await seedMention(db, { entityId: "person-low", fileId: lowEvidenceFile });
+    await seedMention(db, { entityId: "project-low", fileId: lowEvidenceFile });
+
+    for (let i = 0; i <= HUB_PERSON_DEGREE_CAP; i++) {
+      const fileId = `file-hub-evidence-${i}`;
+      const projectId = `project-hub-${i}`;
+      await seedFile(db, fileId, recentDate);
+      await seedEntity(db, { id: projectId, name: `Hub Project ${i}`, sourceType: "project", hotness: i });
+      await seedMention(db, { entityId: "person-hub", fileId });
+      await seedMention(db, { entityId: projectId, fileId });
+    }
+
+    const adjacencyCalls: string[] = [];
+    const loadAdjacencyForAnchor = vi.fn(async (deps, anchorId: string) => {
+      adjacencyCalls.push(anchorId);
+      return adjacencyForAnchor(deps, anchorId);
+    });
+    const known = await buildFileScopedKnownEntities(
+      { db, now: () => now, loadAdjacencyForAnchor },
+      promptFile,
+      [],
+      "",
+    );
+
+    expect(adjacencyCalls).not.toContain("person-hub");
+    expect(adjacencyCalls).toContain("person-low");
+    expect(known.map((entry) => entry.name)).toContain("Low Degree Project");
+    expect(known.map((entry) => entry.name).some((name) => name.startsWith("Hub Project"))).toBe(false);
+  });
+
+  it("keeps anchored ranking and bounds project baseline expansion", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const recentDate = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const promptFile = "file-ranking-parity";
+    const coMentionFile = "file-ranking-parity-evidence";
+    await seedFile(db, promptFile, recentDate);
+    await seedFile(db, coMentionFile, recentDate);
+    await seedEntity(db, { id: "ent-parity-company", name: "Parity Co", sourceType: "company", hotness: 10 });
+    await seedEntity(db, {
+      id: "ent-parity-product",
+      name: "Parity Product",
+      sourceType: "product",
+      hotness: 10,
+      provenanceTier: "declared",
+    });
+    await seedDomain(db, { entityId: "ent-parity-company", domain: "parity.example", kind: "corporate" });
+    await seedAttendeeFact(db, { fileId: promptFile, name: "Parity Person", email: "person@parity.example" });
+    await seedMention(db, { entityId: "ent-parity-company", fileId: coMentionFile });
+    await seedMention(db, { entityId: "ent-parity-product", fileId: coMentionFile });
+
+    const baseline = [
+      { id: "baseline-cold", name: "Cold Product", type: "product", hotness: 1 },
+      { id: "ent-parity-product", name: "Parity Product", type: "product", hotness: 10 },
+    ];
+    const anchoredKnown = await buildFileScopedKnownEntities({ db, now: () => now }, promptFile, baseline, "");
+    expect(anchoredKnown.map((entry) => entry.name)).toContain("Parity Product");
+
+    for (let i = 0; i < 80; i++) {
+      await seedEntity(db, {
+        id: `baseline-project-${i}`,
+        name: `Bounded Project ${i}`,
+        sourceType: "project",
+        hotness: i,
+      });
+    }
+    const baselineKnown = await loadBaselineKnownEntities(db);
+    expect(baselineKnown.map((entry) => entry.name)).toContain("Bounded Project 79");
+
+    const content = Array.from({ length: 80 }, (_, i) => `Bounded Project ${i}`).join("\n");
+    const known = await buildFileScopedKnownEntities(
+      { db, now: () => now },
+      "file-baseline-bound",
+      baselineKnown,
+      content,
+    );
+    expect(known.filter((entry) => entry.type === "project").length).toBeLessThanOrEqual(
+      BASELINE_ALWAYS_INCLUDE_CAP + BASELINE_RELEVANCE_CAP,
+    );
   });
 });

@@ -294,7 +294,7 @@ vi.mock("../agent/workspace", () => ({
 vi.mock("../agent/sessions", () => ({
   getSessionId: vi.fn().mockResolvedValue(undefined),
   saveSessionId: vi.fn().mockResolvedValue(undefined),
-  deleteSessionId: vi.fn().mockResolvedValue(undefined),
+  archiveRuntimeSessions: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Stub slack API for validateSlackTokens
@@ -624,7 +624,7 @@ describe("slack/adapter", () => {
       ]);
     });
 
-    it("treats leading-space /new as a reset command in Slack DMs", async () => {
+    it("treats leading-space /new as an archive command in Slack DMs", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { dm } = getHandlers();
@@ -633,7 +633,8 @@ describe("slack/adapter", () => {
       await dm({ text: " /new", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
       await flush();
 
-      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "u1");
+      expect(sessions.archiveRuntimeSessions).toHaveBeenCalledWith(deps.db, "u1");
+      expect(deps.repos.conversations.advanceWatermarkToCurrentMax).toHaveBeenCalledWith(1);
       expect(deps.runAgent).not.toHaveBeenCalled();
       expect(mockBotInstance.postMessage).toHaveBeenCalledWith(
         "D1",
@@ -1134,7 +1135,7 @@ describe("slack/adapter", () => {
       );
     });
 
-    it("resets the current thread when a channel mention sends /new", async () => {
+    it("archives the current thread when a channel mention sends /new", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { mention } = getHandlers();
@@ -1150,7 +1151,7 @@ describe("slack/adapter", () => {
       });
       await flush();
 
-      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "channel-C1", "0.9");
+      expect(sessions.archiveRuntimeSessions).toHaveBeenCalledWith(deps.db, "channel-C1", "0.9");
       expect(deps.repos.conversations.advanceCursorToCurrentMax).toHaveBeenCalledWith(
         expect.objectContaining({
           conversationId: 1,
@@ -1320,7 +1321,7 @@ describe("slack/adapter", () => {
       });
       await flush();
 
-      expect(sessions.deleteSessionId).toHaveBeenCalledWith(deps.db, "agent-agent-1/channel-C1", "0.9");
+      expect(sessions.archiveRuntimeSessions).toHaveBeenCalledWith(deps.db, "agent-agent-1/channel-C1", "0.9");
       expect(deps.runAgent).not.toHaveBeenCalled();
     });
 
@@ -1341,9 +1342,9 @@ describe("slack/adapter", () => {
   });
 
   describe("Assistant-pane DM shimmer", () => {
-    it("calls setAssistantStatus and skips eyes/✅ reactions for DMs with a threadTs when EXPERIMENTAL_FLAG is on", async () => {
+    it("calls setAssistantStatus and skips eyes/✅ reactions for DMs with a threadTs", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
 
@@ -1364,7 +1365,6 @@ describe("slack/adapter", () => {
             DATA_DIR: "/tmp/test-data",
             PORT: 0,
             LOG_LEVEL: "error",
-            EXPERIMENTAL_FLAG: true,
           }),
           runAgent: vi.fn().mockImplementation(async (params) => {
             await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
@@ -1385,7 +1385,7 @@ describe("slack/adapter", () => {
 
     it("honors the selected tool-progress mode for Assistant shimmer text", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi.fn().mockImplementation(async (params) => {
           await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
           return makeAgentResult();
@@ -1403,7 +1403,7 @@ describe("slack/adapter", () => {
 
     it("streams reasoning text into the shimmer when reasoningText is on", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi.fn().mockImplementation(async (params) => {
           await params.onProgressEvent({ kind: "intermediate_text", text: "thinking about it" });
           return makeAgentResult();
@@ -1421,7 +1421,7 @@ describe("slack/adapter", () => {
 
     it("collapses repeated tool calls into an (xN) multiplier in the shimmer", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi.fn().mockImplementation(async (params) => {
           await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
           await params.onProgressEvent({ kind: "tool_use", toolName: "Read", input: { file_path: "a.ts" } });
@@ -1440,7 +1440,7 @@ describe("slack/adapter", () => {
 
     it("passes threadTs to runAgent for assistant-pane DMs", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
 
@@ -1454,7 +1454,7 @@ describe("slack/adapter", () => {
 
     it("posts the final reply inside the assistant thread", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
 
@@ -1468,7 +1468,7 @@ describe("slack/adapter", () => {
 
     it("posts _No response_ as a thread reply for assistant-pane DMs", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi
           .fn()
           .mockResolvedValue(makeAgentResult({ messageSent: false, trace: { progressEvents: [], finalText: null } })),
@@ -1485,7 +1485,7 @@ describe("slack/adapter", () => {
 
     it("posts the error message as a thread reply for assistant-pane DMs", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi.fn().mockRejectedValue(new Error("boom")),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
@@ -1500,7 +1500,7 @@ describe("slack/adapter", () => {
 
     it("uploads pending files inside the assistant thread", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
         runAgent: vi.fn().mockResolvedValue(makeAgentResult({ pendingUploads: ["/tmp/out.pdf"] })),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
@@ -1514,7 +1514,7 @@ describe("slack/adapter", () => {
 
     it("does not pass threadTs to runAgent for top-level (no-thread) Messages-tab DMs", async () => {
       const deps = makeDeps({
-        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error", EXPERIMENTAL_FLAG: true }),
+        config: createTestConfig({ DATA_DIR: "/tmp/test-data", PORT: 0, LOG_LEVEL: "error" }),
       });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
 

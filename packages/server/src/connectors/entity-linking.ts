@@ -10,6 +10,7 @@ import type { Kysely, Selectable } from "kysely";
 import jaroWinklerModule from "talisman/metrics/jaro-winkler";
 import { createEntityRepository } from "../db/repositories/entities";
 import type { DB, EntitiesTable } from "../db/schema";
+import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 
 /** talisman is CJS — handle both default and named export shapes */
 const jaroWinkler: (a: string, b: string) => number =
@@ -28,7 +29,9 @@ type Entity = Selectable<EntitiesTable>;
  */
 export async function getHotEntitiesForPrompt(db: Kysely<DB>, content: string): Promise<Entity[]> {
   const entityRepo = createEntityRepository(db);
-  const allEntities = await entityRepo.getEntitiesByStatus("confirmed");
+  const allEntities = await entityRepo.getEntitiesByStatus("confirmed", {
+    excludeSourceTypes: Array.from(HIDDEN_ENTITY_SOURCE_TYPES),
+  });
   const contentLower = content.toLowerCase();
 
   const matched = allEntities.filter((e) => {
@@ -64,6 +67,9 @@ export function formatEntitiesForPrompt(entities: Entity[]): string {
  * 1. Exact name match in entities
  * 2. Fuzzy match (Jaro-Winkler >= 0.85) — auto-merge with alias
  * 3. No match — create tentative person entity
+ *
+ * Dormant legacy path retained for compatibility; new extraction flows should
+ * use propose/materialize helpers and pass provenance explicitly.
  */
 export async function resolveNewPerson(db: Kysely<DB>, name: string): Promise<Entity> {
   const entityRepo = createEntityRepository(db);
@@ -93,5 +99,6 @@ export async function resolveNewPerson(db: Kysely<DB>, name: string): Promise<En
     sourceType: "person",
     subtype: "external",
     status: "tentative",
+    provenanceTier: "inferred",
   });
 }

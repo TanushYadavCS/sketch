@@ -14,11 +14,10 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEntityRepository } from "../db/repositories/entities";
-import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { EmbeddingProvider } from "./embeddings/types";
-import { clearEnrichmentData, isEnrichmentActive, matchesAsWord, runEnrichment } from "./enrichment";
+import { clearEnrichmentData, isEnrichmentActive, runEnrichment } from "./enrichment";
 import type { GeminiGenerator } from "./gemini-generate";
 
 /** Insert the minimum rows needed to have an indexed file ready for enrichment. */
@@ -258,6 +257,40 @@ describe("runEnrichment — batch chunk insert", () => {
     // Chunk indices should be sequential
     for (let i = 0; i < chunks.length; i++) {
       expect(chunks[i].chunk_index).toBe(i);
+    }
+  });
+
+  it("processes every pending file with its own content fetched lazily", async () => {
+    const files = [
+      { id: randomUUID(), marker: "ALPHAMARKER" },
+      { id: randomUUID(), marker: "BRAVOMARKER" },
+      { id: randomUUID(), marker: "CHARLIEMARKER" },
+    ];
+    for (const f of files) {
+      await seedFile(db, f.id, `${f.marker} document body ${"word ".repeat(30).trim()}`, {
+        fileName: `${f.marker}.txt`,
+      });
+      await db.updateTable("indexed_files").set({ embedding_status: "pending" }).where("id", "=", f.id).execute();
+    }
+
+    const result = await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null });
+
+    expect(result.filesProcessed).toBe(files.length);
+    for (const f of files) {
+      const chunks = await db
+        .selectFrom("document_chunks")
+        .select("content")
+        .where("indexed_file_id", "=", f.id)
+        .execute();
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.map((c) => c.content).join(" ")).toContain(f.marker);
+
+      const status = await db
+        .selectFrom("indexed_files")
+        .select("embedding_status")
+        .where("id", "=", f.id)
+        .executeTakeFirstOrThrow();
+      expect(status.embedding_status).toBe("done");
     }
   });
 
@@ -700,7 +733,7 @@ describe("runEnrichment — claim semantics", () => {
     expect(await getStatus(fileId)).toBe("done");
   });
 
-  it("deterministic relinking preserves LLM extraction mentions", async () => {
+  it("no-key enrichment preserves existing LLM extraction mentions", async () => {
     const fileId = randomUUID();
     await seedFile(db, fileId, "Jane Doe discussed the launch plan.");
     await setStatus(fileId, "pending");
@@ -715,25 +748,6 @@ describe("runEnrichment — claim semantics", () => {
       confidence: "INFERRED",
       source: "llm_extraction",
       relation: "mentioned",
-    });
-    await createIndexedFileFactRepository(db).upsertFact({
-      indexedFileId: fileId,
-      connectorConfigId: "conn-1",
-      contentHash: "hash",
-      source: "llm_extraction",
-      factType: "llm_extracted",
-      relation: "mentioned",
-      subjectName: "Jane Doe",
-      subjectSource: "llm_extraction",
-      subjectSourceId: `${fileId}:hash:Jane Doe`,
-      raw: {
-        contentHash: "hash",
-        promptVersion: "llm-extraction-v1",
-        model: "gemini",
-        mention: "Jane Doe",
-        type: "person",
-        variations: [],
-      },
     });
 
     await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null, fileIds: [fileId] });
@@ -744,23 +758,17 @@ describe("runEnrichment — claim semantics", () => {
       .where("indexed_file_id", "=", fileId)
       .execute();
     expect(mentions).toContainEqual({ source: "llm_extraction", confidence: "INFERRED", relation: "mentioned" });
+    expect(mentions.some((mention) => mention.source === "deterministic_substring")).toBe(false);
   });
 
-  it("deterministic relinking removes legacy llm_extraction mentions without backing facts", async () => {
+  it("no-key enrichment does not create deterministic substring mentions", async () => {
     const fileId = randomUUID();
     await seedFile(db, fileId, "Jane Doe discussed the launch plan.");
     await setStatus(fileId, "pending");
-    const entity = await createEntityRepository(db).upsertEntity({
+    await createEntityRepository(db).upsertEntity({
       name: "Jane Doe",
       sourceType: "person",
       status: "confirmed",
-    });
-    await createEntityRepository(db).createMention({
-      entityId: entity.id,
-      indexedFileId: fileId,
-      confidence: "INFERRED",
-      source: "llm_extraction",
-      relation: "mentioned",
     });
 
     await runEnrichment({ db, logger: createTestLogger(), embeddingProvider: null, fileIds: [fileId] });
@@ -770,41 +778,7 @@ describe("runEnrichment — claim semantics", () => {
       .select(["source", "confidence", "relation"])
       .where("indexed_file_id", "=", fileId)
       .execute();
-    expect(mentions).not.toContainEqual({ source: "llm_extraction", confidence: "INFERRED", relation: "mentioned" });
-    expect(mentions).toContainEqual({
-      source: "deterministic_substring",
-      confidence: "INFERRED",
-      relation: "mentioned",
-    });
-  });
-});
-
-describe("matchesAsWord — word-boundary entity name matching", () => {
-  it("does NOT match a name embedded inside a longer word", () => {
-    // The bug that motivated this helper: "Anshu" inside "Himanshu" was
-    // creating false-positive entity_mentions on every "Himanshu" doc.
-    expect(matchesAsWord("himanshu kalra is here", "anshu")).toBe(false);
-    expect(matchesAsWord("estimated 5 days", "tim")).toBe(false);
-    expect(matchesAsWord("donate to charity", "don")).toBe(false);
-  });
-
-  it("matches at word boundaries", () => {
-    expect(matchesAsWord("anshu is on the call", "anshu")).toBe(true);
-    expect(matchesAsWord("called anshu yesterday", "anshu")).toBe(true);
-    expect(matchesAsWord("anshu, please review", "anshu")).toBe(true);
-    expect(matchesAsWord("hello, anshu!", "anshu")).toBe(true);
-  });
-
-  it("matches multi-word names exactly", () => {
-    expect(matchesAsWord("himanshu kalra reviewed it", "himanshu kalra")).toBe(true);
-    expect(matchesAsWord("met with himanshu kalra today", "himanshu kalra")).toBe(true);
-    expect(matchesAsWord("himanshu and kalra are different people", "himanshu kalra")).toBe(false);
-  });
-
-  it("escapes regex metacharacters in names", () => {
-    // Names with regex-special chars must not be treated as patterns.
-    expect(matchesAsWord("invoiced o.brien yesterday", "o.brien")).toBe(true);
-    expect(matchesAsWord("invoiced oXbrien yesterday", "o.brien")).toBe(false);
+    expect(mentions).toEqual([]);
   });
 });
 

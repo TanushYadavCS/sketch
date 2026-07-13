@@ -4,14 +4,42 @@ import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
-import { createTestDb } from "../test-utils";
-import { buildMaterializeDeps } from "./materialize";
+import { createTestDb, createTestLogger } from "../test-utils";
+import { buildMaterializeDeps, materializeUnmaterializedFacts } from "./materialize";
 import { materializeStructuralSeed } from "./materialize-structural";
 import type { IndexedFileFactRow } from "./materialize-types";
+import type { ProposeEntityType } from "./propose";
 
 const USER_ID = "user-1";
 const CONNECTOR_ID = "connector-1";
 const FILE_ID = "file-1";
+const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
+
+function birthGateTypes(): Set<ProposeEntityType> {
+  return new Set<ProposeEntityType>(["project", "product", "team"]);
+}
+
+function structuralAutoBirthTypes(): Set<ProposeEntityType> {
+  return new Set<ProposeEntityType>(["project"]);
+}
+
+async function countEntitiesBySourceType(db: Kysely<DB>, sourceType: string): Promise<number> {
+  const row = await db
+    .selectFrom("entities")
+    .select((eb) => eb.fn.count<number>("id").as("count"))
+    .where("source_type", "=", sourceType)
+    .where("id", "!=", TEST_ACCOUNT_ENTITY_ID)
+    .executeTakeFirstOrThrow();
+  return Number(row.count);
+}
+
+async function countReviewQueueRows(db: Kysely<DB>): Promise<number> {
+  const row = await db
+    .selectFrom("entity_review_queue")
+    .select((eb) => eb.fn.count<number>("id").as("count"))
+    .executeTakeFirstOrThrow();
+  return Number(row.count);
+}
 
 async function seedConnectorFile(db: Kysely<DB>, source = "linear"): Promise<void> {
   const now = new Date().toISOString();
@@ -213,5 +241,125 @@ describe("materializeStructuralSeed project birth gate", () => {
     const entity = await db.selectFrom("entities").selectAll().executeTakeFirstOrThrow();
     expect(entity).toMatchObject({ name: "Workspace", source_type: "clickup_workspace" });
     await expect(db.selectFrom("entity_review_queue").selectAll().execute()).resolves.toHaveLength(0);
+  });
+
+  it("auto-births current connector project seeds as structural under the project birth gate", async () => {
+    await seedConnectorFile(db);
+    await seedStructuralFact(db, {
+      sourceType: "project",
+      subjectName: "Apollo",
+      subjectSourceId: "P-live",
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), {
+      birthGateTypes: birthGateTypes(),
+      structuralAutoBirthTypes: structuralAutoBirthTypes(),
+    });
+
+    const project = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("source_type", "=", "project")
+      .where("id", "!=", TEST_ACCOUNT_ENTITY_ID)
+      .executeTakeFirstOrThrow();
+    expect(project).toMatchObject({
+      name: "Apollo",
+      provenance_tier: "structural",
+    });
+    await expect(
+      db
+        .selectFrom("entity_source_refs")
+        .selectAll()
+        .where("entity_id", "=", project.id)
+        .where("source", "=", "linear")
+        .where("source_id", "=", "P-live")
+        .execute(),
+    ).resolves.toHaveLength(1);
+    expect(await countReviewQueueRows(db)).toBe(0);
+  });
+
+  it.each(["rejected", "pending"] as const)(
+    "does not auto-birth a structurally declared project with an existing %s review row",
+    async (status) => {
+      await seedConnectorFile(db);
+      const reviewRepo = createEntityReviewRepo(db);
+      const { row } = await reviewRepo.upsertSeedReviewRow({
+        proposedName: "Sketch",
+        normalizedName: "sketch",
+        entityType: "project",
+        seedSource: "linear",
+        seedSourceId: "P-existing",
+        candidateEntityId: null,
+        triggeredByUserId: USER_ID,
+      });
+      if (status === "rejected") {
+        await db.updateTable("entity_review_queue").set({ status }).where("id", "=", row.id).execute();
+      }
+      await seedStructuralFact(db, {
+        sourceType: "project",
+        subjectName: "Sketch",
+        subjectSourceId: "P-existing",
+      });
+
+      await materializeUnmaterializedFacts(db, createTestLogger(), {
+        birthGateTypes: birthGateTypes(),
+        structuralAutoBirthTypes: structuralAutoBirthTypes(),
+      });
+
+      expect(await countEntitiesBySourceType(db, "project")).toBe(0);
+      const reviews = await db.selectFrom("entity_review_queue").selectAll().execute();
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]).toMatchObject({
+        id: row.id,
+        seed_source: "linear",
+        seed_source_id: "P-existing",
+        status,
+      });
+    },
+  );
+
+  it("A0 documents current structural seed path creating replay-dispatched project and team seeds but queueing linear_project containers until A1 flips it", async () => {
+    await seedConnectorFile(db);
+    await seedStructuralFact(db, {
+      sourceType: "project",
+      subjectName: "Apollo",
+      subjectSourceId: "P-live",
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger());
+
+    expect(await countEntitiesBySourceType(db, "project")).toBe(1);
+    expect(await countReviewQueueRows(db)).toBe(0);
+
+    await db.destroy();
+    db = await createTestDb();
+
+    await seedConnectorFile(db);
+    const containerFact = await seedStructuralFact(db, {
+      subjectName: "Zephyr",
+      subjectSourceId: "P-container",
+    });
+    const containerDeps = await buildMaterializeDeps(db);
+
+    await materializeStructuralSeed(containerDeps, containerFact);
+
+    expect(await countEntitiesBySourceType(db, "project")).toBe(0);
+    expect(await countReviewQueueRows(db)).toBe(1);
+
+    await db.destroy();
+    db = await createTestDb();
+
+    await seedConnectorFile(db);
+    const teamFact = await seedStructuralFact(db, {
+      sourceType: "team",
+      subjectName: "Engineering",
+      subjectSourceId: "T1",
+    });
+    const teamDeps = await buildMaterializeDeps(db);
+
+    await materializeStructuralSeed(teamDeps, teamFact);
+
+    expect(await countEntitiesBySourceType(db, "team")).toBe(1);
+    expect(await countReviewQueueRows(db)).toBe(0);
   });
 });

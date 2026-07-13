@@ -17,8 +17,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { runMigrations } from "../migrate";
 import type { DB } from "../schema";
+import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
+import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 110;
+const EXPECTED_MIGRATION_COUNT = 137;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -143,6 +145,106 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[107]).toBe("112-agent-output-structured-payload");
     expect(names[108]).toBe("113-indexed-file-all-day-flag");
     expect(names[109]).toBe("114-agent-output-deliveries");
+    expect(names[110]).toBe("115-whatsapp-template-mappings-and-provider-events");
+    expect(names[111]).toBe("116-connector-credential-source");
+    expect(names[112]).toBe("117-conversation-message-window-index");
+    expect(names[113]).toBe("118-whatsapp-window-keepalives");
+    expect(names[114]).toBe("119-agent-outputs-source-scope");
+    expect(names[115]).toBe("120-agent-output-period-key");
+    expect(names[116]).toBe("121-tasks");
+    expect(names[117]).toBe("122-tasks-owner");
+    expect(names[118]).toBe("123-sub-entities");
+    expect(names[119]).toBe("124-tasks-assignee-name");
+    expect(names[120]).toBe("125-milestone-series-and-value-signature");
+    expect(names[121]).toBe("126-work-cycles");
+    expect(names[122]).toBe("127-work-cycles-connector");
+    expect(names[123]).toBe("128-work-cycles-connector-key");
+    expect(names[124]).toBe("129-container-name-qualification");
+    expect(names[125]).toBe("130-entity-provenance-tier");
+    expect(names[126]).toBe("131-trunk-name-embeddings");
+    expect(names[127]).toBe("132-agent-messages");
+    expect(names[128]).toBe("133-chat-session-runtime");
+    expect(names[129]).toBe("134-chat-session-archived-at");
+    expect(names[130]).toBe("135-whatsapp-context-graph-indexing");
+    expect(names[131]).toBe("136-whatsapp-slice-denoised-message-ids");
+    expect(names[132]).toBe("137-whatsapp-group-participants");
+    expect(names[133]).toBe("138-whatsapp-identity-candidates");
+    expect(names[134]).toBe("139-tasks-proposed-assignee");
+    expect(names[135]).toBe("140-retire-unassigned-agent-tasks");
+  });
+
+  it("creates the sub-entities table and current-row partial unique index", async () => {
+    const columns = await sql<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>`
+      SELECT column_name, data_type, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'sub_entities'
+    `.execute(db);
+    expect(columns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ column_name: "parent_entity_id", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "parent_scope_key", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "kind", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "normalized_name", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "source_fact_id", data_type: "text", is_nullable: "YES" }),
+      ]),
+    );
+
+    const indexes = await sql<{ indexname: string; indexdef: string }>`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'sub_entities'
+    `.execute(db);
+    const currentIndex = indexes.rows.find((row) => row.indexname === "idx_sub_entities_current_scope_kind_name");
+    expect(currentIndex?.indexdef).toContain("UNIQUE INDEX");
+    expect(currentIndex?.indexdef).toContain("parent_scope_key");
+    expect(currentIndex?.indexdef).toContain("kind");
+    expect(currentIndex?.indexdef).toContain("normalized_name");
+    expect(currentIndex?.indexdef).toContain("WHERE (valid_to IS NULL)");
+
+    const foreignKeys = await sql<{
+      column_name: string;
+      foreign_table_name: string;
+      foreign_column_name: string;
+      delete_rule: string;
+    }>`
+      SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name, rc.delete_rule
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+       AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage ccu
+        ON ccu.constraint_name = tc.constraint_name
+       AND ccu.table_schema = tc.table_schema
+      JOIN information_schema.referential_constraints rc
+        ON rc.constraint_name = tc.constraint_name
+       AND rc.constraint_schema = tc.table_schema
+      WHERE tc.table_schema = 'public'
+        AND tc.table_name = 'sub_entities'
+        AND tc.constraint_type = 'FOREIGN KEY'
+    `.execute(db);
+    expect(foreignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          column_name: "parent_entity_id",
+          foreign_table_name: "entities",
+          foreign_column_name: "id",
+          delete_rule: "SET NULL",
+        }),
+        expect.objectContaining({
+          column_name: "created_by_user_id",
+          foreign_table_name: "users",
+          foreign_column_name: "id",
+        }),
+      ]),
+    );
+    expect(foreignKeys.rows.some((row) => row.column_name === "source_fact_id")).toBe(false);
   });
 
   it("running migrations twice is idempotent", async () => {
@@ -312,6 +414,15 @@ describe("runMigrations on Postgres — full sequence", () => {
         AND column_name = 'rollup_group_id'
     `.execute(db);
     expect(columns.rows).toHaveLength(1);
+
+    const connectorColumns = await sql<{ column_name: string }>`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'connector_configs'
+        AND column_name = 'credential_source'
+    `.execute(db);
+    expect(connectorColumns.rows).toHaveLength(1);
   });
 
   it("creates CRM object summaries table", async () => {
@@ -405,10 +516,11 @@ describe("runMigrations on Postgres — full sequence", () => {
     }
   });
 
-  it("creates mcp_servers, chat_sessions, scheduled_tasks, inbox_messages, and conversation tables", async () => {
+  it("creates mcp_servers, chat_sessions, agent_messages, scheduled_tasks, inbox_messages, and conversation tables", async () => {
     for (const table of [
       "mcp_servers",
       "chat_sessions",
+      "agent_messages",
       "scheduled_tasks",
       "inbox_messages",
       "conversations",
@@ -458,6 +570,16 @@ describe("runMigrations on Postgres — full sequence", () => {
         WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
       `.execute(db);
       expect(result.rows).toHaveLength(0);
+    }
+  });
+
+  it("creates WhatsApp provider event and template mapping tables", async () => {
+    for (const table of ["whatsapp_provider_events", "whatsapp_template_mappings"]) {
+      const result = await sql<{ table_name: string }>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
     }
   });
 
@@ -626,6 +748,34 @@ describe("runMigrations on Postgres — chat_sessions schema", () => {
     expect(result.rows[0].column_default).toContain("''");
   });
 
+  it("chat_sessions has runtime NOT NULL with default sdk", async () => {
+    const result = await sql<{ column_name: string; is_nullable: string; column_default: string }>`
+      SELECT column_name, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'chat_sessions'
+        AND column_name = 'runtime'
+    `.execute(db);
+
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].is_nullable).toBe("NO");
+    expect(result.rows[0].column_default).toContain("'sdk'");
+  });
+
+  it("chat_sessions has nullable archived_at", async () => {
+    const result = await sql<{ column_name: string; is_nullable: string; column_default: string | null }>`
+      SELECT column_name, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'chat_sessions'
+        AND column_name = 'archived_at'
+    `.execute(db);
+
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].is_nullable).toBe("YES");
+    expect(result.rows[0].column_default).toBeNull();
+  });
+
   it("chat_sessions has id as auto-incrementing integer primary key", async () => {
     const result = await sql<{ column_name: string; data_type: string; column_default: string }>`
       SELECT column_name, data_type, column_default
@@ -641,31 +791,22 @@ describe("runMigrations on Postgres — chat_sessions schema", () => {
     expect(result.rows[0].column_default).toMatch(/nextval/i);
   });
 
-  it("UNIQUE constraint on (workspace_key, thread_key) exists", async () => {
-    const result = await sql<{ constraint_name: string; constraint_type: string }>`
-      SELECT tc.constraint_name, tc.constraint_type
-      FROM information_schema.table_constraints tc
-      WHERE tc.table_schema = 'public'
-        AND tc.table_name = 'chat_sessions'
-        AND tc.constraint_type = 'UNIQUE'
+  it("partial UNIQUE index on active (workspace_key, thread_key, runtime) exists", async () => {
+    const result = await sql<{ indexname: string; indexdef: string }>`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'chat_sessions'
+        AND indexname = 'chat_sessions_workspace_thread_uidx'
     `.execute(db);
 
-    expect(result.rows.length).toBeGreaterThanOrEqual(1);
-
-    // Verify the unique constraint covers workspace_key and thread_key
-    const constraintName = result.rows[0].constraint_name;
-    const columns = await sql<{ column_name: string }>`
-      SELECT kcu.column_name
-      FROM information_schema.key_column_usage kcu
-      WHERE kcu.table_schema = 'public'
-        AND kcu.table_name = 'chat_sessions'
-        AND kcu.constraint_name = ${constraintName}
-      ORDER BY kcu.ordinal_position
-    `.execute(db);
-
-    const colNames = columns.rows.map((r) => r.column_name);
-    expect(colNames).toContain("workspace_key");
-    expect(colNames).toContain("thread_key");
+    expect(result.rows).toHaveLength(1);
+    const indexDef = result.rows[0].indexdef.toLowerCase();
+    expect(indexDef).toContain("unique");
+    expect(indexDef).toContain("workspace_key");
+    expect(indexDef).toContain("thread_key");
+    expect(indexDef).toContain("runtime");
+    expect(indexDef).toContain("archived_at is null");
   });
 
   it("chat_sessions allows inserting a row with empty string thread_key", async () => {
@@ -683,4 +824,163 @@ describe("runMigrations on Postgres — chat_sessions schema", () => {
     expect(row?.thread_key).toBe("");
     expect(row?.session_id).toBe("sess-001");
   });
+
+  it("chat_sessions allows the same workspace and thread for different runtimes", async () => {
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "runtime-workspace", thread_key: "", runtime: "sdk", session_id: "sess-sdk" })
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "runtime-workspace", thread_key: "", runtime: "aisdk", session_id: "sess-ai" })
+      .execute();
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["runtime", "session_id"])
+      .where("workspace_key", "=", "runtime-workspace")
+      .orderBy("runtime", "asc")
+      .execute();
+
+    expect(rows).toEqual([
+      { runtime: "aisdk", session_id: "sess-ai" },
+      { runtime: "sdk", session_id: "sess-sdk" },
+    ]);
+  });
+
+  it("allows archived duplicates while enforcing one active row", async () => {
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "archive-workspace", thread_key: "thread-1", runtime: "aisdk", session_id: "sess-1" })
+      .execute();
+    await db
+      .updateTable("chat_sessions")
+      .set({ archived_at: "2026-07-01T00:00:00.000Z" })
+      .where("session_id", "=", "sess-1")
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({ workspace_key: "archive-workspace", thread_key: "thread-1", runtime: "aisdk", session_id: "sess-2" })
+      .execute();
+    await db
+      .updateTable("chat_sessions")
+      .set({ archived_at: "2026-07-02T00:00:00.000Z" })
+      .where("session_id", "=", "sess-2")
+      .execute();
+    await db
+      .insertInto("chat_sessions")
+      .values({
+        workspace_key: "archive-workspace",
+        thread_key: "thread-1",
+        runtime: "aisdk",
+        session_id: "sess-active",
+      })
+      .execute();
+
+    await sql`SAVEPOINT duplicate_active_session`.execute(db);
+    await expect(
+      db
+        .insertInto("chat_sessions")
+        .values({
+          workspace_key: "archive-workspace",
+          thread_key: "thread-1",
+          runtime: "aisdk",
+          session_id: "sess-active-2",
+        })
+        .execute(),
+    ).rejects.toThrow();
+    await sql`ROLLBACK TO SAVEPOINT duplicate_active_session`.execute(db);
+    await sql`RELEASE SAVEPOINT duplicate_active_session`.execute(db);
+
+    const rows = await db
+      .selectFrom("chat_sessions")
+      .select(["session_id", "archived_at"])
+      .where("workspace_key", "=", "archive-workspace")
+      .orderBy("id", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { session_id: "sess-1", archived_at: "2026-07-01T00:00:00.000Z" },
+      { session_id: "sess-2", archived_at: "2026-07-02T00:00:00.000Z" },
+      { session_id: "sess-active", archived_at: null },
+    ]);
+  });
+});
+
+describe("runMigrations on Postgres — chat_session runtime down migration", () => {
+  it("134 down drops archived rows and restores pre-archive uniqueness", async () => {
+    const db = await createTestPgDb();
+    try {
+      await db
+        .insertInto("chat_sessions")
+        .values({ workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-old" })
+        .execute();
+      await db
+        .updateTable("chat_sessions")
+        .set({ archived_at: "2026-07-01T00:00:00.000Z" })
+        .where("session_id", "=", "sess-old")
+        .execute();
+      await db
+        .insertInto("chat_sessions")
+        .values({ workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-active" })
+        .execute();
+
+      await expect(chatSessionArchiveMigration.down(db as Kysely<unknown>)).resolves.not.toThrow();
+
+      const archivedAtColumns = await sql<{ column_name: string }>`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'chat_sessions'
+          AND column_name = 'archived_at'
+      `.execute(db);
+      expect(archivedAtColumns.rows).toEqual([]);
+
+      const rows = await db
+        .selectFrom("chat_sessions")
+        .select(["workspace_key", "thread_key", "runtime", "session_id"])
+        .where("workspace_key", "=", "down-archive")
+        .execute();
+      expect(rows).toEqual([
+        { workspace_key: "down-archive", thread_key: "", runtime: "sdk", session_id: "sess-active" },
+      ]);
+    } finally {
+      await db.destroy();
+    }
+  }, 30000);
+
+  it("keeps the sdk row when dual runtime rows share a workspace and thread", async () => {
+    const db = await createTestPgDb();
+    try {
+      await db
+        .insertInto("chat_sessions")
+        .values({ workspace_key: "down-workspace", thread_key: "", runtime: "sdk", session_id: "sess-sdk" })
+        .execute();
+      await db
+        .insertInto("chat_sessions")
+        .values({ workspace_key: "down-workspace", thread_key: "", runtime: "aisdk", session_id: "sess-ai" })
+        .execute();
+
+      await expect(chatSessionArchiveMigration.down(db as Kysely<unknown>)).resolves.not.toThrow();
+      await expect(chatSessionRuntimeMigration.down(db as Kysely<unknown>)).resolves.not.toThrow();
+
+      const rows = await sql<{ workspace_key: string; thread_key: string; session_id: string }>`
+        SELECT workspace_key, thread_key, session_id
+        FROM chat_sessions
+        WHERE workspace_key = 'down-workspace'
+        ORDER BY session_id ASC
+      `.execute(db);
+      expect(rows.rows).toEqual([{ workspace_key: "down-workspace", thread_key: "", session_id: "sess-sdk" }]);
+
+      const runtimeColumns = await sql<{ column_name: string }>`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'chat_sessions'
+          AND column_name = 'runtime'
+      `.execute(db);
+      expect(runtimeColumns.rows).toEqual([]);
+    } finally {
+      await db.destroy();
+    }
+  }, 30000);
 });

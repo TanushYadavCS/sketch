@@ -50,6 +50,10 @@ export interface WhatsAppGroupsTable {
   tool_progress: string | null;
   reasoning_text: Generated<number | null>;
   agent_user_id: string | null;
+  index_enabled: Generated<number>;
+  slice_gap_minutes: number | null;
+  slice_max_age_minutes: number | null;
+  slice_max_messages: number | null;
   updated_at: Generated<string>;
 }
 
@@ -97,6 +101,7 @@ export interface ConnectorConfigsTable {
   connector_type: string;
   auth_type: string;
   credentials: string;
+  credential_source: Generated<string>;
   scope_config: Generated<string>;
 
   sync_status: Generated<string>;
@@ -189,6 +194,16 @@ export interface ChunkEmbeddingsTable {
 
 export interface FileEmbeddingsTable {
   indexed_file_id: string;
+  embedding: string;
+}
+
+export interface EntityNameEmbeddingsTable {
+  entity_id: string;
+  embedding: string;
+}
+
+export interface EntityReviewQueueEmbeddingsTable {
+  review_id: string;
   embedding: string;
 }
 
@@ -425,8 +440,19 @@ export interface ChatSessionsTable {
   id: Generated<number>;
   workspace_key: string;
   thread_key: Generated<string>;
+  runtime: Generated<string>;
   session_id: string;
   updated_at: Generated<string>;
+  archived_at: Generated<string | null>;
+}
+
+export interface AgentMessagesTable {
+  id: Generated<number>;
+  session_id: string;
+  seq: number;
+  role: string;
+  content: string;
+  created_at: Generated<string>;
 }
 
 export interface ConversationsTable {
@@ -467,6 +493,80 @@ export interface ConversationMessagesTable {
   provider_timestamp: string | null;
   received_at: string;
   created_at: Generated<string>;
+}
+
+export interface ConversationSlicesTable {
+  id: string;
+  conversation_id: number;
+  first_message_id: number;
+  last_message_id: number;
+  started_at: string;
+  ended_at: string;
+  message_count: number;
+  denoised_message_ids: string | null;
+  flush_reason: string;
+  roster_snapshot: string;
+  salience_verdict: string | null;
+  salience_signals: string | null;
+  salience_claim_token: string | null;
+  salience_claimed_at: string | null;
+  indexed_file_id: string | null;
+  created_at: Generated<string>;
+}
+
+export interface ConversationSliceCursorsTable {
+  conversation_id: number;
+  last_effective_at: string | null;
+  last_message_id: number | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface WhatsAppIdentityCandidatesTable {
+  group_jid: string;
+  candidate_ref: string;
+  participant_jid_ref: string;
+  display_name: string | null;
+  kept_slice_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  last_slice_id: string;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface WhatsAppGroupMemberLabelsTable {
+  group_jid: string;
+  phone_e164: string;
+  display_name: string;
+  company_name: string | null;
+  created_by: string;
+  created_at: Generated<string>;
+}
+
+export interface WhatsAppGroupParticipantsTable {
+  group_jid: string;
+  participant_jid: string;
+  phone_e164: string | null;
+  lid: string | null;
+  admin_role: string | null;
+  last_seen_at: Generated<string>;
+}
+
+export interface WhatsAppBackfillCheckpointsTable {
+  group_jid: string;
+  last_fetched_key: string | null;
+  status: string;
+  updated_at: Generated<string>;
+}
+
+export interface WhatsAppWindowKeepAlivesTable {
+  recipient_user_id: string;
+  sent_at: string;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
 }
 
 export interface ScheduledTasksTable {
@@ -527,6 +627,9 @@ export interface AgentOutputsTable {
   agent_key: string;
   user_id: string;
   output_date: string;
+  period_key: Generated<string | null>;
+  source_key: Generated<string>;
+  source_label: string | null;
   timezone: string;
   status: string;
   trigger_type: string;
@@ -574,6 +677,37 @@ export interface AgentOutputDeliveriesTable {
   updated_at: Generated<string>;
 }
 
+export interface WhatsAppProviderEventsTable {
+  id: string;
+  provider: string;
+  dedupe_key: string;
+  provider_message_id: string | null;
+  provider_conversation_id: string | null;
+  event_family: string;
+  event_type: string | null;
+  status: string | null;
+  failure_code: string | null;
+  failure_detail: string | null;
+  provider_timestamp: string | null;
+  raw_payload_json: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface WhatsAppTemplateMappingsTable {
+  id: string;
+  provider: string;
+  logical_key: string;
+  provider_template_name: string;
+  language: Generated<string>;
+  status: Generated<string>;
+  category: string | null;
+  parameter_map_json: string | null;
+  last_synced_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface AgentUserConfigsTable {
   agent_key: string;
   user_id: string;
@@ -612,6 +746,7 @@ export interface EntitiesTable {
   metadata: string | null;
   source_ref_id: string | null;
   status: string;
+  provenance_tier: Generated<string>;
   hotness: number;
   created_at: string;
   updated_at: string;
@@ -831,6 +966,7 @@ export interface EntityReviewQueueTable {
   resolved_entity_id: string | null;
   seed_source: string | null;
   seed_source_id: string | null;
+  seed_aliases: string | null;
 }
 
 export interface EntityReviewEvidenceTable {
@@ -876,8 +1012,99 @@ export interface IndexedFileFactsTable {
   deleted_at: string | null;
   content_hash: string | null;
   materialized_at: string | null;
+  materialization_attempts: Generated<number>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
+}
+
+export interface TasksTable {
+  id: string;
+  parent_entity_id: string | null;
+  parent_source_ref: string | null;
+  parent_name: string | null;
+  source: string;
+  external_ref: string | null;
+  title: string;
+  normalized_title: string;
+  status: string;
+  status_raw: string | null;
+  status_authority: string;
+  assignee_entity_id: string | null;
+  assignee_name: string | null;
+  proposed_assignee_name: string | null;
+  priority: string | null;
+  due_at: string | null;
+  provenance: string;
+  source_task_id: string;
+  created_by_user_id: string | null;
+  status_changed_at: string | null;
+  completed_at: string | null;
+  valid_from: string | null;
+  valid_to: string | null;
+  milestone_series_key: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface TaskEvidenceTable {
+  task_id: string;
+  kind: string;
+  ref_id: string;
+}
+
+export interface WorkCyclesTable {
+  id: string;
+  scope_entity_id: string | null;
+  connector_config_id: string | null;
+  source: string;
+  external_ref: string;
+  name: string;
+  sequence: number | null;
+  starts_at: string | null;
+  ends_at: string | null;
+  state: string;
+  last_seen_sync_run_id: string | null;
+  deleted_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface TaskCycleMembershipsTable {
+  id: string;
+  task_id: string;
+  cycle_id: string;
+  assigned_at: Generated<string>;
+  removed_at: string | null;
+  source_fact_id: string | null;
+  created_at: Generated<string>;
+}
+
+export interface SubEntitiesTable {
+  id: string;
+  parent_entity_id: string | null;
+  parent_scope_key: string;
+  kind: string;
+  normalized_name: string;
+  display_name: string;
+  status: string;
+  status_authority: Generated<string>;
+  valid_from: Generated<string>;
+  valid_to: string | null;
+  provenance: string;
+  due_at: string | null;
+  value_signature: string | null;
+  series_key: string | null;
+  created_by_user_id: string | null;
+  source_fact_id: string | null;
+  metadata_json: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface SubEntityEvidenceTable {
+  sub_entity_id: string;
+  kind: string;
+  ref_id: string;
 }
 
 export interface DB {
@@ -900,6 +1127,8 @@ export interface DB {
   document_timeframes: DocumentTimeframesTable;
   chunk_embeddings: ChunkEmbeddingsTable;
   file_embeddings: FileEmbeddingsTable;
+  entity_name_embeddings: EntityNameEmbeddingsTable;
+  entity_review_queue_embeddings: EntityReviewQueueEmbeddingsTable;
   user_provider_identities: UserProviderIdentitiesTable;
   file_access: FileAccessTable;
   file_share_emails: FileShareEmailsTable;
@@ -917,15 +1146,25 @@ export interface DB {
   agent_environment_variable_shares: AgentEnvironmentVariableSharesTable;
   mcp_servers: McpServersTable;
   chat_sessions: ChatSessionsTable;
+  agent_messages: AgentMessagesTable;
   conversations: ConversationsTable;
   conversation_cursors: ConversationCursorsTable;
   conversation_messages: ConversationMessagesTable;
+  conversation_slices: ConversationSlicesTable;
+  conversation_slice_cursors: ConversationSliceCursorsTable;
+  whatsapp_identity_candidates: WhatsAppIdentityCandidatesTable;
+  whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
+  whatsapp_group_participants: WhatsAppGroupParticipantsTable;
+  whatsapp_backfill_checkpoints: WhatsAppBackfillCheckpointsTable;
+  whatsapp_window_keepalives: WhatsAppWindowKeepAlivesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
   automation_step_content: AutomationStepContentTable;
   agent_outputs: AgentOutputsTable;
   agent_output_items: AgentOutputItemsTable;
   agent_output_deliveries: AgentOutputDeliveriesTable;
+  whatsapp_provider_events: WhatsAppProviderEventsTable;
+  whatsapp_template_mappings: WhatsAppTemplateMappingsTable;
   agent_user_configs: AgentUserConfigsTable;
   inbox_messages: InboxMessagesTable;
   entities: EntitiesTable;
@@ -942,6 +1181,12 @@ export interface DB {
   entity_review_domain_candidates: EntityReviewDomainCandidatesTable;
   entity_alias_rejections: EntityAliasRejectionsTable;
   indexed_file_facts: IndexedFileFactsTable;
+  tasks: TasksTable;
+  task_evidence: TaskEvidenceTable;
+  work_cycles: WorkCyclesTable;
+  task_cycle_memberships: TaskCycleMembershipsTable;
+  sub_entities: SubEntitiesTable;
+  sub_entity_evidence: SubEntityEvidenceTable;
   entity_domains: EntityDomainsTable;
   entity_project_bindings: EntityProjectBindingsTable;
   entity_project_member_overrides: EntityProjectMemberOverridesTable;

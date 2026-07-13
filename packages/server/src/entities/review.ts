@@ -7,6 +7,7 @@
  *                             AFTER the owner-scope check passes
  *   POST   /:id/confirm       resolve via confirmReview()
  *   POST   /:id/reject        resolve via rejectReview()
+ *   POST   /:id/dismiss       drop a pending row (no entity) via dismissReview()
  *
  * Owner-scope: matches row.triggered_by_user_id OR is admin. Rows whose
  * evidence files were created by other users are admin-only — detected
@@ -29,11 +30,15 @@
  */
 import { type Context, Hono } from "hono";
 import type { Kysely } from "kysely";
-import { isAdmin } from "../api/auth-helpers";
+import type { Logger } from "pino";
+import { getContentViewer, isAdmin } from "../api/auth-helpers";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityReviewRepo, readReviewFreezeMs } from "../db/repositories/entity-review";
+import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
+import { createTaskRepository } from "../db/repositories/tasks";
 import type { DB } from "../db/schema";
-import { ResolveError, confirmReview, rejectReview } from "./resolve";
+import { ResolveError, confirmReview, dismissReview, reclassifyReview, rejectReview } from "./resolve";
+import { reconcileStructuralAssigneeContributesTo } from "./structural-assignee";
 
 function readEmail(metadata: string | null): string | null {
   if (!metadata) return null;
@@ -49,6 +54,7 @@ type CandidateSummary = { id: string; name: string; email: string | null };
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+const RECLASSIFIABLE_TYPES = new Set(["project", "product", "team"]);
 
 function statusForError(code: ResolveError["code"]): 404 | 409 | 422 {
   switch (code) {
@@ -106,7 +112,37 @@ async function denyIfNotOwnerOrAdmin(
   return null;
 }
 
-export function entityReviewRoutes(db: Kysely<DB>) {
+async function readErrorResponse(response: Response): Promise<{ code: string; message: string }> {
+  const body = (await response.json().catch(() => ({}))) as { error?: { code?: unknown; message?: unknown } };
+  return {
+    code: typeof body.error?.code === "string" ? body.error.code : "OWNER_SCOPE_DENIED",
+    message: typeof body.error?.message === "string" ? body.error.message : "not allowed",
+  };
+}
+
+function batchError(err: unknown): { code: string; message: string } {
+  if (err instanceof ResolveError) {
+    return { code: err.code, message: err.message };
+  }
+  return { code: "INTERNAL_ERROR", message: "unexpected batch item failure" };
+}
+
+async function backfillStructuralAssigneeForConfirmedProjects(
+  db: Kysely<DB>,
+  logger: Logger,
+  projectEntityIds: string[],
+): Promise<void> {
+  const uniqueProjectEntityIds = [...new Set(projectEntityIds)];
+  if (uniqueProjectEntityIds.length === 0) return;
+  const taskRepo = createTaskRepository(db);
+  const reanchored = await taskRepo.reanchorNullParentTasks();
+  const existingTaskIds = await taskRepo.listStructuralTaskIdsByParentEntityIds(uniqueProjectEntityIds);
+  const taskIds = [...new Set([...reanchored.taskIds, ...existingTaskIds])];
+  if (taskIds.length === 0) return;
+  await reconcileStructuralAssigneeContributesTo(db, logger, { scope: { kind: "tasks", taskIds } });
+}
+
+export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
   const app = new Hono();
 
   app.get("/", async (c) => {
@@ -126,12 +162,33 @@ export function entityReviewRoutes(db: Kysely<DB>) {
       return c.json({ error: { code: "BAD_REQUEST", message: "only status=pending supported in v1" } }, 400);
     }
     const search = c.req.query("q")?.trim() || undefined;
+    // Optional `types` CSV filter on entity_type — a generic allow-list each
+    // caller scopes itself (Your Org passes the taxonomy spine; the Files band
+    // passes person/company). Tokens are trimmed/de-duped; unknown values are
+    // harmless (they match no rows under the parameterized `in`).
+    const typesRaw = c.req.query("types");
+    const types = typesRaw
+      ? Array.from(
+          new Set(
+            typesRaw
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean),
+          ),
+        )
+      : undefined;
+    const typesFilter = types && types.length > 0 ? types : undefined;
 
     const repo = createEntityReviewRepo(db);
     const callerIsAdmin = isAdmin(c);
     const callerId = c.get("sub");
 
-    const total = await repo.countPending({ ownerUserId: callerId, isAdmin: callerIsAdmin, search });
+    const total = await repo.countPending({
+      ownerUserId: callerId,
+      isAdmin: callerIsAdmin,
+      search,
+      types: typesFilter,
+    });
 
     if (countOnly) {
       return c.json({ rows: [], total });
@@ -143,6 +200,7 @@ export function entityReviewRoutes(db: Kysely<DB>) {
       limit,
       offset,
       search,
+      types: typesFilter,
     });
 
     // Evidence summary per visible row.
@@ -169,6 +227,152 @@ export function entityReviewRoutes(db: Kysely<DB>) {
     });
 
     return c.json({ rows: rowsWithSummary, total });
+  });
+
+  app.get("/summary", async (c) => {
+    const repo = createEntityReviewRepo(db);
+    const summary = await repo.summarizePendingByTypeAndOrigin({
+      ownerUserId: c.get("sub"),
+      isAdmin: isAdmin(c),
+    });
+    return c.json(summary);
+  });
+
+  app.post("/confirm-batch", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      items?: Array<{ reviewId?: string; candidateGeneratedAt?: string; mergeIntoEntityId?: string }>;
+    };
+    if (!Array.isArray(body.items)) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "items is required" } }, 400);
+    }
+    const repo = createEntityReviewRepo(db);
+    const results: Array<{
+      reviewId: string;
+      ok: boolean;
+      targetEntityId?: string;
+      error?: { code: string; message: string };
+    }> = [];
+    const confirmedProjectTargetEntityIds = new Set<string>();
+    for (const item of body.items) {
+      const reviewId = item.reviewId ?? "";
+      if (!item.reviewId || !item.candidateGeneratedAt) {
+        results.push({
+          reviewId,
+          ok: false,
+          error: { code: "BAD_REQUEST", message: "reviewId and candidateGeneratedAt are required" },
+        });
+        continue;
+      }
+      const row = await repo.getById(item.reviewId);
+      if (!row) {
+        results.push({
+          reviewId: item.reviewId,
+          ok: false,
+          error: { code: "ROW_NOT_FOUND", message: "review row not found" },
+        });
+        continue;
+      }
+      const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
+      if (denied) {
+        results.push({ reviewId: item.reviewId, ok: false, error: await readErrorResponse(denied) });
+        continue;
+      }
+      try {
+        const result = await confirmReview({ db, userId: c.get("sub") }, item.reviewId, {
+          mergeIntoEntityId: item.mergeIntoEntityId,
+          candidateGeneratedAt: item.candidateGeneratedAt,
+        });
+        if (result.row.entity_type === "project") confirmedProjectTargetEntityIds.add(result.targetEntityId);
+        results.push({ reviewId: item.reviewId, ok: true, targetEntityId: result.targetEntityId });
+      } catch (err) {
+        results.push({ reviewId: item.reviewId, ok: false, error: batchError(err) });
+      }
+    }
+    if (confirmedProjectTargetEntityIds.size > 0) {
+      await backfillStructuralAssigneeForConfirmedProjects(db, deps.logger, [...confirmedProjectTargetEntityIds]);
+    }
+    return c.json({ results });
+  });
+
+  app.post("/reject-batch", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      items?: Array<{ reviewId?: string; candidateGeneratedAt?: string }>;
+    };
+    if (!Array.isArray(body.items)) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "items is required" } }, 400);
+    }
+    const repo = createEntityReviewRepo(db);
+    const results: Array<{ reviewId: string; ok: boolean; error?: { code: string; message: string } }> = [];
+    for (const item of body.items) {
+      const reviewId = item.reviewId ?? "";
+      if (!item.reviewId || !item.candidateGeneratedAt) {
+        results.push({
+          reviewId,
+          ok: false,
+          error: { code: "BAD_REQUEST", message: "reviewId and candidateGeneratedAt are required" },
+        });
+        continue;
+      }
+      const row = await repo.getById(item.reviewId);
+      if (!row) {
+        results.push({
+          reviewId: item.reviewId,
+          ok: false,
+          error: { code: "ROW_NOT_FOUND", message: "review row not found" },
+        });
+        continue;
+      }
+      const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
+      if (denied) {
+        results.push({ reviewId: item.reviewId, ok: false, error: await readErrorResponse(denied) });
+        continue;
+      }
+      try {
+        await rejectReview({ db, userId: c.get("sub") }, item.reviewId, {
+          candidateGeneratedAt: item.candidateGeneratedAt,
+        });
+        results.push({ reviewId: item.reviewId, ok: true });
+      } catch (err) {
+        results.push({ reviewId: item.reviewId, ok: false, error: batchError(err) });
+      }
+    }
+    return c.json({ results });
+  });
+
+  app.post("/:id/reclassify-type", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as {
+      newEntityType?: string;
+      candidateGeneratedAt?: string;
+    };
+    if (!body.candidateGeneratedAt || !body.newEntityType) {
+      return c.json(
+        { error: { code: "BAD_REQUEST", message: "newEntityType and candidateGeneratedAt are required" } },
+        400,
+      );
+    }
+    if (!RECLASSIFIABLE_TYPES.has(body.newEntityType)) {
+      return c.json(
+        { error: { code: "BAD_REQUEST", message: "newEntityType must be project, product, or team" } },
+        400,
+      );
+    }
+
+    const repo = createEntityReviewRepo(db);
+    const row = await repo.getById(id);
+    if (!row) return c.json({ error: { code: "NOT_FOUND", message: "review row not found" } }, 404);
+    const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
+    if (denied) return denied;
+
+    try {
+      const result = await reclassifyReview({ db, userId: c.get("sub") }, id, {
+        newEntityType: body.newEntityType,
+        candidateGeneratedAt: body.candidateGeneratedAt,
+      });
+      return c.json(result);
+    } catch (err) {
+      return handleResolveError(c, err);
+    }
   });
 
   app.get("/:id", async (c) => {
@@ -220,6 +424,22 @@ export function entityReviewRoutes(db: Kysely<DB>) {
     }));
 
     const enrichedRow = { ...baseRow, evidenceCount: evidence.length, sourceBreakdown, candidate };
+
+    // Structural-seed rows (project/team pulled from a tracker) carry no file
+    // evidence — the seed fact has no indexed_file_id. Surface the child tasks
+    // that sit under the parent instead, so review has context. Read-only join;
+    // skipped entirely for non-seed rows.
+    if (baseRow.seed_source && baseRow.seed_source_id) {
+      const factRepo = createIndexedFileFactRepository(db);
+      const { tasks, total } = await factRepo.childTasksForParent({
+        source: baseRow.seed_source,
+        parentSourceId: baseRow.seed_source_id,
+        limit: 50,
+        viewer: getContentViewer(c),
+      });
+      return c.json({ row: enrichedRow, evidence: enrichedEvidence, childTasks: tasks, childTaskCount: total });
+    }
+
     return c.json({ row: enrichedRow, evidence: enrichedEvidence });
   });
 
@@ -228,6 +448,7 @@ export function entityReviewRoutes(db: Kysely<DB>) {
     const body = (await c.req.json().catch(() => ({}))) as {
       mergeIntoEntityId?: string;
       candidateGeneratedAt?: string;
+      nameOverride?: string;
     };
     if (!body.candidateGeneratedAt) {
       return c.json({ error: { code: "BAD_REQUEST", message: "candidateGeneratedAt is required" } }, 400);
@@ -243,7 +464,11 @@ export function entityReviewRoutes(db: Kysely<DB>) {
       const result = await confirmReview({ db, userId: c.get("sub") }, id, {
         mergeIntoEntityId: body.mergeIntoEntityId,
         candidateGeneratedAt: body.candidateGeneratedAt,
+        nameOverride: body.nameOverride,
       });
+      if (result.row.entity_type === "project") {
+        await backfillStructuralAssigneeForConfirmedProjects(db, deps.logger, [result.targetEntityId]);
+      }
       return c.json({
         row: result.row,
         targetEntityId: result.targetEntityId,
@@ -284,6 +509,29 @@ export function entityReviewRoutes(db: Kysely<DB>) {
         createdEntityId: result.createdEntityId,
         idempotent: result.idempotent,
       });
+    } catch (err) {
+      return handleResolveError(c, err);
+    }
+  });
+
+  app.post("/:id/dismiss", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as { candidateGeneratedAt?: string };
+    if (!body.candidateGeneratedAt) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "candidateGeneratedAt is required" } }, 400);
+    }
+
+    const repo = createEntityReviewRepo(db);
+    const row = await repo.getById(id);
+    if (!row) return c.json({ error: { code: "NOT_FOUND", message: "review row not found" } }, 404);
+    const denied = await denyIfNotOwnerOrAdmin(c, repo, row);
+    if (denied) return denied;
+
+    try {
+      const result = await dismissReview({ db, userId: c.get("sub") }, id, {
+        candidateGeneratedAt: body.candidateGeneratedAt,
+      });
+      return c.json({ row: result.row, idempotent: result.idempotent });
     } catch (err) {
       return handleResolveError(c, err);
     }

@@ -125,6 +125,7 @@ async function seedRawCorpus(db: Kysely<DB>) {
 
   // Person seed (file-less, e.g. ClickUp directory).
   await factRepo.upsertFact({
+    createdByUserId: TEST_USER_ID,
     source: "clickup",
     factType: "person_seed",
     relation: "seeded",
@@ -437,6 +438,7 @@ describe("replaySourceFacts", () => {
      */
     for (let i = 0; i < 25; i++) {
       await repo.upsertFact({
+        createdByUserId: TEST_USER_ID,
         source: "manual",
         factType: "person_seed",
         relation: "seeded",
@@ -452,6 +454,7 @@ describe("replaySourceFacts", () => {
     await first;
 
     await repo.upsertFact({
+      createdByUserId: TEST_USER_ID,
       source: "manual",
       factType: "person_seed",
       relation: "seeded",
@@ -475,6 +478,137 @@ describe("replaySourceFacts", () => {
   });
 });
 
+describe("batch-scoped materialization", () => {
+  let db: Kysely<DB>;
+
+  async function seedBase(target: Kysely<DB>): Promise<void> {
+    const now = new Date().toISOString();
+    await target
+      .insertInto("users")
+      .values({
+        id: TEST_USER_ID,
+        name: "Admin",
+        email: "admin@example.com",
+        email_verified_at: now,
+        password_hash: "hash",
+        auth_role: "admin",
+      })
+      .execute();
+    await target
+      .insertInto("connector_configs")
+      .values({
+        id: CONNECTOR_ID,
+        connector_type: "fireflies",
+        auth_type: "api_key",
+        credentials: "{}",
+        created_by: TEST_USER_ID,
+      })
+      .execute();
+    await target
+      .insertInto("indexed_files")
+      .values({
+        id: ATTENDED_FILE_ID,
+        connector_config_id: CONNECTOR_ID,
+        provider_file_id: "meeting-1",
+        file_name: "Q4 Kickoff",
+        file_type: "transcript",
+        content_category: "document",
+        content: "Discussion.",
+        source: "fireflies",
+        content_hash: "hash-1",
+        is_archived: 0,
+        synced_at: now,
+      })
+      .execute();
+  }
+
+  async function seedPersonSeeds(target: Kysely<DB>, count: number): Promise<void> {
+    const repo = createIndexedFileFactRepository(target);
+    for (let i = 0; i < count; i++) {
+      await repo.upsertFact({
+        createdByUserId: TEST_USER_ID,
+        source: "manual",
+        factType: "person_seed",
+        relation: "seeded",
+        subjectName: `Person ${i}`,
+        subjectEmail: `person-${i}@example.com`,
+        subjectSource: "manual",
+        subjectSourceId: `person-${i}`,
+        raw: { subtype: "external" },
+      });
+    }
+  }
+
+  const snapshot = async (target: Kysely<DB>) => ({
+    entities: (await target.selectFrom("entities").select(["name"]).orderBy("name").execute()).map((e) => e.name),
+    mentions: (await target.selectFrom("entity_mentions").select("id").execute()).length,
+    sourceRefs: (await target.selectFrom("entity_source_refs").select("id").execute()).length,
+  });
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedBase(db);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("materializes a backlog larger than one batch with the same end-state as a single pass", async () => {
+    await seedPersonSeeds(db, 5);
+    const single = await createTestDb();
+    await seedBase(single);
+    await seedPersonSeeds(single, 5);
+
+    try {
+      const batched = await materializeUnmaterializedFacts(db, createTestLogger(), { batchSize: 2 });
+      const onePass = await materializeUnmaterializedFacts(single, createTestLogger(), { batchSize: 1000 });
+
+      expect(batched.factsRead).toBe(5);
+      expect(batched.materialized).toBe(5);
+      expect(batched).toEqual(onePass);
+      expect(await snapshot(db)).toEqual(await snapshot(single));
+
+      const unmaterialized = await db
+        .selectFrom("indexed_file_facts")
+        .select("id")
+        .where("materialized_at", "is", null)
+        .execute();
+      expect(unmaterialized).toHaveLength(0);
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  it("preserves cross-fact dedup when two facts about one entity land in different batches", async () => {
+    const repo = createIndexedFileFactRepository(db);
+    for (const sourceId of ["seat-a", "seat-b"]) {
+      await repo.upsertFact({
+        createdByUserId: TEST_USER_ID,
+        source: "manual",
+        factType: "person_seed",
+        relation: "seeded",
+        subjectName: "Repeat Person",
+        subjectEmail: "repeat@example.com",
+        subjectSource: "manual",
+        subjectSourceId: sourceId,
+        raw: { subtype: "external" },
+      });
+    }
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { batchSize: 1 });
+
+    expect(summary.factsRead).toBe(2);
+    const people = await db
+      .selectFrom("entities")
+      .select(["id"])
+      .where("source_type", "=", "person")
+      .where("name", "=", "Repeat Person")
+      .execute();
+    expect(people).toHaveLength(1);
+  });
+});
+
 describe("recreateEntityGraph", () => {
   let db: Kysely<DB>;
 
@@ -487,7 +621,7 @@ describe("recreateEntityGraph", () => {
     await db.destroy();
   });
 
-  it("runs the full reset → fact materialization → deterministic linking chain idempotently", async () => {
+  it("runs the full reset → fact materialization → sweep chain idempotently", async () => {
     const first = await recreateEntityGraph({
       db,
       logger: createTestLogger(),
@@ -497,7 +631,7 @@ describe("recreateEntityGraph", () => {
 
     expect(first.replay.factsRead).toBe(5);
 
-    // Snapshot the deterministic tuples (entity name, file id, relation, source)
+    // Snapshot the mention tuples (entity name, file id, relation, source)
     // so we can assert stability across recreate runs without depending on
     // entity IDs (which churn — that's an explicit out-of-scope guarantee).
     const snapshot = async () => {

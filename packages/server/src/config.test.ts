@@ -31,9 +31,25 @@ describe("configSchema", () => {
         expect(result.data.SLACK_THREAD_HISTORY_LIMIT).toBe(50);
         expect(result.data.WHATSAPP_DM_PROVIDER).toBe("baileys");
         expect(result.data.WHATSAPP_GROUP_PROVIDER).toBe("baileys");
+        expect(result.data.WHATSAPP_HISTORY_LOOKBACK_DAYS).toBe(30);
+        expect(result.data.WHATSAPP_SLICE_GAP_MINUTES).toBe(25);
+        expect(result.data.WHATSAPP_SLICE_MAX_AGE_MINUTES).toBe(120);
+        expect(result.data.WHATSAPP_SLICE_MAX_MESSAGES).toBe(50);
+        expect(result.data.WHATSAPP_SALIENCE_BATCH_LIMIT).toBe(50);
+        expect(result.data.WHATSAPP_EMISSION_REFRESH_DAYS).toBe(7);
+        expect(result.data.WHATSAPP_WINDOW_KEEPALIVE_ENABLED).toBe(false);
         expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(4);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
         expect(result.data.VISION_ENABLED).toBe(false);
+        expect(result.data.AGENT_RUNTIME).toBe("sdk");
+      }
+    });
+
+    it("parses the AI SDK agent runtime flag", () => {
+      const result = configSchema.safeParse({ AGENT_RUNTIME: "aisdk" });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.AGENT_RUNTIME).toBe("aisdk");
       }
     });
 
@@ -41,11 +57,60 @@ describe("configSchema", () => {
       const result = configSchema.safeParse({
         WHATSAPP_DM_PROVIDER: "wati",
         WHATSAPP_GROUP_PROVIDER: "none",
+        WATI_API_ENDPOINT: "https://tenant.wati.io",
+        WATI_ACCESS_TOKEN: "access-token",
+        WATI_WEBHOOK_TOKEN: "webhook-token",
+        WATI_CHANNEL_PHONE_NUMBER: "+15551234567",
       });
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.WHATSAPP_DM_PROVIDER).toBe("wati");
         expect(result.data.WHATSAPP_GROUP_PROVIDER).toBe("none");
+        expect(result.data.WATI_API_ENDPOINT).toBe("https://tenant.wati.io");
+        expect(result.data.WATI_ACCESS_TOKEN).toBe("access-token");
+        expect(result.data.WATI_WEBHOOK_TOKEN).toBe("webhook-token");
+        expect(result.data.WATI_CHANNEL_PHONE_NUMBER).toBe("+15551234567");
+      }
+    });
+
+    it("parses managed WhatsApp provider configuration", () => {
+      const result = configSchema.safeParse({
+        WHATSAPP_DM_PROVIDER: "managed",
+        WHATSAPP_GROUP_PROVIDER: "baileys",
+        MANAGED_WHATSAPP_PLATFORM_URL: "https://app.getsketch.ai",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_HISTORY_LOOKBACK_DAYS: "14",
+        WHATSAPP_SLICE_GAP_MINUTES: "10",
+        WHATSAPP_SLICE_MAX_AGE_MINUTES: "90",
+        WHATSAPP_SLICE_MAX_MESSAGES: "20",
+        WHATSAPP_SALIENCE_BATCH_LIMIT: "7",
+        WHATSAPP_EMISSION_REFRESH_DAYS: "3",
+        WHATSAPP_WINDOW_KEEPALIVE_ENABLED: "true",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.WHATSAPP_DM_PROVIDER).toBe("managed");
+        expect(result.data.MANAGED_WHATSAPP_PLATFORM_URL).toBe("https://app.getsketch.ai");
+        expect(result.data.MANAGED_WHATSAPP_TENANT_TOKEN).toBe("tenant-token");
+        expect(result.data.WHATSAPP_HISTORY_LOOKBACK_DAYS).toBe(14);
+        expect(result.data.WHATSAPP_SLICE_GAP_MINUTES).toBe(10);
+        expect(result.data.WHATSAPP_SLICE_MAX_AGE_MINUTES).toBe(90);
+        expect(result.data.WHATSAPP_SLICE_MAX_MESSAGES).toBe(20);
+        expect(result.data.WHATSAPP_SALIENCE_BATCH_LIMIT).toBe(7);
+        expect(result.data.WHATSAPP_EMISSION_REFRESH_DAYS).toBe(3);
+        expect(result.data.WHATSAPP_WINDOW_KEEPALIVE_ENABLED).toBe(true);
+      }
+    });
+
+    it("treats blank managed WhatsApp settings as absent", () => {
+      const result = configSchema.safeParse({
+        MANAGED_WHATSAPP_PLATFORM_URL: "",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "",
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.MANAGED_WHATSAPP_PLATFORM_URL).toBeUndefined();
+        expect(result.data.MANAGED_WHATSAPP_TENANT_TOKEN).toBeUndefined();
       }
     });
 
@@ -64,6 +129,7 @@ describe("configSchema", () => {
         expect("VISION_API_KEY" in result.data).toBe(false);
         expect(result.data.SYNC_ALLOW_LARGE_RECONCILE).toBe(false);
         expect(result.data.SYNC_MAX_RECONCILE_RATIO).toBe(0.5);
+        expect(result.data.LLM_TASK_CORROBORATION_THRESHOLD).toBe(2);
         expect(result.data.CO_MENTION_CONTRIBUTES_TO_THRESHOLD).toBe(3);
         expect(result.data.MICROSOFT_TENANT).toBe("common");
         expect(result.data.OUTLOOK_INITIAL_LOOKBACK_DAYS).toBe(365);
@@ -77,11 +143,13 @@ describe("configSchema", () => {
     it("parses entity graph heuristic thresholds", () => {
       const result = configSchema.safeParse({
         LLM_PROMOTION_THRESHOLD: "4",
+        LLM_TASK_CORROBORATION_THRESHOLD: "3",
         CO_MENTION_CONTRIBUTES_TO_THRESHOLD: "5",
       });
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.LLM_PROMOTION_THRESHOLD).toBe(4);
+        expect(result.data.LLM_TASK_CORROBORATION_THRESHOLD).toBe(3);
         expect(result.data.CO_MENTION_CONTRIBUTES_TO_THRESHOLD).toBe(5);
       }
     });
@@ -179,6 +247,21 @@ describe("configSchema", () => {
 
     it("rejects agent concurrency below one", () => {
       const result = configSchema.safeParse({ MAX_CONCURRENT_AGENT_RUNS: "0" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects invalid Wati endpoint URLs", () => {
+      const result = configSchema.safeParse({ WATI_API_ENDPOINT: "not-a-url" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects invalid managed WhatsApp platform URLs", () => {
+      const result = configSchema.safeParse({ MANAGED_WHATSAPP_PLATFORM_URL: "not-a-url" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects invalid agent runtime values", () => {
+      const result = configSchema.safeParse({ AGENT_RUNTIME: "other" });
       expect(result.success).toBe(false);
     });
   });
@@ -293,6 +376,123 @@ describe("validateConfig", () => {
     it("does not exit when SLACK_MODE is absent (defaults to socket)", () => {
       const exitSpy = mockProcessExit();
       const config = makeConfig();
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("connector credential encryption validation", () => {
+    it("does not exit at startup when local connector credentials are enabled without ENCRYPTION_KEY", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({ CONNECTOR_CREDENTIAL_SOURCE: "local" });
+
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not exit when local connector credentials have ENCRYPTION_KEY", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        CONNECTOR_CREDENTIAL_SOURCE: "local",
+        ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      });
+
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not exit when Canvas connector credentials are enabled without ENCRYPTION_KEY", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({ CONNECTOR_CREDENTIAL_SOURCE: "canvas" });
+
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Wati validation", () => {
+    it("does not require Wati credentials unless Wati is the configured DM provider", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({ WHATSAPP_DM_PROVIDER: "baileys" });
+
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("exits when Wati is configured without an API endpoint", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "wati",
+        WATI_ACCESS_TOKEN: "access-token",
+        WATI_WEBHOOK_TOKEN: "webhook-token",
+      });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("exits when Wati is configured without an access token", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "wati",
+        WATI_API_ENDPOINT: "https://tenant.wati.io",
+        WATI_WEBHOOK_TOKEN: "webhook-token",
+      });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("exits when Wati is configured without a webhook token", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "wati",
+        WATI_API_ENDPOINT: "https://tenant.wati.io",
+        WATI_ACCESS_TOKEN: "access-token",
+      });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("accepts complete Wati configuration", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "wati",
+        WATI_API_ENDPOINT: "https://tenant.wati.io",
+        WATI_ACCESS_TOKEN: "access-token",
+        WATI_WEBHOOK_TOKEN: "webhook-token",
+      });
+      validateConfig(config);
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("managed WhatsApp validation", () => {
+    it("exits when managed WhatsApp is configured without a platform URL", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "managed",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("exits when managed WhatsApp is configured without a tenant token", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "managed",
+        MANAGED_WHATSAPP_PLATFORM_URL: "https://app.getsketch.ai",
+      });
+      expect(() => validateConfig(config)).toThrow("exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
+
+    it("accepts complete managed WhatsApp configuration", () => {
+      const exitSpy = mockProcessExit();
+      const config = makeConfig({
+        WHATSAPP_DM_PROVIDER: "managed",
+        MANAGED_WHATSAPP_PLATFORM_URL: "https://app.getsketch.ai",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      });
       validateConfig(config);
       expect(exitSpy).not.toHaveBeenCalled();
     });

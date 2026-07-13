@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { whatsappNumberSchema } from "@sketch/shared";
 /**
  * System API routes — internal management endpoints authenticated by bearer token.
@@ -12,6 +12,10 @@ import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import { upsertSlackIdentity } from "../slack/upsert-identity";
+import { InvalidManagedWhatsAppInboundEventError } from "../whatsapp/providers/managed";
+import type { ManagedWhatsAppProvider } from "../whatsapp/providers/managed";
+import { buildIntroductionTemplate } from "../whatsapp/templates";
+import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { upsertWhatsAppIdentity } from "../whatsapp/upsert-identity";
 
 type InboxMessagesRepo = ReturnType<typeof createInboxMessagesRepository>;
@@ -40,7 +44,13 @@ interface SystemDeps {
     userId: string;
     platform: "slack" | "whatsapp";
     message: string;
-  }) => Promise<{ channelId: string; messageRef: string }>;
+    template?: WhatsAppTemplateRequest;
+    senderUserId?: string;
+    storeInInbox?: boolean;
+    inboxKind?: string;
+    inboxMetadata?: Record<string, unknown> | null;
+  }) => Promise<{ channelId: string; messageRef: string; inboxMessageId?: string }>;
+  managedWhatsappInbound?: Pick<ManagedWhatsAppProvider, "handleInboundEvent">;
   whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
   startWhatsAppPairing?: Function;
@@ -91,6 +101,7 @@ const llmSchema = z.discriminatedUnion("provider", [
 const systemUserSchema = z.object({
   email: z.string().email(),
   name: z.string().trim().min(1),
+  whatsappNumber: whatsappNumberSchema.optional(),
 });
 
 const systemBulkUsersSchema = z.object({
@@ -107,6 +118,9 @@ const systemBulkUsersSchema = z.object({
       })
       .refine((row) => !row.slackUserId || row.email, {
         message: "email is required for Slack users",
+      })
+      .refine((row) => !row.whatsappNumber || row.email, {
+        message: "email is required for WhatsApp users",
       }),
   ),
 });
@@ -138,6 +152,13 @@ const whatsappPairingValidationSchema = z.object({
 
 function generateSketchApiKey(): string {
   return `sk_live_${randomBytes(32).toString("base64url")}`;
+}
+
+function isValidSystemAuthorization(auth: string | undefined, systemSecret: string): boolean {
+  if (!auth) return false;
+  const actualBytes = Buffer.from(auth);
+  const expectedBytes = Buffer.from(`Bearer ${systemSecret}`);
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
 }
 
 function buildOpeningIntroMessage(botName: string): string {
@@ -216,7 +237,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
 
   routes.use("/*", async (c, next) => {
     const auth = c.req.header("Authorization");
-    if (!auth || auth !== `Bearer ${deps.systemSecret}`) {
+    if (!isValidSystemAuthorization(auth, deps.systemSecret)) {
       return c.json({ error: { code: "UNAUTHORIZED", message: "Invalid system secret" } }, 401);
     }
     return next();
@@ -406,6 +427,26 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
 
     const email = parsed.data.email.toLowerCase();
+    if (parsed.data.whatsappNumber) {
+      const result = await upsertWhatsAppIdentity(deps.userRepo, {
+        email,
+        name: parsed.data.name,
+        whatsappNumber: parsed.data.whatsappNumber,
+      });
+      if (result.status === "conflict") {
+        return c.json(
+          {
+            error: {
+              code: "CONFLICT",
+              message: "User is already linked to a different WhatsApp identity",
+            },
+          },
+          409,
+        );
+      }
+      return c.json({ ok: true, userId: result.user.id });
+    }
+
     const existing = await deps.userRepo.findByEmail(email);
     if (existing) {
       if (!existing.email_verified_at) {
@@ -494,6 +535,27 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
         409,
       );
     }
+  });
+
+  routes.post("/whatsapp/managed/events", async (c) => {
+    if (!deps.managedWhatsappInbound) {
+      return c.json({ error: { code: "UNAVAILABLE", message: "Managed WhatsApp provider is not configured" } }, 503);
+    }
+
+    const body = await c.req.json().catch(() => undefined);
+    if (body === undefined) {
+      return c.json({ error: { code: "BAD_REQUEST", message: "Invalid JSON body" } }, 400);
+    }
+
+    try {
+      await deps.managedWhatsappInbound.handleInboundEvent(body);
+    } catch (error) {
+      if (error instanceof InvalidManagedWhatsAppInboundEventError) {
+        return c.json({ error: { code: "BAD_REQUEST", message: "Invalid managed WhatsApp event" } }, 400);
+      }
+      throw error;
+    }
+    return c.json({ ok: true });
   });
 
   routes.get("/whatsapp", (c) => {
@@ -626,7 +688,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       }
 
       const requestedNumbers = parsed.data.whatsappNumbers ?? [];
-      const targetUsers = new Map<string, { id: string; whatsapp_number: string | null }>();
+      const targetUsers = new Map<string, { id: string; name: string; whatsapp_number: string | null }>();
       const missingNumbers: string[] = [];
       targetUsers.set(admin.id, admin);
       for (const whatsappNumber of requestedNumbers) {
@@ -663,7 +725,17 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       }
       for (const user of targetUsers.values()) {
         try {
-          const delivery = await deps.sendDm({ userId: user.id, platform: "whatsapp", message });
+          const delivery = await deps.sendDm({
+            userId: user.id,
+            platform: "whatsapp",
+            message,
+            template: buildIntroductionTemplate({
+              recipientName: user.name,
+              botName: settingsRow?.bot_name ?? "Sketch",
+              orgName: parsed.data.orgName ?? settingsRow?.org_name,
+              fallbackText: message,
+            }),
+          });
           deliveries.push({
             userId: user.id,
             ok: true,

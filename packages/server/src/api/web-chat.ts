@@ -16,7 +16,7 @@ import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } from "../agent/runner";
-import { deleteSessionId } from "../agent/sessions";
+import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
 import { TOOL_PROGRESS_OPTIONS, type ToolProgressCommand } from "../commands";
@@ -47,6 +47,7 @@ import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import type { ScheduledTask } from "../scheduler/types";
 import { transcribeAudioFile } from "../transcription/service";
+import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
@@ -70,9 +71,19 @@ interface WebChatRouteDeps {
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: QueueManager;
   getSlack?: () => SlackDmResolver | null;
-  sendDm?: (params: { userId: string; platform: string; message: string }) => Promise<{
+  sendDm?: (params: {
+    userId: string;
+    platform: string;
+    message: string;
+    template?: WhatsAppTemplateRequest;
+    senderUserId?: string;
+    storeInInbox?: boolean;
+    inboxKind?: string;
+    inboxMetadata?: Record<string, unknown> | null;
+  }) => Promise<{
     channelId: string;
     messageRef: string;
+    inboxMessageId?: string;
   }>;
 }
 
@@ -1279,7 +1290,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     await rm(transcriptPath);
     await rm(legacyWebChatTranscriptPath(workspaceDir, conversationId), { force: true });
     await removeEmptyLegacyWebChatTranscriptDir(workspaceDir);
-    await deleteSessionId(deps.db, currentUser.id, conversationId);
+    await archiveRuntimeSessions(deps.db, currentUser.id, conversationId);
     return c.json({ success: true });
   });
 

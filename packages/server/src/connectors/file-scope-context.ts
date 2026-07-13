@@ -22,16 +22,21 @@
  *     prompt grounds on what's currently active in the corpus.
  *   - Math runs in TypeScript so the query stays portable across SQLite + PG
  *     (no julianday / EXTRACT EPOCH).
+ *
+ * Pending proposals:
+ *   - Review-queue project/product proposals are pulled through their evidence
+ *     files when those files also mention the file anchor. This gives the
+ *     extractor pre-confirmation canonical names without changing the prompt.
  */
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
-import { whereLiveEntity } from "../db/repositories/entities";
+import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
 import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
-import { SYSTEM_SOURCE_TYPES } from "../entities/profile-facts";
+import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 
 export const HALF_LIFE_DAYS = 60;
 export const MIN_SCORE = 0.5;
@@ -42,12 +47,23 @@ export const RECENTLY_ACTIVE_WINDOW_DAYS = 14;
 export const BASELINE_RELEVANCE_CAP = 15;
 export const BASELINE_RECENCY_WINDOW_DAYS = 30;
 export const MIN_VERBATIM_NAME_LENGTH = 4;
+export const MAX_PERSON_ANCHORS = 5;
+export const HUB_PERSON_DEGREE_CAP = 30;
+export const ADJACENCY_MAX_ANCHOR_FILES = 500;
+export const BASELINE_ALWAYS_INCLUDE_CAP = 50;
+export const PENDING_PROPOSAL_MIN_OCCURRENCE = 1;
+const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
+const STRUCTURAL_ASSIGNEE_SOURCE = "structural_assignee";
+const CO_MENTION_SOURCE = "co_mention";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface FileScopeDeps {
   db: Kysely<DB>;
   logger?: Logger;
   now?: () => number;
+  loadAdjacencyForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<AdjacencyEntry[]>;
+  loadContributesToForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<ContributesToEntry[]>;
+  loadPendingProposalsForAnchor?: (deps: FileScopeDeps, anchorId: string) => Promise<PendingProposalEntry[]>;
 }
 
 export interface AnchorEntity {
@@ -59,6 +75,7 @@ export interface AnchorEntity {
 
 export interface FileAnchors {
   companies: AnchorEntity[];
+  persons: AnchorEntity[];
 }
 
 export interface AdjacencyEntry {
@@ -71,8 +88,24 @@ export interface AdjacencyEntry {
   recentlyActive: boolean;
 }
 
+export interface PendingProposalEntry {
+  id: string;
+  name: string;
+  type: "project" | "product";
+  score: number;
+}
+
+export interface ContributesToEntry {
+  id: string;
+  name: string;
+  sourceType: string;
+  tier: number;
+}
+
 export interface KnownEntityForPrompt {
   id?: string;
+  entityId?: string;
+  reviewId?: string;
   name: string;
   type: string;
   description?: string;
@@ -84,10 +117,18 @@ export interface KnownEntityForPrompt {
 
 interface BaselineScore {
   entity: KnownEntityForPrompt;
-  anchorOverlap: number;
+  overlap: number;
   recency: number;
   hotness: number;
   score: number;
+}
+
+interface AnchorScopedEntry {
+  id: string;
+  name: string;
+  sourceType: string;
+  mentionCount?: number;
+  recentlyActive?: boolean;
 }
 
 export interface BuildFileScopedKnownEntitiesOptions {
@@ -109,9 +150,12 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
     .execute();
 
   const companyMap = new Map<string, AnchorEntity>();
+  const participantEmails: string[] = [];
   for (const row of attendees) {
     const email = row.subject_email;
     if (!email) continue;
+    if (!email.includes("@")) continue;
+    participantEmails.push(email);
     const domain = domainsRepo.normalizeEmailDomain(email);
     if (!domain) continue;
     if (isRoleAccountEmail(email)) continue;
@@ -130,34 +174,110 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
   const companies = Array.from(companyMap.values())
     .sort((a, b) => b.hotness - a.hotness)
     .slice(0, MAX_ANCHORS_PER_SIDE);
-  return { companies };
+
+  const entityRepo = createEntityRepository(deps.db);
+  const personsByEmail = await entityRepo.getPersonEntitiesByEmails(participantEmails);
+  const personMap = new Map<string, AnchorEntity>();
+  for (const matches of personsByEmail.values()) {
+    const candidates = matches.filter((person) => person.id !== TEST_ACCOUNT_ENTITY_ID);
+    if (candidates.length !== 1) continue;
+    const person = candidates[0];
+    if (personMap.has(person.id)) continue;
+    personMap.set(person.id, {
+      id: person.id,
+      name: person.name,
+      sourceType: person.source_type,
+      hotness: Number(person.hotness ?? 0),
+    });
+  }
+
+  const nonHubIds = await loadNonHubPersonIds(deps, [...personMap.keys()]);
+  const persons = Array.from(personMap.values())
+    .filter((person) => nonHubIds.has(person.id))
+    .sort((a, b) => b.hotness - a.hotness)
+    .slice(0, MAX_PERSON_ANCHORS);
+  return { companies, persons };
+}
+
+async function loadNonHubPersonIds(deps: FileScopeDeps, personIds: string[]): Promise<Set<string>> {
+  if (personIds.length === 0) return new Set();
+  const rows = await deps.db
+    .selectFrom("entity_mentions")
+    .select(["entity_id", deps.db.fn.count<number>("indexed_file_id").distinct().as("file_degree")])
+    .where("entity_id", "in", personIds)
+    .groupBy("entity_id")
+    .execute();
+  const degreeById = new Map(rows.map((row) => [row.entity_id, Number(row.file_degree)]));
+  return new Set(personIds.filter((id) => (degreeById.get(id) ?? 0) <= HUB_PERSON_DEGREE_CAP));
 }
 
 /**
  * Top adjacent entities for an anchor, by recency-weighted co-occurrence.
  * Decay: weight = exp(-ageDays / 60). Floor: total score >= 0.5. System
  * source types are excluded. Sorted by score desc.
+ *
+ * Degree bounding: the org's own company anchor is mentioned in nearly every
+ * file, so an unbounded `entity_mentions` self-join can materialize 10^5-10^6
+ * pair rows on this per-file hot path. Two guards keep Node's working set
+ * bounded without changing results for typical anchors:
+ *   1. The anchor is capped to its `maxAnchorFiles` most-recent files inside
+ *      SQL (ORDER BY file date DESC, LIMIT), so a hub anchor contributes at
+ *      most that many files instead of its full history.
+ *   2. Co-mentions are aggregated per (other entity, file) in the query — Node
+ *      receives one bounded row per co-mentioned entity per retained file with
+ *      the paired mention counts, never the raw pair cross-product.
+ * The decay kernel makes files older than a few half-lives contribute ~nothing,
+ * so trimming the oldest files past the cap leaves the surfaced top entities
+ * unchanged for typical anchors and only bounds pathological high-degree ones
+ * (the org's own company), which still surface their strongest — most recent —
+ * co-mentions rather than an arbitrary truncation. Unlike hub persons (dropped
+ * as anchors upstream in `loadNonHubPersonIds`), a company anchor is the core
+ * of the file's context and cannot be dropped, so it is bounded here instead.
+ * The exp() decay stays in TypeScript so the query is portable (SQLite + PG).
  */
-export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string): Promise<AdjacencyEntry[]> {
-  const systemTypes = Array.from(SYSTEM_SOURCE_TYPES);
+export async function adjacencyForAnchor(
+  deps: FileScopeDeps,
+  anchorId: string,
+  maxAnchorFiles: number = ADJACENCY_MAX_ANCHOR_FILES,
+): Promise<AdjacencyEntry[]> {
+  const systemTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
+  const fileDate = sql<string>`COALESCE(ifile.source_updated_at, ifile.source_created_at)`;
   const rows = await deps.db
-    .selectFrom("entity_mentions as em1")
-    .innerJoin("entity_mentions as em2", (join) =>
-      join.onRef("em2.indexed_file_id", "=", "em1.indexed_file_id").on("em2.entity_id", "!=", anchorId),
+    .with("anchor_files", (qb) =>
+      qb
+        .selectFrom("entity_mentions as em1")
+        .innerJoin("indexed_files as ifile", "ifile.id", "em1.indexed_file_id")
+        .select((eb) => [
+          eb.ref("em1.indexed_file_id").as("fid"),
+          fileDate.as("file_date"),
+          eb.fn.count<number>("em1.id").as("anchor_count"),
+        ])
+        .where("em1.entity_id", "=", anchorId)
+        .where("em1.confidence", "=", "EXTRACTED")
+        .where(sql<boolean>`COALESCE(ifile.source_updated_at, ifile.source_created_at) IS NOT NULL`)
+        .groupBy(["em1.indexed_file_id", fileDate])
+        .orderBy(fileDate, "desc")
+        .limit(maxAnchorFiles),
     )
-    .innerJoin("indexed_files as if", "if.id", "em1.indexed_file_id")
+    .selectFrom("anchor_files as af")
+    .innerJoin("entity_mentions as em2", (join) =>
+      join
+        .onRef("em2.indexed_file_id", "=", "af.fid")
+        .on("em2.entity_id", "!=", anchorId)
+        .on("em2.confidence", "=", "EXTRACTED"),
+    )
     .innerJoin("entities as e", "e.id", "em2.entity_id")
     .select((eb) => [
       eb.ref("em2.entity_id").as("other_id"),
       eb.ref("e.name").as("other_name"),
       eb.ref("e.source_type").as("other_source_type"),
-      sql<string | null>`COALESCE("if".source_updated_at, "if".source_created_at)`.as("file_date"),
+      eb.ref("af.file_date").as("file_date"),
+      eb.ref("af.anchor_count").as("anchor_count"),
+      eb.fn.count<number>("em2.id").as("other_count"),
     ])
-    .where("em1.entity_id", "=", anchorId)
-    .where("em1.confidence", "=", "EXTRACTED")
-    .where("em2.confidence", "=", "EXTRACTED")
     .where("e.source_type", "not in", systemTypes.length > 0 ? systemTypes : [""])
     .where(whereLiveEntity("e"))
+    .groupBy(["em2.entity_id", "e.name", "e.source_type", "af.file_date", "af.anchor_count"])
     .execute();
 
   const now = deps.now ? deps.now() : Date.now();
@@ -168,6 +288,7 @@ export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string):
     if (!t || Number.isNaN(t)) continue;
     const ageDays = Math.max(0, (now - t) / DAY_MS);
     const weight = Math.exp(-ageDays / HALF_LIFE_DAYS);
+    const pairCount = Number(row.anchor_count) * Number(row.other_count);
     const prev = scores.get(row.other_id) ?? {
       id: row.other_id,
       name: row.other_name,
@@ -177,8 +298,8 @@ export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string):
       lastSeen: 0,
       recentlyActive: false,
     };
-    prev.score += weight;
-    prev.mentionCount += 1;
+    prev.score += weight * pairCount;
+    prev.mentionCount += pairCount;
     prev.lastSeen = Math.max(prev.lastSeen, t);
     scores.set(row.other_id, prev);
   }
@@ -189,12 +310,103 @@ export async function adjacencyForAnchor(deps: FileScopeDeps, anchorId: string):
     .sort((a, b) => b.score - a.score);
 }
 
+export async function contributesToForAnchor(deps: FileScopeDeps, anchorId: string): Promise<ContributesToEntry[]> {
+  const hiddenTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
+  const rows = await deps.db
+    .selectFrom("entity_relationships as rel")
+    .innerJoin("entities as t", "t.id", "rel.target_entity_id")
+    .select((eb) => [
+      eb.ref("t.id").as("id"),
+      eb.ref("t.name").as("name"),
+      eb.ref("t.source_type").as("source_type"),
+      eb.ref("rel.source").as("edge_source"),
+      eb.ref("rel.confidence_score").as("confidence_score"),
+      eb.ref("rel.valid_from").as("valid_from"),
+    ])
+    .where("rel.source_entity_id", "=", anchorId)
+    .where("rel.relationship_type", "=", "contributes_to")
+    .where("rel.valid_to", "is", null)
+    .where("rel.source", "in", [STRUCTURAL_ASSIGNEE_SOURCE, CO_MENTION_SOURCE])
+    .where("t.source_type", "in", ["project", "product"])
+    .where("t.source_type", "not in", hiddenTypes.length > 0 ? hiddenTypes : [""])
+    .where(whereLiveEntity("t"))
+    .execute();
+
+  return rows
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      sourceType: row.source_type,
+      tier: row.edge_source === STRUCTURAL_ASSIGNEE_SOURCE ? 0 : 1,
+      confidenceScore: Number(row.confidence_score),
+      validFromTime: new Date(row.valid_from).getTime(),
+    }))
+    .sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier;
+      if (b.confidenceScore !== a.confidenceScore) return b.confidenceScore - a.confidenceScore;
+      const aValidFrom = Number.isNaN(a.validFromTime) ? 0 : a.validFromTime;
+      const bValidFrom = Number.isNaN(b.validFromTime) ? 0 : b.validFromTime;
+      return bValidFrom - aValidFrom;
+    })
+    .map(({ confidenceScore, validFromTime, ...entry }) => entry);
+}
+
+function tieredFill<T extends { id: string }>(primary: T[], backfill: T[], cap: number): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const entry of [...primary, ...backfill]) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    out.push(entry);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+function isPendingProposalType(value: string): value is PendingProposalEntry["type"] {
+  return value === "project" || value === "product";
+}
+
+export async function pendingProposalsForAnchor(
+  deps: FileScopeDeps,
+  anchorId: string,
+): Promise<PendingProposalEntry[]> {
+  const rows = await deps.db
+    .selectFrom("entity_review_queue as q")
+    .innerJoin("entity_review_evidence as ev", "ev.review_id", "q.id")
+    .innerJoin("entity_mentions as em", (join) =>
+      join.onRef("em.indexed_file_id", "=", "ev.indexed_file_id").on("em.entity_id", "=", anchorId),
+    )
+    .select(["q.id as id", "q.proposed_name as name", "q.entity_type as type", "q.occurrence_count as score"])
+    .where("q.status", "=", "pending")
+    .where("q.entity_type", "in", ["project", "product"])
+    .where("q.occurrence_count", ">=", PENDING_PROPOSAL_MIN_OCCURRENCE)
+    .groupBy(["q.id", "q.proposed_name", "q.entity_type", "q.occurrence_count"])
+    .orderBy("q.occurrence_count", "desc")
+    .orderBy("q.proposed_name", "asc")
+    .execute();
+
+  return rows.flatMap((row) =>
+    isPendingProposalType(row.type)
+      ? [
+          {
+            id: row.id,
+            name: row.name,
+            type: row.type,
+            score: Number(row.score),
+          },
+        ]
+      : [],
+  );
+}
+
 /**
  * Compose the file-scoped knownEntities list passed to the extraction prompt.
  *
  * Layering: anchors → adjacency (initiatives + teams, capped per anchor) →
- * org-wide baseline. File-scope wins on duplicate (lowercased name + type).
- * Returns the merged list — caller passes straight to extractEntities.
+ * org-wide baseline → pending anchor-cluster proposals. Earlier layers win on
+ * duplicate (lowercased name + type). Returns the merged list — caller passes
+ * straight to extractEntities.
  */
 export async function buildFileScopedKnownEntities(
   deps: FileScopeDeps,
@@ -209,11 +421,13 @@ export async function buildFileScopedKnownEntities(
 
   for (const a of anchors.companies) {
     const k = keyOf(a.name, a.sourceType);
-    if (!byKey.has(k)) byKey.set(k, { name: a.name, type: a.sourceType });
+    if (!byKey.has(k)) byKey.set(k, { name: a.name, type: a.sourceType, entityId: a.id });
   }
 
+  const contributesToTargetIds = new Set<string>();
+
   for (const anchor of anchors.companies) {
-    const adj = await adjacencyForAnchor(deps, anchor.id);
+    const adj = await (deps.loadAdjacencyForAnchor ?? adjacencyForAnchor)(deps, anchor.id);
     const initiatives = adj
       .filter((x) => x.sourceType === "project" || x.sourceType === "product")
       .slice(0, PER_ANCHOR_INITIATIVE_CAP);
@@ -224,33 +438,101 @@ export async function buildFileScopedKnownEntities(
       byKey.set(k, {
         name: x.name,
         type: x.sourceType,
+        entityId: x.id,
         mentionCount: x.mentionCount,
         recentlyActive: x.recentlyActive,
       });
     }
   }
 
-  for (const b of await rankBaselineKnownEntities(deps, baseline, anchors, fileContent ?? "", opts)) {
+  for (const anchor of anchors.persons) {
+    const contributesTo = await (deps.loadContributesToForAnchor ?? contributesToForAnchor)(deps, anchor.id);
+    for (const entry of contributesTo) contributesToTargetIds.add(entry.id);
+
+    const adj = await (deps.loadAdjacencyForAnchor ?? adjacencyForAnchor)(deps, anchor.id);
+    const adjacencyInitiatives = adj.filter((x) => x.sourceType === "project" || x.sourceType === "product");
+    const initiatives = tieredFill<AnchorScopedEntry>(contributesTo, adjacencyInitiatives, PER_ANCHOR_INITIATIVE_CAP);
+    const teams = adj.filter((x) => x.sourceType === "team").slice(0, PER_ANCHOR_TEAM_CAP);
+    for (const x of [...initiatives, ...teams]) {
+      const k = keyOf(x.name, x.sourceType);
+      if (byKey.has(k)) continue;
+      byKey.set(k, {
+        name: x.name,
+        type: x.sourceType,
+        entityId: x.id,
+        mentionCount: x.mentionCount,
+        recentlyActive: x.recentlyActive,
+      });
+    }
+  }
+
+  const alreadyInjectedIds = new Set(
+    Array.from(byKey.values()).flatMap((entry) => (entry.entityId ? [entry.entityId] : [])),
+  );
+  for (const b of await rankBaselineKnownEntities(
+    deps,
+    baseline,
+    anchors,
+    fileContent ?? "",
+    contributesToTargetIds,
+    alreadyInjectedIds,
+    opts,
+  )) {
     const k = keyOf(b.name, b.type);
     if (byKey.has(k)) continue;
     byKey.set(k, stripPromptInternalFields(b));
+  }
+
+  for (const anchor of [...anchors.companies, ...anchors.persons]) {
+    const pendingProposals = await (deps.loadPendingProposalsForAnchor ?? pendingProposalsForAnchor)(deps, anchor.id);
+    for (const proposal of pendingProposals.slice(0, PER_ANCHOR_INITIATIVE_CAP)) {
+      const k = keyOf(proposal.name, proposal.type);
+      if (byKey.has(k)) continue;
+      byKey.set(k, { name: proposal.name, type: proposal.type, reviewId: proposal.id });
+    }
   }
 
   return Array.from(byKey.values());
 }
 
 function stripPromptInternalFields(entity: KnownEntityForPrompt): KnownEntityForPrompt {
-  return {
+  const stripped: KnownEntityForPrompt = {
     name: entity.name,
     type: entity.type,
     description: entity.description,
     mentionCount: entity.mentionCount,
     recentlyActive: entity.recentlyActive,
   };
+  const entityId = entity.entityId ?? entity.id;
+  if (entityId) stripped.entityId = entityId;
+  if (entity.reviewId) stripped.reviewId = entity.reviewId;
+  return stripped;
 }
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Baseline entries mentioned verbatim in the file, capped at
+ * BASELINE_ALWAYS_INCLUDE_CAP. Sorting by hotness up front and stopping once
+ * the cap is met bounds the per-entity RegExp scans over `content`: on files
+ * that name-drop a large slice of the baseline (e.g. the org's own catalog) we
+ * stop after the top-cap matches instead of compiling and scanning a regex for
+ * every candidate. The result is identical to filter-then-sort-then-slice
+ * because the sort (hotness desc, then name asc) is a total order.
+ */
+function collectVerbatimAlwaysInclude(candidates: KnownEntityForPrompt[], content: string): KnownEntityForPrompt[] {
+  const byHotness = [...candidates].sort((a, b) => {
+    const hotness = Number(b.hotness ?? 0) - Number(a.hotness ?? 0);
+    return hotness !== 0 ? hotness : a.name.localeCompare(b.name);
+  });
+  const alwaysInclude: KnownEntityForPrompt[] = [];
+  for (const entity of byHotness) {
+    if (alwaysInclude.length >= BASELINE_ALWAYS_INCLUDE_CAP) break;
+    if (hasVerbatimMention(content, entity)) alwaysInclude.push(entity);
+  }
+  return alwaysInclude;
 }
 
 function hasVerbatimMention(content: string, entity: KnownEntityForPrompt): boolean {
@@ -309,19 +591,21 @@ async function rankBaselineKnownEntities(
   baseline: KnownEntityForPrompt[],
   anchors: FileAnchors,
   fileContent: string,
+  contributesToTargetIds: Set<string>,
+  alreadyInjectedIds: Set<string>,
   opts: BuildFileScopedKnownEntitiesOptions,
 ): Promise<KnownEntityForPrompt[]> {
   const legacy = baseline.filter((entity) => !entity.id);
-  const scoredCandidates = baseline.filter((entity) => entity.id);
+  const scoredCandidates = baseline.filter((entity) => entity.id && !alreadyInjectedIds.has(entity.id));
   if (scoredCandidates.length === 0) return legacy;
 
   const cap = opts.baselineRelevanceCap ?? BASELINE_RELEVANCE_CAP;
-  const alwaysInclude = scoredCandidates.filter((entity) => hasVerbatimMention(fileContent, entity));
+  const alwaysInclude = collectVerbatimAlwaysInclude(scoredCandidates, fileContent);
   const alwaysIds = new Set(alwaysInclude.map((entity) => entity.id));
   const candidates = scoredCandidates.filter((entity) => !alwaysIds.has(entity.id));
   const candidateIds = candidates.flatMap((entity) => (entity.id ? [entity.id] : []));
-  const anchorIds = anchors.companies.map((anchor) => anchor.id);
-  const [lastSeenById, overlapIds] = await Promise.all([
+  const anchorIds = [...anchors.companies.map((anchor) => anchor.id), ...anchors.persons.map((anchor) => anchor.id)];
+  const [lastSeenById, coOccurOverlapIds] = await Promise.all([
     loadBaselineLastSeen(deps, candidateIds),
     loadBaselineAnchorOverlap(deps, candidateIds, anchorIds),
   ]);
@@ -332,14 +616,19 @@ async function rankBaselineKnownEntities(
     const lastSeen = entity.id ? lastSeenById.get(entity.id) : undefined;
     const ageDays = lastSeen === undefined ? Number.POSITIVE_INFINITY : Math.max(0, (now - lastSeen) / DAY_MS);
     const recency = ageDays <= BASELINE_RECENCY_WINDOW_DAYS ? Math.exp(-ageDays / BASELINE_RECENCY_WINDOW_DAYS) : 0;
-    const anchorOverlap = entity.id && overlapIds.has(entity.id) ? 1 : 0;
+    let overlap = 0;
+    if (entity.id && contributesToTargetIds.has(entity.id)) {
+      overlap = 0.6;
+    } else if (entity.id && coOccurOverlapIds.has(entity.id)) {
+      overlap = 0.4;
+    }
     const hotness = Number(entity.hotness ?? 0) / maxHotness;
     return {
       entity,
-      anchorOverlap,
+      overlap,
       recency,
       hotness,
-      score: 0.5 * anchorOverlap + 0.3 * recency + 0.2 * hotness,
+      score: overlap + 0.3 * recency + 0.2 * hotness,
     };
   });
 

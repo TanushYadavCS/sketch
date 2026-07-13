@@ -4,6 +4,7 @@ import { createWriteAgentOutputTool } from "./tools/agent-output";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
+import { createListTasksTool } from "./tools/list-tasks";
 import { createLocalClaudeSessionTool } from "./tools/local-claude-session";
 import { createLocalRunCommandTool } from "./tools/local-command";
 import { createMessagingTools } from "./tools/messaging";
@@ -20,6 +21,7 @@ import {
 } from "./tools/types";
 import { createSendFileToChatTool } from "./tools/upload";
 import { createVisualAnalysisTool } from "./tools/visual-analysis";
+import { createWhatsAppGroupHistoryTool } from "./tools/whatsapp-group-history";
 
 export { handleResolveInboxWorkflow, handleUpdateInboxWorkflow } from "./tools/inbox-workflows";
 export { handleSearchUsers, handleSendMessageToUser, handleSendMessageToUsers } from "./tools/messaging";
@@ -30,12 +32,13 @@ export { IntegrationConnectionCollector };
 export { AutomationArtifactCollector };
 export type { SketchMcpDeps };
 
-export function createSketchMcpServer(deps: SketchMcpDeps) {
+export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
   const absWorkspace = resolve(deps.workspaceDir);
-  const tools = [
+  return [
     createSendFileToChatTool(deps, absWorkspace),
     createReadChatHistoryTool(deps),
     createSearchChatHistoryTool(deps),
+    createWhatsAppGroupHistoryTool(deps),
     createProviderConfigTool(deps),
     createSearchDeliveryTargetsTool(deps),
     createLocalRunCommandTool(deps),
@@ -77,7 +80,10 @@ export function createSketchMcpServer(deps: SketchMcpDeps) {
         ]
       : []),
     ...createSearchTools(deps),
+    createListTasksTool(deps),
   ];
+}
 
-  return createSdkMcpServer({ name: "sketch", tools });
+export function createSketchMcpServer(deps: SketchMcpDeps) {
+  return createSdkMcpServer({ name: "sketch", tools: createSketchMcpToolDefinitions(deps) });
 }

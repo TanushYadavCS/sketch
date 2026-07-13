@@ -12,6 +12,7 @@ function person(id: string, name: string): Entity {
     metadata: null,
     source_ref_id: null,
     status: "confirmed",
+    provenance_tier: "inferred",
     hotness: 0,
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
@@ -35,7 +36,7 @@ describe("rankPersonLlmMention", () => {
         extractedCompanies: [],
         contextCompanies: [],
       },
-      () => null,
+      () => [],
     );
 
     expect(decision.kind).toBe("confident_match");
@@ -54,7 +55,7 @@ describe("rankPersonLlmMention", () => {
         extractedCompanies: [{ entityId: "company-1" }],
         contextCompanies: [],
       },
-      (entityId) => (entityId === "b" ? "company-1" : null),
+      (entityId) => (entityId === "b" ? ["company-1"] : []),
     );
 
     expect(decision.kind).toBe("confident_match");
@@ -66,7 +67,7 @@ describe("rankPersonLlmMention", () => {
       { name: "Sam", entityType: "person" },
       [person("a", "Sam Patel"), person("b", "Sam Prakash")],
       { fileId: "file-1", extractedPersons: [], extractedCompanies: [], contextCompanies: [] },
-      () => null,
+      () => [],
     );
 
     expect(decision.kind).toBe("ambiguous_existing");
@@ -77,7 +78,7 @@ describe("rankPersonLlmMention", () => {
       { name: "Sarah Cheng", entityType: "person" },
       [person("a", "Sarah C")],
       { fileId: "file-1", extractedPersons: [], extractedCompanies: [], contextCompanies: [] },
-      () => null,
+      () => [],
     );
 
     expect(decision.kind).toBe("ambiguous_new_entity");
@@ -88,7 +89,7 @@ describe("rankPersonLlmMention", () => {
       { name: "Priya Shah", entityType: "person" },
       [person("a", "Sarah Chen")],
       { fileId: "file-1", extractedPersons: [], extractedCompanies: [], contextCompanies: [] },
-      () => null,
+      () => [],
     );
 
     expect(decision.kind).toBe("confident_no_match");

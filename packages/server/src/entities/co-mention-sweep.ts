@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import { forEachChunk } from "../connectors/sync-utils";
 import { whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { DB } from "../db/schema";
@@ -89,34 +90,36 @@ async function queryCoMentionRows(
 }
 
 async function observedPairsForFiles(db: Kysely<DB>, indexedFileIds: string[]): Promise<Map<string, Pair>> {
-  if (indexedFileIds.length === 0) return new Map();
-  const rows = await queryCoMentionRows(db, { indexedFileIds });
   const pairs = new Map<string, Pair>();
-  for (const row of rows) {
-    const pair = { personEntityId: row.personEntityId, targetEntityId: row.targetEntityId };
-    pairs.set(pairKey(pair), pair);
-  }
+  await forEachChunk(indexedFileIds, async (batch) => {
+    const rows = await queryCoMentionRows(db, { indexedFileIds: batch });
+    for (const row of rows) {
+      const pair = { personEntityId: row.personEntityId, targetEntityId: row.targetEntityId };
+      pairs.set(pairKey(pair), pair);
+    }
+  });
   return pairs;
 }
 
 async function existingCoMentionPairsForFiles(db: Kysely<DB>, indexedFileIds: string[]): Promise<Map<string, Pair>> {
-  if (indexedFileIds.length === 0) return new Map();
-  const rows = await db
-    .selectFrom("entity_relationship_evidence as ev")
-    .innerJoin("entity_relationships as rel", "rel.id", "ev.relationship_id")
-    .select(["rel.source_entity_id as personEntityId", "rel.target_entity_id as targetEntityId"])
-    .where("ev.indexed_file_id", "in", indexedFileIds)
-    .where("ev.source_fact_id", "is", null)
-    .where("ev.note", "like", `${CO_MENTION_NOTE_PREFIX}%`)
-    .where("rel.source", "=", CO_MENTION_SOURCE)
-    .where("rel.relationship_type", "=", CO_MENTION_RELATIONSHIP_TYPE)
-    .where("rel.confidence", "=", CO_MENTION_CONFIDENCE)
-    .execute();
   const pairs = new Map<string, Pair>();
-  for (const row of rows) {
-    const pair = { personEntityId: row.personEntityId, targetEntityId: row.targetEntityId };
-    pairs.set(pairKey(pair), pair);
-  }
+  await forEachChunk(indexedFileIds, async (batch) => {
+    const rows = await db
+      .selectFrom("entity_relationship_evidence as ev")
+      .innerJoin("entity_relationships as rel", "rel.id", "ev.relationship_id")
+      .select(["rel.source_entity_id as personEntityId", "rel.target_entity_id as targetEntityId"])
+      .where("ev.indexed_file_id", "in", batch)
+      .where("ev.source_fact_id", "is", null)
+      .where("ev.note", "like", `${CO_MENTION_NOTE_PREFIX}%`)
+      .where("rel.source", "=", CO_MENTION_SOURCE)
+      .where("rel.relationship_type", "=", CO_MENTION_RELATIONSHIP_TYPE)
+      .where("rel.confidence", "=", CO_MENTION_CONFIDENCE)
+      .execute();
+    for (const row of rows) {
+      const pair = { personEntityId: row.personEntityId, targetEntityId: row.targetEntityId };
+      pairs.set(pairKey(pair), pair);
+    }
+  });
   return pairs;
 }
 

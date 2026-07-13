@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
+import { normalizeEntityMatchName } from "../../entities/match-normalize";
+import { isPersonalOrSharedDomain } from "../../entities/personal-domains";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable } from "../schema";
 import { whereLiveEntity } from "./entities";
@@ -81,6 +83,13 @@ export interface AddRelationshipEvidenceInput {
   sourceFactId?: string | null;
 }
 
+export function relationshipSourceRank(source: string | null | undefined): number {
+  if (source === "structural_assignee") return 3;
+  if (source === "llm_extraction") return 2;
+  if (source === "co_mention") return 1;
+  return 0;
+}
+
 /**
  * Lowercase + trim the part after `@`. Returns null for malformed input.
  * Subdomains are conservative: `mail.acme.com` only normalizes to `acme.com`
@@ -123,12 +132,58 @@ export function normalizeWebsiteDomain(value: string | null | undefined): string
 }
 
 /**
- * Propose a company display name from a raw domain. `habuild.in` → `Habuild`,
- * `oliver-wyman.com` → `Oliver Wyman`. The result is a hint for the candidate
- * row — ECR-05 will route this through `proposeEntity` for real review.
+ * Multi-label public suffixes where the registrable label sits one further left
+ * than a single-label TLD. Hand-maintained (no public-suffix-list dependency);
+ * covers the ccTLD shapes that show up in this data. `x.co.in` → SLD `x`, not
+ * `co`.
+ */
+const COMPOUND_TLD_SUFFIXES: ReadonlySet<string> = new Set([
+  "co.in",
+  "co.uk",
+  "co.jp",
+  "co.nz",
+  "co.kr",
+  "co.za",
+  "com.au",
+  "com.br",
+  "com.sg",
+  "com.mx",
+  "com.tr",
+  "ac.in",
+  "ac.uk",
+  "ac.jp",
+  "org.in",
+  "org.uk",
+  "net.in",
+  "gov.in",
+  "gov.uk",
+  "edu.in",
+  "bank.in",
+]);
+
+/**
+ * Propose a company display name from a raw domain. Uses the registrable
+ * second-level label (the one left of the public suffix), NOT the leftmost
+ * label, so a subdomain host does not become the name: `habuild.in` → `Habuild`,
+ * `oliver-wyman.com` → `Oliver Wyman`, `support.aws.com` → `Aws`,
+ * `xwf.google.com` → `Google`, `x.co.in` → `X`. The result is a hint for the
+ * candidate row — ECR-05 will route this through `proposeEntity` for real review.
  */
 export function proposeCompanyNameFromDomain(domain: string): string {
-  const base = domain.split(".")[0] ?? domain;
+  const normalized = domain.trim().toLowerCase().replace(/\.+$/, "");
+  const labels = normalized.split(".").filter((s) => s.length > 0);
+  let base: string;
+  if (labels.length <= 1) {
+    base = labels[0] ?? normalized;
+  } else {
+    const suffixLen = COMPOUND_TLD_SUFFIXES.has(labels.slice(-2).join(".")) ? 2 : 1;
+    const sldIndex = labels.length - 1 - suffixLen;
+    // The input is nothing but a public suffix (e.g. `co.in`) — there is no
+    // registrable label to name a company after, so refuse rather than mint a
+    // bogus "Co" candidate. An empty name is skipped by the promotion sweep.
+    if (sldIndex < 0) return "";
+    base = labels[sldIndex];
+  }
   return base
     .split(/[-_]/)
     .filter((s) => s.length > 0)
@@ -147,10 +202,39 @@ function parseJsonArray(raw: string | null): string[] {
   return [];
 }
 
+function compactNameKey(value: string): string {
+  return normalizeEntityMatchName("company", value.replace(/[._-]+/g, " ")).replace(/\s+/g, "");
+}
+
+function domainMatchesName(domain: string, name: string): boolean {
+  const nameKey = compactNameKey(name);
+  if (!nameKey) return false;
+  const normalizedDomain = normalizeWebsiteDomain(domain) ?? domain.trim().toLowerCase();
+  const labels = normalizedDomain.split(".").filter(Boolean);
+  if (labels.length === 0) return false;
+  const candidates = new Set<string>([labels.join(" ")]);
+  if (labels.length > 1) {
+    candidates.add(labels.slice(0, -1).join(" "));
+    candidates.add(labels[labels.length - 2]);
+  }
+  for (const candidate of candidates) {
+    if (compactNameKey(candidate) === nameKey) return true;
+  }
+  return false;
+}
+
 export function createEntityDomainsRepository(db: Kysely<DB>) {
   async function upsertRelationship(input: UpsertRelationshipInput): Promise<string> {
     const validFrom = input.validFrom ?? "";
     const id = randomUUID();
+    const incomingRank = relationshipSourceRank(input.source);
+    const existingRank = sql<number>`CASE entity_relationships.source
+      WHEN 'structural_assignee' THEN 3
+      WHEN 'llm_extraction' THEN 2
+      WHEN 'co_mention' THEN 1
+      ELSE 0
+    END`;
+    const preserveRankedOwner = sql<boolean>`EXCLUDED.relationship_type = 'contributes_to' AND ${incomingRank} < ${existingRank}`;
     const greatest = isPg(db)
       ? sql`GREATEST(entity_relationships.confidence_score, EXCLUDED.confidence_score)`
       : sql`max(entity_relationships.confidence_score, EXCLUDED.confidence_score)`;
@@ -161,9 +245,15 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
         (${id}, ${input.sourceEntityId}, ${input.targetEntityId}, ${input.relationshipType}, ${input.confidence}, ${input.confidenceScore}, ${input.source}, ${validFrom}, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       ON CONFLICT (source_entity_id, target_entity_id, relationship_type, valid_from)
       DO UPDATE SET
-        confidence = EXCLUDED.confidence,
+        confidence = CASE
+          WHEN ${preserveRankedOwner} THEN entity_relationships.confidence
+          ELSE EXCLUDED.confidence
+        END,
         confidence_score = ${greatest},
-        source = EXCLUDED.source,
+        source = CASE
+          WHEN ${preserveRankedOwner} THEN entity_relationships.source
+          ELSE EXCLUDED.source
+        END,
         updated_at = CURRENT_TIMESTAMP
     `.execute(db);
     const row = await db
@@ -182,6 +272,10 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
     normalizeWebsiteDomain,
 
     async isPersonalOrShared(domain: string): Promise<boolean> {
+      // The code constant wins over any DB row: a poisoned `corporate` row for
+      // gmail.com must never flip this to false. It also keeps the guard alive
+      // when the migration-064 seed has been cleared by a rebuild.
+      if (isPersonalOrSharedDomain(domain)) return true;
       const row = await db.selectFrom("entity_domains").select("kind").where("domain", "=", domain).executeTakeFirst();
       if (!row) return false;
       return row.kind === "personal" || row.kind === "shared";
@@ -198,6 +292,27 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
         .where(whereLiveEntity())
         .executeTakeFirst();
       return (row ?? null) as EntitiesTable | null;
+    },
+
+    async getCompanyIdsByDomain(domain: string): Promise<string[]> {
+      const rows = await db
+        .selectFrom("entity_domains")
+        .innerJoin("entities", "entities.id", "entity_domains.entity_id")
+        .select("entity_domains.entity_id")
+        .where("entity_domains.domain", "=", domain.toLowerCase())
+        .where("entity_domains.kind", "=", "corporate")
+        .where("entity_domains.entity_id", "is not", null)
+        .where(whereLiveEntity())
+        .execute();
+      return rows.flatMap((row) => (row.entity_id ? [row.entity_id] : []));
+    },
+
+    async findCorporateDomainMatchingName(name: string): Promise<string | null> {
+      const rows = await db.selectFrom("entity_domains").select("domain").where("kind", "=", "corporate").execute();
+      for (const row of rows) {
+        if (domainMatchesName(row.domain, name)) return row.domain;
+      }
+      return null;
     },
 
     async upsertDomain(input: UpsertDomainInput): Promise<void> {
@@ -359,6 +474,23 @@ export function createEntityDomainsRepository(db: Kysely<DB>) {
         .where("relationship_id", "in", relationshipIds)
         .where("source_fact_id", "is", null)
         .where("note", "like", "co_mention:%");
+      const keep = [...keepEvidenceKeys];
+      if (keep.length > 0) {
+        query = query.where("evidence_key", "not in", keep);
+      }
+      const result = await query.executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0);
+    },
+
+    async deleteStructuralAssigneeEvidenceForRelationships(
+      relationshipIds: string[],
+      keepEvidenceKeys: Set<string> = new Set(),
+    ): Promise<number> {
+      if (relationshipIds.length === 0) return 0;
+      let query = db
+        .deleteFrom("entity_relationship_evidence")
+        .where("relationship_id", "in", relationshipIds)
+        .where("note", "like", "structural_assignee:%");
       const keep = [...keepEvidenceKeys];
       if (keep.length > 0) {
         query = query.where("evidence_key", "not in", keep);

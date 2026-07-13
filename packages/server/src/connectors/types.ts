@@ -6,7 +6,10 @@
  * - "document": full content stored locally (docs, pages, PRDs)
  * - "structured": metadata only, live-fetched when needed (tasks, issues)
  */
+import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import type { DB } from "../db/schema";
+import type { GeminiGenerator } from "./gemini-generate";
 
 export type ConnectorType =
   | "google_drive"
@@ -18,13 +21,24 @@ export type ConnectorType =
   | "notion"
   | "linear"
   | "fireflies"
-  | "zoho_crm";
+  | "otter"
+  | "zoho_crm"
+  | "whatsapp";
 
-export type AuthType = "oauth" | "api_key" | "service_account";
+export type AuthType = "oauth" | "api_key" | "service_account" | "system";
 
 export type SyncStatus = "pending" | "active" | "syncing" | "paused" | "error" | "disabled";
 
 export type ContentCategory = "document" | "structured";
+
+export type HierarchyTarget = "team" | "project" | "sprint" | "ignore";
+
+export interface HierarchyLevelDeclaration {
+  key: string;
+  label: string;
+  allowedTargets: HierarchyTarget[];
+  default: HierarchyTarget;
+}
 
 /**
  * Decrypted credentials stored per connector.
@@ -45,6 +59,7 @@ export interface OAuthCredentials {
   accounts_server?: string;
   api_domain?: string;
   region?: string;
+  canvas_account_id?: string;
 }
 
 export interface ApiKeyCredentials {
@@ -57,7 +72,16 @@ export interface ServiceAccountCredentials {
   service_account_json: string;
 }
 
-export type ConnectorCredentials = OAuthCredentials | ApiKeyCredentials | ServiceAccountCredentials;
+export interface SystemCredentials {
+  type: "system";
+}
+
+export type ConnectorCredentials = OAuthCredentials | ApiKeyCredentials | ServiceAccountCredentials | SystemCredentials;
+
+export type AccessTokenProvider = (opts?: { forceRefresh?: boolean }) => Promise<{
+  accessToken: string;
+  expiresAt?: string;
+}>;
 
 /**
  * A file/item discovered during sync that should be indexed.
@@ -111,6 +135,29 @@ export interface SyncedItem {
    * Each assignee is matched to a person entity and linked via entity_mentions.
    */
   assignees?: Array<{ name: string; email?: string; source?: string; sourceId?: string }>;
+  task?: {
+    sourceTaskId: string;
+    externalRef?: string;
+    title: string;
+    statusType: string;
+    statusRaw?: string;
+    priority?: string;
+    dueAt?: string;
+    project?: { name: string; source: string; sourceId: string };
+    assignee?: { name: string; email?: string; source?: string; sourceId?: string };
+    cycle?: {
+      source: string;
+      externalRef: string;
+      name: string;
+      scopeRef?: { source: string; sourceId: string };
+      startsAt?: string;
+      endsAt?: string;
+      sequence?: number;
+      isSprint: boolean;
+    };
+  };
+  commitments?: CommitmentSeed[];
+  decisions?: DecisionSeed[];
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
    * Sync seeds person entities from entries where `name` is present or can be
@@ -160,6 +207,7 @@ export interface EntitySeed {
   source: string;
   sourceId: string;
   sourceUrl?: string;
+  aliases?: string[];
   metadata?: Record<string, unknown>;
 }
 
@@ -185,6 +233,77 @@ export interface ContactPointSeed {
   lastContactedAt?: string | null;
 }
 
+export interface CommitmentSeed {
+  commitmentId: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  title: string;
+  status: "open" | "done" | "dropped";
+  dueAt?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+}
+
+export interface FeatureFactRaw {
+  featureId: string;
+  featureName: string;
+  corroborationKey?: string;
+  parentProductRef?: { source: string; sourceId: string };
+  parentProductName?: string;
+  parentEntityId?: string;
+  status: "proposed" | "building" | "shipped" | "deprecated";
+  dueAt?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+  promptVersion?: string;
+  model?: string;
+  confidence?: number;
+}
+
+export interface MilestoneFactRaw {
+  milestoneId: string;
+  milestoneName: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  status: "planned" | "hit" | "missed";
+  dueAt: string;
+  observedAt?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+}
+
+export interface DecisionSeed {
+  decisionId?: string;
+  topic: string;
+  statement: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  rationale?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+  promptVersion?: string;
+}
+
+export interface LlmTaskCandidate {
+  title: string;
+  owner?: { name?: string; email?: string };
+  dueDate?: string;
+  hasOwnerVerbObject: boolean;
+  sourceExcerpt?: string;
+}
+
+export interface LlmTaskFactRaw {
+  candidateId: string;
+  title: string;
+  owner?: { name?: string; email?: string };
+  dueDate?: string;
+  hasOwnerVerbObject: boolean;
+  corroborationKey: string;
+  parentRef?: { source: string; sourceId: string };
+  parentEntityId?: string;
+  evidence: { fileIds: string[]; entityIds: string[] };
+  sourceExcerpt?: string;
+  promptVersion: string;
+}
+
 export type EntitySeedCallback = (seed: EntitySeed) => Promise<void>;
 export type PersonEntitySeedCallback = (seed: PersonEntitySeed) => Promise<void>;
 
@@ -198,6 +317,15 @@ export type IndexedFileFactRaw =
     }
   | { providerFileId: string; author: { name?: string; email?: string; sourceId?: string } }
   | { providerFileId: string; parent: { source: string; sourceId: string; contextSnippet?: string } }
+  | {
+      indexedFileId: string;
+      task: NonNullable<SyncedItem["task"]>;
+    }
+  | CommitmentSeed
+  | FeatureFactRaw
+  | MilestoneFactRaw
+  | DecisionSeed
+  | LlmTaskFactRaw
   | { providerFileId: string; contactPoint: ContactPointSeed }
   | { sourceType: string; sourceUrl?: string; sourcePath?: string; metadata?: Record<string, unknown> }
   | { subtype: "internal" | "external" }
@@ -300,12 +428,17 @@ export interface Connector {
    */
   readonly requiresOAuthClientSetup: boolean;
 
+  /** Whether one sync enumerates the complete source corpus for stale-file reconciliation. */
+  readonly syncIsCompleteSnapshot?: boolean;
+
   /**
    * File types that should be promoted to entities during sync.
    * e.g. Linear returns ["project"] — synced Linear projects become entities.
    * Connectors that seed entities directly via onEntitySeed (e.g. Notion) leave this empty.
    */
   readonly promotableFileTypes?: string[];
+
+  readonly hierarchyLevels?: HierarchyLevelDeclaration[];
 
   /**
    * Whether this connector's people are email correspondents rather than meeting
@@ -327,6 +460,7 @@ export interface Connector {
 
   /** Run initial or incremental sync. Returns items to index. */
   sync(opts: {
+    db?: Kysely<DB>;
     connectorConfigId?: string;
     credentials: ConnectorCredentials;
     scopeConfig: Record<string, unknown>;
@@ -339,6 +473,7 @@ export interface Connector {
      * that don't need it ignore the field.
      */
     ownerEmail?: string | null;
+    accessTokenProvider?: AccessTokenProvider;
     /**
      * Resolve a speaker / attendee name to a Sketch-side identity. Built
      * by the dispatcher from the users table + person entity register
@@ -346,6 +481,7 @@ export interface Connector {
      * Optional — connectors that don't need it leave it unset.
      */
     resolveNameToEmail?: NameResolver;
+    salienceGenerator?: GeminiGenerator | null;
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
     onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;
@@ -358,6 +494,7 @@ export interface Connector {
     scopeConfig: Record<string, unknown>;
     currentCursor: string | null;
     logger: Logger;
+    accessTokenProvider?: AccessTokenProvider;
   }): Promise<string | null>;
 
   /**
@@ -371,7 +508,12 @@ export interface Connector {
    * Returns immediately for sync connectors, or a BrowseJob for async ones (e.g. Notion).
    * Optional — connectors without scope selection don't implement this.
    */
-  browse?(opts: { credentials: ConnectorCredentials; logger: Logger }): Promise<BrowseResult | BrowseJob>;
+  browse?(opts: {
+    db?: Kysely<DB>;
+    credentials: ConnectorCredentials;
+    logger: Logger;
+    accessTokenProvider?: AccessTokenProvider;
+  }): Promise<BrowseResult | BrowseJob>;
 
   /**
    * Browse for an existing connector — always returns sync results.
@@ -379,7 +521,12 @@ export interface Connector {
    * Connectors with async browse (e.g. Notion) should implement this
    * to return results directly without starting a background job.
    */
-  browseExisting?(opts: { credentials: ConnectorCredentials; logger: Logger }): Promise<BrowseResult>;
+  browseExisting?(opts: {
+    db?: Kysely<DB>;
+    credentials: ConnectorCredentials;
+    logger: Logger;
+    accessTokenProvider?: AccessTokenProvider;
+  }): Promise<BrowseResult>;
 
   /**
    * Browse folder/subtree contents for tree-type scope pickers (e.g. Google Drive).
@@ -389,6 +536,7 @@ export interface Connector {
     credentials: ConnectorCredentials;
     parentId: string;
     logger: Logger;
+    accessTokenProvider?: AccessTokenProvider;
   }): Promise<BrowseTreeItem[]>;
 }
 

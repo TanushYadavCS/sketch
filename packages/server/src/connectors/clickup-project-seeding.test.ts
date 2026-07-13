@@ -211,23 +211,33 @@ describe("ClickUp project entity seeding", () => {
     await db.destroy();
   });
 
-  it("seeds folder-with-lists and folderless-list projects and links folderless tasks to the list project", async () => {
+  it("seeds folder projects from the default hierarchy and leaves folderless tasks unparented", async () => {
     await syncRecordedClickUpPayload(db, "sync-run-1");
 
-    const summary = await materializeUnmaterializedFacts(db, createTestLogger());
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), {});
 
     expect(summary.entitiesCreated).toBe(2);
     const projects = await db
       .selectFrom("entities")
       .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")
-      .select(["entities.id", "entities.name", "entity_source_refs.source_id"])
+      .select(["entities.id", "entities.name", "entities.aliases", "entity_source_refs.source_id"])
       .where("entities.source_type", "=", "project")
       .where("entity_source_refs.source", "=", "clickup")
       .orderBy("entity_source_refs.source_id")
       .execute();
     expect(projects).toEqual([
-      { id: expect.any(String), name: "Atlas Launch", source_id: "cu-folder-1" },
-      { id: expect.any(String), name: "Customer Rollout", source_id: "cu-list-flat-1" },
+      {
+        id: expect.any(String),
+        name: "Delivery Atlas Launch",
+        aliases: '["Atlas Launch"]',
+        source_id: "cu-folder-1",
+      },
+      {
+        id: expect.any(String),
+        name: "Delivery No Active Work",
+        aliases: '["No Active Work"]',
+        source_id: "cu-folder-empty",
+      },
     ]);
     const legacyFolders = await db
       .selectFrom("entities")
@@ -240,16 +250,19 @@ describe("ClickUp project entity seeding", () => {
       .select("id")
       .where("provider_file_id", "=", "cu-task-flat-1")
       .executeTakeFirstOrThrow();
-    const flatProject = projects.find((project) => project.source_id === "cu-list-flat-1");
-    expect(flatProject).toBeDefined();
     const flatProjectMention = await db
       .selectFrom("entity_mentions")
       .selectAll()
       .where("indexed_file_id", "=", flatTask.id)
-      .where("entity_id", "=", flatProject?.id ?? "")
       .where("source", "=", "clickup_parent_entity")
+      .executeTakeFirst();
+    expect(flatProjectMention).toBeUndefined();
+    const flatTaskRow = await db
+      .selectFrom("tasks")
+      .select(["parent_name"])
+      .where("source_task_id", "=", "cu-task-flat-1")
       .executeTakeFirstOrThrow();
-    expect(flatProjectMention.context_snippet).toBe("In list: Customer Rollout");
+    expect(flatTaskRow.parent_name).toBeNull();
   });
 
   it("re-syncs the same ClickUp tree without duplicate project entities or entity churn", async () => {
@@ -258,7 +271,13 @@ describe("ClickUp project entity seeding", () => {
     const firstProjects = await db
       .selectFrom("entities")
       .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")
-      .select(["entities.id", "entities.updated_at", "entity_source_refs.source_id"])
+      .select([
+        "entities.id",
+        "entities.name",
+        "entities.aliases",
+        "entities.updated_at",
+        "entity_source_refs.source_id",
+      ])
       .where("entities.source_type", "=", "project")
       .where("entity_source_refs.source", "=", "clickup")
       .orderBy("entity_source_refs.source_id")
@@ -271,20 +290,20 @@ describe("ClickUp project entity seeding", () => {
     const secondProjects = await db
       .selectFrom("entities")
       .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")
-      .select(["entities.id", "entities.updated_at", "entity_source_refs.source_id"])
+      .select([
+        "entities.id",
+        "entities.name",
+        "entities.aliases",
+        "entities.updated_at",
+        "entity_source_refs.source_id",
+      ])
       .where("entities.source_type", "=", "project")
       .where("entity_source_refs.source", "=", "clickup")
       .orderBy("entity_source_refs.source_id")
       .execute();
     expect(secondProjects).toEqual(firstProjects);
     const reviews = await db.selectFrom("entity_review_queue").selectAll().execute();
-    expect(reviews).toHaveLength(1);
-    expect(reviews[0]).toMatchObject({
-      proposed_name: "Delivery",
-      entity_type: "project",
-      seed_source: "clickup",
-      seed_source_id: "cu-space-1",
-    });
+    expect(reviews).toHaveLength(0);
   });
 
   it("migrates legacy ClickUp folder rows and tombstones only folder facts before reset replay", async () => {

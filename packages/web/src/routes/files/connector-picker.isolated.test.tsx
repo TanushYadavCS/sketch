@@ -3,7 +3,7 @@ import type { ConnectorConfig } from "@/lib/api";
 import { INTEGRATIONS } from "@/lib/integrations";
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
@@ -18,7 +18,7 @@ vi.mock("@/routes/dashboard", () => ({
   }),
 }));
 
-function setupStatus() {
+function setupStatus(overrides: { whatsappConnected?: boolean } = {}) {
   server.use(
     http.get("/api/setup/status", () =>
       HttpResponse.json({
@@ -28,9 +28,9 @@ function setupStatus() {
         orgName: "Acme",
         botName: "Sketch",
         slackConnected: true,
+        whatsappConnected: overrides.whatsappConnected ?? false,
         llmConnected: true,
         llmProvider: "anthropic",
-        experimentalFlag: false,
       }),
     ),
   );
@@ -98,6 +98,12 @@ function renderPicker(
   return onManage;
 }
 
+function connectorRowByDescription(description: string): HTMLElement {
+  const row = screen.getByText(description).closest(".rounded-lg");
+  if (!row) throw new Error(`Could not find connector row for ${description}`);
+  return row as HTMLElement;
+}
+
 describe("ConnectorPicker connector capabilities", () => {
   it.each(INTEGRATIONS.filter((def) => def.perUserAuth).map((def) => [def.name, def] as const))(
     "applies the visible account pattern to %s",
@@ -133,6 +139,110 @@ describe("ConnectorPicker connector capabilities", () => {
     },
     10000,
   );
+
+  it("uses an existing native Canvas account when connecting a matching personal connector", async () => {
+    const user = userEvent.setup();
+    const importedBodies: unknown[] = [];
+    setupStatus();
+    server.use(
+      http.get("/api/mcp-servers", () =>
+        HttpResponse.json({
+          servers: [
+            {
+              id: "provider-1",
+              type: "canvas",
+              slug: "canvas",
+              displayName: "Canvas",
+              url: "http://canvas.test",
+              apiUrl: null,
+              credentials: "configured",
+              mode: "skill",
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:00Z",
+            },
+          ],
+        }),
+      ),
+      http.get("/api/mcp-servers/provider-1/connections", () =>
+        HttpResponse.json({
+          connections: [
+            {
+              id: "secrets:user-1:gmail:google-gmail-oauth",
+              providerId: "provider-1",
+              source: "canvas_user_secrets",
+              appId: "google-gmail-oauth",
+              appName: "Gmail",
+              status: "active",
+              accessLevel: "personal",
+              isOwnedByViewer: true,
+              createdAt: "2026-01-01T00:00:00Z",
+            },
+          ],
+        }),
+      ),
+      http.get("/api/connectors/credential-source", () =>
+        HttpResponse.json({
+          mode: "local",
+          canvasConfigured: true,
+          canvasCredentialImportConfigured: true,
+          publicKeyId: "key-1",
+        }),
+      ),
+      http.post("/api/connectors/canvas/import", async ({ request }) => {
+        importedBodies.push(await request.json());
+        return HttpResponse.json({
+          connector: {
+            id: "gmail-connector",
+            connectorType: "gmail",
+            syncStatus: "pending",
+            alreadyConnected: false,
+          },
+        });
+      }),
+    );
+    renderPicker([]);
+
+    await user.click(await screen.findByRole("button", { name: /Browse all/i }));
+    await user.click(
+      within(connectorRowByDescription("Email messages and threads")).getByRole("button", { name: "Connect" }),
+    );
+
+    await waitFor(() =>
+      expect(importedBodies).toEqual([
+        { connectorType: "gmail", accountId: "secrets:user-1:gmail:google-gmail-oauth" },
+      ]),
+    );
+    expect(screen.queryByRole("button", { name: "Connect account" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Canvas/)).not.toBeInTheDocument();
+  });
+
+  it("surfaces unfinished Google Calendar setup instead of looking connected", async () => {
+    const user = userEvent.setup();
+    setupStatus();
+    const onManage = renderPicker([
+      connector({
+        id: "calendar-connector",
+        connectorType: "google_calendar",
+        authType: "oauth",
+        scopeConfig: { calendarIds: [] },
+        syncStatus: "paused",
+        fileCount: 0,
+        createdBy: "admin-1",
+        canManage: true,
+        canBrowseScope: true,
+        canChangeScope: true,
+      }),
+    ]);
+
+    await user.click(await screen.findByRole("button", { name: /Browse all/i }));
+
+    expect(screen.getByText("Setup needed: choose calendars.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Finish setup" }));
+
+    await waitFor(() => expect(onManage).toHaveBeenCalledTimes(1));
+    expect(onManage.mock.calls[0]?.[1].id).toBe("calendar-connector");
+  });
 
   it("renders View and Connect mine for an admin seeing another user's per-user connector", async () => {
     const user = userEvent.setup();
@@ -220,5 +330,32 @@ describe("ConnectorPicker connector capabilities", () => {
 
     await waitFor(() => expect(onManage).toHaveBeenCalledTimes(2));
     expect(onManage.mock.calls[1]?.[1].id).toBe("own-conn");
+  });
+
+  it("only surfaces WhatsApp Groups after the WhatsApp channel is connected", async () => {
+    setupStatus({ whatsappConnected: false });
+    const { unmount } = renderWithProviders(
+      <ConnectorPicker
+        connectors={[]}
+        teamMemberCount={3}
+        connectorMemberCounts={{}}
+        sourceCounts={new Map()}
+        totalFiles={0}
+        localFileCount={0}
+        sourceFilter={null}
+        onSourceFilterChange={() => {}}
+        onConnected={() => {}}
+        onManageConnector={() => {}}
+      />,
+    );
+
+    await screen.findByRole("button", { name: /Browse all/i });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /WhatsApp Groups/i })).not.toBeInTheDocument());
+    unmount();
+
+    setupStatus({ whatsappConnected: true });
+    renderPicker([]);
+
+    expect(await screen.findByRole("button", { name: /WhatsApp Groups/i })).toBeInTheDocument();
   });
 });

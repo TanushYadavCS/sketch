@@ -108,8 +108,7 @@ export function createBaileysWhatsAppProviders(whatsapp: WhatsAppBot, logger: Lo
   };
 
   const getGroupMetadata = async (groupId: string): Promise<WhatsAppGroupMetadata | undefined> => {
-    const meta = await whatsapp.getGroupMetadata(groupId);
-    return meta ? { id: groupId, subject: meta.subject ?? "Unknown Group", desc: meta.desc ?? null } : undefined;
+    return whatsapp.getProviderGroupMetadata(groupId);
   };
 
   const shared = {
@@ -146,6 +145,11 @@ export function createBaileysWhatsAppProviders(whatsapp: WhatsAppBot, logger: Lo
       id: WHATSAPP_BAILEYS_PROVIDER_ID,
       onMessage(handler) {
         whatsapp.onMessage((message) => handler(normalizeBaileysInboundMessage(message)));
+      },
+      onHistoryMessages(handler) {
+        whatsapp.onHistoryMessages((messages, metadata) =>
+          handler(messages.map(normalizeBaileysInboundMessage), metadata),
+        );
       },
     },
   };

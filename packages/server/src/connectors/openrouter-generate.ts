@@ -93,6 +93,12 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
           ],
           max_tokens: maxTokens,
           temperature: 0,
+          ...(opts?.responseMimeType === "application/json"
+            ? {
+                provider: { require_parameters: true },
+                response_format: { type: "json_object" },
+              }
+            : {}),
         }),
       });
 
@@ -129,7 +135,7 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
   }
 
   async function generateJSON<T>(prompt: string, opts?: Omit<GenerateOptions, "responseMimeType">): Promise<T> {
-    const text = await generate(prompt, opts);
+    const text = await generate(prompt, { ...opts, responseMimeType: "application/json" });
     try {
       return JSON.parse(stripJsonFence(text)) as T;
     } catch (err) {

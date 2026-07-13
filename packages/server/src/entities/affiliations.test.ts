@@ -1,6 +1,6 @@
 /**
- * ELP-02 affiliation inference — three load-bearing tests covering distinct
- * failure modes:
+ * ELP-02 affiliation inference — load-bearing tests covering distinct failure
+ * modes:
  *
  * 1. Personal/shared seed domains block `works_at` inference. If this breaks,
  *    we silently declare "57 people work at gmail.com".
@@ -10,9 +10,13 @@
  * 3. Recreate (reset → replay → sweep) rebuilds the same `works_at` edges
  *    that live sync produces. If this breaks, recreate silently loses
  *    affiliation data and recreate parity is no longer a reliable backfill.
+ *
+ * Plus code-constant guard tests: the personal-provider guard must hold even
+ * when the migration-064 domain seed has been wiped by a rebuild, and the
+ * promotion sweep must refuse a personal-provider candidate outright.
  */
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sweepDomainPromotions } from "../connectors/smart-enrichment";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
@@ -138,6 +142,104 @@ describe("ELP-02: affiliation inference", () => {
       .executeTakeFirst();
     expect(gmailRow?.kind).toBe("personal");
     expect(gmailRow?.entity_id).toBeNull();
+  });
+
+  it("blocks personal-provider affiliation even when the domain seed is wiped (code-constant guard)", async () => {
+    const domainsRepo = createEntityDomainsRepository(db);
+    const entityRepo = createEntityRepository(db);
+    // Simulate a rebuild/purge that dropped the migration-064 personal seed.
+    // The code constant must still recognize gmail.com as a personal provider.
+    await db.deleteFrom("entity_domains").execute();
+    const fileId = await seedFile(db, "f-wiped");
+    const person = await entityRepo.upsertPersonEntity({
+      name: "Casey Consumer",
+      email: "casey@gmail.com",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "person-gmail-wiped",
+    });
+
+    await inferAffiliationFromEmail(
+      { db, domainsRepo },
+      { personEntityId: person.id, email: "casey@gmail.com", evidenceFileId: fileId },
+    );
+
+    const observations = await db
+      .selectFrom("entity_candidates")
+      .selectAll()
+      .where("type", "=", "domain_observation")
+      .execute();
+    expect(observations).toHaveLength(0);
+    const rels = await db.selectFrom("entity_relationships").selectAll().execute();
+    expect(rels).toHaveLength(0);
+  });
+
+  it("domain-promotion sweep refuses to mint a company for a personal provider (backstop)", async () => {
+    const domainsRepo = createEntityDomainsRepository(db);
+    const entityRepo = createEntityRepository(db);
+    await db.deleteFrom("entity_domains").execute();
+    const fileId = await seedFile(db, "f-poison");
+    const person = await entityRepo.upsertPersonEntity({
+      name: "Dana Doe",
+      email: "dana@gmail.com",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "person-gmail-poison",
+    });
+    // Inject a domain_observation candidate directly, as if a prior unguarded run
+    // had accumulated it, and confirm the sweep's own backstop refuses it.
+    await domainsRepo.upsertDomainObservation({
+      domain: "gmail.com",
+      proposedCompanyName: "Gmail",
+      observedPersonEntityId: person.id,
+      evidenceFileId: fileId,
+      firstObservedByUserId: ADMIN_ID,
+    });
+
+    const result = await sweepDomainPromotions(db, createTestLogger());
+    expect(result.promoted).toBe(0);
+    expect(result.linkedExisting).toBe(0);
+
+    const companies = await db.selectFrom("entities").selectAll().where("source_type", "=", "company").execute();
+    expect(companies).toHaveLength(0);
+    const candidate = await db
+      .selectFrom("entity_candidates")
+      .selectAll()
+      .where("domain", "=", "gmail.com")
+      .executeTakeFirstOrThrow();
+    expect(candidate.promoted_entity_id).toBeNull();
+  });
+
+  it("skips the entity-corpus load entirely when there are no promotion candidates", async () => {
+    // Live entities that the pre-fix sweep would have loaded unconditionally.
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertEntity({ name: "Existing Co", sourceType: "company", status: "confirmed" });
+    await entityRepo.upsertPersonEntity({
+      name: "Existing Person",
+      email: "person@existing.com",
+      subtype: "external",
+      source: "fireflies",
+      sourceId: "existing-person",
+    });
+
+    const selectedTables: string[] = [];
+    const originalSelectFrom = db.selectFrom.bind(db);
+    const spy = vi.spyOn(db, "selectFrom").mockImplementation(((table: Parameters<typeof db.selectFrom>[0]) => {
+      selectedTables.push(String(table));
+      return originalSelectFrom(table);
+    }) as typeof db.selectFrom);
+
+    try {
+      const result = await sweepDomainPromotions(db, createTestLogger());
+      expect(result.scanned).toBe(0);
+      expect(result.promoted).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The zero-candidate early return must never touch the entities table.
+    expect(selectedTables).toContain("entity_candidates");
+    expect(selectedTables).not.toContain("entities");
   });
 
   it("a single demo prospect promotes the company immediately (threshold=1) with a works_at edge", async () => {
@@ -432,11 +534,12 @@ describe("ELP-02: affiliation inference", () => {
     // test 18 — recreate must reproduce the same graph shape (one promoted
     // company, one corporate domain row, five works_at edges) as live sync
     // crossing the threshold organically.
-    for (let i = 0; i < 5; i++) {
+    const names = ["Charlie Adams", "Priya Rao", "Mateo Silva", "Noor Khan", "Elena Ivers"];
+    for (let i = 0; i < names.length; i++) {
       const fileId = await seedFile(db, `charlie-file-${i}`);
       await seedPersonSeedFact(db, {
         fileId,
-        name: `Charlie Person ${i}`,
+        name: names[i],
         email: `person${i}@charlie.com`,
         sourceId: `charlie-${i}`,
       });
@@ -511,11 +614,12 @@ describe("ELP-02: affiliation inference", () => {
       })
       .execute();
 
-    for (let i = 0; i < 5; i++) {
+    const names = ["Manual Charlie", "Iris Quinn", "Omar Reed", "Lina Soto", "Victor Tan"];
+    for (let i = 0; i < names.length; i++) {
       const fileId = await seedFile(db, `manual-charlie-file-${i}`);
       await seedPersonSeedFact(db, {
         fileId,
-        name: `Manual Charlie Person ${i}`,
+        name: names[i],
         email: `manual${i}@charlie.com`,
         sourceId: `manual-charlie-${i}`,
       });

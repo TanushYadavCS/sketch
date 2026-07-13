@@ -12,6 +12,7 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { decodeSecretField, encodeSecretField } from "../../auth/secret-fields";
 import { getSyncIdentity, syncIdentityKey } from "../../connectors/sync-identity";
+import { forEachChunk } from "../../connectors/sync-utils";
 import type { ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
 import { normalizeSourceTimestampForStorage } from "../../timestamps";
 import type { DB } from "../schema";
@@ -231,7 +232,9 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       connectorType: ConnectorType;
       authType: string;
       credentials: string;
+      credentialSource?: "local" | "canvas";
       scopeConfig?: string;
+      syncStatus?: SyncStatus;
       createdBy: string;
       credentialHint?: string | null;
     }) {
@@ -243,7 +246,9 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
           connector_type: data.connectorType,
           auth_type: data.authType,
           credentials: encodeSecretField(data.credentials, encryptionKey),
+          credential_source: data.credentialSource ?? "local",
           scope_config: data.scopeConfig ?? "{}",
+          ...(data.syncStatus ? { sync_status: data.syncStatus } : {}),
           created_by: data.createdBy,
           credential_hint: data.credentialHint ?? null,
         })
@@ -265,6 +270,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         errorMessage: string | null;
         browseCache: string | null;
         credentialHint: string | null;
+        credentialSource: "local" | "canvas";
       }>,
     ) {
       const values: Record<string, unknown> = {};
@@ -276,6 +282,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       if (data.errorMessage !== undefined) values.error_message = data.errorMessage;
       if (data.browseCache !== undefined) values.browse_cache = data.browseCache;
       if (data.credentialHint !== undefined) values.credential_hint = data.credentialHint;
+      if (data.credentialSource !== undefined) values.credential_source = data.credentialSource;
 
       if (Object.keys(values).length > 0) {
         values.updated_at = new Date().toISOString();
@@ -680,7 +687,16 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       }));
     },
 
-    /** Archive files not seen in this sync for a given connector. */
+    /**
+     * Archive files not seen in this sync for a given connector.
+     *
+     * `seenSyncIdentityKeys` is only consulted in-memory (`.has()`), so passing
+     * the whole set — 100k+ entries on an initial full sync — carries no SQL
+     * bind-variable risk. The derived stale/orphaned id lists, however, feed
+     * `IN (...)` deletes and updates, so those are chunked. Each chunk commits on
+     * its own connection; the archive is idempotent per id, so a chunk landing
+     * independently cannot corrupt state.
+     */
     async archiveStaleFiles(connectorConfigId: string, seenSyncIdentityKeys: Set<string>) {
       if (seenSyncIdentityKeys.size === 0) return 0;
 
@@ -712,28 +728,33 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       const staleIds = stale.map((f) => f.id);
 
       // Remove this connector's link to stale files
-      await db
-        .deleteFrom("connector_files")
-        .where("connector_config_id", "=", connectorConfigId)
-        .where("indexed_file_id", "in", staleIds)
-        .execute();
+      await forEachChunk(staleIds, async (batch) => {
+        await db
+          .deleteFrom("connector_files")
+          .where("connector_config_id", "=", connectorConfigId)
+          .where("indexed_file_id", "in", batch)
+          .execute();
+      });
 
       // Archive files that have no remaining connector links
-      const stillLinked = await db
-        .selectFrom("connector_files")
-        .select("indexed_file_id")
-        .where("indexed_file_id", "in", staleIds)
-        .execute();
-      const stillLinkedIds = new Set(stillLinked.map((f) => f.indexed_file_id));
+      const stillLinkedIds = new Set<string>();
+      await forEachChunk(staleIds, async (batch) => {
+        const stillLinked = await db
+          .selectFrom("connector_files")
+          .select("indexed_file_id")
+          .where("indexed_file_id", "in", batch)
+          .execute();
+        for (const f of stillLinked) stillLinkedIds.add(f.indexed_file_id);
+      });
       const orphanedIds = staleIds.filter((id) => !stillLinkedIds.has(id));
 
-      if (orphanedIds.length > 0) {
+      await forEachChunk(orphanedIds, async (batch) => {
         await db
           .updateTable("indexed_files")
           .set({ is_archived: 1, access_scope_id: null })
-          .where("id", "in", orphanedIds)
+          .where("id", "in", batch)
           .execute();
-      }
+      });
 
       return orphanedIds.length;
     },

@@ -35,6 +35,7 @@ import { createIndexedFileFactRepository } from "../db/repositories/indexed-file
 import type { DB, EntitiesTable, EntityContactPointsTable } from "../db/schema";
 import { inferAffiliationFromEmail } from "./affiliations";
 import { finalizeLinkedDomainCandidates } from "./domain-promotion";
+import { normalizeEntityMatchName } from "./match-normalize";
 import {
   type MaterializeResult,
   buildMaterializeDeps,
@@ -56,6 +57,7 @@ export type ResolveErrorCode =
   | "ALREADY_CONFIRMING"
   | "MULTIPLE_STALE_CANDIDATES"
   | "MULTIPLE_RE_RESOLVE_MATCHES"
+  | "TYPE_RECLASSIFY_COLLISION"
   | "ROW_NOT_FOUND";
 
 export class ResolveError extends Error {
@@ -91,6 +93,13 @@ export interface ConfirmOptions {
   mergeIntoEntityId?: string;
   /** From the client's view of the row — must match row.candidate_generated_at. */
   candidateGeneratedAt: string;
+  /**
+   * Rename the entity at confirm time (births only). When creating from a seed,
+   * the entity is created under this name instead of `proposed_name`, and the
+   * original `proposed_name` is preserved as an alias so the connector's name
+   * still resolves. Ignored on a merge into an existing target.
+   */
+  nameOverride?: string;
 }
 
 export interface RejectOptions {
@@ -119,6 +128,21 @@ export interface RejectResult {
   createdEntityId: string | null;
   /** True when the 200 is a no-op replay of an already-rejected row. */
   idempotent: boolean;
+}
+
+export interface DismissResult {
+  row: QueueRow;
+  /** True when the 200 is a no-op replay of an already-dismissed row. */
+  idempotent: boolean;
+}
+
+export type ReclassifyResultKind = "RECLASSIFY" | "TYPE_RECLASSIFY_COLLISION";
+
+export interface ReclassifyResult {
+  row: QueueRow;
+  result: ReclassifyResultKind;
+  collidingRow?: QueueRow;
+  mergedFromReviewId?: string | null;
 }
 
 /**
@@ -169,16 +193,6 @@ function parseAliases(raw: string | null): string[] {
   } catch {
     return [];
   }
-}
-
-function normalizeEntityMatchName(entityType: string, name: string): string {
-  if (entityType !== "product") return normalizeName(name);
-  return normalizeName(
-    name
-      .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
-      .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
-      .replace(/[-_]+/g, " "),
-  );
 }
 
 function shouldMarkHeldFactMaterialized(result: MaterializeResult): boolean {
@@ -412,6 +426,17 @@ async function autoResolutionShortCircuit(ctx: ResolveTxnCtx, target: Entity, pr
   if (normalizeName(fresh.name) === normalized) return true;
   const aliases: string[] = fresh.aliases ? JSON.parse(fresh.aliases) : [];
   return aliases.some((a) => normalizeName(a) === normalized);
+}
+
+function parseSeedAliases(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((alias): alias is string => typeof alias === "string" && alias.trim().length > 0);
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -668,6 +693,12 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
         currentRow: row,
       });
     }
+    if (row.status === "dismissed") {
+      throw new ResolveError("CANDIDATE_DRIFT", "row already dismissed", {
+        currentStatus: row.status,
+        currentRow: row,
+      });
+    }
     if (row.status === "confirming") {
       throw new ResolveError("ALREADY_CONFIRMING", "row is mid-confirm (chunked backfill in progress)");
     }
@@ -689,23 +720,38 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
       opts.mergeIntoEntityId !== row.candidate_entity_id;
 
     // 2. Existence check + type check.
+    const createName = opts.nameOverride?.trim() || row.proposed_name;
+    const renamed = createName !== row.proposed_name;
     let target: Entity;
     if (!targetId) {
       if (!row.seed_source || !row.seed_source_id) {
-        throw new ResolveError(
-          "CANDIDATE_MISSING",
-          "row has no candidate_entity_id and no mergeIntoEntityId provided",
-          {
-            currentRow: row,
-          },
-        );
+        if (row.candidate_reason === "birth-gated" && row.source && row.source_id) {
+          target = await trxCtx.entityRepo.upsertEntityFromTool({
+            name: createName,
+            sourceType: row.entity_type,
+            source: row.source,
+            sourceId: row.source_id,
+            provenanceTier: "human_confirmed",
+          });
+        } else {
+          throw new ResolveError(
+            "CANDIDATE_MISSING",
+            "row has no candidate_entity_id and no mergeIntoEntityId provided",
+            {
+              currentRow: row,
+            },
+          );
+        }
+      } else {
+        target = await trxCtx.entityRepo.upsertEntityFromTool({
+          name: createName,
+          sourceType: row.entity_type,
+          source: row.seed_source,
+          sourceId: row.seed_source_id,
+          provenanceTier: "human_confirmed",
+        });
       }
-      target = await trxCtx.entityRepo.upsertEntityFromTool({
-        name: row.proposed_name,
-        sourceType: row.entity_type,
-        source: row.seed_source,
-        sourceId: row.seed_source_id,
-      });
+      if (renamed) await trxCtx.entityRepo.appendAlias(target.id, row.proposed_name);
     } else {
       const fetchedTarget = await fetchEntity(trxCtx, targetId);
       if (!fetchedTarget) {
@@ -727,6 +773,9 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
         source: row.seed_source,
         sourceId: row.seed_source_id,
       });
+    }
+    for (const alias of parseSeedAliases(row.seed_aliases)) {
+      await trxCtx.entityRepo.appendAlias(target.id, alias);
     }
 
     // Evidence cap (chunking deferred).
@@ -880,6 +929,12 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
         currentRow: row,
       });
     }
+    if (row.status === "dismissed") {
+      throw new ResolveError("CANDIDATE_DRIFT", "row already dismissed", {
+        currentStatus: row.status,
+        currentRow: row,
+      });
+    }
     if (row.status === "confirming") {
       throw new ResolveError("ALREADY_CONFIRMING", "row is mid-confirm");
     }
@@ -935,6 +990,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
           subtype: "internal" | "external";
           source: string;
           sourceId: string;
+          provenanceTier: "human_confirmed";
         } = {
           // Reject-created entities default to 'external'. The user has
           // told us this is a separate identity from the suggested
@@ -943,6 +999,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
           subtype: "external",
           source: sourceFromEvidence,
           sourceId,
+          provenanceTier: "human_confirmed",
         };
         if (row.proposed_email) personData.email = row.proposed_email;
         const created = await trxCtx.entityRepo.upsertPersonEntity(personData);
@@ -956,6 +1013,7 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
           sourceType: row.entity_type,
           source: sourceFromEvidence,
           sourceId,
+          provenanceTier: "human_confirmed",
         });
         target = created;
       }
@@ -997,5 +1055,104 @@ export async function rejectReview(ctx: ResolveCtx, reviewId: string, opts: Reje
     const refreshedRow = await markResolvedOrThrow(trxCtx, row, "rejected", target.id);
 
     return { row: refreshedRow, targetEntityId: target.id, reResolvedToExisting, createdEntityId, idempotent: false };
+  });
+}
+
+/**
+ * Dismiss a pending review row: drop the proposal WITHOUT creating an entity.
+ * Used for birth rows the reviewer judges not real (e.g. a junk structural
+ * seed). Mirrors {@link rejectReview}'s terminal/drift guards but writes no
+ * entity, no mention, and no alias rejection. The terminal `dismissed` status
+ * suppresses the same key from being re-proposed (it is in `TERMINAL_STATUSES`).
+ */
+export async function dismissReview(
+  ctx: ResolveCtx,
+  reviewId: string,
+  opts: { candidateGeneratedAt: string },
+): Promise<DismissResult> {
+  return ctx.db.transaction().execute(async (trx) => {
+    const trxCtx: ResolveTxnCtx = {
+      db: trx,
+      repo: createEntityReviewRepo(trx),
+      entityRepo: createEntityRepository(trx),
+      userId: ctx.userId,
+      now: ctx.now ?? new Date().toISOString(),
+      logger: ctx.logger,
+    };
+    const row = await fetchRow(trxCtx, reviewId);
+
+    // Idempotent replay against an already-dismissed row.
+    if (row.status === "dismissed") {
+      return { row, idempotent: true };
+    }
+    // Any other terminal status cannot transition to dismissed.
+    if (row.status === "confirmed" || row.status === "rejected") {
+      throw new ResolveError("CANDIDATE_DRIFT", `row already ${row.status}`, {
+        currentStatus: row.status,
+        currentRow: row,
+      });
+    }
+    if (row.status === "confirming") {
+      throw new ResolveError("ALREADY_CONFIRMING", "row is mid-confirm");
+    }
+
+    // Compare-and-swap on the candidate snapshot this request validated.
+    if (row.candidate_generated_at !== opts.candidateGeneratedAt) {
+      throw new ResolveError("CANDIDATE_DRIFT", "candidate_generated_at mismatch", {
+        actual: row.candidate_generated_at,
+        provided: opts.candidateGeneratedAt,
+        currentRow: row,
+      });
+    }
+    if (!row.candidate_generated_at) {
+      throw new ResolveError("CANDIDATE_DRIFT", "row missing candidate_generated_at", { currentRow: row });
+    }
+
+    const won = await trxCtx.repo.markDismissed(row.id, ctx.userId, row.candidate_generated_at);
+    if (!won) {
+      const currentRow = await fetchRow(trxCtx, row.id);
+      throw new ResolveError("CANDIDATE_DRIFT", "row was resolved or refreshed by another request", {
+        currentStatus: currentRow.status,
+        currentRow,
+      });
+    }
+    return { row: await fetchRow(trxCtx, row.id), idempotent: false };
+  });
+}
+
+export async function reclassifyReview(
+  ctx: ResolveCtx,
+  reviewId: string,
+  opts: { newEntityType: string; candidateGeneratedAt: string },
+): Promise<ReclassifyResult> {
+  return ctx.db.transaction().execute(async (trx) => {
+    const repo = createEntityReviewRepo(trx);
+    const row = await repo.getById(reviewId);
+    if (!row) throw new ResolveError("ROW_NOT_FOUND", `queue row ${reviewId} not found`);
+    if (row.status !== "pending" || row.candidate_generated_at !== opts.candidateGeneratedAt) {
+      throw new ResolveError("CANDIDATE_DRIFT", "candidate_generated_at mismatch", {
+        actual: row.candidate_generated_at,
+        provided: opts.candidateGeneratedAt,
+        currentRow: row,
+      });
+    }
+    const result = await repo.reclassifyType(reviewId, opts.newEntityType, opts.candidateGeneratedAt);
+    if (!result) throw new ResolveError("ROW_NOT_FOUND", `queue row ${reviewId} not found`);
+    if (result.kind === "drift") {
+      throw new ResolveError("CANDIDATE_DRIFT", "row changed before reclassify", { currentRow: result.row });
+    }
+    if (result.kind === "collision") {
+      return {
+        row: result.row,
+        result: "TYPE_RECLASSIFY_COLLISION",
+        collidingRow: result.collidingRow,
+        mergedFromReviewId: null,
+      };
+    }
+    return {
+      row: result.row,
+      result: "RECLASSIFY",
+      mergedFromReviewId: result.mergedFromReviewId,
+    };
   });
 }

@@ -17,6 +17,25 @@ import { normalizeEntityMatchName } from "./materialize-deps";
 
 const ADMIN_ID = "admin-1";
 const CONNECTOR_ID = "cfg";
+const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
+
+async function countEntitiesBySourceType(db: Kysely<DB>, sourceType: string): Promise<number> {
+  const row = await db
+    .selectFrom("entities")
+    .select((eb) => eb.fn.count<number>("id").as("count"))
+    .where("source_type", "=", sourceType)
+    .where("id", "!=", TEST_ACCOUNT_ENTITY_ID)
+    .executeTakeFirstOrThrow();
+  return Number(row.count);
+}
+
+async function countReviewQueueRows(db: Kysely<DB>): Promise<number> {
+  const row = await db
+    .selectFrom("entity_review_queue")
+    .select((eb) => eb.fn.count<number>("id").as("count"))
+    .executeTakeFirstOrThrow();
+  return Number(row.count);
+}
 
 async function seedFiles(db: Kysely<DB>, count: number): Promise<string[]> {
   const now = new Date().toISOString();
@@ -229,6 +248,18 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(queue).toHaveLength(0);
   });
 
+  it("A0 documents current LLM mention path creating product and project entities with no review rows until A1 flips it", async () => {
+    await seedFiles(db, 2);
+    await upsertLlmFact(db, "file-1", "Sketch", "product");
+    await upsertLlmFact(db, "file-2", "Apollo", "project");
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(await countEntitiesBySourceType(db, "product")).toBe(1);
+    expect(await countEntitiesBySourceType(db, "project")).toBe(1);
+    expect(await countReviewQueueRows(db)).toBe(0);
+  });
+
   it("promotes legacy project container source refs before queueing review", async () => {
     const [fileId] = await seedFiles(db, 1);
     const entityRepo = createEntityRepository(db);
@@ -282,6 +313,38 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(rels).toHaveLength(0);
     const fact = await db.selectFrom("indexed_file_facts").selectAll().executeTakeFirstOrThrow();
     expect(fact.materialized_at).toBeNull();
+  });
+
+  it("A0 documents current relation endpoint path queueing project endpoints but creating company and product endpoints until A1 flips it", async () => {
+    await seedFiles(db, 1);
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "part_of",
+      source: { name: "Zephyr", type: "project" },
+      target: { name: "Atlas", type: "project" },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(await countEntitiesBySourceType(db, "project")).toBe(0);
+    expect(await countReviewQueueRows(db)).toBe(1);
+
+    await db.destroy();
+    db = await createTestDb();
+
+    await seedFiles(db, 1);
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "builds",
+      source: { name: "Acme", type: "company" },
+      target: { name: "Sketch", type: "product" },
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(await countEntitiesBySourceType(db, "company")).toBe(1);
+    expect(await countEntitiesBySourceType(db, "product")).toBe(1);
+    expect(await countReviewQueueRows(db)).toBe(0);
   });
 
   it("links an existing project relation endpoint and writes the relation", async () => {
@@ -378,6 +441,35 @@ describe("materializeFromFact — llm_extracted threshold + type fidelity", () =
     expect(entities).toHaveLength(0);
     const rels = await db.selectFrom("entity_relationships").selectAll().execute();
     expect(rels).toHaveLength(0);
+  });
+
+  it("suppresses a builds product endpoint when a corporate domain matches the product name", async () => {
+    await seedFiles(db, 1);
+    await db
+      .insertInto("entity_domains")
+      .values({
+        id: "domain-ratevendor",
+        entity_id: null,
+        domain: "ratevendor.test",
+        kind: "corporate",
+        is_primary: 1,
+        confidence: 1,
+        source: "manual",
+      })
+      .execute();
+    await upsertLlmRelationFact(db, {
+      fileId: "file-1",
+      relationType: "builds",
+      source: { name: "Acme Hospitality", type: "company" },
+      target: { name: "Rate Vendor", type: "product" },
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(summary.relationshipsWritten).toBe(0);
+    expect(await countEntitiesBySourceType(db, "company")).toBe(1);
+    expect(await countEntitiesBySourceType(db, "product")).toBe(0);
+    expect(await db.selectFrom("entity_relationships").selectAll().execute()).toHaveLength(0);
   });
 
   it("materializes contact point facts onto the referenced person", async () => {
@@ -849,6 +941,11 @@ describe("materializeFromFact — llm_relation typed edges", () => {
       confidenceScore: 0.9,
       source: "email_domain",
     });
+    await entityRepo.upsertSourceRef({
+      entityId: person.id,
+      source: "llm_relation",
+      sourceId: "file-1:hash-file-1:source:Sarah Chen",
+    });
     await domainsRepo.addEvidence({
       relationshipId,
       indexedFileId: "file-1",
@@ -896,7 +993,24 @@ describe("materializeFromFact — llm_relation typed edges", () => {
 
   it("removes relationships that lose their last source-fact evidence row", async () => {
     await seedFiles(db, 2);
-    await createEntityRepository(db).upsertEntityFromTool({
+    const entityRepo = createEntityRepository(db);
+    const person = await entityRepo.upsertPersonEntity({
+      name: "Sarah Chen",
+      subtype: "external",
+      source: "google_drive",
+      sourceId: "person:sarah",
+    });
+    await entityRepo.upsertSourceRef({
+      entityId: person.id,
+      source: "llm_relation",
+      sourceId: "file-1:hash-file-1:source:Sarah Chen",
+    });
+    await entityRepo.upsertSourceRef({
+      entityId: person.id,
+      source: "llm_relation",
+      sourceId: "file-2:hash-file-2:source:Sarah Chen",
+    });
+    await entityRepo.upsertEntityFromTool({
       name: "Project Atlas",
       sourceType: "project",
       source: "google_drive",

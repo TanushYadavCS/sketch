@@ -4,13 +4,13 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
 import type { Config } from "../config";
-import { runEnrichment } from "../connectors/enrichment";
+import { isEnrichmentActive, runEnrichment } from "../connectors/enrichment";
 import {
   createEnrichmentEmbeddingProvider,
   createEnrichmentGenerator,
   resolveOpenRouterEnrichmentConfig,
 } from "../connectors/enrichment-providers";
-import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
+import { type createSettingsRepository, parseOrgContext, serializeOrgContext } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 
 const searchConfigSchema = z.object({
@@ -26,6 +26,7 @@ const identityUpdateSchema = z.object({
     .object({
       description: z.string().trim().max(2000).optional(),
       industry: z.string().trim().max(80).optional(),
+      disambiguationGuidance: z.string().trim().max(2000).optional(),
     })
     .optional(),
 });
@@ -79,12 +80,7 @@ export function settingsRoutes(
     const updates: Parameters<typeof settings.update>[0] = {};
     if (parsed.data.orgName !== undefined) updates.orgName = parsed.data.orgName;
     if (parsed.data.orgContext !== undefined) {
-      const description = parsed.data.orgContext.description ?? "";
-      const industry = parsed.data.orgContext.industry ?? "";
-      const next: Record<string, string> = {};
-      if (description.length > 0) next.description = description;
-      if (industry.length > 0) next.industry = industry;
-      updates.orgContext = Object.keys(next).length > 0 ? JSON.stringify(next) : null;
+      updates.orgContext = serializeOrgContext(parsed.data.orgContext);
     }
 
     if (Object.keys(updates).length === 0) {
@@ -151,6 +147,10 @@ export function settingsRoutes(
     const row = await settings.get();
     if (row?.enrichment_enabled === 0) {
       return c.json({ error: { code: "DISABLED", message: "Enrichment is disabled" } }, 400);
+    }
+
+    if (isEnrichmentActive()) {
+      return c.json({ error: { code: "CONFLICT", message: "An enrichment run is already in progress" } }, 409);
     }
 
     const openRouterConfig = resolveOpenRouterEnrichmentConfig(row, config?.OPENROUTER_API_KEY);

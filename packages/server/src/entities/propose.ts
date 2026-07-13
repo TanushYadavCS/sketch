@@ -19,15 +19,31 @@
  * preserves duplicates.
  */
 import type { Selectable } from "kysely";
+import type { Logger } from "pino";
 import { normalizeName } from "../connectors/name-normalize";
 import type { UpsertPersonEntityData, createEntityRepository } from "../db/repositories/entities";
+import type { EntityDomainsRepository } from "../db/repositories/entity-domains";
 import type { EntityReviewRepository } from "../db/repositories/entity-review";
 import type { EntitiesTable } from "../db/schema";
+import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "./affiliations";
+import { TOOL_NAME_DENYLIST } from "./graph";
+import { normalizeMatchName } from "./match-normalize";
+import { type ProvenanceTier, canUseEntityAsMatchTarget } from "./provenance";
 
 export type Entity = Selectable<EntitiesTable>;
 
-export type ProposeEntityType = "person" | "company" | "product" | "project" | "team" | "deal";
-export type CandidateReason = "token-superset" | "prefix" | "exact-ambiguous" | "llm-ambiguous" | "birth-gated";
+export type ProposeEntityType = "person" | "company" | "product" | "project" | "team" | "deal" | "tool";
+export type CandidateReason =
+  | "token-superset"
+  | "prefix"
+  | "exact-ambiguous"
+  | "llm-ambiguous"
+  | "birth-gated"
+  | "strict-normalized"
+  | "token-set"
+  | "minhash"
+  | "adjacency"
+  | "embedding";
 
 export interface ProposeInput {
   name: string;
@@ -48,6 +64,7 @@ export interface ProposeInput {
   triggeredByUserId: string;
   aliases?: string[];
   metadata?: Record<string, unknown>;
+  provenanceTier?: ProvenanceTier;
   evidenceDomain?: string | null;
   precomputedCandidates?: Array<{ entity: Entity; score: number; reason?: CandidateReason }>;
   skipFuzzy?: boolean;
@@ -59,12 +76,18 @@ export interface ProposeInput {
    * entity and queuing an ambiguous match are unaffected.
    */
   queueInsteadOfCreate?: boolean;
+  /**
+   * Applies the person seed creation gate for name-only proposals. When true,
+   * an unscoped incoming person proposal queues instead of linking by name.
+   */
+  strictPersonScopeGate?: boolean;
 }
 
 export type ProposeResult =
   | { kind: "linked"; entity: Entity }
   | { kind: "created"; entity: Entity }
-  | { kind: "queued"; reviewId: string; candidateEntityId: string | null };
+  | { kind: "queued"; reviewId: string; candidateEntityId: string | null }
+  | { kind: "suppressed"; reason: string };
 
 /**
  * Ambiguity-aware lookup over existing entities, keyed by `normalizeName(entity.name)`.
@@ -89,20 +112,39 @@ export type EntityLookup = {
   getByAlias?(normalized: string): Entity[];
   /** All entities of the given type (used for prefix/token-superset scan). */
   listByType(entityType: ProposeEntityType): Entity[];
+  /** Same-type normalized-strict, token-set, or MinHash candidates over names and aliases. */
+  findNameDedupCandidates?(
+    entityType: ProposeEntityType,
+    name: string,
+  ): Array<{
+    entity: Entity;
+    score: number;
+    reason: Extract<CandidateReason, "strict-normalized" | "token-set" | "minhash">;
+  }>;
+  retrieveEmbeddingCandidates?(entityType: ProposeEntityType, name: string): Promise<RankedCandidate[]>;
   /** Company ids associated with a normalized corporate domain. */
   getCompanyIdsByDomain?(domain: string): string[];
+  getPersonScopeKeys?(entityId: string): string[];
+  findLlmExtractedThirdPartyMention?(
+    name: string,
+  ): Promise<{ type: Extract<ProposeEntityType, "company" | "tool">; name: string } | null>;
 };
 
 export interface ProposeDeps {
   entityRepo: ReturnType<typeof createEntityRepository>;
   reviewRepo: EntityReviewRepository;
+  domainsRepo?: EntityDomainsRepository;
   lookup: EntityLookup;
+  logger?: Logger;
+  birthGateTypes?: Set<ProposeEntityType>;
+  birthGateLiveTypes?: Set<ProposeEntityType>;
+  birthGateDryRun?: boolean;
   /** Read an entity's email from its metadata JSON. */
   readEmail: (entity: Entity) => string | null;
   onEntityResolved?: (entity: Entity) => void | Promise<void>;
 }
 
-interface RankedCandidate {
+export interface RankedCandidate {
   entity: Entity;
   score: number;
   reason: CandidateReason;
@@ -118,16 +160,6 @@ function tokenize(name: string): string[] {
     .split(" ")
     .map((t) => t.replace(/\.$/, ""))
     .filter((t) => t.length > 0);
-}
-
-function normalizeMatchName(entityType: ProposeEntityType, name: string): string {
-  if (entityType !== "product") return normalizeName(name);
-  return normalizeName(
-    name
-      .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
-      .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
-      .replace(/[-_]+/g, " "),
-  );
 }
 
 function parseAliases(aliases: string | null): string[] {
@@ -152,6 +184,75 @@ function hasTokenOverlap(a: string[], b: string[]): boolean {
   if (a.length === 0 || b.length === 0) return false;
   const bSet = new Set(b);
   return a.some((token) => bSet.has(token));
+}
+
+function lookupHasEntityTypeName(
+  lookup: EntityLookup,
+  entityType: Extract<ProposeEntityType, "company" | "tool">,
+  normalized: string,
+): boolean {
+  const directMatches = lookup
+    .getByNormalizedName(normalized)
+    .some((entity) => entity.source_type === entityType && normalizeMatchName(entityType, entity.name) === normalized);
+  if (directMatches) return true;
+  return lookup.listByType(entityType).some((entity) => normalizeMatchName(entityType, entity.name) === normalized);
+}
+
+async function repoHasEntityTypeName(
+  deps: ProposeDeps,
+  entityType: Extract<ProposeEntityType, "company" | "tool">,
+  normalized: string,
+): Promise<boolean> {
+  const entities = await deps.entityRepo.getEntitiesBySourceType(entityType);
+  return entities.some((entity) => normalizeMatchName(entityType, entity.name) === normalized);
+}
+
+function hasTrailingApiSdkToken(name: string): boolean {
+  return /(?:^|[\s\p{P}\p{S}])(?:api|sdk)[\s\p{P}\p{S}]*$/iu.test(name.trim());
+}
+
+async function productCollidesWithThirdParty(
+  deps: ProposeDeps,
+  name: string,
+): Promise<{ hit: boolean; signal?: string }> {
+  const companyNormalized = normalizeMatchName("company", name);
+  if (
+    lookupHasEntityTypeName(deps.lookup, "company", companyNormalized) ||
+    (await repoHasEntityTypeName(deps, "company", companyNormalized))
+  ) {
+    return { hit: true, signal: "existing_company_entity" };
+  }
+
+  const toolNormalized = normalizeMatchName("tool", name);
+  if (
+    lookupHasEntityTypeName(deps.lookup, "tool", toolNormalized) ||
+    (await repoHasEntityTypeName(deps, "tool", toolNormalized))
+  ) {
+    return { hit: true, signal: "existing_tool_entity" };
+  }
+
+  const matchingDomain = await deps.domainsRepo?.findCorporateDomainMatchingName(name);
+  if (matchingDomain) return { hit: true, signal: "corporate_domain" };
+
+  if (TOOL_NAME_DENYLIST.has(name.trim().toLowerCase())) return { hit: true, signal: "tool_name_denylist" };
+  if (hasTrailingApiSdkToken(name)) return { hit: true, signal: "api_sdk_suffix" };
+
+  const extracted = await deps.lookup.findLlmExtractedThirdPartyMention?.(name);
+  if (extracted) return { hit: true, signal: `llm_extracted_${extracted.type}_fact` };
+
+  return { hit: false };
+}
+
+function canAutoLinkNameDedupCandidate(input: ProposeInput, candidate: RankedCandidate): boolean {
+  if (candidate.reason === "token-set") return false;
+  if (input.entityType === "person" && candidate.reason === "strict-normalized" && !input.email) return false;
+  return true;
+}
+
+function isEligibleMatchTarget(input: Pick<ProposeInput, "entityType">, entity: Entity): boolean {
+  return (
+    entity.source_type === input.entityType && canUseEntityAsMatchTarget(entity.source_type, entity.provenance_tier)
+  );
 }
 
 /**
@@ -217,15 +318,29 @@ async function persistEntity(
   matched?: Entity,
 ): Promise<{ entity: Entity; created: boolean }> {
   if (input.entityType === "person") {
+    if (matched) {
+      await deps.entityRepo.upsertSourceRef({
+        entityId: matched.id,
+        source: input.source,
+        sourceId: input.sourceId,
+      });
+      if (input.email) {
+        await deps.entityRepo.attachEmailIfAbsent(matched.id, input.email);
+        await deps.entityRepo.appendAlias(matched.id, input.email);
+      }
+      const entity = (await deps.entityRepo.getEntity(matched.id)) ?? matched;
+      return { entity, created: false };
+    }
     const personData: UpsertPersonEntityData = {
-      name: matched?.name ?? input.name,
+      name: input.name,
       email: input.email ?? undefined,
       subtype: input.subtype,
       source: input.source,
       sourceId: input.sourceId,
+      provenanceTier: input.provenanceTier ?? "inferred",
     };
-    const entity = await deps.entityRepo.upsertPersonEntity(personData);
-    return { entity, created: !matched };
+    const entity = await deps.entityRepo.createPersonEntity(personData);
+    return { entity, created: true };
   }
 
   if (matched) {
@@ -237,13 +352,15 @@ async function persistEntity(
     return { entity: matched, created: false };
   }
 
-  const entity = await deps.entityRepo.upsertEntity({
+  const createEntity = input.entityType === "product" ? deps.entityRepo.createEntity : deps.entityRepo.upsertEntity;
+  const entity = await createEntity({
     name: input.name,
     sourceType: input.entityType,
     subtype: input.subtype,
     aliases: input.aliases,
     metadata: input.metadata,
     status: "confirmed",
+    provenanceTier: input.provenanceTier ?? "inferred",
   });
   await deps.entityRepo.upsertSourceRef({
     entityId: entity.id,
@@ -251,6 +368,19 @@ async function persistEntity(
     sourceId: input.sourceId,
   });
   return { entity, created: true };
+}
+
+async function linkNameDedupCandidate(deps: ProposeDeps, input: ProposeInput, matched: Entity): Promise<ProposeResult> {
+  const { entity } = await persistEntity(deps, input, matched);
+  const aliasesToAppend = [input.name, ...(input.aliases ?? [])].filter(
+    (alias) => alias.trim() && alias.trim().toLowerCase() !== matched.name.trim().toLowerCase(),
+  );
+  for (const alias of aliasesToAppend) {
+    await deps.entityRepo.appendAlias(entity.id, alias);
+  }
+  const refreshed = (await deps.entityRepo.getEntity(entity.id)) ?? entity;
+  await deps.onEntityResolved?.(refreshed);
+  return { kind: "linked", entity: refreshed };
 }
 
 /**
@@ -299,6 +429,22 @@ function pickConfirmedCanonical(candidates: Entity[], input: ProposeInput, looku
   return sorted[0];
 }
 
+function isSingleStrictPersonReference(ranked: RankedCandidate[]): boolean {
+  return (
+    ranked.length === 1 &&
+    (ranked[0].reason === "exact-ambiguous" ||
+      ranked[0].reason === "strict-normalized" ||
+      ranked[0].reason === "minhash")
+  );
+}
+
+function canAutoLinkScopedPersonCandidate(input: ProposeInput, candidate: RankedCandidate): boolean {
+  return (
+    (candidate.reason === "exact-ambiguous" || candidate.reason === "strict-normalized") &&
+    canAutoLinkNameDedupCandidate(input, candidate)
+  );
+}
+
 async function queueProposal(
   deps: ProposeDeps,
   input: ProposeInput,
@@ -341,8 +487,165 @@ async function queueProposal(
   };
 }
 
+async function birthGateOrCreate(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  normalized: string,
+  branch: "skipFuzzy" | "ranked_empty",
+): Promise<ProposeResult> {
+  if (deps.birthGateTypes?.has(input.entityType)) {
+    const effectiveDryRun = (deps.birthGateDryRun ?? true) && !deps.birthGateLiveTypes?.has(input.entityType);
+    if (effectiveDryRun) {
+      deps.logger?.info(
+        { event: "would_birth_gate", type: input.entityType, name: input.name, path: input.source, branch },
+        "would_birth_gate",
+      );
+    } else {
+      return queueProposal(deps, input, normalized, [], "birth-gated");
+    }
+  }
+  if (input.queueInsteadOfCreate) return queueProposal(deps, input, normalized, [], "birth-gated");
+  const { entity } = await persistEntity(deps, input);
+  return { kind: "created", entity };
+}
+
+async function embeddingCandidatesThenCreate(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  normalized: string,
+  createReason: "skipFuzzy" | "ranked_empty",
+): Promise<ProposeResult> {
+  if ((input.entityType === "person" || input.entityType === "company") && deps.lookup.retrieveEmbeddingCandidates) {
+    try {
+      const retrieved = await deps.lookup.retrieveEmbeddingCandidates(input.entityType, input.name);
+      const ranked: RankedCandidate[] = [];
+      for (const candidate of retrieved) {
+        if (!isEligibleMatchTarget(input, candidate.entity)) continue;
+        if (await deps.reviewRepo.isRejected(candidate.entity.id, normalized)) continue;
+        ranked.push(candidate);
+      }
+      if (ranked.length > 0) return queueProposal(deps, input, normalized, ranked, "embedding");
+    } catch (err) {
+      deps.logger?.warn({ err, entityType: input.entityType }, "embedding candidate retrieval failed open");
+    }
+  }
+  return birthGateOrCreate(deps, input, normalized, createReason);
+}
+
+async function decideScopedPersonCandidates(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  normalized: string,
+  ranked: RankedCandidate[],
+): Promise<ProposeResult> {
+  if (!deps.domainsRepo) {
+    if (input.email) {
+      const { entity } = await persistEntity(deps, input);
+      return { kind: "created", entity };
+    }
+    if (
+      ranked.length === 1 &&
+      isSingleStrictPersonReference(ranked) &&
+      canAutoLinkNameDedupCandidate(input, ranked[0])
+    ) {
+      return linkNameDedupCandidate(deps, input, ranked[0].entity);
+    }
+    return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+  }
+  const incomingScope = deps.domainsRepo ? await personScopeKey(input.email ?? null, deps.domainsRepo) : null;
+  if (!incomingScope) {
+    if (!input.strictPersonScopeGate && ranked.length === 1 && canAutoLinkScopedPersonCandidate(input, ranked[0])) {
+      return linkNameDedupCandidate(deps, input, ranked[0].entity);
+    }
+    if (input.email && !input.strictPersonScopeGate && !input.queueInsteadOfCreate) {
+      const { entity } = await persistEntity(deps, input);
+      return { kind: "created", entity };
+    }
+    return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+  }
+  const incomingScopeId = personScopeKeyId(incomingScope);
+  const candidatesWithScopes = ranked.map((candidate) => {
+    const scopeKeys = new Set(deps.lookup.getPersonScopeKeys?.(candidate.entity.id) ?? []);
+    return { candidate, scopeKeys };
+  });
+  const matching = candidatesWithScopes.filter(({ scopeKeys }) => scopeKeys.has(incomingScopeId));
+  if (matching.length === 1) {
+    const match = matching[0];
+    if (canAutoLinkScopedPersonCandidate(input, match.candidate)) {
+      return linkNameDedupCandidate(deps, input, match.candidate.entity);
+    }
+    if (input.email && !input.queueInsteadOfCreate) {
+      const { entity } = await persistEntity(deps, input);
+      return { kind: "created", entity };
+    }
+    return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+  }
+  if (matching.length >= 2) {
+    return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+  }
+  const allCandidatesTrusted = candidatesWithScopes.every(
+    ({ scopeKeys }) => scopeKeys.size > 0 && [...scopeKeys].some(isTrustedPersonScopeKey),
+  );
+  if (allCandidatesTrusted) {
+    if (input.queueInsteadOfCreate) {
+      return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+    }
+    const { entity } = await persistEntity(deps, input);
+    return { kind: "created", entity };
+  }
+  return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+}
+
+async function decideNameCandidates(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  normalized: string,
+  ranked: RankedCandidate[],
+): Promise<ProposeResult> {
+  if (input.entityType === "person") return decideScopedPersonCandidates(deps, input, normalized, ranked);
+  if (ranked.length === 1) return linkNameDedupCandidate(deps, input, ranked[0].entity);
+  const winner = pickConfirmedCanonical(
+    ranked.map((candidate) => candidate.entity),
+    input,
+    deps.lookup,
+  );
+  if (winner) {
+    const { entity } = await persistEntity(deps, input, winner);
+    return { kind: "linked", entity };
+  }
+  return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
+}
+
 export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Promise<ProposeResult> {
   const normalized = normalizeMatchName(input.entityType, input.name);
+
+  if (input.entityType === "product") {
+    const collision = await productCollidesWithThirdParty(deps, input.name);
+    if (collision.hit) {
+      deps.logger?.info(
+        { entityName: input.name, signal: collision.signal },
+        "Suppressed product proposal due to third-party vendor collision",
+      );
+      return { kind: "suppressed", reason: "third_party_vendor_collision" };
+    }
+  }
+
+  if (input.source && input.sourceId) {
+    const found = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
+    if (found && isEligibleMatchTarget(input, found)) {
+      await deps.entityRepo.upsertSourceRef({
+        entityId: found.id,
+        source: input.source,
+        sourceId: input.sourceId,
+      });
+      if (found.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
+        await deps.entityRepo.appendAlias(found.id, input.name);
+      }
+      const entity = (await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId)) ?? found;
+      await deps.onEntityResolved?.(entity);
+      return { kind: "linked", entity };
+    }
+  }
 
   // 1) Email fast-path — exact match against existing entity's stored email.
   if (input.entityType === "person" && input.email) {
@@ -363,29 +666,6 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
         return { kind: "linked", entity };
       }
     }
-
-    // 2) Email present but no entity matched it. An email is identity-grade;
-    //    a name collision against a different email is a different person.
-    //    Auto-create instead of queuing.
-    const { entity } = await persistEntity(deps, input);
-    return { kind: "created", entity };
-  }
-
-  if (input.entityType !== "person" && input.source && input.sourceId) {
-    const found = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
-    if (found && found.source_type === input.entityType) {
-      await deps.entityRepo.upsertSourceRef({
-        entityId: found.id,
-        source: input.source,
-        sourceId: input.sourceId,
-      });
-      if (found.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
-        await deps.entityRepo.appendAlias(found.id, input.name);
-      }
-      const entity = (await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId)) ?? found;
-      await deps.onEntityResolved?.(entity);
-      return { kind: "linked", entity };
-    }
   }
 
   // 3) Exact-name / alias fast-path — an entity already shares this canonical
@@ -403,9 +683,9 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   const nameMatches = deps.lookup.getByNormalizedName(normalized);
   const aliasMatches = deps.lookup.getByAlias?.(normalized) ?? [];
   const exactById = new Map<string, Entity>();
-  for (const e of nameMatches) if (e.source_type === input.entityType) exactById.set(e.id, e);
-  for (const e of aliasMatches) if (e.source_type === input.entityType) exactById.set(e.id, e);
-  for (const e of deps.lookup.listByType(input.entityType)) {
+  for (const e of nameMatches) if (isEligibleMatchTarget(input, e)) exactById.set(e.id, e);
+  for (const e of aliasMatches) if (isEligibleMatchTarget(input, e)) exactById.set(e.id, e);
+  for (const e of deps.lookup.listByType(input.entityType).filter((entity) => isEligibleMatchTarget(input, entity))) {
     if (normalizeMatchName(input.entityType, e.name) === normalized) exactById.set(e.id, e);
     for (const alias of parseAliases(e.aliases)) {
       if (normalizeMatchName(input.entityType, alias) === normalized) exactById.set(e.id, e);
@@ -413,21 +693,14 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   }
   if (exactById.size === 1) {
     const matched = exactById.values().next().value as Entity;
-    const { entity } = await persistEntity(deps, input, matched);
-    return { kind: "linked", entity };
+    return decideNameCandidates(deps, input, normalized, [{ entity: matched, score: 1, reason: "exact-ambiguous" }]);
   }
   if (exactById.size > 1) {
-    const winner = pickConfirmedCanonical([...exactById.values()], input, deps.lookup);
-    if (winner) {
-      const { entity } = await persistEntity(deps, input, winner);
-      return { kind: "linked", entity };
-    }
-    return queueProposal(
+    return decideNameCandidates(
       deps,
       input,
       normalized,
       [...exactById.values()].map((entity) => ({ entity, score: 1, reason: "exact-ambiguous" })),
-      "exact-ambiguous",
     );
   }
 
@@ -462,12 +735,32 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     }
   }
 
-  if (input.precomputedCandidates && input.precomputedCandidates.length > 0) {
-    let ranked = input.precomputedCandidates.map((c) => ({
-      entity: c.entity,
-      score: c.score,
-      reason: c.reason ?? ("llm-ambiguous" as const),
+  const dedupCandidates = (deps.lookup.findNameDedupCandidates?.(input.entityType, input.name) ?? []).filter(
+    (candidate) => isEligibleMatchTarget(input, candidate.entity),
+  );
+  if (dedupCandidates.length > 0) {
+    let ranked: RankedCandidate[] = dedupCandidates.map((candidate) => ({
+      entity: candidate.entity,
+      score: candidate.score,
+      reason: candidate.reason,
     }));
+    const filtered: RankedCandidate[] = [];
+    for (const r of ranked) {
+      const rejected = await deps.reviewRepo.isRejected(r.entity.id, normalized);
+      if (!rejected) filtered.push(r);
+    }
+    ranked = filtered;
+    if (ranked.length > 0) return decideNameCandidates(deps, input, normalized, ranked);
+  }
+
+  if (input.precomputedCandidates && input.precomputedCandidates.length > 0) {
+    let ranked = input.precomputedCandidates
+      .filter((candidate) => isEligibleMatchTarget(input, candidate.entity))
+      .map((c) => ({
+        entity: c.entity,
+        score: c.score,
+        reason: c.reason ?? ("llm-ambiguous" as const),
+      }));
     const filtered: RankedCandidate[] = [];
     for (const r of ranked) {
       const rejected = await deps.reviewRepo.isRejected(r.entity.id, normalized);
@@ -480,13 +773,11 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   }
 
   if (input.skipFuzzy) {
-    if (input.queueInsteadOfCreate) return queueProposal(deps, input, normalized, [], "birth-gated");
-    const { entity } = await persistEntity(deps, input);
-    return { kind: "created", entity };
+    return embeddingCandidatesThenCreate(deps, input, normalized, "skipFuzzy");
   }
 
   // 4) Fuzzy-rank against same-type entities.
-  const candidates = deps.lookup.listByType(input.entityType);
+  const candidates = deps.lookup.listByType(input.entityType).filter((entity) => isEligibleMatchTarget(input, entity));
   let ranked = rank(input.entityType, input.name, candidates);
 
   // 5) Drop candidates that have a sticky rejection for this normalized name.
@@ -501,9 +792,8 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
 
   // 6) Decide.
   if (ranked.length === 0) {
-    if (input.queueInsteadOfCreate) return queueProposal(deps, input, normalized, [], "birth-gated");
-    const { entity } = await persistEntity(deps, input);
-    return { kind: "created", entity };
+    return embeddingCandidatesThenCreate(deps, input, normalized, "ranked_empty");
   }
+  if (input.entityType === "person") return decideScopedPersonCandidates(deps, input, normalized, ranked);
   return queueProposal(deps, input, normalized, ranked, ranked[0].reason);
 }

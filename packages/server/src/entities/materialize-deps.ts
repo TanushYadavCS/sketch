@@ -1,18 +1,42 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
-import { normalizeName } from "../connectors/name-normalize";
+import { type NameDedupEntityType, retrieveEntityNameCandidates } from "../connectors/embeddings/trunk-name-embeddings";
+import type { EmbeddingProvider } from "../connectors/embeddings/types";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { DB } from "../db/schema";
+import { personScopeKey, personScopeKeyId } from "./affiliations";
+import { DEFAULT_FACT_BATCH_SIZE, forEachFactBatch } from "./fact-batches";
 import { type MentionType, normalizeMentionType } from "./graph";
+import { normalizeEntityMatchName } from "./match-normalize";
 import { parseAliasesString, readJsonObject, readPersonEmailFromMetadata } from "./materialize-json";
 import type { EntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
-import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
+import {
+  type CandidatePoolEntry,
+  addToCandidatePool,
+  buildCandidatePool,
+  findFuzzyMatches,
+  findStrictMatches,
+  findTokenSetMatches,
+  removeFromCandidatePool,
+} from "./name-dedup";
+import type { Entity, EntityLookup, ProposeEntityType, RankedCandidate } from "./propose";
+import { canUseEntityAsMatchTarget } from "./provenance";
+
+export { normalizeEntityMatchName } from "./match-normalize";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
+const DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD = 2;
+const DEFAULT_FEATURE_AUTO_MINT_THRESHOLD = 1;
 let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
+let configuredLlmTaskCorroborationThreshold = DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD;
+let configuredFeatureAutoMintThreshold = DEFAULT_FEATURE_AUTO_MINT_THRESHOLD;
+let configuredBirthGateTypes = new Set<ProposeEntityType>();
+let configuredBirthGateLiveTypes = new Set<ProposeEntityType>();
+let configuredStructuralAutoBirthTypes = new Set<ProposeEntityType>();
+let configuredBirthGateDryRun = true;
 
 /**
  * Set the default `llmPromotionThreshold` used by entry points
@@ -20,24 +44,32 @@ let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
  * `buildMaterializeDeps`) when the caller doesn't pass one. Production
  * callers should invoke this once at boot with `config.LLM_PROMOTION_THRESHOLD`.
  */
-export function configureMaterializeDefaults(opts: { llmPromotionThreshold?: number }): void {
+export function configureMaterializeDefaults(opts: {
+  llmPromotionThreshold?: number;
+  llmTaskCorroborationThreshold?: number;
+  featureAutoMintThreshold?: number;
+  birthGateTypes?: Set<ProposeEntityType>;
+  birthGateLiveTypes?: Set<ProposeEntityType>;
+  structuralAutoBirthTypes?: Set<ProposeEntityType>;
+  birthGateDryRun?: boolean;
+}): void {
   if (typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1) {
     configuredLlmPromotionThreshold = Math.floor(opts.llmPromotionThreshold);
   }
-}
-
-export function normalizeEntityMatchName(entityType: string, name: string): string {
-  if (entityType !== "product") return normalizeName(name);
-  return normalizeName(
-    name
-      .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
-      .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
-      .replace(/[-_]+/g, " "),
-  );
+  if (typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1) {
+    configuredLlmTaskCorroborationThreshold = Math.floor(opts.llmTaskCorroborationThreshold);
+  }
+  if (typeof opts.featureAutoMintThreshold === "number" && opts.featureAutoMintThreshold >= 1) {
+    configuredFeatureAutoMintThreshold = Math.floor(opts.featureAutoMintThreshold);
+  }
+  if (opts.birthGateTypes) configuredBirthGateTypes = new Set(opts.birthGateTypes);
+  if (opts.birthGateLiveTypes) configuredBirthGateLiveTypes = new Set(opts.birthGateLiveTypes);
+  if (opts.structuralAutoBirthTypes) configuredStructuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes);
+  if (typeof opts.birthGateDryRun === "boolean") configuredBirthGateDryRun = opts.birthGateDryRun;
 }
 
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
-  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal"];
+  const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal", "tool"];
   const entities = await db
     .selectFrom("entities")
     .selectAll()
@@ -48,9 +80,13 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   for (const t of supportedTypes) entitiesByType.set(t, []);
   const byNormalizedName = new Map<string, EntityRow[]>();
   const byNormalizedAlias = new Map<string, EntityRow[]>();
+  const dedupEntriesByType = new Map<ProposeEntityType, CandidatePoolEntry[]>();
+  for (const t of supportedTypes) dedupEntriesByType.set(t, []);
   for (const e of entities) {
+    if (!canUseEntityAsMatchTarget(e.source_type, e.provenance_tier)) continue;
     const entityType = e.source_type as ProposeEntityType;
     entitiesByType.get(entityType)?.push(e);
+    dedupEntriesByType.get(entityType)?.push({ entityId: e.id, valueKind: "name", value: e.name });
     const nameKey = normalizeEntityMatchName(entityType, e.name);
     if (nameKey) {
       const bucket = byNormalizedName.get(nameKey);
@@ -58,6 +94,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
       else byNormalizedName.set(nameKey, [e]);
     }
     for (const alias of parseAliasesString(e.aliases)) {
+      dedupEntriesByType.get(entityType)?.push({ entityId: e.id, valueKind: "alias", value: alias });
       const aliasKey = normalizeEntityMatchName(entityType, alias);
       if (!aliasKey) continue;
       const bucket = byNormalizedAlias.get(aliasKey);
@@ -75,6 +112,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
     .execute();
   const bySourceRef = new Map<string, EntityRow>();
   for (const row of sourceRefs) {
+    if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) continue;
     bySourceRef.set(`${row.source}:${row.source_id}`, row as unknown as EntityRow);
   }
   const domainRows = await db
@@ -91,12 +129,100 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
     if (bucket) bucket.push(row.entity_id);
     else companyIdsByDomain.set(domain, [row.entity_id]);
   }
-  return { entitiesByType, byNormalizedName, byNormalizedAlias, bySourceRef, companyIdsByDomain };
+  const dedupPoolsByType = new Map<ProposeEntityType, ReturnType<typeof buildCandidatePool>>();
+  for (const t of supportedTypes) dedupPoolsByType.set(t, buildCandidatePool(dedupEntriesByType.get(t) ?? []));
+  const personScopeKeysByEntityId = await buildPersonScopeKeys(
+    db,
+    entities.filter((entity) => entity.source_type === "person"),
+  );
+  return {
+    entitiesByType,
+    byNormalizedName,
+    byNormalizedAlias,
+    dedupPoolsByType,
+    bySourceRef,
+    companyIdsByDomain,
+    personScopeKeysByEntityId,
+  };
+}
+
+async function buildPersonScopeKeys(db: Kysely<DB>, persons: EntityRow[]): Promise<Map<string, string[]>> {
+  const scopeKeys = new Map<string, Set<string>>();
+  for (const person of persons) scopeKeys.set(person.id, new Set());
+  const domainsRepo = createEntityDomainsRepository(db);
+  for (const person of persons) {
+    const email = readPersonEmailFromMetadata(person.metadata);
+    const scope = await personScopeKey(email, domainsRepo);
+    if (scope) scopeKeys.get(person.id)?.add(personScopeKeyId(scope));
+  }
+
+  const personIds = persons.map((person) => person.id);
+  const worksAtRows =
+    personIds.length > 0
+      ? await db
+          .selectFrom("entity_relationships")
+          .select(["source_entity_id", "target_entity_id"])
+          .where("relationship_type", "=", "works_at")
+          .where("source_entity_id", "in", personIds)
+          .where("valid_to", "is", null)
+          .execute()
+      : [];
+  for (const row of worksAtRows) {
+    scopeKeys.get(row.source_entity_id)?.add(personScopeKeyId({ kind: "company", value: row.target_entity_id }));
+  }
+
+  return new Map([...scopeKeys].map(([entityId, keys]) => [entityId, [...keys]]));
+}
+
+/**
+ * Scan `llm_extracted` facts for a third-party (company/tool) mention matching
+ * `name`. Keyset-paginated by `id` so only one page of `raw` payloads is held at
+ * once, with an early return on the first match. The single-pass version loaded
+ * every `llm_extracted` fact (including `raw`) on every call; iteration order was
+ * DB-unspecified then and is deterministic (ascending `id`) now.
+ */
+async function findLlmExtractedThirdPartyMention(
+  db: Kysely<DB>,
+  name: string,
+): Promise<{ type: Extract<ProposeEntityType, "company" | "tool">; name: string } | null> {
+  let cursor = "";
+  for (;;) {
+    const rows = await db
+      .selectFrom("indexed_file_facts")
+      .select(["id", "subject_name", "raw"])
+      .where("source", "=", "llm_extraction")
+      .where("fact_type", "=", "llm_extracted")
+      .where("deleted_at", "is", null)
+      .where("subject_name", "is not", null)
+      .where("id", ">", cursor)
+      .orderBy("id", "asc")
+      .limit(DEFAULT_FACT_BATCH_SIZE)
+      .execute();
+    if (rows.length === 0) return null;
+    for (const row of rows) {
+      const raw = readJsonObject(row.raw);
+      const rawType = typeof raw.type === "string" ? raw.type.trim().toLowerCase() : "";
+      if (rawType !== "company" && rawType !== "tool") continue;
+      const mention = typeof raw.mention === "string" ? raw.mention : row.subject_name;
+      if (!mention) continue;
+      if (normalizeEntityMatchName(rawType, mention) === normalizeEntityMatchName(rawType, name)) {
+        return { type: rawType, name: mention };
+      }
+    }
+    cursor = rows[rows.length - 1].id;
+    if (rows.length < DEFAULT_FACT_BATCH_SIZE) return null;
+  }
+}
+
+function isNameDedupEntityType(entityType: ProposeEntityType): entityType is NameDedupEntityType {
+  return entityType === "project" || entityType === "product" || entityType === "person" || entityType === "company";
 }
 
 export function registerEntity(index: LookupIndex, entity: EntityRow): void {
+  const existingPersonScopeKeys = index.personScopeKeysByEntityId.get(entity.id);
   unregisterEntity(index, entity.id);
   const entityType = entity.source_type as ProposeEntityType;
+  if (!canUseEntityAsMatchTarget(entityType, entity.provenance_tier)) return;
   const typeBucket = index.entitiesByType.get(entityType);
   if (typeBucket && !typeBucket.some((p) => p.id === entity.id)) typeBucket.push(entity);
   const nameKey = normalizeEntityMatchName(entityType, entity.name);
@@ -118,6 +244,20 @@ export function registerEntity(index: LookupIndex, entity: EntityRow): void {
       index.byNormalizedAlias.set(aliasKey, [entity]);
     }
   }
+  const pool = index.dedupPoolsByType.get(entityType);
+  if (pool) {
+    addToCandidatePool(pool, [
+      { entityId: entity.id, valueKind: "name", value: entity.name },
+      ...parseAliasesString(entity.aliases).map((value) => ({
+        entityId: entity.id,
+        valueKind: "alias" as const,
+        value,
+      })),
+    ]);
+  }
+  if (entityType === "person" && existingPersonScopeKeys) {
+    index.personScopeKeysByEntityId.set(entity.id, existingPersonScopeKeys);
+  }
 }
 
 function removeEntityFromMapBuckets<T extends EntityRow>(map: Map<string, T[]>, entityId: string): void {
@@ -135,32 +275,56 @@ function unregisterEntity(index: LookupIndex, entityId: string): void {
   }
   removeEntityFromMapBuckets(index.byNormalizedName, entityId);
   removeEntityFromMapBuckets(index.byNormalizedAlias, entityId);
+  for (const pool of index.dedupPoolsByType.values()) {
+    removeFromCandidatePool(pool, entityId);
+  }
+  index.personScopeKeysByEntityId.delete(entityId);
 }
 
 function llmFileCountKey(normalizedName: string, mentionType: MentionType): string {
   return `${mentionType}\u0000${normalizedName}`;
 }
 
+/**
+ * Count distinct source files per (name, mention-type) across `llm_extracted`
+ * facts. Keyset-paginated by `id` so only one page of `raw` payloads is held at
+ * once; the result is order-independent, so streaming yields the same Map the
+ * single whole-table load produced.
+ */
 async function buildActiveLlmFileCounts(db: Kysely<DB>): Promise<Map<string, number>> {
-  const rows = await db
-    .selectFrom("indexed_file_facts")
-    .select(["indexed_file_id", "subject_name", "raw"])
-    .where("fact_type", "=", "llm_extracted")
-    .where("deleted_at", "is", null)
-    .where("subject_name", "is not", null)
-    .execute();
   const filesByName = new Map<string, Set<string>>();
-  for (const row of rows) {
-    if (!row.indexed_file_id || !row.subject_name) continue;
-    const mentionType = normalizeMentionType(readJsonObject(row.raw).type);
-    if (!mentionType) continue;
-    const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
-    if (!normalizedName) continue;
-    const key = llmFileCountKey(normalizedName, mentionType);
-    const files = filesByName.get(key);
-    if (files) files.add(row.indexed_file_id);
-    else filesByName.set(key, new Set([row.indexed_file_id]));
-  }
+  await forEachFactBatch(
+    (cursor, limit) =>
+      db
+        .selectFrom("indexed_file_facts")
+        .select(["id", "created_at", "indexed_file_id", "subject_name", "raw"])
+        .where("fact_type", "=", "llm_extracted")
+        .where("deleted_at", "is", null)
+        .where("subject_name", "is not", null)
+        .where((eb) =>
+          eb.or([
+            eb("created_at", ">", cursor.createdAt),
+            eb.and([eb("created_at", "=", cursor.createdAt), eb("id", ">", cursor.id)]),
+          ]),
+        )
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
+        .limit(limit)
+        .execute(),
+    async (rows) => {
+      for (const row of rows) {
+        if (!row.indexed_file_id || !row.subject_name) continue;
+        const mentionType = normalizeMentionType(readJsonObject(row.raw).type);
+        if (!mentionType) continue;
+        const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
+        if (!normalizedName) continue;
+        const key = llmFileCountKey(normalizedName, mentionType);
+        const files = filesByName.get(key);
+        if (files) files.add(row.indexed_file_id);
+        else filesByName.set(key, new Set([row.indexed_file_id]));
+      }
+    },
+  );
   return new Map([...filesByName.entries()].map(([key, files]) => [key, files.size]));
 }
 
@@ -176,6 +340,10 @@ export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIn
     if (indexedEntity.id === entity.id) index.bySourceRef.delete(key);
   }
   registerEntity(index, row);
+  if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) return;
+  const scopeKeys = await buildPersonScopeKeys(db, row.source_type === "person" ? [row] : []);
+  const personScopeKeys = scopeKeys.get(row.id);
+  if (personScopeKeys) index.personScopeKeysByEntityId.set(row.id, personScopeKeys);
   for (const ref of sourceRefs) {
     index.bySourceRef.set(`${ref.source}:${ref.source_id}`, row);
   }
@@ -183,7 +351,14 @@ export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIn
 
 export interface BuildMaterializeDepsOptions {
   llmPromotionThreshold?: number;
+  llmTaskCorroborationThreshold?: number;
+  featureAutoMintThreshold?: number;
   logger?: Logger;
+  birthGateTypes?: Set<ProposeEntityType>;
+  birthGateLiveTypes?: Set<ProposeEntityType>;
+  structuralAutoBirthTypes?: Set<ProposeEntityType>;
+  birthGateDryRun?: boolean;
+  embeddingProvider?: EmbeddingProvider | null;
 }
 
 export async function buildMaterializeDeps(
@@ -200,13 +375,78 @@ export async function buildMaterializeDeps(
       ? Math.floor(opts.llmPromotionThreshold)
       : configuredLlmPromotionThreshold;
   let activeLlmFileCounts: Promise<Map<string, number>> | null = null;
+  const llmTaskCorroborationThreshold =
+    typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1
+      ? Math.floor(opts.llmTaskCorroborationThreshold)
+      : configuredLlmTaskCorroborationThreshold;
+  const featureAutoMintThreshold =
+    typeof opts.featureAutoMintThreshold === "number" && opts.featureAutoMintThreshold >= 1
+      ? Math.floor(opts.featureAutoMintThreshold)
+      : configuredFeatureAutoMintThreshold;
+  const birthGateTypes = new Set(opts.birthGateTypes ?? configuredBirthGateTypes);
+  const birthGateLiveTypes = new Set(opts.birthGateLiveTypes ?? configuredBirthGateLiveTypes);
+  const structuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes ?? configuredStructuralAutoBirthTypes);
+  const birthGateDryRun = opts.birthGateDryRun ?? configuredBirthGateDryRun;
+  const embeddingProvider = opts.embeddingProvider ?? null;
 
   const lookup: EntityLookup = {
     getByNormalizedName: (n) => index.byNormalizedName.get(n) ?? [],
     getByAlias: (n) => index.byNormalizedAlias.get(n) ?? [],
     listByType: (t: ProposeEntityType) => index.entitiesByType.get(t) ?? [],
+    findNameDedupCandidates: (entityType, name) => {
+      const pool = index.dedupPoolsByType.get(entityType);
+      if (!pool) return [];
+      const entitiesById = new Map((index.entitiesByType.get(entityType) ?? []).map((entity) => [entity.id, entity]));
+      const strict = findStrictMatches(name, pool);
+      const strictEntityIds = new Set(strict.map((match) => match.entityId));
+      const tokenSet = findTokenSetMatches(name, pool);
+      const tokenSetEntityIds = new Set(tokenSet.map((match) => match.entityId));
+      const fuzzy = findFuzzyMatches(name, pool);
+      const byEntity = new Map<
+        string,
+        {
+          entity: EntityRow;
+          score: number;
+          reason: "strict-normalized" | "token-set" | "minhash";
+        }
+      >();
+      for (const match of [...strict, ...tokenSet, ...fuzzy]) {
+        const entity = entitiesById.get(match.entityId);
+        if (!entity) continue;
+        const reason = strictEntityIds.has(match.entityId)
+          ? "strict-normalized"
+          : tokenSetEntityIds.has(match.entityId)
+            ? "token-set"
+            : "minhash";
+        const existing = byEntity.get(match.entityId);
+        if (!existing || match.score > existing.score)
+          byEntity.set(match.entityId, { entity, score: match.score, reason });
+      }
+      return [...byEntity.values()].sort((a, b) => b.score - a.score || a.entity.id.localeCompare(b.entity.id));
+    },
     getCompanyIdsByDomain: (domain) => index.companyIdsByDomain.get(domain.toLowerCase()) ?? [],
+    getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
+    findLlmExtractedThirdPartyMention: (name) => findLlmExtractedThirdPartyMention(db, name),
   };
+  if (embeddingProvider) {
+    lookup.retrieveEmbeddingCandidates = async (entityType, name): Promise<RankedCandidate[]> => {
+      if (!isNameDedupEntityType(entityType)) return [];
+      try {
+        const pool = index.entitiesByType.get(entityType) ?? [];
+        const entitiesById = new Map(pool.map((entity) => [entity.id, entity]));
+        const rows = await retrieveEntityNameCandidates(db, embeddingProvider, { name, type: entityType });
+        const candidates: RankedCandidate[] = [];
+        for (const row of rows) {
+          const entity = entitiesById.get(row.entityId);
+          if (entity) candidates.push({ entity, score: row.similarity, reason: "embedding" });
+        }
+        return candidates;
+      } catch (err) {
+        opts.logger?.warn({ err, entityType }, "embedding lookup failed open");
+        return [];
+      }
+    };
+  }
 
   const fileToConnector = new Map<string, string>();
   const connectorOwners = new Map<string, string>();
@@ -214,6 +454,8 @@ export async function buildMaterializeDeps(
   for (const f of allFiles) fileToConnector.set(f.id, f.connector_config_id);
   const allConfigs = await db.selectFrom("connector_configs").select(["id", "created_by"]).execute();
   for (const c of allConfigs) connectorOwners.set(c.id, c.created_by);
+  const allUsers = await db.selectFrom("users").select("id").execute();
+  const knownUserIds = new Set(allUsers.map((u) => u.id));
 
   return {
     db,
@@ -225,18 +467,36 @@ export async function buildMaterializeDeps(
     lookup,
     index,
     llmPromotionThreshold,
+    llmTaskCorroborationThreshold,
+    featureAutoMintThreshold,
+    birthGateTypes,
+    birthGateLiveTypes,
+    structuralAutoBirthTypes,
+    birthGateDryRun,
+    embeddingProvider,
     readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),
     onEntityResolved: (entity: Entity) => refreshResolvedEntityIndex(db, index, entity),
+    getIndexedFileSourceTime: (indexedFileId: string) =>
+      db
+        .selectFrom("indexed_files")
+        .select(["source_created_at", "source_updated_at", "synced_at"])
+        .where("id", "=", indexedFileId)
+        .executeTakeFirst()
+        .then((row) => row ?? null),
+    /**
+     * Resolves the owning user for a fact, falling back to the connector's
+     * owner. Only ids present in `users` are returned: legacy auth wrote
+     * sentinel strings ('admin', 'sketch-api-key') as owners, and a user row
+     * can be deleted after facts referenced it; passing either through would
+     * fail the owner foreign key on every table the materializers write to.
+     */
     resolveOwner: (fact: IndexedFileFactRow) => {
-      if (fact.created_by_user_id) return fact.created_by_user_id;
-      const indexedFileId = fact.indexed_file_id;
-      if (!indexedFileId) return null;
-      if (indexedFileId) {
-        const cfg = fileToConnector.get(indexedFileId);
-        if (cfg) {
-          const owner = connectorOwners.get(cfg);
-          if (owner) return owner;
-        }
+      if (fact.created_by_user_id && knownUserIds.has(fact.created_by_user_id)) return fact.created_by_user_id;
+      const connectorId =
+        fact.connector_config_id ?? (fact.indexed_file_id ? fileToConnector.get(fact.indexed_file_id) : undefined);
+      if (connectorId) {
+        const owner = connectorOwners.get(connectorId);
+        if (owner && knownUserIds.has(owner)) return owner;
       }
       return null;
     },

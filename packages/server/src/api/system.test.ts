@@ -48,9 +48,19 @@ function createTestSystemApp(
       slackUserId: string;
       message: string;
     }) => Promise<{ channelId: string; messageRef: string }>;
-    sendDm?: (params: { userId: string; platform: "slack" | "whatsapp"; message: string }) => Promise<{
+    sendDm?: (params: {
+      userId: string;
+      platform: "slack" | "whatsapp";
+      message: string;
+      template?: unknown;
+      senderUserId?: string;
+      storeInInbox?: boolean;
+      inboxKind?: string;
+      inboxMetadata?: Record<string, unknown> | null;
+    }) => Promise<{
       channelId: string;
       messageRef: string;
+      inboxMessageId?: string;
     }>;
     whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
     startWhatsAppPairing?: ReturnType<typeof vi.fn>;
@@ -752,6 +762,35 @@ describe("POST /api/system/users", () => {
     expect(body.userId).toBe(user?.id);
   });
 
+  it("creates a verified WhatsApp member user and returns userId", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/users", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email: "contractor@gmail.com",
+        name: "Contractor",
+        whatsappNumber: "+14155550111",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+
+    const user = await userRepo.findByWhatsappNumber("+14155550111");
+    expect(user?.id).toBe(body.userId);
+    expect(user?.email).toBe("contractor@gmail.com");
+    expect(user?.name).toBe("Contractor");
+    expect(user?.email_verified_at).toBeTruthy();
+  });
+
   it("returns and verifies the existing user when the email already exists", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
@@ -906,7 +945,7 @@ describe("PUT /api/system/users", () => {
     expect(syncedAdmin?.password_hash).toBeNull();
   });
 
-  it("bulk upserts users by WhatsApp number and optional email", async () => {
+  it("bulk upserts users by WhatsApp number and email", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
     const existing = await userRepo.create({
@@ -925,7 +964,7 @@ describe("PUT /api/system/users", () => {
       body: JSON.stringify({
         users: [
           { email: "alice@acme.com", name: "Alice WhatsApp", whatsappNumber: "+14155552671" },
-          { name: "Bob WhatsApp", whatsappNumber: "+919876543210" },
+          { email: "bob@acme.com", name: "Bob WhatsApp", whatsappNumber: "+919876543210" },
         ],
       }),
     });
@@ -938,6 +977,7 @@ describe("PUT /api/system/users", () => {
     expect(alice?.whatsapp_number).toBe("+14155552671");
 
     const bob = await userRepo.findByWhatsappNumber("+919876543210");
+    expect(bob?.email).toBe("bob@acme.com");
     expect(bob?.name).toBe("Bob WhatsApp");
     expect(bob?.auth_role).toBe("member");
   });
@@ -1104,6 +1144,19 @@ describe("PUT /api/system/users", () => {
     });
 
     expect(res.status).toBe(400);
+
+    const whatsappRes = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [{ name: "Alice", whatsappNumber: "+14155550003" }],
+      }),
+    });
+
+    expect(whatsappRes.status).toBe(400);
   });
 });
 
@@ -1802,18 +1855,24 @@ describe("POST /api/system/onboarding-introductions", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, status: "sent", sent: 2, failed: 0 });
-    expect(sendDm).toHaveBeenCalledWith({
-      userId: admin.id,
-      platform: "whatsapp",
-      message:
-        "Hi, I'm Sketch, your AI coworker in Acme. You can message me here when you need help with your workspace.",
-    });
-    expect(sendDm).toHaveBeenCalledWith({
-      userId: teammate.id,
-      platform: "whatsapp",
-      message:
-        "Hi, I'm Sketch, your AI coworker in Acme. You can message me here when you need help with your workspace.",
-    });
+    expect(sendDm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: admin.id,
+        platform: "whatsapp",
+        message:
+          "Hi, I'm Sketch, your AI coworker in Acme. You can message me here when you need help with your workspace.",
+        template: expect.objectContaining({ key: "whatsapp.introduction" }),
+      }),
+    );
+    expect(sendDm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: teammate.id,
+        platform: "whatsapp",
+        message:
+          "Hi, I'm Sketch, your AI coworker in Acme. You can message me here when you need help with your workspace.",
+        template: expect.objectContaining({ key: "whatsapp.introduction" }),
+      }),
+    );
     const workflow = await inboxMessagesRepo.findUnresolvedByRecipientAndKind(admin.id, "managed_onboarding_intro");
     expect(workflow).toBeUndefined();
   });
@@ -1906,12 +1965,15 @@ describe("POST /api/system/onboarding-introductions", () => {
       ],
     });
     expect(sendDm).toHaveBeenCalledTimes(1);
-    expect(sendDm).toHaveBeenCalledWith({
-      userId: admin.id,
-      platform: "whatsapp",
-      message:
-        "Hi, I'm Sketch, your AI coworker in your workspace. You can message me here when you need help with your workspace.",
-    });
+    expect(sendDm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: admin.id,
+        platform: "whatsapp",
+        message:
+          "Hi, I'm Sketch, your AI coworker in your workspace. You can message me here when you need help with your workspace.",
+        template: expect.objectContaining({ key: "whatsapp.introduction" }),
+      }),
+    );
   });
 
   it("requires admin WhatsApp number before WhatsApp introductions", async () => {

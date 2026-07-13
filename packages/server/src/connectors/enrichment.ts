@@ -4,11 +4,10 @@
  * Runs after sync completes. For each file with embedding_status = 'pending':
  * 1. Chunk text content
  * 2. Extract timeframes (deterministic regex-based)
- * 3. Link entities deterministically (substring match entity names against content)
+ * 3. Extract AI-grounded summaries and entity facts when available
  * 4. Generate embeddings (text chunks or images)
  * 5. Store everything in DB
  *
- * No LLM calls — all extraction is deterministic.
  * Images are downloaded temporarily from Google Drive, embedded, then discarded.
  */
 import { randomUUID } from "node:crypto";
@@ -17,11 +16,15 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
+import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
+import { parseOrgContext } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import { materializeUnmaterializedFacts } from "../entities/materialize";
+import { PRODUCT_MATCH_TARGET_PROVENANCE_TIERS } from "../entities/provenance";
 import { yieldToEventLoop } from "../lib/event-loop";
-import type { Chunk } from "./chunking";
+import { heapStats, heapUsedMb } from "../lib/heap";
 import { chunkText } from "./chunking";
+import { type DocumentFactContext, emitDocumentDerivedFacts, sortDocumentParentRefs } from "./document-facts";
 import { ensureEmailThreadSummary, rebuildEmailThreadSummary } from "./email/thread-summary";
 import type { EmbeddingProvider } from "./embeddings/types";
 import { applyEngagementFloor } from "./engagement-floor";
@@ -36,10 +39,7 @@ export const MAX_FILES_PER_RUN = 5000;
 export const SCHEDULED_ENRICHMENT_MAX_FILES_PER_RUN = 50;
 export const SCHEDULED_ENRICHMENT_TIME_BUDGET_MS = 5 * 60 * 1000;
 
-/** Minimum entity name length for substring matching (avoids false positives). */
-const MIN_ENTITY_NAME_LENGTH = 3;
-
-const DETERMINISTIC_LINK_BATCH_SIZE = 500;
+const PROJECT_BASELINE_LIMIT = 200;
 const ENRICHMENT_BACKOFF_MS = [
   30 * 60 * 1000,
   60 * 60 * 1000,
@@ -60,12 +60,6 @@ class StaleEnrichmentError extends Error {
     this.name = "StaleEnrichmentError";
   }
 }
-
-type DeterministicEntity = {
-  id: string;
-  name: string;
-  aliases: string | null;
-};
 
 type FileContentVersion = {
   contentHash: string | null;
@@ -121,6 +115,7 @@ function assertFreshUpdate(result: { numUpdatedRows?: bigint | number }, fileId:
 function minWordsForSmartEnrichment(fileType: string | null, threadContext: string | null): number {
   if (fileType === "email_message") return threadContext ? 1 : 10;
   if (fileType === "calendar_event") return 10;
+  if (fileType === "whatsapp_conversation_slice") return 1;
   return 100;
 }
 
@@ -145,6 +140,19 @@ function contentVersionMatches(row: FileContentVersion | undefined, version: Fil
   if (version.contentHash !== null) return true;
   if (row.content !== version.content) return false;
   return version.content !== null || row.sourceUpdatedAt === version.sourceUpdatedAt;
+}
+
+/**
+ * Fetch a single file's `content` column by id.
+ *
+ * The pending-files batch query deliberately omits `content` so that a run
+ * spanning thousands of files (paced by multi-hour LLM calls) never pins every
+ * document body in heap at once. Each file's body is instead read just-in-time
+ * here, kept resident only while that one file is being enriched, then released.
+ */
+async function fetchFileContent(db: Kysely<DB>, fileId: string): Promise<string | null> {
+  const row = await db.selectFrom("indexed_files").select("content").where("id", "=", fileId).executeTakeFirst();
+  return row?.content ?? null;
 }
 
 async function ensureFileFresh(db: Kysely<DB>, fileId: string, version: FileContentVersion): Promise<void> {
@@ -216,6 +224,97 @@ async function resetSummaryRetry(db: Kysely<DB>, fileId: string, version?: FileC
   if (version) assertFreshUpdate(result, fileId);
 }
 
+type StoredDocumentFactFile = {
+  id: string;
+  source: string;
+  content: string | null;
+  source_created_at: string | null;
+  source_updated_at: string | null;
+  content_category: string;
+  file_type: string | null;
+  content_hash: string | null;
+  connector_config_id: string;
+};
+
+async function emitAndMaterializeDocumentFactsFromStoredFile(
+  file: StoredDocumentFactFile,
+  deps: EnrichmentDeps,
+  generator: GeminiGenerator | null,
+): Promise<void> {
+  const context = await buildStoredDocumentFactContext(deps.db, file);
+  const result = await emitDocumentDerivedFacts(deps.db, context, {
+    contentChanged: true,
+    generator: generator ?? undefined,
+    dumpDir: deps.debugDumpDir,
+    logger: deps.logger,
+  });
+  if (result.changed) {
+    await materializeUnmaterializedFacts(deps.db, deps.logger, {
+      embeddingProvider: deps.embeddingProvider,
+      factTypes: ["llm_task"],
+    });
+  }
+}
+
+async function buildStoredDocumentFactContext(
+  db: Kysely<DB>,
+  file: StoredDocumentFactFile,
+): Promise<DocumentFactContext> {
+  const owner = await db
+    .selectFrom("connector_configs")
+    .select("created_by")
+    .where("id", "=", file.connector_config_id)
+    .executeTakeFirst();
+  const participants = await db
+    .selectFrom("indexed_file_facts")
+    .select(["subject_name", "subject_email"])
+    .where("indexed_file_id", "=", file.id)
+    .where("fact_type", "in", PERSON_PARTICIPANT_FACT_TYPES)
+    .where("deleted_at", "is", null)
+    .execute();
+  const parentRows = await db
+    .selectFrom("indexed_file_facts")
+    .select(["subject_source", "subject_source_id"])
+    .where("indexed_file_id", "=", file.id)
+    .where("fact_type", "=", "parent_entity")
+    .where("deleted_at", "is", null)
+    .execute();
+
+  const seenParticipants = new Set<string>();
+  const attendees = participants
+    .flatMap((participant) => {
+      const name = participant.subject_name?.trim() || undefined;
+      const email = participant.subject_email?.trim() || undefined;
+      if (!name && !email) return [];
+      const key = `${name?.toLowerCase() ?? ""}|${email?.toLowerCase() ?? ""}`;
+      if (seenParticipants.has(key)) return [];
+      seenParticipants.add(key);
+      return [{ name, email }];
+    })
+    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? "") || (a.email ?? "").localeCompare(b.email ?? ""));
+
+  return {
+    indexedFileId: file.id,
+    source: file.source,
+    content: file.content ?? "",
+    sourceDate: file.source_created_at ?? file.source_updated_at,
+    contentCategory: file.content_category,
+    fileType: file.file_type,
+    contentHash: file.content_hash,
+    connectorConfigId: file.connector_config_id,
+    createdByUserId: owner?.created_by ?? null,
+    lastSeenSyncRunId: null,
+    attendees,
+    parentRefs: sortDocumentParentRefs(
+      parentRows.flatMap((row) =>
+        row.subject_source && row.subject_source_id
+          ? [{ source: row.subject_source, sourceId: row.subject_source_id }]
+          : [],
+      ),
+    ),
+  };
+}
+
 async function markEmbeddingFailure(
   db: Kysely<DB>,
   fileId: string,
@@ -232,15 +331,33 @@ async function markEmbeddingFailure(
 }
 
 export async function loadBaselineKnownEntities(db: Kysely<DB>): Promise<KnownEntityForPrompt[]> {
-  const entities = await db
+  const baseEntities = await db
     .selectFrom("entities")
     .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
     .where("source_type", "in", ["product", "team"])
     .where("status", "=", "confirmed")
+    .where((eb) =>
+      eb.or([
+        eb("source_type", "!=", "product"),
+        eb("provenance_tier", "in", [...PRODUCT_MATCH_TARGET_PROVENANCE_TIERS]),
+      ]),
+    )
     .where(whereLiveEntity())
     .execute();
+  const projectEntities = await db
+    .selectFrom("entities")
+    .select(["id", "name", "source_type", "aliases", "metadata", "hotness"])
+    .where("source_type", "=", "project")
+    .where("status", "=", "confirmed")
+    .where(whereLiveEntity())
+    .orderBy("hotness", "desc")
+    .orderBy("name", "asc")
+    .limit(PROJECT_BASELINE_LIMIT)
+    .execute();
+  const entities = [...baseEntities, ...projectEntities];
   return entities.map((entity) => ({
     id: entity.id,
+    entityId: entity.id,
     name: entity.name,
     type: entity.source_type,
     aliases: parseStringArray(entity.aliases),
@@ -263,9 +380,9 @@ export interface EnrichmentDeps {
   /** If set, only enrich these specific file IDs (ignoring pending status). */
   fileIds?: string[];
   /** Org context for enrichment prompts. Populated at start of enrichment run. */
-  orgContext?: { orgName?: string; description?: string; industry?: string } | null;
+  orgContext?: { orgName?: string; description?: string; industry?: string; disambiguationGuidance?: string } | null;
   /**
-   * Org-wide baseline of confirmed entities (products + teams) used as a
+   * Org-wide baseline of confirmed entities used as a
    * fallback when a file has no resolvable anchors. The per-file scoped list
    * is built on top of this by `buildFileScopedKnownEntities`.
    */
@@ -301,10 +418,12 @@ export interface EnrichmentResult {
  */
 export async function runEnrichment(deps: EnrichmentDeps): Promise<EnrichmentResult> {
   activeEnrichmentRuns++;
+  const startHeapMb = heapUsedMb();
   try {
     return await runEnrichmentInner(deps);
   } finally {
     activeEnrichmentRuns--;
+    deps.logger.info(heapStats(startHeapMb), "Enrichment run finished");
   }
 }
 
@@ -329,11 +448,12 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       .where("id", "=", "default")
       .executeTakeFirst();
     if (settings?.org_context) {
-      const parsed = JSON.parse(settings.org_context) as Record<string, string>;
+      const parsed = parseOrgContext(settings.org_context);
       deps.orgContext = {
         orgName: settings.org_name ?? undefined,
-        description: parsed.description,
-        industry: parsed.industry,
+        description: parsed?.description,
+        industry: parsed?.industry,
+        disambiguationGuidance: parsed?.disambiguationGuidance,
       };
     }
   } catch {
@@ -367,7 +487,6 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       "file_name",
       "file_type",
       "content_category",
-      "content",
       "content_hash",
       "source",
       "source_path",
@@ -440,7 +559,8 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
       );
       break;
     }
-    const file = pendingFiles[idx];
+    const fileMeta = pendingFiles[idx];
+    const file = { ...fileMeta, content: await fetchFileContent(db, fileMeta.id) };
     const fileVersion = contentVersionOf(file);
     const fileStart = Date.now();
     try {
@@ -497,6 +617,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   content: file.content,
                   threadContext,
                   contentCategory: file.content_category,
+                  fileType: file.file_type,
                   source: file.source_path?.split("/")[0] ?? "unknown",
                   sourcePath: file.source_path,
                   contentHash: file.content_hash,
@@ -517,7 +638,9 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               );
               await ensureFileFresh(db, file.id, fileVersion);
               if (floor.emitted > 0) {
-                await materializeUnmaterializedFacts(db, logger);
+                await materializeUnmaterializedFacts(db, logger, {
+                  embeddingProvider: deps.embeddingProvider,
+                });
               }
               await resetSummaryRetry(db, file.id, fileVersion);
             } catch (err) {
@@ -555,6 +678,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
           const skippedResult = await applyContentVersionWhere(skippedQuery, fileVersion).executeTakeFirst();
           assertFreshUpdate(skippedResult, file.id);
         }
+        await emitAndMaterializeDocumentFactsFromStoredFile(file, deps, getGenerator());
         result.filesProcessed++;
         if (isEmailMessage && file.thread_id) {
           touchedEmailThreads.set(`${file.connector_config_id}:${file.thread_id}`, {
@@ -689,6 +813,7 @@ async function enrichTextDocument(
     content_hash: string | null;
     connector_config_id: string;
     source_path: string | null;
+    source: string;
     source_created_at: string | null;
     source_updated_at: string | null;
     synced_at: string;
@@ -703,17 +828,13 @@ async function enrichTextDocument(
   const { db, logger, embeddingProvider } = deps;
   const fileVersion = contentVersionOf(file);
 
-  // For structured data (CSV/sheets), only extract timeframes + link entities — no chunking, no embedding
+  // For structured data (CSV/sheets), only extract timeframes — no chunking, summary, or embedding
   if (isStructured) {
     const timeframes = extractDatesFromText(file.content);
     await withFreshFileWriteLock(db, file.id, fileVersion, async (trx) => {
       await clearFileTimeframes(trx, file.id);
       await storeTimeframes(trx, file.id, timeframes);
     });
-
-    await linkEntitiesDeterministic(db, file.id, file.content, [], undefined, () =>
-      ensureFileFresh(db, file.id, fileVersion),
-    );
 
     logger.debug({ fileId: file.id, fileName: file.file_name }, "Structured file enriched (no chunking/embedding)");
     return;
@@ -742,7 +863,7 @@ async function enrichTextDocument(
     await storeTimeframes(trx, file.id, timeframes);
   });
 
-  // 4. Entity linking — AI-powered when Gemini available, deterministic fallback
+  // 4. Summary and entity extraction — AI-powered when Gemini is available
   // Skip LLM calls for tiny content; mail and calendar items use a lower threshold because the payload is often short.
   const wordCount = file.content.split(/\s+/).filter(Boolean).length;
   let usedSmartEnrichment = false;
@@ -785,6 +906,7 @@ async function enrichTextDocument(
           content: file.content,
           threadContext,
           contentCategory: file.content_category,
+          fileType: file.file_type,
           source: file.source_path?.split("/")[0] ?? "unknown",
           sourcePath: file.source_path,
           contentHash: file.content_hash,
@@ -805,21 +927,20 @@ async function enrichTextDocument(
       );
       await ensureFileFresh(db, file.id, fileVersion);
       if (floor.emitted > 0) {
-        await materializeUnmaterializedFacts(db, logger);
+        await materializeUnmaterializedFacts(db, logger, {
+          embeddingProvider,
+        });
       }
       await resetSummaryRetry(db, file.id, fileVersion);
       usedSmartEnrichment = true;
     } catch (err) {
       if (err instanceof StaleEnrichmentError) throw err;
       smartEnrichmentFailed = true;
-      logger.warn({ err, fileId: file.id }, "Smart enrichment failed, falling back to deterministic");
+      logger.warn({ err, fileId: file.id }, "Smart enrichment failed");
     }
   }
 
   if (!summaryAlreadyResolved && !usedSmartEnrichment) {
-    await linkEntitiesDeterministic(db, file.id, file.content, chunks, undefined, () =>
-      ensureFileFresh(db, file.id, fileVersion),
-    );
     const summaryQuery = db
       .updateTable("indexed_files")
       .set(
@@ -836,6 +957,10 @@ async function enrichTextDocument(
     assertFreshUpdate(summaryResult, file.id);
   }
 
+  await emitAndMaterializeDocumentFactsFromStoredFile(file, deps, generator);
+  await ensureFileFresh(db, file.id, fileVersion);
+
+  // 5. Embed chunks (best-effort — entity linking still succeeds if embedding fails)
   if (embeddingProvider && chunks.length > 0) {
     const texts = chunks.map((c) => c.content);
     let embeddings: number[][];
@@ -935,188 +1060,6 @@ async function enrichImage(
   });
 
   // buffer is garbage collected — nothing stored on disk
-}
-
-/**
- * Deterministic entity linking: substring-match entity names/aliases
- * against document content, create mentions for matches.
- */
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Word-boundary substring match. Plain `String.includes` falsely matches
- * short names inside longer words — "Anshu" inside "Himanshu", "Tim" inside
- * "estimated", "Don" inside "donate". `\b` ensures the candidate sits at
- * an ASCII word boundary. JS `\b` is ASCII-only; names with non-ASCII
- * letters (accents, Devanagari, etc.) would need `\p{L}` boundaries — out
- * of scope for this fix, which targets the dominant false-positive class.
- */
-export function matchesAsWord(content: string, name: string): boolean {
-  if (!name || !content) return false;
-  return new RegExp(`\\b${escapeRegex(name)}\\b`).test(content);
-}
-
-export async function linkEntitiesByDeterministicMatch(db: Kysely<DB>, logger: Logger): Promise<EnrichmentResult> {
-  const result: EnrichmentResult = { filesProcessed: 0, filesSkipped: 0, filesFailed: 0, errors: [] };
-  const allEntities = await createEntityRepository(db).getEntitiesByStatus("confirmed");
-  let lastFileId: string | null = null;
-
-  while (true) {
-    let query = db
-      .selectFrom("indexed_files")
-      .select(["id", "content"])
-      .where("is_archived", "=", 0)
-      .where("content", "is not", null)
-      .orderBy("id", "asc")
-      .limit(DETERMINISTIC_LINK_BATCH_SIZE);
-    if (lastFileId) {
-      query = query.where("id", ">", lastFileId);
-    }
-    const files = await query.execute();
-    if (files.length === 0) break;
-    lastFileId = files[files.length - 1].id;
-
-    const fileIds = files.map((file) => file.id);
-    const chunkRows = await db
-      .selectFrom("document_chunks")
-      .select(["indexed_file_id", "chunk_index", "content", "token_count"])
-      .where("indexed_file_id", "in", fileIds)
-      .orderBy("indexed_file_id", "asc")
-      .orderBy("chunk_index", "asc")
-      .execute();
-    const chunksByFile = new Map<string, Chunk[]>();
-    for (const chunk of chunkRows) {
-      const chunks = chunksByFile.get(chunk.indexed_file_id) ?? [];
-      chunks.push({
-        index: chunk.chunk_index,
-        content: chunk.content,
-        tokenCount: chunk.token_count ?? 0,
-      });
-      chunksByFile.set(chunk.indexed_file_id, chunks);
-    }
-
-    for (const file of files) {
-      try {
-        await linkEntitiesDeterministic(db, file.id, file.content ?? "", chunksByFile.get(file.id) ?? [], allEntities);
-        result.filesProcessed++;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        logger.warn({ err, fileId: file.id }, "Deterministic entity linking failed");
-        result.errors.push({ fileId: file.id, error: message });
-        result.filesFailed++;
-      }
-    }
-  }
-
-  return result;
-}
-
-async function linkEntitiesDeterministic(
-  db: Kysely<DB>,
-  fileId: string,
-  content: string,
-  chunks: Chunk[],
-  allEntities?: DeterministicEntity[],
-  ensureFresh?: () => Promise<void>,
-): Promise<void> {
-  const entityRepo = createEntityRepository(db);
-
-  await ensureFresh?.();
-  await db
-    .deleteFrom("entity_mentions")
-    .where("indexed_file_id", "=", fileId)
-    .where("source", "=", "deterministic_substring")
-    .where("confidence", "!=", "EXTRACTED")
-    .execute();
-
-  await deleteStaleLegacyDeterministicMentions(db, fileId);
-
-  const entities = allEntities ?? (await entityRepo.getEntitiesByStatus("confirmed"));
-  const contentLower = content.toLowerCase();
-
-  for (const entity of entities) {
-    const names: string[] = [entity.name];
-    try {
-      const aliases = JSON.parse(entity.aliases || "[]") as string[];
-      names.push(...aliases);
-    } catch {
-      /* skip bad JSON */
-    }
-
-    // Check if any name/alias appears in content (skip very short names).
-    // Word-boundary match avoids "anshu" inside "himanshu" false positives.
-    const matchedName = names.find((name) => {
-      const nameLower = name.toLowerCase();
-      if (nameLower.length < MIN_ENTITY_NAME_LENGTH) return false;
-      return matchesAsWord(contentLower, nameLower);
-    });
-
-    if (matchedName) {
-      const nameLower = matchedName.toLowerCase();
-      const chunkIndex = chunks.findIndex((c) => matchesAsWord(c.content.toLowerCase(), nameLower));
-
-      await ensureFresh?.();
-      await entityRepo.createMention({
-        entityId: entity.id,
-        indexedFileId: fileId,
-        chunkIndex: chunkIndex >= 0 ? chunkIndex : null,
-        contextSnippet: chunkIndex >= 0 ? chunks[chunkIndex].content.slice(0, 300) : null,
-        confidence: "INFERRED",
-        source: "deterministic_substring",
-        relation: "mentioned",
-      });
-      await entityRepo.updateHotness(entity.id);
-      await yieldToEventLoop();
-    }
-  }
-}
-
-function normalizeDeterministicName(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function entityNames(entity: { name: string; aliases: string | null }): string[] {
-  const names = [entity.name];
-  try {
-    const aliases = JSON.parse(entity.aliases || "[]") as string[];
-    names.push(...aliases.filter((alias) => typeof alias === "string"));
-  } catch {}
-  return names;
-}
-
-async function deleteStaleLegacyDeterministicMentions(db: Kysely<DB>, fileId: string): Promise<void> {
-  const activeFactRows = await db
-    .selectFrom("indexed_file_facts")
-    .select("subject_name")
-    .where("indexed_file_id", "=", fileId)
-    .where("source", "=", "llm_extraction")
-    .where("fact_type", "=", "llm_extracted")
-    .where("deleted_at", "is", null)
-    .execute();
-  const activeLlmNames = new Set(
-    activeFactRows
-      .map((row) => row.subject_name)
-      .filter((name): name is string => Boolean(name))
-      .map(normalizeDeterministicName),
-  );
-
-  const legacyMentions = await db
-    .selectFrom("entity_mentions")
-    .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
-    .select(["entity_mentions.id as id", "entities.name as name", "entities.aliases as aliases"])
-    .where("entity_mentions.indexed_file_id", "=", fileId)
-    .where("entity_mentions.source", "=", "llm_extraction")
-    .where("entity_mentions.confidence", "!=", "EXTRACTED")
-    .where(whereLiveEntity())
-    .execute();
-  const staleIds = legacyMentions
-    .filter((mention) => entityNames(mention).every((name) => !activeLlmNames.has(normalizeDeterministicName(name))))
-    .map((mention) => mention.id);
-
-  if (staleIds.length === 0) return;
-  await db.deleteFrom("entity_mentions").where("id", "in", staleIds).execute();
 }
 
 async function storeTimeframes(

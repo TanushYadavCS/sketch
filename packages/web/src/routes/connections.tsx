@@ -11,7 +11,11 @@ import { ConnectionsBanner } from "@/components/connections-banner";
 import { AddIntegrationDialog } from "@/components/connections/add-integration-dialog";
 import { AddMcpDialog } from "@/components/connections/add-mcp-dialog";
 import { AddProviderDialog, ProviderSelectorDialog } from "@/components/connections/add-provider-dialog";
-import { isOwnedOrPersonalAppConnection } from "@/components/connections/connection-status";
+import {
+  isNativeCanvasAppConnection,
+  isOwnedOrPersonalAppConnection,
+} from "@/components/connections/connection-status";
+import { ConnectorNudgeDialog, type ConnectorNudgeSuggestion } from "@/components/connections/connector-nudge-dialog";
 import { EditMcpDialog } from "@/components/connections/edit-mcp-dialog";
 import { EditProviderDialog } from "@/components/connections/edit-provider-dialog";
 import {
@@ -180,6 +184,13 @@ export function getPersonallyConnectedAppIds(connections: IntegrationConnection[
 
 function connectionMatchesApp(connection: IntegrationConnection, appId: string): boolean {
   return connection.appId.trim().toLowerCase() === appId.trim().toLowerCase();
+}
+
+function findOwnedConnectionForApp(connections: IntegrationConnection[] | undefined, appId: string) {
+  const matchingConnections = (connections ?? []).filter(
+    (connection) => connectionMatchesApp(connection, appId) && isOwnedOrPersonalAppConnection(connection),
+  );
+  return matchingConnections.find(isNativeCanvasAppConnection) ?? matchingConnections[0] ?? null;
 }
 
 function DirectConnectPanel({
@@ -361,10 +372,27 @@ export function ConnectionsPage() {
   const [showAddIntegrationDialog, setShowAddIntegrationDialog] = useState(false);
   const [showProviderSelector, setShowProviderSelector] = useState(false);
   const [showAddProvider, setShowAddProvider] = useState(false);
+  const [connectorNudge, setConnectorNudge] = useState<ConnectorNudgeSuggestion | null>(null);
 
   const invalidateConnections = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["connections"] });
   }, [queryClient]);
+
+  const maybeShowConnectorNudge = useCallback(async (connection: IntegrationConnection) => {
+    if (!isNativeCanvasAppConnection(connection)) return;
+    try {
+      const result = await api.integrations.canvasSuggestion(connection.appId, connection.id, connection.source);
+      if (result.suggestion) {
+        setConnectorNudge({
+          ...result.suggestion,
+          appName: connection.appName,
+          icon: connection.icon ?? connection.app?.imgSrc,
+        });
+      }
+    } catch {
+      return;
+    }
+  }, []);
 
   useEffect(() => {
     if (connectError) {
@@ -405,6 +433,7 @@ export function ConnectionsPage() {
         setDirectConnectState({ kind: "connected", appId: verifyConnectedAppId, appName: connection.appName });
         toast.success(`${connection.appName} connected`);
         invalidateConnections();
+        void maybeShowConnectorNudge(connection);
       };
 
       const failVerification = (message: string) => {
@@ -418,8 +447,8 @@ export function ConnectionsPage() {
         });
       };
 
-      const connection = connectionsQuery.data?.find((item) => connectionMatchesApp(item, verifyConnectedAppId));
-      if (connection && isOwnedOrPersonalAppConnection(connection)) {
+      const connection = findOwnedConnectionForApp(connectionsQuery.data, verifyConnectedAppId);
+      if (connection) {
         completeVerification(connection);
         return;
       }
@@ -432,8 +461,8 @@ export function ConnectionsPage() {
           timeoutId = window.setTimeout(async () => {
             const result = await connectionsQuery.refetch();
             if (cancelled) return;
-            const refreshedConnection = result.data?.find((item) => connectionMatchesApp(item, verifyConnectedAppId));
-            if (refreshedConnection && isOwnedOrPersonalAppConnection(refreshedConnection)) {
+            const refreshedConnection = findOwnedConnectionForApp(result.data, verifyConnectedAppId);
+            if (refreshedConnection) {
               completeVerification(refreshedConnection);
               return;
             }
@@ -471,6 +500,7 @@ export function ConnectionsPage() {
     connectionsQuery.data,
     connectionsQuery.refetch,
     invalidateConnections,
+    maybeShowConnectorNudge,
   ]);
 
   useEffect(() => {
@@ -499,10 +529,8 @@ export function ConnectionsPage() {
     directConnectRequestRef.current = requestKey;
     removeSearchParams(["connect"]);
 
-    const existingConnection = connectionsQuery.data?.find((connection) =>
-      connectionMatchesApp(connection, requestedAppConnect),
-    );
-    if (existingConnection && isOwnedOrPersonalAppConnection(existingConnection)) {
+    const existingConnection = findOwnedConnectionForApp(connectionsQuery.data, requestedAppConnect);
+    if (existingConnection) {
       setRequestedAppConnect(null);
       setDirectConnectState({
         kind: "already_connected",
@@ -738,9 +766,20 @@ export function ConnectionsPage() {
           connectedAppIds={getPersonallyConnectedAppIds(connections)}
           initialAppId={null}
           initialSearch={requestedAppSearch}
-          onSuccess={invalidateAll}
+          onSuccess={(_app, connection) => {
+            invalidateAll();
+            if (connection) void maybeShowConnectorNudge(connection);
+          }}
         />
       )}
+
+      <ConnectorNudgeDialog
+        suggestion={connectorNudge}
+        onOpenChange={(open) => {
+          if (!open) setConnectorNudge(null);
+        }}
+        onConnected={invalidateAll}
+      />
     </div>
   );
 }

@@ -9,6 +9,10 @@ import { createTeamsConnector } from "./teams";
 import type { OAuthCredentials, SyncedItem } from "./types";
 
 const logger = createTestLogger();
+const TEAMS_EVENT_START = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+const TEAMS_EVENT_END = new Date(TEAMS_EVENT_START.getTime() + 60 * 60 * 1000);
+const TEAMS_EVENT_MODIFIED = new Date(TEAMS_EVENT_END.getTime() + 5 * 60 * 1000);
+const TEAMS_TRANSCRIPT_CREATED = new Date(TEAMS_EVENT_START.getTime() + 45 * 60 * 1000);
 
 describe("Teams connector", () => {
   let db: Kysely<DB> | null = null;
@@ -59,7 +63,7 @@ describe("Teams connector", () => {
       fileName: "Acme kickoff",
       fileType: "meeting_transcript",
       contentCategory: "document",
-      sourceCreatedAt: "2026-06-01T10:00:00.000Z",
+      sourceCreatedAt: TEAMS_EVENT_START.toISOString(),
     });
     expect(items[0].content).toContain("Jane Doe: Confirmed the launch plan.");
     expect(items[0].attendees).toEqual([
@@ -219,7 +223,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 30 },
+        scopeConfig: { initialDays: 3650 },
         cursor: null,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -291,7 +295,7 @@ describe("Teams connector", () => {
     const items = await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 30 },
+        scopeConfig: { initialDays: 3650 },
         cursor,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -309,7 +313,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 30 },
+        scopeConfig: { initialDays: 3650 },
         cursor: null,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -328,7 +332,7 @@ describe("Teams connector", () => {
     await drain(
       connector.sync({
         credentials: validCredentials(),
-        scopeConfig: { initialDays: 30 },
+        scopeConfig: { initialDays: 3650 },
         cursor,
         logger,
         ownerEmail: "owner@canvasx.ai",
@@ -349,7 +353,7 @@ describe("Teams connector", () => {
       connectorType: "teams",
       authType: "oauth",
       credentials: JSON.stringify(validCredentials()),
-      scopeConfig: JSON.stringify({ initialDays: 30 }),
+      scopeConfig: JSON.stringify({ initialDays: 3650 }),
       createdBy: "owner",
     });
     mockTeamsGraph();
@@ -414,7 +418,7 @@ describe("Teams connector", () => {
       connectorType: "teams",
       authType: "oauth",
       credentials: JSON.stringify(validCredentials()),
-      scopeConfig: JSON.stringify({ initialDays: 30 }),
+      scopeConfig: JSON.stringify({ initialDays: 3650 }),
       createdBy: "owner",
     });
     mockTeamsGraph();
@@ -463,6 +467,90 @@ describe("Teams connector", () => {
         relation: "attended",
       },
     ]);
+  });
+
+  it("streams meeting items instead of fetching the whole corpus before the first yield", async () => {
+    const connector = createTeamsConnector({ maxInflight: 1, processingLagMs: 0, retryBaseMs: 0 });
+    const sequence: string[] = [];
+    mockGoodMeetings(sequence, ["recent", "middle", "old"]);
+
+    const received: string[] = [];
+    for await (const item of connector.sync({
+      credentials: validCredentials(),
+      scopeConfig: { initialDays: 7 },
+      cursor: null,
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    })) {
+      if (received.length === 0) sequence.push("yield:first");
+      received.push(item.providerFileId);
+    }
+
+    expect([...received].sort()).toEqual(["transcript-middle", "transcript-old", "transcript-recent"]);
+    // The old buffered path fetched every meeting before yielding anything, so
+    // the oldest meeting's lookup preceded the first yield. Streaming (with a
+    // single in-flight worker) yields the first item before the last meeting is
+    // ever fetched.
+    expect(sequence.indexOf("yield:first")).toBeLessThan(sequence.indexOf("onlineMeetings:old"));
+  });
+
+  it("caps meetings per run to the most recent maxMeetings and never fetches older ones", async () => {
+    const connector = createTeamsConnector({ maxInflight: 2, processingLagMs: 0, retryBaseMs: 0 });
+    const sequence: string[] = [];
+    mockGoodMeetings(sequence, ["recent", "old"]);
+
+    const received: string[] = [];
+    for await (const item of connector.sync({
+      credentials: validCredentials(),
+      scopeConfig: { initialDays: 7, maxMeetings: 1 },
+      cursor: null,
+      logger,
+      ownerEmail: "owner@canvasx.ai",
+    })) {
+      received.push(item.providerFileId);
+    }
+    const advancedCursor = await connector.getCursor({
+      credentials: validCredentials(),
+      scopeConfig: {},
+      currentCursor: null,
+      logger,
+    });
+
+    expect(received).toEqual(["transcript-recent"]);
+    expect(sequence).not.toContain("onlineMeetings:old");
+    expect(JSON.parse(advancedCursor ?? "{}").lastSyncedAt).toEqual(expect.any(String));
+  });
+
+  it("aborts the run when a meeting fails with a non-skippable Graph error", async () => {
+    const connector = createTeamsConnector({ maxInflight: 1, processingLagMs: 0, retryBaseMs: 0 });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1.0/me/calendarView") {
+        return jsonResponse({
+          value: [teamsEvent("event-fail", "Boom", "https://teams.microsoft.com/l/meetup-join/fail")],
+        });
+      }
+      if (url.pathname === "/v1.0/me/onlineMeetings") {
+        return jsonResponse({ value: [{ id: "meeting-fail", subject: "Boom" }] });
+      }
+      if (url.pathname === "/v1.0/me/onlineMeetings/meeting-fail/transcripts") {
+        return new Response("server error", { status: 500 });
+      }
+      throw new Error(`unexpected fetch ${url.toString()}`);
+    });
+
+    await expect(
+      drain(
+        connector.sync({
+          credentials: validCredentials(),
+          scopeConfig: { initialDays: 7 },
+          cursor: null,
+          logger,
+          ownerEmail: "owner@canvasx.ai",
+        }),
+      ),
+    ).rejects.toThrow();
   });
 });
 
@@ -534,7 +622,9 @@ function mockTeamsGraph() {
     }
 
     if (url.pathname === "/v1.0/me/onlineMeetings/meeting-good/transcripts") {
-      return jsonResponse({ value: [{ id: "transcript-good", createdDateTime: "2026-06-01T10:45:00Z" }] });
+      return jsonResponse({
+        value: [{ id: "transcript-good", createdDateTime: TEAMS_TRANSCRIPT_CREATED.toISOString() }],
+      });
     }
 
     if (url.pathname === "/v1.0/me/onlineMeetings/meeting-good/recordings") {
@@ -592,6 +682,56 @@ function mockTeamsGraphWithoutTranscripts() {
   });
 }
 
+/**
+ * Mock a set of resolvable Teams meetings, each with its own transcript. `keys`
+ * are ordered oldest-last (index 0 is the most recent); each key's start time is
+ * spaced one hour apart so the per-run cap and processing order are
+ * deterministic. Every `/onlineMeetings` lookup is appended to `sequence` as
+ * `onlineMeetings:<key>` so tests can observe fetch order relative to yields.
+ */
+function mockGoodMeetings(sequence: string[], keys: string[]) {
+  const events = keys.map((key, index) => ({
+    ...teamsEvent(`event-${key}`, `${key} sync`, `https://teams.microsoft.com/l/meetup-join/${key}`),
+    start: { dateTime: new Date(Date.now() - (index + 1) * 60 * 60_000).toISOString(), timeZone: "UTC" },
+    end: { dateTime: new Date(Date.now() - (index + 1) * 60 * 60_000 + 30 * 60_000).toISOString(), timeZone: "UTC" },
+  }));
+  const keyForJoin = (value: string): string | undefined => keys.find((key) => value.includes(key));
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input: string | URL | Request) => {
+    const url = new URL(input.toString());
+
+    if (url.pathname === "/v1.0/me/calendarView") {
+      return jsonResponse({ value: events });
+    }
+
+    if (url.pathname === "/v1.0/me/onlineMeetings") {
+      const key = keyForJoin(url.searchParams.get("$filter") ?? "") ?? "unknown";
+      sequence.push(`onlineMeetings:${key}`);
+      return jsonResponse({
+        value: [{ id: `meeting-${key}`, subject: key, joinWebUrl: `https://teams.microsoft.com/l/meetup-join/${key}` }],
+      });
+    }
+
+    const listMatch = url.pathname.match(/\/onlineMeetings\/meeting-([^/]+)\/(transcripts|recordings)$/);
+    if (listMatch) {
+      const key = listMatch[1];
+      if (listMatch[2] === "recordings") return jsonResponse({ value: [] });
+      return jsonResponse({ value: [{ id: `transcript-${key}`, createdDateTime: new Date().toISOString() }] });
+    }
+
+    const contentMatch = url.pathname.match(/\/transcripts\/transcript-([^/]+)\/content$/);
+    if (contentMatch) {
+      return new Response(
+        ["WEBVTT", "", "00:00:00.000 --> 00:00:02.000", `<v Jane Doe>Recap ${contentMatch[1]}.</v>`].join("\n"),
+      );
+    }
+
+    throw new Error(`unexpected fetch ${url.toString()}`);
+  });
+
+  return events;
+}
+
 function teamsEvent(id: string, subject: string, joinUrl: string) {
   return {
     id,
@@ -601,9 +741,9 @@ function teamsEvent(id: string, subject: string, joinUrl: string) {
     onlineMeeting: { joinUrl },
     organizer: { emailAddress: { name: "Owner User", address: "owner@canvasx.ai" } },
     attendees: [{ emailAddress: { name: "Jane Doe", address: "jane@example.com" } }],
-    start: { dateTime: "2026-06-01T10:00:00Z", timeZone: "UTC" },
-    end: { dateTime: "2026-06-01T11:00:00Z", timeZone: "UTC" },
-    lastModifiedDateTime: "2026-06-01T11:05:00Z",
+    start: { dateTime: TEAMS_EVENT_START.toISOString(), timeZone: "UTC" },
+    end: { dateTime: TEAMS_EVENT_END.toISOString(), timeZone: "UTC" },
+    lastModifiedDateTime: TEAMS_EVENT_MODIFIED.toISOString(),
   };
 }
 

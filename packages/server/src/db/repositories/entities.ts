@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely, RawBuilder, Selectable } from "kysely";
 import { sql } from "kysely";
+import { deleteNameEmbedding } from "../../connectors/embeddings/trunk-name-embeddings";
 import { normalizeName } from "../../connectors/name-normalize";
+import { normalizeEntityMatchName } from "../../entities/match-normalize";
+import { HIDDEN_ENTITY_SOURCE_TYPES } from "../../entities/profile-facts";
+import type { ProvenanceTier } from "../../entities/provenance";
 import { resolveLiveEntity, resolveLiveEntityId, resolveSourceRefToLiveEntityId } from "../../entities/redirect";
+import { yieldToEventLoop } from "../../lib/event-loop";
 import { parseTimestampMs } from "../../timestamps";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable, EntityContactPointsTable } from "../schema";
@@ -12,6 +17,15 @@ const SYSTEM_ENTITY_SOURCE_TYPES = ["clickup_workspace", "clickup_space"];
 const PROTECTED_ENTITY_SOURCES = ["team", "team_directory"];
 const HOTNESS_WINDOW_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Entities processed per `recomputeHotnessBatch` page when recomputing the
+ * whole corpus. better-sqlite3 is synchronous, so a batch of this size runs as
+ * one uninterrupted block; the caller yields to the event loop between batches
+ * (see {@link yieldToEventLoop}) so a 10k+ entity recompute after every sync
+ * cannot stall incoming HTTP requests for seconds.
+ */
+const HOTNESS_RECOMPUTE_BATCH_SIZE = 500;
 const CANONICAL_TIMESTAMP_LIKE = "____-__-__T__:__:__.___Z";
 const TIMESTAMP_DIGIT_POSITIONS = [1, 2, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19, 21, 22, 23];
 
@@ -129,6 +143,20 @@ export interface UpsertEntityData {
   metadata?: Record<string, unknown>;
   sourceRefId?: string | null;
   status?: string;
+  provenanceTier?: ProvenanceTier;
+}
+
+export interface DeclareProductData {
+  name: string;
+  aliases?: string[];
+}
+
+export interface DeclaredProductListEntry {
+  id: string;
+  name: string;
+  aliases: string[];
+  hotness: number;
+  provenance_tier: string;
 }
 
 export interface UpsertEntityFromToolData {
@@ -139,6 +167,7 @@ export interface UpsertEntityFromToolData {
   sourceUrl?: string;
   sourceRefId?: string;
   metadata?: Record<string, unknown>;
+  provenanceTier?: ProvenanceTier;
 }
 
 export interface UpsertPersonEntityData {
@@ -147,6 +176,7 @@ export interface UpsertPersonEntityData {
   subtype: "internal" | "external";
   source: string;
   sourceId: string;
+  provenanceTier?: ProvenanceTier;
 }
 
 export type EntityContactPointKind = "email" | "phone" | "linkedin" | "whatsapp";
@@ -202,6 +232,52 @@ function normalizeLinkedin(value: string): string {
     throw new Error("LinkedIn contact point must be a public identifier or /in/ profile URL");
   }
   return decodeURIComponent(parts[inIndex + 1]).toLowerCase();
+}
+
+function parseAliasesString(aliases: string | null): string[] {
+  if (!aliases) return [];
+  try {
+    const parsed = JSON.parse(aliases);
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeAliasInput(aliases: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const alias of aliases ?? []) {
+    const trimmed = alias.trim();
+    if (!trimmed) continue;
+    const key = normalizeEntityMatchName("product", trimmed);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function mergeAliases(existing: string | null, incoming: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const alias of [...parseAliasesString(existing), ...incoming]) {
+    const key = normalizeEntityMatchName("product", alias);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(alias);
+  }
+  return out;
+}
+
+function toDeclaredProductListEntry(entity: Selectable<EntitiesTable>): DeclaredProductListEntry {
+  return {
+    id: entity.id,
+    name: entity.name,
+    aliases: parseAliasesString(entity.aliases),
+    hotness: Number(entity.hotness ?? 0),
+    provenance_tier: entity.provenance_tier,
+  };
 }
 
 export function normalizeContactPointValue(kind: EntityContactPointKind, value: string): string {
@@ -263,6 +339,35 @@ async function loadCrmActivityBrief(db: Kysely<DB>, entityId: string): Promise<E
 }
 
 export function createEntityRepository(db: Kysely<DB>) {
+  async function createEntityRow(data: UpsertEntityData) {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values({
+        id,
+        name: data.name,
+        source_type: data.sourceType,
+        subtype: data.subtype ?? null,
+        aliases: data.aliases ? JSON.stringify(data.aliases) : null,
+        metadata: data.metadata ? JSON.stringify(data.metadata) : null,
+        source_ref_id: data.sourceRefId ?? null,
+        status: data.status ?? "confirmed",
+        provenance_tier: data.provenanceTier ?? "inferred",
+        hotness: 0,
+        created_at: now,
+        updated_at: now,
+      })
+      .execute();
+
+    return await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", id)
+      .where(whereLiveEntity())
+      .executeTakeFirstOrThrow();
+  }
+
   return {
     // ── CRUD ──
 
@@ -304,6 +409,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           metadata: data.metadata ? JSON.stringify(data.metadata) : null,
           source_ref_id: data.sourceRefId ?? null,
           status: data.status ?? "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
           hotness: 0,
           created_at: now,
           updated_at: now,
@@ -316,6 +422,107 @@ export function createEntityRepository(db: Kysely<DB>) {
         .where("id", "=", id)
         .where(whereLiveEntity())
         .executeTakeFirstOrThrow();
+    },
+
+    async createEntity(data: UpsertEntityData) {
+      return await createEntityRow(data);
+    },
+
+    /**
+     * Declare a product as user-asserted ground truth. If duplicate live
+     * product rows share the normalized product name from the pre-gate window,
+     * the hottest and then most-mentioned row is upgraded and the others are
+     * left untouched so declaration stays non-blocking.
+     */
+    async declareProduct(data: DeclareProductData) {
+      const name = data.name.trim();
+      if (!name) throw new Error("Product name cannot be empty");
+      const aliases = normalizeAliasInput(data.aliases);
+      const incomingKeys = new Set(
+        [name, ...aliases].map((value) => normalizeEntityMatchName("product", value)).filter(Boolean),
+      );
+      const products = await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("source_type", "=", "product")
+        .where(whereLiveEntity())
+        .execute();
+      const matches = products.filter((product) => {
+        const keys = [product.name, ...parseAliasesString(product.aliases)]
+          .map((value) => normalizeEntityMatchName("product", value))
+          .filter(Boolean);
+        return keys.some((key) => incomingKeys.has(key));
+      });
+
+      if (matches.length > 0) {
+        const mentionCounts = new Map<string, number>();
+        const counts = await db
+          .selectFrom("entity_mentions")
+          .select(["entity_id", (eb) => eb.fn.count<number>("id").as("mention_count")])
+          .where(
+            "entity_id",
+            "in",
+            matches.map((match) => match.id),
+          )
+          .groupBy("entity_id")
+          .execute();
+        for (const row of counts) mentionCounts.set(row.entity_id, Number(row.mention_count));
+        const best = [...matches].sort((a, b) => {
+          const hotnessDelta = Number(b.hotness ?? 0) - Number(a.hotness ?? 0);
+          if (hotnessDelta !== 0) return hotnessDelta;
+          const mentionDelta = (mentionCounts.get(b.id) ?? 0) - (mentionCounts.get(a.id) ?? 0);
+          if (mentionDelta !== 0) return mentionDelta;
+          return a.id.localeCompare(b.id);
+        })[0];
+        if (best.provenance_tier === "declared") return best;
+
+        const mergedAliases = mergeAliases(best.aliases, aliases);
+        const now = new Date().toISOString();
+        await db
+          .updateTable("entities")
+          .set({
+            aliases: mergedAliases.length > 0 ? JSON.stringify(mergedAliases) : best.aliases,
+            provenance_tier: "declared",
+            updated_at: now,
+          })
+          .where("id", "=", best.id)
+          .execute();
+        return await db
+          .selectFrom("entities")
+          .selectAll()
+          .where("id", "=", best.id)
+          .where(whereLiveEntity())
+          .executeTakeFirstOrThrow();
+      }
+
+      return await createEntityRow({
+        name,
+        sourceType: "product",
+        aliases,
+        status: "confirmed",
+        provenanceTier: "declared",
+      });
+    },
+
+    /**
+     * The curated product closed list shown on the Your Org surface: products
+     * the user has blessed, either by declaring them (`declared`) or by
+     * approving a proposal from the review queue (`human_confirmed`). This is
+     * the same tier set extraction matches against
+     * ({@link PRODUCT_MATCH_TARGET_PROVENANCE_TIERS}); raw `inferred` guesses are
+     * excluded so the curation home only shows trusted products. Each row keeps
+     * its tier so the UI can chip declared vs confirmed.
+     */
+    async listCuratedProducts(): Promise<DeclaredProductListEntry[]> {
+      const rows = await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("source_type", "=", "product")
+        .where("provenance_tier", "in", ["declared", "human_confirmed"])
+        .where(whereLiveEntity())
+        .orderBy("name", "asc")
+        .execute();
+      return rows.map(toDeclaredProductListEntry);
     },
 
     /**
@@ -346,8 +553,12 @@ export function createEntityRepository(db: Kysely<DB>) {
         .execute();
     },
 
-    async getEntitiesByStatus(status: string) {
-      return db.selectFrom("entities").selectAll().where("status", "=", status).where(whereLiveEntity()).execute();
+    async getEntitiesByStatus(status: string, opts?: { excludeSourceTypes?: string[] }) {
+      let query = db.selectFrom("entities").selectAll().where("status", "=", status).where(whereLiveEntity());
+      if (opts?.excludeSourceTypes && opts.excludeSourceTypes.length > 0) {
+        query = query.where("source_type", "not in", opts.excludeSourceTypes);
+      }
+      return query.execute();
     },
 
     async updateEntity(
@@ -362,11 +573,17 @@ export function createEntityRepository(db: Kysely<DB>) {
       }>,
     ) {
       const entityId = await resolveLiveEntityId(db, id);
+      const existing = updates.name
+        ? await db.selectFrom("entities").select("name").where("id", "=", entityId).executeTakeFirst()
+        : undefined;
       await db
         .updateTable("entities")
         .set({ ...updates, updated_at: new Date().toISOString() })
         .where("id", "=", entityId)
         .execute();
+      if (existing && updates.name && existing.name !== updates.name) {
+        await deleteNameEmbedding(db, "entity", entityId);
+      }
     },
 
     /**
@@ -699,6 +916,52 @@ export function createEntityRepository(db: Kysely<DB>) {
       return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
     },
 
+    async getPersonEntitiesByEmails(rawEmails: string[]): Promise<Map<string, Selectable<EntitiesTable>[]>> {
+      const emails = Array.from(new Set(rawEmails.map((email) => normalizeContactPointValue("email", email))));
+      const out = new Map<string, Selectable<EntitiesTable>[]>();
+      if (emails.length === 0) return out;
+
+      const byContactPoint = await db
+        .selectFrom("entity_contact_points")
+        .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+        .selectAll("entities")
+        .select("entity_contact_points.value as matched_email")
+        .where("entity_contact_points.kind", "=", "email")
+        .where("entity_contact_points.value", "in", emails)
+        .where("entities.source_type", "=", "person")
+        .where(whereLiveEntity())
+        .execute();
+      const byMetadata = await db
+        .selectFrom("entities")
+        .selectAll()
+        .select(
+          (isPg(db) ? sql<string>`(metadata::jsonb ->> 'email')` : sql<string>`json_extract(metadata, '$.email')`).as(
+            "matched_email",
+          ),
+        )
+        .where("source_type", "=", "person")
+        .where(whereLiveEntity())
+        .where(isPg(db) ? sql`(metadata::jsonb ->> 'email')` : sql`json_extract(metadata, '$.email')`, "in", emails)
+        .execute();
+
+      const byEmailAndId = new Map<string, Map<string, Selectable<EntitiesTable>>>();
+      for (const row of [...byContactPoint, ...byMetadata]) {
+        const matchedEmail = row.matched_email;
+        if (!matchedEmail) continue;
+        const normalized = normalizeContactPointValue("email", matchedEmail);
+        const entities = byEmailAndId.get(normalized) ?? new Map<string, Selectable<EntitiesTable>>();
+        entities.set(row.id, row);
+        byEmailAndId.set(normalized, entities);
+      }
+      for (const [email, entities] of byEmailAndId) {
+        out.set(
+          email,
+          [...entities.values()].sort((a, b) => a.id.localeCompare(b.id)),
+        );
+      }
+      return out;
+    },
+
     // ── Search ──
 
     async searchEntities(
@@ -714,6 +977,9 @@ export function createEntityRepository(db: Kysely<DB>) {
 
       if (opts?.sourceTypes && opts.sourceTypes.length > 0) {
         q = q.where("source_type", "in", opts.sourceTypes);
+      } else {
+        const hiddenTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
+        if (hiddenTypes.length > 0) q = q.where("source_type", "not in", hiddenTypes);
       }
 
       if (opts?.sortBy === "recency") {
@@ -749,11 +1015,13 @@ export function createEntityRepository(db: Kysely<DB>) {
     // ── Hotness ──
 
     async getHotEntities(limit: number) {
+      const hiddenTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
       return db
         .selectFrom("entities")
         .selectAll()
         .where("status", "!=", "archived")
         .where(whereLiveEntity())
+        .where("source_type", "not in", hiddenTypes.length > 0 ? hiddenTypes : [""])
         .orderBy("hotness", "desc")
         .limit(limit)
         .execute();
@@ -801,17 +1069,28 @@ export function createEntityRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    /**
+     * Recompute hotness for every live, non-archived entity. Runs after every
+     * connector sync, so it pages through the corpus via `recomputeHotnessBatch`
+     * (identical filter, id-ordered cursor) and yields to the event loop between
+     * batches instead of looping the whole table with zero yields. The processed
+     * set and per-entity scores are identical to updating each id in one pass;
+     * only the loop is chunked so it no longer blocks the shared event loop.
+     */
     async recomputeAllHotness() {
-      const entities = await db
-        .selectFrom("entities")
-        .select("id")
-        .where("status", "!=", "archived")
-        .where(whereLiveEntity())
-        .execute();
-      for (const entity of entities) {
-        await this.updateHotness(entity.id);
+      let cursor: string | null = null;
+      let total = 0;
+      for (;;) {
+        const { processed, nextCursor, done } = await this.recomputeHotnessBatch({
+          cursor,
+          limit: HOTNESS_RECOMPUTE_BATCH_SIZE,
+        });
+        total += processed;
+        if (done) break;
+        cursor = nextCursor;
+        await yieldToEventLoop();
       }
-      return entities.length;
+      return total;
     },
 
     async recomputeHotnessBatch(opts: { cursor?: string | null; limit: number }) {
@@ -960,6 +1239,9 @@ export function createEntityRepository(db: Kysely<DB>) {
         }
 
         await db.updateTable("entities").set(updates).where("id", "=", existing.id).execute();
+        if (existing.name !== data.name) {
+          await deleteNameEmbedding(db, "entity", existing.id);
+        }
 
         await db
           .updateTable("entity_source_refs")
@@ -988,6 +1270,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           metadata: data.metadata ? JSON.stringify(data.metadata) : null,
           source_ref_id: data.sourceRefId ?? null,
           status: "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
           hotness: 0,
           created_at: now,
           updated_at: now,
@@ -1020,6 +1303,10 @@ export function createEntityRepository(db: Kysely<DB>) {
      * done client-side so the same path works on SQLite and Postgres.
      * Returns whether the row was newly created so materialization summaries
      * don't count updates as new entities.
+     *
+     * Dormant legacy helper retained for compatibility; new materializers
+     * should route through the reviewed/propose paths and pass an explicit
+     * provenance tier.
      */
     async upsertLlmExtractedEntity(
       data: UpsertEntityData,
@@ -1067,6 +1354,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           metadata: data.metadata ? JSON.stringify(data.metadata) : null,
           source_ref_id: null,
           status: data.status ?? "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
           hotness: 0,
           created_at: now,
           updated_at: now,
@@ -1281,6 +1569,51 @@ export function createEntityRepository(db: Kysely<DB>) {
           metadata: JSON.stringify(metadata),
           source_ref_id: null,
           status: "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        })
+        .execute();
+
+      await db
+        .insertInto("entity_source_refs")
+        .values({
+          id: randomUUID(),
+          entity_id: id,
+          source: data.source,
+          source_id: data.sourceId,
+          source_url: null,
+          last_seen_at: now,
+        })
+        .execute();
+
+      return await db
+        .selectFrom("entities")
+        .selectAll()
+        .where("id", "=", id)
+        .where(whereLiveEntity())
+        .executeTakeFirstOrThrow();
+    },
+
+    async createPersonEntity(data: UpsertPersonEntityData) {
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      const metadata = data.email ? { email: data.email } : {};
+      const initialAliases = data.email ? JSON.stringify([data.email]) : null;
+
+      await db
+        .insertInto("entities")
+        .values({
+          id,
+          name: data.name,
+          source_type: "person",
+          subtype: data.subtype,
+          aliases: initialAliases,
+          metadata: JSON.stringify(metadata),
+          source_ref_id: null,
+          status: "confirmed",
+          provenance_tier: data.provenanceTier ?? "inferred",
           hotness: 0,
           created_at: now,
           updated_at: now,

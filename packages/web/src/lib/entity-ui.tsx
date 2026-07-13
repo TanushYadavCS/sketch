@@ -84,6 +84,7 @@ const ACCENTS: Record<DrawerEntityType, string> = {
   product: "#0f766e",
   project: "#6d28d9",
   team: "#475569",
+  tool: "#525252",
   system: "#525252",
   other: "#3f3f46",
 };
@@ -101,6 +102,8 @@ function normalizeType(input: EntityIdentity): DrawerEntityType {
       return "project";
     case "team":
       return "team";
+    case "tool":
+      return "tool";
     case "clickup_workspace":
     case "clickup_space":
       return "system";

@@ -15,5 +15,6 @@ export { createClickUpConnector } from "./clickup";
 export { createNotionConnector } from "./notion";
 export { createLinearConnector } from "./linear";
 export { createFirefliesConnector } from "./fireflies";
+export { createOtterConnector } from "./otter";
 export { runConnectorSync, runAllSyncs, runScheduledEnrichment, startSyncScheduler } from "./sync";
 export { searchFiles, getFileContent, listIndexedSources } from "./search";
