@@ -67,10 +67,10 @@ const MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 /**
  * Max file size to attempt binary extraction: 25MB.
  *
- * Binary extractors (`extractTextFromBinary`) run synchronously on the shared
- * event loop and allocate several transient copies of the input. A large XLSX
- * can stall the loop for seconds and spike memory to multiples of the file
- * size, so we skip anything above this cap rather than degrade the whole
+ * Binary extractors (`extractTextFromBinary`) run in a capped worker pool, so
+ * they no longer stall the shared event loop, but parsing still allocates
+ * several transient copies of the input inside the worker. Skipping anything
+ * above this cap bounds per-parse memory rather than degrading the whole
  * process (which also serves HTTP + Slack + agent runs).
  */
 const MAX_EXTRACT_BYTES = 25 * 1024 * 1024;

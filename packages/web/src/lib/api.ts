@@ -235,7 +235,15 @@ export interface WhatsAppGroupInfo {
   name: string;
   description: string | null;
   agent_user_id: string | null;
+  index_enabled?: number;
   updated_at: string;
+}
+
+export interface WhatsAppGroupMemberLabel {
+  id: string;
+  maskedPhone: string;
+  displayName: string;
+  companyName: string | null;
 }
 
 export interface SetupStatus {
@@ -245,6 +253,7 @@ export interface SetupStatus {
   orgName: string | null;
   botName: string;
   slackConnected: boolean;
+  whatsappConnected?: boolean;
   llmConnected: boolean;
   llmProvider: LlmProvider | null;
   managedUrl?: string;
@@ -1561,6 +1570,23 @@ export const api = {
     },
     listWhatsAppGroups() {
       return request<{ groups: WhatsAppGroupInfo[] }>("/api/channels/whatsapp/groups");
+    },
+    listWhatsAppGroupMemberLabels(groupJid: string) {
+      return request<{ labels: WhatsAppGroupMemberLabel[] }>(
+        `/api/channels/whatsapp/groups/${encodeURIComponent(groupJid)}/member-labels`,
+      );
+    },
+    replaceWhatsAppGroupMemberLabels(
+      groupJid: string,
+      labels: Array<{ id?: string; phoneE164?: string; displayName: string; companyName?: string | null }>,
+    ) {
+      return request<{ labels: WhatsAppGroupMemberLabel[] }>(
+        `/api/channels/whatsapp/groups/${encodeURIComponent(groupJid)}/member-labels`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ labels }),
+        },
+      );
     },
     disconnectSlack() {
       return request<{ success: boolean }>("/api/channels/slack", { method: "DELETE" });

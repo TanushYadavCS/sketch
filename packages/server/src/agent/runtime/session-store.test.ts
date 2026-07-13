@@ -2,6 +2,7 @@ import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createAgentMessagesRepository } from "../../db/repositories/agent-messages";
 import type { DB } from "../../db/schema";
 import { createTestDb } from "../../test-utils";
 import {
@@ -9,10 +10,29 @@ import {
   createDefaultAgentRuntimeCompactionProvider,
   reconstructCompactedHistory,
 } from "./compaction";
+import type { AgentRuntimeMessage } from "./contracts";
 import { runAgentRuntimeCore } from "./core";
 import { DEFAULT_AGENT_RUNTIME_COST_TABLE } from "./pricing";
 import type { AgentRuntimeProvider } from "./provider";
 import { createDbAgentRuntimeSessionStore } from "./session-store";
+
+function markerEnvelope(replacedPrefixEndSeq: number) {
+  return {
+    marker: AGENT_RUNTIME_COMPACTION_SUMMARY_MARKER,
+    version: 1,
+    trigger: "auto",
+    summary: "Prefix summary.",
+    replacedPrefixStartSeq: 1,
+    replacedPrefixEndSeq,
+    keepRecentTailStartSeq: replacedPrefixEndSeq + 1,
+  };
+}
+
+function toRuntimeMessages(
+  rows: ReadonlyArray<{ seq: number; role: string; content: unknown }>,
+): AgentRuntimeMessage[] {
+  return rows.map((row) => ({ seq: row.seq, role: row.role as AgentRuntimeMessage["role"], content: row.content }));
+}
 
 function usage(inputTokens: number, outputTokens: number) {
   return {
@@ -106,11 +126,12 @@ describe("DB-backed agent runtime session store", () => {
     });
 
     await compactor.compact({ sessionId: "sess-compact-restart", messages: await store.load("sess-compact-restart") });
-    const rawRows = await store.load("sess-compact-restart");
-    const effectiveRows = reconstructCompactedHistory(rawRows);
+    const allRows = await createAgentMessagesRepository(db).loadBySession("sess-compact-restart");
+    const turnRows = await store.load("sess-compact-restart");
+    const effectiveRows = reconstructCompactedHistory(turnRows);
 
-    expect(rawRows.map((row) => row.seq)).toEqual([1, 2, 3, 4]);
-    expect(rawRows[3]).toMatchObject({
+    expect(allRows.map((row) => row.seq)).toEqual([1, 2, 3, 4]);
+    expect(allRows[3]).toMatchObject({
       role: "user",
       content: {
         marker: AGENT_RUNTIME_COMPACTION_SUMMARY_MARKER,
@@ -120,9 +141,65 @@ describe("DB-backed agent runtime session store", () => {
         keepRecentTailStartSeq: 3,
       },
     });
+    expect(turnRows.map((row) => row.seq)).toEqual([3, 4]);
     expect(effectiveRows.map((row) => row.content)).toEqual([
       { role: "user", content: "[Prior conversation summary]\nRestart-safe summary." },
       { role: "user", content: "recent" },
+    ]);
+  });
+
+  it("assembles identical history from the reduced turn load and a full load, with and without a marker", async () => {
+    const store = createDbAgentRuntimeSessionStore(db);
+    const repo = createAgentMessagesRepository(db);
+
+    await store.appendTransactional("s-nomarker", [
+      { role: "user", content: { role: "user", content: "a" } },
+      { role: "assistant", content: { role: "assistant", content: "b" } },
+      { role: "user", content: { role: "user", content: "c" } },
+    ]);
+    const fullNoMarker = toRuntimeMessages(await repo.loadBySession("s-nomarker"));
+    const reducedNoMarker = await store.load("s-nomarker");
+    expect(reducedNoMarker).toEqual(fullNoMarker);
+    expect(reconstructCompactedHistory(reducedNoMarker)).toEqual(reconstructCompactedHistory(fullNoMarker));
+
+    await store.appendTransactional("s-marker", [
+      { role: "user", content: { role: "user", content: "old-1" } },
+      { role: "assistant", content: { role: "assistant", content: "old-2" } },
+      { role: "user", content: { role: "user", content: "recent" } },
+    ]);
+    await store.appendTransactional("s-marker", [{ role: "user", content: markerEnvelope(2) }]);
+
+    const fullMarker = toRuntimeMessages(await repo.loadBySession("s-marker"));
+    const reducedMarker = await store.load("s-marker");
+    expect(reducedMarker.map((row) => row.seq)).toEqual([3, 4]);
+    expect(reconstructCompactedHistory(reducedMarker)).toEqual(reconstructCompactedHistory(fullMarker));
+  });
+
+  it("skips a poisoned pre-marker row that a full load would fail to parse", async () => {
+    const store = createDbAgentRuntimeSessionStore(db);
+    const repo = createAgentMessagesRepository(db);
+
+    await db
+      .insertInto("agent_messages")
+      .values([
+        { session_id: "s-poison", seq: 1, role: "user", content: "{ not valid json" },
+        { session_id: "s-poison", seq: 2, role: "user", content: JSON.stringify(markerEnvelope(1)) },
+        {
+          session_id: "s-poison",
+          seq: 3,
+          role: "assistant",
+          content: JSON.stringify({ role: "assistant", content: "tail" }),
+        },
+      ])
+      .execute();
+
+    await expect(repo.loadBySession("s-poison")).rejects.toThrow();
+
+    const rows = await store.load("s-poison");
+    expect(rows.map((row) => row.seq)).toEqual([2, 3]);
+    expect(reconstructCompactedHistory(rows).map((row) => row.content)).toEqual([
+      { role: "user", content: "[Prior conversation summary]\nPrefix summary." },
+      { role: "assistant", content: "tail" },
     ]);
   });
 

@@ -384,6 +384,138 @@ describe("createEntityRepository hotness", () => {
       .executeTakeFirstOrThrow();
     expect(row.hotness).toBeGreaterThan(0.4);
   });
+
+  it("recomputeAllHotness recomputes the live, non-archived set identically to per-entity updates", async () => {
+    const recentSourceAt = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const oldSourceAt = new Date(Date.now() - 120 * 24 * 60 * 60 * 1000).toISOString();
+    await seedIndexedFile(db, "recent-file", "config-test", {
+      sourceCreatedAt: recentSourceAt,
+      sourceUpdatedAt: recentSourceAt,
+    });
+    await seedIndexedFile(db, "old-file", "config-test", {
+      sourceCreatedAt: oldSourceAt,
+      sourceUpdatedAt: oldSourceAt,
+    });
+
+    const recent = await repo.upsertPersonEntity({
+      name: "Recent Person",
+      email: "recent@example.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:recent",
+    });
+    const old = await repo.upsertPersonEntity({
+      name: "Old Person",
+      email: "old@example.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:old",
+    });
+    const quiet = await repo.upsertPersonEntity({
+      name: "Quiet Person",
+      email: "quiet@example.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:quiet",
+    });
+
+    await repo.createMention({
+      entityId: recent.id,
+      indexedFileId: "recent-file",
+      confidence: "EXTRACTED",
+      source: "seed",
+      relation: "mentioned",
+    });
+    await repo.createMention({
+      entityId: old.id,
+      indexedFileId: "old-file",
+      confidence: "EXTRACTED",
+      source: "seed",
+      relation: "mentioned",
+    });
+
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "excl-archived",
+          name: "Archived",
+          source_type: "person",
+          status: "archived",
+          hotness: -1,
+          created_at: now,
+          updated_at: now,
+        },
+        {
+          id: "excl-deleted",
+          name: "Deleted",
+          source_type: "person",
+          status: "confirmed",
+          hotness: -1,
+          created_at: now,
+          updated_at: now,
+          deleted_at: now,
+        },
+        {
+          id: "excl-merged",
+          name: "Merged",
+          source_type: "person",
+          status: "confirmed",
+          hotness: -1,
+          created_at: now,
+          updated_at: now,
+          merged_into_entity_id: recent.id,
+        },
+      ])
+      .execute();
+
+    const includedIds = [recent.id, old.id, quiet.id];
+
+    for (const id of includedIds) {
+      await repo.updateHotness(id);
+    }
+    const baseline = new Map(
+      (await db.selectFrom("entities").select(["id", "hotness"]).where("id", "in", includedIds).execute()).map(
+        (r) => [r.id, r.hotness] as const,
+      ),
+    );
+
+    await db.updateTable("entities").set({ hotness: -1 }).execute();
+    const count = await repo.recomputeAllHotness();
+    expect(count).toBe(includedIds.length);
+
+    const after = new Map(
+      (await db.selectFrom("entities").select(["id", "hotness"]).execute()).map((r) => [r.id, r.hotness] as const),
+    );
+    for (const id of includedIds) {
+      expect(after.get(id)).toBeCloseTo(baseline.get(id) as number, 6);
+    }
+    expect(after.get(recent.id)).toBeGreaterThan(after.get(old.id) as number);
+    expect(after.get("excl-archived")).toBe(-1);
+    expect(after.get("excl-deleted")).toBe(-1);
+    expect(after.get("excl-merged")).toBe(-1);
+  });
+
+  it("recomputeAllHotness processes every entity across multiple batches above the batch size", async () => {
+    const now = new Date().toISOString();
+    const rows = Array.from({ length: 501 }, (_, i) => ({
+      id: `bulk-${String(i).padStart(4, "0")}`,
+      name: `Bulk ${i}`,
+      source_type: "person",
+      status: "confirmed",
+      hotness: -1,
+      created_at: now,
+      updated_at: now,
+    }));
+    await db.insertInto("entities").values(rows).execute();
+
+    const count = await repo.recomputeAllHotness();
+    expect(count).toBe(501);
+
+    const untouched = await db.selectFrom("entities").select(["id"]).where("hotness", "=", -1).execute();
+    expect(untouched).toHaveLength(0);
+  });
 });
 
 describe("createEntityRepository deleteEntitiesForFiles", () => {

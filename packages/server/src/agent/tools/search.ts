@@ -36,10 +36,10 @@ export const searchToolSchema = {
     .enum(["meeting", "doc", "task", "message"])
     .optional()
     .describe(
-      "Semantic content kind. meeting=Fireflies, doc=Drive/Notion/ClickUp Docs/Linear projects, task=ClickUp tasks/Linear issues, message=conversation.",
+      "Semantic content kind. meeting=Fireflies, doc=Drive/Notion/ClickUp Docs/Linear projects, task=ClickUp tasks/Linear issues, message=conversation/WhatsApp.",
     ),
   source: z
-    .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "local"])
+    .enum(["google_drive", "clickup", "linear", "notion", "fireflies", "conversation", "whatsapp", "local"])
     .optional()
     .describe("Filter to a specific source. Omit to search all."),
   sortBy: z
@@ -93,7 +93,7 @@ type SearchEntitiesArgs = z.infer<z.ZodObject<typeof searchEntitiesToolSchema>>;
 type GetEntityContextArgs = z.infer<z.ZodObject<typeof getEntityContextToolSchema>>;
 type GetFileContentArgs = z.infer<z.ZodObject<typeof getFileContentToolSchema>>;
 
-async function resolveUserEmails(deps: SketchMcpDeps): Promise<string[]> {
+export async function resolveUserEmails(deps: SketchMcpDeps): Promise<string[]> {
   if (deps.publicMcp?.userEmails) return deps.publicMcp.userEmails;
   if (!deps.currentUserId || !deps.userRepo?.getAllEmailsForUser) return [];
   return deps.userRepo.getAllEmailsForUser(deps.currentUserId);

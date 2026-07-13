@@ -1,3 +1,5 @@
+const REQUEST_TIMEOUT_MS = 30_000;
+
 export interface SlackAuthTestResponse {
   ok?: boolean;
   error?: string;
@@ -14,6 +16,7 @@ export async function slackApiCall(
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   const body = (await response.json().catch(() => ({}))) as SlackAuthTestResponse;

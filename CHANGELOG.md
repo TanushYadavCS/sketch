@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## [1.0.2] -- 2026-07-10
+
+- Streams Gmail sync in two passes (address-only reciprocity then paged body fetches) to bound peak residency to one page instead of the full 5,000-message corpus.
+- Streams Google Calendar sync per page instead of materializing the entire 730-day expanded event set before the first yield.
+- Streams Teams transcripts per meeting with bounded concurrency, adds a `maxMeetings` cap, and eliminates double VTT parsing.
+- Streams Outlook bodies per page with an address-only reciprocity pass, mirroring the Gmail two-pass shape to avoid materializing the full `NormalizedEmail[]` array.
+- Bounds company-anchor adjacency queries with a file-recency cap to prevent self-join blowup on high-degree entities during enrichment.
+- Keyset-pages source-fact materialization by chronological order (`created_at`, `id`) instead of loading the entire backlog into memory, reducing peak heap from corpus-proportional to batch-sized.
+- Pages post-sync sweeps (hotness recomputation, domain promotions, name resolver) to yield to the event loop and avoid multi-second stalls on large corpora.
+- Caps tool output retained in agent progress-log cards to 30k characters to prevent large results from persisting in memory for the run's lifetime.
+- Loads only post-compaction-marker transcript rows in the AI SDK runtime instead of re-parsing the full history every turn, and truncates large persisted outputs over 128 KB.
+- Adds outbound HTTP timeouts via `AbortSignal.timeout` to previously unbounded fetches (Slack, OAuth, Gemini, Canvas) to prevent hung upstreams from wedging queue slots.
+- Guards scheduler re-entrancy with per-task single-flight, caps queue backlog at 50 items per key, and evicts drained queues to prevent unbounded growth.
+- Moves Drive binary parsing (XLSX, PDF, DOCX, PPTX) to a capped worker-thread pool to keep the shared event loop responsive during concurrent syncs.
+
 ## [1.0.1] -- 2026-07-10
 
 - Automatically derives Node.js heap size from container memory limits at startup to prevent out-of-memory crashes in environments like Fargate, respecting any explicit `--max-old-space-size` override.

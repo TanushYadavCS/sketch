@@ -58,6 +58,7 @@ describe("downloadSlackFile", () => {
     const [, init] = fetchSpy.mock.calls[0];
     const headers = init?.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer xoxb-token");
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("strips auth header when redirected to non-Slack CDN", async () => {

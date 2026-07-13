@@ -6,6 +6,31 @@ import type { WatiWhatsAppProvider } from "../whatsapp/providers/wati";
 
 export const WATI_WEBHOOK_QUEUE_KEY = "whatsapp:wati:webhooks";
 
+/**
+ * Derives a per-conversation queue key from a raw Wati webhook payload so one
+ * busy chat cannot head-of-line-block every tenant's traffic through a single
+ * global key. Falls back to the global key when no conversation identifier is
+ * present (e.g. malformed or owner delivery-status events).
+ */
+export function watiWebhookQueueKey(payload: unknown): string {
+  if (payload && typeof payload === "object") {
+    const record = payload as Record<string, unknown>;
+    const conversationId = firstNonEmptyString(record.conversationId, record.ticketId, record.waId);
+    if (conversationId) return `${WATI_WEBHOOK_QUEUE_KEY}:${conversationId}`;
+  }
+  return WATI_WEBHOOK_QUEUE_KEY;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return null;
+}
+
 export function watiWebhookRoutes(
   provider: Pick<WatiWhatsAppProvider, "handleWebhook" | "webhookToken">,
   queueManager: QueueManager,
@@ -27,7 +52,7 @@ export function watiWebhookRoutes(
       return c.json({ error: { code: "INVALID_JSON", message: "Invalid JSON body" } }, 400);
     }
 
-    queueManager.getQueue(WATI_WEBHOOK_QUEUE_KEY).enqueue(async () => {
+    queueManager.getQueue(watiWebhookQueueKey(payload)).enqueue(async () => {
       try {
         const results = await provider.handleWebhook(payload);
         logger.debug(

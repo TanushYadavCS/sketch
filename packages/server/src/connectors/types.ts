@@ -6,7 +6,10 @@
  * - "document": full content stored locally (docs, pages, PRDs)
  * - "structured": metadata only, live-fetched when needed (tasks, issues)
  */
+import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import type { DB } from "../db/schema";
+import type { GeminiGenerator } from "./gemini-generate";
 
 export type ConnectorType =
   | "google_drive"
@@ -19,9 +22,10 @@ export type ConnectorType =
   | "linear"
   | "fireflies"
   | "otter"
-  | "zoho_crm";
+  | "zoho_crm"
+  | "whatsapp";
 
-export type AuthType = "oauth" | "api_key" | "service_account";
+export type AuthType = "oauth" | "api_key" | "service_account" | "system";
 
 export type SyncStatus = "pending" | "active" | "syncing" | "paused" | "error" | "disabled";
 
@@ -68,7 +72,11 @@ export interface ServiceAccountCredentials {
   service_account_json: string;
 }
 
-export type ConnectorCredentials = OAuthCredentials | ApiKeyCredentials | ServiceAccountCredentials;
+export interface SystemCredentials {
+  type: "system";
+}
+
+export type ConnectorCredentials = OAuthCredentials | ApiKeyCredentials | ServiceAccountCredentials | SystemCredentials;
 
 export type AccessTokenProvider = (opts?: { forceRefresh?: boolean }) => Promise<{
   accessToken: string;
@@ -420,6 +428,9 @@ export interface Connector {
    */
   readonly requiresOAuthClientSetup: boolean;
 
+  /** Whether one sync enumerates the complete source corpus for stale-file reconciliation. */
+  readonly syncIsCompleteSnapshot?: boolean;
+
   /**
    * File types that should be promoted to entities during sync.
    * e.g. Linear returns ["project"] — synced Linear projects become entities.
@@ -449,6 +460,7 @@ export interface Connector {
 
   /** Run initial or incremental sync. Returns items to index. */
   sync(opts: {
+    db?: Kysely<DB>;
     connectorConfigId?: string;
     credentials: ConnectorCredentials;
     scopeConfig: Record<string, unknown>;
@@ -469,6 +481,7 @@ export interface Connector {
      * Optional — connectors that don't need it leave it unset.
      */
     resolveNameToEmail?: NameResolver;
+    salienceGenerator?: GeminiGenerator | null;
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
     onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;
@@ -496,6 +509,7 @@ export interface Connector {
    * Optional — connectors without scope selection don't implement this.
    */
   browse?(opts: {
+    db?: Kysely<DB>;
     credentials: ConnectorCredentials;
     logger: Logger;
     accessTokenProvider?: AccessTokenProvider;
@@ -508,6 +522,7 @@ export interface Connector {
    * to return results directly without starting a background job.
    */
   browseExisting?(opts: {
+    db?: Kysely<DB>;
     credentials: ConnectorCredentials;
     logger: Logger;
     accessTokenProvider?: AccessTokenProvider;

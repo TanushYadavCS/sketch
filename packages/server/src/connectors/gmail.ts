@@ -21,6 +21,7 @@ const DEFAULT_INITIAL_DAYS = 90;
 const DEFAULT_MAX_MESSAGES = 500;
 const DEFAULT_RECIPROCITY_DAYS = 365;
 const DEFAULT_MAX_RECIPROCITY_SENT = 250;
+const GMAIL_MAX_LOOKBACK_DAYS = 1095;
 const MESSAGE_FETCH_CONCURRENCY = 12;
 const MESSAGE_PAGE_SIZE = 100;
 const RECIPROCITY_METADATA_HEADERS = ["From", "To", "Cc", "Message-ID", "Subject", "Date"];
@@ -77,6 +78,14 @@ function assertOAuth(credentials: ConnectorCredentials): asserts credentials is 
 function parsePositiveInt(value: unknown, fallback: number, max: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.max(1, Math.min(Math.floor(value), max));
+}
+
+function normalizeLookbackQuery(query: string): string {
+  return query.replace(/\bnewer_than:(\d+)d\b/gi, (match, rawDays: string) => {
+    const days = Number.parseInt(rawDays, 10);
+    if (!Number.isFinite(days) || days <= GMAIL_MAX_LOOKBACK_DAYS) return match;
+    return `newer_than:${GMAIL_MAX_LOOKBACK_DAYS}d`;
+  });
 }
 
 function parseCursor(cursor: string | null): GmailCursor | null {
@@ -329,7 +338,7 @@ async function loadRecentSentMessages(
   scopeConfig: Record<string, unknown>,
   logger: Logger,
 ): Promise<NormalizedEmail[]> {
-  const days = parsePositiveInt(scopeConfig.reciprocityDays, DEFAULT_RECIPROCITY_DAYS, 3650);
+  const days = parsePositiveInt(scopeConfig.reciprocityDays, DEFAULT_RECIPROCITY_DAYS, GMAIL_MAX_LOOKBACK_DAYS);
   const maxMessages = parsePositiveInt(scopeConfig.maxReciprocitySent, DEFAULT_MAX_RECIPROCITY_SENT, 2000);
   const { refs, nextPageToken } = await listMessageRefs(accessToken, { q: `in:sent newer_than:${days}d` }, maxMessages);
   if (nextPageToken) {
@@ -462,13 +471,14 @@ async function* syncFullMailbox(
   setNextCursor: (cursor: GmailCursor) => void,
   opts?: { query?: string; pageToken?: string; bootstrapReciprocity?: boolean },
 ) {
-  const initialDays = parsePositiveInt(scopeConfig.initialDays, DEFAULT_INITIAL_DAYS, 3650);
+  const initialDays = parsePositiveInt(scopeConfig.initialDays, DEFAULT_INITIAL_DAYS, GMAIL_MAX_LOOKBACK_DAYS);
   const maxMessages = parsePositiveInt(scopeConfig.maxMessages, DEFAULT_MAX_MESSAGES, 5000);
-  const query =
+  const query = normalizeLookbackQuery(
     opts?.query ??
-    (typeof scopeConfig.query === "string" && scopeConfig.query.trim()
-      ? scopeConfig.query.trim()
-      : `newer_than:${initialDays}d (in:inbox OR in:sent)`);
+      (typeof scopeConfig.query === "string" && scopeConfig.query.trim()
+        ? scopeConfig.query.trim()
+        : `newer_than:${initialDays}d (in:inbox OR in:sent)`),
+  );
   const { refs, nextPageToken } = await listMessageRefs(
     accessToken,
     { q: query, pageToken: opts?.pageToken ?? "" },

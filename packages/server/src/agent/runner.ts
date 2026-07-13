@@ -20,7 +20,11 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { DB, UsersTable } from "../db/schema";
 import type { Attachment } from "../files";
 import { buildMultimodalContent, formatAttachmentsForPrompt, isImageAttachment } from "../files";
-import { type IntegrationProgressEventLike, collectIntegrationCardsFromProgressEvents } from "../integrations/cards";
+import {
+  type IntegrationProgressEventLike,
+  collectIntegrationCardsFromProgressEvents,
+  projectToolResultForProgressLog,
+} from "../integrations/cards";
 import type { IntegrationProvider } from "../integrations/types";
 import {
   type IntegrationAccessResult,
@@ -627,7 +631,7 @@ export function applySdkStreamMessageMapping(
           kind: "tool_result",
           toolName: toolUse.toolName,
           input: toolUse.input,
-          output: toolResult.content,
+          output: projectToolResultForProgressLog(toolResult.content),
           isError: toolResult.is_error === true,
         };
         state.integrationProgressEvents.push(resultEvent);
