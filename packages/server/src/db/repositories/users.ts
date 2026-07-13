@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, type Transaction, sql } from "kysely";
 import type { DB, UsersTable } from "../schema";
+import { invalidateSettingsCache } from "./settings";
 
 type UserDb = Kysely<DB> | Transaction<DB>;
 type UserRow = Selectable<UsersTable>;
@@ -330,6 +331,9 @@ export function createUserRepository(db: UserDb): UserRepository {
         .set({ whatsapp_fallback_agent_id: null })
         .where("whatsapp_fallback_agent_id", "=", id)
         .execute();
+      // Direct settings write — bust get() cache so WhatsApp fallback routing
+      // does not keep a deleted agent id until TTL expiry.
+      invalidateSettingsCache(db);
       return db.deleteFrom("users").where("id", "=", id).execute();
     },
 

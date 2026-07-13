@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { createSettingsRepository } from "./settings";
+import { createUserRepository } from "./users";
 
 describe("Settings repository", () => {
   let db: Kysely<DB>;
@@ -241,6 +242,17 @@ describe("Settings repository", () => {
 
       expect((await repoA.get())?.org_name).toBe("Concurrent");
       expect((await repoB.get())?.org_name).toBe("Concurrent");
+    });
+
+    it("users.remove() invalidates cached whatsapp_fallback_agent_id", async () => {
+      const users = createUserRepository(db);
+      await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      const agent = await users.create({ name: "Fallback Agent", type: "agent" });
+      await settings.update({ whatsappFallbackAgentId: agent.id });
+      expect((await settings.get())?.whatsapp_fallback_agent_id).toBe(agent.id);
+
+      await users.remove(agent.id);
+      expect((await settings.get())?.whatsapp_fallback_agent_id).toBeNull();
     });
   });
 });

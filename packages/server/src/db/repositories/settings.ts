@@ -145,6 +145,23 @@ function cacheBucketFor(root: SettingsDbCacheRoot, encryptionKey: string | undef
 }
 
 /**
+ * Bust process-local settings.get() cache for a db after a direct settings write
+ * that does not go through createSettingsRepository (e.g. users.remove clearing
+ * whatsapp_fallback_agent_id). Pass the same Kysely (or transaction) handle used
+ * by createSettingsRepository for that process. No-op when nothing has been
+ * cached for this handle.
+ */
+export function invalidateSettingsCache(db: object): void {
+  const root = cacheByDb.get(db);
+  if (!root) return;
+  root.generation += 1;
+  for (const bucket of root.buckets.values()) {
+    bucket.entry = null;
+    bucket.inflight = null;
+  }
+}
+
+/**
  * Singleton settings row repository with a process-local get() cache.
  *
  * Auth middleware, adapters, and agent runtime all call get() frequently for a
