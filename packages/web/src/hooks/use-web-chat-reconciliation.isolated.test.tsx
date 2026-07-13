@@ -1,4 +1,5 @@
 import { act, cleanup, render } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type UseWebChatReconciliationParams,
@@ -23,6 +24,10 @@ const REQUEST_TIMEOUT_MS = 10_000;
 
 function hasPendingProgress(messages: TestMessage[]): boolean {
   return messages.at(-1)?.id === "assistant-pending";
+}
+
+function abortError(): DOMException {
+  return new DOMException("Aborted", "AbortError");
 }
 
 function deferred<T>() {
@@ -50,7 +55,7 @@ function createParams(overrides: Partial<TestParams> = {}): TestParams {
   };
 }
 
-function renderReconciliation(initialParams: TestParams) {
+function renderReconciliation(initialParams: TestParams, options: { strict?: boolean } = {}) {
   const result = { current: null as unknown as WebChatReconciliationResult };
 
   function Harness({ params }: { params: TestParams }) {
@@ -58,10 +63,18 @@ function renderReconciliation(initialParams: TestParams) {
     return null;
   }
 
-  const view = render(<Harness params={initialParams} />);
+  const renderHarness = (params: TestParams) =>
+    options.strict ? (
+      <StrictMode>
+        <Harness params={params} />
+      </StrictMode>
+    ) : (
+      <Harness params={params} />
+    );
+  const view = render(renderHarness(initialParams));
   return {
     result,
-    rerender: (params: TestParams) => view.rerender(<Harness params={params} />),
+    rerender: (params: TestParams) => view.rerender(renderHarness(params)),
     unmount: view.unmount,
   };
 }
@@ -116,7 +129,7 @@ describe("useWebChatReconciliation", () => {
     );
     await flushAsyncWork();
 
-    expect(loadMessages).toHaveBeenCalledWith("chat-alpha");
+    expect(loadMessages).toHaveBeenCalledWith("chat-alpha", expect.any(AbortSignal));
     expect(setMessages).toHaveBeenCalledWith(persistedPendingMessages);
     expect(clearError).toHaveBeenCalledTimes(1);
     expect(setMessages.mock.invocationCallOrder[0]).toBeLessThan(clearError.mock.invocationCallOrder[0] ?? 0);
@@ -141,8 +154,26 @@ describe("useWebChatReconciliation", () => {
     expect(loadMessages).not.toHaveBeenCalled();
 
     await advanceTimersByTime(1);
-    expect(loadMessages).toHaveBeenCalledWith("chat-alpha");
+    expect(loadMessages).toHaveBeenCalledWith("chat-alpha", expect.any(AbortSignal));
     expect(setMessages).toHaveBeenCalledWith(persistedPendingMessages);
+  });
+
+  it.each(["submitted", "streaming"] as const)("does not poll pending progress while status is %s", async (status) => {
+    const loadMessages = vi.fn().mockResolvedValue({
+      messages: persistedPendingMessages,
+      updatedAt: "2026-07-13T07:30:00.000Z",
+    });
+
+    renderReconciliation(
+      createParams({
+        status,
+        messages: persistedPendingMessages,
+        loadMessages,
+      }),
+    );
+    await advanceTimersByTime(WEB_CHAT_RECONCILE_INTERVAL_MS * 2);
+
+    expect(loadMessages).not.toHaveBeenCalled();
   });
 
   it("progresses from silent recovery to reconnecting and persistent stages", async () => {
@@ -215,7 +246,7 @@ describe("useWebChatReconciliation", () => {
     document.dispatchEvent(new Event("visibilitychange"));
     await flushAsyncWork();
 
-    expect(loadMessages).toHaveBeenCalledWith("chat-alpha");
+    expect(loadMessages).toHaveBeenCalledWith("chat-alpha", expect.any(AbortSignal));
   });
 
   it("reconciles immediately on online events while persisted progress is active", async () => {
@@ -234,12 +265,29 @@ describe("useWebChatReconciliation", () => {
     window.dispatchEvent(new Event("online"));
     await flushAsyncWork();
 
-    expect(loadMessages).toHaveBeenCalledWith("chat-alpha");
+    expect(loadMessages).toHaveBeenCalledWith("chat-alpha", expect.any(AbortSignal));
   });
 
   it("prevents overlapping reconciliation requests", async () => {
-    const pendingLoad = deferred<{ messages: TestMessage[]; updatedAt: string | null }>();
-    const loadMessages = vi.fn().mockReturnValue(pendingLoad.promise);
+    let activeLoads = 0;
+    let maxActiveLoads = 0;
+    const signals: AbortSignal[] = [];
+    const loadMessages = vi.fn((_conversationId: string, signal: AbortSignal) => {
+      signals.push(signal);
+      activeLoads += 1;
+      maxActiveLoads = Math.max(maxActiveLoads, activeLoads);
+      return new Promise<{ messages: TestMessage[]; updatedAt: string | null }>((_resolve, reject) => {
+        const abort = () => {
+          activeLoads -= 1;
+          reject(abortError());
+        };
+        if (signal.aborted) {
+          abort();
+        } else {
+          signal.addEventListener("abort", abort, { once: true });
+        }
+      });
+    });
     const { result } = renderReconciliation(
       createParams({
         status: "error",
@@ -249,15 +297,15 @@ describe("useWebChatReconciliation", () => {
     );
     await flushAsyncWork();
 
-    document.dispatchEvent(new Event("visibilitychange"));
-    window.dispatchEvent(new Event("online"));
     result.current.retryNow();
-    await advanceTimersByTime(WEB_CHAT_RECONCILE_INTERVAL_MS * 2);
-
     expect(loadMessages).toHaveBeenCalledTimes(1);
+    expect(signals[0]?.aborted).toBe(true);
 
-    pendingLoad.resolve({ messages: persistedPendingMessages, updatedAt: null });
     await flushAsyncWork();
+
+    expect(loadMessages).toHaveBeenCalledTimes(2);
+    expect(maxActiveLoads).toBe(1);
+    expect(signals[1]?.aborted).toBe(false);
   });
 
   it("rejects an in-flight response after the conversation becomes terminal", async () => {
@@ -295,14 +343,20 @@ describe("useWebChatReconciliation", () => {
     expect(result.current.stage).toBe("idle");
   });
 
-  it("resets recovery and reconciles a new conversation after the old request settles", async () => {
-    const oldLoad = deferred<{ messages: TestMessage[]; updatedAt: string | null }>();
+  it("aborts the old conversation before reconciling the new conversation", async () => {
+    let rejectOldLoad!: (reason?: unknown) => void;
+    let oldSignal: AbortSignal | undefined;
     const betaUserMessage = { id: "user-beta", role: "user" };
     const betaMessages = [betaUserMessage, { id: "assistant-beta", role: "assistant" }];
-    const loadMessages = vi
-      .fn()
-      .mockReturnValueOnce(oldLoad.promise)
-      .mockResolvedValueOnce({ messages: betaMessages, updatedAt: null });
+    const loadMessages = vi.fn((conversationId: string, signal: AbortSignal) => {
+      if (conversationId === "chat-alpha") {
+        oldSignal = signal;
+        return new Promise<{ messages: TestMessage[]; updatedAt: string | null }>((_resolve, reject) => {
+          rejectOldLoad = reject;
+        });
+      }
+      return Promise.resolve({ messages: betaMessages, updatedAt: null });
+    });
     const setMessages = vi.fn();
     const clearError = vi.fn();
     const { result, rerender } = renderReconciliation(
@@ -330,22 +384,29 @@ describe("useWebChatReconciliation", () => {
       }),
     );
     expect(result.current.stage).toBe("silent");
+    expect(oldSignal?.aborted).toBe(true);
+    expect(loadMessages).toHaveBeenCalledTimes(1);
 
-    oldLoad.resolve({ messages: persistedPendingMessages, updatedAt: null });
+    rejectOldLoad(abortError());
     await flushAsyncWork();
 
-    expect(loadMessages).toHaveBeenNthCalledWith(1, "chat-alpha");
-    expect(loadMessages).toHaveBeenNthCalledWith(2, "chat-beta");
-    expect(setMessages).not.toHaveBeenCalledWith(persistedPendingMessages);
+    expect(loadMessages).toHaveBeenNthCalledWith(1, "chat-alpha", expect.any(AbortSignal));
+    expect(loadMessages).toHaveBeenNthCalledWith(2, "chat-beta", expect.any(AbortSignal));
     expect(setMessages).toHaveBeenCalledWith(betaMessages);
   });
 
-  it("runs a queued manual retry immediately after the in-flight request settles", async () => {
-    const pendingLoad = deferred<{ messages: TestMessage[]; updatedAt: string | null }>();
-    const loadMessages = vi
-      .fn()
-      .mockReturnValueOnce(pendingLoad.promise)
-      .mockResolvedValueOnce({ messages: persistedFinalMessages, updatedAt: null });
+  it("aborts and queues a manual retry until the current request settles", async () => {
+    let rejectFirstLoad!: (reason?: unknown) => void;
+    let firstSignal: AbortSignal | undefined;
+    const loadMessages = vi.fn((_conversationId: string, signal: AbortSignal) => {
+      if (!firstSignal) {
+        firstSignal = signal;
+        return new Promise<{ messages: TestMessage[]; updatedAt: string | null }>((_resolve, reject) => {
+          rejectFirstLoad = reject;
+        });
+      }
+      return Promise.resolve({ messages: persistedFinalMessages, updatedAt: null });
+    });
     const setMessages = vi.fn();
     const { result } = renderReconciliation(
       createParams({
@@ -358,19 +419,26 @@ describe("useWebChatReconciliation", () => {
     await flushAsyncWork();
 
     result.current.retryNow();
-    pendingLoad.resolve({ messages: [], updatedAt: null });
+    expect(firstSignal?.aborted).toBe(true);
+    expect(loadMessages).toHaveBeenCalledTimes(1);
+
+    rejectFirstLoad(abortError());
     await flushAsyncWork();
 
     expect(loadMessages).toHaveBeenCalledTimes(2);
     expect(setMessages).toHaveBeenCalledWith(persistedFinalMessages);
   });
 
-  it("releases a timed-out request and rejects its late result", async () => {
-    const timedOutLoad = deferred<{ messages: TestMessage[]; updatedAt: string | null }>();
+  it("does not adopt a late result after its request was aborted", async () => {
+    const abortedLoad = deferred<{ messages: TestMessage[]; updatedAt: string | null }>();
     const lateMessages = [latestUserMessage, { id: "assistant-late", role: "assistant" }];
+    let firstSignal: AbortSignal | undefined;
     const loadMessages = vi
       .fn()
-      .mockReturnValueOnce(timedOutLoad.promise)
+      .mockImplementationOnce((_conversationId: string, signal: AbortSignal) => {
+        firstSignal = signal;
+        return abortedLoad.promise;
+      })
       .mockResolvedValueOnce({ messages: persistedFinalMessages, updatedAt: null });
     const setMessages = vi.fn();
     const { result } = renderReconciliation(
@@ -384,15 +452,76 @@ describe("useWebChatReconciliation", () => {
     await flushAsyncWork();
 
     result.current.retryNow();
-    await advanceTimersByTime(REQUEST_TIMEOUT_MS);
+    expect(firstSignal?.aborted).toBe(true);
+    expect(loadMessages).toHaveBeenCalledTimes(1);
 
-    expect(loadMessages).toHaveBeenCalledTimes(2);
-    expect(setMessages).toHaveBeenCalledWith(persistedFinalMessages);
-
-    timedOutLoad.resolve({ messages: lateMessages, updatedAt: null });
+    abortedLoad.resolve({ messages: lateMessages, updatedAt: null });
     await flushAsyncWork();
 
     expect(setMessages).not.toHaveBeenCalledWith(lateMessages);
+    expect(setMessages).toHaveBeenCalledWith(persistedFinalMessages);
+  });
+
+  it("waits for a timed-out request to settle before retrying", async () => {
+    let rejectTimedOutLoad!: (reason?: unknown) => void;
+    let timedOutSignal: AbortSignal | undefined;
+    const loadMessages = vi.fn((_conversationId: string, signal: AbortSignal) => {
+      if (!timedOutSignal) {
+        timedOutSignal = signal;
+        return new Promise<{ messages: TestMessage[]; updatedAt: string | null }>((_resolve, reject) => {
+          rejectTimedOutLoad = reject;
+        });
+      }
+      return Promise.resolve({ messages: persistedFinalMessages, updatedAt: null });
+    });
+
+    renderReconciliation(
+      createParams({
+        status: "error",
+        error: new Error("stream dropped"),
+        loadMessages,
+      }),
+    );
+    await flushAsyncWork();
+    await advanceTimersByTime(REQUEST_TIMEOUT_MS);
+
+    expect(timedOutSignal?.aborted).toBe(true);
+    expect(loadMessages).toHaveBeenCalledTimes(1);
+
+    rejectTimedOutLoad(abortError());
+    await flushAsyncWork();
+    await advanceTimersByTime(WEB_CHAT_RECONCILE_INTERVAL_MS);
+
+    expect(loadMessages).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases an abort-aware loader during StrictMode replay", async () => {
+    const signals: AbortSignal[] = [];
+    const loadMessages = vi.fn((_conversationId: string, signal: AbortSignal) => {
+      signals.push(signal);
+      return new Promise<{ messages: TestMessage[]; updatedAt: string | null }>((_resolve, reject) => {
+        const abort = () => reject(abortError());
+        if (signal.aborted) {
+          abort();
+        } else {
+          signal.addEventListener("abort", abort, { once: true });
+        }
+      });
+    });
+
+    renderReconciliation(
+      createParams({
+        status: "error",
+        error: new Error("stream dropped"),
+        loadMessages,
+      }),
+      { strict: true },
+    );
+    await flushAsyncWork();
+
+    expect(loadMessages).toHaveBeenCalledTimes(2);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[1]?.aborted).toBe(false);
   });
 
   it("suppresses the transport error while recovery owns its presentation", async () => {

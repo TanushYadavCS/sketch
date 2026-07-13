@@ -6,11 +6,16 @@ export const WEB_CHAT_RECONNECT_NOTICE_MS = 2_000;
 export const WEB_CHAT_PERSISTENT_ERROR_MS = 15_000;
 
 const WEB_CHAT_RECONCILE_REQUEST_TIMEOUT_MS = 10_000;
-const RECONCILIATION_REQUEST_TIMEOUT = Symbol("reconciliation-request-timeout");
 
 type ReconciliationMessage = {
   id: string;
   role: string;
+};
+
+type ActiveReconciliationRequest = {
+  controller: AbortController;
+  generation: number;
+  timeoutId: number | null;
 };
 
 export interface UseWebChatReconciliationParams<TMessage extends ReconciliationMessage> {
@@ -20,7 +25,10 @@ export interface UseWebChatReconciliationParams<TMessage extends ReconciliationM
   error: Error | undefined;
   messages: TMessage[];
   hasPendingProgress: (messages: TMessage[]) => boolean;
-  loadMessages: (conversationId: string) => Promise<{ messages: TMessage[]; updatedAt: string | null }>;
+  loadMessages: (
+    conversationId: string,
+    signal: AbortSignal,
+  ) => Promise<{ messages: TMessage[]; updatedAt: string | null }>;
   setMessages: (messages: TMessage[]) => void;
   clearError: () => void;
 }
@@ -57,11 +65,10 @@ export function useWebChatReconciliation<TMessage extends ReconciliationMessage>
   const [stage, setStage] = useState<ChatRecoveryStage>("idle");
   const paramsRef = useRef(params);
   const mountedRef = useRef(true);
-  const inFlightRef = useRef<Promise<void> | null>(null);
+  const activeRequestRef = useRef<ActiveReconciliationRequest | null>(null);
   const pollTimerRef = useRef<number | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const persistentTimerRef = useRef<number | null>(null);
-  const requestTimeoutRef = useRef<number | null>(null);
   const requestGenerationRef = useRef(0);
   const previousConversationIdRef = useRef(params.conversationId);
   const queuedRetryRef = useRef(false);
@@ -85,11 +92,34 @@ export function useWebChatReconciliation<TMessage extends ReconciliationMessage>
     }
   }, []);
 
-  const clearRequestTimeout = useCallback(() => {
-    if (requestTimeoutRef.current === null) return;
-    window.clearTimeout(requestTimeoutRef.current);
-    requestTimeoutRef.current = null;
+  const clearRequestTimeout = useCallback((request: ActiveReconciliationRequest) => {
+    if (request.timeoutId === null) return;
+    window.clearTimeout(request.timeoutId);
+    request.timeoutId = null;
   }, []);
+
+  const abortActiveRequest = useCallback(
+    (queueRetry: boolean) => {
+      const request = activeRequestRef.current;
+      if (!request) return false;
+      if (queueRetry) queuedRetryRef.current = true;
+      if (!request.controller.signal.aborted) {
+        requestGenerationRef.current += 1;
+        clearRequestTimeout(request);
+        request.controller.abort();
+      }
+      return true;
+    },
+    [clearRequestTimeout],
+  );
+
+  const invalidateConversationRequest = useCallback(() => {
+    const currentParams = paramsRef.current;
+    const queueImmediateRetry = currentParams.historyReady && currentParams.status === "error";
+    if (!abortActiveRequest(queueImmediateRetry)) {
+      requestGenerationRef.current += 1;
+    }
+  }, [abortActiveRequest]);
 
   const schedulePoll = useCallback(
     (delayMs: number) => {
@@ -105,7 +135,7 @@ export function useWebChatReconciliation<TMessage extends ReconciliationMessage>
   const reconcile = useCallback(() => {
     const requestParams = paramsRef.current;
     if (!isReconciliationActive(requestParams)) return;
-    if (inFlightRef.current) {
+    if (activeRequestRef.current) {
       queuedRetryRef.current = true;
       return;
     }
@@ -113,21 +143,26 @@ export function useWebChatReconciliation<TMessage extends ReconciliationMessage>
     const requestConversationId = requestParams.conversationId;
     const requestGeneration = requestGenerationRef.current + 1;
     requestGenerationRef.current = requestGeneration;
+    const request: ActiveReconciliationRequest = {
+      controller: new AbortController(),
+      generation: requestGeneration,
+      timeoutId: null,
+    };
+    activeRequestRef.current = request;
     let adopted = false;
     let adoptedPendingProgress = false;
-    const loadPromise = Promise.resolve().then(() => requestParams.loadMessages(requestConversationId));
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      requestTimeoutRef.current = window.setTimeout(() => {
-        requestTimeoutRef.current = null;
-        reject(RECONCILIATION_REQUEST_TIMEOUT);
-      }, WEB_CHAT_RECONCILE_REQUEST_TIMEOUT_MS);
-    });
-    const request = Promise.race([loadPromise, timeoutPromise])
+    request.timeoutId = window.setTimeout(() => {
+      request.timeoutId = null;
+      if (activeRequestRef.current === request) abortActiveRequest(false);
+    }, WEB_CHAT_RECONCILE_REQUEST_TIMEOUT_MS);
+    void Promise.resolve()
+      .then(() => requestParams.loadMessages(requestConversationId, request.controller.signal))
       .then(({ messages }) => {
         const currentParams = paramsRef.current;
         if (
           !mountedRef.current ||
-          requestGenerationRef.current !== requestGeneration ||
+          request.controller.signal.aborted ||
+          requestGenerationRef.current !== request.generation ||
           currentParams.conversationId !== requestConversationId ||
           !isReconciliationActive(currentParams)
         ) {
@@ -144,14 +179,11 @@ export function useWebChatReconciliation<TMessage extends ReconciliationMessage>
         clearRecoveryTimers();
         setStage("idle");
       })
-      .catch((error: unknown) => {
-        if (error === RECONCILIATION_REQUEST_TIMEOUT && requestGenerationRef.current === requestGeneration) {
-          requestGenerationRef.current += 1;
-        }
-      })
+      .catch(() => undefined)
       .finally(() => {
-        clearRequestTimeout();
-        if (inFlightRef.current === request) inFlightRef.current = null;
+        clearRequestTimeout(request);
+        if (activeRequestRef.current !== request) return;
+        activeRequestRef.current = null;
         if (!mountedRef.current) return;
 
         const currentParams = paramsRef.current;
@@ -181,17 +213,16 @@ export function useWebChatReconciliation<TMessage extends ReconciliationMessage>
           schedulePoll(WEB_CHAT_RECONCILE_INTERVAL_MS);
         }
       });
-
-    inFlightRef.current = request;
-  }, [clearPollTimer, clearRecoveryTimers, clearRequestTimeout, schedulePoll]);
+  }, [abortActiveRequest, clearPollTimer, clearRecoveryTimers, clearRequestTimeout, schedulePoll]);
   reconcileRef.current = reconcile;
 
   const retryNow = useCallback(() => {
     const currentParams = paramsRef.current;
     if (!isReconciliationActive(currentParams)) return;
     clearPollTimer();
+    if (abortActiveRequest(true)) return;
     reconcile();
-  }, [clearPollTimer, reconcile]);
+  }, [abortActiveRequest, clearPollTimer, reconcile]);
 
   const active = isReconciliationActive(params);
   const conversationId = params.conversationId;
@@ -199,8 +230,8 @@ export function useWebChatReconciliation<TMessage extends ReconciliationMessage>
   useEffect(() => {
     if (previousConversationIdRef.current === conversationId) return;
     previousConversationIdRef.current = conversationId;
-    requestGenerationRef.current += 1;
-  }, [conversationId]);
+    invalidateConversationRequest();
+  }, [conversationId, invalidateConversationRequest]);
 
   useEffect(() => {
     clearRecoveryTimers();
@@ -251,13 +282,12 @@ export function useWebChatReconciliation<TMessage extends ReconciliationMessage>
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      requestGenerationRef.current += 1;
       queuedRetryRef.current = false;
       clearPollTimer();
       clearRecoveryTimers();
-      clearRequestTimeout();
+      abortActiveRequest(false);
     };
-  }, [clearPollTimer, clearRecoveryTimers, clearRequestTimeout]);
+  }, [abortActiveRequest, clearPollTimer, clearRecoveryTimers]);
 
   return {
     stage,
