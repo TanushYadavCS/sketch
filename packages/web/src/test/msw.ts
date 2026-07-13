@@ -14,6 +14,7 @@ export const handlers = [
       orgName: null,
       botName: "Sketch",
       slackConnected: false,
+      whatsappConnected: false,
       llmConnected: false,
       llmProvider: null,
     });
@@ -98,6 +99,24 @@ export const handlers = [
 
   http.get("/api/channels/whatsapp/groups", () => {
     return HttpResponse.json({ groups: [] });
+  }),
+
+  http.get("/api/channels/whatsapp/groups/:jid/member-labels", () => {
+    return HttpResponse.json({ labels: [] });
+  }),
+
+  http.put("/api/channels/whatsapp/groups/:jid/member-labels", async ({ request }) => {
+    const body = (await request.json()) as {
+      labels?: Array<{ id?: string; phoneE164?: string; displayName: string; companyName?: string | null }>;
+    };
+    return HttpResponse.json({
+      labels: (body.labels ?? []).map((label, index) => ({
+        id: label.id ?? `label-${index}`,
+        maskedPhone: label.phoneE164 ? `**${label.phoneE164.replace(/\D/gu, "").slice(-2)}` : "**67",
+        displayName: label.displayName,
+        companyName: label.companyName ?? null,
+      })),
+    });
   }),
 
   http.delete("/api/channels/whatsapp/pair", () => {

@@ -43,6 +43,7 @@ export interface AgentRuntimeCompactionTriggerInput {
   thresholdFraction?: number;
   contextWindowTokens?: number;
   estimateTokens?: (value: unknown) => number;
+  messageTokenEstimator?: AgentRuntimeMessageTokenEstimator;
 }
 
 export interface AgentRuntimeKeepRecentTailBoundaryInput {
@@ -50,6 +51,7 @@ export interface AgentRuntimeKeepRecentTailBoundaryInput {
   targetTokens: number;
   fallbackStartSeq?: number;
   estimateTokens?: (value: unknown) => number;
+  messageTokenEstimator?: AgentRuntimeMessageTokenEstimator;
 }
 
 export interface DefaultAgentRuntimeCompactionProviderParams {
@@ -89,6 +91,63 @@ export function estimateAgentRuntimeTokens(value: unknown): number {
 
 function estimateMessageTokens(message: AgentRuntimeMessage, estimateTokens: (value: unknown) => number): number {
   return estimateTokens({ role: message.role, content: message.content });
+}
+
+/**
+ * Per-message token estimates are recomputed every turn on the pre-run compaction path, which re-serializes the
+ * entire history each time. Persisted rows are immutable once written and their seq is unique within a session,
+ * so a per-process, per-(session, seq) cache lets each turn estimate only newly appended rows. The cache is a
+ * pure latency optimization: it is empty after a restart and always recomputes the identical char/4 estimate,
+ * so correctness never depends on it. A session always drives the same estimator, so keying by seq alone is safe.
+ */
+const MAX_ESTIMATE_CACHE_SESSIONS = 1024;
+const MAX_ESTIMATE_CACHE_ENTRIES_PER_SESSION = 8192;
+const messageTokenEstimateCache = new Map<string, Map<number, number>>();
+
+function sessionEstimateCache(sessionId: string): Map<number, number> {
+  const existing = messageTokenEstimateCache.get(sessionId);
+  if (existing) {
+    messageTokenEstimateCache.delete(sessionId);
+    messageTokenEstimateCache.set(sessionId, existing);
+    return existing;
+  }
+
+  const created = new Map<number, number>();
+  messageTokenEstimateCache.set(sessionId, created);
+  if (messageTokenEstimateCache.size > MAX_ESTIMATE_CACHE_SESSIONS) {
+    const oldest = messageTokenEstimateCache.keys().next().value;
+    if (oldest !== undefined) messageTokenEstimateCache.delete(oldest);
+  }
+  return created;
+}
+
+export type AgentRuntimeMessageTokenEstimator = (message: AgentRuntimeMessage) => number;
+
+/**
+ * Builds a memoized per-message estimator scoped to one session. Newly appended seqs are estimated once and
+ * reused on later turns; the oldest cached seqs (already behind the compaction boundary) are evicted first.
+ */
+export function createCachedMessageTokenEstimator(
+  sessionId: string,
+  estimateTokens: (value: unknown) => number = estimateAgentRuntimeTokens,
+): AgentRuntimeMessageTokenEstimator {
+  const cache = sessionEstimateCache(sessionId);
+  return (message) => {
+    const cached = cache.get(message.seq);
+    if (cached !== undefined) return cached;
+    const value = estimateMessageTokens(message, estimateTokens);
+    cache.delete(message.seq);
+    cache.set(message.seq, value);
+    if (cache.size > MAX_ESTIMATE_CACHE_ENTRIES_PER_SESSION) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    return value;
+  };
+}
+
+function defaultMessageTokenEstimator(estimateTokens: (value: unknown) => number): AgentRuntimeMessageTokenEstimator {
+  return (message) => estimateMessageTokens(message, estimateTokens);
 }
 
 function isLikelyZodSchema(value: unknown): boolean {
@@ -146,11 +205,12 @@ export function createAgentRuntimeCompactionTrigger(
   input: AgentRuntimeCompactionTriggerInput,
 ): AgentRuntimeCompactionTrigger {
   const estimateTokens = input.estimateTokens ?? estimateAgentRuntimeTokens;
+  const estimateMessage = input.messageTokenEstimator ?? defaultMessageTokenEstimator(estimateTokens);
   const config = createTriggerConfig(input);
   const thresholdTokens = Math.floor(config.contextWindowTokens * config.thresholdFraction);
   const estimatedInputTokens =
     estimateTokens(input.systemPrompt) +
-    input.history.reduce((total, message) => total + estimateMessageTokens(message, estimateTokens), 0) +
+    input.history.reduce((total, message) => total + estimateMessage(message), 0) +
     estimateTokens(input.currentUserMessage) +
     estimateToolSetTokens(input.tools, estimateTokens);
 
@@ -177,6 +237,14 @@ function isCompactionSummaryEnvelope(value: unknown): value is AgentRuntimeCompa
 
 function isCompactionSummaryRow(message: AgentRuntimeMessage): boolean {
   return isCompactionSummaryEnvelope(message.content);
+}
+
+/**
+ * Reads the replaced-prefix boundary from a persisted row's content when it is a compaction marker.
+ * The turn load path uses this to skip re-reading rows at or below the boundary; a non-marker row returns null.
+ */
+export function readCompactionReplacedPrefixEnd(content: unknown): number | null {
+  return isCompactionSummaryEnvelope(content) ? content.replacedPrefixEndSeq : null;
 }
 
 function latestCompactionSummary(rows: readonly AgentRuntimeMessage[]): {
@@ -259,7 +327,7 @@ function initialTailStartSeq(
   messages: readonly AgentRuntimeMessage[],
   targetTokens: number,
   fallbackStartSeq: number,
-  estimateTokens: (value: unknown) => number,
+  estimateMessage: AgentRuntimeMessageTokenEstimator,
 ): number {
   if (messages.length === 0) return fallbackStartSeq;
 
@@ -270,7 +338,7 @@ function initialTailStartSeq(
   for (let index = sorted.length - 1; index >= 0; index -= 1) {
     const message = sorted[index];
     startSeq = message.seq;
-    accumulatedTokens += estimateMessageTokens(message, estimateTokens);
+    accumulatedTokens += estimateMessage(message);
     if (accumulatedTokens >= targetTokens) break;
   }
 
@@ -281,6 +349,7 @@ export function computeAgentRuntimeKeepRecentTailBoundary(
   input: AgentRuntimeKeepRecentTailBoundaryInput,
 ): AgentRuntimeKeepRecentTailBoundary {
   const estimateTokens = input.estimateTokens ?? estimateAgentRuntimeTokens;
+  const estimateMessage = input.messageTokenEstimator ?? defaultMessageTokenEstimator(estimateTokens);
   const sortedMessages = input.messages
     .filter((message) => !isCompactionSummaryRow(message))
     .sort((a, b) => a.seq - b.seq);
@@ -288,7 +357,7 @@ export function computeAgentRuntimeKeepRecentTailBoundary(
     input.fallbackStartSeq ?? (sortedMessages.length > 0 ? (sortedMessages.at(-1)?.seq ?? 0) + 1 : 1);
   const pairs = collectToolCallResultPairs(sortedMessages);
   const checkedPairs = new Map<string, AgentRuntimeToolCallResultPairBoundary>();
-  let startSeq = initialTailStartSeq(sortedMessages, input.targetTokens, fallbackStartSeq, estimateTokens);
+  let startSeq = initialTailStartSeq(sortedMessages, input.targetTokens, fallbackStartSeq, estimateMessage);
   let moved = true;
 
   while (moved) {
@@ -401,6 +470,10 @@ export function createDefaultAgentRuntimeCompactionProvider(
       const reconstructed = reconstructCompactedHistory(messages);
       if (messages.length === 0) return reconstructed;
 
+      const messageTokenEstimator = createCachedMessageTokenEstimator(
+        sessionId,
+        params.estimateTokens ?? estimateAgentRuntimeTokens,
+      );
       const trigger = createAgentRuntimeCompactionTrigger({
         modelId: params.provider.modelId,
         systemPrompt: params.systemPrompt,
@@ -410,6 +483,7 @@ export function createDefaultAgentRuntimeCompactionProvider(
         thresholdFraction: params.thresholdFraction,
         contextWindowTokens: params.contextWindowTokens,
         estimateTokens: params.estimateTokens,
+        messageTokenEstimator,
       });
       if (trigger.behavior === "skip") return reconstructed;
 
@@ -424,6 +498,7 @@ export function createDefaultAgentRuntimeCompactionProvider(
         targetTokens,
         fallbackStartSeq: (latest?.envelope.replacedPrefixEndSeq ?? 0) + 1,
         estimateTokens: params.estimateTokens,
+        messageTokenEstimator,
       });
       const tailSeqs = new Set(
         persistedTailRows.filter((message) => message.seq >= keepRecentTail.startSeq).map((message) => message.seq),

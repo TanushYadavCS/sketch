@@ -39,7 +39,6 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     }
   }
 }
-
 export async function down(db: Kysely<unknown>): Promise<void> {
   await db.schema.alterTable("tasks").dropColumn("proposed_assignee_name").execute();
 }

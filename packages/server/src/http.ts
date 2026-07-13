@@ -364,6 +364,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       onSlackTokensUpdated: deps?.onSlackTokensUpdated,
       onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
       userRepo: users,
+      whatsappConnected: () => Boolean(deps?.whatsappRuntime?.isConnected || deps?.whatsapp?.isConnected),
     }),
   );
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger, config));

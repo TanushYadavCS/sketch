@@ -25,10 +25,16 @@ import {
   type proto,
 } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
+import type {
+  WhatsAppGroupParticipantInput,
+  WhatsAppGroupParticipantRefreshLogger,
+} from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import type { Logger } from "../logger";
 import { createDbAuthState } from "./auth-store";
 import { WHATSAPP_TEXT_LIMIT, chunkText } from "./chunking";
+import { collectWhatsAppGroupParticipants, toParticipantInputs } from "./group-participants";
+import type { WhatsAppGroupMetadata as ProviderWhatsAppGroupMetadata } from "./provider";
 
 const ECHO_TTL_MS = 60_000;
 const COMPOSING_INTERVAL_MS = 5_000;
@@ -90,7 +96,16 @@ export interface WhatsAppHistoryBatchResult {
   skippedDup: number;
 }
 
-export type WhatsAppHistoryMessagesHandler = (messages: WhatsAppGroupMessage[]) => Promise<WhatsAppHistoryBatchResult>;
+export interface WhatsAppHistoryBatchMetadata {
+  isLatest?: boolean;
+  progress?: number | null;
+  syncType?: proto.HistorySync.HistorySyncType | null;
+}
+
+export type WhatsAppHistoryMessagesHandler = (
+  messages: WhatsAppGroupMessage[],
+  metadata?: WhatsAppHistoryBatchMetadata,
+) => Promise<WhatsAppHistoryBatchResult>;
 
 export interface PairingCallbacks {
   onQr: (qr: string) => Promise<void>;
@@ -103,6 +118,12 @@ export interface WhatsAppBotConfig {
   logger: Logger;
   groupMetadataStore?: {
     upsert: (group: { jid: string; name: string; description: string | null; updated_at: string }) => Promise<unknown>;
+    refreshParticipants?: (
+      groupJid: string,
+      participants: WhatsAppGroupParticipantInput[],
+      lastSeenAt?: string,
+      logger?: WhatsAppGroupParticipantRefreshLogger,
+    ) => Promise<unknown>;
   };
 }
 
@@ -412,6 +433,11 @@ export class WhatsAppBot {
     return meta?.subject ?? "Unknown Group";
   }
 
+  async getProviderGroupMetadata(groupJid: string): Promise<ProviderWhatsAppGroupMetadata | undefined> {
+    const meta = await this.getGroupMetadata(groupJid);
+    return meta ? this.toProviderGroupMetadata(groupJid, meta) : undefined;
+  }
+
   async syncAllGroups(opts: { force?: boolean } = {}): Promise<number> {
     const socket = this.sock;
     const store = this.groupMetadataStore;
@@ -444,12 +470,7 @@ export class WhatsAppBot {
 
       for (const [jid, meta] of Object.entries(groups)) {
         this.groupMetaCache.set(jid, { meta, expires: Date.now() + GROUP_META_TTL_MS });
-        await store.upsert({
-          jid,
-          name: meta.subject ?? "Unknown Group",
-          description: meta.desc ?? null,
-          updated_at: new Date().toISOString(),
-        });
+        await this.persistGroupMetadata(jid, meta, new Date().toISOString());
         syncedCount += 1;
       }
 
@@ -563,7 +584,7 @@ export class WhatsAppBot {
     socket: WASocket = this.sock as WASocket,
     socketGeneration = this.activeSocketGeneration,
   ): void {
-    socket.ev.on("messaging-history.set", async ({ messages }) => {
+    socket.ev.on("messaging-history.set", async ({ messages, isLatest, progress, syncType }) => {
       if (socketGeneration !== this.activeSocketGeneration || socket !== this.sock) {
         return;
       }
@@ -605,7 +626,7 @@ export class WhatsAppBot {
       let result: WhatsAppHistoryBatchResult = { persisted: 0, skippedOld: 0, skippedDup: 0 };
       try {
         if (groupMessages.length > 0 && this.historyHandler) {
-          result = await this.historyHandler(groupMessages);
+          result = await this.historyHandler(groupMessages, { isLatest, progress, syncType });
         }
       } catch (err) {
         this.logger.warn(
@@ -632,6 +653,9 @@ export class WhatsAppBot {
           skippedNontext,
           skippedNonGroup,
           skippedNoSender,
+          isLatest,
+          progress,
+          syncType,
         },
         "WhatsApp history batch processed",
       );
@@ -838,18 +862,45 @@ export class WhatsAppBot {
       const meta = await this.sock?.groupMetadata(groupJid);
       if (meta) {
         this.groupMetaCache.set(groupJid, { meta, expires: Date.now() + GROUP_META_TTL_MS });
-        await this.groupMetadataStore?.upsert({
-          jid: groupJid,
-          name: meta.subject ?? "Unknown Group",
-          description: meta.desc ?? null,
-          updated_at: new Date().toISOString(),
-        });
+        await this.persistGroupMetadata(groupJid, meta, new Date().toISOString());
       }
       return meta;
     } catch (err) {
       this.logger.warn({ err, groupJid }, "Failed to fetch group metadata");
       return undefined;
     }
+  }
+
+  private async toProviderGroupMetadata(groupJid: string, meta: GroupMetadata): Promise<ProviderWhatsAppGroupMetadata> {
+    const collected = await collectWhatsAppGroupParticipants(meta, (jid) => this.resolveLidToPhone(jid));
+    if (collected.skippedCount > 0) {
+      this.logger.warn(
+        { groupJid, skippedCount: collected.skippedCount },
+        "Skipped unrecognized WhatsApp group participants",
+      );
+    }
+    return {
+      id: groupJid,
+      subject: meta.subject ?? "Unknown Group",
+      desc: meta.desc ?? null,
+      participants: collected.participants,
+    };
+  }
+
+  private async persistGroupMetadata(groupJid: string, meta: GroupMetadata, updatedAt: string): Promise<void> {
+    const providerMetadata = await this.toProviderGroupMetadata(groupJid, meta);
+    await this.groupMetadataStore?.upsert({
+      jid: groupJid,
+      name: providerMetadata.subject,
+      description: providerMetadata.desc ?? null,
+      updated_at: updatedAt,
+    });
+    await this.groupMetadataStore?.refreshParticipants?.(
+      groupJid,
+      toParticipantInputs(providerMetadata.participants),
+      updatedAt,
+      this.logger,
+    );
   }
 
   /**

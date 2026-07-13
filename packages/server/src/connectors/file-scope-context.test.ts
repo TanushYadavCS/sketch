@@ -18,6 +18,7 @@ import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import { loadBaselineKnownEntities } from "./enrichment";
 import {
+  ADJACENCY_MAX_ANCHOR_FILES,
   BASELINE_ALWAYS_INCLUDE_CAP,
   BASELINE_RELEVANCE_CAP,
   HALF_LIFE_DAYS,
@@ -361,6 +362,98 @@ describe("file-scope-context", () => {
     expect(older?.score).toBeCloseTo(expectedOlder, 3);
     expect((older?.score ?? 0) >= MIN_SCORE).toBe(true);
     expect((recent?.score ?? 0) > (older?.score ?? 0)).toBe(true);
+  });
+
+  it("bounds a high-degree company anchor to its most-recent files and surfaces the strongest co-mentions", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const dayMs = 24 * 60 * 60 * 1000;
+    await seedEntity(db, { id: "ent-hub-co", name: "Hub Co", sourceType: "company", hotness: 0.9 });
+
+    const fileCap = 3;
+    const totalFiles = 6;
+    for (let i = 0; i < totalFiles; i++) {
+      const fileId = `file-hub-co-${i}`;
+      const projectId = `proj-hub-co-${i}`;
+      await seedFile(db, fileId, new Date(now - (i + 1) * dayMs).toISOString());
+      await seedEntity(db, { id: projectId, name: `Hub Project ${i}`, sourceType: "project", hotness: 0.5 });
+      await seedMention(db, { entityId: "ent-hub-co", fileId });
+      await seedMention(db, { entityId: projectId, fileId });
+    }
+
+    const adj = await adjacencyForAnchor({ db, now: () => now }, "ent-hub-co", fileCap);
+
+    expect(adj).toHaveLength(fileCap);
+    expect(adj.map((a) => a.id)).toEqual(["proj-hub-co-0", "proj-hub-co-1", "proj-hub-co-2"]);
+    expect(adj.map((a) => a.id)).not.toContain("proj-hub-co-5");
+    for (let i = 0; i < fileCap; i++) {
+      expect(adj[i]?.score).toBeCloseTo(Math.exp(-(i + 1) / HALF_LIFE_DAYS), 6);
+      expect(adj[i]?.mentionCount).toBe(1);
+    }
+  });
+
+  it("leaves adjacency identical for a sub-cap anchor whether or not the file cap binds", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const dayMs = 24 * 60 * 60 * 1000;
+    await seedEntity(db, { id: "ent-typical-co", name: "Typical Co", sourceType: "company", hotness: 0.9 });
+    await seedEntity(db, { id: "proj-a", name: "Project A", sourceType: "project", hotness: 0.5 });
+    await seedEntity(db, { id: "proj-b", name: "Project B", sourceType: "project", hotness: 0.5 });
+
+    const fileA = "file-typical-a";
+    const fileB1 = "file-typical-b1";
+    const fileB2 = "file-typical-b2";
+    await seedFile(db, fileA, new Date(now - 3 * dayMs).toISOString());
+    await seedFile(db, fileB1, new Date(now - 20 * dayMs).toISOString());
+    await seedFile(db, fileB2, new Date(now - 25 * dayMs).toISOString());
+    await seedMention(db, { entityId: "ent-typical-co", fileId: fileA });
+    await seedMention(db, { entityId: "proj-a", fileId: fileA });
+    for (const f of [fileB1, fileB2]) {
+      await seedMention(db, { entityId: "ent-typical-co", fileId: f });
+      await seedMention(db, { entityId: "proj-b", fileId: f });
+    }
+
+    const withDefaultCap = await adjacencyForAnchor({ db, now: () => now }, "ent-typical-co");
+    const withHugeCap = await adjacencyForAnchor({ db, now: () => now }, "ent-typical-co", 10_000);
+
+    expect(withDefaultCap).toEqual(withHugeCap);
+    expect(withDefaultCap.map((a) => a.id)).toEqual(["proj-b", "proj-a"]);
+    expect(withDefaultCap.find((a) => a.id === "proj-a")?.score).toBeCloseTo(Math.exp(-3 / HALF_LIFE_DAYS), 6);
+    expect(withDefaultCap.find((a) => a.id === "proj-b")?.mentionCount).toBe(2);
+    expect(ADJACENCY_MAX_ANCHOR_FILES).toBeGreaterThan(3);
+  });
+
+  it("keeps person-anchor adjacency unchanged under the file-window cap", async () => {
+    const now = Date.UTC(2026, 4, 26);
+    const dayMs = 24 * 60 * 60 * 1000;
+    await seedEntity(db, { id: "person-anchor-adj", name: "Anchor Person", sourceType: "person", hotness: 5 });
+    await seedEntity(db, {
+      id: "proj-person-recent",
+      name: "Recent Person Project",
+      sourceType: "project",
+      hotness: 1,
+    });
+    await seedEntity(db, { id: "proj-person-older", name: "Older Person Project", sourceType: "project", hotness: 1 });
+
+    const recentFile = "file-person-adj-recent";
+    const olderFile1 = "file-person-adj-older-1";
+    const olderFile2 = "file-person-adj-older-2";
+    const olderFile3 = "file-person-adj-older-3";
+    await seedFile(db, recentFile, new Date(now - 5 * dayMs).toISOString());
+    for (const f of [olderFile1, olderFile2, olderFile3]) {
+      await seedFile(db, f, new Date(now - 90 * dayMs).toISOString());
+    }
+    await seedMention(db, { entityId: "person-anchor-adj", fileId: recentFile });
+    await seedMention(db, { entityId: "proj-person-recent", fileId: recentFile });
+    for (const f of [olderFile1, olderFile2, olderFile3]) {
+      await seedMention(db, { entityId: "person-anchor-adj", fileId: f });
+      await seedMention(db, { entityId: "proj-person-older", fileId: f });
+    }
+
+    const adj = await adjacencyForAnchor({ db, now: () => now }, "person-anchor-adj");
+
+    expect(adj.map((a) => a.id)).toEqual(["proj-person-recent", "proj-person-older"]);
+    expect(adj.find((a) => a.id === "proj-person-recent")?.score).toBeCloseTo(Math.exp(-5 / HALF_LIFE_DAYS), 6);
+    expect(adj.find((a) => a.id === "proj-person-older")?.score).toBeCloseTo(3 * Math.exp(-90 / HALF_LIFE_DAYS), 6);
+    expect(adj.find((a) => a.id === "proj-person-older")?.mentionCount).toBe(3);
   });
 
   it("returns pending proposals scoped to evidence files that mention the anchor", async () => {

@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 132;
+const EXPECTED_MIGRATION_COUNT = 136;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -165,8 +165,12 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[127]).toBe("132-agent-messages");
     expect(names[128]).toBe("133-chat-session-runtime");
     expect(names[129]).toBe("134-chat-session-archived-at");
-    expect(names[130]).toBe("135-tasks-proposed-assignee");
-    expect(names[131]).toBe("136-retire-unassigned-agent-tasks");
+    expect(names[130]).toBe("135-whatsapp-context-graph-indexing");
+    expect(names[131]).toBe("136-whatsapp-slice-denoised-message-ids");
+    expect(names[132]).toBe("137-whatsapp-group-participants");
+    expect(names[133]).toBe("138-whatsapp-identity-candidates");
+    expect(names[134]).toBe("139-tasks-proposed-assignee");
+    expect(names[135]).toBe("140-retire-unassigned-agent-tasks");
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {

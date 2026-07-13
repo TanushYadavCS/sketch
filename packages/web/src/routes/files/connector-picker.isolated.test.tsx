@@ -18,7 +18,7 @@ vi.mock("@/routes/dashboard", () => ({
   }),
 }));
 
-function setupStatus() {
+function setupStatus(overrides: { whatsappConnected?: boolean } = {}) {
   server.use(
     http.get("/api/setup/status", () =>
       HttpResponse.json({
@@ -28,6 +28,7 @@ function setupStatus() {
         orgName: "Acme",
         botName: "Sketch",
         slackConnected: true,
+        whatsappConnected: overrides.whatsappConnected ?? false,
         llmConnected: true,
         llmProvider: "anthropic",
       }),
@@ -329,5 +330,32 @@ describe("ConnectorPicker connector capabilities", () => {
 
     await waitFor(() => expect(onManage).toHaveBeenCalledTimes(2));
     expect(onManage.mock.calls[1]?.[1].id).toBe("own-conn");
+  });
+
+  it("only surfaces WhatsApp Groups after the WhatsApp channel is connected", async () => {
+    setupStatus({ whatsappConnected: false });
+    const { unmount } = renderWithProviders(
+      <ConnectorPicker
+        connectors={[]}
+        teamMemberCount={3}
+        connectorMemberCounts={{}}
+        sourceCounts={new Map()}
+        totalFiles={0}
+        localFileCount={0}
+        sourceFilter={null}
+        onSourceFilterChange={() => {}}
+        onConnected={() => {}}
+        onManageConnector={() => {}}
+      />,
+    );
+
+    await screen.findByRole("button", { name: /Browse all/i });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /WhatsApp Groups/i })).not.toBeInTheDocument());
+    unmount();
+
+    setupStatus({ whatsappConnected: true });
+    renderPicker([]);
+
+    expect(await screen.findByRole("button", { name: /WhatsApp Groups/i })).toBeInTheDocument();
   });
 });

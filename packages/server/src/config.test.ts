@@ -32,6 +32,11 @@ describe("configSchema", () => {
         expect(result.data.WHATSAPP_DM_PROVIDER).toBe("baileys");
         expect(result.data.WHATSAPP_GROUP_PROVIDER).toBe("baileys");
         expect(result.data.WHATSAPP_HISTORY_LOOKBACK_DAYS).toBe(30);
+        expect(result.data.WHATSAPP_SLICE_GAP_MINUTES).toBe(25);
+        expect(result.data.WHATSAPP_SLICE_MAX_AGE_MINUTES).toBe(120);
+        expect(result.data.WHATSAPP_SLICE_MAX_MESSAGES).toBe(50);
+        expect(result.data.WHATSAPP_SALIENCE_BATCH_LIMIT).toBe(50);
+        expect(result.data.WHATSAPP_EMISSION_REFRESH_DAYS).toBe(7);
         expect(result.data.WHATSAPP_WINDOW_KEEPALIVE_ENABLED).toBe(false);
         expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(4);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
@@ -75,6 +80,11 @@ describe("configSchema", () => {
         MANAGED_WHATSAPP_PLATFORM_URL: "https://app.getsketch.ai",
         MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
         WHATSAPP_HISTORY_LOOKBACK_DAYS: "14",
+        WHATSAPP_SLICE_GAP_MINUTES: "10",
+        WHATSAPP_SLICE_MAX_AGE_MINUTES: "90",
+        WHATSAPP_SLICE_MAX_MESSAGES: "20",
+        WHATSAPP_SALIENCE_BATCH_LIMIT: "7",
+        WHATSAPP_EMISSION_REFRESH_DAYS: "3",
         WHATSAPP_WINDOW_KEEPALIVE_ENABLED: "true",
       });
       expect(result.success).toBe(true);
@@ -83,6 +93,11 @@ describe("configSchema", () => {
         expect(result.data.MANAGED_WHATSAPP_PLATFORM_URL).toBe("https://app.getsketch.ai");
         expect(result.data.MANAGED_WHATSAPP_TENANT_TOKEN).toBe("tenant-token");
         expect(result.data.WHATSAPP_HISTORY_LOOKBACK_DAYS).toBe(14);
+        expect(result.data.WHATSAPP_SLICE_GAP_MINUTES).toBe(10);
+        expect(result.data.WHATSAPP_SLICE_MAX_AGE_MINUTES).toBe(90);
+        expect(result.data.WHATSAPP_SLICE_MAX_MESSAGES).toBe(20);
+        expect(result.data.WHATSAPP_SALIENCE_BATCH_LIMIT).toBe(7);
+        expect(result.data.WHATSAPP_EMISSION_REFRESH_DAYS).toBe(3);
         expect(result.data.WHATSAPP_WINDOW_KEEPALIVE_ENABLED).toBe(true);
       }
     });

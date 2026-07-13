@@ -46,6 +46,14 @@ function sanitizeFilename(name: string): string {
 }
 
 /**
+ * Per-hop timeout for Slack file downloads. Larger than the API-call default
+ * because attachments can be sizeable and the body is streamed in full; the
+ * signal is renewed on each redirect hop so a wedged CDN response cannot pin a
+ * queue slot indefinitely.
+ */
+const SLACK_FILE_DOWNLOAD_TIMEOUT_MS = 60_000;
+
+/**
  * Downloads a file from Slack's url_private with Bearer auth.
  * Follows redirects manually to strip auth header on CDN hops —
  * Slack redirects to pre-signed CDN URLs that reject the Bearer token.
@@ -73,7 +81,11 @@ export async function downloadSlackFile(
     }
 
     logger?.debug({ hop: i, hostname, isSlackHost, hasAuth: isSlackHost }, "Fetching URL");
-    response = await fetch(currentUrl, { headers, redirect: "manual" });
+    response = await fetch(currentUrl, {
+      headers,
+      redirect: "manual",
+      signal: AbortSignal.timeout(SLACK_FILE_DOWNLOAD_TIMEOUT_MS),
+    });
     logger?.debug(
       { hop: i, status: response.status, contentType: response.headers.get("content-type") },
       "Response received",

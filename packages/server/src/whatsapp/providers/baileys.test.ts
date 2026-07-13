@@ -22,6 +22,7 @@ function createMockBot() {
       addReaction: vi.fn(),
       removeReaction: vi.fn(),
       getGroupMetadata: vi.fn(),
+      getProviderGroupMetadata: vi.fn(),
       resolveJidToPhone: vi.fn(),
     },
     emit: async (message: unknown) => {
@@ -52,6 +53,25 @@ describe("createBaileysWhatsAppProviders", () => {
     await providers.groupProvider.sendText({ kind: "group", groupId: "group@g.us" }, "hello");
 
     expect(bot.sendText).toHaveBeenCalledWith("group@g.us", "hello", undefined);
+  });
+
+  it("returns provider-safe group metadata with participants", async () => {
+    const { bot } = createMockBot();
+    bot.getProviderGroupMetadata.mockResolvedValue({
+      id: "group@g.us",
+      subject: "Group",
+      desc: null,
+      participants: [{ jid: "15551234567@s.whatsapp.net", phoneE164: "+15551234567", lid: null, admin: "admin" }],
+    });
+    const providers = createBaileysWhatsAppProviders(bot as never, createTestLogger());
+
+    await expect(providers.groupProvider.getGroupMetadata?.("group@g.us")).resolves.toEqual({
+      id: "group@g.us",
+      subject: "Group",
+      desc: null,
+      participants: [{ jid: "15551234567@s.whatsapp.net", phoneE164: "+15551234567", lid: null, admin: "admin" }],
+    });
+    expect(bot.getProviderGroupMetadata).toHaveBeenCalledWith("group@g.us");
   });
 
   it("normalizes Baileys inbound DMs before emitting provider events", async () => {

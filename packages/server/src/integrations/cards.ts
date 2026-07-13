@@ -463,6 +463,23 @@ function toolResultText(value: unknown): string {
   return parts.join("\n");
 }
 
+/**
+ * Projects a raw tool-result payload down to the bounded text the per-run
+ * progress-event log actually needs. Runtimes call this AT PUSH TIME so the log
+ * retains only this capped string (<= TOOL_RESULT_TEXT_LIMIT chars) instead of
+ * the full, possibly multi-MB tool output that lived until run end.
+ *
+ * Behaviour is preserved because the sole consumer of a retained tool_result's
+ * `output` is `toolResultIndicatesConnectionIssue`, which flattens it through
+ * `toolResultText` anyway. `toolResultText` is idempotent on its own output
+ * (re-projecting a <=30k string returns it unchanged), so the connection-issue
+ * scan sees identical text whether it receives the raw payload or this
+ * projection.
+ */
+export function projectToolResultForProgressLog(output: unknown): string {
+  return toolResultText(output);
+}
+
 function toolResultIndicatesConnectionIssue(output: unknown): boolean {
   const text = toolResultText(output);
   if (!text.trim()) return false;

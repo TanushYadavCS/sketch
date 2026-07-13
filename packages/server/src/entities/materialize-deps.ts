@@ -8,6 +8,7 @@ import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createEntitySuppressionRepository } from "../db/repositories/entity-suppressions";
 import type { DB } from "../db/schema";
 import { personScopeKey, personScopeKeyId } from "./affiliations";
+import { DEFAULT_FACT_BATCH_SIZE, forEachFactBatch } from "./fact-batches";
 import { type MentionType, normalizeMentionType } from "./graph";
 import { normalizeEntityMatchName } from "./match-normalize";
 import { parseAliasesString, readJsonObject, readPersonEmailFromMetadata } from "./materialize-json";
@@ -173,29 +174,44 @@ async function buildPersonScopeKeys(db: Kysely<DB>, persons: EntityRow[]): Promi
   return new Map([...scopeKeys].map(([entityId, keys]) => [entityId, [...keys]]));
 }
 
+/**
+ * Scan `llm_extracted` facts for a third-party (company/tool) mention matching
+ * `name`. Keyset-paginated by `id` so only one page of `raw` payloads is held at
+ * once, with an early return on the first match. The single-pass version loaded
+ * every `llm_extracted` fact (including `raw`) on every call; iteration order was
+ * DB-unspecified then and is deterministic (ascending `id`) now.
+ */
 async function findLlmExtractedThirdPartyMention(
   db: Kysely<DB>,
   name: string,
 ): Promise<{ type: Extract<ProposeEntityType, "company" | "tool">; name: string } | null> {
-  const rows = await db
-    .selectFrom("indexed_file_facts")
-    .select(["subject_name", "raw"])
-    .where("source", "=", "llm_extraction")
-    .where("fact_type", "=", "llm_extracted")
-    .where("deleted_at", "is", null)
-    .where("subject_name", "is not", null)
-    .execute();
-  for (const row of rows) {
-    const raw = readJsonObject(row.raw);
-    const rawType = typeof raw.type === "string" ? raw.type.trim().toLowerCase() : "";
-    if (rawType !== "company" && rawType !== "tool") continue;
-    const mention = typeof raw.mention === "string" ? raw.mention : row.subject_name;
-    if (!mention) continue;
-    if (normalizeEntityMatchName(rawType, mention) === normalizeEntityMatchName(rawType, name)) {
-      return { type: rawType, name: mention };
+  let cursor = "";
+  for (;;) {
+    const rows = await db
+      .selectFrom("indexed_file_facts")
+      .select(["id", "subject_name", "raw"])
+      .where("source", "=", "llm_extraction")
+      .where("fact_type", "=", "llm_extracted")
+      .where("deleted_at", "is", null)
+      .where("subject_name", "is not", null)
+      .where("id", ">", cursor)
+      .orderBy("id", "asc")
+      .limit(DEFAULT_FACT_BATCH_SIZE)
+      .execute();
+    if (rows.length === 0) return null;
+    for (const row of rows) {
+      const raw = readJsonObject(row.raw);
+      const rawType = typeof raw.type === "string" ? raw.type.trim().toLowerCase() : "";
+      if (rawType !== "company" && rawType !== "tool") continue;
+      const mention = typeof raw.mention === "string" ? raw.mention : row.subject_name;
+      if (!mention) continue;
+      if (normalizeEntityMatchName(rawType, mention) === normalizeEntityMatchName(rawType, name)) {
+        return { type: rawType, name: mention };
+      }
     }
+    cursor = rows[rows.length - 1].id;
+    if (rows.length < DEFAULT_FACT_BATCH_SIZE) return null;
   }
-  return null;
 }
 
 function isNameDedupEntityType(entityType: ProposeEntityType): entityType is NameDedupEntityType {
@@ -269,26 +285,46 @@ function llmFileCountKey(normalizedName: string, mentionType: MentionType): stri
   return `${mentionType}\u0000${normalizedName}`;
 }
 
+/**
+ * Count distinct source files per (name, mention-type) across `llm_extracted`
+ * facts. Keyset-paginated by `id` so only one page of `raw` payloads is held at
+ * once; the result is order-independent, so streaming yields the same Map the
+ * single whole-table load produced.
+ */
 async function buildActiveLlmFileCounts(db: Kysely<DB>): Promise<Map<string, number>> {
-  const rows = await db
-    .selectFrom("indexed_file_facts")
-    .select(["indexed_file_id", "subject_name", "raw"])
-    .where("fact_type", "=", "llm_extracted")
-    .where("deleted_at", "is", null)
-    .where("subject_name", "is not", null)
-    .execute();
   const filesByName = new Map<string, Set<string>>();
-  for (const row of rows) {
-    if (!row.indexed_file_id || !row.subject_name) continue;
-    const mentionType = normalizeMentionType(readJsonObject(row.raw).type);
-    if (!mentionType) continue;
-    const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
-    if (!normalizedName) continue;
-    const key = llmFileCountKey(normalizedName, mentionType);
-    const files = filesByName.get(key);
-    if (files) files.add(row.indexed_file_id);
-    else filesByName.set(key, new Set([row.indexed_file_id]));
-  }
+  await forEachFactBatch(
+    (cursor, limit) =>
+      db
+        .selectFrom("indexed_file_facts")
+        .select(["id", "created_at", "indexed_file_id", "subject_name", "raw"])
+        .where("fact_type", "=", "llm_extracted")
+        .where("deleted_at", "is", null)
+        .where("subject_name", "is not", null)
+        .where((eb) =>
+          eb.or([
+            eb("created_at", ">", cursor.createdAt),
+            eb.and([eb("created_at", "=", cursor.createdAt), eb("id", ">", cursor.id)]),
+          ]),
+        )
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
+        .limit(limit)
+        .execute(),
+    async (rows) => {
+      for (const row of rows) {
+        if (!row.indexed_file_id || !row.subject_name) continue;
+        const mentionType = normalizeMentionType(readJsonObject(row.raw).type);
+        if (!mentionType) continue;
+        const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
+        if (!normalizedName) continue;
+        const key = llmFileCountKey(normalizedName, mentionType);
+        const files = filesByName.get(key);
+        if (files) files.add(row.indexed_file_id);
+        else filesByName.set(key, new Set([row.indexed_file_id]));
+      }
+    },
+  );
   return new Map([...filesByName.entries()].map(([key, files]) => [key, files.size]));
 }
 

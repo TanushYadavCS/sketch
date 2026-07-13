@@ -7,7 +7,9 @@ import {
   EMPTY_COMPACTION_SUMMARY_PLACEHOLDER,
   computeAgentRuntimeKeepRecentTailBoundary,
   createAgentRuntimeCompactionTrigger,
+  createCachedMessageTokenEstimator,
   createDefaultAgentRuntimeCompactionProvider,
+  estimateAgentRuntimeTokens,
   reconstructCompactedHistory,
 } from "./compaction";
 import type { AgentRuntimeMessage, AgentRuntimeMessageAppend, AgentRuntimeSessionStore } from "./contracts";
@@ -313,6 +315,51 @@ describe("agent runtime compaction trigger", () => {
 
     expect(trigger.estimatedInputTokens).toBeGreaterThanOrEqual(300);
     expect(trigger.behavior).toBe("compact");
+  });
+});
+
+describe("cached message token estimator", () => {
+  it("matches a full recompute and only estimates newly appended seqs on the next turn", () => {
+    const sessionId = `sess-estimate-${Math.random()}`;
+    const rows = [textMessage(1, "user", "one"), textMessage(2, "assistant", "two"), textMessage(3, "user", "three")];
+    let calls = 0;
+    const counting = (value: unknown) => {
+      calls += 1;
+      return estimateAgentRuntimeTokens(value);
+    };
+
+    const firstTurn = createCachedMessageTokenEstimator(sessionId, counting);
+    const cachedTotal = rows.reduce((total, message) => total + firstTurn(message), 0);
+    const recomputed = rows.reduce(
+      (total, message) => total + estimateAgentRuntimeTokens({ role: message.role, content: message.content }),
+      0,
+    );
+    expect(cachedTotal).toBe(recomputed);
+    expect(calls).toBe(rows.length);
+
+    const grown = [...rows, textMessage(4, "assistant", "four")];
+    const nextTurn = createCachedMessageTokenEstimator(sessionId, counting);
+    const grownCached = grown.reduce((total, message) => total + nextTurn(message), 0);
+    const grownRecomputed = grown.reduce(
+      (total, message) => total + estimateAgentRuntimeTokens({ role: message.role, content: message.content }),
+      0,
+    );
+    expect(grownCached).toBe(grownRecomputed);
+    expect(calls).toBe(rows.length + 1);
+  });
+
+  it("yields the same total from an empty (post-restart) cache as a full recompute", () => {
+    const rows = [textMessage(1, "user", "alpha"), textMessage(2, "assistant", "beta")];
+    const freshEstimator = createCachedMessageTokenEstimator(
+      `sess-restart-${Math.random()}`,
+      estimateAgentRuntimeTokens,
+    );
+    const freshTotal = rows.reduce((total, message) => total + freshEstimator(message), 0);
+    const recomputed = rows.reduce(
+      (total, message) => total + estimateAgentRuntimeTokens({ role: message.role, content: message.content }),
+      0,
+    );
+    expect(freshTotal).toBe(recomputed);
   });
 });
 

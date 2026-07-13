@@ -24,7 +24,7 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 132;
+const EXPECTED_MIGRATION_COUNT = 136;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -198,13 +198,17 @@ describe("runMigrations — full sequence", () => {
     expect(names[127]).toBe("132-agent-messages");
     expect(names[128]).toBe("133-chat-session-runtime");
     expect(names[129]).toBe("134-chat-session-archived-at");
-    expect(names[130]).toBe("135-tasks-proposed-assignee");
-    expect(names[131]).toBe("136-retire-unassigned-agent-tasks");
+    expect(names[130]).toBe("135-whatsapp-context-graph-indexing");
+    expect(names[131]).toBe("136-whatsapp-slice-denoised-message-ids");
+    expect(names[132]).toBe("137-whatsapp-group-participants");
+    expect(names[133]).toBe("138-whatsapp-identity-candidates");
+    expect(names[134]).toBe("139-tasks-proposed-assignee");
+    expect(names[135]).toBe("140-retire-unassigned-agent-tasks");
   });
 
-  it("migration 136 retires unassigned local agent tasks without touching structural tasks", async () => {
+  it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {
     const migrator = createMigrator(db);
-    const partial = await migrator.migrateTo("135-tasks-proposed-assignee");
+    const partial = await migrator.migrateTo("139-tasks-proposed-assignee");
     expect(partial.error).toBeUndefined();
 
     await sql`
@@ -889,8 +893,12 @@ describe("runMigrations — incremental upgrade", () => {
         '132-agent-messages',
         '133-chat-session-runtime',
         '134-chat-session-archived-at',
-        '135-tasks-proposed-assignee',
-        '136-retire-unassigned-agent-tasks'
+        '135-whatsapp-context-graph-indexing',
+        '136-whatsapp-slice-denoised-message-ids',
+        '137-whatsapp-group-participants',
+        '138-whatsapp-identity-candidates',
+        '139-tasks-proposed-assignee',
+        '140-retire-unassigned-agent-tasks'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -923,8 +931,12 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "132-agent-messages" },
       { name: "133-chat-session-runtime" },
       { name: "134-chat-session-archived-at" },
-      { name: "135-tasks-proposed-assignee" },
-      { name: "136-retire-unassigned-agent-tasks" },
+      { name: "135-whatsapp-context-graph-indexing" },
+      { name: "136-whatsapp-slice-denoised-message-ids" },
+      { name: "137-whatsapp-group-participants" },
+      { name: "138-whatsapp-identity-candidates" },
+      { name: "139-tasks-proposed-assignee" },
+      { name: "140-retire-unassigned-agent-tasks" },
     ]);
 
     // runMigrations() always migrates to latest, so recovering 107-120 above

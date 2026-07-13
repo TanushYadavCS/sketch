@@ -9,7 +9,6 @@ export interface DocumentFactParticipant {
   name?: string;
   email?: string;
 }
-
 export interface DocumentFactParentRef {
   source: string;
   sourceId: string;

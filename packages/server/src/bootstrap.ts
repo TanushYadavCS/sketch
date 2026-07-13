@@ -248,7 +248,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   }
 
   // 6. Queue manager
-  const queueManager = new QueueManager();
+  const queueManager = new QueueManager({ logger });
 
   // 7. Slack infrastructure
   const userCache = new UserCache();

@@ -68,7 +68,16 @@ export interface WhatsAppHistorySyncResult {
   skippedDup: number;
 }
 
-export type WhatsAppHistoryMessagesHandler = (messages: WhatsAppInboundMessage[]) => Promise<WhatsAppHistorySyncResult>;
+export interface WhatsAppHistoryBatchMetadata {
+  isLatest?: boolean;
+  progress?: number | null;
+  syncType?: number | string | null;
+}
+
+export type WhatsAppHistoryMessagesHandler = (
+  messages: WhatsAppInboundMessage[],
+  metadata?: WhatsAppHistoryBatchMetadata,
+) => Promise<WhatsAppHistorySyncResult>;
 
 export interface WhatsAppInboundProvider {
   id: string;
@@ -87,10 +96,20 @@ export interface WhatsAppSendOptions {
   quotedMessage?: WhatsAppInboundMessage;
 }
 
+export type WhatsAppGroupParticipantAdminRole = "admin" | "superadmin";
+
+export interface WhatsAppGroupParticipantMetadata {
+  jid: string;
+  phoneE164: string | null;
+  lid: string | null;
+  admin: WhatsAppGroupParticipantAdminRole | null;
+}
+
 export interface WhatsAppGroupMetadata {
   id: string;
   subject: string;
   desc?: string | null;
+  participants: WhatsAppGroupParticipantMetadata[];
 }
 
 interface WhatsAppProviderBase {

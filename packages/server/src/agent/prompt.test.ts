@@ -158,6 +158,7 @@ describe("buildSystemContext", () => {
       expect(result).toContain('scope: "conversation"');
       expect(result).toContain("does not replace the existing Search tool");
       expect(result).toContain("call ReadChatHistory around that row id");
+      expect(result).toContain("use WhatsAppGroupHistory with the sliceId");
     });
   });
 

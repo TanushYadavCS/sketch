@@ -20,10 +20,6 @@ import {
   personalCanvasConnectorTypeFromAppId,
 } from "@sketch/shared";
 
-// These are single org-wide credential rows. Per-user connectors are handled in
-// Browse all with one account row per visible user-owned connector.
-const ORG_LEVEL_INTEGRATIONS = INTEGRATIONS.filter((def) => !def.perUserAuth);
-
 const SYNC_STATUS_PRECEDENCE: Record<string, number> = {
   error: 4,
   syncing: 3,
@@ -178,6 +174,10 @@ export function ConnectorPicker({
   const [canvasConnectionPolling, setCanvasConnectionPolling] = useState(false);
   const auth = useDashboardAuth();
   const isAdmin = auth.role === "admin";
+  const setupStatusQuery = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () => api.setup.status(),
+  });
 
   const connectedByType = new Map<string, ConnectorConfig>();
   // aggregatedByType drives sync-status indicator on the chip (which is
@@ -193,6 +193,15 @@ export function ConnectorPicker({
       syncStatus: cur ? mergeStatus(cur.syncStatus, c.syncStatus) : c.syncStatus,
     });
   }
+  const visibleIntegrations = INTEGRATIONS.filter((def) => {
+    if (def.type !== "whatsapp") return true;
+    return (
+      setupStatusQuery.data?.whatsappConnected === true ||
+      connectedByType.has(def.type) ||
+      (sourceCounts.get(def.type) ?? 0) > 0
+    );
+  });
+  const orgLevelIntegrations = visibleIntegrations.filter((def) => !def.perUserAuth);
 
   const handleConnected = () => {
     onConnected();
@@ -257,7 +266,7 @@ export function ConnectorPicker({
           icon={<FolderSimpleIcon size={12} />}
         />
 
-        {INTEGRATIONS.map((def) => {
+        {visibleIntegrations.map((def) => {
           const agg = aggregatedByType.get(def.type);
           const count = sourceCounts.get(def.type) ?? 0;
           // Render if the viewer either owns/can see a connector row of this
@@ -280,7 +289,7 @@ export function ConnectorPicker({
         })}
 
         {isAdmin &&
-          ORG_LEVEL_INTEGRATIONS.map((def) => {
+          orgLevelIntegrations.map((def) => {
             if (connectedByType.has(def.type)) return null;
             return (
               <button
@@ -312,6 +321,7 @@ export function ConnectorPicker({
         connectors={connectors}
         teamMemberCount={teamMemberCount}
         connectorMemberCounts={connectorMemberCounts}
+        integrations={visibleIntegrations}
         isAdmin={isAdmin}
         onConnect={(def) => {
           setShowBrowseAll(false);
@@ -421,6 +431,7 @@ function BrowseConnectorsDialog({
   connectors,
   teamMemberCount,
   connectorMemberCounts,
+  integrations,
   isAdmin,
   onConnect,
   onManage,
@@ -430,6 +441,7 @@ function BrowseConnectorsDialog({
   connectors: ConnectorConfig[];
   teamMemberCount: number;
   connectorMemberCounts: Record<string, number>;
+  integrations: IntegrationDefinition[];
   isAdmin: boolean;
   onConnect: (def: IntegrationDefinition) => void;
   onManage: (def: IntegrationDefinition, connector: ConnectorConfig) => void;
@@ -478,7 +490,7 @@ function BrowseConnectorsDialog({
         {tab === "connectors" ? (
           <div className="-mr-1 min-h-0 overflow-y-auto pr-1">
             <div className="space-y-2">
-              {INTEGRATIONS.map((def) => {
+              {integrations.map((def) => {
                 const matchingConnectors = connectorsForDefinition(def, connectors);
                 const connector = preferredConnectorForDefinition(def, matchingConnectors);
                 return (

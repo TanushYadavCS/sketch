@@ -192,7 +192,6 @@ async function seedBase(db: Kysely<DB>): Promise<void> {
     })
     .execute();
 }
-
 async function seedIndexedFile(
   db: Kysely<DB>,
   input: {

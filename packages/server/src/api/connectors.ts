@@ -51,7 +51,7 @@ import {
 import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import { removeConnectorSourceItems } from "../connectors/sync-reconcile";
 import { parseCredentials, serializeCredentials } from "../connectors/sync-utils";
-import type { ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
+import type { AuthType, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
@@ -59,6 +59,7 @@ import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createFileSharesRepository } from "../db/repositories/file-shares";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
+import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import {
@@ -216,7 +217,23 @@ export async function pruneGoogleCalendarFilesOutsideScope(params: {
   return result;
 }
 
-const VALID_AUTH_TYPES = ["oauth", "api_key", "service_account"] as const;
+export async function applyWhatsAppGroupScope(params: {
+  db: Kysely<DB>;
+  scopeConfig: Record<string, unknown>;
+}): Promise<Record<string, unknown>> {
+  if (!hasOwn(params.scopeConfig, "groupJids")) return params.scopeConfig;
+  const repo = createWhatsAppGroupRepository(params.db);
+  const knownGroups = await repo.list();
+  const knownJids = new Set(knownGroups.map((group) => group.jid));
+  const selectedJids = [...new Set(stringArray(params.scopeConfig.groupJids))].filter((jid) => knownJids.has(jid));
+  await params.db.updateTable("whatsapp_groups").set({ index_enabled: 0 }).execute();
+  if (selectedJids.length > 0) {
+    await params.db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", selectedJids).execute();
+  }
+  return { ...params.scopeConfig, groupJids: selectedJids };
+}
+
+const VALID_AUTH_TYPES = ["oauth", "api_key", "service_account", "system"] as const;
 
 const createConnectorSchema = z.object({
   connectorType: z.enum(VALID_CONNECTOR_TYPES as [string, ...string[]]),
@@ -298,6 +315,36 @@ const CANVAS_APP_BY_CONNECTOR: Partial<Record<ConnectorType, string>> = {
 };
 
 const SCOPE_REQUIRED_CONNECTORS = new Set<ConnectorType>(["google_drive", "google_calendar", "clickup", "notion"]);
+
+function defaultAuthTypeForConnector(connectorType: ConnectorType): AuthType {
+  switch (connectorType) {
+    case "google_drive":
+    case "google_calendar":
+    case "gmail":
+    case "outlook":
+    case "teams":
+    case "zoho_crm":
+      return "oauth";
+    case "clickup":
+    case "notion":
+    case "linear":
+    case "fireflies":
+    case "otter":
+      return "api_key";
+    case "whatsapp":
+      return "system";
+  }
+}
+
+function authTypeForBrowse(connectorType: ConnectorType, credentials: Record<string, unknown>): AuthType {
+  const fallback = defaultAuthTypeForConnector(connectorType);
+  if (fallback === "system") return fallback;
+  const requested = credentials.type;
+  if (typeof requested === "string" && VALID_AUTH_TYPES.includes(requested as (typeof VALID_AUTH_TYPES)[number])) {
+    return requested as AuthType;
+  }
+  return fallback;
+}
 
 export function connectorRoutes(
   connectorRepo: ConnectorRepo,
@@ -1347,6 +1394,11 @@ export function connectorRoutes(
 
   /** Browse scope items for a new connection (generic). */
   routes.post("/browse", async (c) => {
+    const sub = c.get("sub");
+    if (!sub || typeof sub !== "string") {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "Sign-in required" } }, 401);
+    }
+
     const body = await c.req.json();
     const parsed = z
       .object({
@@ -1362,6 +1414,10 @@ export function connectorRoutes(
 
     const connectorType = parsed.data.connectorType as ConnectorType;
     const connector = getConnector(connectorType);
+    const permissions = connectorPermissions(c, { created_by: sub, sync_status: "active" }, connector.perUserAuth);
+    const denied = denyUnless(c, permissions.canBrowseScope);
+    if (denied) return denied;
+
     if (!connector.browse) {
       return c.json(
         { error: { code: "NOT_SUPPORTED", message: "This connector does not support scope browsing" } },
@@ -1370,9 +1426,12 @@ export function connectorRoutes(
     }
 
     try {
-      const credentials = { type: "api_key", ...parsed.data.credentials } as ConnectorCredentials;
+      const credentials = {
+        ...parsed.data.credentials,
+        type: authTypeForBrowse(connectorType, parsed.data.credentials),
+      } as ConnectorCredentials;
       await connector.validateCredentials(credentials);
-      const result = await connector.browse({ credentials, logger });
+      const result = await connector.browse({ db, credentials, logger });
       return c.json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Browse failed";
@@ -1435,8 +1494,8 @@ export function connectorRoutes(
       }
 
       const result = connector.browseExisting
-        ? await connector.browseExisting({ credentials, logger, accessTokenProvider: resolved.accessTokenProvider })
-        : await connector.browse?.({ credentials, logger, accessTokenProvider: resolved.accessTokenProvider });
+        ? await connector.browseExisting({ db, credentials, logger, accessTokenProvider: resolved.accessTokenProvider })
+        : await connector.browse?.({ db, credentials, logger, accessTokenProvider: resolved.accessTokenProvider });
       if (!result) {
         return c.json({ error: "Connector does not support browsing" }, 400);
       }
@@ -2178,25 +2237,30 @@ export function connectorRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    // Merge into the existing scope_config and clear the sync cursor to force a full re-sync.
-    // hierarchyMapping and the workspace/space selections are sibling keys edited by separate
-    // flows, so a partial update must preserve the keys it does not touch rather than replace.
-    const existingScope =
-      config.scope_config && typeof config.scope_config === "string"
-        ? (JSON.parse(config.scope_config) as Record<string, unknown>)
-        : {};
-    const mergedScope = { ...existingScope, ...parsed.data.scopeConfig };
-    await connectorRepo.updateConfig(config.id, {
-      scopeConfig: JSON.stringify(mergedScope),
-      syncCursor: null,
-      errorMessage: null,
+    const requestedScope = await db.transaction().execute(async (trx) => {
+      const txConnectorRepo = createConnectorRepository(trx);
+      const scope =
+        config.connector_type === "whatsapp"
+          ? await applyWhatsAppGroupScope({ db: trx, scopeConfig: parsed.data.scopeConfig })
+          : parsed.data.scopeConfig;
+      const existingScope =
+        config.scope_config && typeof config.scope_config === "string"
+          ? (JSON.parse(config.scope_config) as Record<string, unknown>)
+          : {};
+      const mergedScope = { ...existingScope, ...scope };
+      await txConnectorRepo.updateConfig(config.id, {
+        scopeConfig: JSON.stringify(mergedScope),
+        syncCursor: null,
+        errorMessage: null,
+      });
+      return scope;
     });
 
     if (config.connector_type === "google_calendar") {
       await pruneGoogleCalendarFilesOutsideScope({
         db,
         connectorConfigId: config.id,
-        scopeConfig: parsed.data.scopeConfig,
+        scopeConfig: requestedScope,
         logger,
       });
     }
