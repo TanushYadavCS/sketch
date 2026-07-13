@@ -840,6 +840,16 @@ function ChatIndexPage() {
       toast.error(getDeleteConversationError(error));
     },
   });
+  const handleConversationIntent = useCallback(
+    (conversationId: string) => {
+      void queryClient.prefetchQuery({
+        queryKey: webChatMessagesQueryKey(conversationId),
+        queryFn: ({ signal }) => api.webChat.messages(conversationId, { signal }),
+        staleTime: WEB_CHAT_MESSAGES_STALE_TIME_MS,
+      });
+    },
+    [queryClient],
+  );
 
   useEffect(() => {
     if (!search.message) return;
@@ -848,6 +858,7 @@ function ChatIndexPage() {
       params: { conversationId: createWebChatConversationId() },
       search,
       replace: true,
+      viewTransition: true,
     });
   }, [navigate, search]);
 
@@ -859,6 +870,7 @@ function ChatIndexPage() {
       tiles={summaryQuery.data ? buildSummaryTiles(summaryQuery.data) : undefined}
       recents={webChatQuery.data ? buildWebChatRecents(webChatQuery.data.conversations) : []}
       deletingConversationId={deleteConversationMutation.variables ?? null}
+      onConversationIntent={handleConversationIntent}
       onDeleteConversation={(conversation) => {
         deleteConversationMutation.mutate(conversation.id);
       }}
@@ -867,6 +879,7 @@ function ChatIndexPage() {
           to: "/chat/$conversationId" as const,
           params: { conversationId: createWebChatConversationId() },
           search: { message: value.trim() },
+          viewTransition: true,
         };
         if (attachments.length > 0) {
           setPendingWebChatSubmission(target.params.conversationId, { text: value.trim(), attachments });
@@ -1188,7 +1201,13 @@ export function ChatPage() {
     } else {
       void chat.sendMessage(outgoingTextMessage(initialText));
     }
-    void navigate({ to: "/chat/$conversationId", params: { conversationId }, search: {}, replace: true });
+    void navigate({
+      to: "/chat/$conversationId",
+      params: { conversationId },
+      search: {},
+      replace: true,
+      viewTransition: true,
+    });
   }, [chat.sendMessage, conversationId, historyReady, navigate, search.message]);
 
   useEffect(() => {

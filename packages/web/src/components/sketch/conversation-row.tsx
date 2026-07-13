@@ -24,6 +24,7 @@ export interface ConversationRowProps {
   channel: ConversationChannel;
   occurredAt: string;
   now?: Date;
+  onConversationIntent?: (conversationId: string) => void;
 }
 
 const CHANNEL_ICON = {
@@ -71,6 +72,7 @@ export function ConversationRow({
   now,
   onDelete,
   isDeleting,
+  onConversationIntent,
 }: ConversationRowProps & ConversationRowActionProps) {
   const ChannelIcon = CHANNEL_ICON[channel];
   const content = (
@@ -91,6 +93,9 @@ export function ConversationRow({
       <Link
         to="/chat/$conversationId"
         params={{ conversationId: id }}
+        viewTransition
+        onMouseEnter={() => onConversationIntent?.(id)}
+        onFocus={() => onConversationIntent?.(id)}
         className={cn(
           "group flex w-full items-center gap-[12px] rounded-[6px] px-[8px] py-[8px]",
           "transition-colors duration-100 ease-out hover:bg-accent",
@@ -111,6 +116,9 @@ export function ConversationRow({
       <Link
         to="/chat/$conversationId"
         params={{ conversationId: id }}
+        viewTransition
+        onMouseEnter={() => onConversationIntent?.(id)}
+        onFocus={() => onConversationIntent?.(id)}
         className="flex min-w-0 flex-1 items-center gap-[12px]"
       >
         {content}

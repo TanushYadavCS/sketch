@@ -3,12 +3,13 @@ import { renderWithProviders } from "@/test/utils";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { type ReactNode, StrictMode } from "react";
+import { type ComponentType, type ReactNode, StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ChatPage,
   SMOOTH_TEXT_STREAM_DELAY_MS,
   buildChatThreadMessages,
+  chatIndexRoute,
   hasPendingAssistantProgress,
   nextSmoothedAssistantText,
   outgoingRequestOptions,
@@ -19,6 +20,8 @@ import {
   validateChatSearch,
   webChatMessagesQueryKey,
 } from "./chat";
+
+const ChatIndexPage = chatIndexRoute.options.component as ComponentType;
 
 const sendMessage = vi.fn();
 const setMessages = vi.fn();
@@ -44,6 +47,24 @@ const mocks = vi.hoisted(() => ({
     app: { id: "github", name: "GitHub", description: "Code hosting" },
     redirectUrl: "https://canvas.example/connect",
   }),
+  workspaceSummary: vi.fn().mockResolvedValue({
+    automations: { running: 0, total: 0, nextRunAt: null },
+    skills: { total: 0, yours: 0, shared: 0 },
+    integrations: { connected: 0, appNames: [] },
+    team: { total: 1, humans: 1, agents: 0 },
+  }),
+  conversations: vi.fn().mockResolvedValue({
+    conversations: [
+      {
+        id: "chat-alpha",
+        title: "Plan my day",
+        channel: "web",
+        updatedAt: "2026-07-13T08:00:00.000Z",
+      },
+    ],
+  }),
+  removeConversation: vi.fn().mockResolvedValue({ success: true }),
+  homePaneProps: vi.fn(),
   conversationId: "chat-alpha",
   search: { message: "Plan my day" } as Record<string, unknown>,
 }));
@@ -65,6 +86,11 @@ vi.mock("@/lib/api", () => ({
       progressSettings: mocks.progressSettings,
       updateProgressSettings: mocks.updateProgressSettings,
       interrupt: mocks.interrupt,
+      conversations: mocks.conversations,
+      removeConversation: mocks.removeConversation,
+    },
+    workspace: {
+      summary: mocks.workspaceSummary,
     },
     mcpServers: {
       list: mocks.listMcpServers,
@@ -106,7 +132,10 @@ vi.mock("./dashboard", () => ({
 }));
 
 vi.mock("@/components/sketch/home-pane", () => ({
-  HomePane: ({ firstName }: { firstName: string; children?: ReactNode }) => <div>Chat launcher for {firstName}</div>,
+  HomePane: (props: { firstName: string; children?: ReactNode }) => {
+    mocks.homePaneProps(props);
+    return <div>Chat launcher for {props.firstName}</div>;
+  },
 }));
 
 describe("chat route", () => {
@@ -136,6 +165,10 @@ describe("chat route", () => {
       app: { id: "github", name: "GitHub", description: "Code hosting" },
       redirectUrl: "https://canvas.example/connect",
     });
+    mocks.workspaceSummary.mockClear();
+    mocks.conversations.mockClear();
+    mocks.removeConversation.mockClear();
+    mocks.homePaneProps.mockClear();
     mockChatStatus = "ready";
     mockChatError = undefined;
     clearError.mockReset();
@@ -145,6 +178,55 @@ describe("chat route", () => {
     ];
     mocks.conversationId = "chat-alpha";
     mocks.search = { message: "Plan my day" };
+  });
+
+  it("prefetches intended recent conversations with React Query cancellation", async () => {
+    const prefetchQuery = vi.spyOn(QueryClient.prototype, "prefetchQuery");
+    mocks.search = {};
+    renderWithProviders(<ChatIndexPage />);
+
+    await waitFor(() => expect(mocks.homePaneProps).toHaveBeenCalled());
+    const onConversationIntent = mocks.homePaneProps.mock.lastCall?.[0].onConversationIntent as
+      | ((conversationId: string) => void)
+      | undefined;
+    expect(onConversationIntent).toBeTypeOf("function");
+
+    act(() => onConversationIntent?.("chat-alpha"));
+
+    await waitFor(() =>
+      expect(prefetchQuery).toHaveBeenCalledWith(
+        expect.objectContaining({
+          queryKey: webChatMessagesQueryKey("chat-alpha"),
+          staleTime: 15_000,
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(mocks.loadMessages).toHaveBeenCalledWith(
+        "chat-alpha",
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      ),
+    );
+  });
+
+  it("uses a view transition when Home starts a chat", async () => {
+    mocks.search = {};
+    renderWithProviders(<ChatIndexPage />);
+
+    await waitFor(() => expect(mocks.homePaneProps).toHaveBeenCalled());
+    const onSubmit = mocks.homePaneProps.mock.lastCall?.[0].onSubmit as
+      | ((value: string, attachments: never[]) => void)
+      | undefined;
+    expect(onSubmit).toBeTypeOf("function");
+
+    act(() => onSubmit?.("Plan my day", []));
+
+    expect(mocks.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "/chat/$conversationId",
+        viewTransition: true,
+      }),
+    );
   });
 
   it("validates optional initial message search state", () => {
@@ -641,6 +723,7 @@ describe("chat route", () => {
       params: { conversationId: "chat-alpha" },
       search: {},
       replace: true,
+      viewTransition: true,
     });
   });
 
@@ -925,6 +1008,7 @@ describe("chat route", () => {
       params: { conversationId: "chat-alpha" },
       search: {},
       replace: true,
+      viewTransition: true,
     });
   });
 

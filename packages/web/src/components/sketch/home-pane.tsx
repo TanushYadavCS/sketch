@@ -22,6 +22,7 @@ export interface HomePaneProps {
   firstName: string;
   recents?: ConversationRowProps[];
   onSubmit?: ChatInputProps["onSubmit"];
+  onConversationIntent?: (conversationId: string) => void;
   onDeleteConversation?: (conversation: ConversationRowProps) => void;
   deletingConversationId?: string | null;
   tiles?: TileDef[];
@@ -31,6 +32,7 @@ export function HomePane({
   firstName,
   recents = [],
   onSubmit,
+  onConversationIntent,
   onDeleteConversation,
   deletingConversationId,
   tiles: tilesProp,
@@ -65,6 +67,7 @@ export function HomePane({
         <Recents
           conversations={recents}
           deletingConversationId={deletingConversationId}
+          onConversationIntent={onConversationIntent}
           onDeleteConversation={onDeleteConversation ? setConversationToDelete : undefined}
         />
       </div>
@@ -100,11 +103,18 @@ function QuickActions({ tiles, className }: QuickActionsProps) {
 interface RecentsProps {
   conversations: ConversationRowProps[];
   deletingConversationId?: string | null;
+  onConversationIntent?: (conversationId: string) => void;
   onDeleteConversation?: (conversation: ConversationRowProps) => void;
   className?: string;
 }
 
-function Recents({ conversations, deletingConversationId, onDeleteConversation, className }: RecentsProps) {
+function Recents({
+  conversations,
+  deletingConversationId,
+  onConversationIntent,
+  onDeleteConversation,
+  className,
+}: RecentsProps) {
   const items = conversations.slice(0, 5);
   return (
     <section className={cn("flex flex-col", className)}>
@@ -122,6 +132,7 @@ function Recents({ conversations, deletingConversationId, onDeleteConversation, 
               key={item.id}
               {...item}
               isDeleting={deletingConversationId === item.id}
+              onConversationIntent={onConversationIntent}
               onDelete={onDeleteConversation ? () => onDeleteConversation(item) : undefined}
             />
           ))}
