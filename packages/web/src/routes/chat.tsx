@@ -1,6 +1,7 @@
 import { isOwnedOrPersonalAppConnection } from "@/components/connections/connection-status";
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatIntegrationConnectionFrame } from "@/components/sketch/chat-integration-connection-dialog";
+import { ChatConversationSkeleton, ChatRecoveryStatus } from "@/components/sketch/chat-route-state";
 import {
   ChatThread,
   type ChatThreadFile,
@@ -15,9 +16,11 @@ import {
 import type { ConversationRowProps } from "@/components/sketch/conversation-row";
 import { HomePane } from "@/components/sketch/home-pane";
 import { DEFAULT_TILES, type TileDef } from "@/components/sketch/tile-grid";
+import { useWebChatReconciliation } from "@/hooks/use-web-chat-reconciliation";
 import {
   type AutomationArtifact,
   type WebChatConversationSummary,
+  type WebChatMessagesResponse,
   type WebChatToolProgress,
   type WebChatUploadedAttachment,
   type WorkspaceSummary,
@@ -25,6 +28,7 @@ import {
 } from "@/lib/api";
 import {
   createWebChatConversationId,
+  hasPendingWebChatSubmission,
   setPendingWebChatSubmission,
   takePendingWebChatSubmission,
 } from "@/lib/chat-target";
@@ -72,6 +76,7 @@ type WebChatMetadata = {
 
 type WebChatMessage = UIMessage<WebChatMetadata, WebChatDataParts> & { createdAt?: string | Date };
 type WebChatPart = WebChatMessage["parts"][number];
+type WebChatLoadedMessagesResponse = Omit<WebChatMessagesResponse, "messages"> & { messages: WebChatMessage[] };
 type ActiveIntegrationConnection = {
   connection: ChatThreadIntegrationConnection;
   popupWindow: Window | null;
@@ -145,6 +150,9 @@ export function buildWebChatRecents(conversations: WebChatConversationSummary[])
 }
 
 const WEB_CHAT_CONVERSATIONS_QUERY_KEY = ["web-chat", "conversations"];
+const WEB_CHAT_MESSAGES_STALE_TIME_MS = 15_000;
+
+export const webChatMessagesQueryKey = (conversationId: string) => ["web-chat", "messages", conversationId] as const;
 
 function removeWebChatConversationFromCache(
   data: { conversations: WebChatConversationSummary[] } | undefined,
@@ -834,6 +842,8 @@ export function ChatPage() {
   const { conversationId } = useParams({ from: chatRoute.id });
   const search = useSearch({ from: chatRoute.id }) as ChatSearch;
   const sentInitialMessage = useRef<string | null>(null);
+  const knownNewConversationRef = useRef({ conversationId, knownNew: false });
+  const recoveryResponsesRef = useRef(new WeakMap<WebChatMessage[], WebChatLoadedMessagesResponse>());
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
   const toolProgressMutationId = useRef(0);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
@@ -847,6 +857,15 @@ export function ChatPage() {
     Record<string, ChatThreadIntegrationConnectionStatus>
   >({});
   const queryClient = useQueryClient();
+  const hasNewConversationIntent = Boolean(
+    search.message || search.prefill || hasPendingWebChatSubmission(conversationId),
+  );
+  if (knownNewConversationRef.current.conversationId !== conversationId) {
+    knownNewConversationRef.current = { conversationId, knownNew: hasNewConversationIntent };
+  } else if (hasNewConversationIntent) {
+    knownNewConversationRef.current.knownNew = true;
+  }
+  const knownNewConversation = knownNewConversationRef.current.knownNew;
   const transport = useMemo(
     () =>
       new DefaultChatTransport<WebChatMessage>({
@@ -859,6 +878,34 @@ export function ChatPage() {
     transport,
   });
   const historyReady = loadedConversationId === conversationId;
+  const loadMessagesForReconciliation = useCallback(async (targetConversationId: string, signal: AbortSignal) => {
+    const response = await api.webChat.messages(targetConversationId, { signal });
+    const messages = response.messages as WebChatMessage[];
+    const typedResponse = { ...response, messages };
+    recoveryResponsesRef.current.set(messages, typedResponse);
+    return typedResponse;
+  }, []);
+  const setReconciledMessages = useCallback(
+    (messages: WebChatMessage[]) => {
+      chat.setMessages(messages);
+      queryClient.setQueryData(
+        webChatMessagesQueryKey(conversationId),
+        recoveryResponsesRef.current.get(messages) ?? { messages, updatedAt: null },
+      );
+    },
+    [chat.setMessages, conversationId, queryClient],
+  );
+  const recovery = useWebChatReconciliation({
+    conversationId,
+    historyReady,
+    status: chat.status,
+    error: chat.error,
+    messages: chat.messages,
+    hasPendingProgress: hasPendingAssistantProgress,
+    loadMessages: loadMessagesForReconciliation,
+    setMessages: setReconciledMessages,
+    clearError: chat.clearError,
+  });
   const chatTitle = titleFromChatMessages(chat.messages);
   const hasBackgroundRun = hasPendingAssistantProgress(chat.messages);
   const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun || stoppingRun;
@@ -1029,8 +1076,16 @@ export function ChatPage() {
     let cancelled = false;
     setLoadedConversationId(null);
     chat.setMessages([]);
-    void api.webChat
-      .messages(conversationId)
+    if (knownNewConversation) {
+      setLoadedConversationId(conversationId);
+      return;
+    }
+    void queryClient
+      .fetchQuery({
+        queryKey: webChatMessagesQueryKey(conversationId),
+        queryFn: ({ signal }) => api.webChat.messages(conversationId, { signal }),
+        staleTime: WEB_CHAT_MESSAGES_STALE_TIME_MS,
+      })
       .then(({ messages }) => {
         if (!cancelled) {
           chat.setMessages(messages as WebChatMessage[]);
@@ -1042,7 +1097,7 @@ export function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [chat.setMessages, conversationId]);
+  }, [chat.setMessages, conversationId, knownNewConversation, queryClient]);
 
   useEffect(() => {
     if (!historyReady || !threadScrollKey) return;
@@ -1057,22 +1112,6 @@ export function ChatPage() {
     });
     return () => window.cancelAnimationFrame(frameId);
   }, [historyReady, threadScrollKey]);
-
-  useEffect(() => {
-    if (!historyReady || !hasBackgroundRun || chat.status !== "ready") return;
-    let cancelled = false;
-    const intervalId = window.setInterval(() => {
-      void api.webChat.messages(conversationId).then(({ messages }) => {
-        if (!cancelled) {
-          chat.setMessages(messages as WebChatMessage[]);
-        }
-      });
-    }, 1500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [chat.setMessages, chat.status, conversationId, hasBackgroundRun, historyReady]);
 
   useEffect(() => {
     if (!historyReady) return;
@@ -1101,32 +1140,39 @@ export function ChatPage() {
     <TabContentContainer className="mx-auto box-content flex min-h-[calc(100vh-52px)] max-w-4xl flex-col px-10">
       <ChatHeader title={chatTitle} onBack={() => navigate({ to: "/chat" })} />
 
-      <div className="relative min-h-0 flex-1">
+      <div className="sketch-chat-route-enter relative min-h-0 flex-1">
         <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[28px] bg-gradient-to-b from-background to-transparent" />
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-[28px] bg-gradient-to-t from-background to-transparent" />
         <div
           ref={threadScrollRef}
           className="chat-scrollbar absolute inset-y-0 left-0 right-[-18px] overflow-y-auto pr-[18px]"
         >
-          <ChatThread
-            className="pt-8 pb-12"
-            messages={threadMessages}
-            busy={chatBusy}
-            error={chat.error?.message ?? null}
-            integrationConnectionStatuses={integrationConnectionStatuses}
-            onConnectIntegration={handleConnectIntegration}
-            conversationId={conversationId}
-          />
+          {historyReady ? (
+            <ChatThread
+              className="pt-8 pb-12"
+              messages={threadMessages}
+              busy={chatBusy}
+              error={recovery.suppressError ? null : (chat.error?.message ?? null)}
+              integrationConnectionStatuses={integrationConnectionStatuses}
+              onConnectIntegration={handleConnectIntegration}
+              conversationId={conversationId}
+            />
+          ) : (
+            <div className="pt-8 pb-12">
+              <ChatConversationSkeleton />
+            </div>
+          )}
         </div>
       </div>
 
       <div className="shrink-0 bg-background">
         <div className="pt-3 pb-[18px]">
+          <ChatRecoveryStatus stage={recovery.stage} onRetry={recovery.retryNow} />
           <ChatInput
             key={conversationId}
             initialValue={search.prefill ?? ""}
-            disabled={chatBusy}
-            disabledPlaceholder="Sketch is thinking..."
+            disabled={!historyReady || chatBusy}
+            disabledPlaceholder={historyReady ? "Sketch is thinking..." : "Loading conversation..."}
             running={chatBusy}
             runningPlaceholder="Sketch is thinking..."
             stopping={stoppingRun}

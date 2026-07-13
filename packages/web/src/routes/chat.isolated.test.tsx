@@ -1,5 +1,6 @@
 import { setPendingWebChatSubmission, takePendingWebChatSubmission } from "@/lib/chat-target";
 import { renderWithProviders } from "@/test/utils";
+import { QueryClient } from "@tanstack/react-query";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
@@ -19,8 +20,10 @@ import {
 
 const sendMessage = vi.fn();
 const setMessages = vi.fn();
+const clearError = vi.fn();
 const useChatArgs = vi.fn();
 let mockChatStatus = "ready";
+let mockChatError: Error | undefined;
 let mockChatMessages: Array<{ id: string; role: string; parts: Array<Record<string, unknown>> }> = [
   { id: "u1", role: "user", parts: [{ type: "text", text: "Hi Sketch" }] },
   { id: "a1", role: "assistant", parts: [{ type: "text", text: "Hi Karan" }] },
@@ -76,7 +79,8 @@ vi.mock("@ai-sdk/react", () => ({
     return {
       messages: mockChatMessages,
       status: mockChatStatus,
-      error: undefined,
+      error: mockChatError,
+      clearError,
       setMessages,
       sendMessage,
     };
@@ -105,6 +109,7 @@ vi.mock("@/components/sketch/home-pane", () => ({
 describe("chat route", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     takePendingWebChatSubmission("chat-alpha");
     mocks.loadMessages.mockReset();
     mocks.loadMessages.mockResolvedValue({ messages: [] });
@@ -128,6 +133,8 @@ describe("chat route", () => {
       redirectUrl: "https://canvas.example/connect",
     });
     mockChatStatus = "ready";
+    mockChatError = undefined;
+    clearError.mockReset();
     mockChatMessages = [
       { id: "u1", role: "user", parts: [{ type: "text", text: "Hi Sketch" }] },
       { id: "a1", role: "assistant", parts: [{ type: "text", text: "Hi Karan" }] },
@@ -559,35 +566,60 @@ describe("chat route", () => {
     expect(outgoingRequestOptions([attachment])).toEqual({ body: { attachments: [attachment] } });
   });
 
+  it("forwards AbortSignal through the web chat messages API helper", async () => {
+    const signal = new AbortController().signal;
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ messages: [], updatedAt: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { api: actualApi } = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+
+    await actualApi.webChat.messages("chat-alpha", { signal });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/web-chat/messages?conversationId=chat-alpha",
+      expect.objectContaining({ signal }),
+    );
+  });
+
   it("loads persisted web chat messages into the AI SDK chat state", async () => {
     const persisted = [
       { id: "u-history", role: "user", parts: [{ type: "text", text: "What did we discuss?" }] },
       { id: "a-history", role: "assistant", parts: [{ type: "text", text: "We discussed skills." }] },
     ];
-    mocks.loadMessages.mockResolvedValueOnce({ messages: persisted });
+    mocks.search = {};
+    mocks.loadMessages.mockResolvedValueOnce({ messages: persisted, updatedAt: "2026-07-13T08:00:00.000Z" });
 
     renderWithProviders(<ChatPage />);
 
-    expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha");
+    expect(mocks.loadMessages).toHaveBeenCalledWith(
+      "chat-alpha",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     await waitFor(() => expect(setMessages).toHaveBeenCalledWith(persisted));
   });
 
   it("clears stale chat state when the selected conversation has no persisted messages", async () => {
     setMessages.mockClear();
-    mocks.loadMessages.mockResolvedValueOnce({ messages: [] });
+    mocks.search = {};
+    mocks.loadMessages.mockResolvedValueOnce({ messages: [], updatedAt: null });
 
     renderWithProviders(<ChatPage />);
 
     await waitFor(() => expect(setMessages).toHaveBeenCalledWith([]));
   });
 
-  it("renders a dedicated chat screen and submits the initial search message after history loads", async () => {
+  it("skips history for an initial message new chat and sends immediately", async () => {
     sendMessage.mockClear();
     mocks.navigate.mockClear();
 
     const { container } = renderWithProviders(<ChatPage />);
 
     expect(container.firstElementChild).toHaveClass("mx-auto", "box-content", "max-w-4xl", "px-10");
+    expect(container.querySelector(".sketch-chat-route-enter")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Hi Sketch" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Thread options")).not.toBeInTheDocument();
     const thread = within(screen.getByLabelText("Chat thread"));
@@ -595,18 +627,77 @@ describe("chat route", () => {
     expect(thread.getByText("Hi Sketch")).toBeInTheDocument();
     expect(thread.getByText("Hi Karan")).toBeInTheDocument();
     expect(useChatArgs).toHaveBeenCalledWith(expect.objectContaining({ id: "chat-alpha" }));
-    await waitFor(() =>
-      expect(sendMessage).toHaveBeenCalledWith({
-        text: "Plan my day",
-        metadata: { createdAt: expect.any(String) },
-      }),
-    );
+    expect(mocks.loadMessages).not.toHaveBeenCalled();
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Plan my day" })));
     expect(mocks.navigate).toHaveBeenCalledWith({
       to: "/chat/$conversationId",
       params: { conversationId: "chat-alpha" },
       search: {},
       replace: true,
     });
+  });
+
+  it("renders a loading shell and disables the composer until existing history resolves", async () => {
+    const history = deferred<{
+      messages: Array<{ id: string; role: "user" | "assistant"; parts: Array<{ type: string; text: string }> }>;
+      updatedAt: string | null;
+    }>();
+    mocks.search = {};
+    mocks.loadMessages.mockReturnValueOnce(history.promise);
+
+    renderWithProviders(<ChatPage />);
+
+    expect(screen.getByLabelText("Loading conversation")).toBeInTheDocument();
+    expect(screen.getByLabelText("Message Sketch")).toBeDisabled();
+
+    history.resolve({
+      messages: [{ id: "u-history", role: "user", parts: [{ type: "text", text: "Persisted question" }] }],
+      updatedAt: "2026-07-13T08:00:00.000Z",
+    });
+
+    await waitFor(() => expect(screen.queryByLabelText("Loading conversation")).not.toBeInTheDocument());
+    expect(screen.getByLabelText("Message Sketch")).not.toBeDisabled();
+  });
+
+  it("reconciles an SDK error from persisted history and updates the shared cache", async () => {
+    const persisted = [
+      { id: "user-latest", role: "user", parts: [{ type: "text", text: "Latest question" }] },
+      { id: "assistant-final", role: "assistant", parts: [{ type: "text", text: "Recovered answer" }] },
+    ];
+    const response = { messages: persisted, updatedAt: "2026-07-13T08:00:00.000Z" };
+    const setQueryData = vi.spyOn(QueryClient.prototype, "setQueryData");
+    mocks.search = {};
+    mockChatStatus = "error";
+    mockChatError = new Error("Network error");
+    mockChatMessages = [{ id: "user-latest", role: "user", parts: [{ type: "text", text: "Latest question" }] }];
+    mocks.loadMessages.mockResolvedValue(response);
+
+    renderWithProviders(<ChatPage />);
+
+    await waitFor(() => expect(clearError).toHaveBeenCalledTimes(1));
+    expect(setMessages).toHaveBeenCalledWith(persisted);
+    expect(screen.queryByText("Network error")).not.toBeInTheDocument();
+    expect(setQueryData).toHaveBeenCalledWith(["web-chat", "messages", "chat-alpha"], response);
+  });
+
+  it("uses reconciliation instead of the old ready-only interval polling effect", async () => {
+    const intervalSpy = vi.spyOn(window, "setInterval");
+    const persisted = [
+      { id: "user-latest", role: "user", parts: [{ type: "text", text: "Latest question" }] },
+      {
+        id: "assistant-progress",
+        role: "assistant",
+        parts: [{ type: "data-progress", id: "progress", data: { lines: ["Working"] } }],
+      },
+    ];
+    mocks.search = {};
+    mockChatMessages = persisted;
+    mocks.loadMessages.mockResolvedValue({ messages: persisted, updatedAt: "2026-07-13T08:00:00.000Z" });
+
+    renderWithProviders(<ChatPage />);
+
+    await waitFor(() => expect(setMessages).toHaveBeenCalledWith(persisted));
+    expect(intervalSpy).not.toHaveBeenCalledWith(expect.any(Function), 1500);
   });
 
   it("loads and updates the web chat activity renderer mode", async () => {
@@ -647,6 +738,7 @@ describe("chat route", () => {
     renderWithProviders(<ChatPage />);
 
     expect(screen.getByLabelText("Message Sketch")).toHaveValue("Plan with Sketch");
+    expect(mocks.loadMessages).not.toHaveBeenCalled();
     await waitFor(() =>
       expect(mocks.navigate).toHaveBeenCalledWith({
         to: "/chat/$conversationId",
@@ -673,6 +765,7 @@ describe("chat route", () => {
 
     renderWithProviders(<ChatPage />);
 
+    expect(mocks.loadMessages).not.toHaveBeenCalled();
     await waitFor(() =>
       expect(sendMessage).toHaveBeenCalledWith(
         {

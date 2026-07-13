@@ -1244,9 +1244,10 @@ export const api = {
         body: JSON.stringify({ toolProgress }),
       });
     },
-    messages(conversationId = "default") {
+    messages(conversationId = "default", options?: { signal?: AbortSignal }) {
       return request<WebChatMessagesResponse>(
         `/api/web-chat/messages?conversationId=${encodeURIComponent(conversationId)}`,
+        options,
       );
     },
     conversations() {

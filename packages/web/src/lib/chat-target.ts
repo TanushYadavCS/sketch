@@ -16,6 +16,10 @@ export function setPendingWebChatSubmission(conversationId: string, submission: 
   pendingWebChatSubmissions.set(conversationId, submission);
 }
 
+export function hasPendingWebChatSubmission(conversationId: string): boolean {
+  return pendingWebChatSubmissions.has(conversationId);
+}
+
 export function takePendingWebChatSubmission(conversationId: string): PendingWebChatSubmission | null {
   const submission = pendingWebChatSubmissions.get(conversationId) ?? null;
   pendingWebChatSubmissions.delete(conversationId);
