@@ -53,7 +53,7 @@ export function HomePane({
   }
 
   return (
-    <TabContentContainer className="mx-auto box-content max-w-4xl px-10 py-8">
+    <TabContentContainer className="mx-auto box-content max-w-4xl w-[calc(100%-32px)] px-4 py-8 sm:w-[calc(100%-80px)] sm:px-10">
       <section className="flex flex-col">
         <GreetingBar firstName={firstName} />
         <div className="mt-7 flex flex-col gap-3">

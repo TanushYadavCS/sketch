@@ -5,6 +5,14 @@ export function createWebChatConversationId(): string {
   return `chat-${uuid ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`;
 }
 
+export function shouldUseChatViewTransition(): boolean {
+  return (
+    typeof window === "undefined" ||
+    typeof window.matchMedia !== "function" ||
+    !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 interface PendingWebChatSubmission {
   text: string;
   attachments: WebChatUploadedAttachment[];

@@ -1,3 +1,4 @@
+import { shouldUseChatViewTransition } from "@/lib/chat-target";
 import {
   BrowserIcon,
   DotsThreeIcon,
@@ -93,7 +94,7 @@ export function ConversationRow({
       <Link
         to="/chat/$conversationId"
         params={{ conversationId: id }}
-        viewTransition
+        viewTransition={shouldUseChatViewTransition()}
         onMouseEnter={() => onConversationIntent?.(id)}
         onFocus={() => onConversationIntent?.(id)}
         className={cn(
@@ -116,7 +117,7 @@ export function ConversationRow({
       <Link
         to="/chat/$conversationId"
         params={{ conversationId: id }}
-        viewTransition
+        viewTransition={shouldUseChatViewTransition()}
         onMouseEnter={() => onConversationIntent?.(id)}
         onFocus={() => onConversationIntent?.(id)}
         className="flex min-w-0 flex-1 items-center gap-[12px]"

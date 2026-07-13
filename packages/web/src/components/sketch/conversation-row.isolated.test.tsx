@@ -7,6 +7,22 @@ const { linkMock } = vi.hoisted(() => ({
   linkMock: vi.fn(),
 }));
 
+function mockReducedMotionPreference() {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
+}
+
 vi.mock("@tanstack/react-router", () => ({
   Link: (
     {
@@ -82,6 +98,24 @@ describe("ConversationRow", () => {
     expect(linkMock).toHaveBeenCalledWith(expect.objectContaining({ viewTransition: true }), expect.anything());
   });
 
+  it("disables both conversation link transitions when reduced motion is preferred", () => {
+    mockReducedMotionPreference();
+    const props = {
+      id: "web-chat",
+      title: "Create a PDF for my skills",
+      channel: "web" as const,
+      occurredAt: "2026-05-26T06:30:00.000Z",
+    };
+    const { rerender } = render(<ConversationRow {...props} />);
+
+    expect(linkMock).toHaveBeenCalledWith(expect.objectContaining({ viewTransition: false }), expect.anything());
+
+    linkMock.mockClear();
+    rerender(<ConversationRow {...props} onDelete={() => undefined} />);
+
+    expect(linkMock).toHaveBeenCalledWith(expect.objectContaining({ viewTransition: false }), expect.anything());
+  });
+
   it("reports hover and keyboard focus as conversation intent", async () => {
     const user = userEvent.setup();
     const onConversationIntent = vi.fn();
@@ -91,6 +125,30 @@ describe("ConversationRow", () => {
         title="Create a PDF for my skills"
         channel="web"
         occurredAt="2026-05-26T06:30:00.000Z"
+        onConversationIntent={onConversationIntent}
+      />,
+    );
+
+    const link = screen.getByRole("link", { name: /Create a PDF for my skills/i });
+    await user.hover(link);
+    expect(onConversationIntent).toHaveBeenCalledWith("web-chat");
+
+    onConversationIntent.mockClear();
+    await user.tab();
+    expect(link).toHaveFocus();
+    expect(onConversationIntent).toHaveBeenCalledWith("web-chat");
+  });
+
+  it("reports hover and keyboard focus as conversation intent when delete actions are enabled", async () => {
+    const user = userEvent.setup();
+    const onConversationIntent = vi.fn();
+    render(
+      <ConversationRow
+        id="web-chat"
+        title="Create a PDF for my skills"
+        channel="web"
+        occurredAt="2026-05-26T06:30:00.000Z"
+        onDelete={() => undefined}
         onConversationIntent={onConversationIntent}
       />,
     );

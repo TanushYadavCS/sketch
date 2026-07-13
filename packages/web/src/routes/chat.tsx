@@ -34,6 +34,7 @@ import {
   createWebChatConversationId,
   hasPendingWebChatSubmission,
   setPendingWebChatSubmission,
+  shouldUseChatViewTransition,
   takePendingWebChatSubmission,
 } from "@/lib/chat-target";
 import { useChat } from "@ai-sdk/react";
@@ -834,6 +835,7 @@ function ChatIndexPage() {
         WEB_CHAT_CONVERSATIONS_QUERY_KEY,
         (data) => removeWebChatConversationFromCache(data, conversationId),
       );
+      queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
       toast.success("Conversation deleted");
     },
     onError: (error) => {
@@ -858,7 +860,7 @@ function ChatIndexPage() {
       params: { conversationId: createWebChatConversationId() },
       search,
       replace: true,
-      viewTransition: true,
+      viewTransition: shouldUseChatViewTransition(),
     });
   }, [navigate, search]);
 
@@ -879,7 +881,7 @@ function ChatIndexPage() {
           to: "/chat/$conversationId" as const,
           params: { conversationId: createWebChatConversationId() },
           search: { message: value.trim() },
-          viewTransition: true,
+          viewTransition: shouldUseChatViewTransition(),
         };
         if (attachments.length > 0) {
           setPendingWebChatSubmission(target.params.conversationId, { text: value.trim(), attachments });
@@ -1195,6 +1197,7 @@ export function ChatPage() {
     const initialMessageKey = initialText ? `${conversationId}:${initialText}` : null;
     if (!initialText || sentInitialMessage.current === initialMessageKey) return;
     sentInitialMessage.current = initialMessageKey;
+    queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
     const requestOptions = outgoingRequestOptions(initialAttachments);
     if (requestOptions) {
       void chat.sendMessage(outgoingTextMessage(initialText, initialAttachments), requestOptions);
@@ -1206,9 +1209,9 @@ export function ChatPage() {
       params: { conversationId },
       search: {},
       replace: true,
-      viewTransition: true,
+      viewTransition: shouldUseChatViewTransition(),
     });
-  }, [chat.sendMessage, conversationId, historyReady, navigate, search.message]);
+  }, [chat.sendMessage, conversationId, historyReady, navigate, queryClient, search.message]);
 
   useEffect(() => {
     if (!search.prefill) return;
@@ -1216,7 +1219,7 @@ export function ChatPage() {
   }, [conversationId, navigate, search.prefill]);
 
   return (
-    <TabContentContainer className="mx-auto box-content flex min-h-[calc(100vh-52px)] max-w-4xl flex-col px-10">
+    <TabContentContainer className="mx-auto box-content flex min-h-[calc(100vh-52px)] max-w-4xl flex-col w-[calc(100%-32px)] px-4 sm:w-[calc(100%-80px)] sm:px-10">
       <ChatHeader title={chatTitle} onBack={() => navigate({ to: "/chat" })} />
 
       <div className="sketch-chat-route-enter relative min-h-0 flex-1">
@@ -1272,6 +1275,7 @@ export function ChatPage() {
             onStop={handleStop}
             placeholder="Reply to Sketch..."
             onSubmit={(value, attachments) => {
+              queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
               void chat.sendMessage(outgoingTextMessage(value, attachments), outgoingRequestOptions(attachments));
             }}
           />

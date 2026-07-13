@@ -47,11 +47,21 @@ describe("HomePane", () => {
     Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: originalMediaDevices });
   });
 
-  it("uses the shared dashboard tab content width", () => {
+  it("uses the shared dashboard tab content width and fits the viewport at narrow widths", () => {
     const { container } = render(<HomePane firstName="Karan" onSubmit={() => undefined} />);
 
-    expect(container.firstElementChild).toHaveClass("w-full", "mx-auto", "box-content", "max-w-4xl", "px-10", "py-8");
+    expect(container.firstElementChild).toHaveClass(
+      "mx-auto",
+      "box-content",
+      "max-w-4xl",
+      "px-4",
+      "py-8",
+      "sm:px-10",
+      "w-[calc(100%-32px)]",
+      "sm:w-[calc(100%-80px)]",
+    );
     expect(container.firstElementChild?.className).not.toContain("max-w-[");
+    expect(container.firstElementChild?.className).not.toContain("w-full");
   });
 
   it("keeps Home as a launcher and renders the design's empty Recents state", () => {
