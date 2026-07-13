@@ -115,6 +115,7 @@ function assertFreshUpdate(result: { numUpdatedRows?: bigint | number }, fileId:
 function minWordsForSmartEnrichment(fileType: string | null, threadContext: string | null): number {
   if (fileType === "email_message") return threadContext ? 1 : 10;
   if (fileType === "calendar_event") return 10;
+  if (fileType === "whatsapp_conversation_slice") return 1;
   return 100;
 }
 
