@@ -11,14 +11,6 @@ const CONNECTOR_ID = "doc-facts-real-connector";
 const FILE_ID = "doc-facts-real-file";
 const CONTENT = "Alice will ship the Slack capture by Friday.";
 
-const taskCandidate = {
-  title: "Ship Slack capture",
-  owner: { name: "Alice", email: "alice@example.com" },
-  dueDate: "2025-04-30",
-  hasOwnerVerbObject: true,
-  sourceExcerpt: "Alice will ship the Slack capture by Friday.",
-};
-
 describe("document-derived llm_task extraction", () => {
   let db: Kysely<DB>;
 
@@ -31,14 +23,14 @@ describe("document-derived llm_task extraction", () => {
     await db.destroy();
   });
 
-  it("emits llm_task facts from the injected Gemini generator", async () => {
+  it("does not call the Gemini generator or emit llm_task facts", async () => {
     const generateJSONCalls: Array<{ prompt: string; opts?: Parameters<GeminiGenerator["generateJSON"]>[1] }> = [];
     const generateJSON: GeminiGenerator["generateJSON"] = async <T>(
       prompt: string,
       opts?: Parameters<GeminiGenerator["generateJSON"]>[1],
     ) => {
       generateJSONCalls.push({ prompt, opts });
-      return { tasks: [taskCandidate] } as T;
+      return { tasks: [] } as T;
     };
     const generator = fakeGenerator(generateJSON);
 
@@ -47,17 +39,12 @@ describe("document-derived llm_task extraction", () => {
       generator,
     });
 
-    expect(result.changed).toBe(true);
-    expect(generateJSONCalls).toEqual([
-      {
-        prompt: expect.stringContaining("Source date: 2025-04-25"),
-        opts: { maxTokens: 8192, label: "extractLlmTask", dumpDir: undefined },
-      },
-    ]);
-    expect(await activeLlmTaskFacts(db)).toHaveLength(1);
+    expect(result.changed).toBe(false);
+    expect(generateJSONCalls).toEqual([]);
+    expect(await activeLlmTaskFacts(db)).toHaveLength(0);
   });
 
-  it("returns unchanged when Gemini extraction throws", async () => {
+  it("does not invoke or warn from the retired extraction path", async () => {
     const logger = { warn: vi.fn() } as unknown as Logger;
     const generator = fakeGenerator(async () => {
       throw new Error("provider unavailable");
@@ -71,10 +58,7 @@ describe("document-derived llm_task extraction", () => {
 
     expect(result.changed).toBe(false);
     expect(await activeLlmTaskFacts(db)).toHaveLength(0);
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ err: expect.any(Error), indexedFileId: FILE_ID }),
-      "llm_task extraction failed",
-    );
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it("skips gracefully when no generator is available", async () => {
@@ -91,7 +75,7 @@ describe("document-derived llm_task extraction", () => {
       let calls = 0;
       const generator = fakeGenerator(async <T>() => {
         calls++;
-        return { tasks: [taskCandidate] } as T;
+        return { tasks: [] } as T;
       });
 
       const result = await emitDocumentDerivedFacts(
@@ -106,9 +90,13 @@ describe("document-derived llm_task extraction", () => {
     expect(await activeLlmTaskFacts(db)).toHaveLength(0);
   });
 
-  it("still extracts for non-task document types and when fileType is absent", async () => {
+  it("skips non-task document types and when fileType is absent", async () => {
     for (const fileType of ["meeting_transcript", "email_message", "doc", undefined]) {
-      const generator = fakeGenerator(async <T>() => ({ tasks: [taskCandidate] }) as T);
+      let calls = 0;
+      const generator = fakeGenerator(async <T>() => {
+        calls++;
+        return { tasks: [] } as T;
+      });
 
       const result = await emitDocumentDerivedFacts(
         db,
@@ -116,9 +104,10 @@ describe("document-derived llm_task extraction", () => {
         { contentChanged: true, generator },
       );
 
-      expect(result.changed).toBe(true);
+      expect(result.changed).toBe(false);
+      expect(calls).toBe(0);
     }
-    expect(await activeLlmTaskFacts(db)).toHaveLength(1);
+    expect(await activeLlmTaskFacts(db)).toHaveLength(0);
   });
 });
 

@@ -179,7 +179,15 @@ function SummariserContent({
         {tab === "runs" ? (
           <RunsTab agentKey={agentKey} agent={agent} route={route} running={running} />
         ) : (
-          <ConfigContent agent={agent} route={route} input={input} save={save} onEdit={setEditing} />
+          <ConfigContent
+            agentKey={agentKey}
+            agent={agent}
+            route={route}
+            input={input}
+            save={save}
+            onChanged={invalidate}
+            onEdit={setEditing}
+          />
         )}
       </TabContentContainer>
 
@@ -260,16 +268,20 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 function ConfigContent({
+  agentKey,
   agent,
   route,
   input,
   save,
+  onChanged,
   onEdit,
 }: {
+  agentKey: string;
   agent: AgentConfig;
   route: AgentRoute;
   input: ReturnType<typeof routeInput>;
   save: { mutate: (next: AgentRoute) => void; isPending: boolean };
+  onChanged: () => void;
   onEdit: (field: RouteField) => void;
 }) {
   return (
@@ -297,6 +309,7 @@ function ConfigContent({
         <Row label="Delivers to" onEdit={() => onEdit("delivery")}>
           <p className="text-[12.5px] text-foreground/85">{deliversLabel(route)}</p>
         </Row>
+        <TaskCreationToggleRow agentKey={agentKey} enabled={agent.createTasks} onChanged={onChanged} />
       </div>
 
       <div className="mb-3 mt-7 flex items-baseline justify-between border-b border-border/60 pb-2">
@@ -332,23 +345,66 @@ function ConfigContent({
   );
 }
 
-function Row({ label, children, onEdit }: { label: string; children: React.ReactNode; onEdit: () => void }) {
+function TaskCreationToggleRow({
+  agentKey,
+  enabled,
+  onChanged,
+}: {
+  agentKey: string;
+  enabled: boolean;
+  onChanged: () => void;
+}) {
+  const mutation = useMutation({
+    mutationFn: (next: boolean) => api.agents.updateConfig(agentKey, { createTasks: next }),
+    onSuccess: onChanged,
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to update task writing"),
+  });
+
   return (
-    <button
-      type="button"
-      onClick={onEdit}
-      className="group flex w-full items-start gap-3 border-b border-border/50 py-3.5 text-left last:border-0"
-    >
+    <Row label="Tasks">
+      <span className="flex items-center justify-between gap-3">
+        <span className="min-w-0 space-y-0.5 leading-relaxed">
+          <span className="block text-[12.5px] font-medium text-foreground/85">
+            Create project tasks from action items
+          </span>
+          <span className="block text-[11.5px] text-muted-foreground">
+            Tasks appear on linked projects. Task owners can update status; admins can monitor progress.
+          </span>
+        </span>
+        <Switch
+          checked={enabled}
+          disabled={mutation.isPending}
+          onCheckedChange={(checked) => mutation.mutate(checked)}
+          aria-label="Create project tasks from action items"
+          className="data-[state=checked]:bg-emerald-500"
+        />
+      </span>
+    </Row>
+  );
+}
+
+function Row({ label, children, onEdit }: { label: string; children: React.ReactNode; onEdit?: () => void }) {
+  const className = "group flex w-full items-start gap-3 border-b border-border/50 py-3.5 text-left last:border-0";
+  const inner = (
+    <>
       <span className="mt-[1px] w-[88px] shrink-0 font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70">
         {label}
       </span>
       <div className="min-w-0 flex-1">{children}</div>
-      <PencilSimpleIcon
-        size={13}
-        weight="bold"
-        aria-hidden
-        className="mt-[1px] shrink-0 text-muted-foreground/30 transition-colors group-hover:text-foreground"
-      />
+      {onEdit ? (
+        <PencilSimpleIcon
+          size={13}
+          weight="bold"
+          aria-hidden
+          className="mt-[1px] shrink-0 text-muted-foreground/30 transition-colors group-hover:text-foreground"
+        />
+      ) : null}
+    </>
+  );
+  if (!onEdit) return <div className={className}>{inner}</div>;
+  return (
+    <button type="button" onClick={onEdit} className={className}>
+      {inner}
     </button>
   );
 }

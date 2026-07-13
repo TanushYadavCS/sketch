@@ -180,7 +180,7 @@ describe("emitFactsForSyncedItem", () => {
     ]);
   });
 
-  it("keeps unchanged LLM task facts seen in the current sync run", async () => {
+  it("leaves legacy LLM task facts untouched until the file content refreshes", async () => {
     const factRepo = createIndexedFileFactRepository(db);
     await upsertLlmTaskFact(db, {
       indexedFileId: "file-1",
@@ -219,7 +219,7 @@ describe("emitFactsForSyncedItem", () => {
       .select(["last_seen_sync_run_id", "deleted_at"])
       .where("fact_type", "=", "llm_task")
       .executeTakeFirstOrThrow();
-    expect(fact).toEqual({ last_seen_sync_run_id: "run-2", deleted_at: null });
+    expect(fact).toEqual({ last_seen_sync_run_id: "run-1", deleted_at: null });
   });
 });
 

@@ -1530,7 +1530,8 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
       .selectFrom("entity_mentions")
       .select(db.fn.countAll<number>().as("count"))
       .executeTakeFirstOrThrow();
-    expect(Number(mentionsBefore.count)).toBe(100);
+    const mentionsBeforeCount = Number(mentionsBefore.count);
+    expect(mentionsBeforeCount).toBeGreaterThan(0);
 
     async function* mockGen() {
       yield {
@@ -1591,7 +1592,7 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
       .selectFrom("entity_mentions")
       .select(db.fn.countAll<number>().as("count"))
       .executeTakeFirstOrThrow();
-    expect(Number(mentionsAfter.count)).toBe(100);
+    expect(Number(mentionsAfter.count)).toBe(mentionsBeforeCount);
   });
 
   it("force override processes the large reconcile and tombstones facts", async () => {

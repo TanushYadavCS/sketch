@@ -4,7 +4,8 @@
  *  - Summary block lazy-loads the Gemini narrative; renders the WHAT line as a fallback
  *    when no cached brief exists.
  *  - Timeline and Relationships are tabs; Timeline is the default; switching surfaces
- *    the Relationships pane with AMBIGUOUS pinned to the top.
+ *    the Relationships pane with AMBIGUOUS pinned to the top. Projects also expose
+ *    Tasks and Scope tabs; tasks render only under the Tasks tab.
  *  - clicking a related entity pill pushes a new drawer level and shows a Back chip.
  */
 import { EntityUiProvider, useEntityUi } from "@/lib/entity-ui";
@@ -68,6 +69,25 @@ const STRIPE = {
   },
 };
 
+const ATLAS = {
+  ...SARAH,
+  id: "e-atlas",
+  name: "Project Atlas",
+  sourceType: "project",
+  aliases: [],
+  metadata: null,
+  profile: {
+    ...SARAH.profile,
+    entityType: "project",
+    domainsForCompany: [],
+    crmActivityBrief: null,
+    summary: {
+      identity: "Project.",
+      activity: "Active in 2 files (2 mentions) across 1 day.",
+    },
+  },
+};
+
 const relationsForSarah = {
   outgoing: [
     {
@@ -108,12 +128,17 @@ beforeEach(() => {
   server.use(
     http.get("/api/entities/e-sarah", () => HttpResponse.json({ entity: SARAH, sourceRefs: [] })),
     http.get("/api/entities/e-stripe", () => HttpResponse.json({ entity: STRIPE, sourceRefs: [] })),
+    http.get("/api/entities/e-atlas", () => HttpResponse.json({ entity: ATLAS, sourceRefs: [] })),
     http.get("/api/entities/e-sarah/relations", () => HttpResponse.json(relationsForSarah)),
     http.get("/api/entities/e-stripe/relations", () =>
       HttpResponse.json({ outgoing: [], incoming: [], truncated: false, totalCount: 0 }),
     ),
+    http.get("/api/entities/e-atlas/relations", () =>
+      HttpResponse.json({ outgoing: [], incoming: [], truncated: false, totalCount: 0 }),
+    ),
     http.get("/api/entities/e-sarah/timeline", () => HttpResponse.json(emptyTimeline)),
     http.get("/api/entities/e-stripe/timeline", () => HttpResponse.json(emptyTimeline)),
+    http.get("/api/entities/e-atlas/timeline", () => HttpResponse.json(emptyTimeline)),
   );
 });
 
@@ -250,5 +275,184 @@ describe("EntityDrawer", () => {
     expect(screen.getByText("CRM Activity")).toBeInTheDocument();
     expect(screen.getByText(/Recent CRM activity focused on renewal follow-ups/)).toBeInTheDocument();
     expect(screen.getByText(/47 activities · updated/)).toBeInTheDocument();
+  });
+
+  it("renders project tasks and updates Sketch-native task status", async () => {
+    const user = userEvent.setup();
+    let patchedStatus: string | null = null;
+    server.use(
+      http.get("/api/entities/e-atlas/tasks", () =>
+        HttpResponse.json({
+          tasks: [
+            {
+              id: "task-summary",
+              parentEntityId: "e-atlas",
+              parentSourceRef: null,
+              parentName: "Project Atlas",
+              source: "summary",
+              externalRef: null,
+              title: "Tanush: verify Stripe webhook events hitting staging before cutover green",
+              status: "in_progress",
+              statusRaw: "action_item",
+              statusAuthority: "local",
+              assigneeEntityId: "e-tanush",
+              assigneeName: "Tanush Yadav",
+              proposedAssigneeName: null,
+              priority: "medium",
+              dueAt: null,
+              provenance: "summary",
+              sourceTaskId: "summary-1",
+              createdByUserId: "u1",
+              createdByUserName: "Alice Smith",
+              createdByUserEmail: "alice@example.com",
+              isOwnedByViewer: true,
+              readonlyReason: null,
+              completedAt: null,
+              updatedAt: "2026-05-01T00:00:00.000Z",
+              canEditStatus: true,
+            },
+            {
+              id: "task-admin-monitoring",
+              parentEntityId: "e-atlas",
+              parentSourceRef: null,
+              parentName: "Project Atlas",
+              source: "summary",
+              externalRef: null,
+              title: "Confirm vendor onboarding copy",
+              status: "open",
+              statusRaw: "action_item",
+              statusAuthority: "local",
+              assigneeEntityId: "e-vedant",
+              assigneeName: "Vedant QA",
+              proposedAssigneeName: null,
+              priority: "high",
+              dueAt: null,
+              provenance: "summary",
+              sourceTaskId: "summary-2",
+              createdByUserId: "u2",
+              createdByUserName: "Apeksha Reviewer",
+              createdByUserEmail: "apeksha.qa@sketch.local",
+              isOwnedByViewer: false,
+              readonlyReason: null,
+              completedAt: null,
+              updatedAt: "2026-05-01T00:00:00.000Z",
+              canEditStatus: true,
+            },
+            {
+              id: "task-external",
+              parentEntityId: "e-atlas",
+              parentSourceRef: "clickup:list-1",
+              parentName: "Project Atlas",
+              source: "clickup",
+              externalRef: "CU-1",
+              title: "Review ClickUp import",
+              status: "in_progress",
+              statusRaw: "In Review",
+              statusAuthority: "external",
+              assigneeEntityId: null,
+              assigneeName: null,
+              proposedAssigneeName: null,
+              priority: null,
+              dueAt: null,
+              provenance: "structural",
+              sourceTaskId: "clickup-1",
+              createdByUserId: null,
+              createdByUserName: null,
+              createdByUserEmail: null,
+              isOwnedByViewer: false,
+              readonlyReason: "external_authority",
+              completedAt: null,
+              updatedAt: "2026-05-01T00:00:00.000Z",
+              canEditStatus: false,
+            },
+          ],
+        }),
+      ),
+      http.patch("/api/entities/e-atlas/tasks/task-summary", async ({ request }) => {
+        const body = (await request.json()) as { status: string };
+        patchedStatus = body.status;
+        return HttpResponse.json({
+          task: {
+            id: "task-summary",
+            parentEntityId: "e-atlas",
+            parentSourceRef: null,
+            parentName: "Project Atlas",
+            source: "summary",
+            externalRef: null,
+            title: "Tanush: verify Stripe webhook events hitting staging before cutover green",
+            status: body.status,
+            statusRaw: body.status,
+            statusAuthority: "local",
+            assigneeEntityId: "e-tanush",
+            assigneeName: "Tanush Yadav",
+            proposedAssigneeName: null,
+            priority: "medium",
+            dueAt: null,
+            provenance: "summary",
+            sourceTaskId: "summary-1",
+            createdByUserId: "u1",
+            createdByUserName: "Alice Smith",
+            createdByUserEmail: "alice@example.com",
+            isOwnedByViewer: true,
+            readonlyReason: null,
+            completedAt: body.status === "done" ? "2026-05-02T00:00:00.000Z" : null,
+            updatedAt: "2026-05-02T00:00:00.000Z",
+            canEditStatus: true,
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<DrawerHarness initialId="e-atlas" />);
+
+    await screen.findByRole("heading", { name: /Project Atlas/ });
+    await user.click(screen.getByRole("button", { name: /Tasks/ }));
+    expect(await screen.findByText("3 total · 1 open · 2 in progress · 2 editable")).toBeInTheDocument();
+    const editableTask = screen.getByRole("group", {
+      name: "Tanush: verify Stripe webhook events hitting staging before cutover green task",
+    });
+    const adminEditableTask = screen.getByRole("group", { name: "Confirm vendor onboarding copy task" });
+    expect(
+      screen.getByText("Tanush: verify Stripe webhook events hitting staging before cutover green"),
+    ).not.toHaveClass("truncate");
+    expect(within(editableTask).getAllByText("In progress")).toHaveLength(1);
+    expect(screen.getByText("Confirm vendor onboarding copy")).toBeInTheDocument();
+    expect(screen.getByText("Review ClickUp import")).toBeInTheDocument();
+    expect(screen.getAllByText("From Summarizer")).toHaveLength(2);
+    expect(screen.getByText("Assigned to Tanush Yadav")).toBeInTheDocument();
+    expect(within(editableTask).getByText("Created by you")).toBeInTheDocument();
+    expect(within(adminEditableTask).getByText("Assigned to Vedant QA")).toBeInTheDocument();
+    expect(within(adminEditableTask).getByText("Created by Apeksha Reviewer")).toBeInTheDocument();
+    expect(screen.queryByText("Vedant to draft onboarding notes for the new hire")).not.toBeInTheDocument();
+    expect(screen.queryByText("Mentioned: Vedant")).not.toBeInTheDocument();
+    expect(screen.queryByText("Assigned to Vedant")).not.toBeInTheDocument();
+    expect(screen.queryByText("Owned by you")).not.toBeInTheDocument();
+    expect(screen.queryByText("Owned by Vedant QA")).not.toBeInTheDocument();
+    expect(screen.queryByText("Read-only for you")).not.toBeInTheDocument();
+    expect(screen.queryByText("Needs assignee")).not.toBeInTheDocument();
+    expect(screen.queryByText("Managed in ClickUp")).not.toBeInTheDocument();
+    expect(screen.queryByText("External status: In Review")).not.toBeInTheDocument();
+    expect(screen.getByText("In Review")).toBeInTheDocument();
+    expect(screen.getByText("High")).toBeInTheDocument();
+    expect(screen.getAllByText("In progress")).toHaveLength(2);
+    expect(screen.queryByText("action_item")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: /Tanush: verify Stripe webhook events/ }));
+    await user.click(await screen.findByRole("option", { name: "Done" }));
+
+    await waitFor(() => expect(patchedStatus).toBe("done"));
+  });
+
+  it("renders a stable empty task state for projects", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<DrawerHarness initialId="e-atlas" />);
+
+    await screen.findByRole("heading", { name: /Project Atlas/ });
+    await user.click(screen.getByRole("button", { name: /Tasks/ }));
+
+    expect(await screen.findByText("No project tasks yet.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Summarizer action items will appear here when they are linked to this project."),
+    ).toBeInTheDocument();
   });
 });

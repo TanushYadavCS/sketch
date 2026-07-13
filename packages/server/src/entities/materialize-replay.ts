@@ -12,7 +12,6 @@ import { buildMaterializeDeps } from "./materialize-deps";
 import { materializeFeature } from "./materialize-feature";
 import { readJsonObject } from "./materialize-json";
 import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
-import { materializeLlmTask } from "./materialize-llm-task";
 import { materializeMilestone } from "./materialize-milestone";
 import { materializePersonFact, materializePersonSeed } from "./materialize-person";
 import { materializeProjectSeed } from "./materialize-project";
@@ -142,7 +141,7 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
     return materializeMilestone(deps, fact);
   }
   if (fact.fact_type === "llm_task") {
-    return materializeLlmTask(deps, fact);
+    return { kind: "skipped", reason: "llm_task_disabled" };
   }
   return { kind: "skipped", reason: "unknown_fact_type" };
 }

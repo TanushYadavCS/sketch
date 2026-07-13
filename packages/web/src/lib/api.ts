@@ -528,6 +528,36 @@ export interface EntityRelationEvidenceResponse {
   truncated: boolean;
 }
 
+export type TaskStatus = "open" | "in_progress" | "done" | "dropped";
+
+export interface EntityTask {
+  id: string;
+  parentEntityId: string | null;
+  parentSourceRef: string | null;
+  parentName: string | null;
+  source: string;
+  externalRef: string | null;
+  title: string;
+  status: TaskStatus;
+  statusRaw: string | null;
+  statusAuthority: string;
+  assigneeEntityId: string | null;
+  assigneeName: string | null;
+  proposedAssigneeName: string | null;
+  priority: string | null;
+  dueAt: string | null;
+  provenance: "structural" | "brief" | "summary";
+  sourceTaskId: string | null;
+  createdByUserId: string | null;
+  createdByUserName: string | null;
+  createdByUserEmail: string | null;
+  isOwnedByViewer: boolean;
+  readonlyReason: "not_owner" | "external_authority" | null;
+  completedAt: string | null;
+  updatedAt: string;
+  canEditStatus: boolean;
+}
+
 export interface EntityTimelineItem {
   fileId: string;
   fileName: string;
@@ -1204,6 +1234,7 @@ export interface AgentConfig {
   sources: AgentSourceConfig[];
   routes: AgentRoute[];
   sections: AgentSectionConfig[];
+  createTasks: boolean;
 }
 
 /** Generic output item for any prebuilt agent. `sectionKey` is whatever the agent defines. */
@@ -1260,6 +1291,7 @@ export interface AgentConfigPatch {
   delivery?: AgentDeliveryConfig | null;
   sources?: AgentSourceConfig[];
   routes?: AgentRoute[];
+  createTasks?: boolean;
 }
 
 export interface AgentOutputsResponse {
@@ -2395,6 +2427,19 @@ export const api = {
     },
     timeline(id: string) {
       return request<EntityTimelineResponse>(`/api/entities/${id}/timeline`);
+    },
+    tasks(id: string, opts?: { status?: TaskStatus; limit?: number }) {
+      const params = new URLSearchParams();
+      if (opts?.status) params.set("status", opts.status);
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return request<{ tasks: EntityTask[] }>(`/api/entities/${id}/tasks${qs ? `?${qs}` : ""}`);
+    },
+    updateTaskStatus(id: string, taskId: string, status: TaskStatus) {
+      return request<{ task: EntityTask }>(`/api/entities/${id}/tasks/${taskId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
     },
     listBindings(id: string, effective = true) {
       return request<{ bindings: EntityBinding[]; children: GroupedProjectChild[] }>(

@@ -138,6 +138,8 @@ import * as m135 from "./migrations/135-whatsapp-context-graph-indexing";
 import * as m136 from "./migrations/136-whatsapp-slice-denoised-message-ids";
 import * as m137 from "./migrations/137-whatsapp-group-participants";
 import * as m138 from "./migrations/138-whatsapp-identity-candidates";
+import * as m139 from "./migrations/139-tasks-proposed-assignee";
+import * as m140 from "./migrations/140-retire-unassigned-agent-tasks";
 import type { DB } from "./schema";
 
 /**
@@ -285,6 +287,8 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "136-whatsapp-slice-denoised-message-ids": m136,
           "137-whatsapp-group-participants": m137,
           "138-whatsapp-identity-candidates": m138,
+          "139-tasks-proposed-assignee": m139,
+          "140-retire-unassigned-agent-tasks": m140,
         };
       },
     },

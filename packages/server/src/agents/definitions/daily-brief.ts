@@ -902,6 +902,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
 }
 
 async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
+  if (!args.createTasks) return;
   const taskRepo = createTaskRepository(args.db);
   for (const item of args.items) {
     if (item.sectionKey !== "todos") continue;

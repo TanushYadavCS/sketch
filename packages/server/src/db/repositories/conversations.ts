@@ -508,12 +508,13 @@ export function createConversationRepository(db: Kysely<DB>) {
         .where("received_at", "<=", options.beforeReceivedAt);
       if (!options.includeBotMessages) query = query.where("is_bot", "=", 0);
       const rows = await query
-        .orderBy("received_at", "asc")
-        .orderBy("id", "asc")
+        .orderBy("received_at", "desc")
+        .orderBy("id", "desc")
         .limit(limit + 1)
         .execute();
+      const visibleRows = rows.slice(0, limit).reverse();
       return {
-        messages: rows.slice(0, limit).map(toStored),
+        messages: visibleRows.map(toStored),
         hasMore: rows.length > limit,
       };
     },

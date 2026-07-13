@@ -24,7 +24,7 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 134;
+const EXPECTED_MIGRATION_COUNT = 136;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -202,6 +202,39 @@ describe("runMigrations — full sequence", () => {
     expect(names[131]).toBe("136-whatsapp-slice-denoised-message-ids");
     expect(names[132]).toBe("137-whatsapp-group-participants");
     expect(names[133]).toBe("138-whatsapp-identity-candidates");
+    expect(names[134]).toBe("139-tasks-proposed-assignee");
+    expect(names[135]).toBe("140-retire-unassigned-agent-tasks");
+  });
+
+  it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {
+    const migrator = createMigrator(db);
+    const partial = await migrator.migrateTo("139-tasks-proposed-assignee");
+    expect(partial.error).toBeUndefined();
+
+    await sql`
+      INSERT INTO tasks
+        (id, source, title, normalized_title, status, status_authority, provenance, source_task_id, updated_at)
+      VALUES
+        ('summary-unassigned', 'summary', 'Summary unassigned', 'summary unassigned', 'open', 'local', 'summary', 'summary-unassigned', '2026-07-10T00:00:00.000Z'),
+        ('brief-unassigned', 'brief', 'Brief unassigned', 'brief unassigned', 'open', 'local', 'brief', 'brief-unassigned', '2026-07-10T00:00:00.000Z'),
+        ('structural-unassigned', 'linear', 'Linear unassigned', 'linear unassigned', 'open', 'external', 'structural', 'structural-unassigned', '2026-07-10T00:00:00.000Z')
+    `.execute(db);
+
+    const latest = await migrator.migrateToLatest();
+    expect(latest.error).toBeUndefined();
+
+    const rows = await sql<{ id: string; valid_to: string | null }>`
+      SELECT id, valid_to
+      FROM tasks
+      WHERE id IN ('summary-unassigned', 'brief-unassigned', 'structural-unassigned')
+      ORDER BY id ASC
+    `.execute(db);
+
+    expect(rows.rows).toEqual([
+      { id: "brief-unassigned", valid_to: expect.any(String) },
+      { id: "structural-unassigned", valid_to: null },
+      { id: "summary-unassigned", valid_to: expect.any(String) },
+    ]);
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {
@@ -859,7 +892,13 @@ describe("runMigrations — incremental upgrade", () => {
         '131-trunk-name-embeddings',
         '132-agent-messages',
         '133-chat-session-runtime',
-        '134-chat-session-archived-at'
+        '134-chat-session-archived-at',
+        '135-whatsapp-context-graph-indexing',
+        '136-whatsapp-slice-denoised-message-ids',
+        '137-whatsapp-group-participants',
+        '138-whatsapp-identity-candidates',
+        '139-tasks-proposed-assignee',
+        '140-retire-unassigned-agent-tasks'
       )
       ORDER BY name ASC
     `.execute(db);
@@ -892,6 +931,12 @@ describe("runMigrations — incremental upgrade", () => {
       { name: "132-agent-messages" },
       { name: "133-chat-session-runtime" },
       { name: "134-chat-session-archived-at" },
+      { name: "135-whatsapp-context-graph-indexing" },
+      { name: "136-whatsapp-slice-denoised-message-ids" },
+      { name: "137-whatsapp-group-participants" },
+      { name: "138-whatsapp-identity-candidates" },
+      { name: "139-tasks-proposed-assignee" },
+      { name: "140-retire-unassigned-agent-tasks" },
     ]);
 
     // runMigrations() always migrates to latest, so recovering 107-120 above

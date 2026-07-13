@@ -282,6 +282,24 @@ describe("agentRoutes", () => {
     );
   });
 
+  it("passes createTasks config through to the service", async () => {
+    const service = createService();
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${DAILY_BRIEF_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ createTasks: true }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(service.updateConfigForUser).toHaveBeenCalledWith(
+      DAILY_BRIEF_AGENT_KEY,
+      "user-1",
+      expect.objectContaining({ createTasks: true }),
+    );
+  });
+
   it("rejects delivery mentions for the wrong platform", async () => {
     const service = createService();
     const app = createRoutesTestApp(service);
