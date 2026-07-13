@@ -18,6 +18,8 @@ type TestParams = UseWebChatReconciliationParams<TestMessage>;
 
 const latestUserMessage: TestMessage = { id: "user-latest", role: "user" };
 const persistedPendingMessages: TestMessage[] = [latestUserMessage, { id: "assistant-pending", role: "assistant" }];
+const persistedFinalMessages: TestMessage[] = [latestUserMessage, { id: "assistant-final", role: "assistant" }];
+const REQUEST_TIMEOUT_MS = 10_000;
 
 function hasPendingProgress(messages: TestMessage[]): boolean {
   return messages.at(-1)?.id === "assistant-pending";
@@ -189,7 +191,8 @@ describe("useWebChatReconciliation", () => {
     expect(clearError).not.toHaveBeenCalled();
   });
 
-  it("reconciles immediately on visibility changes during recovery", async () => {
+  it("reconciles on visibility changes only after the document becomes visible", async () => {
+    const visibilityState = vi.spyOn(document, "visibilityState", "get");
     const loadMessages = vi.fn().mockResolvedValue({ messages: [], updatedAt: null });
 
     renderReconciliation(
@@ -202,6 +205,13 @@ describe("useWebChatReconciliation", () => {
     await flushAsyncWork();
     loadMessages.mockClear();
 
+    visibilityState.mockReturnValue("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushAsyncWork();
+
+    expect(loadMessages).not.toHaveBeenCalled();
+
+    visibilityState.mockReturnValue("visible");
     document.dispatchEvent(new Event("visibilitychange"));
     await flushAsyncWork();
 
@@ -248,6 +258,141 @@ describe("useWebChatReconciliation", () => {
 
     pendingLoad.resolve({ messages: persistedPendingMessages, updatedAt: null });
     await flushAsyncWork();
+  });
+
+  it("rejects an in-flight response after the conversation becomes terminal", async () => {
+    const pendingLoad = deferred<{ messages: TestMessage[]; updatedAt: string | null }>();
+    const loadMessages = vi.fn().mockReturnValue(pendingLoad.promise);
+    const setMessages = vi.fn();
+    const clearError = vi.fn();
+    const { result, rerender } = renderReconciliation(
+      createParams({
+        status: "error",
+        error: new Error("stream dropped"),
+        loadMessages,
+        setMessages,
+        clearError,
+      }),
+    );
+    await flushAsyncWork();
+
+    rerender(
+      createParams({
+        status: "ready",
+        messages: persistedFinalMessages,
+        loadMessages,
+        setMessages,
+        clearError,
+      }),
+    );
+    pendingLoad.resolve({ messages: persistedPendingMessages, updatedAt: null });
+    await flushAsyncWork();
+    await advanceTimersByTime(WEB_CHAT_RECONCILE_INTERVAL_MS * 2);
+
+    expect(setMessages).not.toHaveBeenCalledWith(persistedPendingMessages);
+    expect(clearError).not.toHaveBeenCalled();
+    expect(loadMessages).toHaveBeenCalledTimes(1);
+    expect(result.current.stage).toBe("idle");
+  });
+
+  it("resets recovery and reconciles a new conversation after the old request settles", async () => {
+    const oldLoad = deferred<{ messages: TestMessage[]; updatedAt: string | null }>();
+    const betaUserMessage = { id: "user-beta", role: "user" };
+    const betaMessages = [betaUserMessage, { id: "assistant-beta", role: "assistant" }];
+    const loadMessages = vi
+      .fn()
+      .mockReturnValueOnce(oldLoad.promise)
+      .mockResolvedValueOnce({ messages: betaMessages, updatedAt: null });
+    const setMessages = vi.fn();
+    const clearError = vi.fn();
+    const { result, rerender } = renderReconciliation(
+      createParams({
+        status: "error",
+        error: new Error("alpha stream dropped"),
+        loadMessages,
+        setMessages,
+        clearError,
+      }),
+    );
+    await flushAsyncWork();
+    await advanceTimersByTime(WEB_CHAT_RECONNECT_NOTICE_MS);
+    expect(result.current.stage).toBe("reconnecting");
+
+    rerender(
+      createParams({
+        conversationId: "chat-beta",
+        status: "error",
+        error: new Error("beta stream dropped"),
+        messages: [betaUserMessage],
+        loadMessages,
+        setMessages,
+        clearError,
+      }),
+    );
+    expect(result.current.stage).toBe("silent");
+
+    oldLoad.resolve({ messages: persistedPendingMessages, updatedAt: null });
+    await flushAsyncWork();
+
+    expect(loadMessages).toHaveBeenNthCalledWith(1, "chat-alpha");
+    expect(loadMessages).toHaveBeenNthCalledWith(2, "chat-beta");
+    expect(setMessages).not.toHaveBeenCalledWith(persistedPendingMessages);
+    expect(setMessages).toHaveBeenCalledWith(betaMessages);
+  });
+
+  it("runs a queued manual retry immediately after the in-flight request settles", async () => {
+    const pendingLoad = deferred<{ messages: TestMessage[]; updatedAt: string | null }>();
+    const loadMessages = vi
+      .fn()
+      .mockReturnValueOnce(pendingLoad.promise)
+      .mockResolvedValueOnce({ messages: persistedFinalMessages, updatedAt: null });
+    const setMessages = vi.fn();
+    const { result } = renderReconciliation(
+      createParams({
+        status: "error",
+        error: new Error("stream dropped"),
+        loadMessages,
+        setMessages,
+      }),
+    );
+    await flushAsyncWork();
+
+    result.current.retryNow();
+    pendingLoad.resolve({ messages: [], updatedAt: null });
+    await flushAsyncWork();
+
+    expect(loadMessages).toHaveBeenCalledTimes(2);
+    expect(setMessages).toHaveBeenCalledWith(persistedFinalMessages);
+  });
+
+  it("releases a timed-out request and rejects its late result", async () => {
+    const timedOutLoad = deferred<{ messages: TestMessage[]; updatedAt: string | null }>();
+    const lateMessages = [latestUserMessage, { id: "assistant-late", role: "assistant" }];
+    const loadMessages = vi
+      .fn()
+      .mockReturnValueOnce(timedOutLoad.promise)
+      .mockResolvedValueOnce({ messages: persistedFinalMessages, updatedAt: null });
+    const setMessages = vi.fn();
+    const { result } = renderReconciliation(
+      createParams({
+        status: "error",
+        error: new Error("stream dropped"),
+        loadMessages,
+        setMessages,
+      }),
+    );
+    await flushAsyncWork();
+
+    result.current.retryNow();
+    await advanceTimersByTime(REQUEST_TIMEOUT_MS);
+
+    expect(loadMessages).toHaveBeenCalledTimes(2);
+    expect(setMessages).toHaveBeenCalledWith(persistedFinalMessages);
+
+    timedOutLoad.resolve({ messages: lateMessages, updatedAt: null });
+    await flushAsyncWork();
+
+    expect(setMessages).not.toHaveBeenCalledWith(lateMessages);
   });
 
   it("suppresses the transport error while recovery owns its presentation", async () => {
