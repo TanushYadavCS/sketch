@@ -102,27 +102,46 @@ export interface SettingsRepositoryOptions {
 
 type SettingsRow = Selectable<SettingsTable>;
 
-interface SettingsCacheState {
+interface SettingsCacheBucket {
   entry: { value: SettingsRow | null; expiresAt: number } | null;
-  generation: number;
   inflight: Promise<SettingsRow | null> | null;
 }
 
 /**
- * Cache is shared across all repository instances for the same Kysely db.
- * createApp and bootstrap each call createSettingsRepository(); without
- * sharing, middleware would keep a stale row after settings.update() from
- * another instance. WeakMap drops state when the db is GC'd (tests).
+ * Per-db cache root. `generation` is shared so any write invalidates every
+ * encryption-key bucket. Entries/inflight are keyed by encryption key so a
+ * decrypted warm from one key cannot be served to a different key (or no key).
  */
-const cacheByDb = new WeakMap<object, SettingsCacheState>();
+interface SettingsDbCacheRoot {
+  generation: number;
+  buckets: Map<string, SettingsCacheBucket>;
+}
 
-function cacheStateFor(db: Kysely<DB>): SettingsCacheState {
-  let state = cacheByDb.get(db);
-  if (!state) {
-    state = { entry: null, generation: 0, inflight: null };
-    cacheByDb.set(db, state);
+/**
+ * Cache is shared across repository instances for the same Kysely db +
+ * encryption key. createApp and bootstrap each call createSettingsRepository();
+ * without sharing, middleware would keep a stale row after settings.update()
+ * from another instance. WeakMap drops state when the db is GC'd (tests).
+ */
+const cacheByDb = new WeakMap<object, SettingsDbCacheRoot>();
+
+function cacheRootFor(db: Kysely<DB>): SettingsDbCacheRoot {
+  let root = cacheByDb.get(db);
+  if (!root) {
+    root = { generation: 0, buckets: new Map() };
+    cacheByDb.set(db, root);
   }
-  return state;
+  return root;
+}
+
+function cacheBucketFor(root: SettingsDbCacheRoot, encryptionKey: string | undefined): SettingsCacheBucket {
+  const key = encryptionKey ?? "";
+  let bucket = root.buckets.get(key);
+  if (!bucket) {
+    bucket = { entry: null, inflight: null };
+    root.buckets.set(key, bucket);
+  }
+  return bucket;
 }
 
 /**
@@ -133,18 +152,22 @@ function cacheStateFor(db: Kysely<DB>): SettingsCacheState {
  * path. Mutations (create / ensure / ensureSketchApiKey / update) bust the
  * cache so jwt_secret, onboarding, and authz flags stay correct after writes.
  *
- * Cache state is shared per Kysely db instance so every createSettingsRepository
- * handle for that db stays coherent. Not distributed across processes.
+ * Cache state is shared per (Kysely db, encryption key) so every matching
+ * createSettingsRepository handle stays coherent. Writes invalidate all key
+ * buckets for that db. Not distributed across processes.
  */
 export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string, options?: SettingsRepositoryOptions) {
   const cacheTtlMs = options?.cacheTtlMs ?? DEFAULT_SETTINGS_CACHE_TTL_MS;
   const now = options?.now ?? Date.now;
-  const state = cacheStateFor(db);
+  const root = cacheRootFor(db);
+  const bucket = cacheBucketFor(root, encryptionKey);
 
   function invalidateCache(): void {
-    state.entry = null;
-    state.generation += 1;
-    state.inflight = null;
+    root.generation += 1;
+    for (const b of root.buckets.values()) {
+      b.entry = null;
+      b.inflight = null;
+    }
   }
 
   function cloneRow(row: SettingsRow): SettingsRow {
@@ -152,17 +175,17 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
   }
 
   function readCache(): SettingsRow | null | undefined {
-    if (!state.entry) return undefined;
-    if (cacheTtlMs > 0 && now() >= state.entry.expiresAt) {
-      state.entry = null;
+    if (!bucket.entry) return undefined;
+    if (cacheTtlMs > 0 && now() >= bucket.entry.expiresAt) {
+      bucket.entry = null;
       return undefined;
     }
-    return state.entry.value === null ? null : cloneRow(state.entry.value);
+    return bucket.entry.value === null ? null : cloneRow(bucket.entry.value);
   }
 
   function writeCache(value: SettingsRow | null, generationAtLoad: number): void {
-    if (generationAtLoad !== state.generation) return;
-    state.entry = {
+    if (generationAtLoad !== root.generation) return;
+    bucket.entry = {
       value: value === null ? null : cloneRow(value),
       expiresAt: cacheTtlMs > 0 ? now() + cacheTtlMs : Number.POSITIVE_INFINITY,
     };
@@ -179,22 +202,22 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
       const hit = readCache();
       if (hit !== undefined) return hit;
 
-      if (state.inflight) {
-        const shared = await state.inflight;
+      if (bucket.inflight) {
+        const shared = await bucket.inflight;
         return shared === null ? null : cloneRow(shared);
       }
 
-      const generationAtLoad = state.generation;
+      const generationAtLoad = root.generation;
       const pending = loadFromDb().then((loaded) => {
         writeCache(loaded, generationAtLoad);
         return loaded;
       });
-      state.inflight = pending;
+      bucket.inflight = pending;
       try {
         const loaded = await pending;
         return loaded === null ? null : cloneRow(loaded);
       } finally {
-        if (state.inflight === pending) state.inflight = null;
+        if (bucket.inflight === pending) bucket.inflight = null;
       }
     },
 
@@ -213,9 +236,10 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
         .execute();
 
       invalidateCache();
+      const generationAtLoad = root.generation;
       const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
       const decrypted = decryptSettingsRow(row, encryptionKey);
-      writeCache(decrypted, state.generation);
+      writeCache(decrypted, generationAtLoad);
       return cloneRow(decrypted);
     },
 
@@ -235,9 +259,10 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
         .execute();
 
       invalidateCache();
+      const generationAtLoad = root.generation;
       const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
       const decrypted = decryptSettingsRow(row, encryptionKey);
-      writeCache(decrypted, state.generation);
+      writeCache(decrypted, generationAtLoad);
       if (!decrypted.sketch_api_key) {
         throw new Error("Sketch API key could not be ensured");
       }

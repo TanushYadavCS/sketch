@@ -210,13 +210,37 @@ describe("Settings repository", () => {
       expect((await settings.get())?.org_name).toBeNull();
     });
 
-    it("shares cache invalidation across repository instances for the same db", async () => {
+    it("shares cache invalidation across repository instances for the same db and key", async () => {
       const other = createSettingsRepository(db);
       await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
       expect((await other.get())?.admin_can_read_all_files).toBe(0);
 
       await settings.update({ adminCanReadAllFiles: true });
       expect((await other.get())?.admin_can_read_all_files).toBe(1);
+    });
+
+    it("does not serve a keyed decrypted cache hit to an unkeyed repository", async () => {
+      const TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      const keyed = createSettingsRepository(db, TEST_KEY);
+      await keyed.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      await keyed.update({ slackBotToken: "xoxb-secret" });
+      expect((await keyed.get())?.slack_bot_token).toBe("xoxb-secret");
+
+      const unkeyed = createSettingsRepository(db);
+      await expect(unkeyed.get()).rejects.toThrow(/ENCRYPTION_KEY is not set/);
+    });
+
+    it("ensure() does not write a stale row after a concurrent update", async () => {
+      const repoA = createSettingsRepository(db);
+      const repoB = createSettingsRepository(db);
+      await repoA.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+
+      const ensurePromise = repoA.ensure();
+      await repoB.update({ orgName: "Concurrent" });
+      await ensurePromise;
+
+      expect((await repoA.get())?.org_name).toBe("Concurrent");
+      expect((await repoB.get())?.org_name).toBe("Concurrent");
     });
   });
 });
