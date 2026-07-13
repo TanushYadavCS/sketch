@@ -107,10 +107,15 @@ function safePushName(value: string | undefined): string | undefined {
   return sanitized.length > 0 ? sanitized : undefined;
 }
 
-function displayNameForResolution(resolution: WhatsAppIdentityResolution, phoneE164: string | null): string {
+function displayNameForResolution(
+  resolution: WhatsAppIdentityResolution,
+  phoneE164: string | null,
+  pushName: string | undefined,
+): string {
   if (resolution.kind === "teammate") return resolution.name;
   if (resolution.kind === "entity") return formatWithCompany(resolution.name, resolution.company);
   if (resolution.kind === "labeled") return formatWithCompany(resolution.name, resolution.company);
+  if (pushName) return pushName;
   return unresolvedDisplayName(phoneE164);
 }
 
@@ -129,7 +134,10 @@ function snapshotParticipant(
     const phoneJidRef = stableWhatsAppParticipantJidRef(phoneE164ToWhatsAppJid(normalizedPhone));
     if (!senderJidRefs.includes(phoneJidRef)) senderJidRefs.push(phoneJidRef);
   }
-  const displayName = sanitizeWhatsAppDisplayText(displayNameForResolution(resolution, normalizedPhone));
+  const safeParticipantPushName = safePushName(pushName);
+  const displayName = sanitizeWhatsAppDisplayText(
+    displayNameForResolution(resolution, normalizedPhone, safeParticipantPushName),
+  );
   const company =
     "company" in resolution && resolution.company ? sanitizeWhatsAppDisplayText(resolution.company) : undefined;
 
@@ -143,7 +151,7 @@ function snapshotParticipant(
     ...(resolution.kind === "teammate" ? { userId: resolution.userId } : {}),
     ...(resolution.kind === "entity" ? { entityId: resolution.entityId } : {}),
     ...(company ? { company } : {}),
-    ...(pushName ? { pushName } : {}),
+    ...(safeParticipantPushName ? { pushName: safeParticipantPushName } : {}),
   };
 }
 

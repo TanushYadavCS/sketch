@@ -15,7 +15,7 @@ import {
 import { sanitizeWhatsAppDisplayText } from "../whatsapp/privacy";
 import { phoneE164ToWhatsAppJid } from "../whatsapp/provider";
 import type { GeminiGenerator } from "./gemini-generate";
-import type { EntitySeed, SyncedItem } from "./types";
+import type { SyncedItem } from "./types";
 
 export const DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT = 50;
 export const WHATSAPP_EMISSION_REFRESH_DAYS = 7;
@@ -24,8 +24,6 @@ const PROMPT_VERSION = "whatsapp-salience-v1";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SALIENCE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const SALIENCE_SIGNALS = new Set(["decision", "commitment", "question", "named_entity"]);
-const PERSON_ENTITY_TYPES = new Set(["person", "people", "human", "individual", "contact"]);
-const STRUCTURAL_ENTITY_TYPES = new Set(["company", "project", "product", "tool", "team", "deal"]);
 const RAW_WHATSAPP_JID_PATTERN = /[^\s"'<>()[\]{}]+@(?:s\.whatsapp\.net|lid)\b/iu;
 const RAW_CONTIGUOUS_PHONE_PATTERN = /\+?[1-9]\d{9,14}\b/u;
 
@@ -404,26 +402,6 @@ function serializedSignals(verdict: WhatsAppSalienceVerdict): string {
   });
 }
 
-function shouldSeedEntity(entity: WhatsAppSalienceEntity): boolean {
-  if (PERSON_ENTITY_TYPES.has(entity.type)) return false;
-  return STRUCTURAL_ENTITY_TYPES.has(entity.type);
-}
-
-function entitySeedsFromVerdict(sliceId: string, verdict: WhatsAppSalienceVerdict): EntitySeed[] {
-  return verdict.entities.filter(shouldSeedEntity).map((entity) => {
-    const sourceId = createHash("sha256")
-      .update(`${sliceId}:${entity.type}:${entity.name.toLowerCase()}`)
-      .digest("hex");
-    return {
-      name: entity.name,
-      sourceType: entity.type,
-      source: "whatsapp",
-      sourceId: `salience:${sourceId}`,
-      metadata: { origin: "whatsapp_salience", sliceId, promptVersion: PROMPT_VERSION },
-    };
-  });
-}
-
 async function recordUnresolvedNumberCandidates(
   db: Kysely<DB>,
   context: SliceContext,
@@ -545,12 +523,6 @@ async function syncedItemForKeptSlice(
   }
   const titleGroup = sanitizeWhatsAppDisplayText(context.groupName) || "WhatsApp group";
   const content = rendered.content;
-  const storedSignals = context.slice.salience_signals ? JSON.parse(context.slice.salience_signals) : null;
-  const verdict: WhatsAppSalienceVerdict = {
-    salient: true,
-    signals: Array.isArray(storedSignals?.signals) ? storedSignals.signals : [],
-    entities: Array.isArray(storedSignals?.entities) ? storedSignals.entities : [],
-  };
   return {
     skippedNoScope: false,
     item: {
@@ -571,7 +543,6 @@ async function syncedItemForKeptSlice(
         label: titleGroup,
         memberEmails: rendered.teammateEmails,
       },
-      entitySeeds: entitySeedsFromVerdict(context.slice.id, verdict),
     },
   };
 }
