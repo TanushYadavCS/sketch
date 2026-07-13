@@ -3,7 +3,7 @@ import { renderWithProviders } from "@/test/utils";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
+import { type ReactNode, StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ChatPage,
@@ -642,6 +642,20 @@ describe("chat route", () => {
       search: {},
       replace: true,
     });
+  });
+
+  it("preserves the initial message during StrictMode effect replay", async () => {
+    sendMessage.mockClear();
+    setMessages.mockClear();
+
+    renderWithProviders(
+      <StrictMode>
+        <ChatPage />
+      </StrictMode>,
+    );
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    expect(setMessages).not.toHaveBeenCalledWith([]);
   });
 
   it("renders a loading shell and disables the composer until existing history resolves", async () => {

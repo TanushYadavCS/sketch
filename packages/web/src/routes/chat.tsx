@@ -1124,7 +1124,6 @@ export function ChatPage() {
     const queryKey = webChatMessagesQueryKey(conversationId);
     setHistoryLoadError((error) => (error?.conversationId === conversationId ? null : error));
     if (knownNewConversation) {
-      chat.setMessages([]);
       setLoadedConversationId(conversationId);
       return;
     }
