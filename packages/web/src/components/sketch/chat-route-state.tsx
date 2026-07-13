@@ -13,6 +13,29 @@ export function ChatConversationSkeleton(): JSX.Element {
   );
 }
 
+export function ChatConversationLoadError(props: { onRetry: () => void }): JSX.Element {
+  return (
+    <div className="flex flex-wrap items-center gap-x-[10px] gap-y-[6px] rounded-[10px] border border-destructive/30 bg-destructive/5 px-[12px] py-[8px]">
+      <p
+        role="alert"
+        aria-live="assertive"
+        className="inline-flex items-center gap-[6px] text-[13px] font-medium text-destructive"
+      >
+        <WarningCircleIcon size={14} aria-hidden />
+        Couldn’t load this conversation.
+      </p>
+      <button
+        type="button"
+        onClick={props.onRetry}
+        className="inline-flex h-[28px] items-center gap-[6px] rounded-[7px] bg-foreground px-[10px] text-[12px] font-semibold text-background transition-colors hover:bg-foreground/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/45"
+      >
+        <ArrowClockwiseIcon size={13} aria-hidden />
+        Retry
+      </button>
+    </div>
+  );
+}
+
 export function ChatRecoveryStatus(props: { stage: ChatRecoveryStage; onRetry: () => void }): JSX.Element | null {
   const { stage, onRetry } = props;
 
