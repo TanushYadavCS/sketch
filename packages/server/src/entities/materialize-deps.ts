@@ -454,6 +454,8 @@ export async function buildMaterializeDeps(
   for (const f of allFiles) fileToConnector.set(f.id, f.connector_config_id);
   const allConfigs = await db.selectFrom("connector_configs").select(["id", "created_by"]).execute();
   for (const c of allConfigs) connectorOwners.set(c.id, c.created_by);
+  const allUsers = await db.selectFrom("users").select("id").execute();
+  const knownUserIds = new Set(allUsers.map((u) => u.id));
 
   return {
     db,
@@ -481,16 +483,20 @@ export async function buildMaterializeDeps(
         .where("id", "=", indexedFileId)
         .executeTakeFirst()
         .then((row) => row ?? null),
+    /**
+     * Resolves the owning user for a fact, falling back to the connector's
+     * owner. Only ids present in `users` are returned: legacy auth wrote
+     * sentinel strings ('admin', 'sketch-api-key') as owners, and a user row
+     * can be deleted after facts referenced it; passing either through would
+     * fail the owner foreign key on every table the materializers write to.
+     */
     resolveOwner: (fact: IndexedFileFactRow) => {
-      if (fact.created_by_user_id) return fact.created_by_user_id;
-      const indexedFileId = fact.indexed_file_id;
-      if (!indexedFileId) return null;
-      if (indexedFileId) {
-        const cfg = fileToConnector.get(indexedFileId);
-        if (cfg) {
-          const owner = connectorOwners.get(cfg);
-          if (owner) return owner;
-        }
+      if (fact.created_by_user_id && knownUserIds.has(fact.created_by_user_id)) return fact.created_by_user_id;
+      const connectorId =
+        fact.connector_config_id ?? (fact.indexed_file_id ? fileToConnector.get(fact.indexed_file_id) : undefined);
+      if (connectorId) {
+        const owner = connectorOwners.get(connectorId);
+        if (owner && knownUserIds.has(owner)) return owner;
       }
       return null;
     },

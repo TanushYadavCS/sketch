@@ -51,6 +51,12 @@ async function seedFile(
   opts: { content?: string; contentHash?: string | null } = {},
 ): Promise<void> {
   await db
+    .insertInto("users")
+    .values({ id: "admin", name: "Connector Owner", email: "connector-owner@example.test" })
+    .onConflict((oc) => oc.doNothing())
+    .execute();
+
+  await db
     .insertInto("connector_configs")
     .values({
       id: "conn-smart",

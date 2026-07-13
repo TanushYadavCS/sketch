@@ -188,7 +188,7 @@ async function countActiveFacts(db: Kysely<DB>): Promise<number> {
 async function clearMaterializedFlags(db: Kysely<DB>): Promise<number> {
   const result = await db
     .updateTable("indexed_file_facts")
-    .set({ materialized_at: null })
+    .set({ materialized_at: null, materialization_attempts: 0 })
     .where("deleted_at", "is", null)
     .executeTakeFirst();
   return Number(result.numUpdatedRows ?? 0);

@@ -51,6 +51,14 @@ const FACT_REPLAY_ORDER = [
 const FACT_REPLAY_ORDER_RANK = new Map<string, number>(FACT_REPLAY_ORDER.map((t, i) => [t, i]));
 
 /**
+ * Facts whose materialization throws this many times are quarantined: backlog
+ * sweeps stop retrying them until their content changes (which resets the
+ * counter). Without a cap, a fact that fails deterministically (e.g. an owner
+ * foreign-key violation) is retried by every post-sync sweep forever.
+ */
+export const MAX_MATERIALIZATION_ATTEMPTS = 5;
+
+/**
  * Fetch one keyset page of facts for a backlog-scoped pass. Rows are bounded by
  * `(created_at, id) > cursor`, ordered by `created_at` then `id` ascending, and
  * capped at `limit` so the caller holds at most one page (including `raw`
@@ -84,7 +92,10 @@ function fetchFactBatch(
     .orderBy("created_at", "asc")
     .orderBy("id", "asc")
     .limit(limit);
-  if (filter.onlyUnmaterialized) query = query.where("materialized_at", "is", null);
+  if (filter.onlyUnmaterialized)
+    query = query
+      .where("materialized_at", "is", null)
+      .where("materialization_attempts", "<", MAX_MATERIALIZATION_ATTEMPTS);
   if (filter.factType) query = query.where("fact_type", "=", filter.factType);
   if (filter.factTypesIn) query = query.where("fact_type", "in", [...filter.factTypesIn]);
   if (filter.factTypesNotIn) query = query.where("fact_type", "not in", [...filter.factTypesNotIn]);
@@ -311,7 +322,8 @@ async function materializeUnmaterializedFactsInner(
     .selectFrom("indexed_file_facts")
     .select((eb) => eb.fn.countAll().as("count"))
     .where("deleted_at", "is", null)
-    .where("materialized_at", "is", null);
+    .where("materialized_at", "is", null)
+    .where("materialization_attempts", "<", MAX_MATERIALIZATION_ATTEMPTS);
   if (factTypesFilter) {
     countQuery = countQuery.where("fact_type", "in", factTypesFilter);
   }
@@ -346,7 +358,22 @@ async function materializeUnmaterializedFactsInner(
         summary.deferred++;
       }
     } catch (err) {
-      logger.warn({ err, factId: fact.id, factType: fact.fact_type }, "Materialization failed for fact");
+      const attempts = fact.materialization_attempts + 1;
+      const quarantined = attempts >= MAX_MATERIALIZATION_ATTEMPTS;
+      logger.warn(
+        { err, factId: fact.id, factType: fact.fact_type, attempts, quarantined },
+        quarantined
+          ? "Materialization failed for fact, quarantined from future sweeps"
+          : "Materialization failed for fact",
+      );
+      await db
+        .updateTable("indexed_file_facts")
+        .set((eb) => ({
+          materialization_attempts: eb("materialization_attempts", "+", 1),
+          updated_at: new Date().toISOString(),
+        }))
+        .where("id", "=", fact.id)
+        .execute();
       summary.skipped++;
       summary.deferred++;
     }

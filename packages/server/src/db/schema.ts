@@ -1012,6 +1012,7 @@ export interface IndexedFileFactsTable {
   deleted_at: string | null;
   content_hash: string | null;
   materialized_at: string | null;
+  materialization_attempts: Generated<number>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

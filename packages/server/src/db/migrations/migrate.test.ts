@@ -24,7 +24,7 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 136;
+const EXPECTED_MIGRATION_COUNT = 137;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -204,6 +204,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[133]).toBe("138-whatsapp-identity-candidates");
     expect(names[134]).toBe("139-tasks-proposed-assignee");
     expect(names[135]).toBe("140-retire-unassigned-agent-tasks");
+    expect(names[136]).toBe("141-fact-materialization-quarantine");
   });
 
   it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {
@@ -234,6 +235,55 @@ describe("runMigrations — full sequence", () => {
       { id: "brief-unassigned", valid_to: expect.any(String) },
       { id: "structural-unassigned", valid_to: null },
       { id: "summary-unassigned", valid_to: expect.any(String) },
+    ]);
+  });
+
+  it("migration 141 reassigns sentinel connector and fact owners to the earliest admin user", async () => {
+    const migrator = createMigrator(db);
+    const partial = await migrator.migrateTo("140-retire-unassigned-agent-tasks");
+    expect(partial.error).toBeUndefined();
+
+    await sql`
+      INSERT INTO users (id, name, email, auth_role, created_at)
+      VALUES
+        ('member-1', 'Member', 'member@example.com', 'member', '2026-01-01T00:00:00.000Z'),
+        ('admin-late', 'Admin Late', 'admin-late@example.com', 'admin', '2026-03-01T00:00:00.000Z'),
+        ('admin-early', 'Admin Early', 'admin-early@example.com', 'admin', '2026-02-01T00:00:00.000Z')
+    `.execute(db);
+    await sql`
+      INSERT INTO connector_configs (id, connector_type, auth_type, credentials, scope_config, created_by)
+      VALUES
+        ('conn-admin', 'clickup', 'api_key', '{}', '{}', 'admin'),
+        ('conn-api-key', 'gmail', 'oauth', '{}', '{}', 'sketch-api-key'),
+        ('conn-owned', 'linear', 'api_key', '{}', '{}', 'member-1')
+    `.execute(db);
+    await sql`
+      INSERT INTO indexed_file_facts (id, source, fact_type, relation, fact_key, created_by_user_id)
+      VALUES
+        ('fact-admin', 'clickup', 'llm_task', 'mentioned', 'key-1', 'admin'),
+        ('fact-api-key', 'gmail', 'commitment', 'mentioned', 'key-2', 'sketch-api-key'),
+        ('fact-owned', 'linear', 'commitment', 'mentioned', 'key-3', 'member-1')
+    `.execute(db);
+
+    const latest = await migrator.migrateToLatest();
+    expect(latest.error).toBeUndefined();
+
+    const configs = await sql<{ id: string; created_by: string }>`
+      SELECT id, created_by FROM connector_configs ORDER BY id ASC
+    `.execute(db);
+    expect(configs.rows).toEqual([
+      { id: "conn-admin", created_by: "admin-early" },
+      { id: "conn-api-key", created_by: "admin-early" },
+      { id: "conn-owned", created_by: "member-1" },
+    ]);
+
+    const facts = await sql<{ id: string; created_by_user_id: string; materialization_attempts: number }>`
+      SELECT id, created_by_user_id, materialization_attempts FROM indexed_file_facts ORDER BY id ASC
+    `.execute(db);
+    expect(facts.rows).toEqual([
+      { id: "fact-admin", created_by_user_id: "admin-early", materialization_attempts: 0 },
+      { id: "fact-api-key", created_by_user_id: "admin-early", materialization_attempts: 0 },
+      { id: "fact-owned", created_by_user_id: "member-1", materialization_attempts: 0 },
     ]);
   });
 
