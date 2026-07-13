@@ -915,9 +915,9 @@ export function ChatPage() {
   const chat = useChat<WebChatMessage>({
     id: conversationId,
     transport,
-    ...(freshCachedHistory ? { messages: freshCachedHistory.messages } : {}),
+    ...(freshCachedHistory ? { messages: freshCachedHistory.messages } : knownNewConversation ? { messages: [] } : {}),
   });
-  const historyReady = loadedConversationId === conversationId || freshCachedHistory !== null;
+  const historyReady = knownNewConversation || loadedConversationId === conversationId || freshCachedHistory !== null;
   const historyLoadFailed =
     historyLoadError?.conversationId === conversationId && historyLoadError.attempt === historyLoadAttempt;
   const loadMessagesForReconciliation = useCallback(async (targetConversationId: string, signal: AbortSignal) => {
@@ -1237,7 +1237,13 @@ export function ChatPage() {
             key={conversationId}
             initialValue={search.prefill ?? ""}
             disabled={!historyReady || chatBusy}
-            disabledPlaceholder={historyReady ? "Sketch is thinking..." : "Loading conversation..."}
+            disabledPlaceholder={
+              historyLoadFailed
+                ? "Conversation unavailable"
+                : historyReady
+                  ? "Sketch is thinking..."
+                  : "Loading conversation..."
+            }
             running={chatBusy}
             runningPlaceholder="Sketch is thinking..."
             stopping={stoppingRun}

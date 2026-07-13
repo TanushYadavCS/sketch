@@ -631,7 +631,9 @@ describe("chat route", () => {
     expect(screen.getByLabelText("Chat thread").parentElement).toHaveClass("right-[-18px]", "pr-[18px]");
     expect(thread.getByText("Hi Sketch")).toBeInTheDocument();
     expect(thread.getByText("Hi Karan")).toBeInTheDocument();
-    expect(useChatArgs).toHaveBeenCalledWith(expect.objectContaining({ id: "chat-alpha" }));
+    expect(useChatArgs).toHaveBeenCalledWith(expect.objectContaining({ id: "chat-alpha", messages: [] }));
+    expect(screen.queryByLabelText("Loading conversation")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Message Sketch")).not.toBeDisabled();
     expect(mocks.loadMessages).not.toHaveBeenCalled();
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Plan my day" })));
     expect(mocks.navigate).toHaveBeenCalledWith({
@@ -675,6 +677,7 @@ describe("chat route", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn’t load this conversation.");
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(screen.getByLabelText("Message Sketch")).toBeDisabled();
+    expect(screen.getByLabelText("Message Sketch")).toHaveAttribute("placeholder", "Conversation unavailable");
     expect(screen.queryByLabelText("Chat thread")).not.toBeInTheDocument();
     await Promise.resolve();
     expect(unhandledRejection).not.toHaveBeenCalled();
