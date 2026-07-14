@@ -1498,6 +1498,7 @@ async function reconcileLlmExtractionFacts(
     await deps.ensureFresh?.();
     await materializeUnmaterializedFacts(db, deps.logger, {
       embeddingProvider: deps.embeddingProvider,
+      factTypes: ["llm_extracted", "llm_relation", "feature"],
     });
     return writtenFactKeys;
   } catch (err) {
