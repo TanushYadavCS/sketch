@@ -4,7 +4,12 @@ import { createEntityDomainsRepository } from "../db/repositories/entity-domains
 import type { DB } from "../db/schema";
 import { yieldToEventLoop } from "../lib/event-loop";
 import { heapStats, heapUsedMb } from "../lib/heap";
-import { DEFAULT_FACT_BATCH_SIZE, type FactBatchCursor, forEachFactBatch } from "./fact-batches";
+import {
+  DEFAULT_FACT_BATCH_SIZE,
+  type FactBatchCursor,
+  forEachFactBatch,
+  forEachFactCandidatePage,
+} from "./fact-batches";
 import { materializeCommitment } from "./materialize-commitment";
 import { materializeContactPointFact } from "./materialize-contact-points";
 import { materializeDecision } from "./materialize-decision";
@@ -59,30 +64,80 @@ const FACT_REPLAY_ORDER_RANK = new Map<string, number>(FACT_REPLAY_ORDER.map((t,
 export const MAX_MATERIALIZATION_ATTEMPTS = 5;
 
 /**
- * Fetch one keyset page of facts for a backlog-scoped pass. Rows are bounded by
- * `(created_at, id) > cursor`, ordered by `created_at` then `id` ascending, and
- * capped at `limit` so the caller holds at most one page (including `raw`
- * payloads) at a time. Types are processed in `FACT_REPLAY_ORDER` rank order;
- * within a type, `created_at` keeps facts in the chronological order the
- * pre-batching whole-table load produced in practice — sub-entity supersession
- * dedups a same-valued observation into its predecessor only when facts arrive
- * oldest-first — and `id` breaks same-timestamp ties deterministically.
+ * Narrow projection used to page and classify a backlog sweep without touching
+ * each row's `raw` payload. `(fact_type, created_at, id)` are exactly the columns
+ * of the `idx_indexed_file_facts_open_materializable` partial index, so the
+ * candidate scan is index-only on both SQLite and Postgres and never reads the
+ * table heap. `materialized_at`/`materialization_attempts` are intentionally not
+ * projected: the open predicate already constrains them, and classification (all
+ * open facts are candidates until Fix 3 adds event filtering) needs nothing more.
  */
-function fetchFactBatch(
+interface OpenFactCandidate {
+  id: string;
+  created_at: string;
+  fact_type: string;
+}
+
+interface FactTypeFilter {
+  factType?: string;
+  factTypesIn?: readonly string[];
+  factTypesNotIn?: readonly string[];
+}
+
+/**
+ * Fetch one keyset page of full fact rows for the chronological replay/recreate
+ * scope. Rows are bounded by `(created_at, id) > cursor`, ordered by `created_at`
+ * then `id` ascending, and capped at `limit` so the caller holds at most one page
+ * (including `raw` payloads) at a time. Replay intentionally scans every live fact
+ * of a type regardless of verdict, so it does not apply the open predicate.
+ * `created_at` keeps facts in the chronological order the pre-batching whole-table
+ * load produced in practice — sub-entity supersession dedups a same-valued
+ * observation into its predecessor only when facts arrive oldest-first — and `id`
+ * breaks same-timestamp ties deterministically.
+ */
+function fetchReplayFactBatch(
   db: Kysely<DB>,
   cursor: FactBatchCursor,
   limit: number,
-  filter: {
-    factType?: string;
-    factTypesIn?: readonly string[];
-    factTypesNotIn?: readonly string[];
-    onlyUnmaterialized: boolean;
-  },
+  factType: string,
 ): Promise<IndexedFileFactRow[]> {
-  let query = db
+  return db
     .selectFrom("indexed_file_facts")
     .selectAll()
     .where("deleted_at", "is", null)
+    .where("fact_type", "=", factType)
+    .where((eb) =>
+      eb.or([
+        eb("created_at", ">", cursor.createdAt),
+        eb.and([eb("created_at", "=", cursor.createdAt), eb("id", ">", cursor.id)]),
+      ]),
+    )
+    .orderBy("created_at", "asc")
+    .orderBy("id", "asc")
+    .limit(limit)
+    .execute();
+}
+
+/**
+ * Build the narrow open-fact candidate query for one keyset page. The
+ * `deleted_at IS NULL AND materialized_at IS NULL AND materialization_attempts <
+ * cap` predicate plus the `(created_at, id)` keyset and ordering match the Fix 2a
+ * `idx_indexed_file_facts_open_materializable` partial index, so this drives
+ * paging cheaply without loading `raw`. Exported so tests can `EXPLAIN` the exact
+ * query and assert the planner uses that index on both dialects.
+ */
+export function buildOpenFactCandidateQuery(
+  db: Kysely<DB>,
+  cursor: FactBatchCursor,
+  limit: number,
+  filter: FactTypeFilter,
+) {
+  let query = db
+    .selectFrom("indexed_file_facts")
+    .select(["id", "created_at", "fact_type"])
+    .where("deleted_at", "is", null)
+    .where("materialized_at", "is", null)
+    .where("materialization_attempts", "<", MAX_MATERIALIZATION_ATTEMPTS)
     .where((eb) =>
       eb.or([
         eb("created_at", ">", cursor.createdAt),
@@ -92,14 +147,36 @@ function fetchFactBatch(
     .orderBy("created_at", "asc")
     .orderBy("id", "asc")
     .limit(limit);
-  if (filter.onlyUnmaterialized)
-    query = query
-      .where("materialized_at", "is", null)
-      .where("materialization_attempts", "<", MAX_MATERIALIZATION_ATTEMPTS);
   if (filter.factType) query = query.where("fact_type", "=", filter.factType);
   if (filter.factTypesIn) query = query.where("fact_type", "in", [...filter.factTypesIn]);
   if (filter.factTypesNotIn) query = query.where("fact_type", "not in", [...filter.factTypesNotIn]);
-  return query.execute();
+  return query;
+}
+
+function fetchOpenFactCandidateBatch(
+  db: Kysely<DB>,
+  cursor: FactBatchCursor,
+  limit: number,
+  filter: FactTypeFilter,
+): Promise<OpenFactCandidate[]> {
+  return buildOpenFactCandidateQuery(db, cursor, limit, filter).execute();
+}
+
+/**
+ * Fetch the full payload rows for one page of candidate ids. The open predicate
+ * is re-applied so a fact deleted, materialized, or quarantined between the
+ * candidate scan and this fetch is never returned to the sweep. Callers restore
+ * `(created_at, id)` order from the candidate page; this query does not order.
+ */
+function fetchOpenFactRowsByIds(db: Kysely<DB>, ids: string[]): Promise<IndexedFileFactRow[]> {
+  return db
+    .selectFrom("indexed_file_facts")
+    .selectAll()
+    .where("id", "in", ids)
+    .where("deleted_at", "is", null)
+    .where("materialized_at", "is", null)
+    .where("materialization_attempts", "<", MAX_MATERIALIZATION_ATTEMPTS)
+    .execute();
 }
 
 export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
@@ -241,7 +318,7 @@ export async function replaySourceFacts(
   const batchSize = opts.batchSize && opts.batchSize > 0 ? Math.floor(opts.batchSize) : DEFAULT_FACT_BATCH_SIZE;
   for (const factType of FACT_REPLAY_ORDER) {
     await forEachFactBatch(
-      (cursor, limit) => fetchFactBatch(db, cursor, limit, { factType, onlyUnmaterialized: false }),
+      (cursor, limit) => fetchReplayFactBatch(db, cursor, limit, factType),
       async (facts) => {
         for (const fact of facts) {
           summary.factsRead++;
@@ -383,15 +460,26 @@ async function materializeUnmaterializedFactsInner(
   };
 
   const batchSize = opts.batchSize && opts.batchSize > 0 ? Math.floor(opts.batchSize) : DEFAULT_FACT_BATCH_SIZE;
-  const knownTypes = FACT_REPLAY_ORDER.filter((t) => !factTypesFilter || factTypesFilter.includes(t));
-  for (const factType of knownTypes) {
-    await forEachFactBatch(
-      (cursor, limit) => fetchFactBatch(db, cursor, limit, { factType, onlyUnmaterialized: true }),
+
+  /**
+   * The sweep pages the narrow candidate projection and loads `raw` only for the
+   * page's passing ids. Fix 3 (deferred) is what narrows "passing" below the full
+   * open set; until then every open candidate passes, so this bounds retained raw
+   * rows to one page but does not reduce total payload reads.
+   */
+  const sweepFactType = (filter: FactTypeFilter) =>
+    forEachFactCandidatePage(
+      (cursor, limit) => fetchOpenFactCandidateBatch(db, cursor, limit, filter),
+      (ids) => fetchOpenFactRowsByIds(db, ids),
       async (facts) => {
         for (const fact of facts) await processFact(fact);
       },
       batchSize,
     );
+
+  const knownTypes = FACT_REPLAY_ORDER.filter((t) => !factTypesFilter || factTypesFilter.includes(t));
+  for (const factType of knownTypes) {
+    await sweepFactType({ factType });
   }
 
   /**
@@ -401,17 +489,7 @@ async function materializeUnmaterializedFactsInner(
    */
   const unknownRequested = factTypesFilter?.filter((t) => !FACT_REPLAY_ORDER_RANK.has(t)) ?? null;
   if (unknownRequested === null || unknownRequested.length > 0) {
-    await forEachFactBatch(
-      (cursor, limit) =>
-        fetchFactBatch(db, cursor, limit, {
-          ...(unknownRequested ? { factTypesIn: unknownRequested } : { factTypesNotIn: FACT_REPLAY_ORDER }),
-          onlyUnmaterialized: true,
-        }),
-      async (facts) => {
-        for (const fact of facts) await processFact(fact);
-      },
-      batchSize,
-    );
+    await sweepFactType(unknownRequested ? { factTypesIn: unknownRequested } : { factTypesNotIn: FACT_REPLAY_ORDER });
   }
 
   await cleanupEmptyRelationships(db);
