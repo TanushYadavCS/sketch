@@ -1,5 +1,5 @@
 import { normalizeName } from "../connectors/name-normalize";
-import type { Entity } from "./propose";
+import type { IndexEntityRow } from "./materialize-types";
 
 const LOW_SIGNAL_PERSON_TOKENS = new Set(["person", "people", "user", "unknown"]);
 
@@ -10,13 +10,13 @@ export interface ExtractedMention {
 }
 
 export interface RankedCandidate {
-  entity: Entity;
+  entity: IndexEntityRow;
   score: number;
   reason: "llm-ambiguous";
 }
 
 export type LlmMentionDecision =
-  | { kind: "confident_match"; mention: ExtractedMention; entity: Entity; confidence: "INFERRED" }
+  | { kind: "confident_match"; mention: ExtractedMention; entity: IndexEntityRow; confidence: "INFERRED" }
   | { kind: "confident_no_match"; mention: ExtractedMention }
   | { kind: "ambiguous_existing"; mention: ExtractedMention; candidates: RankedCandidate[] }
   | {
@@ -48,7 +48,7 @@ function hasTokenOverlap(a: string[], b: string[]): boolean {
 
 function scoreCandidate(
   mentionTokens: string[],
-  entity: Entity,
+  entity: IndexEntityRow,
   ctx: RankerContext,
   worksAtLookup: (entityId: string) => readonly string[],
 ): number | null {
@@ -70,7 +70,7 @@ function scoreCandidate(
 
 export function rankPersonLlmMention(
   mention: ExtractedMention,
-  candidates: Entity[],
+  candidates: IndexEntityRow[],
   ctx: RankerContext,
   worksAtLookup: (entityId: string) => readonly string[],
 ): LlmMentionDecision {

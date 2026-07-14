@@ -38,11 +38,11 @@ export async function materializeContactPointFact(
   let entity = deps.index.bySourceRef.get(`${subjectSource}:${subjectSourceId}`);
   if (!entity) {
     const found = await deps.entityRepo.getEntityBySourceRef(subjectSource, subjectSourceId);
-    if (found) entity = found as unknown as EntityRow;
+    if (found) entity = found;
   }
   if (!entity && fact.subject_email) {
     const matches = await deps.entityRepo.getPersonEntitiesByEmail(fact.subject_email);
-    if (matches.length === 1) entity = matches[0] as unknown as EntityRow;
+    if (matches.length === 1) entity = matches[0];
   }
   if (!entity) {
     return { kind: "skipped", reason: "missing_contact_point_subject_entity" };

@@ -4,7 +4,7 @@ import { type SubEntityRow, createSubEntityRepository } from "../db/repositories
 import { type SubEntityParentInput, resolveParent } from "./materialize-commitment";
 import { normalizeEntityMatchName } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
-import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 
 export type FeatureReconcileReason = "minted" | "feature_parent_absent" | "below_threshold" | "noise_rejected";
 
@@ -197,7 +197,7 @@ function resolveSupportedFeature(
   deps: MaterializeDeps,
   entries: Array<{ fact: IndexedFileFactRow; feature: FeatureInput }>,
 ): {
-  feature: { fact: IndexedFileFactRow; feature: FeatureInput; parent: EntityRow } | null;
+  feature: { fact: IndexedFileFactRow; feature: FeatureInput; parent: IndexEntityRow } | null;
   reason: Exclude<FeatureReconcileReason, "minted" | "below_threshold">;
 } {
   let sawNonNoise = false;
@@ -213,7 +213,7 @@ function resolveSupportedFeature(
 export function resolveFeatureParentByName(
   deps: MaterializeDeps,
   parentName: string | null | undefined,
-): EntityRow | null {
+): IndexEntityRow | null {
   const productKey = normalizeEntityMatchName("product", parentName ?? "");
   const projectKey = normalizeEntityMatchName("project", parentName ?? "");
   const matches = [
@@ -256,7 +256,7 @@ async function replaceCurrentEvidence(
 async function closeCurrentFeatureSubEntity(
   deps: MaterializeDeps,
   corroborationKey: string,
-  supported: { feature: FeatureInput; parent: EntityRow } | null,
+  supported: { feature: FeatureInput; parent: IndexEntityRow } | null,
 ): Promise<void> {
   const current = supported
     ? await findCurrentFeatureByParentAndName(

@@ -1,7 +1,7 @@
 import { createSubEntityRepository } from "../db/repositories/sub-entities";
 import { TEST_ACCOUNT_ENTITY_ID } from "../db/repositories/tasks";
 import { readJsonObject } from "./materialize-json";
-import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 import type { ProposeEntityType } from "./propose";
 
 export async function materializeCommitment(
@@ -44,7 +44,7 @@ export function resolveParent(
   deps: MaterializeDeps,
   input: SubEntityParentInput,
   allowedTypes: readonly string[],
-): EntityRow | null {
+): IndexEntityRow | null {
   if (input.parentRef) {
     const byRef = deps.index.bySourceRef.get(`${input.parentRef.source}:${input.parentRef.sourceId}`);
     if (isAllowedParent(byRef, allowedTypes)) return byRef;
@@ -64,7 +64,7 @@ export function findEntityById(
   deps: MaterializeDeps,
   entityId: string,
   allowedTypes: readonly string[],
-): EntityRow | undefined {
+): IndexEntityRow | undefined {
   for (const type of allowedTypes) {
     const found = deps.index.entitiesByType.get(type as ProposeEntityType)?.find((entity) => entity.id === entityId);
     if (found) return found;
@@ -72,7 +72,10 @@ export function findEntityById(
   return undefined;
 }
 
-export function isAllowedParent(entity: EntityRow | undefined, allowedTypes: readonly string[]): entity is EntityRow {
+export function isAllowedParent(
+  entity: IndexEntityRow | undefined,
+  allowedTypes: readonly string[],
+): entity is IndexEntityRow {
   return Boolean(entity && entity.id !== TEST_ACCOUNT_ENTITY_ID && allowedTypes.includes(entity.source_type));
 }
 

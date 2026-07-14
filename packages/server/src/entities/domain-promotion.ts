@@ -4,6 +4,7 @@ import { createEntityRepository, whereLiveEntity } from "../db/repositories/enti
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB, EntitiesTable } from "../db/schema";
+import type { IndexEntityRow } from "./materialize-types";
 import { isPersonalOrSharedDomain, isWellKnownNonClientDomain } from "./personal-domains";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
 import { isEmailProviderName } from "./validators";
@@ -37,7 +38,7 @@ function parseStringArray(raw: string | null): string[] {
   return [];
 }
 
-function readEmail(entity: Entity): string | null {
+function readEmail(entity: IndexEntityRow): string | null {
   if (!entity.metadata) return null;
   try {
     const metadata = JSON.parse(entity.metadata);

@@ -28,6 +28,7 @@ import type { EntitiesTable } from "../db/schema";
 import { isTrustedPersonScopeKey, personScopeKey, personScopeKeyId } from "./affiliations";
 import { TOOL_NAME_DENYLIST } from "./graph";
 import { normalizeMatchName } from "./match-normalize";
+import type { IndexEntityRow } from "./materialize-types";
 import { type ProvenanceTier, canUseEntityAsMatchTarget } from "./provenance";
 
 export type Entity = Selectable<EntitiesTable>;
@@ -66,7 +67,7 @@ export interface ProposeInput {
   metadata?: Record<string, unknown>;
   provenanceTier?: ProvenanceTier;
   evidenceDomain?: string | null;
-  precomputedCandidates?: Array<{ entity: Entity; score: number; reason?: CandidateReason }>;
+  precomputedCandidates?: Array<{ entity: IndexEntityRow; score: number; reason?: CandidateReason }>;
   skipFuzzy?: boolean;
   /**
    * Birth gate: when set, a proposal that would otherwise CREATE a brand-new
@@ -84,8 +85,8 @@ export interface ProposeInput {
 }
 
 export type ProposeResult =
-  | { kind: "linked"; entity: Entity }
-  | { kind: "created"; entity: Entity }
+  | { kind: "linked"; entity: IndexEntityRow }
+  | { kind: "created"; entity: IndexEntityRow }
   | { kind: "queued"; reviewId: string; candidateEntityId: string | null }
   | { kind: "suppressed"; reason: string };
 
@@ -101,7 +102,7 @@ export type ProposeResult =
  */
 export type EntityLookup = {
   /** All entities sharing this normalized name. */
-  getByNormalizedName(normalized: string): Entity[];
+  getByNormalizedName(normalized: string): IndexEntityRow[];
   /**
    * All entities carrying this normalized form as an alias. Confirm appends
    * the proposed name to an existing entity's aliases, so the next propose
@@ -109,15 +110,15 @@ export type EntityLookup = {
    * Optional for backwards compat with callers that only have a name map
    * (cold callers without alias indexing); defaults to `[]`.
    */
-  getByAlias?(normalized: string): Entity[];
+  getByAlias?(normalized: string): IndexEntityRow[];
   /** All entities of the given type (used for prefix/token-superset scan). */
-  listByType(entityType: ProposeEntityType): Entity[];
+  listByType(entityType: ProposeEntityType): IndexEntityRow[];
   /** Same-type normalized-strict, token-set, or MinHash candidates over names and aliases. */
   findNameDedupCandidates?(
     entityType: ProposeEntityType,
     name: string,
   ): Array<{
-    entity: Entity;
+    entity: IndexEntityRow;
     score: number;
     reason: Extract<CandidateReason, "strict-normalized" | "token-set" | "minhash">;
   }>;
@@ -140,12 +141,12 @@ export interface ProposeDeps {
   birthGateLiveTypes?: Set<ProposeEntityType>;
   birthGateDryRun?: boolean;
   /** Read an entity's email from its metadata JSON. */
-  readEmail: (entity: Entity) => string | null;
-  onEntityResolved?: (entity: Entity) => void | Promise<void>;
+  readEmail: (entity: IndexEntityRow) => string | null;
+  onEntityResolved?: (entity: IndexEntityRow) => void | Promise<void>;
 }
 
 export interface RankedCandidate {
-  entity: Entity;
+  entity: IndexEntityRow;
   score: number;
   reason: CandidateReason;
 }
@@ -249,7 +250,7 @@ function canAutoLinkNameDedupCandidate(input: ProposeInput, candidate: RankedCan
   return true;
 }
 
-function isEligibleMatchTarget(input: Pick<ProposeInput, "entityType">, entity: Entity): boolean {
+function isEligibleMatchTarget(input: Pick<ProposeInput, "entityType">, entity: IndexEntityRow): boolean {
   return (
     entity.source_type === input.entityType && canUseEntityAsMatchTarget(entity.source_type, entity.provenance_tier)
   );
@@ -291,7 +292,7 @@ function isPrefixMatch(proposed: string[], existing: string[]): boolean {
  * match — multi-candidate at that tier signals "human pick" rather than
  * falling through to a weaker rule.
  */
-function rank(entityType: ProposeEntityType, name: string, candidates: Entity[]): RankedCandidate[] {
+function rank(entityType: ProposeEntityType, name: string, candidates: IndexEntityRow[]): RankedCandidate[] {
   const proposedTokens = tokenize(normalizeMatchName(entityType, name));
   if (proposedTokens.length === 0) return [];
 
@@ -315,8 +316,8 @@ function rank(entityType: ProposeEntityType, name: string, candidates: Entity[])
 async function persistEntity(
   deps: ProposeDeps,
   input: ProposeInput,
-  matched?: Entity,
-): Promise<{ entity: Entity; created: boolean }> {
+  matched?: IndexEntityRow,
+): Promise<{ entity: IndexEntityRow; created: boolean }> {
   if (input.entityType === "person") {
     if (matched) {
       await deps.entityRepo.upsertSourceRef({
@@ -370,7 +371,11 @@ async function persistEntity(
   return { entity, created: true };
 }
 
-async function linkNameDedupCandidate(deps: ProposeDeps, input: ProposeInput, matched: Entity): Promise<ProposeResult> {
+async function linkNameDedupCandidate(
+  deps: ProposeDeps,
+  input: ProposeInput,
+  matched: IndexEntityRow,
+): Promise<ProposeResult> {
   const { entity } = await persistEntity(deps, input, matched);
   const aliasesToAppend = [input.name, ...(input.aliases ?? [])].filter(
     (alias) => alias.trim() && alias.trim().toLowerCase() !== matched.name.trim().toLowerCase(),
@@ -396,7 +401,11 @@ async function linkNameDedupCandidate(deps: ProposeDeps, input: ProposeInput, ma
  * Returns null to mean "fall through to queue" (person type, no confirmed
  * candidate, or the rare case where the pool empties under filtering).
  */
-function pickConfirmedCanonical(candidates: Entity[], input: ProposeInput, lookup: EntityLookup): Entity | null {
+function pickConfirmedCanonical(
+  candidates: IndexEntityRow[],
+  input: ProposeInput,
+  lookup: EntityLookup,
+): IndexEntityRow | null {
   if (input.entityType === "person") return null;
   const confirmed = candidates.filter((c) => c.status === "confirmed");
   if (confirmed.length === 0) return null;
@@ -682,7 +691,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   //    NULL candidate).
   const nameMatches = deps.lookup.getByNormalizedName(normalized);
   const aliasMatches = deps.lookup.getByAlias?.(normalized) ?? [];
-  const exactById = new Map<string, Entity>();
+  const exactById = new Map<string, IndexEntityRow>();
   for (const e of nameMatches) if (isEligibleMatchTarget(input, e)) exactById.set(e.id, e);
   for (const e of aliasMatches) if (isEligibleMatchTarget(input, e)) exactById.set(e.id, e);
   for (const e of deps.lookup.listByType(input.entityType).filter((entity) => isEligibleMatchTarget(input, entity))) {
@@ -692,7 +701,7 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
     }
   }
   if (exactById.size === 1) {
-    const matched = exactById.values().next().value as Entity;
+    const matched = exactById.values().next().value as IndexEntityRow;
     return decideNameCandidates(deps, input, normalized, [{ entity: matched, score: 1, reason: "exact-ambiguous" }]);
   }
   if (exactById.size > 1) {

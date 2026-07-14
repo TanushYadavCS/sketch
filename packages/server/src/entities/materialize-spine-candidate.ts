@@ -43,7 +43,7 @@ export async function materializeSpineCandidate(
 
   const existing = await deps.entityRepo.getEntityBySourceRef(args.subjectSource, args.subjectSourceId);
   if (existing && existing.source_type === spineType) {
-    const entity = await applySeedAliases(deps, existing as unknown as EntityRow, extractSeedAliases(args.raw));
+    const entity = await applySeedAliases(deps, existing, extractSeedAliases(args.raw));
     if (fact.indexed_file_id) {
       await createMentionFromFact(deps, {
         entityId: entity.id,
@@ -61,7 +61,7 @@ export async function materializeSpineCandidate(
   if (spineType === "project" && existing && isProjectCandidateSeed(existing.source_type)) {
     const entity = await applySeedAliases(
       deps,
-      await promoteLegacyProjectContainer(deps, existing as unknown as EntityRow, fact, args.metadata),
+      await promoteLegacyProjectContainer(deps, existing, fact, args.metadata),
       extractSeedAliases(args.raw),
     );
     if (fact.indexed_file_id) {
@@ -157,7 +157,7 @@ async function upsertEntityFromSeed(
     aliases: string[];
   },
 ): Promise<EntityRow> {
-  const entity = (await deps.entityRepo.upsertEntityFromTool({
+  const entity = await deps.entityRepo.upsertEntityFromTool({
     name: input.name,
     sourceType: input.sourceType,
     source: input.source,
@@ -166,7 +166,7 @@ async function upsertEntityFromSeed(
     sourceRefId: input.sourceRefId,
     metadata: input.metadata,
     provenanceTier: "structural",
-  })) as unknown as EntityRow;
+  });
   return applySeedAliases(deps, entity, input.aliases);
 }
 
@@ -176,7 +176,7 @@ async function applySeedAliases(deps: MaterializeDeps, entity: EntityRow, aliase
     await deps.entityRepo.appendAlias(refreshed.id, alias);
   }
   if (aliases.length > 0) {
-    refreshed = ((await deps.entityRepo.getEntity(refreshed.id)) ?? refreshed) as unknown as EntityRow;
+    refreshed = (await deps.entityRepo.getEntity(refreshed.id)) ?? refreshed;
   }
   registerEntity(deps.index, refreshed);
   return refreshed;
