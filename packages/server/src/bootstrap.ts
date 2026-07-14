@@ -39,6 +39,7 @@ import { createWhatsAppProviderEventRepository } from "./db/repositories/whatsap
 import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
 import type { DB } from "./db/schema";
 import { configureMaterializeDefaults } from "./entities/materialize";
+import { startNormalizationBackfill } from "./entities/normalization-backfill";
 import type { ProposeEntityType } from "./entities/propose";
 import { createApp } from "./http";
 import { buildMcpConfig, createProvider } from "./integrations/factory";
@@ -463,6 +464,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
   const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
+
+  // 8.7. Fix 2b normalization backfill — populates indexed corroboration columns
+  // for pre-migration rows in the background; readers stay on the legacy path
+  // until it completes, so this must not block startup readiness.
+  const normalizationBackfill = startNormalizationBackfill(db, logger);
   const whatsappWindowKeepAliveJob = config.WHATSAPP_WINDOW_KEEPALIVE_ENABLED
     ? startWhatsAppWindowKeepAliveJob({
         db,
@@ -608,6 +614,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 11. Shutdown handle
   async function shutdown() {
     logger.info("Shutting down...");
+    normalizationBackfill.stop();
     await telemetry.shutdown();
     await syncScheduler.stop();
     whatsappWindowKeepAliveJob?.stop();

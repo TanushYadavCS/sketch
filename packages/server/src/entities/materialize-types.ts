@@ -66,6 +66,12 @@ export interface MaterializeDeps {
   birthGateDryRun: boolean;
   embeddingProvider: EmbeddingProvider | null;
   countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
+  /**
+   * True once the Fix 2b normalization backfill has populated projection columns
+   * for every pre-existing row. Feature corroboration and LLM count/third-party
+   * reads switch from legacy `raw`-parsing scans to indexed SQL only when set.
+   */
+  normalizationBackfillComplete: boolean;
 }
 
 export type MaterializeResult =

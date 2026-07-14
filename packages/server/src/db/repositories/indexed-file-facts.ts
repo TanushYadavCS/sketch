@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type Kysely, type RawBuilder, sql } from "kysely";
 import type { IndexedFileFactRaw, LlmTaskCandidate, LlmTaskFactRaw } from "../../connectors/types";
+import { readJsonObject } from "../../entities/materialize-json";
+import {
+  projectFeatureCorroborationKey,
+  projectLlmExtractedNormalization,
+} from "../../entities/normalization-projection";
 import type { DB } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 
@@ -250,8 +255,20 @@ function canonicalizeJson(value: unknown): unknown {
  * does not reopen an otherwise identical verdict. The stored raw JSON is parsed
  * and recursively key-sorted before hashing, making equivalent payloads stable
  * across producer property order and database dialects.
+ *
+ * Decision and milestone facts additionally fold in their file's
+ * `source_created_at`/`source_updated_at`. Those materializers derive
+ * `effectiveAt` from the file's source timestamps whenever the raw fact omits an
+ * explicit time (`decidedAt`/`observedAt`), and re-syncs advance those file
+ * columns even for unchanged items. Without folding them in, a timestamp-only
+ * file change would leave the fact's verdict closed and its `effectiveAt` stale.
+ * `synced_at` is intentionally excluded: it moves on every sync, so folding it
+ * would rematerialize these facts each cycle; a fact whose only available time is
+ * `synced_at` accepts a stable-but-stale `effectiveAt` instead of that churn. The
+ * extra element is appended only for these two fact types, so every other fact
+ * type keeps the exact 2a fingerprint and does not spuriously reopen.
  */
-function buildMaterializationInputHash(values: {
+export interface MaterializationInputHashValues {
   indexed_file_id: string | null;
   connector_config_id: string | null;
   created_by_user_id: string | null;
@@ -266,28 +283,95 @@ function buildMaterializationInputHash(values: {
   raw: string | null;
   last_seen_sync_run_id: string | null;
   content_hash: string | null;
-}): string {
+  file_source_created_at?: string | null;
+  file_source_updated_at?: string | null;
+}
+
+export function buildMaterializationInputHash(values: MaterializationInputHashValues): string {
   const canonicalRaw = values.raw === null ? null : canonicalizeJson(JSON.parse(values.raw));
-  return createHash("sha256")
-    .update(
-      JSON.stringify([
-        values.content_hash,
-        canonicalRaw,
-        values.indexed_file_id,
-        values.connector_config_id,
-        values.created_by_user_id,
-        values.source,
-        values.fact_type,
-        values.relation,
-        values.subject_name,
-        values.subject_email,
-        values.subject_source,
-        values.subject_source_id,
-        values.context_snippet,
-        values.fact_type === "structural_task" ? values.last_seen_sync_run_id : null,
-      ]),
-    )
-    .digest("hex");
+  const foldsFileTime = values.fact_type === "decision" || values.fact_type === "milestone";
+  const base: unknown[] = [
+    values.content_hash,
+    canonicalRaw,
+    values.indexed_file_id,
+    values.connector_config_id,
+    values.created_by_user_id,
+    values.source,
+    values.fact_type,
+    values.relation,
+    values.subject_name,
+    values.subject_email,
+    values.subject_source,
+    values.subject_source_id,
+    values.context_snippet,
+    values.fact_type === "structural_task" ? values.last_seen_sync_run_id : null,
+  ];
+  if (foldsFileTime) {
+    base.push([values.file_source_created_at ?? null, values.file_source_updated_at ?? null]);
+  }
+  return createHash("sha256").update(JSON.stringify(base)).digest("hex");
+}
+
+interface NormalizationColumns {
+  normalized_subject_name: string | null;
+  normalized_mention_name: string | null;
+  raw_mention_type: string | null;
+  mention_type: string | null;
+  feature_corroboration_key: string | null;
+}
+
+const EMPTY_NORMALIZATION_COLUMNS: NormalizationColumns = {
+  normalized_subject_name: null,
+  normalized_mention_name: null,
+  raw_mention_type: null,
+  mention_type: null,
+  feature_corroboration_key: null,
+};
+
+/**
+ * Derives the persisted normalization projections so indexed corroboration and
+ * third-party lookups avoid table-wide `raw` scans. Only `llm_extracted` (mention
+ * projections) and `feature` (corroboration key) rows carry values; every other
+ * fact type stores nulls. `subjectName` is the already-trimmed stored value, the
+ * same one the count-map and materializer read back.
+ */
+function projectNormalizationColumns(
+  input: UpsertIndexedFileFactInput,
+  subjectName: string | null,
+  rawJson: string | null,
+): NormalizationColumns {
+  if (input.factType === "llm_extracted") {
+    return {
+      ...EMPTY_NORMALIZATION_COLUMNS,
+      ...projectLlmExtractedNormalization(subjectName, readJsonObject(rawJson)),
+    };
+  }
+  if (input.factType === "feature") {
+    return {
+      ...EMPTY_NORMALIZATION_COLUMNS,
+      feature_corroboration_key: projectFeatureCorroborationKey(input.source, readJsonObject(rawJson)),
+    };
+  }
+  return EMPTY_NORMALIZATION_COLUMNS;
+}
+
+/**
+ * Decision and milestone facts fold their file's source timestamps into the
+ * verdict hash; every other fact type skips this read.
+ */
+async function loadFileSourceTimesForHash(
+  db: Kysely<DB>,
+  factType: IndexedFileFactType,
+  indexedFileId: string | null,
+): Promise<{ source_created_at: string | null; source_updated_at: string | null } | null> {
+  if ((factType !== "decision" && factType !== "milestone") || !indexedFileId) return null;
+  return (
+    (await db
+      .selectFrom("indexed_files")
+      .select(["source_created_at", "source_updated_at"])
+      .where("id", "=", indexedFileId)
+      .executeTakeFirst()) ?? null
+  );
 }
 
 function sameMaterializationInputHash(incomingHash: RawBuilder<string | null>): RawBuilder<boolean> {
@@ -712,6 +796,7 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
       const raw = validateRaw(input);
       const factKey = buildIndexedFileFactKey(input);
       const legacyFactKey = buildLegacyIndexedFileFactKey(input);
+      const fileSourceTimes = await loadFileSourceTimesForHash(db, input.factType, input.indexedFileId ?? null);
       const materializationInputs = {
         indexed_file_id: input.indexedFileId ?? null,
         connector_config_id: input.connectorConfigId ?? null,
@@ -730,9 +815,16 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         deleted_at: null,
         content_hash: input.contentHash ?? null,
       };
-      const materializationInputHash = buildMaterializationInputHash(materializationInputs);
+      const materializationInputHash = buildMaterializationInputHash({
+        ...materializationInputs,
+        file_source_created_at: fileSourceTimes?.source_created_at ?? null,
+        file_source_updated_at: fileSourceTimes?.source_updated_at ?? null,
+      });
+      const projection = projectNormalizationColumns(input, materializationInputs.subject_name, raw);
       const values = {
         ...materializationInputs,
+        ...projection,
+        normalization_projected_at: now,
         materialization_input_hash: materializationInputHash,
         materialized_at: null,
         materialization_attempts: 0,

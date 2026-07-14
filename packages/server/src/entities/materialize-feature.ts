@@ -160,17 +160,26 @@ function isLlmFeatureSource(source: string): boolean {
   return source === "llm_extraction" || source === "llm";
 }
 
+/**
+ * Corroborating feature facts for one key. Once the normalization backfill has
+ * populated `feature_corroboration_key`, the indexed predicate restricts the read
+ * to matching rows instead of every feature fact; the subsequent source/key
+ * filter is unchanged, so the two paths return identical entries (including
+ * tombstone invalidation, since both filter `deleted_at IS NULL`).
+ */
 async function loadCorroboratingFeatureFacts(
   deps: MaterializeDeps,
   corroborationKey: string,
 ): Promise<Array<{ fact: IndexedFileFactRow; feature: FeatureInput }>> {
-  const rows = await deps.db
+  let query = deps.db
     .selectFrom("indexed_file_facts")
     .selectAll()
     .where("fact_type", "=", "feature")
-    .where("deleted_at", "is", null)
-    .orderBy("updated_at", "desc")
-    .execute();
+    .where("deleted_at", "is", null);
+  if (deps.normalizationBackfillComplete) {
+    query = query.where("feature_corroboration_key", "=", corroborationKey);
+  }
+  const rows = await query.orderBy("updated_at", "desc").execute();
   const out: Array<{ fact: IndexedFileFactRow; feature: FeatureInput }> = [];
   for (const row of rows) {
     if (!isLlmFeatureSource(row.source)) continue;

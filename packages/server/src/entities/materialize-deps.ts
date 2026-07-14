@@ -214,6 +214,77 @@ async function findLlmExtractedThirdPartyMention(
   }
 }
 
+/**
+ * Indexed equivalent of `findLlmExtractedThirdPartyMention`. Once the
+ * normalization backfill is complete every `llm_extracted` row carries
+ * `raw_mention_type`/`normalized_mention_name`, so the first company/tool match
+ * for a name is a single indexed lookup instead of a keyset scan of every
+ * payload. The returned `name` reparses only the one matched row (the caller
+ * uses only `type`, but parity is preserved).
+ */
+async function findLlmExtractedThirdPartyMentionIndexed(
+  db: Kysely<DB>,
+  name: string,
+): Promise<{ type: Extract<ProposeEntityType, "company" | "tool">; name: string } | null> {
+  const key = normalizeEntityMatchName("company", name);
+  if (!key) return null;
+  const row = await db
+    .selectFrom("indexed_file_facts")
+    .select(["subject_name", "raw", "raw_mention_type"])
+    .where("source", "=", "llm_extraction")
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .where("subject_name", "is not", null)
+    .where("raw_mention_type", "in", ["company", "tool"])
+    .where("normalized_mention_name", "=", key)
+    .orderBy("id", "asc")
+    .limit(1)
+    .executeTakeFirst();
+  if (!row || (row.raw_mention_type !== "company" && row.raw_mention_type !== "tool")) return null;
+  const raw = readJsonObject(row.raw);
+  const mention = typeof raw.mention === "string" ? raw.mention : row.subject_name;
+  if (!mention) return null;
+  return { type: row.raw_mention_type, name: mention };
+}
+
+/**
+ * Indexed equivalent of the `buildActiveLlmFileCounts` map lookup for one
+ * (name, mention-type) pair: a single `COUNT(DISTINCT indexed_file_id)` over the
+ * partial corroboration index. Callers pass the coerced `mentionType`, so a row
+ * whose `raw_mention_type` differs after tool-denylist coercion is excluded here
+ * exactly as the whole-table map missed it.
+ */
+async function countActiveLlmFilesIndexed(
+  db: Kysely<DB>,
+  normalizedName: string,
+  mentionType: MentionType,
+): Promise<number> {
+  const row = await db
+    .selectFrom("indexed_file_facts")
+    .select((eb) => eb.fn.count("indexed_file_id").distinct().as("c"))
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .where("raw_mention_type", "=", mentionType)
+    .where("normalized_subject_name", "=", normalizedName)
+    .executeTakeFirst();
+  return Number(row?.c ?? 0);
+}
+
+/**
+ * Reads whether the Fix 2b normalization backfill has populated projection
+ * columns for every pre-existing row. Until then, corroboration and third-party
+ * reads must fall back to the legacy JS scans, which parse `raw` and so see rows
+ * the not-yet-populated columns would miss.
+ */
+async function isNormalizationBackfillComplete(db: Kysely<DB>): Promise<boolean> {
+  const row = await db
+    .selectFrom("normalization_backfill_state")
+    .select("status")
+    .where("id", "=", "v1")
+    .executeTakeFirst();
+  return row?.status === "complete";
+}
+
 function isNameDedupEntityType(entityType: ProposeEntityType): entityType is NameDedupEntityType {
   return entityType === "project" || entityType === "product" || entityType === "person" || entityType === "company";
 }
@@ -370,6 +441,7 @@ export async function buildMaterializeDeps(
   const suppressionRepo = createEntitySuppressionRepository(db);
   const domainsRepo = createEntityDomainsRepository(db);
   const index = await buildLookupIndex(db);
+  const normalizationBackfillComplete = await isNormalizationBackfillComplete(db);
   const llmPromotionThreshold =
     typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1
       ? Math.floor(opts.llmPromotionThreshold)
@@ -426,7 +498,10 @@ export async function buildMaterializeDeps(
     },
     getCompanyIdsByDomain: (domain) => index.companyIdsByDomain.get(domain.toLowerCase()) ?? [],
     getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
-    findLlmExtractedThirdPartyMention: (name) => findLlmExtractedThirdPartyMention(db, name),
+    findLlmExtractedThirdPartyMention: (name) =>
+      normalizationBackfillComplete
+        ? findLlmExtractedThirdPartyMentionIndexed(db, name)
+        : findLlmExtractedThirdPartyMention(db, name),
   };
   if (embeddingProvider) {
     lookup.retrieveEmbeddingCandidates = async (entityType, name): Promise<RankedCandidate[]> => {
@@ -500,7 +575,11 @@ export async function buildMaterializeDeps(
       }
       return null;
     },
+    normalizationBackfillComplete,
     countActiveLlmFilesForName: async (normalizedName, mentionType) => {
+      if (normalizationBackfillComplete) {
+        return countActiveLlmFilesIndexed(db, normalizedName, mentionType);
+      }
       activeLlmFileCounts ??= buildActiveLlmFileCounts(db);
       const counts = await activeLlmFileCounts;
       return counts.get(llmFileCountKey(normalizedName, mentionType)) ?? 0;
