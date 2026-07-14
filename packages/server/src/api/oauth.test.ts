@@ -174,7 +174,7 @@ describe("Microsoft OAuth callback", () => {
 });
 
 describe("Microsoft admin consent route", () => {
-  it("builds a Teams admin consent URL with the configured tenant and Graph default scope", async () => {
+  it("builds a Teams admin consent URL with the configured tenant and connector scopes", async () => {
     const { app, userId } = createMicrosoftOauthTestApp();
 
     const res = await app.request("/microsoft/admin-consent?connector=teams", { redirect: "manual" });
@@ -185,7 +185,16 @@ describe("Microsoft admin consent route", () => {
     expect(`${url.origin}${url.pathname}`).toBe("https://login.microsoftonline.com/tenant-id/v2.0/adminconsent");
     expect(url.searchParams.get("client_id")).toBe("env-cid");
     expect(url.searchParams.get("redirect_uri")).toBe("http://localhost/api/oauth/microsoft/callback");
-    expect(url.searchParams.get("scope")).toBe("https://graph.microsoft.com/.default");
+    expect(url.searchParams.get("scope")?.split(" ").sort()).toEqual(
+      [
+        "offline_access",
+        "https://graph.microsoft.com/Calendars.Read",
+        "https://graph.microsoft.com/OnlineMeetingRecording.Read.All",
+        "https://graph.microsoft.com/OnlineMeetingTranscript.Read.All",
+        "https://graph.microsoft.com/OnlineMeetings.Read",
+        "https://graph.microsoft.com/User.Read",
+      ].sort(),
+    );
     expect(url.searchParams.get("state")).toContain(`${userId}:teams:`);
   });
 
@@ -208,6 +217,9 @@ describe("Microsoft admin consent route", () => {
     expect(res.status).toBe(302);
     const url = new URL(res.headers.get("location") ?? "");
     expect(`${url.origin}${url.pathname}`).toBe("https://login.microsoftonline.com/tenant-id/v2.0/adminconsent");
+    expect(url.searchParams.get("scope")?.split(" ").sort()).toEqual(
+      ["offline_access", "https://graph.microsoft.com/Mail.Read", "https://graph.microsoft.com/User.Read"].sort(),
+    );
     expect(url.searchParams.get("state")).toContain(`${userId}:outlook:`);
   });
 

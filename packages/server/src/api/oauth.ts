@@ -95,7 +95,6 @@ const USERINFO_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
 const GOOGLE_OAUTH_CONNECTORS = new Set<ConnectorType>(["google_drive", "google_calendar", "gmail"]);
 const MICROSOFT_OAUTH_CONNECTORS = new Set<ConnectorType>(["outlook", "teams"]);
 const ZOHO_SCOPE = "ZohoCRM.modules.ALL,ZohoCRM.users.READ,ZohoCRM.org.READ,ZohoCRM.settings.READ";
-const MICROSOFT_GRAPH_ADMIN_CONSENT_SCOPE = "https://graph.microsoft.com/.default";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -165,6 +164,19 @@ function microsoftConnectorFromQuery(value: string | undefined): ConnectorType {
 
 function microsoftScopesFor(connectorType: ConnectorType): string {
   return connectorType === "teams" ? TEAMS_MICROSOFT_SCOPE : OUTLOOK_MICROSOFT_SCOPE;
+}
+
+function microsoftAdminConsentScopesFor(connectorType: ConnectorType): string {
+  return microsoftScopesFor(connectorType)
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((scope) => {
+      if (scope.includes("://") || scope === "offline_access" || scope === "openid" || scope === "profile") {
+        return scope;
+      }
+      return `https://graph.microsoft.com/${scope}`;
+    })
+    .join(" ");
 }
 
 function microsoftConnectorName(connectorType: ConnectorType): string {
@@ -670,7 +682,7 @@ export function oauthRoutes(
       client_id: clientId,
       redirect_uri: redirectUri,
       state,
-      scope: MICROSOFT_GRAPH_ADMIN_CONSENT_SCOPE,
+      scope: microsoftAdminConsentScopesFor(connectorType),
     });
 
     return c.redirect(`${microsoftAdminConsentEndpoint(adminConsentTenant)}?${params.toString()}`);
