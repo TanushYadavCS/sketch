@@ -343,7 +343,7 @@ async function materializeUnmaterializedFactsInner(
       if (shouldMarkMaterialized(result)) {
         await db
           .updateTable("indexed_file_facts")
-          .set({ materialized_at: new Date().toISOString() })
+          .set({ materialized_at: new Date().toISOString(), materialization_attempts: 0 })
           .where("id", "=", fact.id)
           .execute();
         if (

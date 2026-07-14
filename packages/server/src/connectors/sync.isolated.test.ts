@@ -2309,7 +2309,7 @@ describe("runConnectorSync — entity creation review queue (ECR-01)", () => {
     expect(persons.map((p) => p.name)).toEqual(["Aryaman Soni"]);
   });
 
-  it("12. cursor reset re-walk bumps evidence seen_at and queue occurrence_count (skip branch)", async () => {
+  it("12. cursor reset re-walk preserves the queued verdict without evidence churn (skip branch)", async () => {
     db = await createTestDb();
     const testDb = db;
     await seedConnector(testDb, "connector-ecr-3");
@@ -2354,11 +2354,6 @@ describe("runConnectorSync — entity creation review queue (ECR-01)", () => {
     const evidenceAfterFirst = await testDb.selectFrom("entity_review_evidence").selectAll().executeTakeFirstOrThrow();
     expect(queueAfterFirst.occurrence_count).toBe(1);
 
-    // Step "forward in time" so seen_at updates are observable.
-    await new Promise((r) => setTimeout(r, 25));
-
-    // Second pass: same content hash → goes through the skip branch and
-    // re-walks the meeting via the cursor-reset attendee loop.
     async function* skipPass() {
       yield {
         providerFileId: "p-ecr-12",
@@ -2380,14 +2375,10 @@ describe("runConnectorSync — entity creation review queue (ECR-01)", () => {
     const queueAfterSkip = await testDb.selectFrom("entity_review_queue").selectAll().executeTakeFirstOrThrow();
     const evidenceAfterSkip = await testDb.selectFrom("entity_review_evidence").selectAll().executeTakeFirstOrThrow();
 
-    expect(queueAfterSkip.occurrence_count).toBe(2);
-    expect(new Date(queueAfterSkip.last_seen_at).getTime()).toBeGreaterThanOrEqual(
-      new Date(queueAfterFirst.last_seen_at).getTime(),
-    );
+    expect(queueAfterSkip.occurrence_count).toBe(1);
+    expect(queueAfterSkip.last_seen_at).toBe(queueAfterFirst.last_seen_at);
     expect(evidenceAfterSkip.id).toBe(evidenceAfterFirst.id);
-    expect(new Date(evidenceAfterSkip.seen_at).getTime()).toBeGreaterThanOrEqual(
-      new Date(evidenceAfterFirst.seen_at).getTime(),
-    );
+    expect(evidenceAfterSkip.seen_at).toBe(evidenceAfterFirst.seen_at);
 
     // Still exactly one evidence row — UNIQUE constraint held, no insert.
     const allEvidence = await testDb.selectFrom("entity_review_evidence").selectAll().execute();

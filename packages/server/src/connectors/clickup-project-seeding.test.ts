@@ -286,7 +286,7 @@ describe("ClickUp project entity seeding", () => {
     await syncRecordedClickUpPayload(db, "sync-run-2");
     const summary = await materializeUnmaterializedFacts(db, createTestLogger());
 
-    expect(summary.entitiesLinked).toBeGreaterThanOrEqual(2);
+    expect(summary.entitiesLinked).toBe(0);
     const secondProjects = await db
       .selectFrom("entities")
       .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")

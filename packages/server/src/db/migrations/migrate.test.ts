@@ -24,7 +24,7 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 137;
+const EXPECTED_MIGRATION_COUNT = 138;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -205,6 +205,27 @@ describe("runMigrations — full sequence", () => {
     expect(names[134]).toBe("139-tasks-proposed-assignee");
     expect(names[135]).toBe("140-retire-unassigned-agent-tasks");
     expect(names[136]).toBe("141-fact-materialization-quarantine");
+    expect(names[137]).toBe("142-verdict-safe-fact-upserts");
+  });
+
+  it("creates the bounded open-materializable partial index", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const result = await sql<{ name: string; sql: string }>`
+      SELECT name, sql
+      FROM sqlite_master
+      WHERE type = 'index'
+        AND name = 'idx_indexed_file_facts_open_materializable'
+    `.execute(db);
+
+    expect(result.rows).toHaveLength(1);
+    const indexSql = result.rows[0].sql.toLowerCase().replaceAll('"', "");
+    expect(indexSql).toContain("fact_type");
+    expect(indexSql).toContain("created_at");
+    expect(indexSql).toContain("id");
+    expect(indexSql).toContain("deleted_at is null");
+    expect(indexSql).toContain("materialized_at is null");
+    expect(indexSql).toContain("materialization_attempts < 5");
   });
 
   it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {

@@ -1011,6 +1011,7 @@ export interface IndexedFileFactsTable {
   last_seen_sync_run_id: string | null;
   deleted_at: string | null;
   content_hash: string | null;
+  materialization_input_hash: string | null;
   materialized_at: string | null;
   materialization_attempts: Generated<number>;
   created_at: Generated<string>;

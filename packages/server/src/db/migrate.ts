@@ -141,6 +141,7 @@ import * as m138 from "./migrations/138-whatsapp-identity-candidates";
 import * as m139 from "./migrations/139-tasks-proposed-assignee";
 import * as m140 from "./migrations/140-retire-unassigned-agent-tasks";
 import * as m141 from "./migrations/141-fact-materialization-quarantine";
+import * as m142 from "./migrations/142-verdict-safe-fact-upserts";
 import type { DB } from "./schema";
 
 /**
@@ -291,6 +292,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "139-tasks-proposed-assignee": m139,
           "140-retire-unassigned-agent-tasks": m140,
           "141-fact-materialization-quarantine": m141,
+          "142-verdict-safe-fact-upserts": m142,
         };
       },
     },
