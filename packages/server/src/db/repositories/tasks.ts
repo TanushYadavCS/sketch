@@ -87,6 +87,12 @@ export interface LoadOpenDurableTasksForBriefOptions {
   limit?: number;
 }
 
+export interface LoadSummaryTasksForBriefOptions {
+  userId: string;
+  since: string;
+  limit?: number;
+}
+
 export interface UpsertLlmTaskInput {
   candidate: { title: string; dueAt?: string | null; assigneeEntityId?: string | null; assigneeName?: string | null };
   ownerUserId: string;
@@ -169,11 +175,20 @@ export function createTaskRepository(db: Kysely<DB>) {
     },
 
     async promoteBriefTask(input: PromoteBriefTaskInput): Promise<PromoteBriefTaskResult> {
-      if (input.knowledgeRefs.fileIds.length === 0) return { status: "skipped", reason: "missing_file_id" };
-
       const parent = await resolveBriefTaskParent(db, input.knowledgeRefs.entityIds);
       const parentKey = parent?.id ?? "global";
       const normalizedTitle = normalizeName(input.todo.title);
+      const existing = await findBriefCollationTarget(db, {
+        userId: input.userId,
+        parentEntityId: parent?.id ?? null,
+        normalizedTitle,
+      });
+      if (existing) {
+        await promoteBriefTaskEvidence(db, existing.id, input.knowledgeRefs);
+        return { status: "collated", taskId: existing.id };
+      }
+
+      if (input.knowledgeRefs.fileIds.length === 0) return { status: "skipped", reason: "missing_file_id" };
 
       if (parent) {
         const structural = await db
@@ -375,6 +390,28 @@ export function createTaskRepository(db: Kysely<DB>) {
           ]),
         )
         .orderBy("tasks.updated_at", "desc")
+        .limit(opts.limit ?? 50)
+        .execute();
+    },
+
+    async loadSummaryTasksForBrief(opts: LoadSummaryTasksForBriefOptions): Promise<Selectable<TasksTable>[]> {
+      return db
+        .selectFrom("tasks")
+        .selectAll()
+        .where("valid_to", "is", null)
+        .where("created_by_user_id", "=", opts.userId)
+        .where("provenance", "=", "summary")
+        .where("updated_at", ">=", opts.since)
+        .where("status", "in", ["open", "in_progress", "done", "dropped"])
+        .orderBy(sql<number>`CASE
+          WHEN status = 'open' THEN 0
+          WHEN status = 'in_progress' THEN 1
+          WHEN status = 'done' THEN 2
+          WHEN status = 'dropped' THEN 3
+          ELSE 4
+        END`)
+        .orderBy("updated_at", "desc")
+        .orderBy("id", "asc")
         .limit(opts.limit ?? 50)
         .execute();
     },
@@ -670,6 +707,48 @@ async function upsertSummaryTask(
     })
     .execute();
   return { taskId, created: true };
+}
+
+async function findBriefCollationTarget(
+  db: Kysely<DB>,
+  input: { userId: string; parentEntityId: string | null; normalizedTitle: string },
+): Promise<Pick<Selectable<TasksTable>, "id"> | undefined> {
+  if (input.parentEntityId) {
+    const structural = await db
+      .selectFrom("tasks")
+      .select("id")
+      .where("provenance", "=", "structural")
+      .where("valid_to", "is", null)
+      .where("parent_entity_id", "=", input.parentEntityId)
+      .where("normalized_title", "=", input.normalizedTitle)
+      .executeTakeFirst();
+    if (structural) return structural;
+  }
+
+  let summaryQuery = db
+    .selectFrom("tasks")
+    .select("id")
+    .where("provenance", "=", "summary")
+    .where("created_by_user_id", "=", input.userId)
+    .where("normalized_title", "=", input.normalizedTitle)
+    .where("valid_to", "is", null);
+  summaryQuery = input.parentEntityId
+    ? summaryQuery.where((eb) =>
+        eb.or([eb("parent_entity_id", "=", input.parentEntityId), eb("parent_entity_id", "is", null)]),
+      )
+    : summaryQuery.where("parent_entity_id", "is", null);
+  if (input.parentEntityId) {
+    return summaryQuery
+      .orderBy(sql<number>`CASE
+        WHEN parent_entity_id = ${input.parentEntityId} THEN 0
+        WHEN parent_entity_id IS NULL THEN 1
+        ELSE 2
+      END`)
+      .orderBy("updated_at", "desc")
+      .orderBy("id", "asc")
+      .executeTakeFirst();
+  }
+  return summaryQuery.orderBy("updated_at", "desc").orderBy("id", "asc").executeTakeFirst();
 }
 
 async function findReanchorableSummaryTask(

@@ -123,6 +123,59 @@ describe("createTaskRepository postgres", () => {
     ]);
   });
 
+  it("prefers project-specific summary tasks over parentless summary tasks when collating Brief todos on postgres", async () => {
+    await seedPgUser(db, "pg-summary-u1", "pg-summary@example.com");
+    await seedPgPerson(db, "pg-person-summary", "PG Summary Owner", "pg-summary@example.com");
+    await seedPgProject(db, "pg-project-summary", "PG Project Summary");
+    const repo = createTaskRepository(db);
+    const parentless = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Send launch notes",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "pg-summary-global",
+      createdByUserId: "pg-summary-u1",
+    });
+    const projectSpecific = await repo.upsertTask({
+      parentEntityId: "pg-project-summary",
+      parentSourceRef: null,
+      parentName: "PG Project Summary",
+      source: "summary",
+      externalRef: null,
+      title: "Send launch notes",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "pg-summary-project",
+      createdByUserId: "pg-summary-u1",
+    });
+
+    const collated = await repo.promoteBriefTask({
+      userId: "pg-summary-u1",
+      todo: pgBriefTodo({
+        title: "Send launch notes",
+        structuredPayload: { assigneeName: "PG Summary Owner" },
+      }),
+      knowledgeRefs: { entityIds: ["pg-project-summary"], fileIds: [] },
+    });
+
+    expect(collated).toEqual({ status: "collated", taskId: projectSpecific.taskId });
+    expect(collated).not.toEqual({ status: "collated", taskId: parentless.taskId });
+  });
+
   it("marks legacy llm task facts materialized without minting tasks on postgres", async () => {
     await seedPgUser(db, "pg-llm-u1", "pg-llm-u1@example.com");
     await seedPgIndexedFileForUser(db, "pg-llm-file-1", "pg-llm-u1");

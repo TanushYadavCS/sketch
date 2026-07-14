@@ -8,6 +8,7 @@ import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import type { QueueManager } from "../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import { CONVERSATION_SUMMARY_AGENT_KEY, CONVERSATION_SUMMARY_AGENT_VERSION } from "./definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION } from "./definitions/daily-brief";
 import { AgentRunService } from "./service";
 
@@ -83,6 +84,103 @@ describe("Daily Brief durable-task hooks", () => {
     expect(tasksWithToggle.context.createTasks).toBe(true);
     expect(after).toBeGreaterThan(before);
   });
+
+  it("adds recent Summarizer outputs and user-owned summary tasks to Daily Brief context without replaying old summaries", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Daily Brief User",
+      email: "brief-owner@example.com",
+      emailVerified: true,
+    });
+    await seedAssignablePerson(db, "person-brief-owner", "Daily Brief User", "brief-owner@example.com");
+    await seedIndexedFile(db, "brief-file-1", user.id);
+    await seedCompletedOutput(db, user.id, OUTPUT_DATE, { generatedAt: "2026-06-15T08:00:00.000Z" });
+    const oldSummaryId = await seedSummaryOutput(db, user.id, {
+      generatedAt: "2026-06-15T07:00:00.000Z",
+      title: "Old chat action",
+    });
+    const recentSummaryId = await seedSummaryOutput(db, user.id, {
+      generatedAt: "2026-06-15T09:00:00.000Z",
+      title: "Recent chat action",
+    });
+    const taskRepo = createTaskRepository(db);
+    const summaryTask = await taskRepo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Recent chat action",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-recent-chat-action",
+      createdByUserId: user.id,
+    });
+
+    const run = await runAndCapture(db, user.id, OUTPUT_DATE, [], { createTasks: false });
+
+    expect(run.context.recentSummaries as Array<{ outputId: string; actionItems: Array<{ title: string }> }>).toEqual([
+      {
+        outputId: recentSummaryId,
+        generatedAt: "2026-06-15T09:00:00.000Z",
+        summaryWindow: { start: "2026-06-15T08:00:00.000Z", end: "2026-06-15T09:00:00.000Z" },
+        actionItems: [
+          {
+            id: expect.any(String),
+            title: "Recent chat action",
+            summary: "Recent chat action summary",
+            priority: "high",
+            sourceLabels: ["#launch"],
+            messageIds: ["message-recent-chat-action"],
+          },
+        ],
+      },
+    ]);
+    expect(JSON.stringify(run.context.recentSummaries)).not.toContain(oldSummaryId);
+    expect(run.context.summaryTasks).toEqual([
+      {
+        id: summaryTask.taskId,
+        title: "Recent chat action",
+        status: "open",
+        statusRaw: "action_item",
+        provenance: "summary",
+        parentEntityId: null,
+        updatedAt: expect.any(String),
+      },
+    ]);
+    expect(run.instructions).toContain("summaryTasks");
+    expect(run.instructions).toContain("recentSummaries");
+  });
+
+  it("keeps create-tasks disabled for Brief writes while allowing genuinely new Brief tasks when enabled", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Daily Brief User",
+      email: "brief-owner@example.com",
+      emailVerified: true,
+    });
+    await seedAssignablePerson(db, "person-brief-owner", "Daily Brief User", "brief-owner@example.com");
+    await seedProject(db, "project-x", "Project X");
+    await seedIndexedFile(db, "brief-file-1", user.id);
+    const todo = briefItem({
+      title: "New Brief-only follow-up",
+      structuredPayload: { assigneeName: "Daily Brief User" },
+      knowledgeRefs: { entityIds: ["project-x"], fileIds: ["brief-file-1"] },
+    });
+
+    await runAndCapture(db, user.id, OUTPUT_DATE, [todo], { createTasks: false });
+    const afterDisabled = await countTasks(db);
+    await runAndCapture(db, user.id, "2026-06-16", [todo], { createTasks: true });
+    const afterEnabled = await countTasks(db);
+
+    expect(afterDisabled).toBe(0);
+    expect(afterEnabled).toBe(1);
+  });
 });
 
 async function runAndCapture(
@@ -157,7 +255,12 @@ function createPausedQueueManager(tasks: Array<() => Promise<void>>): QueueManag
   } as unknown as QueueManager;
 }
 
-async function seedCompletedOutput(db: Kysely<DB>, userId: string, outputDate: string): Promise<void> {
+async function seedCompletedOutput(
+  db: Kysely<DB>,
+  userId: string,
+  outputDate: string,
+  opts: { generatedAt?: string } = {},
+): Promise<void> {
   const repo = createAgentOutputRepository(db);
   const running = await repo.createRunning({
     agentKey: DAILY_BRIEF_AGENT_KEY,
@@ -176,6 +279,64 @@ async function seedCompletedOutput(db: Kysely<DB>, userId: string, outputDate: s
       briefItem({ title: "Open prior todo", label: "todo", sortOrder: 1 }),
     ],
   });
+  if (opts.generatedAt) {
+    await db
+      .updateTable("agent_outputs")
+      .set({ generated_at: opts.generatedAt, updated_at: opts.generatedAt })
+      .where("id", "=", running.row.id)
+      .execute();
+  }
+}
+
+async function seedSummaryOutput(
+  db: Kysely<DB>,
+  userId: string,
+  params: { generatedAt: string; title: string },
+): Promise<string> {
+  const repo = createAgentOutputRepository(db);
+  const outputDate = params.generatedAt.slice(0, 10);
+  const running = await repo.createRunning({
+    agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+    agentVersion: CONVERSATION_SUMMARY_AGENT_VERSION,
+    userId,
+    outputDate,
+    periodKey: outputDate,
+    sourceKey: "slack:channel:C_LAUNCH",
+    sourceLabel: "#launch",
+    timezone: "UTC",
+    triggerType: "manual",
+  });
+  await repo.completeOutput({
+    outputId: running.row.id,
+    masthead: { title: "Conversation Summary", summary: "Summary" },
+    rawPayload: {
+      outputDate,
+      timezone: "UTC",
+      summaryWindow: { start: "2026-06-15T08:00:00.000Z", end: params.generatedAt },
+      items: [],
+    },
+    items: [
+      {
+        sectionKey: "action_items",
+        title: params.title,
+        summary: `${params.title} summary`,
+        priority: "high",
+        label: "action_item",
+        knowledgeRefs: { entityIds: [], fileIds: [] },
+        structuredPayload: {
+          sourceLabels: ["#launch"],
+          messageIds: [`message-${params.title.toLowerCase().replaceAll(" ", "-")}`],
+        },
+        sortOrder: 0,
+      },
+    ],
+  });
+  await db
+    .updateTable("agent_outputs")
+    .set({ generated_at: params.generatedAt, updated_at: params.generatedAt })
+    .where("id", "=", running.row.id)
+    .execute();
+  return running.row.id;
 }
 
 async function seedIndexedFile(db: Kysely<DB>, id: string, userId: string): Promise<void> {
@@ -223,6 +384,26 @@ async function seedAssignablePerson(db: Kysely<DB>, id: string, name: string, em
       source_type: "person",
       subtype: null,
       aliases: JSON.stringify([email]),
+      metadata: null,
+      source_ref_id: null,
+      status: "active",
+      hotness: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ai_brief: null,
+    })
+    .execute();
+}
+
+async function seedProject(db: Kysely<DB>, id: string, name: string): Promise<void> {
+  await db
+    .insertInto("entities")
+    .values({
+      id,
+      name,
+      source_type: "project",
+      subtype: null,
+      aliases: null,
       metadata: null,
       source_ref_id: null,
       status: "active",

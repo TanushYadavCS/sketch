@@ -929,6 +929,233 @@ describe("createTaskRepository sqlite", () => {
     expect(externalUpdate).toBeNull();
   });
 
+  it("loads recent user-owned summary tasks for Daily Brief including completed protection rows", async () => {
+    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedUser(db, "summary-u2", "other@example.com");
+    await seedProject(db, "project-x", "Project X");
+    const repo = createTaskRepository(db);
+    const open = await repo.upsertTask({
+      parentEntityId: "project-x",
+      parentSourceRef: null,
+      parentName: "Project X",
+      source: "summary",
+      externalRef: null,
+      title: "Open summary task",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-open",
+      createdByUserId: "summary-u1",
+    });
+    const done = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Done summary task",
+      status: "done",
+      statusRaw: "done",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "low",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-done",
+      createdByUserId: "summary-u1",
+    });
+    const old = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Old summary task",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-old",
+      createdByUserId: "summary-u1",
+    });
+    await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Other user summary task",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-other-user",
+      createdByUserId: "summary-u2",
+    });
+    await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "brief",
+      externalRef: null,
+      title: "Brief task",
+      status: "open",
+      statusRaw: "todo",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "brief",
+      sourceTaskId: "brief-task",
+      createdByUserId: "summary-u1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({ updated_at: "2026-07-09T12:00:00.000Z" })
+      .where("id", "in", [open.taskId, done.taskId])
+      .execute();
+    await db
+      .updateTable("tasks")
+      .set({ updated_at: "2026-07-08T12:00:00.000Z" })
+      .where("id", "=", old.taskId)
+      .execute();
+
+    const rows = await repo.loadSummaryTasksForBrief({
+      userId: "summary-u1",
+      since: "2026-07-09T00:00:00.000Z",
+      limit: 10,
+    });
+
+    expect(rows.map((task) => task.id)).toEqual([open.taskId, done.taskId]);
+    expect(rows.map((task) => task.status)).toEqual(["open", "done"]);
+  });
+
+  it("collates Brief todos with matching Summary tasks even when Brief evidence has no file", async () => {
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
+    await seedPerson(db, "person-summary", "Summary Owner", ["summary@example.com"]);
+    await seedProject(db, "project-x", "Project X");
+    const repo = createTaskRepository(db);
+
+    const summary = await repo.promoteSummaryTask({
+      userId: "summary-u1",
+      item: summaryAction({
+        title: "Send launch notes",
+        structuredPayload: {
+          assigneeName: "Summary Owner",
+          parentEntityId: "project-x",
+          messageIds: ["message-1"],
+        },
+        knowledgeRefs: { entityIds: ["project-x"], fileIds: [] },
+      }),
+    });
+    const brief = await repo.promoteBriefTask({
+      userId: "summary-u1",
+      todo: briefTodo({
+        title: "Send launch notes",
+        structuredPayload: { assigneeName: "Summary Owner" },
+        knowledgeRefs: { entityIds: ["project-x"], fileIds: [] },
+      }),
+      knowledgeRefs: { entityIds: ["project-x"], fileIds: [] },
+    });
+
+    const tasks = await db
+      .selectFrom("tasks")
+      .selectAll()
+      .where("normalized_title", "=", "send launch notes")
+      .execute();
+
+    expect(summary.status).toBe("upserted");
+    expect(brief).toEqual({ status: "collated", taskId: summary.status === "upserted" ? summary.taskId : "" });
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ source: "summary", provenance: "summary", status: "open" });
+  });
+
+  it("collates Brief todos with parentless Summary tasks when Brief has only entity evidence", async () => {
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
+    await seedProject(db, "project-x", "Project X");
+    const repo = createTaskRepository(db);
+    const summary = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Send launch notes",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-parentless",
+      createdByUserId: "summary-u1",
+    });
+    const brief = await repo.promoteBriefTask({
+      userId: "summary-u1",
+      todo: briefTodo({
+        title: "Send launch notes",
+        knowledgeRefs: { entityIds: ["project-x"], fileIds: [] },
+      }),
+      knowledgeRefs: { entityIds: ["project-x"], fileIds: [] },
+    });
+
+    const tasks = await db
+      .selectFrom("tasks")
+      .selectAll()
+      .where("normalized_title", "=", "send launch notes")
+      .execute();
+
+    expect(brief).toEqual({ status: "collated", taskId: summary.taskId });
+    expect(tasks).toHaveLength(1);
+  });
+
+  it("collates Brief todos with parentless Summary tasks when Brief has no evidence", async () => {
+    await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
+    const repo = createTaskRepository(db);
+    const summary = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Send launch notes",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-parentless-no-evidence",
+      createdByUserId: "summary-u1",
+    });
+    const brief = await repo.promoteBriefTask({
+      userId: "summary-u1",
+      todo: briefTodo({ title: "Send launch notes", knowledgeRefs: { entityIds: [], fileIds: [] } }),
+      knowledgeRefs: { entityIds: [], fileIds: [] },
+    });
+
+    const tasks = await db
+      .selectFrom("tasks")
+      .selectAll()
+      .where("normalized_title", "=", "send launch notes")
+      .execute();
+
+    expect(brief).toEqual({ status: "collated", taskId: summary.taskId });
+    expect(tasks).toHaveLength(1);
+  });
+
   it("loads and updates assigned local tasks for non-creator assignees", async () => {
     await seedUser(db, "summary-owner", "owner@example.com");
     await seedUser(db, "summary-assignee", "assignee@example.com");
