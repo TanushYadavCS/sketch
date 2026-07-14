@@ -539,6 +539,14 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
         .executeTakeFirstOrThrow();
       if (!before.indexed_file_id) throw new Error("expected linked file");
 
+      const recentEnd = new Date();
+      await setSliceWindow(
+        db,
+        seeded.sliceId,
+        new Date(recentEnd.getTime() - 60_000).toISOString(),
+        recentEnd.toISOString(),
+      );
+
       await db.updateTable("users").set({ whatsapp_number: null }).where("id", "=", seeded.teammateUserId).execute();
       const result = await runConnectorSync(db, config.id, createTestLogger());
       const after = await db
