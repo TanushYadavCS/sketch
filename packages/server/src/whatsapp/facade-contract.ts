@@ -44,6 +44,10 @@ export const whatsAppSendResultSchema = z.object({
   rawProviderPayload: z.unknown().optional(),
 });
 
+export const whatsAppSendResponseSchema = z.object({
+  result: whatsAppSendResultSchema.nullable(),
+});
+
 export const whatsAppReactionResultSchema = z.union([
   z.object({ ok: z.literal(true) }),
   z.object({ error: z.literal("unknown-message") }),
@@ -97,6 +101,11 @@ export const whatsAppGroupMetadataRequestSchema = z.object({
 });
 export const whatsAppResolveLidRequestSchema = z.object({ jid: z.string().min(1) });
 export const whatsAppEmptyRequestSchema = z.object({});
+export const whatsAppOkResponseSchema = z.object({ ok: z.literal(true) });
+export const whatsAppReactionResponseSchema = z.object({ result: whatsAppReactionResultSchema });
+export const whatsAppMediaDownloadResponseSchema = z.object({ result: stagedMediaRefSchema.nullable() });
+export const whatsAppGroupMetadataResponseSchema = z.object({ result: normalizedGroupMetadataSchema.nullable() });
+export const whatsAppResolveLidResponseSchema = z.object({ phoneJid: z.string().nullable() });
 
 export const whatsAppPairingStatusSchema = z.object({
   connected: z.boolean(),
@@ -120,6 +129,65 @@ export const whatsAppFacadeHealthSchema = z.object({
   contractVersion: z.string().min(1),
 });
 
+export const whatsAppInboundEnvelopeVersionSchema = z.literal("1.0");
+export const whatsAppIsoUtcTimestampSchema = z.string().datetime({ offset: true });
+
+export const whatsAppInboundMessageSchema = z.object({
+  type: z.enum(["dm", "group"]),
+  text: z.string(),
+  jid: z.string().min(1),
+  messageId: z.string(),
+  pushName: z.string(),
+  mediaType: z.string().optional(),
+  quotedMessage: z
+    .object({
+      providerMessageId: z.string(),
+      participantJid: z.string().nullable(),
+      text: z.string(),
+    })
+    .optional(),
+  phoneNumber: z.string().optional(),
+  isMentioned: z.boolean().optional(),
+  senderJid: z.string().optional(),
+  senderPhone: z.string().nullable().optional(),
+  rawProviderPayload: z.unknown(),
+  stagedMediaRef: stagedMediaRefSchema.nullable(),
+  mediaStagingError: z.string().nullable(),
+});
+
+export const whatsAppMessageEnvelopeSchema = z.object({
+  version: whatsAppInboundEnvelopeVersionSchema,
+  kind: z.enum(["message", "history_message"]),
+  providerTimestamp: whatsAppIsoUtcTimestampSchema,
+  providerConversationId: z.string().min(1),
+  providerMessageId: z.string().nullable(),
+  eventKey: z.string().nullable(),
+  fromMe: z.boolean(),
+  message: whatsAppInboundMessageSchema,
+});
+
+export const whatsAppHistoryBatchMetadataSchema = z.object({
+  batchId: z.string().min(1),
+  chunkIndex: z.number().int().nonnegative(),
+  chunkCount: z.number().int().positive(),
+  syncType: z.union([z.number(), z.string()]).nullable(),
+  progress: z.number().nullable(),
+  isLatest: z.boolean().nullable(),
+});
+
+export const whatsAppHistoryBatchEnvelopeSchema = z.object({
+  version: whatsAppInboundEnvelopeVersionSchema,
+  kind: z.literal("history_batch"),
+  providerTimestamp: whatsAppIsoUtcTimestampSchema,
+  batch: whatsAppHistoryBatchMetadataSchema,
+  messages: z.array(whatsAppMessageEnvelopeSchema),
+});
+
+export const whatsAppInboundEnvelopeSchema = z.union([
+  whatsAppMessageEnvelopeSchema,
+  whatsAppHistoryBatchEnvelopeSchema,
+]);
+
 export type WhatsAppQuotedRef = z.infer<typeof whatsAppQuotedRefSchema>;
 export type WhatsAppSendContent = z.infer<typeof whatsAppSendContentSchema>;
 export type WhatsAppFacadeSendOptions = z.infer<typeof whatsAppSendOptionsSchema>;
@@ -132,6 +200,9 @@ export type WhatsAppGroupSyncSummary = z.infer<typeof whatsAppGroupSyncSummarySc
 export type WhatsAppPairingStatus = z.infer<typeof whatsAppPairingStatusSchema>;
 export type WhatsAppPairingEvent = z.infer<typeof whatsAppPairingEventSchema>;
 export type WhatsAppFacadeHealth = z.infer<typeof whatsAppFacadeHealthSchema>;
+export type WhatsAppMessageEnvelope = z.infer<typeof whatsAppMessageEnvelopeSchema>;
+export type WhatsAppHistoryBatchEnvelope = z.infer<typeof whatsAppHistoryBatchEnvelopeSchema>;
+export type WhatsAppInboundEnvelope = z.infer<typeof whatsAppInboundEnvelopeSchema>;
 
 export interface WhatsAppSocketFacade {
   send(

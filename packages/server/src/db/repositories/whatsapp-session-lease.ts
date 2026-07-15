@@ -187,6 +187,26 @@ export function createWhatsAppSessionLeaseRepository(
     );
   }
 
+  async function release(fence: WhatsAppLeaseFence): Promise<boolean> {
+    return withBoundedSqliteRetry(
+      db,
+      async () => {
+        const result = await db
+          .updateTable("whatsapp_session_lease")
+          .set({
+            owner_token: `released:${fence.ownerToken}`,
+            heartbeat_at: "1970-01-01T00:00:00.000Z",
+          })
+          .where("id", "=", WHATSAPP_SESSION_LEASE_ID)
+          .where("owner_token", "=", fence.ownerToken)
+          .where("generation", "=", fence.generation)
+          .executeTakeFirst();
+        return Number(result.numUpdatedRows) === 1;
+      },
+      options.sqliteRetry,
+    );
+  }
+
   async function assertFence(executor: WhatsAppLeaseFenceExecutor, fence: WhatsAppLeaseFence): Promise<void> {
     const lease = await executor
       .selectFrom("whatsapp_session_lease")
@@ -246,5 +266,5 @@ export function createWhatsAppSessionLeaseRepository(
     );
   }
 
-  return { get, acquire, compareAndSwap, heartbeat, markDisconnected, deriveDisconnectedAt, withLeaseFence };
+  return { get, acquire, compareAndSwap, heartbeat, markDisconnected, deriveDisconnectedAt, release, withLeaseFence };
 }

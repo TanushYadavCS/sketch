@@ -118,6 +118,15 @@ describe("WhatsApp session lease repository on SQLite", () => {
     await expect(repo.deriveDisconnectedAt(fence)).resolves.toBe(true);
     const lease = await repo.get();
     expect(lease?.disconnected_at).toBe(lease?.last_live_at);
+    await expect(repo.deriveDisconnectedAt(fence)).resolves.toBe(false);
+  });
+
+  it("leaves disconnected_at null when no live heartbeat exists", async () => {
+    const repo = createWhatsAppSessionLeaseRepository(db, { sqlitePath });
+    const acquired = await repo.acquire(owner("owner-a"));
+    const fence = { ownerToken: "owner-a", generation: acquired.lease?.generation ?? 0 };
+    await expect(repo.deriveDisconnectedAt(fence)).resolves.toBe(false);
+    await expect(repo.get()).resolves.toMatchObject({ last_live_at: null, disconnected_at: null });
   });
 
   it("distinguishes heartbeat ownership loss from a database failure", async () => {
@@ -126,5 +135,21 @@ describe("WhatsApp session lease repository on SQLite", () => {
     await expect(repo.heartbeat("zombie-owner")).resolves.toBe(false);
     await db.schema.dropTable("whatsapp_session_lease").execute();
     await expect(repo.heartbeat("owner-a")).rejects.toThrow();
+  });
+
+  it("releases ownership immediately while retaining the persisted HTTP token", async () => {
+    const repo = createWhatsAppSessionLeaseRepository(db, { sqlitePath });
+    const acquired = await repo.acquire(owner("owner-a"));
+    const fence = { ownerToken: "owner-a", generation: acquired.lease?.generation ?? 0 };
+    await expect(repo.release(fence)).resolves.toBe(true);
+    await expect(repo.get()).resolves.toMatchObject({
+      owner_token: "released:owner-a",
+      gateway_http_token: "http-owner-a",
+      heartbeat_at: "1970-01-01T00:00:00.000Z",
+    });
+    await expect(repo.acquire(owner("owner-b"))).resolves.toMatchObject({
+      acquired: true,
+      lease: { owner_token: "owner-b", generation: 2, gateway_http_token: "http-owner-b" },
+    });
   });
 });

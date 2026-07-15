@@ -16,6 +16,7 @@ import {
   whatsAppSendContentSchema,
   whatsAppSendOptionsSchema,
   whatsAppSendRequestSchema,
+  whatsAppSendResponseSchema,
   whatsAppSendResultSchema,
 } from "./facade-contract";
 
@@ -63,6 +64,7 @@ describe("WhatsApp socket facade contract", () => {
         rawProviderPayload: { key: { id: "wamid.sent" } },
       }),
     ).toMatchObject({ providerMessageId: "wamid.sent", providerTimestamp: "2026-07-15T08:27:00.000Z" });
+    expect(whatsAppSendResponseSchema.parse({ result: null })).toEqual({ result: null });
   });
 
   it("parses reaction and staged-media examples", () => {

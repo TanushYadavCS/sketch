@@ -23,6 +23,8 @@ export interface WhatsAppInboundEventInsert {
   batchId?: string | null;
   chunkIndex?: number | null;
   chunkCount?: number | null;
+  status?: "pending" | "dead";
+  lastError?: string | null;
 }
 
 export interface SqliteRetryOptions {
@@ -120,44 +122,64 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
     return db.selectFrom("whatsapp_inbound_events").selectAll().where("event_key", "=", eventKey).executeTakeFirst();
   }
 
+  async function insertOn(executor: WhatsAppInboundDb, data: WhatsAppInboundEventInsert) {
+    if (data.eventKey) {
+      const existing = await executor
+        .selectFrom("whatsapp_inbound_events")
+        .selectAll()
+        .where("event_key", "=", data.eventKey)
+        .executeTakeFirst();
+      if (existing) return { row: existing, inserted: false };
+    }
+
+    const oversized = Buffer.byteLength(data.envelope, "utf8") > WHATSAPP_INBOUND_ENVELOPE_MAX_BYTES;
+    const status = oversized || data.status === "dead" ? "dead" : "pending";
+    const values: Insertable<WhatsAppInboundEventsTable> = {
+      kind: data.kind,
+      origin: data.origin,
+      status,
+      event_key: data.eventKey ?? null,
+      provider_message_id: data.providerMessageId ?? null,
+      envelope: data.envelope,
+      batch_id: data.batchId ?? null,
+      chunk_index: data.chunkIndex ?? null,
+      chunk_count: data.chunkCount ?? null,
+      last_error: oversized ? "serialized envelope exceeds 256KB" : truncateError(data.lastError),
+    };
+
+    try {
+      const inserted = await executor
+        .insertInto("whatsapp_inbound_events")
+        .values(values)
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      return { row: inserted, inserted: true };
+    } catch (error) {
+      if (data.eventKey) {
+        const existing = await executor
+          .selectFrom("whatsapp_inbound_events")
+          .selectAll()
+          .where("event_key", "=", data.eventKey)
+          .executeTakeFirst();
+        if (existing) return { row: existing, inserted: false };
+      }
+      throw error;
+    }
+  }
+
   async function insert(data: WhatsAppInboundEventInsert) {
+    return withBoundedSqliteRetry(db, () => insertOn(db, data), retryOptions);
+  }
+
+  async function insertManyAtomic(data: WhatsAppInboundEventInsert[]) {
     return withBoundedSqliteRetry(
       db,
-      async (): Promise<{ row: WhatsAppInboundEventRow; inserted: boolean }> => {
-        if (data.eventKey) {
-          const existing = await findByEventKey(data.eventKey);
-          if (existing) return { row: existing, inserted: false };
-        }
-
-        const oversized = Buffer.byteLength(data.envelope, "utf8") > WHATSAPP_INBOUND_ENVELOPE_MAX_BYTES;
-        const values: Insertable<WhatsAppInboundEventsTable> = {
-          kind: data.kind,
-          origin: data.origin,
-          status: oversized ? "dead" : "pending",
-          event_key: data.eventKey ?? null,
-          provider_message_id: data.providerMessageId ?? null,
-          envelope: data.envelope,
-          batch_id: data.batchId ?? null,
-          chunk_index: data.chunkIndex ?? null,
-          chunk_count: data.chunkCount ?? null,
-          last_error: oversized ? "serialized envelope exceeds 256KB" : null,
-        };
-
-        try {
-          const inserted = await db
-            .insertInto("whatsapp_inbound_events")
-            .values(values)
-            .returningAll()
-            .executeTakeFirstOrThrow();
-          return { row: inserted, inserted: true };
-        } catch (error) {
-          if (data.eventKey) {
-            const existing = await findByEventKey(data.eventKey);
-            if (existing) return { row: existing, inserted: false };
-          }
-          throw error;
-        }
-      },
+      () =>
+        db.transaction().execute(async (trx) => {
+          const results: Array<{ row: WhatsAppInboundEventRow; inserted: boolean }> = [];
+          for (const item of data) results.push(await insertOn(trx, item));
+          return results;
+        }),
       retryOptions,
     );
   }
@@ -400,6 +422,7 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
 
   return {
     insert,
+    insertManyAtomic,
     findByEventKey,
     claim,
     markCaptured,
