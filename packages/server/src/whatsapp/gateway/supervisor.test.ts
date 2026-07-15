@@ -190,6 +190,40 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
     await db.destroy();
   });
 
+  it("shares one spawn across concurrent pairing requests", async () => {
+    const db = await createTestDb();
+    const supervisor = new WhatsAppGatewaySupervisor({
+      db,
+      config: createTestConfig({ WHATSAPP_RUNTIME_MODE: "gateway" }),
+      logger: createTestLogger(),
+      gatewayScriptPath: fileURLToPath(import.meta.url),
+    });
+    const internals = supervisor as unknown as SupervisorInternals;
+    internals.loggedOut = true;
+    const facade = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+    });
+    const replacement = fakeChild(103);
+    const spawnAndWait = vi.spyOn(internals, "spawnAndWait").mockImplementation(async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      internals.child = replacement;
+      internals.client = facade;
+      return facade;
+    });
+    vi.spyOn(internals, "startHealthPolling").mockImplementation(() => undefined);
+
+    const [first, second] = await Promise.all([supervisor.ensurePairingReady(), supervisor.ensurePairingReady()]);
+
+    expect(spawnAndWait).toHaveBeenCalledTimes(1);
+    expect(first).toBe(facade);
+    expect(second).toBe(facade);
+    await expect(supervisor.ensurePairingReady()).resolves.toBe(facade);
+    expect(spawnAndWait).toHaveBeenCalledTimes(1);
+    await db.destroy();
+  });
+
   it("schedules another attempt when a replacement child dies before readiness", async () => {
     const db = await createTestDb();
     const sleepCalls: number[] = [];

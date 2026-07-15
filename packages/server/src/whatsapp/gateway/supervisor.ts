@@ -120,6 +120,7 @@ export class WhatsAppGatewaySupervisor {
   private startedSuccessfully = false;
   private respawnScheduled = false;
   private lastHealth: WhatsAppFacadeHealth | null = null;
+  private pairingSpawn: Promise<GatewayClientFacade> | null = null;
   private readonly expectedExits = new WeakSet<ChildProcess>();
 
   constructor(private readonly options: WhatsAppGatewaySupervisorOptions) {
@@ -172,9 +173,24 @@ export class WhatsAppGatewaySupervisor {
     return !this.stopping && !this.loggedOut && this.client !== null && this.lastHealth?.socketState === "connected";
   }
 
+  /**
+   * Concurrent pairing requests share one in-flight spawn: the pre-spawn checks
+   * (`this.child`) sit after an await on `fileHash`, so without the memo two
+   * simultaneous callers could both pass them and double-spawn the gateway.
+   */
   async ensurePairingReady(): Promise<GatewayClientFacade> {
     if (!this.loggedOut && this.client) return this.client;
+    if (this.pairingSpawn) return this.pairingSpawn;
     if (this.child) throw new Error("WhatsApp gateway is still starting");
+    this.pairingSpawn = this.spawnForPairing();
+    try {
+      return await this.pairingSpawn;
+    } finally {
+      this.pairingSpawn = null;
+    }
+  }
+
+  private async spawnForPairing(): Promise<GatewayClientFacade> {
     this.loggedOut = false;
     this.stopping = false;
     const scriptPath = this.options.gatewayScriptPath ?? defaultGatewayScriptPath();
