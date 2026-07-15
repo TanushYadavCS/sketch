@@ -29,6 +29,8 @@ interface GatewayClientFacadeOptions {
   token: string;
   logger: Logger;
   fetch?: typeof fetch;
+  beforePairingStart?: () => Promise<void>;
+  queryTimeoutMs?: number;
 }
 
 function usableRef(ref: WhatsAppQuotedRef | undefined): ref is WhatsAppQuotedRef {
@@ -40,36 +42,48 @@ function usableRef(ref: WhatsAppQuotedRef | undefined): ref is WhatsAppQuotedRef
 
 export class GatewayClientFacade implements WhatsAppSocketFacade {
   private readonly fetchImpl: typeof fetch;
+  private readonly queryTimeoutMs: number;
+  private pairingAbortController: AbortController | null = null;
 
   readonly pairing = {
     startQr: async (onEvent: (event: WhatsAppPairingEvent) => Promise<void>): Promise<void> => {
-      const response = await this.requestRaw(
-        "/pairing-sessions",
-        { method: "POST" },
-        WHATSAPP_GATEWAY_QUERY_TIMEOUT_MS,
-      );
-      if (!response.body) throw new Error("WhatsApp gateway pairing response had no body");
-      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-      let pending = "";
-      for (;;) {
-        const next = await reader.read();
-        if (next.done) break;
-        pending += next.value;
-        const frames = pending.split("\n\n");
-        pending = frames.pop() ?? "";
-        for (const frame of frames) {
-          const data = frame
-            .split("\n")
-            .filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice("data:".length).trimStart())
-            .join("\n");
-          if (!data) continue;
-          await onEvent(whatsAppPairingEventSchema.parse(JSON.parse(data)));
+      await this.options.beforePairingStart?.();
+      const controller = new AbortController();
+      this.pairingAbortController?.abort();
+      this.pairingAbortController = controller;
+      try {
+        const response = await this.requestRaw(
+          "/pairing-sessions",
+          { method: "POST", signal: controller.signal },
+          this.queryTimeoutMs,
+          controller,
+        );
+        if (!response.body) throw new Error("WhatsApp gateway pairing response had no body");
+        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+        let pending = "";
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          pending += next.value;
+          const frames = pending.split("\n\n");
+          pending = frames.pop() ?? "";
+          for (const frame of frames) {
+            const data = frame
+              .split("\n")
+              .filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice("data:".length).trimStart())
+              .join("\n");
+            if (!data) continue;
+            await onEvent(whatsAppPairingEventSchema.parse(JSON.parse(data)));
+          }
         }
+      } finally {
+        if (this.pairingAbortController === controller) this.pairingAbortController = null;
       }
     },
     status: () => this.request("/pairing-sessions/current", {}, whatsAppPairingStatusSchema),
     cancel: async (): Promise<void> => {
+      this.pairingAbortController?.abort();
       await this.request("/pairing-sessions/current", { method: "DELETE" }, whatsAppOkResponseSchema);
     },
     logout: async (): Promise<void> => {
@@ -79,6 +93,7 @@ export class GatewayClientFacade implements WhatsAppSocketFacade {
 
   constructor(private readonly options: GatewayClientFacadeOptions) {
     this.fetchImpl = options.fetch ?? fetch;
+    this.queryTimeoutMs = options.queryTimeoutMs ?? WHATSAPP_GATEWAY_QUERY_TIMEOUT_MS;
   }
 
   get gatewayToken(): string {
@@ -170,23 +185,37 @@ export class GatewayClientFacade implements WhatsAppSocketFacade {
     path: string,
     init: RequestInit,
     schema: ZodType<T>,
-    timeoutMs = WHATSAPP_GATEWAY_QUERY_TIMEOUT_MS,
+    timeoutMs = this.queryTimeoutMs,
   ): Promise<T> {
     const response = await this.requestRaw(path, init, timeoutMs);
     const body = await response.json();
     return schema.parse(body);
   }
 
-  private async requestRaw(path: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-    const response = await this.fetchImpl(`${this.options.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${this.options.token}`,
-        ...(init.body ? { "Content-Type": "application/json" } : {}),
-        ...init.headers,
-      },
-      signal: init.signal ?? AbortSignal.timeout(timeoutMs),
-    });
+  private async requestRaw(
+    path: string,
+    init: RequestInit,
+    timeoutMs: number,
+    connectionController?: AbortController,
+  ): Promise<Response> {
+    const timeout = connectionController
+      ? setTimeout(() => connectionController.abort(new Error("WhatsApp gateway connection timed out")), timeoutMs)
+      : null;
+    timeout?.unref?.();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.options.baseUrl}${path}`, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${this.options.token}`,
+          ...(init.body ? { "Content-Type": "application/json" } : {}),
+          ...init.headers,
+        },
+        signal: init.signal ?? AbortSignal.timeout(timeoutMs),
+      });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
     if (!response.ok) {
       await response.body?.cancel();
       throw new Error(`WhatsApp gateway request failed: ${response.status}`);

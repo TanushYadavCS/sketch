@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestLogger } from "../../test-utils";
 import type { WhatsAppSocketFacade } from "../facade-contract";
 import type { InProcessMessageReferenceStore } from "../in-process-socket-facade";
@@ -117,5 +117,27 @@ describe("GatewaySocketFacade", () => {
       maxFileBytes: 2048,
     });
     expect(received).toMatchObject({ destinationDir: "/tmp/wa-staging", maxFileBytes: 1024 });
+  });
+
+  it("warns when inbound queue depth exceeds 200", async () => {
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const facade = new GatewaySocketFacade({
+      delegate: delegate(async () => null),
+      stagingDir: "/tmp/wa-staging",
+      maxFileBytes: 1024,
+      logger,
+      socketState: () => "connected",
+      queueDepth: async () => 201,
+      insertFailures: () => 0,
+      scriptHash: "hash",
+      shutdown: async () => undefined,
+    });
+
+    await expect(facade.health()).resolves.toMatchObject({ queueDepth: 201 });
+    expect(warn).toHaveBeenCalledWith(
+      { queueDepth: 201, threshold: 200 },
+      "WhatsApp gateway inbound queue depth exceeded the warning threshold",
+    );
   });
 });

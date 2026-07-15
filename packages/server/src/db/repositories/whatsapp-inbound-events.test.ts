@@ -45,6 +45,7 @@ describe("WhatsApp inbound events repository on SQLite", () => {
     ]);
     const indexes = await sql<{ name: string }>`PRAGMA index_list(whatsapp_inbound_events)`.execute(db);
     expect(indexes.rows.map((row) => row.name).sort()).toEqual([
+      "whatsapp_inbound_events_batch_id_idx",
       "whatsapp_inbound_events_event_key_uidx",
       "whatsapp_inbound_events_provider_message_id_idx",
       "whatsapp_inbound_events_status_id_idx",
@@ -55,8 +56,12 @@ describe("WhatsApp inbound events repository on SQLite", () => {
     const providerIndex = await sql<{ name: string }>`
       PRAGMA index_info(whatsapp_inbound_events_provider_message_id_idx)
     `.execute(db);
+    const batchIndex = await sql<{ name: string }>`
+      PRAGMA index_info(whatsapp_inbound_events_batch_id_idx)
+    `.execute(db);
     expect(statusIndex.rows.map((row) => row.name)).toEqual(["status", "id"]);
     expect(providerIndex.rows.map((row) => row.name)).toEqual(["provider_message_id"]);
+    expect(batchIndex.rows.map((row) => row.name)).toEqual(["batch_id"]);
   });
 
   it("uses the canonical conversation, provider id, and fromMe identity and deduplicates inserts", async () => {

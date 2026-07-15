@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWhatsAppInboundEventsRepository } from "../db/repositories/whatsapp-inbound-events";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { WhatsAppAdapterHandlers } from "./adapter";
@@ -196,6 +196,56 @@ describe("WhatsAppInboundConsumer", () => {
       .executeTakeFirstOrThrow();
     expect(row.status).toBe("consumed");
     expect(dispatched).toBe(false);
+    expect(consumer.missingProviderIdEvents).toBe(1);
+  });
+
+  it("captures and consumes a fromMe envelope without dispatching it", async () => {
+    const envelope = messageEnvelope("outbound", "event-outbound");
+    envelope.fromMe = true;
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const inserted = await repo.insert({
+      kind: "history_message",
+      origin: "gateway",
+      eventKey: "event-outbound",
+      providerMessageId: "outbound",
+      envelope: JSON.stringify(envelope),
+    });
+    let captured = 0;
+    let dispatched = 0;
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger,
+      stagingDir,
+      handlers: handlers({
+        captureQueuedMessage: async () => {
+          captured += 1;
+          return null;
+        },
+        dispatchCapturedMessage: async () => {
+          dispatched += 1;
+          return true;
+        },
+      }),
+    });
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select("status")
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "consumed" });
+    expect(captured).toBe(1);
+    expect(dispatched).toBe(0);
+    expect(warn).toHaveBeenCalledWith(
+      { inboundEventId: inserted.row.id },
+      "Captured outbound WhatsApp event from the durable inbound queue; dispatch skipped",
+    );
   });
 
   it("dead-letters after five failed processing attempts", async () => {
@@ -394,5 +444,29 @@ describe("moveWhatsAppStagedMedia", () => {
         stagingDir,
       }),
     ).rejects.toThrow("hash or size mismatch");
+  });
+
+  it("rejects a symlinked attachments directory that escapes the workspace", async () => {
+    const stagingDir = join(root, "staging");
+    const workspaceDir = join(root, "workspace");
+    const outsideDir = join(root, "outside");
+    await mkdir(stagingDir, { recursive: true });
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(outsideDir, { recursive: true });
+    await symlink(outsideDir, join(workspaceDir, "attachments"));
+    const stagedPath = join(stagingDir, "media.txt");
+    await writeFile(stagedPath, "media");
+    const ref = {
+      stagedPath,
+      mime: "text/plain",
+      size: 5,
+      sha256: createHash("sha256").update("media").digest("hex"),
+      originalName: "media.txt",
+    };
+
+    await expect(moveWhatsAppStagedMedia({ ref, eventKey: "event", workspaceDir, stagingDir })).rejects.toThrow(
+      "attachment directory escaped the workspace root",
+    );
+    await expect(readFile(stagedPath, "utf8")).resolves.toBe("media");
   });
 });

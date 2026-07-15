@@ -157,7 +157,17 @@ export class WhatsAppGatewayCapture {
           lastError: chunk.dead ? "history message exceeds 200KB after raw payload compaction" : null,
         })),
       );
-      for (const result of results) if (result.inserted) this.pingWake();
+      for (const [index, result] of results.entries()) {
+        if (!result.inserted) continue;
+        this.pingWake();
+        const chunk = chunks[index];
+        if (chunk?.dead) {
+          this.deps.logger.warn(
+            { batchId, chunkIndex: chunk.chunkIndex },
+            "WhatsApp history chunk was dead-lettered at insert; history indexing has a gap",
+          );
+        }
+      }
 
       let replyInserted = 0;
       let replyDeduplicated = 0;
@@ -170,6 +180,7 @@ export class WhatsAppGatewayCapture {
         const watermark = lease?.disconnected_at ?? lease?.last_live_at;
         const cutoff = watermark ? Date.parse(watermark) - HISTORY_REPLY_TOLERANCE_MS : Number.POSITIVE_INFINITY;
         for (const item of prepared) {
+          if (item.envelope.fromMe) continue;
           const timestamp = Date.parse(item.envelope.providerTimestamp);
           if (!Number.isFinite(timestamp) || timestamp < cutoff) continue;
           const result = await this.events.insert({

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestLogger } from "../test-utils";
 import { GatewayClientFacade, WHATSAPP_GATEWAY_SEND_TIMEOUT_MS } from "./gateway-client-facade";
 
@@ -123,5 +123,41 @@ describe("GatewayClientFacade", () => {
     });
     await facade.shutdown();
     expect(request).toMatchObject({ input: "http://127.0.0.1:3901/process", init: { method: "DELETE" } });
+  });
+
+  it("keeps a QR stream open after the query timeout once response headers arrive", async () => {
+    const state: {
+      stream?: ReadableStreamDefaultController<Uint8Array>;
+      requestSignal?: AbortSignal;
+    } = {};
+    const encoder = new TextEncoder();
+    const facade = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+      queryTimeoutMs: 5,
+      fetch: async (_input, init) => {
+        state.requestSignal = init?.signal as AbortSignal;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              state.stream = controller;
+              controller.enqueue(encoder.encode('data: {"type":"qr","qr":"still-open"}\n\n'));
+            },
+          }),
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      },
+    });
+    const events: unknown[] = [];
+    const pairing = facade.pairing.startQr(async (event) => {
+      events.push(event);
+    });
+    await vi.waitFor(() => expect(events).toEqual([{ type: "qr", qr: "still-open" }]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(state.requestSignal?.aborted).toBe(false);
+    state.stream?.close();
+    await expect(pairing).resolves.toBeUndefined();
   });
 });

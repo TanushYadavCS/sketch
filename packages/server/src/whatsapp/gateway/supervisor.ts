@@ -8,7 +8,7 @@ import type { Config } from "../../config";
 import { createWhatsAppSessionLeaseRepository } from "../../db/repositories/whatsapp-session-lease";
 import type { DB, WhatsAppSessionLeaseTable } from "../../db/schema";
 import type { Logger } from "../../logger";
-import { WHATSAPP_FACADE_CONTRACT_VERSION } from "../facade-contract";
+import { WHATSAPP_FACADE_CONTRACT_VERSION, type WhatsAppFacadeHealth } from "../facade-contract";
 import { GatewayClientFacade } from "../gateway-client-facade";
 import { WHATSAPP_GATEWAY_DEFAULT_PORT, WHATSAPP_GATEWAY_HOST } from "./http-server";
 import { loadBootId, loadHostId, loadPidStartTime } from "./identity";
@@ -117,6 +117,10 @@ export class WhatsAppGatewaySupervisor {
   private healthFailures = 0;
   private restartAttempt = 0;
   private loggedOut = false;
+  private startedSuccessfully = false;
+  private respawnScheduled = false;
+  private lastHealth: WhatsAppFacadeHealth | null = null;
+  private readonly expectedExits = new WeakSet<ChildProcess>();
 
   constructor(private readonly options: WhatsAppGatewaySupervisorOptions) {
     this.leases = createWhatsAppSessionLeaseRepository(options.db, {
@@ -136,6 +140,7 @@ export class WhatsAppGatewaySupervisor {
 
     const adopted = await this.tryAdopt(expectedHash, hostId, bootId);
     if (adopted) {
+      this.startedSuccessfully = true;
       this.startHealthPolling(scriptPath);
       return adopted;
     }
@@ -150,6 +155,7 @@ export class WhatsAppGatewaySupervisor {
 
     await this.waitForTakeoverEligibility(hostId, bootId);
     const client = await this.spawnAndWait(scriptPath, expectedHash);
+    this.startedSuccessfully = true;
     this.startHealthPolling(scriptPath);
     return client;
   }
@@ -160,6 +166,24 @@ export class WhatsAppGatewaySupervisor {
 
   get requiresPairing(): boolean {
     return this.loggedOut;
+  }
+
+  get isConnected(): boolean {
+    return !this.stopping && !this.loggedOut && this.client !== null && this.lastHealth?.socketState === "connected";
+  }
+
+  async ensurePairingReady(): Promise<GatewayClientFacade> {
+    if (!this.loggedOut && this.client) return this.client;
+    if (this.child) throw new Error("WhatsApp gateway is still starting");
+    this.loggedOut = false;
+    this.stopping = false;
+    const scriptPath = this.options.gatewayScriptPath ?? defaultGatewayScriptPath();
+    const expectedHash = await fileHash(scriptPath);
+    const client = await this.spawnAndWait(scriptPath, expectedHash);
+    this.startedSuccessfully = true;
+    this.restartAttempt = 0;
+    this.startHealthPolling(scriptPath);
+    return client;
   }
 
   async shutdown(): Promise<void> {
@@ -189,6 +213,7 @@ export class WhatsAppGatewaySupervisor {
       ) {
         this.lease = lease;
         this.client = candidate;
+        this.lastHealth = health;
         this.options.logger.info({ pid: lease.pid }, "Adopted healthy WhatsApp gateway process");
         return candidate;
       }
@@ -251,6 +276,7 @@ export class WhatsAppGatewaySupervisor {
           }
           this.lease = lease;
           this.client = client;
+          this.lastHealth = health;
           return client;
         } catch (error) {
           this.options.logger.debug({ error }, "Waiting for WhatsApp gateway readiness");
@@ -280,6 +306,7 @@ export class WhatsAppGatewaySupervisor {
         await this.restart("gateway contract skew");
         return;
       }
+      this.lastHealth = health;
       this.healthFailures = 0;
       this.restartAttempt = 0;
     } catch (error) {
@@ -297,8 +324,14 @@ export class WhatsAppGatewaySupervisor {
       await this.stopGateway();
       const scriptPath = this.options.gatewayScriptPath ?? defaultGatewayScriptPath();
       const expectedHash = await fileHash(scriptPath);
-      await this.spawnAndWait(scriptPath, expectedHash);
+      const client = await this.spawnAndWait(scriptPath, expectedHash);
+      if (!this.child || this.client !== client)
+        throw new Error("WhatsApp gateway exited while restart readiness completed");
       this.healthFailures = 0;
+      this.restartAttempt = 0;
+    } catch (error) {
+      this.scheduleRespawn("failed gateway restart");
+      throw error;
     } finally {
       this.restarting = false;
     }
@@ -306,6 +339,7 @@ export class WhatsAppGatewaySupervisor {
 
   private async onChildExit(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     if (this.child !== child) return;
+    const expectedExit = this.expectedExits.delete(child);
     const exitedLease = this.lease;
     const wasReady = this.client !== null && exitedLease !== null;
     if (exitedLease && child.pid === exitedLease.pid) {
@@ -316,6 +350,8 @@ export class WhatsAppGatewaySupervisor {
     this.child = null;
     this.client = null;
     this.lease = null;
+    this.lastHealth = null;
+    if (expectedExit || this.stopping) return;
     const decision = whatsappGatewayExitDecision(code, this.restartAttempt + 1);
     if (decision.action === "re-pair") {
       this.loggedOut = true;
@@ -323,20 +359,44 @@ export class WhatsAppGatewaySupervisor {
       this.options.logger.warn("WhatsApp gateway logged out; automatic respawn stopped until re-pairing");
       return;
     }
-    if (!wasReady) return;
-    if (this.stopping || this.restarting) return;
+    if (!wasReady && !this.startedSuccessfully) return;
+    this.scheduleRespawn("unexpected gateway exit", { code, signal });
+  }
+
+  private scheduleRespawn(reason: string, context: Record<string, unknown> = {}): void {
+    if (this.respawnScheduled || this.stopping || this.loggedOut) return;
     this.restartAttempt += 1;
-    const backoffMs = decision.delayMs;
-    this.options.logger.warn({ code, signal, backoffMs }, "WhatsApp gateway exited unexpectedly");
-    await this.sleep(backoffMs);
+    const backoffMs = whatsappGatewayRestartBackoffMs(this.restartAttempt);
+    this.respawnScheduled = true;
+    this.options.logger.warn(
+      { ...context, backoffMs, attempt: this.restartAttempt },
+      "WhatsApp gateway respawn scheduled",
+    );
+    void this.runScheduledRespawn(reason, backoffMs);
+  }
+
+  private async runScheduledRespawn(reason: string, backoffMs: number): Promise<void> {
     try {
-      await this.restart("unexpected gateway exit");
+      await this.sleep(backoffMs);
     } catch (error) {
-      if (!this.stopping) this.options.logger.error({ error }, "WhatsApp gateway respawn failed");
+      this.respawnScheduled = false;
+      this.options.logger.error({ error }, "WhatsApp gateway respawn backoff failed");
+      this.scheduleRespawn("failed gateway respawn backoff");
+      return;
+    }
+    this.respawnScheduled = false;
+    if (this.stopping || this.loggedOut) return;
+    try {
+      await this.restart(reason);
+    } catch (error) {
+      if (!this.stopping && !this.loggedOut) {
+        this.options.logger.error({ error }, "WhatsApp gateway respawn failed");
+      }
     }
   }
 
   private async stopGateway(): Promise<void> {
+    if (this.child) this.expectedExits.add(this.child);
     const lease = this.lease ?? (await this.leases.getFresh()) ?? null;
     const client = this.client ?? (lease?.gateway_http_token ? this.createClient(lease.gateway_http_token) : null);
     await this.stopLeaseOwner(lease, client);
@@ -415,6 +475,7 @@ export class WhatsAppGatewaySupervisor {
       baseUrl: gatewayBaseUrl(this.options.config.WHATSAPP_GATEWAY_PORT ?? WHATSAPP_GATEWAY_DEFAULT_PORT),
       token,
       logger: this.options.logger,
+      beforePairingStart: () => this.ensurePairingReady().then(() => undefined),
     });
   }
 }

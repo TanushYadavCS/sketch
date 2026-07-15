@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { Kysely, SqliteDialect } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../../db/migrate";
 import { createWhatsAppEventKey } from "../../db/repositories/whatsapp-inbound-events";
 import { createWhatsAppSessionLeaseRepository } from "../../db/repositories/whatsapp-session-lease";
@@ -12,7 +12,7 @@ import { createTestLogger } from "../../test-utils";
 import type { WhatsAppGroupMessage, WhatsAppHistoryBatchMetadata, WhatsAppMessage } from "../bot";
 import { WhatsAppGatewayCapture } from "./capture";
 
-function groupMessage(id: string, timestamp: string): WhatsAppGroupMessage {
+function groupMessage(id: string, timestamp: string, fromMe = false): WhatsAppGroupMessage {
   const groupJid = "120363000000001@g.us";
   return {
     type: "group",
@@ -24,7 +24,7 @@ function groupMessage(id: string, timestamp: string): WhatsAppGroupMessage {
       key: {
         remoteJid: groupJid,
         id,
-        fromMe: false,
+        fromMe,
         participant: "15551234567@s.whatsapp.net",
       },
       messageTimestamp: Math.floor(Date.parse(timestamp) / 1000),
@@ -182,10 +182,49 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
     ).toBe(true);
   });
 
-  it("dead-letters an indivisible history message that remains over 200KB after compaction", async () => {
+  it("captures reconnect outbound messages in history batches without promoting them for dispatch", async () => {
+    const lease = createWhatsAppSessionLeaseRepository(db);
+    const acquired = await lease.acquire({
+      ownerKind: "gateway",
+      ownerToken: "owner-outbound",
+      gatewayHttpToken: "http-token",
+      hostId: "host-outbound",
+      bootId: "boot-outbound",
+      pid: 2,
+      pidStartTime: "2",
+      scriptHash: "hash",
+      contractVersion: "1.0",
+    });
+    const fence = { ownerToken: "owner-outbound", generation: acquired.lease?.generation ?? 0 };
+    await lease.heartbeat("owner-outbound", { markLive: true });
+    await lease.markDisconnected(fence);
     const capture = new WhatsAppGatewayCapture({
       db,
       logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => false,
+      wake: async () => undefined,
+    });
+
+    await capture.captureHistory([groupMessage("outbound-replay", new Date().toISOString(), true)]);
+
+    const rows = await db.selectFrom("whatsapp_inbound_events").select(["kind", "envelope"]).execute();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("history_batch");
+    expect(
+      (JSON.parse(rows[0]?.envelope ?? "{}") as { messages: Array<{ fromMe: boolean }> }).messages[0]?.fromMe,
+    ).toBe(true);
+  });
+
+  it("dead-letters an indivisible history message that remains over 200KB after compaction", async () => {
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger,
       stagingDir: join(directory, "staging"),
       maxFileBytes: 1024,
       getSocket: () => null,
@@ -204,5 +243,9 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
       .executeTakeFirstOrThrow();
     expect(row).toMatchObject({ kind: "history_batch", status: "dead" });
     expect(row.last_error).toMatch(/200KB|256KB/u);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ chunkIndex: 0 }),
+      "WhatsApp history chunk was dead-lettered at insert; history indexing has a gap",
+    );
   });
 });

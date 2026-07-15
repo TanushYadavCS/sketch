@@ -112,6 +112,7 @@ describe("bootstrap", () => {
     const body = await res.json();
     expect(body.status).toBe("ok");
     expect(body.db).toBe("ok");
+    expect(body.whatsapp).toEqual({ missingProviderIdEvents: 0 });
   });
 
   it("sends explicit WhatsApp magic-link templates without proactive parking", async () => {

@@ -54,12 +54,17 @@ export async function moveWhatsAppStagedMedia(params: {
   if (!inside(stagingRoot, stagedPath)) throw new Error("WhatsApp staged media path escaped the staging root");
   const attachmentDir = join(params.workspaceDir, "attachments");
   await mkdir(attachmentDir, { recursive: true });
+  const resolvedWorkspaceDir = await realpath(params.workspaceDir);
+  const resolvedAttachmentDir = await realpath(attachmentDir);
+  if (!inside(resolvedWorkspaceDir, resolvedAttachmentDir)) {
+    throw new Error("WhatsApp attachment directory escaped the workspace root");
+  }
   const extension = extname(params.ref.originalName ?? params.ref.stagedPath).replace(/[^a-zA-Z0-9.]/gu, "");
   const identitySource = params.eventKey ?? "missing-provider-id";
   const identity = /^[a-f0-9]{64}$/u.test(identitySource)
     ? identitySource
     : createHash("sha256").update(identitySource).digest("hex");
-  const destination = join(attachmentDir, `${identity}-${params.ref.sha256.slice(0, 16)}${extension}`);
+  const destination = join(resolvedAttachmentDir, `${identity}-${params.ref.sha256.slice(0, 16)}${extension}`);
 
   const verify = async (path: string): Promise<boolean> => {
     try {
@@ -100,9 +105,14 @@ export class WhatsAppInboundConsumer {
   private active: Promise<void> | null = null;
   private rerun = false;
   private acceptingClaims = false;
+  private missingProviderIdEventCount = 0;
 
   constructor(private readonly options: WhatsAppInboundConsumerOptions) {
     this.events = createWhatsAppInboundEventsRepository(options.db);
+  }
+
+  get missingProviderIdEvents(): number {
+    return this.missingProviderIdEventCount;
   }
 
   start(): void {
@@ -215,8 +225,17 @@ export class WhatsAppInboundConsumer {
       },
     });
     if (!captureCommitted && !(await this.events.markCaptured(row.id, claimToken))) return;
+    if (envelope.fromMe) {
+      if (!(await this.events.markConsumed(row.id, claimToken))) return;
+      this.options.logger.warn(
+        { inboundEventId: row.id },
+        "Captured outbound WhatsApp event from the durable inbound queue; dispatch skipped",
+      );
+      return;
+    }
     if (!envelope.providerMessageId) {
-      await this.events.markConsumed(row.id, claimToken);
+      if (!(await this.events.markConsumed(row.id, claimToken))) return;
+      this.missingProviderIdEventCount += 1;
       this.options.logger.warn(
         { inboundEventId: row.id },
         "Captured WhatsApp event without provider id; dispatch skipped",

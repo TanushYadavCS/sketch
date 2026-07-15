@@ -130,6 +130,7 @@ interface AppDeps {
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   whatsappWakeToken?: string;
   onWhatsAppWake?: () => Promise<void> | void;
+  getWhatsAppHealth?: () => { missingProviderIdEvents: number };
 }
 
 /**
@@ -386,7 +387,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   };
 
   // API routes
-  app.route("/api/health", healthRoutes(db));
+  app.route("/api/health", healthRoutes(db, deps?.getWhatsAppHealth));
   app.route("/api/auth", authRoutes(settings, db, { config, logger, userRepo: users, sendMagicLink }));
   app.route(
     "/api/setup",

@@ -68,6 +68,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     ON whatsapp_inbound_events(status, id)`.execute(db);
   await sql`CREATE INDEX whatsapp_inbound_events_provider_message_id_idx
     ON whatsapp_inbound_events(provider_message_id)`.execute(db);
+  await sql`CREATE INDEX whatsapp_inbound_events_batch_id_idx
+    ON whatsapp_inbound_events(batch_id)`.execute(db);
 
   await db.schema
     .createTable("whatsapp_session_lease")

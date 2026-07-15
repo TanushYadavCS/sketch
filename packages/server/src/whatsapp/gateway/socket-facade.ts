@@ -17,6 +17,7 @@ const SEND_TIMEOUT_MS = 60_000;
 const QUERY_TIMEOUT_MS = 30_000;
 const IDEMPOTENCY_CACHE_CAPACITY = 512;
 const IDEMPOTENCY_CACHE_TTL_MS = 10 * 60_000;
+export const WHATSAPP_GATEWAY_QUEUE_DEPTH_WARN_THRESHOLD = 200;
 
 interface CachedSendResult {
   result: WhatsAppSendResult;
@@ -140,9 +141,16 @@ export class GatewaySocketFacade implements WhatsAppSocketFacade, InProcessMessa
   }
 
   async health(): Promise<WhatsAppFacadeHealth> {
+    const queueDepth = await this.deps.queueDepth();
+    if (queueDepth > WHATSAPP_GATEWAY_QUEUE_DEPTH_WARN_THRESHOLD) {
+      this.deps.logger.warn(
+        { queueDepth, threshold: WHATSAPP_GATEWAY_QUEUE_DEPTH_WARN_THRESHOLD },
+        "WhatsApp gateway inbound queue depth exceeded the warning threshold",
+      );
+    }
     return {
       socketState: this.deps.socketState(),
-      queueDepth: await this.deps.queueDepth(),
+      queueDepth,
       insertFailures: this.deps.insertFailures(),
       uptime: process.uptime(),
       scriptHash: this.deps.scriptHash,

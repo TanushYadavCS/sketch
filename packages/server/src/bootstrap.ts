@@ -72,6 +72,7 @@ import { whatsappDeliveryTargetFromTarget } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
 import { WHATSAPP_MANAGED_PROVIDER_ID, createManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
+import { startWhatsAppInboundRetention } from "./whatsapp/retention";
 import { createWhatsAppRuntime } from "./whatsapp/runtime";
 import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
 import { startWhatsAppWindowKeepAliveJob } from "./whatsapp/window-keepalive";
@@ -282,6 +283,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
         baseUrl: `http://127.0.0.1:${config.WHATSAPP_GATEWAY_PORT}`,
         token: lease?.gateway_http_token ?? "gateway-not-started",
         logger,
+        beforePairingStart: () => whatsappSupervisor?.ensurePairingReady().then(() => undefined) ?? Promise.resolve(),
       });
     }
   } else {
@@ -317,7 +319,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   }
   const gatewayInboundSource = {
     get isConnected() {
-      return config.WHATSAPP_RUNTIME_MODE === "gateway";
+      return whatsappSupervisor?.isConnected ?? false;
     },
     onMessage() {},
     onHistoryMessages() {},
@@ -623,6 +625,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
     stagingDir: join(config.DATA_DIR, "wa-staging"),
   });
   whatsappInboundConsumer.start();
+  const whatsappInboundRetention = startWhatsAppInboundRetention({
+    db,
+    logger,
+    stagingDir: join(config.DATA_DIR, "wa-staging"),
+  });
 
   // 9. HTTP server
   const app = createApp(db, config, {
@@ -658,6 +665,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       logger.info("SMTP configuration updated");
     },
     logger,
+    getWhatsAppHealth: () => ({ missingProviderIdEvents: whatsappInboundConsumer.missingProviderIdEvents }),
     localDeviceGateway,
     localClaudeSessionService,
     agentRunService,
@@ -690,6 +698,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   async function shutdown() {
     logger.info("Shutting down...");
     await whatsappInboundConsumer.stop();
+    whatsappInboundRetention.stop();
     normalizationBackfill.stop();
     await telemetry.shutdown();
     await syncScheduler.stop();
