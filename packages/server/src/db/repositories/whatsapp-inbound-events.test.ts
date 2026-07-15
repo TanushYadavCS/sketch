@@ -129,6 +129,7 @@ describe("WhatsApp inbound events repository on SQLite", () => {
       envelope: "{}",
     });
     const capturedReady = await repo.insert({ origin: "gateway", kind: "message", envelope: "{}" });
+    const dispatched = await repo.insert({ origin: "gateway", kind: "message", envelope: "{}" });
     await db
       .updateTable("whatsapp_inbound_events")
       .set({ status: "captured", next_attempt_at: "2999-01-01T00:00:00.000Z" })
@@ -138,6 +139,11 @@ describe("WhatsApp inbound events repository on SQLite", () => {
       .updateTable("whatsapp_inbound_events")
       .set({ status: "captured", next_attempt_at: sql`CURRENT_TIMESTAMP` })
       .where("id", "=", capturedReady.row.id)
+      .execute();
+    await db
+      .updateTable("whatsapp_inbound_events")
+      .set({ status: "dispatched", claimed_at: sql`datetime(CURRENT_TIMESTAMP, '-121 seconds')` })
+      .where("id", "=", dispatched.row.id)
       .execute();
 
     const claimed = await repo.claim("first-token");
@@ -149,6 +155,7 @@ describe("WhatsApp inbound events repository on SQLite", () => {
       .execute();
     const reclaimed = await repo.claim("second-token");
     expect(reclaimed.map((row) => row.id)).toContain(early.row.id);
+    expect(reclaimed.map((row) => row.id)).not.toContain(dispatched.row.id);
     await expect(repo.markCaptured(early.row.id, "first-token")).resolves.toBe(false);
     await expect(repo.markCaptured(early.row.id, "second-token")).resolves.toBe(true);
     await expect(repo.markConsumed(early.row.id, "first-token")).resolves.toBe(false);
@@ -156,17 +163,18 @@ describe("WhatsApp inbound events repository on SQLite", () => {
     await expect(repo.markDead(early.row.id, "first-token", "zombie")).resolves.toBe(false);
   });
 
-  it("captures immediately, consumes before dispatch, compensates sheds, and dead-letters after five attempts", async () => {
+  it("dispatches durably, consumes at run start, compensates sheds, and dead-letters after five attempts", async () => {
     const repo = createWhatsAppInboundEventsRepository(db);
     const inserted = await repo.insert({ origin: "gateway", kind: "message", envelope: "{}" });
     const [claimed] = await repo.claim("claim-1");
     expect(claimed?.attempts).toBe(1);
     await expect(repo.markCaptured(inserted.row.id, "claim-1")).resolves.toBe(true);
-    await expect(repo.markConsumed(inserted.row.id, "claim-1")).resolves.toBe(true);
-    await expect(repo.claim("post-consume-token")).resolves.toEqual([]);
+    await expect(repo.markDispatched(inserted.row.id, "claim-1")).resolves.toBe(true);
+    await expect(repo.consumeDispatched(inserted.row.id, "zombie-token")).resolves.toBe(false);
+    await expect(repo.claim("post-dispatch-token")).resolves.toEqual([]);
     await expect(
       db.selectFrom("whatsapp_inbound_events").select("status").where("id", "=", inserted.row.id).executeTakeFirst(),
-    ).resolves.toEqual({ status: "consumed" });
+    ).resolves.toEqual({ status: "dispatched" });
     await expect(repo.revertToCaptured(inserted.row.id, "claim-1", "shed")).resolves.toBe(true);
     const requeued = await db
       .selectFrom("whatsapp_inbound_events")
@@ -182,6 +190,21 @@ describe("WhatsApp inbound events repository on SQLite", () => {
 
     await db
       .updateTable("whatsapp_inbound_events")
+      .set({ next_attempt_at: sql`CURRENT_TIMESTAMP` })
+      .where("id", "=", inserted.row.id)
+      .execute();
+    await expect(repo.claim("claim-2")).resolves.toHaveLength(1);
+    await expect(repo.markCaptured(inserted.row.id, "claim-2")).resolves.toBe(true);
+    await expect(repo.markDispatched(inserted.row.id, "claim-2")).resolves.toBe(true);
+    await expect(repo.consumeDispatched(inserted.row.id, "claim-2")).resolves.toBe(true);
+    await expect(repo.revertToCaptured(inserted.row.id, "claim-2", "late shed")).resolves.toBe(false);
+    await expect(repo.claim("post-consume-token")).resolves.toEqual([]);
+    await expect(
+      db.selectFrom("whatsapp_inbound_events").select("status").where("id", "=", inserted.row.id).executeTakeFirst(),
+    ).resolves.toEqual({ status: "consumed" });
+
+    await db
+      .updateTable("whatsapp_inbound_events")
       .set({ status: "pending", attempts: 5, next_attempt_at: "2000-01-01T00:00:00.000Z" })
       .where("id", "=", inserted.row.id)
       .execute();
@@ -192,6 +215,29 @@ describe("WhatsApp inbound events repository on SQLite", () => {
       .where("id", "=", inserted.row.id)
       .executeTakeFirstOrThrow();
     expect(dead).toMatchObject({ status: "dead", attempts: 5, last_error: "shed" });
+  });
+
+  it("resets dispatched rows for boot recovery and reclaims them immediately", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const inserted = await repo.insert({ origin: "gateway", kind: "message", envelope: "{}" });
+    await repo.claim("old-process-token");
+    await repo.markCaptured(inserted.row.id, "old-process-token");
+    await repo.markDispatched(inserted.row.id, "old-process-token");
+
+    await expect(repo.claim("stale-sweep-token")).resolves.toEqual([]);
+    await expect(repo.resetDispatched()).resolves.toBe(1);
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["status", "claim_token", "claimed_at"])
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirst(),
+    ).resolves.toEqual({ status: "captured", claim_token: null, claimed_at: null });
+    await expect(repo.claim("new-process-token")).resolves.toMatchObject([
+      { id: inserted.row.id, status: "processing", claim_token: "new-process-token", attempts: 2 },
+    ]);
+    await expect(repo.markCaptured(inserted.row.id, "new-process-token")).resolves.toBe(true);
+    await expect(repo.markDispatched(inserted.row.id, "new-process-token")).resolves.toBe(true);
   });
 
   it("commits conversation, message, and captured status together and reclaims a captured crash", async () => {
@@ -358,7 +404,7 @@ describe("WhatsApp inbound events repository on SQLite", () => {
 
   it("sweeps only expired terminal rows in portable 500-row batches", async () => {
     const repo = createWhatsAppInboundEventsRepository(db);
-    for (const status of ["pending", "processing", "captured", "consumed", "dead"] as const) {
+    for (const status of ["pending", "processing", "captured", "dispatched", "consumed", "dead"] as const) {
       const inserted = await repo.insert({ origin: "gateway", kind: "message", envelope: "{}" });
       await db
         .updateTable("whatsapp_inbound_events")
@@ -373,7 +419,7 @@ describe("WhatsApp inbound events repository on SQLite", () => {
 
     await expect(repo.sweep()).resolves.toEqual({ consumed: 1, dead: 1 });
     const statuses = await db.selectFrom("whatsapp_inbound_events").select("status").orderBy("id").execute();
-    expect(statuses.map((row) => row.status)).toEqual(["pending", "processing", "captured"]);
+    expect(statuses.map((row) => row.status)).toEqual(["pending", "processing", "captured", "dispatched"]);
   });
 
   it("retries SQLite contention with bounded attempts", async () => {

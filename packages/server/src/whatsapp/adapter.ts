@@ -75,6 +75,10 @@ export interface WhatsAppQueuedCapture {
   omitted: false;
 }
 
+export interface WhatsAppDispatchHooks {
+  onRunStart: () => Promise<void>;
+}
+
 export interface WhatsAppAdapterHandlers {
   captureQueuedMessage(
     message: WhatsAppInboundMessage,
@@ -87,7 +91,11 @@ export interface WhatsAppAdapterHandlers {
       ) => Promise<WhatsAppQueuedCapture | null>;
     },
   ): Promise<WhatsAppQueuedCapture | null>;
-  dispatchCapturedMessage(message: WhatsAppInboundMessage, capture: WhatsAppQueuedCapture | null): Promise<boolean>;
+  dispatchCapturedMessage(
+    message: WhatsAppInboundMessage,
+    capture: WhatsAppQueuedCapture | null,
+    hooks: WhatsAppDispatchHooks,
+  ): Promise<boolean>;
   handleHistoryMessages(
     messages: WhatsAppInboundMessage[],
     metadata?: WhatsAppHistoryBatchMetadata,
@@ -682,7 +690,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
 
   whatsapp.onHistoryMessages(handleHistoryMessages);
 
-  const handleMessage = async (message: WhatsAppInboundMessage): Promise<boolean> => {
+  const handleMessage = async (message: WhatsAppInboundMessage, hooks?: WhatsAppDispatchHooks): Promise<boolean> => {
     if (message.kind === "dm") {
       const replyTarget = message.target;
       let user = await repos.users.findByWhatsappNumber(message.senderPhoneE164);
@@ -690,6 +698,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         const settingsRow = await repos.settings.get();
         const fallbackAgentId = settingsRow?.whatsapp_fallback_agent_id ?? null;
         if (!fallbackAgentId) {
+          await hooks?.onRunStart();
           await whatsapp.sendText(
             replyTarget,
             "Sorry, you're not authorized to use this bot. Contact your admin to get access.",
@@ -698,6 +707,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         }
         const fallbackAgent = await repos.users.findById(fallbackAgentId);
         if (!fallbackAgent || fallbackAgent.type !== "agent") {
+          await hooks?.onRunStart();
           logger.warn(
             { fallbackAgentId },
             "WhatsApp fallback agent is missing or not an agent; dropping unknown-sender DM",
@@ -727,6 +737,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       const userQueue = queue.getQueue(activeQueueKey);
 
       const accepted = userQueue.enqueue(async () => {
+        await hooks?.onRunStart();
         const command = parseSketchCommand(message.text);
         const settingsRowEarly = await repos.settings.get();
         const fallbackAgentEarly =
@@ -944,6 +955,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     // --- Group handler ---
 
     if (!message.isMentioned) {
+      await hooks?.onRunStart();
       const groupJid = message.target.groupId;
       const user = message.senderPhoneE164
         ? await repos.users.findByWhatsappNumber(message.senderPhoneE164)
@@ -972,6 +984,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     const groupQueue = queue.getQueue(activeQueueKey);
 
     return groupQueue.enqueue(async () => {
+      await hooks?.onRunStart();
       const command = parseSketchCommand(message.text);
       const existingGroupForBinding = await repos.whatsappGroups.getByJid(groupJid);
       const boundAgent = existingGroupForBinding?.agent_user_id
@@ -1275,9 +1288,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
 
   return {
     captureQueuedMessage,
-    async dispatchCapturedMessage(message, capture) {
+    async dispatchCapturedMessage(message, capture, hooks) {
       if (capture) queuedCaptures.set(message, capture);
-      return handleMessage(message);
+      return handleMessage(message, hooks);
     },
     handleHistoryMessages,
   };

@@ -194,7 +194,13 @@ export class WhatsAppInboundConsumer {
     const capture = await this.options.handlers.captureQueuedMessage(message, {
       eventKey: envelope.eventKey,
       attachmentsForWorkspace: async (workspaceDir) => {
-        if (envelope.message.mediaStagingError) throw new Error(envelope.message.mediaStagingError);
+        if (envelope.message.mediaStagingError) {
+          this.options.logger.warn(
+            { inboundEventId: row.id, mediaStagingError: envelope.message.mediaStagingError },
+            "Stored WhatsApp media staging failed; continuing without attachment",
+          );
+          return [];
+        }
         if (!envelope.message.stagedMediaRef) return [];
         return [
           await moveWhatsAppStagedMedia({
@@ -242,11 +248,27 @@ export class WhatsAppInboundConsumer {
       );
       return;
     }
-    if (!(await this.events.markConsumed(row.id, claimToken))) return;
-    const accepted = await this.options.handlers.dispatchCapturedMessage(message, capture);
+    if (!(await this.events.markDispatched(row.id, claimToken))) return;
+    const accepted = await this.options.handlers.dispatchCapturedMessage(message, capture, {
+      onRunStart: () => this.consumeAtDispatchStart(row.id, claimToken),
+    });
     if (!accepted) {
       await this.events.revertToCaptured(row.id, claimToken, "channel queue shed inbound event");
     }
+  }
+
+  /**
+   * The only supported ownership reset runs during a fresh process boot, after
+   * the prior process's in-memory queues are gone. A false transition is logged
+   * defensively but cannot imply a second live closure, so the admitted run can
+   * continue without violating at-most-once replies.
+   */
+  private async consumeAtDispatchStart(id: number, claimToken: string): Promise<void> {
+    if (await this.events.consumeDispatched(id, claimToken)) return;
+    this.options.logger.warn(
+      { inboundEventId: id },
+      "WhatsApp inbound event dispatch started after durable claim ownership was lost",
+    );
   }
 
   private async processHistory(
@@ -280,7 +302,13 @@ export class WhatsAppInboundConsumer {
         attachmentsForMessage: async (message, workspaceDir) => {
           const item = envelopeByMessage.get(message);
           if (!item) return [];
-          if (item.message.mediaStagingError) throw new Error(item.message.mediaStagingError);
+          if (item.message.mediaStagingError) {
+            this.options.logger.warn(
+              { inboundEventId: row.id, mediaStagingError: item.message.mediaStagingError },
+              "Stored WhatsApp media staging failed; continuing without attachment",
+            );
+            return [];
+          }
           if (!item.message.stagedMediaRef) return [];
           return [
             await moveWhatsAppStagedMedia({

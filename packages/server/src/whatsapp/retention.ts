@@ -32,7 +32,7 @@ async function liveStagedPaths(db: Kysely<DB>): Promise<Set<string>> {
   const rows = await db
     .selectFrom("whatsapp_inbound_events")
     .select("envelope")
-    .where("status", "in", ["pending", "processing", "captured"])
+    .where("status", "in", ["pending", "processing", "captured", "dispatched"])
     .execute();
   const paths = new Set<string>();
   for (const row of rows) {

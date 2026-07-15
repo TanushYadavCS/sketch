@@ -85,7 +85,11 @@ function handlersForQueue(queue: ChannelQueue, onDispatch: () => void): WhatsApp
   return {
     captureQueuedMessage: async (_message, params) =>
       params.commitCapture ? params.commitCapture(async () => null) : null,
-    dispatchCapturedMessage: async () => queue.enqueue(async () => onDispatch()),
+    dispatchCapturedMessage: async (_message, _capture, hooks) =>
+      queue.enqueue(async () => {
+        await hooks.onRunStart();
+        onDispatch();
+      }),
     handleHistoryMessages: async () => ({ persisted: 0, skippedOld: 0, skippedDup: 0 }),
   };
 }

@@ -10,7 +10,7 @@ export const WHATSAPP_INBOUND_SWEEP_BATCH_SIZE = 500;
 
 export type WhatsAppInboundEventKind = "message" | "history_message" | "history_batch";
 export type WhatsAppInboundEventOrigin = "gateway" | "inprocess";
-export type WhatsAppInboundEventStatus = "pending" | "processing" | "captured" | "consumed" | "dead";
+export type WhatsAppInboundEventStatus = "pending" | "processing" | "captured" | "dispatched" | "consumed" | "dead";
 export type WhatsAppInboundEventRow = Selectable<WhatsAppInboundEventsTable>;
 type WhatsAppInboundDb = Kysely<DB> | Transaction<DB>;
 
@@ -323,6 +323,66 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
     );
   }
 
+  async function markDispatched(id: number, claimToken: string): Promise<boolean> {
+    return withBoundedSqliteRetry(
+      db,
+      async () => {
+        const result = await db
+          .updateTable("whatsapp_inbound_events")
+          .set({ status: "dispatched" })
+          .where("id", "=", id)
+          .where("claim_token", "=", claimToken)
+          .where("status", "=", "captured")
+          .executeTakeFirst();
+        return Number(result.numUpdatedRows) === 1;
+      },
+      retryOptions,
+    );
+  }
+
+  async function consumeDispatched(id: number, claimToken: string): Promise<boolean> {
+    return withBoundedSqliteRetry(
+      db,
+      async () => {
+        const result = await db
+          .updateTable("whatsapp_inbound_events")
+          .set({ status: "consumed", consumed_at: sql`CURRENT_TIMESTAMP` })
+          .where("id", "=", id)
+          .where("claim_token", "=", claimToken)
+          .where("status", "=", "dispatched")
+          .executeTakeFirst();
+        return Number(result.numUpdatedRows) === 1;
+      },
+      retryOptions,
+    );
+  }
+
+  /**
+   * Recovers work admitted only to the prior process's in-memory queues. This
+   * reset is unconditional because bootstrap calls it before this process starts
+   * the consumer or admits any work to its queues.
+   */
+  async function resetDispatched(): Promise<number> {
+    return withBoundedSqliteRetry(
+      db,
+      async () => {
+        const result = await db
+          .updateTable("whatsapp_inbound_events")
+          .set({
+            status: "captured",
+            claim_token: null,
+            claimed_at: null,
+            next_attempt_at: sql`CURRENT_TIMESTAMP`,
+            consumed_at: null,
+          })
+          .where("status", "=", "dispatched")
+          .executeTakeFirst();
+        return Number(result.numUpdatedRows);
+      },
+      retryOptions,
+    );
+  }
+
   async function revertToCaptured(id: number, claimToken: string, error?: string | null): Promise<boolean> {
     return withBoundedSqliteRetry(
       db,
@@ -346,7 +406,7 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
           })
           .where("id", "=", id)
           .where("claim_token", "=", claimToken)
-          .where("status", "in", ["processing", "captured", "consumed"])
+          .where("status", "in", ["processing", "captured", "dispatched"])
           .executeTakeFirst();
         return Number(result.numUpdatedRows) === 1;
       },
@@ -470,7 +530,10 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
     findByEventKey,
     claim,
     markCaptured,
+    markDispatched,
     markConsumed,
+    consumeDispatched,
+    resetDispatched,
     revertToCaptured,
     markDead,
     isBatchComplete,

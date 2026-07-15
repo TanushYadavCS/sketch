@@ -27,7 +27,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       CONSTRAINT whatsapp_inbound_events_origin_check
         CHECK (origin IN ('gateway', 'inprocess')),
       CONSTRAINT whatsapp_inbound_events_status_check
-        CHECK (status IN ('pending', 'processing', 'captured', 'consumed', 'dead'))
+        CHECK (status IN ('pending', 'processing', 'captured', 'dispatched', 'consumed', 'dead'))
     )`.execute(db);
   } else {
     await db.schema
@@ -57,7 +57,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       .addCheckConstraint("whatsapp_inbound_events_origin_check", sql`origin IN ('gateway', 'inprocess')`)
       .addCheckConstraint(
         "whatsapp_inbound_events_status_check",
-        sql`status IN ('pending', 'processing', 'captured', 'consumed', 'dead')`,
+        sql`status IN ('pending', 'processing', 'captured', 'dispatched', 'consumed', 'dead')`,
       )
       .execute();
   }

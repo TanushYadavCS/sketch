@@ -47,8 +47,40 @@ describe("WhatsApp inbound events repository on Postgres", () => {
     await expect(repo.claim("pg-token-2")).resolves.toHaveLength(1);
     await expect(repo.markCaptured(first.row.id, "pg-token-1")).resolves.toBe(false);
     await expect(repo.markCaptured(first.row.id, "pg-token-2")).resolves.toBe(true);
-    await expect(repo.markConsumed(first.row.id, "pg-token-2")).resolves.toBe(true);
+    await expect(repo.markDispatched(first.row.id, "pg-token-2")).resolves.toBe(true);
+    await expect(repo.claim("pg-stale-sweep-token")).resolves.toEqual([]);
     await expect(repo.revertToCaptured(first.row.id, "pg-token-2", "shed")).resolves.toBe(true);
+    await db
+      .updateTable("whatsapp_inbound_events")
+      .set({ next_attempt_at: sql`CURRENT_TIMESTAMP` })
+      .where("id", "=", first.row.id)
+      .execute();
+    await expect(repo.claim("pg-token-3")).resolves.toHaveLength(1);
+    await expect(repo.markCaptured(first.row.id, "pg-token-3")).resolves.toBe(true);
+    await expect(repo.markDispatched(first.row.id, "pg-token-3")).resolves.toBe(true);
+    await expect(repo.consumeDispatched(first.row.id, "pg-token-3")).resolves.toBe(true);
+    await expect(repo.revertToCaptured(first.row.id, "pg-token-3", "late shed")).resolves.toBe(false);
+  });
+
+  it("resets dispatched rows for boot recovery and reclaims them without stale sweeping", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const inserted = await repo.insert({ origin: "gateway", kind: "message", envelope: "{}" });
+    await repo.claim("pg-old-process-token");
+    await repo.markCaptured(inserted.row.id, "pg-old-process-token");
+    await repo.markDispatched(inserted.row.id, "pg-old-process-token");
+    await db
+      .updateTable("whatsapp_inbound_events")
+      .set({ claimed_at: "2000-01-01T00:00:00.000Z" })
+      .where("id", "=", inserted.row.id)
+      .execute();
+
+    await expect(repo.claim("pg-stale-token")).resolves.toEqual([]);
+    await expect(repo.resetDispatched()).resolves.toBe(1);
+    await expect(repo.claim("pg-new-process-token")).resolves.toMatchObject([
+      { id: inserted.row.id, status: "processing", claim_token: "pg-new-process-token", attempts: 2 },
+    ]);
+    await expect(repo.markCaptured(inserted.row.id, "pg-new-process-token")).resolves.toBe(true);
+    await expect(repo.markDispatched(inserted.row.id, "pg-new-process-token")).resolves.toBe(true);
   });
 
   it("dead-letters the sixth claim, treats dead chunks as terminal, and sweeps only expired terminal rows", async () => {
@@ -99,6 +131,15 @@ describe("WhatsApp inbound events repository on Postgres", () => {
       .set({ next_attempt_at: "2000-01-01T00:00:00.000Z" })
       .where("id", "=", second.row.id)
       .execute();
+    const dispatched = await repo.insert({ origin: "gateway", kind: "message", envelope: "{}" });
+    await db
+      .updateTable("whatsapp_inbound_events")
+      .set({ status: "dispatched", claimed_at: "2000-01-01T00:00:00.000Z" })
+      .where("id", "=", dispatched.row.id)
+      .execute();
     await expect(repo.sweep()).resolves.toEqual({ consumed: 1, dead: 1 });
+    await expect(
+      db.selectFrom("whatsapp_inbound_events").select("status").where("id", "=", dispatched.row.id).executeTakeFirst(),
+    ).resolves.toEqual({ status: "dispatched" });
   });
 });

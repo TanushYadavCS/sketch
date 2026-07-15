@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -57,5 +57,27 @@ describe("WhatsApp inbound retention", () => {
     await expect(sweepWhatsAppStagedMedia({ db, stagingDir, now: () => now })).resolves.toBe(1);
     await expect(readFile(oldPath)).rejects.toThrow();
     await expect(readFile(freshPath, "utf8")).resolves.toBe("fresh");
+  });
+
+  it("keeps old staged files referenced by dispatched events", async () => {
+    const stagingDir = join(directory, "wa-staging");
+    await mkdir(stagingDir, { recursive: true });
+    const dispatchedPath = join(stagingDir, "dispatched.bin");
+    await writeFile(dispatchedPath, "queued");
+    const now = Date.now();
+    const oldTimestamp = new Date(now - WHATSAPP_STAGED_MEDIA_RETENTION_MS - 1_000);
+    await utimes(dispatchedPath, oldTimestamp, oldTimestamp);
+    await db
+      .insertInto("whatsapp_inbound_events")
+      .values({
+        kind: "message",
+        origin: "gateway",
+        status: "dispatched",
+        envelope: JSON.stringify({ stagedPath: await realpath(dispatchedPath) }),
+      })
+      .execute();
+
+    await expect(sweepWhatsAppStagedMedia({ db, stagingDir, now: () => now })).resolves.toBe(0);
+    await expect(readFile(dispatchedPath, "utf8")).resolves.toBe("queued");
   });
 });

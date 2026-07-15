@@ -107,7 +107,7 @@ export class WhatsAppGatewayCapture {
     const row = await this.deps.db
       .selectFrom("whatsapp_inbound_events")
       .select((eb) => eb.fn.countAll<number>().as("count"))
-      .where("status", "in", ["pending", "processing", "captured"])
+      .where("status", "in", ["pending", "processing", "captured", "dispatched"])
       .executeTakeFirstOrThrow();
     return Number(row.count);
   }

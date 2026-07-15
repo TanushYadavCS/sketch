@@ -55,7 +55,7 @@ describe("WhatsAppInboundConsumer", () => {
     await rm(stagingDir, { recursive: true, force: true });
   });
 
-  it("captures, consumes, then dispatches a pending message", async () => {
+  it("keeps an admitted message dispatched until the queued run starts", async () => {
     const repo = createWhatsAppInboundEventsRepository(db);
     const inserted = await repo.insert({
       kind: "message",
@@ -66,12 +66,13 @@ describe("WhatsAppInboundConsumer", () => {
     });
     let dispatched = 0;
     let statusAtDispatch: string | undefined;
+    let onRunStart: (() => Promise<void>) | undefined;
     const consumer = new WhatsAppInboundConsumer({
       db,
       logger: createTestLogger(),
       stagingDir,
       handlers: handlers({
-        dispatchCapturedMessage: async () => {
+        dispatchCapturedMessage: async (_message, _capture, hooks) => {
           statusAtDispatch = (
             await db
               .selectFrom("whatsapp_inbound_events")
@@ -79,6 +80,7 @@ describe("WhatsAppInboundConsumer", () => {
               .where("id", "=", inserted.row.id)
               .executeTakeFirst()
           )?.status;
+          onRunStart = hooks.onRunStart;
           dispatched += 1;
           return true;
         },
@@ -93,9 +95,112 @@ describe("WhatsAppInboundConsumer", () => {
       .select(["status", "attempts"])
       .where("id", "=", inserted.row.id)
       .executeTakeFirstOrThrow();
-    expect(row).toEqual({ status: "consumed", attempts: 1 });
-    expect(statusAtDispatch).toBe("consumed");
+    expect(row).toEqual({ status: "dispatched", attempts: 1 });
+    expect(statusAtDispatch).toBe("dispatched");
     expect(dispatched).toBe(1);
+    await onRunStart?.();
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["status", "consumed_at"])
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ status: "consumed", consumed_at: expect.any(String) });
+  });
+
+  it("resets a dispatched row on boot and reclaims and redispatches it", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const inserted = await repo.insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: "event-restart",
+      providerMessageId: "restart",
+      envelope: JSON.stringify(messageEnvelope("restart", "event-restart")),
+    });
+    const dispatchStatuses: string[] = [];
+    let dispatchCount = 0;
+    const makeConsumer = () =>
+      new WhatsAppInboundConsumer({
+        db,
+        logger: createTestLogger(),
+        stagingDir,
+        handlers: handlers({
+          dispatchCapturedMessage: async (_message, _capture, hooks) => {
+            dispatchStatuses.push(
+              (
+                await db
+                  .selectFrom("whatsapp_inbound_events")
+                  .select("status")
+                  .where("id", "=", inserted.row.id)
+                  .executeTakeFirstOrThrow()
+              ).status,
+            );
+            dispatchCount += 1;
+            if (dispatchCount === 2) await hooks.onRunStart();
+            return true;
+          },
+        }),
+      });
+
+    const firstConsumer = makeConsumer();
+    firstConsumer.start();
+    await firstConsumer.wake();
+    await firstConsumer.stop();
+    await expect(repo.resetDispatched()).resolves.toBe(1);
+
+    const restartedConsumer = makeConsumer();
+    restartedConsumer.start();
+    await restartedConsumer.wake();
+    await restartedConsumer.stop();
+
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["status", "attempts"])
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "consumed", attempts: 2 });
+    expect(dispatchStatuses).toEqual(["dispatched", "dispatched"]);
+  });
+
+  it("warns and continues when a queued run starts after losing durable ownership", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const inserted = await repo.insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: "event-lost-token",
+      providerMessageId: "lost-token",
+      envelope: JSON.stringify(messageEnvelope("lost-token", "event-lost-token")),
+    });
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    let continued = false;
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger,
+      stagingDir,
+      handlers: handlers({
+        dispatchCapturedMessage: async (_message, _capture, hooks) => {
+          await db
+            .updateTable("whatsapp_inbound_events")
+            .set({ status: "captured", claim_token: null })
+            .where("id", "=", inserted.row.id)
+            .execute();
+          await hooks.onRunStart();
+          continued = true;
+          return true;
+        },
+      }),
+    });
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    expect(continued).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      { inboundEventId: inserted.row.id },
+      "WhatsApp inbound event dispatch started after durable claim ownership was lost",
+    );
   });
 
   it("survives a failing claim without rejecting the poll loop", async () => {
@@ -328,6 +433,113 @@ describe("WhatsAppInboundConsumer", () => {
         .where("id", "=", inserted.row.id)
         .executeTakeFirstOrThrow(),
     ).resolves.toEqual({ status: "dead", last_error: "staged media missing", attempts: 1 });
+  });
+
+  it("captures and dispatches message text without a permanently failed staged attachment", async () => {
+    const envelope = messageEnvelope("staging-error", "event-staging-error");
+    envelope.message.mediaStagingError = "gateway media download failed";
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const inserted = await repo.insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: envelope.eventKey,
+      providerMessageId: envelope.providerMessageId,
+      envelope: JSON.stringify(envelope),
+    });
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    let capturedAttachments: unknown;
+    let dispatchedText: string | undefined;
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger,
+      stagingDir,
+      handlers: handlers({
+        captureQueuedMessage: async (message, params) => {
+          expect(message.text).toBe("hello");
+          capturedAttachments = await params.attachmentsForWorkspace?.(join(stagingDir, "workspace"));
+          return null;
+        },
+        dispatchCapturedMessage: async (message, _capture, hooks) => {
+          dispatchedText = message.text;
+          await hooks.onRunStart();
+          return true;
+        },
+      }),
+    });
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    expect(capturedAttachments).toEqual([]);
+    expect(dispatchedText).toBe("hello");
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select("status")
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "consumed" });
+    expect(warn).toHaveBeenCalledWith(
+      { inboundEventId: inserted.row.id, mediaStagingError: "gateway media download failed" },
+      "Stored WhatsApp media staging failed; continuing without attachment",
+    );
+  });
+
+  it("processes history text without a permanently failed staged attachment", async () => {
+    const item = messageEnvelope("history-staging-error", "event-history-staging-error");
+    item.message.mediaStagingError = "gateway history media download failed";
+    const envelope = whatsAppHistoryBatchEnvelopeSchema.parse({
+      version: "1.0",
+      kind: "history_batch",
+      providerTimestamp: "2026-07-15T08:27:00.000Z",
+      batch: {
+        batchId: "media-error-batch",
+        chunkIndex: 0,
+        chunkCount: 1,
+        syncType: 1,
+        progress: 100,
+        isLatest: true,
+      },
+      messages: [item],
+    });
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const inserted = await repo.insert({
+      kind: "history_batch",
+      origin: "gateway",
+      envelope: JSON.stringify(envelope),
+      batchId: "media-error-batch",
+      chunkIndex: 0,
+      chunkCount: 1,
+    });
+    let historyAttachments: unknown;
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger: createTestLogger(),
+      stagingDir,
+      handlers: handlers({
+        handleHistoryMessages: async (messages, _metadata, options) => {
+          expect(messages.map((message) => message.text)).toEqual(["hello"]);
+          historyAttachments = await options?.attachmentsForMessage?.(
+            messages[0],
+            join(stagingDir, "history-workspace"),
+          );
+          return { persisted: 1, skippedOld: 0, skippedDup: 0 };
+        },
+      }),
+    });
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    expect(historyAttachments).toEqual([]);
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select("status")
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "consumed" });
   });
 
   it("only exposes completion progress to the final history chunk", async () => {

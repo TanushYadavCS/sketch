@@ -36,6 +36,7 @@ import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
+import { createWhatsAppInboundEventsRepository } from "./db/repositories/whatsapp-inbound-events";
 import { createWhatsAppProviderEventRepository } from "./db/repositories/whatsapp-provider-events";
 import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
 import type { DB } from "./db/schema";
@@ -624,6 +625,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     handlers: whatsappHandlers,
     stagingDir: join(config.DATA_DIR, "wa-staging"),
   });
+  await createWhatsAppInboundEventsRepository(db).resetDispatched();
   whatsappInboundConsumer.start();
   const whatsappInboundRetention = startWhatsAppInboundRetention({
     db,
