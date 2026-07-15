@@ -157,12 +157,12 @@ describe("createLocalClaudeEventDispatcher", () => {
     });
     const conversations = { insertMessage: vi.fn() };
     const whatsapp = {
-      isConnected: true,
-      sendText: vi.fn().mockResolvedValue({
-        key: { id: "sent-1" },
-        messageTimestamp: 1767225600,
+      pairing: { status: vi.fn().mockResolvedValue({ connected: true, phoneNumber: "+15551234567" }) },
+      send: vi.fn().mockResolvedValue({
+        providerMessageId: "sent-1",
+        providerConversationId: "15551234567@s.whatsapp.net",
+        providerTimestamp: "2026-01-01T00:00:00.000Z",
       }),
-      sendFile: vi.fn().mockResolvedValue(undefined),
     };
     const dispatcher = createLocalClaudeEventDispatcher({
       db: {} as never,
@@ -201,7 +201,11 @@ describe("createLocalClaudeEventDispatcher", () => {
     dispatcher.enqueue(createDelivery(0));
     await queued[0];
 
-    expect(whatsapp.sendText).toHaveBeenCalledWith("15551234567@s.whatsapp.net", finalText);
+    expect(whatsapp.send).toHaveBeenCalledWith(
+      "15551234567@s.whatsapp.net",
+      { kind: "text", text: finalText },
+      { idempotencyKey: expect.any(String) },
+    );
     expect(conversations.insertMessage).toHaveBeenCalledWith(expect.objectContaining({ text: finalText }));
   });
 });

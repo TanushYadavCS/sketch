@@ -60,6 +60,8 @@ import { initTelemetry } from "./telemetry/setup";
 import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { WhatsAppBot } from "./whatsapp/bot";
+import type { WhatsAppSocketFacade } from "./whatsapp/facade-contract";
+import { InProcessSocketFacade } from "./whatsapp/in-process-socket-facade";
 import { WORKFLOW_OUTPUT_INBOX_KIND, deliverProactiveDm } from "./whatsapp/proactive-delivery";
 import { whatsappDeliveryTargetFromTarget } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
@@ -73,7 +75,7 @@ export interface ServerHandle {
   config: Config;
   server: ReturnType<typeof serve>;
   db: Kysely<DB>;
-  whatsapp: WhatsAppBot;
+  whatsapp: WhatsAppSocketFacade;
   whatsappRuntime: ReturnType<typeof createWhatsAppRuntime>;
   getSlack: () => SlackBot | null;
   shutdown: () => Promise<void>;
@@ -256,8 +258,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
   let slack: SlackBot | null = null;
 
   // 8. WhatsApp
-  const whatsapp = new WhatsAppBot({ db, logger, groupMetadataStore: whatsappGroupsRepo });
-  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, logger);
+  const whatsappBot = new WhatsAppBot({ db, logger, groupMetadataStore: whatsappGroupsRepo });
+  const whatsapp = new InProcessSocketFacade(whatsappBot, logger);
+  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, whatsappBot, logger);
   const watiWhatsApp =
     config.WHATSAPP_DM_PROVIDER === WHATSAPP_WATI_PROVIDER_ID
       ? createWatiWhatsAppProvider({
@@ -599,7 +602,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   if (connect) {
     await startSlackBotIfConfigured().catch(() => {});
 
-    const whatsappConnected = await whatsapp.start();
+    const whatsappConnected = await whatsappBot.start();
     if (whatsappConnected) {
       logger.info("WhatsApp connected");
     } else {
@@ -621,7 +624,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     agentScheduler.stop();
     scheduler.stop();
     if (slack) await slack.stop();
-    await whatsapp.stop();
+    await whatsapp.shutdown();
     server.close();
     await db.destroy();
   }

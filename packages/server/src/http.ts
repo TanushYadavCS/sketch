@@ -2,6 +2,7 @@
  * HTTP app factory — API routes, auth middleware, static file serving.
  * Route registration order: API routes → static assets → SPA catch-all.
  */
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -80,7 +81,7 @@ import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
-import type { WhatsAppBot } from "./whatsapp/bot";
+import type { WhatsAppSocketFacade } from "./whatsapp/facade-contract";
 import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
 import type { ManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import type { WatiWhatsAppProvider } from "./whatsapp/providers/wati";
@@ -89,7 +90,7 @@ import { buildMagicLinkTemplate } from "./whatsapp/templates";
 import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
 
 interface AppDeps {
-  whatsapp?: WhatsAppBot;
+  whatsapp?: WhatsAppSocketFacade;
   whatsappRuntime?: WhatsAppRuntime;
   watiWebhook?: WatiWhatsAppProvider;
   managedWhatsapp?: ManagedWhatsAppProvider;
@@ -344,7 +345,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       try {
         const jid = phoneE164ToWhatsAppJid(user.whatsapp_number);
         const text = `Here's your sign-in link for ${botName}:\n${magicLinkUrl}\n\nThis link expires in 15 minutes and can only be used once.`;
-        await deps.whatsapp.sendText(jid, text);
+        await deps.whatsapp.send(jid, { kind: "text", text }, { idempotencyKey: randomUUID() });
         channels.push("whatsapp");
       } catch (err) {
         logger.warn({ err }, "Failed to send magic link via WhatsApp");
@@ -364,7 +365,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       onSlackTokensUpdated: deps?.onSlackTokensUpdated,
       onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
       userRepo: users,
-      whatsappConnected: () => Boolean(deps?.whatsappRuntime?.isConnected || deps?.whatsapp?.isConnected),
+      whatsappConnected: async () =>
+        Boolean(deps?.whatsappRuntime?.isConnected || (await deps?.whatsapp?.pairing.status())?.connected),
     }),
   );
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger, config));
@@ -563,15 +565,14 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         sendDm: deps?.sendDm,
         managedWhatsappInbound: deps?.managedWhatsapp,
         whatsappStatus: whatsapp
-          ? () => ({
-              connected: whatsapp.isConnected,
-              phoneNumber: whatsapp.phoneNumber,
+          ? async () => ({
+              ...(await whatsapp.pairing.status()),
               pairingInProgress,
             })
           : undefined,
         startWhatsAppPairing: whatsapp
-          ? (c: Context) => {
-              if (whatsapp.isConnected) {
+          ? async (c: Context) => {
+              if ((await whatsapp.pairing.status()).connected) {
                 return c.json({ error: { code: "ALREADY_CONNECTED", message: "WhatsApp is already connected" } }, 400);
               }
               if (pairingInProgress) {
@@ -584,16 +585,17 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
 
               return streamSSE(c, async (stream) => {
                 try {
-                  pairingSettled = whatsapp.startPairing({
-                    onQr: async (qr) => {
-                      await stream.writeSSE({ event: "qr", data: JSON.stringify({ qr }) });
-                    },
-                    onConnected: async (phoneNumber) => {
-                      await stream.writeSSE({ event: "connected", data: JSON.stringify({ phoneNumber }) });
-                    },
-                    onError: async (message) => {
-                      await stream.writeSSE({ event: "error", data: JSON.stringify({ message }) });
-                    },
+                  pairingSettled = whatsapp.pairing.startQr(async (event) => {
+                    if (event.type === "qr") {
+                      await stream.writeSSE({ event: "qr", data: JSON.stringify({ qr: event.qr }) });
+                    } else if (event.type === "connected") {
+                      await stream.writeSSE({
+                        event: "connected",
+                        data: JSON.stringify({ phoneNumber: event.phoneNumber }),
+                      });
+                    } else {
+                      await stream.writeSSE({ event: "error", data: JSON.stringify({ message: event.message }) });
+                    }
                   });
                   await pairingSettled;
                 } finally {
@@ -604,11 +606,11 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
             }
           : undefined,
         cancelWhatsAppPairing: whatsapp
-          ? () => {
-              whatsapp.cancelPairing();
+          ? async () => {
+              await whatsapp.pairing.cancel();
             }
           : undefined,
-        disconnectWhatsApp: whatsapp ? () => whatsapp.disconnect() : undefined,
+        disconnectWhatsApp: whatsapp ? () => whatsapp.pairing.logout() : undefined,
       }),
     );
   }

@@ -35,7 +35,7 @@ import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import type { QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { NormalizedGroupMetadata, WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
 import type { AgentOutputDeliveryPublisher } from "./output-delivery";
 import { getAgentDefinition, listAgentDefinitions, requireAgentDefinition } from "./registry";
@@ -80,8 +80,8 @@ export interface AgentRunServiceDeps {
   outputDelivery?: AgentOutputDeliveryPublisher;
   getSlack?: () => Pick<SlackBot, "isUserInChannel" | "listChannels"> | null;
   getWhatsApp?: () =>
-    | (Pick<WhatsAppBot, "getGroupMetadata"> & {
-        resolveJidToPhone?: (jid: string) => Promise<string | null>;
+    | (Pick<WhatsAppSocketFacade, "groupMetadata"> & {
+        resolveLid?: (jid: string) => Promise<string | null>;
       })
     | null;
 }
@@ -638,18 +638,19 @@ function normalizeWhatsappMentionTarget(targetId: string): string {
 }
 
 async function whatsappGroupHasParticipant(
-  group: Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+  group: NormalizedGroupMetadata | null,
   whatsappNumber: string,
-  resolveJidToPhone?: (jid: string) => Promise<string | null>,
+  resolveLid?: (jid: string) => Promise<string | null>,
 ): Promise<boolean> {
   const userJid = whatsappNumberToJid(whatsappNumber);
   const userNumber = normalizeWhatsappNumber(whatsappNumber);
 
   for (const participant of group?.participants ?? []) {
-    if (areJidsSameUser(participant.id, userJid)) return true;
+    if (areJidsSameUser(participant.jid, userJid)) return true;
+    if (participant.phoneE164 && normalizeWhatsappNumber(participant.phoneE164) === userNumber) return true;
 
-    const participantPhone = await resolveJidToPhone?.(participant.id);
-    if (participantPhone && normalizeWhatsappNumber(participantPhone) === userNumber) return true;
+    const participantPhoneJid = await resolveLid?.(participant.jid);
+    if (participantPhoneJid && areJidsSameUser(participantPhoneJid, userJid)) return true;
   }
 
   return false;
@@ -1342,12 +1343,12 @@ export class AgentRunService {
 
     const whatsapp = this.deps.getWhatsApp?.() ?? null;
     if (!whatsapp) throw new AgentDeliveryTargetError("WhatsApp is not connected");
-    const groupMetadata = await whatsapp.getGroupMetadata(group.jid);
+    const groupMetadata = await whatsapp.groupMetadata(group.jid, { refresh: false });
     if (
       !(await whatsappGroupHasParticipant(
         groupMetadata,
         user.whatsapp_number,
-        async (jid) => (await whatsapp.resolveJidToPhone?.(jid)) ?? null,
+        async (jid) => (await whatsapp.resolveLid?.(jid)) ?? null,
       ))
     ) {
       throw new AgentDeliveryTargetError("WhatsApp group is not available for this user");
@@ -1434,7 +1435,7 @@ export class AgentRunService {
 
   private async resolveDeliveryMentions(
     delivery: AgentDeliveryConfig,
-    context: { whatsappGroup?: Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>> } = {},
+    context: { whatsappGroup?: NormalizedGroupMetadata | null } = {},
   ): Promise<AgentDeliveryMention[]> {
     const mentions = delivery.mentions ?? [];
     if (mentions.length === 0) return [];
@@ -1478,12 +1479,12 @@ export class AgentRunService {
       if (delivery.targetType === "group") {
         const whatsapp = this.deps.getWhatsApp?.() ?? null;
         if (!whatsapp) throw new AgentDeliveryTargetError("WhatsApp is not connected");
-        const group = context.whatsappGroup ?? (await whatsapp.getGroupMetadata(delivery.targetId));
+        const group = context.whatsappGroup ?? (await whatsapp.groupMetadata(delivery.targetId, { refresh: false }));
         if (
           !(await whatsappGroupHasParticipant(
             group,
             user.whatsapp_number,
-            async (jid) => (await whatsapp.resolveJidToPhone?.(jid)) ?? null,
+            async (jid) => (await whatsapp.resolveLid?.(jid)) ?? null,
           ))
         ) {
           throw new AgentDeliveryTargetError("WhatsApp mention target is not in the delivery group");

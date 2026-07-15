@@ -374,8 +374,8 @@ export class WhatsAppBot {
     return sent ?? null;
   }
 
-  async sendFile(jid: string, filePath: string, mimeType: string, fileName: string): Promise<void> {
-    if (!this.sock) return;
+  async sendFile(jid: string, filePath: string, mimeType: string, fileName: string): Promise<WAMessage | null> {
+    if (!this.sock) return null;
     const isImage = mimeType.startsWith("image/");
 
     if (isImage) {
@@ -384,14 +384,16 @@ export class WhatsAppBot {
         caption: fileName,
       });
       this.trackSentMessageId(sent?.key?.id);
-    } else {
-      const sent = await this.sock.sendMessage(jid, {
-        document: { url: filePath },
-        mimetype: mimeType,
-        fileName,
-      });
-      this.trackSentMessageId(sent?.key?.id);
+      return sent ?? null;
     }
+
+    const sent = await this.sock.sendMessage(jid, {
+      document: { url: filePath },
+      mimetype: mimeType,
+      fileName,
+    });
+    this.trackSentMessageId(sent?.key?.id);
+    return sent ?? null;
   }
 
   startComposing(jid: string): void {
@@ -433,8 +435,11 @@ export class WhatsAppBot {
     return meta?.subject ?? "Unknown Group";
   }
 
-  async getProviderGroupMetadata(groupJid: string): Promise<ProviderWhatsAppGroupMetadata | undefined> {
-    const meta = await this.getGroupMetadata(groupJid);
+  async getProviderGroupMetadata(
+    groupJid: string,
+    opts: { refresh?: boolean } = {},
+  ): Promise<ProviderWhatsAppGroupMetadata | undefined> {
+    const meta = opts.refresh ? await this.refreshGroupMetadata(groupJid) : await this.getGroupMetadata(groupJid);
     return meta ? this.toProviderGroupMetadata(groupJid, meta) : undefined;
   }
 

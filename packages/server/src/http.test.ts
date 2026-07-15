@@ -8,7 +8,7 @@ import { createUserRepository } from "./db/repositories/users";
 import type { DB } from "./db/schema";
 import { createApp } from "./http";
 import { createTestConfig, createTestDb } from "./test-utils";
-import type { PairingCallbacks, WhatsAppBot } from "./whatsapp/bot";
+import type { WhatsAppPairingEvent, WhatsAppSocketFacade } from "./whatsapp/facade-contract";
 
 const config = createTestConfig();
 
@@ -278,16 +278,25 @@ describe("WhatsApp endpoints", () => {
     } catch {}
   });
 
-  function makeMockWhatsApp(overrides: Partial<WhatsAppBot> = {}): WhatsAppBot {
+  function makeMockWhatsApp(
+    overrides: {
+      connected?: boolean;
+      phoneNumber?: string | null;
+      startQr?: (onEvent: (event: WhatsAppPairingEvent) => Promise<void>) => Promise<void>;
+      cancel?: () => void | Promise<void>;
+      logout?: () => void | Promise<void>;
+    } = {},
+  ): WhatsAppSocketFacade {
+    const connected = overrides.connected ?? false;
+    const phoneNumber = overrides.phoneNumber ?? null;
     return {
-      isConfigured: false,
-      isConnected: false,
-      phoneNumber: null,
-      startPairing: async () => {},
-      cancelPairing: () => {},
-      disconnect: async () => {},
-      ...overrides,
-    } as WhatsAppBot;
+      pairing: {
+        status: async () => ({ connected, phoneNumber }),
+        startQr: overrides.startQr ?? (async () => {}),
+        cancel: overrides.cancel ?? (async () => {}),
+        logout: overrides.logout ?? (async () => {}),
+      },
+    } as WhatsAppSocketFacade;
   }
 
   /** Login and return the session cookie string. */
@@ -305,7 +314,7 @@ describe("WhatsApp endpoints", () => {
       await seedAdmin(db);
       const settings = createSettingsRepository(db);
       await settings.update({ onboardingCompletedAt: new Date().toISOString() });
-      const whatsapp = makeMockWhatsApp({ isConnected: true } as Partial<WhatsAppBot>);
+      const whatsapp = makeMockWhatsApp({ connected: true });
       const app = createApp(db, config, { whatsapp });
       const cookie = await loginAdmin(app);
 
@@ -322,8 +331,8 @@ describe("WhatsApp endpoints", () => {
       await settings.update({ onboardingCompletedAt: new Date().toISOString() });
 
       const whatsapp = makeMockWhatsApp({
-        startPairing: () => new Promise<void>(() => {}),
-      } as unknown as Partial<WhatsAppBot>);
+        startQr: () => new Promise<void>(() => {}),
+      });
       const app = createApp(db, config, { whatsapp });
       const cookie = await loginAdmin(app);
 
@@ -346,11 +355,11 @@ describe("WhatsApp endpoints", () => {
       await settings.update({ onboardingCompletedAt: new Date().toISOString() });
 
       const whatsapp = makeMockWhatsApp({
-        startPairing: async (callbacks: PairingCallbacks) => {
-          await callbacks.onQr("test-qr-data-123");
-          await callbacks.onConnected("+919876543210");
+        startQr: async (onEvent) => {
+          await onEvent({ type: "qr", qr: "test-qr-data-123" });
+          await onEvent({ type: "connected", phoneNumber: "+919876543210" });
         },
-      } as unknown as Partial<WhatsAppBot>);
+      });
       const app = createApp(db, config, { whatsapp });
       const cookie = await loginAdmin(app);
 
@@ -369,11 +378,11 @@ describe("WhatsApp endpoints", () => {
       await settings.update({ onboardingCompletedAt: new Date().toISOString() });
 
       const whatsapp = makeMockWhatsApp({
-        startPairing: async (callbacks: PairingCallbacks) => {
-          await callbacks.onQr("qr-before-failure");
-          await callbacks.onError("QR code expired");
+        startQr: async (onEvent) => {
+          await onEvent({ type: "qr", qr: "qr-before-failure" });
+          await onEvent({ type: "error", message: "QR code expired" });
         },
-      } as unknown as Partial<WhatsAppBot>);
+      });
       const app = createApp(db, config, { whatsapp });
       const cookie = await loginAdmin(app);
 
@@ -391,7 +400,7 @@ describe("WhatsApp endpoints", () => {
       await seedAdmin(db);
       const settings = createSettingsRepository(db);
       await settings.update({ onboardingCompletedAt: new Date().toISOString() });
-      const whatsapp = makeMockWhatsApp({ isConnected: false, phoneNumber: null } as Partial<WhatsAppBot>);
+      const whatsapp = makeMockWhatsApp({ connected: false, phoneNumber: null });
       const app = createApp(db, config, { whatsapp });
       const cookie = await loginAdmin(app);
 
@@ -408,9 +417,9 @@ describe("WhatsApp endpoints", () => {
       const settings = createSettingsRepository(db);
       await settings.update({ onboardingCompletedAt: new Date().toISOString() });
       const whatsapp = makeMockWhatsApp({
-        isConnected: true,
+        connected: true,
         phoneNumber: "+919876543210",
-      } as Partial<WhatsAppBot>);
+      });
       const app = createApp(db, config, { whatsapp });
       const cookie = await loginAdmin(app);
 
@@ -428,7 +437,7 @@ describe("WhatsApp endpoints", () => {
       await seedAdmin(db);
       const settings = createSettingsRepository(db);
       await settings.update({ onboardingCompletedAt: new Date().toISOString() });
-      const whatsapp = makeMockWhatsApp({ isConnected: false } as Partial<WhatsAppBot>);
+      const whatsapp = makeMockWhatsApp({ connected: false });
       const app = createApp(db, config, { whatsapp });
       const cookie = await loginAdmin(app);
 
@@ -445,9 +454,9 @@ describe("WhatsApp endpoints", () => {
       await settings.update({ onboardingCompletedAt: new Date().toISOString() });
       const disconnectFn = vi.fn();
       const whatsapp = makeMockWhatsApp({
-        isConnected: true,
-        disconnect: disconnectFn,
-      } as unknown as Partial<WhatsAppBot>);
+        connected: true,
+        logout: disconnectFn,
+      });
       const app = createApp(db, config, { whatsapp });
       const cookie = await loginAdmin(app);
 
@@ -484,16 +493,16 @@ describe("WhatsApp endpoints", () => {
       // Mock where cancelPairing resolves the startPairing promise (like real sock.ws.close())
       let resolvePairing: (() => void) | null = null;
       const whatsapp = makeMockWhatsApp({
-        startPairing: async (callbacks: PairingCallbacks) => {
+        startQr: async (onEvent) => {
           await new Promise<void>((r) => {
             resolvePairing = r;
           });
-          await callbacks.onError("Connection closed");
+          await onEvent({ type: "error", message: "Connection closed" });
         },
-        cancelPairing: () => {
+        cancel: () => {
           resolvePairing?.();
         },
-      } as unknown as Partial<WhatsAppBot>);
+      });
       const app = createApp(db, config, { whatsapp });
       const cookie = await loginAdmin(app);
 
@@ -621,9 +630,8 @@ describe("GET /api/channels/status — WhatsApp states", () => {
     const settings = createSettingsRepository(db);
     await settings.update({ onboardingCompletedAt: new Date().toISOString() });
     const whatsapp = {
-      isConnected: false,
-      phoneNumber: null,
-    } as unknown as WhatsAppBot;
+      pairing: { status: vi.fn().mockResolvedValue({ connected: false, phoneNumber: null }) },
+    } as unknown as WhatsAppSocketFacade;
     const app = createApp(db, config, { whatsapp });
     const cookie = await loginAdmin(app);
 
@@ -642,9 +650,8 @@ describe("GET /api/channels/status — WhatsApp states", () => {
     const settings = createSettingsRepository(db);
     await settings.update({ onboardingCompletedAt: new Date().toISOString() });
     const whatsapp = {
-      isConnected: true,
-      phoneNumber: "+919876543210",
-    } as unknown as WhatsAppBot;
+      pairing: { status: vi.fn().mockResolvedValue({ connected: true, phoneNumber: "+919876543210" }) },
+    } as unknown as WhatsAppSocketFacade;
     const app = createApp(db, config, { whatsapp });
     const cookie = await loginAdmin(app);
 
@@ -1052,11 +1059,12 @@ describe("Auth middleware", () => {
     const settings = createSettingsRepository(db);
     await settings.update({ onboardingCompletedAt: new Date().toISOString() });
     const whatsapp = {
-      isConnected: false,
-      phoneNumber: null,
-      startPairing: async () => {},
-      disconnect: async () => {},
-    } as unknown as WhatsAppBot;
+      pairing: {
+        status: vi.fn().mockResolvedValue({ connected: false, phoneNumber: null }),
+        startQr: async () => {},
+        logout: async () => {},
+      },
+    } as unknown as WhatsAppSocketFacade;
     const app = createApp(db, config, { whatsapp });
 
     const res = await app.request("/api/channels/whatsapp");
@@ -1067,7 +1075,9 @@ describe("Auth middleware", () => {
     await seedAdmin(db);
     const settings = createSettingsRepository(db);
     await settings.update({ onboardingCompletedAt: new Date().toISOString() });
-    const whatsapp = { isConnected: true, phoneNumber: null } as unknown as WhatsAppBot;
+    const whatsapp = {
+      pairing: { status: vi.fn().mockResolvedValue({ connected: true, phoneNumber: null }) },
+    } as unknown as WhatsAppSocketFacade;
     const app = createApp(db, config, { whatsapp });
 
     const cookie = await loginAdmin(app);
@@ -1096,7 +1106,9 @@ describe("Auth middleware", () => {
 
   it("allows whatsapp routes during onboarding with valid session", async () => {
     await seedAdmin(db);
-    const whatsapp = { isConnected: false, phoneNumber: null } as unknown as WhatsAppBot;
+    const whatsapp = {
+      pairing: { status: vi.fn().mockResolvedValue({ connected: false, phoneNumber: null }) },
+    } as unknown as WhatsAppSocketFacade;
     const app = createApp(db, config, { whatsapp });
     const cookie = await loginAdmin(app);
 

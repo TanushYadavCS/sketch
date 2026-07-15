@@ -8,7 +8,7 @@ import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import type { SlackBot } from "../slack/bot";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 import type { WatiWhatsAppProvider } from "../whatsapp/providers/wati";
 
 const ADMIN_EMAIL = "admin@test.com";
@@ -59,18 +59,19 @@ function makeApp(
     listChannels: vi.fn().mockResolvedValue([]),
   } as unknown as SlackBot;
   const whatsapp = {
-    get isConnected() {
-      return whatsappConnected;
+    pairing: {
+      status: vi.fn(async () => ({
+        connected: whatsappConnected,
+        phoneNumber: whatsappConnected ? "+15555550100" : null,
+      })),
+      logout: vi.fn().mockImplementation(async () => {
+        whatsappConnected = false;
+      }),
+      cancel: vi.fn(),
+      startQr: vi.fn().mockResolvedValue(undefined),
     },
-    get phoneNumber() {
-      return whatsappConnected ? "+15555550100" : null;
-    },
-    disconnect: vi.fn().mockImplementation(async () => {
-      whatsappConnected = false;
-    }),
-    cancelPairing: vi.fn(),
-    startPairing: vi.fn().mockResolvedValue(undefined),
-  } as unknown as WhatsAppBot;
+    syncAllGroups: vi.fn().mockResolvedValue({ synced: 1 }),
+  } as unknown as WhatsAppSocketFacade;
   const onSlackDisconnect = vi.fn().mockResolvedValue(undefined);
   const onSmtpUpdated = vi.fn().mockResolvedValue(undefined);
 
@@ -111,6 +112,19 @@ describe("Channels API authorization", () => {
     });
 
     expect(res.status).toBe(200);
+  });
+
+  it("forces group synchronization through the socket facade without changing the response", async () => {
+    const { app, whatsapp } = makeApp(db);
+
+    const res = await app.request("/api/channels/whatsapp/groups/sync", {
+      method: "POST",
+      headers: { Cookie: adminCookie },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ groups: [] });
+    expect(whatsapp.syncAllGroups).toHaveBeenCalledWith({ force: true });
   });
 
   it("rejects channel management writes from members", async () => {
@@ -176,8 +190,8 @@ describe("Channels API authorization", () => {
     }
     expect(onSlackDisconnect).not.toHaveBeenCalled();
     expect(onSmtpUpdated).not.toHaveBeenCalled();
-    expect(whatsapp.disconnect).not.toHaveBeenCalled();
-    expect(whatsapp.startPairing).not.toHaveBeenCalled();
+    expect(whatsapp.pairing.logout).not.toHaveBeenCalled();
+    expect(whatsapp.pairing.startQr).not.toHaveBeenCalled();
   });
 
   it("does not expose legacy email channel routes", async () => {
@@ -262,7 +276,7 @@ describe("Channels API authorization", () => {
       headers: { Cookie: adminCookie },
     });
     expect(whatsappRes.status).toBe(200);
-    expect(whatsapp.disconnect).toHaveBeenCalledTimes(1);
+    expect(whatsapp.pairing.logout).toHaveBeenCalledTimes(1);
 
     const slackSetupRes = await app.request("/api/setup/slack", {
       method: "POST",
