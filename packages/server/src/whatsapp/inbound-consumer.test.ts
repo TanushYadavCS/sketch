@@ -98,6 +98,19 @@ describe("WhatsAppInboundConsumer", () => {
     expect(dispatched).toBe(1);
   });
 
+  it("survives a failing claim without rejecting the poll loop", async () => {
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger: createTestLogger(),
+      stagingDir,
+      handlers: handlers(),
+    });
+    await db.schema.dropTable("whatsapp_inbound_events").execute();
+    consumer.start();
+    await expect(consumer.wake()).resolves.toBeUndefined();
+    await consumer.stop();
+  });
+
   it("reverts a shed dispatch to captured with backoff", async () => {
     const repo = createWhatsAppInboundEventsRepository(db);
     const inserted = await repo.insert({

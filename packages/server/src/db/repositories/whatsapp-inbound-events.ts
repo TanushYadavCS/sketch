@@ -184,10 +184,42 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
     );
   }
 
+  /**
+   * Cheap read-only eligibility pre-check so an idle consumer (default mode,
+   * empty queue) never issues the claim UPDATE: a zero-row UPDATE still takes
+   * the SQLite writer lock every poll tick, which would add steady-state write
+   * churn to deployments that never enable gateway mode. Racing a concurrent
+   * insert is harmless: the row is claimed on the next poll or wake ping.
+   */
+  async function hasClaimableRows(): Promise<boolean> {
+    const precheck = isPg(db)
+      ? sql`
+          SELECT id FROM whatsapp_inbound_events
+          WHERE (
+              status = 'pending'
+              OR (status = 'captured' AND next_attempt_at::timestamptz <= CURRENT_TIMESTAMP)
+              OR (status = 'processing' AND claimed_at::timestamptz < CURRENT_TIMESTAMP - INTERVAL '120 seconds')
+            )
+          LIMIT 1
+        `
+      : sql`
+          SELECT id FROM whatsapp_inbound_events
+          WHERE (
+              status = 'pending'
+              OR (status = 'captured' AND datetime(next_attempt_at) <= CURRENT_TIMESTAMP)
+              OR (status = 'processing' AND datetime(claimed_at) < datetime(CURRENT_TIMESTAMP, '-120 seconds'))
+            )
+          LIMIT 1
+        `;
+    const result = await precheck.execute(db);
+    return result.rows.length > 0;
+  }
+
   async function claim(claimToken: string = randomUUID()): Promise<WhatsAppInboundEventRow[]> {
     return withBoundedSqliteRetry(
       db,
       async () => {
+        if (!(await hasClaimableRows())) return [];
         if (isPg(db)) {
           await sql`
             UPDATE whatsapp_inbound_events

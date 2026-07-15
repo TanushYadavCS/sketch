@@ -127,7 +127,9 @@ export class WhatsAppInboundConsumer {
       await this.active;
       return;
     }
-    this.active = this.drain();
+    this.active = this.drain().catch((error) => {
+      this.options.logger.error({ error }, "WhatsApp inbound consumer drain failed; retrying on next poll");
+    });
     try {
       await this.active;
     } finally {
