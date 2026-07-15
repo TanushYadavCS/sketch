@@ -13,7 +13,7 @@ import {
 } from "../../db/repositories/whatsapp-session-lease";
 import { createLogger } from "../../logger";
 import { createDbAuthState } from "../auth-store";
-import { WhatsAppBot } from "../bot";
+import { WhatsAppBot, type WhatsAppMessage } from "../bot";
 import { WHATSAPP_FACADE_CONTRACT_VERSION } from "../facade-contract";
 import { InProcessSocketFacade } from "../in-process-socket-facade";
 import { WhatsAppGatewayCapture } from "./capture";
@@ -27,6 +27,7 @@ import { GatewaySocketFacade, type WhatsAppGatewaySocketState } from "./socket-f
 export const WHATSAPP_GATEWAY_LOGGED_OUT_EXIT_CODE = 64;
 
 const gatewayPortSchema = z.coerce.number().int().min(1).max(65_535).default(WHATSAPP_GATEWAY_DEFAULT_PORT);
+const gatewayHttpTokenSchema = z.string().min(32);
 
 function closeServer(server: ReturnType<typeof serve>): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -51,7 +52,11 @@ export async function runWhatsAppGateway(): Promise<void> {
     ...(config.DB_TYPE === "sqlite" ? { sqlitePath: config.SQLITE_PATH } : {}),
   });
   const observedLease = await leaseRepository.get();
-  const gatewayHttpToken = observedLease?.gateway_http_token ?? randomBytes(32).toString("hex");
+  const configuredGatewayHttpToken = process.env.WHATSAPP_GATEWAY_HTTP_TOKEN
+    ? gatewayHttpTokenSchema.parse(process.env.WHATSAPP_GATEWAY_HTTP_TOKEN)
+    : null;
+  const gatewayHttpToken =
+    configuredGatewayHttpToken ?? observedLease?.gateway_http_token ?? randomBytes(32).toString("hex");
   const ownerToken = randomUUID();
   const acquired = await leaseRepository.acquire({
     ownerKind: "gateway",
@@ -175,6 +180,13 @@ export async function runWhatsAppGateway(): Promise<void> {
   });
   bot.onMessage((message) => capture.captureMessage(message));
   bot.onHistoryMessages((messages, metadata) => capture.captureHistory(messages, metadata));
+  if (process.env.WHATSAPP_GATEWAY_TEST_FAKE_SOCKET === "1" && typeof process.send === "function") {
+    process.on("message", (input) => {
+      if (!input || typeof input !== "object" || !("type" in input) || input.type !== "capture-message") return;
+      if (!("message" in input)) return;
+      void capture.captureMessage(input.message as WhatsAppMessage);
+    });
+  }
 
   const facade = new GatewaySocketFacade({
     delegate: inProcessFacade,

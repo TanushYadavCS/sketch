@@ -2,9 +2,10 @@
  * HTTP app factory — API routes, auth middleware, static file serving.
  * Route registration order: API routes → static assets → SPA catch-all.
  */
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { HttpBindings } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { type Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -127,6 +128,8 @@ interface AppDeps {
   localClaudeSessionService?: LocalClaudeSessionService;
   agentRunService?: AgentRunService;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
+  whatsappWakeToken?: string;
+  onWhatsAppWake?: () => Promise<void> | void;
 }
 
 /**
@@ -148,6 +151,10 @@ interface AppDeps {
 function resolveBodyLimitBytes(config: Config): number {
   const maxUploadMb = Math.max(config.MAX_FILE_SIZE_MB, config.MAX_UPLOAD_SIZE_MB);
   return Math.ceil(maxUploadMb * 1.1 * 1024 * 1024);
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -196,6 +203,29 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           sendDm: deps.sendDm,
         })
       : null;
+
+  if (deps?.whatsappWakeToken && deps.onWhatsAppWake) {
+    const whatsappWakeToken = deps.whatsappWakeToken;
+    const onWhatsAppWake = deps.onWhatsAppWake;
+    app.post("/internal/whatsapp/wake", async (context) => {
+      const remoteAddress = (context.env as Partial<HttpBindings> | undefined)?.incoming?.socket.remoteAddress;
+      const requestHost = new URL(context.req.url).hostname;
+      const loopback = remoteAddress
+        ? isLoopbackAddress(remoteAddress)
+        : requestHost === "localhost" || isLoopbackAddress(requestHost);
+      if (!loopback) {
+        return context.json({ error: "loopback_only" }, 403);
+      }
+      const header = context.req.header("authorization");
+      const actual = Buffer.from(header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : "");
+      const expected = Buffer.from(whatsappWakeToken);
+      if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+        return context.json({ error: "unauthorized" }, 401);
+      }
+      await onWhatsAppWake();
+      return context.body(null, 204);
+    });
+  }
 
   app.route(
     "/",

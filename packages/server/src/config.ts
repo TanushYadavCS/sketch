@@ -64,6 +64,8 @@ export const configSchema = z.object({
   // WhatsApp providers
   WHATSAPP_DM_PROVIDER: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("baileys")),
   WHATSAPP_GROUP_PROVIDER: z.preprocess((v) => (v === "" ? undefined : v), z.string().default("baileys")),
+  WHATSAPP_RUNTIME_MODE: z.enum(["inprocess", "gateway"]).default("inprocess"),
+  WHATSAPP_GATEWAY_PORT: z.coerce.number().int().min(1).max(65_535).default(3901),
   WATI_API_ENDPOINT: z.preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
   WATI_ACCESS_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   WATI_WEBHOOK_TOKEN: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),

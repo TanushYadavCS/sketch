@@ -162,6 +162,8 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     SLACK_THREAD_HISTORY_LIMIT: 50,
     WHATSAPP_DM_PROVIDER: "baileys",
     WHATSAPP_GROUP_PROVIDER: "baileys",
+    WHATSAPP_RUNTIME_MODE: "inprocess",
+    WHATSAPP_GATEWAY_PORT: 3901,
     WHATSAPP_HISTORY_LOOKBACK_DAYS: 30,
     WHATSAPP_SLICE_GAP_MINUTES: 25,
     WHATSAPP_SLICE_MAX_AGE_MINUTES: 120,

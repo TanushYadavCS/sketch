@@ -65,6 +65,38 @@ type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
 type WhatsAppGroupsRepository = ReturnType<typeof createWhatsAppGroupRepository>;
 type ConversationRepository = ReturnType<typeof createConversationRepository>;
+export type WhatsAppConversationRepository = ConversationRepository;
+
+export interface WhatsAppQueuedCapture {
+  conversation: Awaited<ReturnType<ConversationRepository["getOrCreate"]>>;
+  captured: NonNullable<Awaited<ReturnType<ConversationRepository["findMessageByEventKey"]>>>;
+  attachments: Attachment[];
+  inserted: true;
+  omitted: false;
+}
+
+export interface WhatsAppAdapterHandlers {
+  captureQueuedMessage(
+    message: WhatsAppInboundMessage,
+    params: {
+      eventKey: string | null;
+      attachments?: Attachment[];
+      attachmentsForWorkspace?: (workspaceDir: string) => Promise<Attachment[]>;
+      commitCapture?: (
+        capture: (conversationRepository: WhatsAppConversationRepository) => Promise<WhatsAppQueuedCapture | null>,
+      ) => Promise<WhatsAppQueuedCapture | null>;
+    },
+  ): Promise<WhatsAppQueuedCapture | null>;
+  dispatchCapturedMessage(message: WhatsAppInboundMessage, capture: WhatsAppQueuedCapture | null): Promise<boolean>;
+  handleHistoryMessages(
+    messages: WhatsAppInboundMessage[],
+    metadata?: WhatsAppHistoryBatchMetadata,
+    options?: {
+      checkpoint?: boolean;
+      attachmentsForMessage?: (message: WhatsAppInboundMessage, workspaceDir: string) => Promise<Attachment[]>;
+    },
+  ): Promise<WhatsAppHistorySyncResult>;
+}
 
 const INLINE_BACKLOG_LIMIT = 10;
 const WHATSAPP_AGENT_ERROR_MESSAGE = "Something went wrong, try again.";
@@ -210,7 +242,7 @@ function legacyDmConversationIds(message: WhatsAppInboundMessage): string[] {
   );
 }
 
-export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAdapterDeps): void {
+export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAdapterDeps): WhatsAppAdapterHandlers {
   const {
     db,
     config,
@@ -229,19 +261,24 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
   const backfillCheckpoints = repos.conversationSlices ?? createConversationSlicesRepository(db);
+  const queuedCaptures = new WeakMap<WhatsAppInboundMessage, WhatsAppQueuedCapture>();
 
-  const getOrCreateConversationForMessage = async (message: WhatsAppInboundMessage, displayName?: string | null) => {
+  const getOrCreateConversationForMessage = async (
+    message: WhatsAppInboundMessage,
+    displayName?: string | null,
+    conversationRepository: ConversationRepository = repos.conversations,
+  ) => {
     const ref = conversationRefForMessage(message);
     if (message.kind === "dm") {
       let canonicalConversation: Awaited<ReturnType<ConversationRepository["getOrCreate"]>> | undefined;
       for (const legacyId of legacyDmConversationIds(message)) {
-        const legacyConversation = await repos.conversations.find({
+        const legacyConversation = await conversationRepository.find({
           platform: ref.platform,
           kind: ref.kind,
           providerConversationId: legacyId,
         });
         if (legacyConversation) {
-          canonicalConversation = await repos.conversations.claimProviderConversationId(
+          canonicalConversation = await conversationRepository.claimProviderConversationId(
             legacyConversation.id,
             ref,
             displayName,
@@ -250,7 +287,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       }
       if (canonicalConversation) return canonicalConversation;
     }
-    return repos.conversations.getOrCreate(ref, displayName);
+    return conversationRepository.getOrCreate(ref, displayName);
   };
 
   const updateReaction = async (message: WhatsAppInboundMessage, emoji: string | null) => {
@@ -308,22 +345,35 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     addressedToSketch: boolean;
     receivedAt?: string;
     skipControlMessages?: boolean;
+    eventKey?: string | null;
+    attachments?: Attachment[];
+    conversationRepository?: ConversationRepository;
+    queued?: boolean;
   }) => {
     const conversation = await getOrCreateConversationForMessage(
       params.message,
       params.message.kind === "group" ? params.message.target.groupId : params.senderName,
+      params.conversationRepository,
     );
 
     if ((params.skipControlMessages ?? true) && isConversationControlMessage(params.message.text)) {
       return { conversation, captured: null, attachments: [] as Attachment[], inserted: false, omitted: true };
     }
 
-    const attachments = await downloadMessageAttachments(params.message, params.workspaceDir);
+    const queuedCapture = queuedCaptures.get(params.message);
+    if (queuedCapture) {
+      queuedCaptures.delete(params.message);
+      return queuedCapture;
+    }
+
+    const attachments = params.attachments ?? (await downloadMessageAttachments(params.message, params.workspaceDir));
     const providerTimestamp = validProviderTimestamp(params.message.providerTimestamp);
     const receivedAt = params.receivedAt ? validProviderTimestamp(params.receivedAt) : providerTimestamp;
-    const captured = await repos.conversations.insertMessage({
+    const conversationRepository = params.conversationRepository ?? repos.conversations;
+    const messageInsert = {
       conversationId: conversation.id,
       providerMessageId: params.message.providerMessageId,
+      eventKey: params.eventKey,
       senderJid: senderJidForMessage(params.message),
       senderName: params.senderName,
       senderUserId: params.senderUserId ?? null,
@@ -334,7 +384,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       isThreadReply: Boolean(params.message.quotedMessage?.providerMessageId),
       providerTimestamp: providerTimestamp ?? null,
       receivedAt,
-    });
+    };
+    const captured = params.queued
+      ? { row: await conversationRepository.captureOrGet(messageInsert), inserted: true }
+      : await conversationRepository.insertMessage(messageInsert);
 
     return { conversation, captured: captured.row, attachments, inserted: captured.inserted, omitted: false };
   };
@@ -429,6 +482,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     groupJid: string,
     groupMessages: WhatsAppInboundMessage[],
     metadata: WhatsAppHistoryBatchMetadata | undefined,
+    options: {
+      checkpoint: boolean;
+      attachmentsForMessage?: (message: WhatsAppInboundMessage, workspaceDir: string) => Promise<Attachment[]>;
+    },
   ): Promise<WhatsAppHistorySyncResult> => {
     const result = emptyHistoryResult();
     const cutoffMs = Date.now() - config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS;
@@ -519,6 +576,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       const user = await resolveUserByPhone(message.senderPhoneE164);
       const workspaceDir = await resolveWorkspaceDir();
       try {
+        const attachments = await options.attachmentsForMessage?.(message, workspaceDir);
         const capture = await captureUserMessage({
           message,
           workspaceDir,
@@ -527,6 +585,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           addressedToSketch: false,
           receivedAt,
           skipControlMessages: false,
+          attachments,
         });
         if (messageKey) {
           lastDurableKey = oldestWhatsAppBackfillCheckpointKey(lastDurableKey, messageKey);
@@ -537,28 +596,32 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           result.skippedDup += 1;
         }
       } catch (err) {
-        try {
-          await backfillCheckpoints.setBackfillCheckpoint({
-            groupJid,
-            lastFetchedKey: lastDurableKey,
-            status: "failed",
-          });
-        } catch (checkpointErr) {
-          logger.warn(
-            { err: checkpointErr, groupRef, checkpointKey: lastDurableKey },
-            "Failed to mark WhatsApp history checkpoint failed",
-          );
+        if (options.checkpoint) {
+          try {
+            await backfillCheckpoints.setBackfillCheckpoint({
+              groupJid,
+              lastFetchedKey: lastDurableKey,
+              status: "failed",
+            });
+          } catch (checkpointErr) {
+            logger.warn(
+              { err: checkpointErr, groupRef, checkpointKey: lastDurableKey },
+              "Failed to mark WhatsApp history checkpoint failed",
+            );
+          }
         }
         throw err;
       }
     }
 
     const checkpointStatus = isHistorySyncComplete(metadata) ? "complete" : "in_progress";
-    const checkpoint = await backfillCheckpoints.setBackfillCheckpoint({
-      groupJid,
-      lastFetchedKey: lastDurableKey,
-      status: checkpointStatus,
-    });
+    const checkpoint = options.checkpoint
+      ? await backfillCheckpoints.setBackfillCheckpoint({
+          groupJid,
+          lastFetchedKey: lastDurableKey,
+          status: checkpointStatus,
+        })
+      : null;
 
     logger.info(
       {
@@ -574,8 +637,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         persisted: result.persisted,
         skippedOld: result.skippedOld,
         skippedDup: result.skippedDup,
-        checkpointKey: checkpoint.last_fetched_key,
-        checkpointStatus: checkpoint.status,
+        checkpointKey: checkpoint?.last_fetched_key ?? lastDurableKey,
+        checkpointStatus: checkpoint?.status ?? "deferred",
         isLatest: metadata?.isLatest,
         progress: metadata?.progress,
         syncType: metadata?.syncType,
@@ -586,7 +649,14 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     return result;
   };
 
-  whatsapp.onHistoryMessages(async (messages, metadata) => {
+  const handleHistoryMessages = async (
+    messages: WhatsAppInboundMessage[],
+    metadata?: WhatsAppHistoryBatchMetadata,
+    options?: {
+      checkpoint?: boolean;
+      attachmentsForMessage?: (message: WhatsAppInboundMessage, workspaceDir: string) => Promise<Attachment[]>;
+    },
+  ) => {
     const result = emptyHistoryResult();
     const messagesByGroup = new Map<string, WhatsAppInboundMessage[]>();
 
@@ -598,13 +668,21 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     }
 
     for (const [groupJid, groupMessages] of messagesByGroup) {
-      addHistoryResult(result, await processHistoryGroupBatch(groupJid, groupMessages, metadata));
+      addHistoryResult(
+        result,
+        await processHistoryGroupBatch(groupJid, groupMessages, metadata, {
+          checkpoint: options?.checkpoint ?? true,
+          attachmentsForMessage: options?.attachmentsForMessage,
+        }),
+      );
     }
 
     return result;
-  });
+  };
 
-  whatsapp.onMessage(async (message) => {
+  whatsapp.onHistoryMessages(handleHistoryMessages);
+
+  const handleMessage = async (message: WhatsAppInboundMessage): Promise<boolean> => {
     if (message.kind === "dm") {
       const replyTarget = message.target;
       let user = await repos.users.findByWhatsappNumber(message.senderPhoneE164);
@@ -616,7 +694,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             replyTarget,
             "Sorry, you're not authorized to use this bot. Contact your admin to get access.",
           );
-          return;
+          return true;
         }
         const fallbackAgent = await repos.users.findById(fallbackAgentId);
         if (!fallbackAgent || fallbackAgent.type !== "agent") {
@@ -624,7 +702,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             { fallbackAgentId },
             "WhatsApp fallback agent is missing or not an agent; dropping unknown-sender DM",
           );
-          return;
+          return true;
         }
         user = await repos.users.create({
           name: "External user",
@@ -648,7 +726,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       const activeQueueKey = user.id;
       const userQueue = queue.getQueue(activeQueueKey);
 
-      userQueue.enqueue(async () => {
+      const accepted = userQueue.enqueue(async () => {
         const command = parseSketchCommand(message.text);
         const settingsRowEarly = await repos.settings.get();
         const fallbackAgentEarly =
@@ -860,7 +938,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           whatsapp.stopComposing(deliveryTarget);
         }
       });
-      return;
+      return accepted;
     }
 
     // --- Group handler ---
@@ -882,7 +960,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         senderUserId: user?.id ?? null,
         addressedToSketch: false,
       });
-      return;
+      return true;
     }
 
     const user = message.senderPhoneE164 ? await repos.users.findByWhatsappNumber(message.senderPhoneE164) : undefined;
@@ -893,7 +971,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     const activeQueueKey = `wa-group-${groupJid}`;
     const groupQueue = queue.getQueue(activeQueueKey);
 
-    groupQueue.enqueue(async () => {
+    return groupQueue.enqueue(async () => {
       const command = parseSketchCommand(message.text);
       const existingGroupForBinding = await repos.whatsappGroups.getByJid(groupJid);
       const boundAgent = existingGroupForBinding?.agent_user_id
@@ -1113,5 +1191,94 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         whatsapp.stopComposing(groupTarget);
       }
     });
+  };
+
+  whatsapp.onMessage(async (message) => {
+    await handleMessage(message);
   });
+
+  const captureQueuedMessage = async (
+    message: WhatsAppInboundMessage,
+    params: {
+      eventKey: string | null;
+      attachments?: Attachment[];
+      attachmentsForWorkspace?: (workspaceDir: string) => Promise<Attachment[]>;
+      commitCapture?: (
+        capture: (conversationRepository: WhatsAppConversationRepository) => Promise<WhatsAppQueuedCapture | null>,
+      ) => Promise<WhatsAppQueuedCapture | null>;
+    },
+  ): Promise<WhatsAppQueuedCapture | null> => {
+    if (message.kind === "dm") {
+      let user = await repos.users.findByWhatsappNumber(message.senderPhoneE164);
+      if (!user) {
+        const fallbackAgentId = (await repos.settings.get())?.whatsapp_fallback_agent_id ?? null;
+        const fallbackAgent = fallbackAgentId ? await repos.users.findById(fallbackAgentId) : null;
+        if (!fallbackAgent || fallbackAgent.type !== "agent") return null;
+        user = await repos.users.create({
+          name: "External user",
+          type: "external",
+          whatsappNumber: message.senderPhoneE164,
+        });
+      }
+      const settingsRow = await repos.settings.get();
+      const fallbackAgent =
+        user.type === "external" && settingsRow?.whatsapp_fallback_agent_id
+          ? await repos.users.findById(settingsRow.whatsapp_fallback_agent_id)
+          : null;
+      const workspaceDir = fallbackAgent
+        ? await ensureAgentSubWorkspace(config, fallbackAgent.id, user.id)
+        : await ensureWorkspace(config, user.id);
+      const attachments = params.attachments ?? (await params.attachmentsForWorkspace?.(workspaceDir));
+      const capture = async (conversationRepository: ConversationRepository) => {
+        const captured = await captureUserMessage({
+          message,
+          workspaceDir,
+          senderName: user.name,
+          senderUserId: user.id,
+          addressedToSketch: true,
+          eventKey: params.eventKey,
+          attachments,
+          conversationRepository,
+          queued: true,
+        });
+        if (!captured.captured || captured.omitted) return null;
+        return { ...captured, inserted: true as const, omitted: false as const };
+      };
+      return params.commitCapture ? params.commitCapture(capture) : capture(repos.conversations);
+    }
+
+    const groupJid = message.target.groupId;
+    const user = message.senderPhoneE164 ? await repos.users.findByWhatsappNumber(message.senderPhoneE164) : undefined;
+    const existingGroup = await repos.whatsappGroups.getByJid(groupJid);
+    const boundAgent = existingGroup?.agent_user_id ? await repos.users.findById(existingGroup.agent_user_id) : null;
+    const workspaceDir = boundAgent
+      ? await ensureAgentSubWorkspace(config, boundAgent.id, `whatsappgroup-${groupJid}`)
+      : await ensureGroupWorkspace(config, groupJid);
+    const attachments = params.attachments ?? (await params.attachmentsForWorkspace?.(workspaceDir));
+    const capture = async (conversationRepository: ConversationRepository) => {
+      const captured = await captureUserMessage({
+        message,
+        workspaceDir,
+        senderName: user?.name ?? message.senderName,
+        senderUserId: user?.id ?? null,
+        addressedToSketch: Boolean(message.isMentioned),
+        eventKey: params.eventKey,
+        attachments,
+        conversationRepository,
+        queued: true,
+      });
+      if (!captured.captured || captured.omitted) return null;
+      return { ...captured, inserted: true as const, omitted: false as const };
+    };
+    return params.commitCapture ? params.commitCapture(capture) : capture(repos.conversations);
+  };
+
+  return {
+    captureQueuedMessage,
+    async dispatchCapturedMessage(message, capture) {
+      if (capture) queuedCaptures.set(message, capture);
+      return handleMessage(message);
+    },
+    handleHistoryMessages,
+  };
 }

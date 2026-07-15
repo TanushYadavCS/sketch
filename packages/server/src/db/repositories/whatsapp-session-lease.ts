@@ -63,6 +63,25 @@ export function createWhatsAppSessionLeaseRepository(
       .executeTakeFirst();
   }
 
+  async function getFresh() {
+    let query = db.selectFrom("whatsapp_session_lease").selectAll().where("id", "=", WHATSAPP_SESSION_LEASE_ID);
+    query = isPg(db)
+      ? query.where(sql<boolean>`heartbeat_at::timestamptz >= CURRENT_TIMESTAMP - INTERVAL '45 seconds'`)
+      : query.where(sql<boolean>`datetime(heartbeat_at) >= datetime(CURRENT_TIMESTAMP, '-45 seconds')`);
+    return query.executeTakeFirst();
+  }
+
+  async function isOwned(fence: WhatsAppLeaseFence): Promise<boolean> {
+    const row = await db
+      .selectFrom("whatsapp_session_lease")
+      .select("id")
+      .where("id", "=", WHATSAPP_SESSION_LEASE_ID)
+      .where("owner_token", "=", fence.ownerToken)
+      .where("generation", "=", fence.generation)
+      .executeTakeFirst();
+    return row !== undefined;
+  }
+
   async function acquire(
     owner: WhatsAppSessionLeaseOwner,
   ): Promise<{ acquired: boolean; lease: Selectable<WhatsAppSessionLeaseTable> | undefined }> {
@@ -266,5 +285,16 @@ export function createWhatsAppSessionLeaseRepository(
     );
   }
 
-  return { get, acquire, compareAndSwap, heartbeat, markDisconnected, deriveDisconnectedAt, release, withLeaseFence };
+  return {
+    get,
+    getFresh,
+    isOwned,
+    acquire,
+    compareAndSwap,
+    heartbeat,
+    markDisconnected,
+    deriveDisconnectedAt,
+    release,
+    withLeaseFence,
+  };
 }

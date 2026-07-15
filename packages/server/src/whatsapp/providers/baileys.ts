@@ -248,7 +248,7 @@ export function baileysTargetFromPhone(phoneE164: string): Extract<WhatsAppTarge
   return { kind: "dm", phoneE164, providerConversationId: phoneE164ToWhatsAppJid(phoneE164) };
 }
 
-function normalizeBaileysInboundMessage(message: WhatsAppMessage): WhatsAppInboundMessage {
+export function normalizeBaileysInboundMessage(message: WhatsAppMessage): WhatsAppInboundMessage {
   if (message.type === "dm") {
     const providerConversationId = phoneE164ToWhatsAppJid(message.phoneNumber);
     return {

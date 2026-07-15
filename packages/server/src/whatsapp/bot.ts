@@ -132,6 +132,7 @@ export interface WhatsAppBotConfig {
   onConnectionClose?: (statusCode: number | undefined, socketGeneration: number) => Promise<void> | void;
   onLoggedOut?: (socketGeneration: number) => Promise<void> | void;
   watchdogEnabled?: boolean;
+  beforeSocketOpen?: () => Promise<void>;
 }
 
 export class WhatsAppBot {
@@ -145,6 +146,7 @@ export class WhatsAppBot {
   private onConnectionClose?: WhatsAppBotConfig["onConnectionClose"];
   private onLoggedOut?: WhatsAppBotConfig["onLoggedOut"];
   private watchdogEnabled: boolean;
+  private beforeSocketOpen?: () => Promise<void>;
   private sock: WASocket | null = null;
   private handler: WhatsAppMessageHandler | null = null;
   private historyHandler: WhatsAppHistoryMessagesHandler | null = null;
@@ -175,6 +177,7 @@ export class WhatsAppBot {
     this.onConnectionClose = config.onConnectionClose;
     this.onLoggedOut = config.onLoggedOut;
     this.watchdogEnabled = config.watchdogEnabled ?? true;
+    this.beforeSocketOpen = config.beforeSocketOpen;
   }
 
   onMessage(handler: WhatsAppMessageHandler): void {
@@ -209,6 +212,7 @@ export class WhatsAppBot {
    * completes (connected or failed) — keeps the SSE stream alive until then.
    */
   async startPairing(callbacks: PairingCallbacks): Promise<void> {
+    await this.beforeSocketOpen?.();
     this.clearReconnectTimer();
     this.stopping = false;
     if (this.sock) {
@@ -530,6 +534,7 @@ export class WhatsAppBot {
   // --- Internal ---
 
   private async createSocket(): Promise<void> {
+    await this.beforeSocketOpen?.();
     this.clearReconnectTimer();
     this.stopping = false;
     const authState = await this.authStateFactory();

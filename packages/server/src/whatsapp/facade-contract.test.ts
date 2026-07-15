@@ -6,6 +6,7 @@ import {
   whatsAppFacadeHealthSchema,
   whatsAppGroupMetadataRequestSchema,
   whatsAppGroupSyncSummarySchema,
+  whatsAppInboundEnvelopeVersionSchema,
   whatsAppMediaDownloadRefSchema,
   whatsAppPairingEventSchema,
   whatsAppPairingStatusSchema,
@@ -21,6 +22,10 @@ import {
 } from "./facade-contract";
 
 describe("WhatsApp socket facade contract", () => {
+  it("accepts compatible minor envelope versions and rejects unknown majors", () => {
+    expect(whatsAppInboundEnvelopeVersionSchema.parse("1.7")).toBe("1.7");
+    expect(() => whatsAppInboundEnvelopeVersionSchema.parse("2.0")).toThrow();
+  });
   it("parses send and quoted-reference examples", () => {
     const providerRef = {
       kind: "providerMessageId",

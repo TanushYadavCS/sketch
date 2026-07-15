@@ -350,6 +350,18 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
     return row === undefined;
   }
 
+  async function isBatchCompleteExcluding(batchId: string, id: number): Promise<boolean> {
+    const row = await db
+      .selectFrom("whatsapp_inbound_events")
+      .select("id")
+      .where("batch_id", "=", batchId)
+      .where("id", "!=", id)
+      .where("status", "not in", ["consumed", "dead"])
+      .limit(1)
+      .executeTakeFirst();
+    return row === undefined;
+  }
+
   async function markConsumedAndCheckBatch(
     id: number,
     claimToken: string,
@@ -430,6 +442,7 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
     revertToCaptured,
     markDead,
     isBatchComplete,
+    isBatchCompleteExcluding,
     markConsumedAndCheckBatch,
     sweep,
   };

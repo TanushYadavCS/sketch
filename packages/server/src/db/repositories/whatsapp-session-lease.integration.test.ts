@@ -56,6 +56,19 @@ describe("WhatsApp session lease repository on shared Postgres", () => {
     await expect(repo.heartbeat("owner-a")).resolves.toBe(false);
     await expect(repo.heartbeat("owner-b", { markLive: true })).resolves.toBe(true);
   });
+
+  it("releases to the epoch sentinel and permits CAS takeover through the Postgres timestamptz cast", async () => {
+    const repo = createWhatsAppSessionLeaseRepository(db);
+    const acquired = await repo.acquire(owner("owner-release"));
+    const fence = { ownerToken: "owner-release", generation: acquired.lease?.generation ?? 0 };
+    await expect(repo.release(fence)).resolves.toBe(true);
+    const released = await repo.get();
+    expect(released?.owner_token).toBe("released:owner-release");
+    await expect(repo.compareAndSwap("released:owner-release", owner("owner-after-release"))).resolves.toMatchObject({
+      acquired: true,
+      lease: { owner_token: "owner-after-release", generation: 2 },
+    });
+  });
 });
 
 describe("WhatsApp session lease fence on Postgres", () => {

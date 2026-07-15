@@ -129,7 +129,7 @@ export const whatsAppFacadeHealthSchema = z.object({
   contractVersion: z.string().min(1),
 });
 
-export const whatsAppInboundEnvelopeVersionSchema = z.literal("1.0");
+export const whatsAppInboundEnvelopeVersionSchema = z.string().regex(/^1\.\d+$/u);
 export const whatsAppIsoUtcTimestampSchema = z.string().datetime({ offset: true });
 
 export const whatsAppInboundMessageSchema = z.object({

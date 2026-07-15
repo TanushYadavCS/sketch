@@ -1,7 +1,11 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { hostname, uptime } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 async function readTrimmed(path: string): Promise<string | null> {
   try {
@@ -26,14 +30,23 @@ export async function loadHostId(dataDir: string): Promise<string> {
 }
 
 export async function loadBootId(): Promise<string> {
-  return (
-    (await readTrimmed("/proc/sys/kernel/random/boot_id")) ??
-    `${hostname()}:${Math.floor(Date.now() / 1000 - uptime())}`
-  );
+  const kernelBootId = await readTrimmed("/proc/sys/kernel/random/boot_id");
+  if (kernelBootId) return kernelBootId;
+  try {
+    return `${hostname()}:${Math.floor(Date.now() / 1000 - uptime())}`;
+  } catch {
+    return `${hostname()}:boot-unknown`;
+  }
 }
 
-export async function loadPidStartTime(): Promise<string> {
-  const stat = await readTrimmed(`/proc/${process.pid}/stat`);
+export async function loadPidStartTime(pid = process.pid): Promise<string> {
+  const stat = await readTrimmed(`/proc/${pid}/stat`);
   const fields = stat?.split(" ");
-  return fields?.[21] ?? String(Math.floor(Date.now() - process.uptime() * 1000));
+  if (fields?.[21]) return fields[21];
+  try {
+    const result = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)]);
+    const startedAt = result.stdout.trim();
+    if (startedAt) return startedAt;
+  } catch {}
+  return pid === process.pid ? String(Math.floor(Date.now() - process.uptime() * 1000)) : "";
 }
