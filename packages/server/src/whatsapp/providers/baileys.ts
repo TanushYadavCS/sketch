@@ -71,11 +71,13 @@ export function createBaileysWhatsAppProviders(
   ): WhatsAppQuotedRef | undefined => {
     const quoted = options?.quotedMessage?.rawProviderPayload;
     if (!quoted || !isBaileysMessage(quoted)) return undefined;
-    rememberMessage(whatsapp, providerConversationId, options.quotedMessage?.providerMessageId ?? "", quoted);
+    const quotedMessageId = options.quotedMessage?.providerMessageId;
+    if (!quotedMessageId) return undefined;
+    rememberMessage(whatsapp, providerConversationId, quotedMessageId, quoted);
     return {
       kind: "providerMessageId",
       providerConversationId,
-      value: options.quotedMessage?.providerMessageId ?? "",
+      value: quotedMessageId,
     };
   };
 
@@ -114,6 +116,10 @@ export function createBaileysWhatsAppProviders(
   const addReaction = async (message: WhatsAppInboundMessage, emoji: string) => {
     const rawMessage = baileysRawMessage(message);
     if (!rawMessage?.key) return;
+    if (!message.providerMessageId) {
+      logger.warn("Skipped WhatsApp reaction for message without provider id");
+      return;
+    }
     rememberMessage(whatsapp, message.providerConversationId, message.providerMessageId, rawMessage);
     const result = await whatsapp.react(reactionJidForMessage(message, rawMessage), providerMessageRef(message), emoji);
     if ("error" in result) {
@@ -124,6 +130,10 @@ export function createBaileysWhatsAppProviders(
   const removeReaction = async (message: WhatsAppInboundMessage) => {
     const rawMessage = baileysRawMessage(message);
     if (!rawMessage?.key) return;
+    if (!message.providerMessageId) {
+      logger.warn("Skipped WhatsApp reaction removal for message without provider id");
+      return;
+    }
     rememberMessage(whatsapp, message.providerConversationId, message.providerMessageId, rawMessage);
     const result = await whatsapp.react(reactionJidForMessage(message, rawMessage), providerMessageRef(message), "");
     if ("error" in result) {
