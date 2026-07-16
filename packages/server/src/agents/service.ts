@@ -2337,7 +2337,14 @@ export class AgentRunService {
             internalSectionKeys.has(item.sectionKey),
         );
         const reconciled = def.reconcileItems
-          ? await def.reconcileItems({ db: this.deps.db, items: filtered, runtimeContext: params.runtimeContext })
+          ? await def.reconcileItems({
+              db: this.deps.db,
+              items: filtered,
+              runtimeContext: params.runtimeContext,
+              logger: this.deps.logger,
+              outputId: params.outputId,
+              userId: params.userId,
+            })
           : filtered;
         const itemsForHooks = await def.enrichItems(this.deps.db, reconciled);
         const visibleItems = itemsForHooks.filter(

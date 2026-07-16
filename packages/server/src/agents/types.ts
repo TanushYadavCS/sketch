@@ -149,6 +149,9 @@ export interface AgentDefinition {
     db: Kysely<DB>;
     items: AgentOutputItemInput[];
     runtimeContext: Record<string, unknown>;
+    logger: Logger;
+    outputId: string;
+    userId: string;
   }): Promise<AgentOutputItemInput[]>;
   /** Normalize a stored item into its API representation (label/action/displayRef fallbacks). */
   toApiItem(item: AgentStoredItem): AgentApiItem;

@@ -1,8 +1,10 @@
 import type { Kysely, Selectable } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentOutputItemInput } from "../../db/repositories/agent-outputs";
+import { createTaskRepository } from "../../db/repositories/tasks";
+import { createUserRepository } from "../../db/repositories/users";
 import type { DB, UsersTable } from "../../db/schema";
-import { createTestDb } from "../../test-utils";
+import { createTestConfig, createTestDb } from "../../test-utils";
 import {
   DAILY_BRIEF_ENTITY_WINDOW_DAYS,
   DAILY_BRIEF_EVIDENCE_WINDOW_DAYS,
@@ -17,15 +19,22 @@ const NOW = new Date("2026-06-25T08:00:00.000Z");
 
 async function seedUser(
   db: Kysely<DB>,
-  params: { id?: string; email?: string; authRole?: "member" | "admin" } = {},
+  params: {
+    id?: string;
+    name?: string;
+    email?: string;
+    emailVerified?: boolean;
+    authRole?: "member" | "admin";
+  } = {},
 ): Promise<Selectable<UsersTable>> {
   const id = params.id ?? "user-1";
   await db
     .insertInto("users")
     .values({
       id,
-      name: "Agent User",
+      name: params.name ?? "Agent User",
       email: params.email ?? "agent@example.com",
+      email_verified_at: params.emailVerified ? NOW.toISOString() : null,
       auth_role: params.authRole ?? "member",
     })
     .execute();
@@ -120,6 +129,96 @@ async function seedMention(
     .execute();
 }
 
+async function seedPersonEntity(
+  db: Kysely<DB>,
+  params: { id: string; name: string; emails?: string[] },
+): Promise<void> {
+  await db
+    .insertInto("entities")
+    .values({
+      id: params.id,
+      name: params.name,
+      source_type: "person",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      hotness: 0,
+      created_at: NOW.toISOString(),
+      updated_at: NOW.toISOString(),
+      ai_brief: null,
+    })
+    .execute();
+  for (const [index, email] of (params.emails ?? []).entries()) {
+    await db
+      .insertInto("entity_contact_points")
+      .values({
+        id: `${params.id}-email-${index}`,
+        entity_id: params.id,
+        kind: "email",
+        value: email.toLowerCase(),
+        display_value: email,
+        label: null,
+        source: "test",
+        connector_config_id: null,
+        created_by_user_id: null,
+        verified_at: NOW.toISOString(),
+        last_contacted_at: null,
+      })
+      .execute();
+  }
+}
+
+async function seedTask(
+  db: Kysely<DB>,
+  params: {
+    id: string;
+    title: string;
+    status?: "open" | "in_progress" | "done" | "dropped";
+    statusRaw?: string;
+    priority?: string | null;
+    provenance?: "structural" | "brief" | "summary";
+    assigneeEntityId?: string | null;
+    parentEntityId?: string | null;
+    createdByUserId?: string | null;
+    updatedAt?: string;
+    fileIds?: string[];
+    entityIds?: string[];
+  },
+): Promise<void> {
+  const repo = createTaskRepository(db);
+  await repo.upsertTask({
+    parentEntityId: params.parentEntityId ?? null,
+    parentSourceRef: null,
+    parentName: null,
+    source: params.provenance === "structural" ? "linear" : (params.provenance ?? "summary"),
+    externalRef: `EXT-${params.id}`,
+    title: params.title,
+    status: params.status ?? "open",
+    statusRaw: params.statusRaw ?? params.status ?? "open",
+    statusAuthority: params.provenance === "structural" ? "external" : "local",
+    assigneeEntityId: params.assigneeEntityId ?? null,
+    priority: params.priority ?? null,
+    dueAt: null,
+    provenance: params.provenance ?? "summary",
+    sourceTaskId: params.id,
+    createdByUserId: params.createdByUserId ?? null,
+  });
+  const task = await db
+    .selectFrom("tasks")
+    .select("id")
+    .where("source_task_id", "=", params.id)
+    .executeTakeFirstOrThrow();
+  await db
+    .updateTable("tasks")
+    .set({ id: params.id, updated_at: params.updatedAt ?? NOW.toISOString() })
+    .where("id", "=", task.id)
+    .execute();
+  for (const fileId of params.fileIds ?? []) await repo.upsertEvidence(params.id, "file", fileId);
+  for (const entityId of params.entityIds ?? []) await repo.upsertEvidence(params.id, "entity", entityId);
+}
+
 describe("dailyBriefDefinition.buildInstructions", () => {
   it("is static and defers per-user values to the runtime context (prompt-cache safe)", () => {
     const instructions = dailyBriefDefinition.buildInstructions();
@@ -136,6 +235,164 @@ describe("dailyBriefDefinition.buildInstructions", () => {
     expect(instructions).toContain("active_projects:");
 
     expect(instructions).not.toMatch(/at most \d+ items/);
+  });
+
+  it("requires todos to project only allowlisted durable task ids", () => {
+    const instructions = dailyBriefDefinition.buildInstructions();
+
+    expect(instructions).toContain("structuredPayload.durableTaskId");
+    expect(instructions).toContain("openDurableTasks");
+    expect(instructions).toMatch(/only IDs present in `openDurableTasks`/);
+    expect(instructions).toMatch(/Do not derive new todos from recentSummaries or broad search/);
+  });
+});
+
+describe("dailyBriefDefinition.augmentRuntimeContext", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedConnectorConfig(db);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("resolves verified primary and provider emails into an unambiguous reader-owned task runtime", async () => {
+    const user = await seedUser(db, {
+      id: "reader-1",
+      email: "primary@example.com",
+      emailVerified: true,
+    });
+    await db
+      .insertInto("user_provider_identities")
+      .values({
+        id: "provider-reader-1",
+        user_id: user.id,
+        provider: "google",
+        provider_user_id: "google-reader-1",
+        provider_email: "provider@example.com",
+      })
+      .execute();
+    await seedPersonEntity(db, {
+      id: "person-reader",
+      name: "Reader Person",
+      emails: ["primary@example.com", "provider@example.com"],
+    });
+    await seedEntity(db, { id: "project-runtime", name: "Runtime Project" });
+    await seedIndexedFile(db, { id: "file-runtime", sourceUpdatedAt: NOW.toISOString() });
+    await seedTask(db, {
+      id: "task-runtime",
+      title: "Canonical task title",
+      status: "in_progress",
+      statusRaw: "Started",
+      priority: "Urgent",
+      provenance: "structural",
+      assigneeEntityId: "person-reader",
+      parentEntityId: "project-runtime",
+      updatedAt: "2026-06-25T07:00:00.000Z",
+      fileIds: ["file-runtime"],
+    });
+    await seedTask(db, {
+      id: "summary-assigned",
+      title: "Assigned summary task",
+      provenance: "summary",
+      assigneeEntityId: "person-reader",
+      updatedAt: "2026-06-25T06:00:00.000Z",
+      fileIds: ["file-runtime"],
+    });
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: user.id,
+      maxItemsPerSection: 4,
+      baseContext: { outputDate: "2026-06-25", timezone: "UTC" },
+    });
+
+    expect(context?.openDurableTasks).toEqual([
+      {
+        id: "task-runtime",
+        title: "Canonical task title",
+        status: "in_progress",
+        statusRaw: "Started",
+        priority: "Urgent",
+        provenance: "structural",
+        externalRef: "EXT-task-runtime",
+        updatedAt: "2026-06-25T07:00:00.000Z",
+        createdByReader: false,
+        assignedToReader: true,
+        parentEntity: { id: "project-runtime", name: "Runtime Project", sourceType: "project" },
+        assigneeEntity: { id: "person-reader", name: "Reader Person", sourceType: "person" },
+        knowledgeRefs: {
+          entityIds: ["person-reader", "project-runtime"],
+          fileIds: ["file-runtime"],
+        },
+      },
+      {
+        id: "summary-assigned",
+        title: "Assigned summary task",
+        status: "open",
+        statusRaw: "open",
+        priority: null,
+        provenance: "summary",
+        externalRef: "EXT-summary-assigned",
+        updatedAt: "2026-06-25T06:00:00.000Z",
+        createdByReader: false,
+        assignedToReader: true,
+        parentEntity: null,
+        assigneeEntity: { id: "person-reader", name: "Reader Person", sourceType: "person" },
+        knowledgeRefs: {
+          entityIds: ["person-reader"],
+          fileIds: ["file-runtime"],
+        },
+      },
+    ]);
+    expect(context?.summaryTasks).toEqual([
+      expect.objectContaining({ id: "summary-assigned", title: "Assigned summary task" }),
+    ]);
+    expect(context?.identityUnresolvedTaskCount).toBe(0);
+  });
+
+  it("does not fall back to matching the user name and fails structural tasks closed when identity is unresolved", async () => {
+    const user = await seedUser(db, {
+      id: "reader-unresolved",
+      name: "Matching Person Name",
+      email: "verified-but-unmapped@example.com",
+      emailVerified: true,
+    });
+    await seedPersonEntity(db, { id: "person-name-only", name: "Matching Person Name" });
+    await seedIndexedFile(db, { id: "file-unresolved", sourceUpdatedAt: NOW.toISOString() });
+    await seedTask(db, {
+      id: "structural-withheld",
+      title: "Withheld structural task",
+      provenance: "structural",
+      assigneeEntityId: "person-name-only",
+      fileIds: ["file-unresolved"],
+    });
+    await seedTask(db, {
+      id: "reader-created-local",
+      title: "Reader-created local task",
+      provenance: "summary",
+      createdByUserId: user.id,
+      fileIds: ["file-unresolved"],
+    });
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: user.id,
+      maxItemsPerSection: 4,
+      baseContext: { outputDate: "2026-06-25", timezone: "UTC" },
+    });
+
+    expect(context?.openDurableTasks).toEqual([
+      expect.objectContaining({ id: "reader-created-local", createdByReader: true, assignedToReader: false }),
+    ]);
+    expect(context?.identityUnresolvedTaskCount).toBe(1);
   });
 });
 
@@ -642,6 +899,45 @@ describe("dailyBriefDefinition.reconcileItems", () => {
     };
   }
 
+  function todoItem(durableTaskId: unknown, overrides: Partial<AgentOutputItemInput> = {}): AgentOutputItemInput {
+    return {
+      sectionKey: "todos",
+      title: "Model todo title",
+      summary: "Model todo summary",
+      priority: "low",
+      label: "blocked",
+      actionLabel: "Unblock with Sketch",
+      actionPrompt: "Model prompt",
+      structuredPayload: { durableTaskId, unrelated: "model data" },
+      knowledgeRefs: { entityIds: ["model-entity"], fileIds: ["model-file"] },
+      sortOrder: 99,
+      ...overrides,
+    };
+  }
+
+  function durableTask(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id,
+      title: `Canonical ${id}`,
+      status: "open",
+      statusRaw: "Open",
+      priority: "medium",
+      provenance: "structural",
+      externalRef: `EXT-${id}`,
+      updatedAt: "2026-06-25T06:00:00.000Z",
+      createdByReader: false,
+      assignedToReader: true,
+      parentEntity: null,
+      assigneeEntity: { id: "person-reader", name: "Reader", sourceType: "person" },
+      knowledgeRefs: { entityIds: ["person-reader"], fileIds: [`file-${id}`] },
+      ...overrides,
+    };
+  }
+
+  function reconcileLogger() {
+    return { info: vi.fn() };
+  }
+
   it("uses the skeleton as truth: enriches matches, backfills skipped, drops invented meetings", async () => {
     const items: AgentOutputItemInput[] = [
       meetingItem("evt-1", {
@@ -651,11 +947,12 @@ describe("dailyBriefDefinition.reconcileItems", () => {
       meetingItem("ghost", { context: "Invented meeting." }),
       {
         sectionKey: "todos",
-        title: "Ship the thing",
+        title: "Model todo title",
         summary: "do it",
         priority: "high",
         label: "todo",
-        knowledgeRefs: { entityIds: [], fileIds: [] },
+        structuredPayload: { durableTaskId: "task-1" },
+        knowledgeRefs: { entityIds: ["model-entity"], fileIds: ["model-file"] },
         sortOrder: 0,
       },
     ];
@@ -664,7 +961,16 @@ describe("dailyBriefDefinition.reconcileItems", () => {
       (await dailyBriefDefinition.reconcileItems?.({
         db,
         items,
-        runtimeContext: { sections: ["meetings", "todos"], todaysMeetings: skeleton },
+        runtimeContext: {
+          sections: ["meetings", "todos"],
+          maxItemsPerSection: 4,
+          todaysMeetings: skeleton,
+          openDurableTasks: [durableTask("task-1")],
+          identityUnresolvedTaskCount: 0,
+        },
+        logger: reconcileLogger() as never,
+        outputId: "output-meetings",
+        userId: "user-meetings",
       })) ?? [];
 
     const meetings = result.filter((item) => item.sectionKey === DAILY_BRIEF_MEETINGS_SECTION_KEY);
@@ -693,6 +999,9 @@ describe("dailyBriefDefinition.reconcileItems", () => {
         db,
         items: [meetingItem("evt-1", null)],
         runtimeContext: { sections: ["meetings"], todaysMeetings: [] },
+        logger: reconcileLogger() as never,
+        outputId: "output-empty-meetings",
+        userId: "user-meetings",
       })) ?? [];
 
     expect(result).toEqual([]);
@@ -704,8 +1013,197 @@ describe("dailyBriefDefinition.reconcileItems", () => {
       db,
       items,
       runtimeContext: { sections: ["todos"], todaysMeetings: skeleton },
+      logger: reconcileLogger() as never,
+      outputId: "output-meetings-disabled",
+      userId: "user-meetings",
     });
 
     expect(result).toBe(items);
+  });
+
+  it("accepts only unique allowlisted durable task ids and canonicalizes task-owned fields", async () => {
+    const logger = reconcileLogger();
+    const customer = {
+      sectionKey: "customer_updates",
+      title: "Customer unchanged",
+      summary: "Keep this model content",
+      priority: "high",
+      label: "warm",
+      knowledgeRefs: { entityIds: ["customer-1"], fileIds: ["customer-file"] },
+      sortOrder: 0,
+    } satisfies AgentOutputItemInput;
+    const items = [
+      todoItem("task-valid"),
+      todoItem(undefined, { structuredPayload: {} }),
+      todoItem(42),
+      todoItem("task-invented"),
+      todoItem("task-valid"),
+      customer,
+    ];
+
+    const result =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items,
+        runtimeContext: {
+          sections: ["todos", "customer_updates"],
+          maxItemsPerSection: 4,
+          openDurableTasks: [
+            durableTask("task-valid", {
+              title: "Canonical urgent task",
+              status: "in_progress",
+              statusRaw: "Started",
+              priority: "urgent",
+              knowledgeRefs: { entityIds: ["project-1"], fileIds: ["canonical-file"] },
+            }),
+            durableTask("task-no-refs", {
+              knowledgeRefs: { entityIds: [], fileIds: [] },
+            }),
+          ],
+          identityUnresolvedTaskCount: 3,
+        },
+        logger: logger as never,
+        outputId: "output-reconcile",
+        userId: "user-reconcile",
+      })) ?? [];
+
+    expect(result.filter((item) => item.sectionKey === "todos")).toEqual([
+      expect.objectContaining({
+        title: "Canonical urgent task",
+        label: "in_progress",
+        priority: "high",
+        structuredPayload: { durableTaskId: "task-valid" },
+        knowledgeRefs: { entityIds: ["project-1"], fileIds: ["canonical-file"] },
+        sortOrder: 0,
+      }),
+    ]);
+    expect(result.find((item) => item.sectionKey === "customer_updates")).toBe(customer);
+    expect(JSON.stringify(result)).not.toContain("model-entity");
+    expect(JSON.stringify(result)).not.toContain("model-file");
+    expect(logger.info).toHaveBeenCalledTimes(1);
+    expect(logger.info.mock.calls[0]?.[0]).toEqual({
+      outputId: "output-reconcile",
+      userId: "user-reconcile",
+      allowedTaskCount: 1,
+      rejectedTaskCount: 4,
+      backfilledTaskCount: 0,
+      identityUnresolvedTaskCount: 3,
+    });
+    expect(Object.keys(logger.info.mock.calls[0]?.[0] ?? {}).sort()).toEqual(
+      [
+        "allowedTaskCount",
+        "backfilledTaskCount",
+        "identityUnresolvedTaskCount",
+        "outputId",
+        "rejectedTaskCount",
+        "userId",
+      ].sort(),
+    );
+  });
+
+  it("backfills unused tasks in updatedAt DESC then id ASC order and enforces the todo cap", async () => {
+    const logger = reconcileLogger();
+    const result =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items: [todoItem("task-b")],
+        runtimeContext: {
+          sections: ["todos"],
+          maxItemsPerSection: 3,
+          openDurableTasks: [
+            durableTask("task-a", {
+              priority: null,
+              updatedAt: "2026-06-25T06:00:00.000Z",
+            }),
+            durableTask("task-b", {
+              priority: "low",
+              updatedAt: "2026-06-25T06:00:00.000Z",
+            }),
+            durableTask("task-latest", {
+              status: "in_progress",
+              priority: "1",
+              updatedAt: "2026-06-25T07:00:00.000Z",
+            }),
+            durableTask("task-over-cap", {
+              updatedAt: "2026-06-25T05:00:00.000Z",
+            }),
+          ],
+          identityUnresolvedTaskCount: 0,
+        },
+        logger: logger as never,
+        outputId: "output-backfill",
+        userId: "user-backfill",
+      })) ?? [];
+
+    const todos = result.filter((item) => item.sectionKey === "todos");
+    expect(todos.map((item) => item.structuredPayload?.durableTaskId)).toEqual(["task-b", "task-latest", "task-a"]);
+    expect(todos.map((item) => item.priority)).toEqual(["low", "high", "medium"]);
+    expect(todos.map((item) => item.label)).toEqual(["todo", "in_progress", "todo"]);
+    expect(todos.slice(1)).toEqual([
+      expect.objectContaining({
+        summary: expect.any(String),
+        actionLabel: "Plan with Sketch",
+        actionPrompt: expect.any(String),
+        sortOrder: 1,
+      }),
+      expect.objectContaining({
+        summary: expect.any(String),
+        actionLabel: "Plan with Sketch",
+        actionPrompt: expect.any(String),
+        sortOrder: 2,
+      }),
+    ]);
+    expect(logger.info.mock.calls[0]?.[0]).toMatchObject({
+      allowedTaskCount: 4,
+      rejectedTaskCount: 0,
+      backfilledTaskCount: 2,
+    });
+  });
+
+  it("composes todo projection with meeting reconciliation while leaving customer and project items unchanged", async () => {
+    const logger = reconcileLogger();
+    const customer = {
+      sectionKey: "customer_updates",
+      title: "Customer update",
+      summary: "Customer model summary",
+      priority: "high",
+      label: "at_risk",
+      knowledgeRefs: { entityIds: ["customer-1"], fileIds: ["customer-file"] },
+      sortOrder: 0,
+    } satisfies AgentOutputItemInput;
+    const project = {
+      sectionKey: "active_projects",
+      title: "Project update",
+      summary: "Project model summary",
+      priority: "medium",
+      label: "active",
+      knowledgeRefs: { entityIds: ["project-1"], fileIds: ["project-file"] },
+      sortOrder: 0,
+    } satisfies AgentOutputItemInput;
+
+    const result =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items: [meetingItem("evt-1", { context: "Meeting context" }), todoItem("task-compose"), customer, project],
+        runtimeContext: {
+          sections: ["meetings", "todos", "customer_updates", "active_projects"],
+          maxItemsPerSection: 2,
+          todaysMeetings: [skeleton[0]],
+          openDurableTasks: [durableTask("task-compose")],
+          identityUnresolvedTaskCount: 0,
+        },
+        logger: logger as never,
+        outputId: "output-compose",
+        userId: "user-compose",
+      })) ?? [];
+
+    expect(result.map((item) => item.sectionKey)).toEqual(["meetings", "todos", "customer_updates", "active_projects"]);
+    expect(result[0]).toMatchObject({ title: "Standup", summary: "Meeting context" });
+    expect(result[1]).toMatchObject({
+      title: "Canonical task-compose",
+      structuredPayload: { durableTaskId: "task-compose" },
+    });
+    expect(result[2]).toBe(customer);
+    expect(result[3]).toBe(project);
   });
 });

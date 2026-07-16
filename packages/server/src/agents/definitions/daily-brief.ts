@@ -8,7 +8,7 @@ import {
   type AgentStructuredPayload,
   createAgentOutputRepository,
 } from "../../db/repositories/agent-outputs";
-import { whereLiveEntity } from "../../db/repositories/entities";
+import { createEntityRepository, whereLiveEntity } from "../../db/repositories/entities";
 import { createTaskRepository } from "../../db/repositories/tasks";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
@@ -33,6 +33,7 @@ export const DAILY_BRIEF_HOT_FALLBACK_LIMIT = 10;
 const FILE_ACCESS_FILTER_CHUNK_SIZE = 500;
 const DAILY_BRIEF_SUMMARY_OUTPUT_LIMIT = 10;
 const DAILY_BRIEF_SUMMARY_TASK_LIMIT = 50;
+const DAILY_BRIEF_DEFAULT_MAX_ITEMS_PER_SECTION = 4;
 
 export const DAILY_BRIEF_SECTION_LABELS = {
   meetings: ["meeting"],
@@ -149,6 +150,16 @@ type MeetingAttendeeEnrichment = {
   role?: string;
   note?: string;
   emphasis?: boolean;
+};
+
+type RuntimeDurableTask = {
+  id: string;
+  title: string;
+  status: "open" | "in_progress" | "done";
+  priority: string | null;
+  externalRef: string | null;
+  updatedAt: string;
+  knowledgeRefs: AgentKnowledgeRefs;
 };
 
 /** Per-attendee shape persisted in the meeting item's structured payload. */
@@ -686,10 +697,11 @@ const DAILY_BRIEF_INSTRUCTIONS = [
 ].join("\n");
 
 const DURABLE_TASKS_INSTRUCTION = [
-  "- The runtime context may include openDurableTasks and summaryTasks: tasks that already exist with the shown status. Render those as-is and only create todos for genuinely new work; do not duplicate an existing task.",
-  "- Some summary tasks may also appear in openDurableTasks. Treat matching ids, titles, or parents as one existing task, not as separate pieces of work.",
-  "- Use recentSummaries to understand what Summarizer already extracted from chat. Treat those action items as already-derived context, not as raw source material to derive again.",
-  "- Do not create a new todo if it matches an existing durable task or summary task. Create todos only for genuinely new work from non-Summarizer-covered sources or newly discovered evidence.",
+  "- The runtime context includes `openDurableTasks`, the complete allowlist for the todos section.",
+  "- Every emitted todo must set `structuredPayload.durableTaskId` to one of the task IDs in `openDurableTasks`.",
+  "- Todos may reference only IDs present in `openDurableTasks`. Do not emit a todo for any other task or inferred action.",
+  "- Preserve recentSummaries and summaryTasks only as context for describing allowlisted tasks. Do not derive new todos from recentSummaries or broad search.",
+  "- Search results, recent summaries, and other evidence must never create a newly inferred todo, even when they look actionable.",
 ].join("\n");
 
 function buildInstructions(): string {
@@ -827,6 +839,166 @@ function reconcileMeetingItems(items: AgentOutputItemInput[], meetings: TodaysMe
   });
 
   return [...reconciled, ...others];
+}
+
+function uniqueStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value.flatMap((entry) => {
+        const text = readString(entry);
+        return text ? [text] : [];
+      }),
+    ),
+  ];
+}
+
+function parseRuntimeDurableTasks(value: unknown): RuntimeDurableTask[] {
+  if (!Array.isArray(value)) return [];
+  const tasks: RuntimeDurableTask[] = [];
+  for (const entry of value) {
+    const task = asRecord(entry);
+    const id = readString(task?.id);
+    const title = readString(task?.title);
+    const status = readString(task?.status);
+    if (!id || !title || (status !== "open" && status !== "in_progress" && status !== "done")) continue;
+    const refs = asRecord(task?.knowledgeRefs);
+    tasks.push({
+      id,
+      title,
+      status,
+      priority: readString(task?.priority),
+      externalRef: readString(task?.externalRef),
+      updatedAt: readString(task?.updatedAt) ?? "",
+      knowledgeRefs: {
+        entityIds: uniqueStrings(refs?.entityIds),
+        fileIds: uniqueStrings(refs?.fileIds),
+      },
+    });
+  }
+  return tasks;
+}
+
+function normalizeDurableTaskPriority(value: string | null): "high" | "medium" | "low" {
+  const normalized = value
+    ?.trim()
+    .toLowerCase()
+    .replaceAll(/[\s_-]+/g, "");
+  if (!normalized) return "medium";
+  if (["1", "2", "p0", "p1", "urgent", "critical", "blocker", "highest", "high"].includes(normalized)) {
+    return "high";
+  }
+  if (["4", "p3", "p4", "lowest", "low", "minor", "trivial"].includes(normalized)) return "low";
+  if (["3", "p2", "medium", "normal", "default", "nopriority", "none"].includes(normalized)) return "medium";
+  return "medium";
+}
+
+function durableTaskLabel(status: RuntimeDurableTask["status"]): "todo" | "in_progress" | "done" {
+  if (status === "in_progress") return "in_progress";
+  if (status === "done") return "done";
+  return "todo";
+}
+
+function durableTaskFallbackSummary(status: RuntimeDurableTask["status"]): string {
+  if (status === "in_progress") return "In progress and ready for the next step.";
+  if (status === "done") return "Completed and ready to review.";
+  return "Open and ready for your attention.";
+}
+
+function durableTaskActionPrompt(task: RuntimeDurableTask): string {
+  if (task.status === "done") {
+    return `Review the completed task "${task.title}" with me using the linked organizational context. Summarize the outcome and any follow-up worth tracking.`;
+  }
+  return `Help me plan the next step for "${task.title}" using the linked organizational context. Summarize what matters, identify blockers, and propose a concrete next action.`;
+}
+
+function canonicalTodoItem(
+  task: RuntimeDurableTask,
+  source: AgentOutputItemInput | undefined,
+  sortOrder: number,
+): AgentOutputItemInput {
+  const label = durableTaskLabel(task.status);
+  return {
+    sectionKey: "todos",
+    title: task.title,
+    summary: readString(source?.summary) ?? durableTaskFallbackSummary(task.status),
+    priority: normalizeDurableTaskPriority(task.priority),
+    label,
+    displayRef: task.externalRef,
+    actionType: "task",
+    actionLabel: defaultActionLabel("todos", label),
+    actionPrompt: readString(source?.actionPrompt) ?? durableTaskActionPrompt(task),
+    sourceUrl: null,
+    structuredPayload: { durableTaskId: task.id },
+    knowledgeRefs: task.knowledgeRefs,
+    sortOrder,
+  };
+}
+
+function reconcileTodoItems(
+  items: AgentOutputItemInput[],
+  runtimeContext: Record<string, unknown>,
+): {
+  items: AgentOutputItemInput[];
+  allowedTaskCount: number;
+  rejectedTaskCount: number;
+  backfilledTaskCount: number;
+} {
+  const allowedById = new Map<string, RuntimeDurableTask>();
+  for (const task of parseRuntimeDurableTasks(runtimeContext.openDurableTasks)) {
+    if (task.knowledgeRefs.entityIds.length + task.knowledgeRefs.fileIds.length === 0) continue;
+    if (!allowedById.has(task.id)) allowedById.set(task.id, task);
+  }
+  if (!readStringArray(runtimeContext.sections).includes("todos")) {
+    return { items, allowedTaskCount: allowedById.size, rejectedTaskCount: 0, backfilledTaskCount: 0 };
+  }
+
+  const rawMaxItems = runtimeContext.maxItemsPerSection;
+  const maxItemsPerSection =
+    typeof rawMaxItems === "number" && Number.isFinite(rawMaxItems)
+      ? Math.max(0, Math.floor(rawMaxItems))
+      : DAILY_BRIEF_DEFAULT_MAX_ITEMS_PER_SECTION;
+  const modelTodos = items.filter((item) => item.sectionKey === "todos");
+  const otherItems = items.filter((item) => item.sectionKey !== "todos");
+  const usedIds = new Set<string>();
+  const accepted: AgentOutputItemInput[] = [];
+  let rejectedTaskCount = 0;
+
+  for (const item of modelTodos) {
+    const taskId = readString(item.structuredPayload?.durableTaskId);
+    const task = taskId ? allowedById.get(taskId) : undefined;
+    if (!task || usedIds.has(task.id) || accepted.length >= maxItemsPerSection) {
+      rejectedTaskCount += 1;
+      continue;
+    }
+    usedIds.add(task.id);
+    accepted.push(canonicalTodoItem(task, item, accepted.length));
+  }
+
+  const remaining = [...allowedById.values()]
+    .filter((task) => !usedIds.has(task.id))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
+  let backfilledTaskCount = 0;
+  for (const task of remaining) {
+    if (accepted.length >= maxItemsPerSection) break;
+    accepted.push(canonicalTodoItem(task, undefined, accepted.length));
+    backfilledTaskCount += 1;
+  }
+
+  if (modelTodos.length === 0 && accepted.length === 0) {
+    return {
+      items,
+      allowedTaskCount: allowedById.size,
+      rejectedTaskCount,
+      backfilledTaskCount,
+    };
+  }
+  return {
+    items: [...accepted, ...otherItems],
+    allowedTaskCount: allowedById.size,
+    rejectedTaskCount,
+    backfilledTaskCount,
+  };
 }
 
 async function enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]> {
@@ -974,25 +1146,81 @@ function compactRecentSummary(summary: AgentOutputWithItems) {
   };
 }
 
+async function resolveReaderTaskIdentity(args: AgentRuntimeContextArgs): Promise<{
+  verifiedEmails: string[];
+  assigneeEntityIds: string[];
+}> {
+  const verifiedEmails = [
+    ...new Set(
+      (await args.users.getVerifiedEmailsForUser(args.userId)).flatMap((email) => {
+        const normalized = normalizeEmail(email);
+        return normalized ? [normalized] : [];
+      }),
+    ),
+  ];
+  const entitiesByEmail = await createEntityRepository(args.db).getPersonEntitiesByEmails(verifiedEmails);
+  const assigneeEntityIds = new Set<string>();
+  for (const email of verifiedEmails) {
+    const matches = entitiesByEmail.get(email) ?? [];
+    if (matches.length === 1) assigneeEntityIds.add(matches[0].id);
+  }
+  return {
+    verifiedEmails,
+    assigneeEntityIds: [...assigneeEntityIds].sort(),
+  };
+}
+
+async function countIdentityUnresolvedStructuralTasks(
+  db: Kysely<DB>,
+  verifiedEmails: string[],
+  assigneeEntityIds: string[],
+): Promise<number> {
+  if (verifiedEmails.length === 0 || assigneeEntityIds.length > 0) return 0;
+  const evidence = await db
+    .selectFrom("tasks")
+    .innerJoin("task_evidence", "task_evidence.task_id", "tasks.id")
+    .innerJoin("indexed_files", "indexed_files.id", "task_evidence.ref_id")
+    .select(["tasks.id as taskId", "indexed_files.id as fileId"])
+    .where("tasks.valid_to", "is", null)
+    .where("tasks.status", "in", ["open", "in_progress"])
+    .where("tasks.provenance", "=", "structural")
+    .where("task_evidence.kind", "=", "file")
+    .where("indexed_files.is_archived", "=", 0)
+    .execute();
+  const visibleFileIds = await filterVisibleCandidateFileIds(
+    db,
+    evidence.map((row) => row.fileId),
+    verifiedEmails,
+  );
+  return new Set(evidence.filter((row) => visibleFileIds.has(row.fileId)).map((row) => row.taskId)).size;
+}
+
 async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Record<string, unknown>> {
   const taskRepo = createTaskRepository(args.db);
   const outputRepo = createAgentOutputRepository(args.db);
   const summarySince = dailyBriefSummarySince(args.baseContext);
-  const userEmails = await args.users.getAllEmailsForUser(args.userId);
-  const [openDurableTasks, recentSummaries, summaryTasks] = await Promise.all([
+  const runtimeMaxItemsPerSection =
+    typeof args.baseContext.maxItemsPerSection === "number" && Number.isFinite(args.baseContext.maxItemsPerSection)
+      ? Math.max(0, Math.floor(args.baseContext.maxItemsPerSection))
+      : args.maxItemsPerSection;
+  const { verifiedEmails, assigneeEntityIds } = await resolveReaderTaskIdentity(args);
+  const [openDurableTasks, recentSummaries, summaryTasks, identityUnresolvedTaskCount] = await Promise.all([
     taskRepo.loadOpenDurableTasksForBrief({
       userId: args.userId,
-      userEmails,
-      limit: args.maxItemsPerSection * 4,
+      userEmails: verifiedEmails,
+      assigneeEntityIds,
+      limit: runtimeMaxItemsPerSection * 4,
     }),
     outputRepo.listCompletedForUserSince(CONVERSATION_SUMMARY_AGENT_KEY, args.userId, summarySince, {
       limit: DAILY_BRIEF_SUMMARY_OUTPUT_LIMIT,
     }),
     taskRepo.loadSummaryTasksForBrief({
       userId: args.userId,
+      assigneeEntityIds,
       since: summarySince,
       limit: DAILY_BRIEF_SUMMARY_TASK_LIMIT,
     }),
+    countIdentityUnresolvedStructuralTasks(args.db, verifiedEmails, assigneeEntityIds),
   ]);
   return {
     openDurableTasks: openDurableTasks.map((task) => ({
@@ -1000,10 +1228,27 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
       title: task.title,
       status: task.status,
       statusRaw: task.status_raw,
+      priority: task.priority,
       provenance: task.provenance,
       externalRef: task.external_ref,
-      parentEntityId: task.parent_entity_id,
       updatedAt: task.updated_at,
+      createdByReader: task.createdByReader,
+      assignedToReader: task.assignedToReader,
+      parentEntity: task.parentEntity
+        ? {
+            id: task.parentEntity.id,
+            name: task.parentEntity.name,
+            sourceType: task.parentEntity.source_type,
+          }
+        : null,
+      assigneeEntity: task.assigneeEntity
+        ? {
+            id: task.assigneeEntity.id,
+            name: task.assigneeEntity.name,
+            sourceType: task.assigneeEntity.source_type,
+          }
+        : null,
+      knowledgeRefs: task.knowledgeRefs,
     })),
     recentSummaries: recentSummaries.map(compactRecentSummary),
     summaryTasks: summaryTasks.map((task) => ({
@@ -1015,6 +1260,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
       parentEntityId: task.parent_entity_id,
       updatedAt: task.updated_at,
     })),
+    identityUnresolvedTaskCount,
     sameDayPreviousOutput: dropCompletedTodos(args.baseContext.sameDayPreviousOutput as FormattedPriorOutput | null),
     previousDayOutput: dropCompletedTodos(args.baseContext.previousDayOutput as FormattedPriorOutput | null),
   };
@@ -1083,10 +1329,27 @@ export const dailyBriefDefinition: AgentDefinition = {
     ]);
     return { dailyBriefCandidateContext, todaysMeetings };
   },
-  reconcileItems: async ({ items, runtimeContext }) => {
+  reconcileItems: async ({ items, runtimeContext, logger, outputId, userId }) => {
     const sections = Array.isArray(runtimeContext.sections) ? (runtimeContext.sections as string[]) : [];
-    if (!sections.includes(DAILY_BRIEF_MEETINGS_SECTION_KEY)) return items;
-    return reconcileMeetingItems(items, parseTodaysMeetings(runtimeContext.todaysMeetings));
+    const todoResult = reconcileTodoItems(items, runtimeContext);
+    const reconciled = sections.includes(DAILY_BRIEF_MEETINGS_SECTION_KEY)
+      ? reconcileMeetingItems(todoResult.items, parseTodaysMeetings(runtimeContext.todaysMeetings))
+      : todoResult.items;
+    logger.info(
+      {
+        outputId,
+        userId,
+        allowedTaskCount: todoResult.allowedTaskCount,
+        rejectedTaskCount: todoResult.rejectedTaskCount,
+        backfilledTaskCount: todoResult.backfilledTaskCount,
+        identityUnresolvedTaskCount:
+          typeof runtimeContext.identityUnresolvedTaskCount === "number"
+            ? runtimeContext.identityUnresolvedTaskCount
+            : 0,
+      },
+      "Daily Brief: todo reconciliation",
+    );
+    return reconciled;
   },
   enrichItems,
   toApiItem,
