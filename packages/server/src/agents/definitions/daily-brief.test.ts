@@ -4,7 +4,7 @@ import type { AgentOutputItemInput } from "../../db/repositories/agent-outputs";
 import { createTaskRepository } from "../../db/repositories/tasks";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB, UsersTable } from "../../db/schema";
-import { createTestConfig, createTestDb } from "../../test-utils";
+import { createTestConfig, createTestDb, createTestLogger } from "../../test-utils";
 import {
   DAILY_BRIEF_ENTITY_WINDOW_DAYS,
   DAILY_BRIEF_EVIDENCE_WINDOW_DAYS,
@@ -1252,5 +1252,57 @@ describe("dailyBriefDefinition.reconcileItems", () => {
     });
     expect(result[2]).toBe(customer);
     expect(result[3]).toBe(project);
+  });
+});
+
+describe("dailyBriefDefinition.onOutputSaved", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedUser(db, { id: "user-1", name: "Agent User", email: "agent@example.com", emailVerified: true });
+    await seedConnectorConfig(db);
+    await seedPersonEntity(db, {
+      id: "person-agent",
+      name: "Agent User",
+      emails: ["agent@example.com"],
+    });
+    await seedIndexedFile(db, { id: "task-source", sourceUpdatedAt: NOW.toISOString() });
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("skips promotion for every todo carrying a valid durable task id even when task creation is enabled", async () => {
+    await dailyBriefDefinition.onOutputSaved?.({
+      db,
+      config: createTestConfig(),
+      logger: createTestLogger(),
+      userId: "user-1",
+      outputId: "output-task-backed",
+      createTasks: true,
+      items: [
+        {
+          sectionKey: "todos",
+          title: "Task-backed todo",
+          summary: "Already represents a durable task.",
+          priority: "high",
+          label: "todo",
+          structuredPayload: {
+            durableTaskId: "durable-task-1",
+            assigneeName: "Agent User",
+          },
+          knowledgeRefs: { entityIds: [], fileIds: ["task-source"] },
+          sortOrder: 0,
+        },
+      ],
+    });
+
+    const row = await db
+      .selectFrom("tasks")
+      .select((eb) => eb.fn.countAll<number>().as("count"))
+      .executeTakeFirstOrThrow();
+    expect(Number(row.count)).toBe(0);
   });
 });

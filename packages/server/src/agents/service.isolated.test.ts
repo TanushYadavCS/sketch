@@ -561,6 +561,8 @@ describe("AgentRunService", () => {
       db,
       tasks,
       briefItem({
+        sectionKey: "customer_updates",
+        label: "warm",
         sourceUrl: "javascript:alert(1)",
         knowledgeRefs: { entityIds: [], fileIds: ["safe-source-file"] },
       }),
@@ -576,7 +578,7 @@ describe("AgentRunService", () => {
     await tasks[0]();
     const output = await service.getByIdForUser(DAILY_BRIEF_AGENT_KEY, row.id, user.id);
 
-    expect(output?.sections.todos[0].sourceUrl).toBe("https://docs.example.com/source");
+    expect(output?.sections.customer_updates[0].sourceUrl).toBe("https://docs.example.com/source");
   });
 
   it("drops agent-provided source URLs when referenced files have no provider URL", async () => {
@@ -588,6 +590,8 @@ describe("AgentRunService", () => {
       db,
       tasks,
       briefItem({
+        sectionKey: "customer_updates",
+        label: "warm",
         sourceUrl: "https://phishing.example.com/source",
         knowledgeRefs: { entityIds: [], fileIds: ["source-file-without-url"] },
       }),
@@ -603,7 +607,7 @@ describe("AgentRunService", () => {
     await tasks[0]();
     const output = await service.getByIdForUser(DAILY_BRIEF_AGENT_KEY, row.id, user.id);
 
-    expect(output?.sections.todos[0].sourceUrl).toBeNull();
+    expect(output?.sections.customer_updates[0].sourceUrl).toBeNull();
   });
 
   it("passes Daily Brief candidate context into the agent runtime message", async () => {
@@ -830,7 +834,7 @@ describe("AgentRunService", () => {
     expect(latest.enabledSections).not.toContain("customer_updates");
   });
 
-  it("defaults agent task creation off and passes the toggle through runtime context", async () => {
+  it("keeps the create-tasks toggle harmless for inferred Daily Brief todos", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
     const user = await users.create({ name: "Agent User", email: "user@example.com", emailVerified: true });
@@ -930,7 +934,7 @@ describe("AgentRunService", () => {
 
     expect(defaultConfig?.createTasks).toBe(false);
     expect(disabledCount.count).toBe(0);
-    expect(enabledCount.count).toBe(1);
+    expect(enabledCount.count).toBe(0);
     expect(contexts.map((context) => context.createTasks)).toEqual([false, true]);
   });
 

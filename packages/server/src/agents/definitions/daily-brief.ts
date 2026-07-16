@@ -1266,6 +1266,7 @@ async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
   const taskRepo = createTaskRepository(args.db);
   for (const item of args.items) {
     if (item.sectionKey !== "todos") continue;
+    if (readString(item.structuredPayload?.durableTaskId)) continue;
     try {
       await taskRepo.promoteBriefTask({
         userId: args.userId,
