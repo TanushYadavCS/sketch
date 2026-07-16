@@ -253,6 +253,7 @@ function createPausedQueueManager(tasks: Array<() => Promise<void>>): QueueManag
     getQueue: () => ({
       enqueue: (task: () => Promise<void>) => {
         tasks.push(task);
+        return true;
       },
     }),
   } as unknown as QueueManager;

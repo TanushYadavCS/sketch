@@ -1863,6 +1863,21 @@ export class AgentRunService {
           if (params.triggerType === "manual" && existingRunning.trigger_type === "scheduled") {
             const admission = this.scheduledRunAdmissions.get(existingRunning.id);
             if (!admission || admission.state !== "active") {
+              let resolveReplacement!: (run: boolean) => void;
+              const replacementDecision = new Promise<boolean>((resolve) => {
+                resolveReplacement = resolve;
+              });
+              const replacementAccepted = this.enqueueRun(
+                def.key,
+                existingRunning.id,
+                user.id,
+                "manual",
+                replacementDecision,
+              );
+              if (!replacementAccepted) {
+                rows.push(existingRunning);
+                continue;
+              }
               if (admission) {
                 admission.state = "promoted";
                 admission.controller.abort();
@@ -1870,14 +1885,17 @@ export class AgentRunService {
               try {
                 const promoted = await this.repo.promoteRunningToManual(def.key, existingRunning.id);
                 if (!promoted) {
+                  resolveReplacement(false);
+                  if (admission) this.enqueueRun(def.key, existingRunning.id, user.id, "scheduled");
                   const current = await this.repo.findById(def.key, existingRunning.id);
                   rows.push(current ?? existingRunning);
                   continue;
                 }
-                this.enqueueRun(def.key, existingRunning.id, user.id, "manual");
+                resolveReplacement(true);
                 rows.push(promoted);
                 continue;
               } catch (err) {
+                resolveReplacement(false);
                 if (admission) this.enqueueRun(def.key, existingRunning.id, user.id, "scheduled");
                 throw err;
               }
@@ -1975,12 +1993,19 @@ export class AgentRunService {
     );
   }
 
-  private enqueueRun(agentKey: string, outputId: string, userId: string, triggerType: AgentOutputTriggerType): void {
+  private enqueueRun(
+    agentKey: string,
+    outputId: string,
+    userId: string,
+    triggerType: AgentOutputTriggerType,
+    startWhen?: Promise<boolean>,
+  ): boolean {
     const admission =
       triggerType === "scheduled" ? { controller: new AbortController(), state: "queued" as const } : undefined;
     if (admission) this.scheduledRunAdmissions.set(outputId, admission);
     const task = async () => {
       try {
+        if (startWhen && !(await startWhen)) return;
         await this.generateExistingOutput(agentKey, outputId, userId, admission);
       } finally {
         if (admission && this.scheduledRunAdmissions.get(outputId) === admission) {
@@ -1989,12 +2014,16 @@ export class AgentRunService {
       }
     };
     if (this.deps.queueManager) {
-      this.deps.queueManager.getQueue(`agent-${agentKey}-${userId}`).enqueue(task);
-      return;
+      const accepted = this.deps.queueManager.getQueue(`agent-${agentKey}-${userId}`).enqueue(task);
+      if (!accepted && admission && this.scheduledRunAdmissions.get(outputId) === admission) {
+        this.scheduledRunAdmissions.delete(outputId);
+      }
+      return accepted;
     }
     task().catch((err) => {
       this.deps.logger.error({ err, agentKey, outputId, userId }, "Agent: background generation failed");
     });
+    return true;
   }
 
   private formatOutputForContext(api: AgentOutputApi | null) {

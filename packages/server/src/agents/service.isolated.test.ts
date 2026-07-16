@@ -37,6 +37,7 @@ function createPausedQueueManager(tasks: Array<() => Promise<void>>): QueueManag
     getQueue: () => ({
       enqueue: (task: () => Promise<void>) => {
         tasks.push(task);
+        return true;
       },
     }),
   } as unknown as QueueManager;
@@ -3461,6 +3462,56 @@ describe("AgentRunService", () => {
     await tasks.shift()?.();
     expect(interactiveRunAgent).toHaveBeenCalledTimes(1);
     expect(scheduledRunAgent).not.toHaveBeenCalled();
+  });
+
+  it("keeps the scheduled generation when the manual replacement queue is full", async () => {
+    const acceptedTasks: Array<() => Promise<void>> = [];
+    let enqueueCalls = 0;
+    const queueManager = {
+      getQueue: () => ({
+        enqueue: (task: () => Promise<void>) => {
+          enqueueCalls += 1;
+          if (enqueueCalls > 1) return false;
+          acceptedTasks.push(task);
+          return true;
+        },
+      }),
+    } as unknown as QueueManager;
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const interactiveRunAgent = vi.fn(async () => {
+      throw new Error("interactive test stop");
+    }) as unknown as AgentRunServiceDeps["runAgent"];
+    const scheduledRunAgent = vi.fn(async () => {
+      throw new Error("scheduled test stop");
+    }) as unknown as AgentRunServiceDeps["runScheduledAgent"];
+    const service = createService(db, [], {
+      queueManager,
+      runAgent: interactiveRunAgent,
+      runScheduledAgent: scheduledRunAgent,
+    });
+
+    const [scheduled] = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    const [manual] = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+
+    expect(enqueueCalls).toBe(2);
+    expect(acceptedTasks).toHaveLength(1);
+    expect(manual.id).toBe(scheduled.id);
+    expect(manual.trigger_type).toBe("scheduled");
+
+    await acceptedTasks[0]?.();
+    expect(scheduledRunAgent).toHaveBeenCalledTimes(1);
+    expect(interactiveRunAgent).not.toHaveBeenCalled();
   });
 
   it("keeps an admitted scheduled generation instead of duplicating it for a manual request", async () => {
