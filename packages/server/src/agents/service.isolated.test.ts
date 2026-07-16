@@ -3422,6 +3422,93 @@ describe("AgentRunService", () => {
     expect(scheduledRunAgent).toHaveBeenCalledTimes(1);
   });
 
+  it("promotes a queued scheduled generation when a manual request coalesces onto it", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const interactiveRunAgent = vi.fn(async () => {
+      throw new Error("interactive test stop");
+    }) as unknown as AgentRunServiceDeps["runAgent"];
+    const scheduledRunAgent = vi.fn(async () => {
+      throw new Error("scheduled test stop");
+    }) as unknown as AgentRunServiceDeps["runScheduledAgent"];
+    const service = createService(db, tasks, {
+      runAgent: interactiveRunAgent,
+      runScheduledAgent: scheduledRunAgent,
+    });
+
+    const [scheduled] = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    const [manual] = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+
+    expect(manual.id).toBe(scheduled.id);
+    expect(manual.trigger_type).toBe("manual");
+    expect(tasks).toHaveLength(2);
+
+    await tasks.shift()?.();
+    expect(scheduledRunAgent).not.toHaveBeenCalled();
+    expect(interactiveRunAgent).not.toHaveBeenCalled();
+
+    await tasks.shift()?.();
+    expect(interactiveRunAgent).toHaveBeenCalledTimes(1);
+    expect(scheduledRunAgent).not.toHaveBeenCalled();
+  });
+
+  it("keeps an admitted scheduled generation instead of duplicating it for a manual request", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    let releaseScheduled!: () => void;
+    const scheduledGate = new Promise<void>((resolve) => {
+      releaseScheduled = resolve;
+    });
+    const interactiveRunAgent = vi.fn(async () => {
+      throw new Error("interactive test stop");
+    }) as unknown as AgentRunServiceDeps["runAgent"];
+    const scheduledRunAgent = vi.fn(async (_params, admission) => {
+      admission?.onStart?.();
+      await scheduledGate;
+      throw new Error("scheduled test stop");
+    }) as unknown as AgentRunServiceDeps["runScheduledAgent"];
+    const service = createService(db, tasks, {
+      runAgent: interactiveRunAgent,
+      runScheduledAgent: scheduledRunAgent,
+    });
+
+    const [scheduled] = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    const runningTask = tasks.shift()?.();
+    await vi.waitFor(() => expect(scheduledRunAgent).toHaveBeenCalledTimes(1));
+
+    const [manual] = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+
+    expect(manual.id).toBe(scheduled.id);
+    expect(manual.trigger_type).toBe("scheduled");
+    expect(tasks).toHaveLength(0);
+    expect(interactiveRunAgent).not.toHaveBeenCalled();
+
+    releaseScheduled();
+    await runningTask;
+  });
+
   it("uses the latest delivery config after a scheduled run completes", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);

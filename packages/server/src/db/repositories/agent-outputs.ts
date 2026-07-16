@@ -439,6 +439,18 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .executeTakeFirst();
     },
 
+    async promoteRunningToManual(agentKey: string, id: string): Promise<AgentOutputRow | undefined> {
+      const result = await db
+        .updateTable("agent_outputs")
+        .set({ trigger_type: "manual", updated_at: new Date().toISOString() })
+        .where("agent_key", "=", agentKey)
+        .where("id", "=", id)
+        .where("status", "=", "running")
+        .executeTakeFirst();
+      if (affectedRows(result) === 0) return undefined;
+      return this.findById(agentKey, id);
+    },
+
     async findRunning(
       agentKey: string,
       userId: string,

@@ -5,7 +5,7 @@
  */
 import { serve } from "@hono/node-server";
 import type { Kysely } from "kysely";
-import { createAgentRunLimiter } from "./agent/concurrency-limiter";
+import { type AgentRunAdmissionOptions, createAgentRunLimiter } from "./agent/concurrency-limiter";
 import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/environment";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
@@ -235,8 +235,10 @@ export async function createServer(config: Config, options?: CreateServerOptions
   };
   const trackedRunAgent = (params: RunAgentParams): Promise<RunAgentResult> =>
     runTrackedAgent(params, limitAgentExecution);
-  const trackedScheduledRunAgent = (params: RunAgentParams): Promise<RunAgentResult> =>
-    runTrackedAgent(params, limitScheduledAgentExecution);
+  const trackedScheduledRunAgent = (
+    params: RunAgentParams,
+    admission?: AgentRunAdmissionOptions,
+  ): Promise<RunAgentResult> => runTrackedAgent(params, (work) => scheduledAgentRunLimiter.run(work, admission));
 
   // 4. LLM env from DB
   async function applyLlmEnvFromDb() {

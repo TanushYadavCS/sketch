@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Logger } from "../logger";
-import { createAgentRunLimiter } from "./concurrency-limiter";
+import { AgentRunAdmissionCancelledError, createAgentRunLimiter } from "./concurrency-limiter";
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -95,6 +95,39 @@ describe("AgentRunLimiter", () => {
     await expect(first).rejects.toThrow("first failed");
     await vi.waitFor(() => expect(started).toEqual([0, 1]));
     await expect(second).resolves.toBe("second complete");
+    expect(limiter.snapshot()).toEqual({ limit: 1, active: 0, waiting: 0 });
+  });
+
+  it("cancels a waiting admission without consuming or disturbing the next slot", async () => {
+    const { logger } = captureLogger();
+    const limiter = createAgentRunLimiter({ limit: 1, queue: "scheduled", logger });
+    const releaseFirst = deferred<void>();
+    const controller = new AbortController();
+    const started: string[] = [];
+
+    const first = limiter.run(async () => {
+      started.push("first");
+      await releaseFirst.promise;
+    });
+    const cancelled = limiter.run(
+      async () => {
+        started.push("cancelled");
+      },
+      { signal: controller.signal },
+    );
+    const third = limiter.run(async () => {
+      started.push("third");
+    });
+
+    await vi.waitFor(() => expect(limiter.snapshot()).toEqual({ limit: 1, active: 1, waiting: 2 }));
+    controller.abort();
+    await expect(cancelled).rejects.toBeInstanceOf(AgentRunAdmissionCancelledError);
+    expect(limiter.snapshot()).toEqual({ limit: 1, active: 1, waiting: 1 });
+
+    releaseFirst.resolve();
+    await first;
+    await third;
+    expect(started).toEqual(["first", "third"]);
     expect(limiter.snapshot()).toEqual({ limit: 1, active: 0, waiting: 0 });
   });
 

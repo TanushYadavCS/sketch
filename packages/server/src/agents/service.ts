@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { areJidsSameUser } from "@whiskeysockets/baileys";
 import type { Kysely, Selectable } from "kysely";
+import { AgentRunAdmissionCancelledError, type AgentRunAdmissionOptions } from "../agent/concurrency-limiter";
 import { buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams, RunAgentResult } from "../agent/runner";
 import type { AgentOutputWriter, WriteAgentOutputPayload } from "../agent/tools/agent-output";
@@ -74,7 +75,7 @@ export interface AgentRunServiceDeps {
   users: ReturnType<typeof createUserRepository>;
   settings: ReturnType<typeof createSettingsRepository>;
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
-  runScheduledAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
+  runScheduledAgent: (params: RunAgentParams, admission?: AgentRunAdmissionOptions) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: QueueManager;
@@ -804,6 +805,10 @@ function emptySections(def: AgentDefinition): Record<string, AgentApiItem[]> {
  * definition only describes contract and shaping.
  */
 export class AgentRunService {
+  private readonly scheduledRunAdmissions = new Map<
+    string,
+    { controller: AbortController; state: "queued" | "active" | "promoted" }
+  >();
   private repo: ReturnType<typeof createAgentOutputRepository>;
   private deps: AgentRunServiceDeps;
 
@@ -1855,6 +1860,29 @@ export class AgentRunService {
       const existingRunning = await this.repo.findRunning(def.key, user.id, periodKey, scope.sourceKey);
       if (existingRunning) {
         if (!this.isRunningStale(existingRunning, now)) {
+          if (params.triggerType === "manual" && existingRunning.trigger_type === "scheduled") {
+            const admission = this.scheduledRunAdmissions.get(existingRunning.id);
+            if (!admission || admission.state !== "active") {
+              if (admission) {
+                admission.state = "promoted";
+                admission.controller.abort();
+              }
+              try {
+                const promoted = await this.repo.promoteRunningToManual(def.key, existingRunning.id);
+                if (!promoted) {
+                  const current = await this.repo.findById(def.key, existingRunning.id);
+                  rows.push(current ?? existingRunning);
+                  continue;
+                }
+                this.enqueueRun(def.key, existingRunning.id, user.id, "manual");
+                rows.push(promoted);
+                continue;
+              } catch (err) {
+                if (admission) this.enqueueRun(def.key, existingRunning.id, user.id, "scheduled");
+                throw err;
+              }
+            }
+          }
           rows.push(existingRunning);
           continue;
         }
@@ -1885,7 +1913,7 @@ export class AgentRunService {
         timezone,
         triggerType: params.triggerType,
       });
-      if (result.created) this.enqueueRun(def.key, result.row.id, user.id);
+      if (result.created) this.enqueueRun(def.key, result.row.id, user.id, params.triggerType);
       rows.push(result.row);
     }
 
@@ -1947,9 +1975,18 @@ export class AgentRunService {
     );
   }
 
-  private enqueueRun(agentKey: string, outputId: string, userId: string): void {
+  private enqueueRun(agentKey: string, outputId: string, userId: string, triggerType: AgentOutputTriggerType): void {
+    const admission =
+      triggerType === "scheduled" ? { controller: new AbortController(), state: "queued" as const } : undefined;
+    if (admission) this.scheduledRunAdmissions.set(outputId, admission);
     const task = async () => {
-      await this.generateExistingOutput(agentKey, outputId, userId);
+      try {
+        await this.generateExistingOutput(agentKey, outputId, userId, admission);
+      } finally {
+        if (admission && this.scheduledRunAdmissions.get(outputId) === admission) {
+          this.scheduledRunAdmissions.delete(outputId);
+        }
+      }
     };
     if (this.deps.queueManager) {
       this.deps.queueManager.getQueue(`agent-${agentKey}-${userId}`).enqueue(task);
@@ -2018,7 +2055,13 @@ export class AgentRunService {
     );
   }
 
-  private async generateExistingOutput(agentKey: string, outputId: string, userId: string): Promise<void> {
+  private async generateExistingOutput(
+    agentKey: string,
+    outputId: string,
+    userId: string,
+    scheduledAdmission?: { controller: AbortController; state: "queued" | "active" | "promoted" },
+  ): Promise<void> {
+    if (scheduledAdmission?.state === "promoted" || scheduledAdmission?.controller.signal.aborted) return;
     const def = requireAgentDefinition(agentKey);
     const output = await this.repo.findById(def.key, outputId);
     const user = await this.deps.users.findById(userId);
@@ -2130,8 +2173,7 @@ export class AgentRunService {
       });
       const integrationMcpServers = this.deps.buildMcpServers ? await this.deps.buildMcpServers(user.email) : {};
       const workspaceDir = join(this.deps.config.DATA_DIR, "workspaces", user.id);
-      const executeAgent = output.trigger_type === "scheduled" ? this.deps.runScheduledAgent : this.deps.runAgent;
-      const result = await executeAgent({
+      const agentParams: RunAgentParams = {
         db: this.deps.db,
         workspaceKey: user.id,
         userMessage,
@@ -2154,7 +2196,16 @@ export class AgentRunService {
         agentInstructions: def.buildInstructions(),
         agentAllowedTools: def.allowedTools,
         agentOutputWriter: writer,
-      });
+      };
+      const result =
+        output.trigger_type === "scheduled" && scheduledAdmission
+          ? await this.deps.runScheduledAgent(agentParams, {
+              signal: scheduledAdmission.controller.signal,
+              onStart: () => {
+                if (scheduledAdmission.state === "queued") scheduledAdmission.state = "active";
+              },
+            })
+          : await this.deps.runAgent(agentParams);
       if (!saved) {
         await this.repo.markFailed(outputId, "Agent did not call WriteAgentOutput.");
       } else {
@@ -2166,6 +2217,7 @@ export class AgentRunService {
         await this.deliverCompletedOutput(def, outputId, user.id);
       }
     } catch (err) {
+      if (err instanceof AgentRunAdmissionCancelledError) return;
       const message = err instanceof Error ? err.message : String(err);
       await this.repo.markFailed(outputId, message);
       this.deps.logger.error({ err, agentKey, outputId, userId }, "Agent: generation failed");
