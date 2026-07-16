@@ -272,21 +272,27 @@ export async function createServer(config: Config, options?: CreateServerOptions
   let whatsapp: WhatsAppSocketFacade;
   if (config.WHATSAPP_RUNTIME_MODE === "gateway" && usesBaileys) {
     whatsappSupervisor = new WhatsAppGatewaySupervisor({ db, config, logger });
-    if (connect) {
-      whatsapp = await whatsappSupervisor.start();
-    } else {
+    /**
+     * Keeps one application facade stable across gateway child exits and reads
+     * status from the live supervisor client after startup or pairing.
+     */
+    const createGatewayFacade = async (): Promise<GatewayClientFacade> => {
       const lease = await db
         .selectFrom("whatsapp_session_lease")
         .select("gateway_http_token")
         .where("id", "=", "default")
         .executeTakeFirst();
-      whatsapp = new GatewayClientFacade({
+      return new GatewayClientFacade({
         baseUrl: `http://127.0.0.1:${config.WHATSAPP_GATEWAY_PORT}`,
         token: lease?.gateway_http_token ?? "gateway-not-started",
         logger,
         beforePairingStart: () => whatsappSupervisor?.ensurePairingReady().then(() => undefined) ?? Promise.resolve(),
+        pairingStatus: async () =>
+          whatsappSupervisor?.facade?.pairing.status() ?? { connected: false, phoneNumber: null },
       });
-    }
+    };
+    if (connect) await whatsappSupervisor.start();
+    whatsapp = await createGatewayFacade();
   } else {
     inProcessWhatsAppLease = new InProcessWhatsAppLease({
       db,

@@ -140,6 +140,70 @@ describe("WhatsApp gateway supervision decisions", () => {
 });
 
 describe("WhatsAppGatewaySupervisor lifecycle", () => {
+  it("continues startup in pairing-required state after an initial logout exit", async () => {
+    const db = await createTestDb();
+    const child = fakeChild(100);
+    const spawn = vi.fn(() => {
+      queueMicrotask(() => child.emit("exit", 64, null));
+      return child;
+    });
+    const supervisor = new WhatsAppGatewaySupervisor({
+      db,
+      config: createTestConfig({ WHATSAPP_RUNTIME_MODE: "gateway" }),
+      logger: createTestLogger(),
+      gatewayScriptPath: fileURLToPath(import.meta.url),
+      spawn: spawn as unknown as typeof import("node:child_process").spawn,
+      sleep: () => new Promise((resolve) => setTimeout(resolve, 0)),
+    });
+
+    await expect(supervisor.start()).resolves.toBeNull();
+    expect(supervisor.requiresPairing).toBe(true);
+
+    const internals = supervisor as unknown as SupervisorInternals;
+    const appFacade = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+      beforePairingStart: () => supervisor.ensurePairingReady().then(() => undefined),
+      fetch: async () =>
+        new Response('data: {"type":"qr","qr":"initial-pair-qr"}\n\n', {
+          headers: { "Content-Type": "text/event-stream" },
+        }),
+    });
+    vi.spyOn(internals, "spawnAndWait").mockImplementation(async () => {
+      internals.child = fakeChild(101);
+      internals.client = appFacade;
+      return appFacade;
+    });
+    vi.spyOn(internals, "startHealthPolling").mockImplementation(() => undefined);
+    const events: unknown[] = [];
+
+    await appFacade.pairing.startQr(async (event) => {
+      events.push(event);
+    });
+
+    expect(events).toEqual([{ type: "qr", qr: "initial-pair-qr" }]);
+    expect(supervisor.requiresPairing).toBe(false);
+    expect(spawn).toHaveBeenCalledOnce();
+    await db.destroy();
+  });
+
+  it("rejects startup failures that are not logout exits", async () => {
+    const db = await createTestDb();
+    const supervisor = new WhatsAppGatewaySupervisor({
+      db,
+      config: createTestConfig({ WHATSAPP_RUNTIME_MODE: "gateway" }),
+      logger: createTestLogger(),
+      gatewayScriptPath: fileURLToPath(import.meta.url),
+    });
+    const internals = supervisor as unknown as SupervisorInternals;
+    vi.spyOn(internals, "spawnAndWait").mockRejectedValue(new Error("spawn failed"));
+
+    await expect(supervisor.start()).rejects.toThrow("spawn failed");
+    expect(supervisor.requiresPairing).toBe(false);
+    await db.destroy();
+  });
+
   it("respawns on a pairing request after a logout exit and streams QR events", async () => {
     const db = await createTestDb();
     const supervisorRef: { current?: WhatsAppGatewaySupervisor } = {};

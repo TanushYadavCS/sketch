@@ -7,8 +7,9 @@ import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import type { DB } from "./db/schema";
 import { createApp } from "./http";
-import { createTestConfig, createTestDb } from "./test-utils";
+import { createTestConfig, createTestDb, createTestLogger } from "./test-utils";
 import type { WhatsAppPairingEvent, WhatsAppSocketFacade } from "./whatsapp/facade-contract";
+import { GatewayClientFacade } from "./whatsapp/gateway-client-facade";
 
 const config = createTestConfig();
 
@@ -517,6 +518,56 @@ describe("WhatsApp endpoints", () => {
 
       const body = await res.json();
       expect(body.success).toBe(true);
+    });
+
+    it("returns success when gateway cancellation aborts the active QR stream", async () => {
+      await seedAdmin(db);
+      const settings = createSettingsRepository(db);
+      await settings.update({ onboardingCompletedAt: new Date().toISOString() });
+      let pairingStarted = false;
+      const whatsapp = new GatewayClientFacade({
+        baseUrl: "http://127.0.0.1:3901",
+        token: "secret",
+        logger: createTestLogger(),
+        fetch: async (input, init) => {
+          const path = new URL(String(input)).pathname;
+          if (path === "/pairing-sessions/current" && init?.method === "DELETE") {
+            return new Response(JSON.stringify({ ok: true }), {
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (path === "/pairing-sessions/current") {
+            return new Response(JSON.stringify({ connected: false, phoneNumber: null }), {
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          const signal = init?.signal as AbortSignal;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                pairingStarted = true;
+                controller.enqueue(new TextEncoder().encode('data: {"type":"qr","qr":"cancel-route"}\n\n'));
+                signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+              },
+            }),
+            { headers: { "Content-Type": "text/event-stream" } },
+          );
+        },
+      });
+      const app = createApp(db, config, { whatsapp });
+      const cookie = await loginAdmin(app);
+      const pairingResponse = await app.request("/api/channels/whatsapp/pair", { headers: { Cookie: cookie } });
+      const pairingBody = pairingResponse.text();
+      await vi.waitFor(() => expect(pairingStarted).toBe(true));
+
+      const response = await app.request("/api/channels/whatsapp/pair", {
+        method: "DELETE",
+        headers: { Cookie: cookie },
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ success: true });
+      await expect(pairingBody).resolves.toContain("event: qr");
     });
   });
 

@@ -132,7 +132,7 @@ export class WhatsAppGatewaySupervisor {
     this.now = options.now ?? Date.now;
   }
 
-  async start(): Promise<GatewayClientFacade> {
+  async start(): Promise<GatewayClientFacade | null> {
     this.stopping = false;
     const scriptPath = this.options.gatewayScriptPath ?? defaultGatewayScriptPath();
     const expectedHash = await fileHash(scriptPath);
@@ -155,7 +155,14 @@ export class WhatsAppGatewaySupervisor {
     }
 
     await this.waitForTakeoverEligibility(hostId, bootId);
-    const client = await this.spawnAndWait(scriptPath, expectedHash);
+    let client: GatewayClientFacade;
+    try {
+      client = await this.spawnAndWait(scriptPath, expectedHash);
+    } catch (error) {
+      if (!this.loggedOut) throw error;
+      this.options.logger.info("WhatsApp gateway requires pairing; continuing server startup without a live gateway");
+      return null;
+    }
     this.startedSuccessfully = true;
     this.startHealthPolling(scriptPath);
     return client;

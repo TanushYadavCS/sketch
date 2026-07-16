@@ -4,6 +4,7 @@ import {
   type WhatsAppFacadeHealth,
   type WhatsAppMediaDownloadRef,
   type WhatsAppPairingEvent,
+  type WhatsAppPairingStatus,
   type WhatsAppQuotedRef,
   type WhatsAppReactionResult,
   type WhatsAppSendContent,
@@ -30,6 +31,7 @@ interface GatewayClientFacadeOptions {
   logger: Logger;
   fetch?: typeof fetch;
   beforePairingStart?: () => Promise<void>;
+  pairingStatus?: () => Promise<WhatsAppPairingStatus>;
   queryTimeoutMs?: number;
 }
 
@@ -40,10 +42,15 @@ function usableRef(ref: WhatsAppQuotedRef | undefined): ref is WhatsAppQuotedRef
     : ref.value.trim().length > 0 && ref.providerConversationId.trim().length > 0;
 }
 
+function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
+}
+
 export class GatewayClientFacade implements WhatsAppSocketFacade {
   private readonly fetchImpl: typeof fetch;
   private readonly queryTimeoutMs: number;
   private pairingAbortController: AbortController | null = null;
+  private readonly cancelledPairingControllers = new WeakSet<AbortController>();
 
   readonly pairing = {
     startQr: async (onEvent: (event: WhatsAppPairingEvent) => Promise<void>): Promise<void> => {
@@ -77,13 +84,21 @@ export class GatewayClientFacade implements WhatsAppSocketFacade {
             await onEvent(whatsAppPairingEventSchema.parse(JSON.parse(data)));
           }
         }
+      } catch (error) {
+        if (!this.cancelledPairingControllers.has(controller) || !isAbortError(error)) throw error;
       } finally {
+        this.cancelledPairingControllers.delete(controller);
         if (this.pairingAbortController === controller) this.pairingAbortController = null;
       }
     },
-    status: () => this.request("/pairing-sessions/current", {}, whatsAppPairingStatusSchema),
+    status: () =>
+      this.options.pairingStatus?.() ?? this.request("/pairing-sessions/current", {}, whatsAppPairingStatusSchema),
     cancel: async (): Promise<void> => {
-      this.pairingAbortController?.abort();
+      const controller = this.pairingAbortController;
+      if (controller) {
+        this.cancelledPairingControllers.add(controller);
+        controller.abort();
+      }
       await this.request("/pairing-sessions/current", { method: "DELETE" }, whatsAppOkResponseSchema);
     },
     logout: async (): Promise<void> => {

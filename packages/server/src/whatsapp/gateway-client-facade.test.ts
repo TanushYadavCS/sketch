@@ -160,4 +160,49 @@ describe("GatewayClientFacade", () => {
     state.stream?.close();
     await expect(pairing).resolves.toBeUndefined();
   });
+
+  it("settles an active QR stream cleanly when pairing cancel aborts it", async () => {
+    const state: { stream?: ReadableStreamDefaultController<Uint8Array> } = {};
+    const events: unknown[] = [];
+    const facade = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+      fetch: async (input, init) => {
+        if (String(input).endsWith("/pairing-sessions/current")) return json({ ok: true });
+        const signal = init?.signal as AbortSignal;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              state.stream = controller;
+              controller.enqueue(new TextEncoder().encode('data: {"type":"qr","qr":"cancel-me"}\n\n'));
+              signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+            },
+          }),
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      },
+    });
+    const pairing = facade.pairing.startQr(async (event) => {
+      events.push(event);
+    });
+    await vi.waitFor(() => expect(events).toEqual([{ type: "qr", qr: "cancel-me" }]));
+
+    await expect(facade.pairing.cancel()).resolves.toBeUndefined();
+    await expect(pairing).resolves.toBeUndefined();
+    expect(state.stream).toBeDefined();
+  });
+
+  it("still rejects unexpected abort errors from pairing", async () => {
+    const facade = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+      fetch: async () => {
+        throw new DOMException("unexpected abort", "AbortError");
+      },
+    });
+
+    await expect(facade.pairing.startQr(async () => undefined)).rejects.toMatchObject({ name: "AbortError" });
+  });
 });
