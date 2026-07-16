@@ -1241,6 +1241,62 @@ describe("createTaskRepository sqlite", () => {
     });
   });
 
+  it("excludes archived-only structural evidence and omits archived file references", async () => {
+    await seedUser(db, "archived-reader-u1", "archived-reader@example.com");
+    await seedPerson(db, "person-archived-reader", "Archived Reader", ["archived-reader@example.com"]);
+    await seedIndexedFile(db, "file-active");
+    await seedIndexedFile(db, "file-archived");
+    await db.updateTable("indexed_files").set({ is_archived: 1 }).where("id", "=", "file-archived").execute();
+
+    const repo = createTaskRepository(db);
+    const archivedOnly = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "linear",
+      externalRef: "SKE-406",
+      title: "Archived-only structural",
+      status: "open",
+      statusRaw: "Todo",
+      statusAuthority: "external",
+      assigneeEntityId: "person-archived-reader",
+      assigneeName: "Archived Reader",
+      priority: "medium",
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "archived-only-structural",
+    });
+    const mixedEvidence = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "linear",
+      externalRef: "SKE-407",
+      title: "Mixed structural evidence",
+      status: "open",
+      statusRaw: "Todo",
+      statusAuthority: "external",
+      assigneeEntityId: "person-archived-reader",
+      assigneeName: "Archived Reader",
+      priority: "medium",
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "mixed-structural-evidence",
+    });
+    await repo.upsertEvidence(archivedOnly.taskId, "file", "file-archived");
+    await repo.upsertEvidence(mixedEvidence.taskId, "file", "file-active");
+    await repo.upsertEvidence(mixedEvidence.taskId, "file", "file-archived");
+
+    const rows = await repo.loadOpenDurableTasksForBrief({
+      userId: "archived-reader-u1",
+      userEmails: ["archived-reader@example.com"],
+      assigneeEntityIds: ["person-archived-reader"],
+    });
+
+    expect(rows.map((task) => task.id)).toEqual([mixedEvidence.taskId]);
+    expect(rows[0]?.knowledgeRefs.fileIds).toEqual(["file-active"]);
+  });
+
   it("loads recent user-owned summary tasks for Daily Brief including completed protection rows", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedUser(db, "summary-u2", "other@example.com");
@@ -1380,6 +1436,42 @@ describe("createTaskRepository sqlite", () => {
 
     expect(rows.map((task) => task.id)).toEqual([open.taskId, done.taskId, assigned.taskId]);
     expect(rows.map((task) => task.status)).toEqual(["open", "done", "done"]);
+  });
+
+  it("keeps summary tasks assigned to a merged-away reader person eligible", async () => {
+    await seedUser(db, "merged-summary-reader-u1", "merged-summary-reader@example.com");
+    await seedUser(db, "merged-summary-owner-u1", "merged-summary-owner@example.com");
+    await seedPerson(db, "person-summary-survivor", "Summary Survivor", ["merged-summary-reader@example.com"]);
+    await seedPerson(db, "person-summary-merged", "Summary Merged");
+    await mergeEntity(db, "person-summary-merged", "person-summary-survivor");
+
+    const repo = createTaskRepository(db);
+    const task = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Merged reader summary",
+      status: "done",
+      statusRaw: "done",
+      statusAuthority: "local",
+      assigneeEntityId: "person-summary-merged",
+      assigneeName: "Summary Merged",
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "merged-reader-summary",
+      createdByUserId: "merged-summary-owner-u1",
+    });
+
+    const rows = await repo.loadSummaryTasksForBrief({
+      userId: "merged-summary-reader-u1",
+      since: "2026-07-09T00:00:00.000Z",
+      assigneeEntityIds: ["person-summary-survivor"],
+    });
+
+    expect(rows.map((row) => row.id)).toEqual([task.taskId]);
   });
 
   it("collates Brief todos with matching Summary tasks even when Brief evidence has no file", async () => {

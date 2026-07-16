@@ -394,6 +394,7 @@ export function createTaskRepository(db: Kysely<DB>) {
             INNER JOIN indexed_files ON indexed_files.id = task_evidence.ref_id
             WHERE task_evidence.task_id = tasks.id
               AND task_evidence.kind = 'file'
+              AND indexed_files.is_archived = 0
               AND ${fileAccessFilterSql(opts.userEmails)}
           )`;
       const tasks = await db
@@ -428,6 +429,10 @@ export function createTaskRepository(db: Kysely<DB>) {
 
     async loadSummaryTasksForBrief(opts: LoadSummaryTasksForBriefOptions): Promise<Selectable<TasksTable>[]> {
       const assigneeEntityIds = [...new Set(opts.assigneeEntityIds ?? [])].filter(Boolean);
+      const canonicalAssigneeEntityIds = [
+        ...new Set((await resolveCanonicalEntityIds(db, assigneeEntityIds)).values()),
+      ];
+      const eligibleAssigneeEntityIds = await loadMergedEntityPredecessorIds(db, canonicalAssigneeEntityIds);
       return db
         .selectFrom("tasks")
         .selectAll()
@@ -435,7 +440,9 @@ export function createTaskRepository(db: Kysely<DB>) {
         .where((eb) =>
           eb.or([
             eb("created_by_user_id", "=", opts.userId),
-            ...(assigneeEntityIds.length > 0 ? [eb("assignee_entity_id", "in", assigneeEntityIds)] : []),
+            ...(eligibleAssigneeEntityIds.length > 0
+              ? [eb("assignee_entity_id", "in", eligibleAssigneeEntityIds)]
+              : []),
           ]),
         )
         .where("provenance", "=", "summary")
@@ -529,6 +536,7 @@ async function loadDurableTaskMetadata(
           .selectFrom("indexed_files")
           .select("id")
           .where("id", "in", evidenceFileIds)
+          .where("is_archived", "=", 0)
           .where(fileAccessFilterSql(opts.userEmails))
           .execute();
   const visibleFileIds = new Set(visibleFiles.map((file) => file.id));
