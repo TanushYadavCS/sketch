@@ -5,12 +5,19 @@ import Database from "better-sqlite3";
 import { Kysely, SqliteDialect } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../../db/migrate";
-import { createWhatsAppEventKey } from "../../db/repositories/whatsapp-inbound-events";
+import {
+  createWhatsAppEventKey,
+  type createWhatsAppInboundEventsRepository,
+} from "../../db/repositories/whatsapp-inbound-events";
 import { createWhatsAppSessionLeaseRepository } from "../../db/repositories/whatsapp-session-lease";
 import type { DB } from "../../db/schema";
 import { createTestLogger } from "../../test-utils";
 import type { WhatsAppGroupMessage, WhatsAppHistoryBatchMetadata, WhatsAppMessage } from "../bot";
 import { WhatsAppGatewayCapture } from "./capture";
+
+type CaptureInternals = {
+  events: ReturnType<typeof createWhatsAppInboundEventsRepository>;
+};
 
 function groupMessage(id: string, timestamp: string, fromMe = false): WhatsAppGroupMessage {
   const groupJid = "120363000000001@g.us";
@@ -117,6 +124,7 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
       rememberMessage: () => undefined,
       isInitialSyncGeneration: () => false,
       wake: async () => undefined,
+      onPersistFailure: () => undefined,
     });
     const socket = new FakeBaileysBuffer(capture);
     const absorbed = groupMessage("absorbed", new Date().toISOString());
@@ -159,6 +167,7 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
       rememberMessage: () => undefined,
       isInitialSyncGeneration: () => true,
       wake: async () => undefined,
+      onPersistFailure: () => undefined,
     });
     const socket = new FakeBaileysBuffer(capture);
     socket.connect();
@@ -221,6 +230,7 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
       rememberMessage: () => undefined,
       isInitialSyncGeneration: () => isInitialSyncGeneration,
       wake: async () => undefined,
+      onPersistFailure: () => undefined,
     });
 
     await capture.captureHistory([groupMessage("old-after-repair", new Date().toISOString())]);
@@ -254,6 +264,7 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
       rememberMessage: () => undefined,
       isInitialSyncGeneration: () => false,
       wake: async () => undefined,
+      onPersistFailure: () => undefined,
     });
 
     await capture.captureHistory([groupMessage("outbound-replay", new Date().toISOString(), true)]);
@@ -278,6 +289,7 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
       rememberMessage: () => undefined,
       isInitialSyncGeneration: () => true,
       wake: async () => undefined,
+      onPersistFailure: () => undefined,
     });
     const oversized = groupMessage("oversized", "2020-01-01T00:00:00.000Z");
     oversized.text = "x".repeat(210 * 1024);
@@ -294,5 +306,110 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
       expect.objectContaining({ chunkIndex: 0 }),
       "WhatsApp history chunk was dead-lettered at insert; history indexing has a gap",
     );
+  });
+
+  it("escalates a live-message insert failure after recording it", async () => {
+    const onPersistFailure = vi.fn();
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => false,
+      wake: async () => undefined,
+      onPersistFailure,
+    });
+    const events = (capture as unknown as CaptureInternals).events;
+    const failure = new Error("insert unavailable");
+    vi.spyOn(events, "insert").mockRejectedValue(failure);
+
+    await expect(
+      capture.captureMessage(groupMessage("insert-failure", new Date().toISOString())),
+    ).resolves.toBeUndefined();
+
+    expect(capture.insertFailures).toBe(1);
+    expect(onPersistFailure).toHaveBeenCalledTimes(1);
+    expect(onPersistFailure).toHaveBeenCalledWith(failure);
+  });
+
+  it("escalates a history transaction failure after recording it", async () => {
+    const onPersistFailure = vi.fn();
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => true,
+      wake: async () => undefined,
+      onPersistFailure,
+    });
+    const events = (capture as unknown as CaptureInternals).events;
+    const failure = new Error("transaction unavailable");
+    vi.spyOn(events, "insertManyAtomic").mockRejectedValue(failure);
+
+    await expect(
+      capture.captureHistory([groupMessage("history-insert-failure", new Date().toISOString())]),
+    ).resolves.toEqual({ persisted: 0, skippedOld: 0, skippedDup: 0 });
+
+    expect(capture.insertFailures).toBe(1);
+    expect(onPersistFailure).toHaveBeenCalledTimes(1);
+    expect(onPersistFailure).toHaveBeenCalledWith(failure);
+  });
+
+  it("escalates a pre-insert dedup lookup failure without rejecting", async () => {
+    const onPersistFailure = vi.fn();
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => false,
+      wake: async () => undefined,
+      onPersistFailure,
+    });
+    const events = (capture as unknown as CaptureInternals).events;
+    const failure = new Error("dedup lookup unavailable");
+    vi.spyOn(events, "findByEventKey").mockRejectedValue(failure);
+    const insert = vi.spyOn(events, "insert");
+
+    await expect(
+      capture.captureMessage(groupMessage("lookup-failure", new Date().toISOString())),
+    ).resolves.toBeUndefined();
+
+    expect(insert).not.toHaveBeenCalled();
+    expect(capture.insertFailures).toBe(1);
+    expect(onPersistFailure).toHaveBeenCalledTimes(1);
+    expect(onPersistFailure).toHaveBeenCalledWith(failure);
+  });
+
+  it("does not escalate a live-message dedup hit", async () => {
+    const onPersistFailure = vi.fn();
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => false,
+      wake: async () => undefined,
+      onPersistFailure,
+    });
+    const events = (capture as unknown as CaptureInternals).events;
+    const insert = vi.spyOn(events, "insert");
+    const message = groupMessage("dedup-hit", new Date().toISOString());
+
+    await capture.captureMessage(message);
+    await capture.captureMessage(message);
+
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(capture.insertFailures).toBe(0);
+    expect(onPersistFailure).not.toHaveBeenCalled();
   });
 });

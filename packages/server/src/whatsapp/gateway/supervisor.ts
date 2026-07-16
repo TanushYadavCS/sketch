@@ -354,7 +354,7 @@ export class WhatsAppGatewaySupervisor {
       )
         return;
       if (whatsappGatewayHealthDecision(health, expectedHash) === "restart") {
-        await this.restart("gateway contract skew");
+        await this.restartFromHealthPoll("gateway contract skew");
         return;
       }
       this.lastHealth = health;
@@ -363,7 +363,15 @@ export class WhatsAppGatewaySupervisor {
     } catch (error) {
       this.healthFailures += 1;
       this.options.logger.warn({ error, failures: this.healthFailures }, "WhatsApp gateway health check failed");
-      if (this.healthFailures >= 3) await this.restart("three consecutive health failures");
+      if (this.healthFailures >= 3) await this.restartFromHealthPoll("three consecutive health failures");
+    }
+  }
+
+  private async restartFromHealthPoll(reason: string): Promise<void> {
+    try {
+      await this.restart(reason);
+    } catch (error) {
+      this.options.logger.error({ error, reason }, "WhatsApp gateway health-triggered restart failed");
     }
   }
 
@@ -568,7 +576,13 @@ export class InProcessWhatsAppLease {
     this.fence = { ownerToken: this.ownerToken, generation: result.lease.generation };
     this.lastHeartbeatSuccess = performance.now();
     this.heartbeatFailures = 0;
-    this.heartbeatTimer = setInterval(() => void this.heartbeat(), 10_000);
+    this.heartbeatTimer = setInterval(
+      () =>
+        void this.heartbeat().catch((error) =>
+          this.options.logger.error({ error }, "In-process WhatsApp session lease heartbeat rejected"),
+        ),
+      10_000,
+    );
     this.heartbeatTimer.unref?.();
   }
 
@@ -592,7 +606,13 @@ export class InProcessWhatsAppLease {
     if (!(await this.leases.resetHistoryGeneration(this.fence))) {
       throw new Error("In-process WhatsApp history generation reset was fenced out");
     }
-    this.heartbeatTimer = setInterval(() => void this.heartbeat(), 10_000);
+    this.heartbeatTimer = setInterval(
+      () =>
+        void this.heartbeat().catch((error) =>
+          this.options.logger.error({ error }, "In-process WhatsApp session lease heartbeat rejected"),
+        ),
+      10_000,
+    );
     this.heartbeatTimer.unref?.();
   }
 

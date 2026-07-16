@@ -192,6 +192,7 @@ export async function runWhatsAppGateway(): Promise<void> {
     rememberMessage: (params) => inProcessFacade.rememberMessage(params),
     isInitialSyncGeneration: () => initialSyncGeneration,
     wake: () => appNotifier.wake(),
+    onPersistFailure: () => void terminate(1, false, "durable inbound capture failed"),
   });
   bot.onMessage((message) => capture.captureMessage(message));
   bot.onHistoryMessages((messages, metadata) => capture.captureHistory(messages, metadata));

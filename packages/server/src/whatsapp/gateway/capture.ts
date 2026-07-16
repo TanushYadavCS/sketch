@@ -42,6 +42,7 @@ export interface WhatsAppGatewayCaptureDeps {
   }) => void;
   isInitialSyncGeneration: () => boolean;
   wake: () => Promise<void>;
+  onPersistFailure: (error: unknown) => void;
   now?: () => Date;
 }
 
@@ -119,9 +120,8 @@ export class WhatsAppGatewayCapture {
       identity.providerMessageId ?? "",
       identity.fromMe,
     );
-    if (eventKey && (await this.events.findByEventKey(eventKey))) return;
-
     try {
+      if (eventKey && (await this.events.findByEventKey(eventKey))) return;
       const envelope = await this.prepareMessageEnvelope(message, "message");
       const result = await this.events.insert({
         kind: "message",
@@ -133,6 +133,7 @@ export class WhatsAppGatewayCapture {
       if (result.inserted) this.pingWake();
     } catch (error) {
       this.recordInsertFailure(error, identity.providerMessageId);
+      this.deps.onPersistFailure(error);
     }
   }
 
@@ -206,6 +207,7 @@ export class WhatsAppGatewayCapture {
       };
     } catch (error) {
       this.recordInsertFailure(error, null);
+      this.deps.onPersistFailure(error);
       return { persisted: 0, skippedOld: 0, skippedDup: 0 };
     }
   }

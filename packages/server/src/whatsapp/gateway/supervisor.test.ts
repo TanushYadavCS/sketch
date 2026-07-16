@@ -30,10 +30,13 @@ type SupervisorInternals = {
   lease: { owner_token: string; generation: number; pid?: number } | null;
   lastHealth: Awaited<ReturnType<GatewayClientFacade["health"]>> | null;
   loggedOut: boolean;
+  healthFailures: number;
+  respawnScheduled: boolean;
   restarting: boolean;
   stopping: boolean;
   startedSuccessfully: boolean;
   onChildExit(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): Promise<void>;
+  pollHealth(scriptPath: string): Promise<void>;
   restart(reason: string): Promise<void>;
   spawnAndWait(scriptPath: string, expectedHash: string): Promise<GatewayClientFacade>;
   stopGateway(): Promise<void>;
@@ -358,6 +361,39 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
 
     await expect(internals.restart("test restart failure")).rejects.toThrow("spawn failed");
 
+    expect(sleepCalls).toEqual([1_000]);
+    await db.destroy();
+  });
+
+  it("contains a health-poll restart rejection and leaves respawn scheduled", async () => {
+    const db = await createTestDb();
+    const sleepCalls: number[] = [];
+    const supervisor = new WhatsAppGatewaySupervisor({
+      db,
+      config: createTestConfig({ WHATSAPP_RUNTIME_MODE: "gateway" }),
+      logger: createTestLogger(),
+      gatewayScriptPath: fileURLToPath(import.meta.url),
+      sleep: async (milliseconds) => {
+        sleepCalls.push(milliseconds);
+        await new Promise<void>(() => undefined);
+      },
+    });
+    const internals = supervisor as unknown as SupervisorInternals;
+    const facade = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+    });
+    vi.spyOn(facade, "health").mockRejectedValue(new Error("health unavailable"));
+    internals.client = facade;
+    internals.lease = { owner_token: "current-owner", generation: 1 };
+    internals.healthFailures = 2;
+    vi.spyOn(internals, "stopGateway").mockResolvedValue();
+    vi.spyOn(internals, "spawnAndWait").mockRejectedValue(new Error("spawn failed"));
+
+    await expect(internals.pollHealth(fileURLToPath(import.meta.url))).resolves.toBeUndefined();
+
+    expect(internals.respawnScheduled).toBe(true);
     expect(sleepCalls).toEqual([1_000]);
     await db.destroy();
   });
