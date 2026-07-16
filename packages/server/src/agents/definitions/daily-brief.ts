@@ -1199,17 +1199,12 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
   const taskRepo = createTaskRepository(args.db);
   const outputRepo = createAgentOutputRepository(args.db);
   const summarySince = dailyBriefSummarySince(args.baseContext);
-  const runtimeMaxItemsPerSection =
-    typeof args.baseContext.maxItemsPerSection === "number" && Number.isFinite(args.baseContext.maxItemsPerSection)
-      ? Math.max(0, Math.floor(args.baseContext.maxItemsPerSection))
-      : args.maxItemsPerSection;
   const { verifiedEmails, assigneeEntityIds } = await resolveReaderTaskIdentity(args);
   const [openDurableTasks, recentSummaries, summaryTasks, identityUnresolvedTaskCount] = await Promise.all([
     taskRepo.loadOpenDurableTasksForBrief({
       userId: args.userId,
       userEmails: verifiedEmails,
       assigneeEntityIds,
-      limit: runtimeMaxItemsPerSection * 4,
     }),
     outputRepo.listCompletedForUserSince(CONVERSATION_SUMMARY_AGENT_KEY, args.userId, summarySince, {
       limit: DAILY_BRIEF_SUMMARY_OUTPUT_LIMIT,

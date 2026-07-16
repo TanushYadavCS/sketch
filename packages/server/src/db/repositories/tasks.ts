@@ -396,7 +396,7 @@ export function createTaskRepository(db: Kysely<DB>) {
               AND indexed_files.is_archived = 0
               AND ${fileVisibilityForEmails(opts.userEmails)}
           )`;
-      const tasks = await db
+      let query = db
         .selectFrom("tasks")
         .selectAll("tasks")
         .where("tasks.valid_to", "is", null)
@@ -416,9 +416,9 @@ export function createTaskRepository(db: Kysely<DB>) {
           ]);
         })
         .orderBy("tasks.updated_at", "desc")
-        .orderBy("tasks.id", "asc")
-        .limit(opts.limit ?? 50)
-        .execute();
+        .orderBy("tasks.id", "asc");
+      if (opts.limit !== undefined) query = query.limit(opts.limit);
+      const tasks = await query.execute();
       return loadDurableTaskMetadata(db, tasks, {
         userId: opts.userId,
         userEmails: opts.userEmails,

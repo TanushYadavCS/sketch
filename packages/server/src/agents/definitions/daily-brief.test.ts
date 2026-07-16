@@ -394,6 +394,53 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
     ]);
     expect(context?.identityUnresolvedTaskCount).toBe(1);
   });
+
+  it("loads the complete reader-owned allowlist while reconciliation caps displayed todos", async () => {
+    const user = await seedUser(db, {
+      id: "reader-many-tasks",
+      email: "many-tasks@example.com",
+      emailVerified: true,
+    });
+    await seedEntity(db, { id: "project-many-tasks", name: "Many Tasks Project" });
+    const taskIds = Array.from({ length: 55 }, (_, index) => `task-many-${String(index).padStart(2, "0")}`);
+    for (const taskId of taskIds) {
+      await seedTask(db, {
+        id: taskId,
+        title: `Canonical ${taskId}`,
+        provenance: "summary",
+        createdByUserId: user.id,
+        parentEntityId: "project-many-tasks",
+      });
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: user.id,
+      maxItemsPerSection: 4,
+      baseContext: { outputDate: "2026-06-25", timezone: "UTC" },
+    });
+
+    const openDurableTasks = context?.openDurableTasks as Array<{ id: string }>;
+    expect(openDurableTasks.map((task) => task.id).sort()).toEqual(taskIds);
+
+    const reconciled =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items: [],
+        runtimeContext: {
+          ...context,
+          sections: ["todos"],
+          maxItemsPerSection: 4,
+        },
+        logger: { info: vi.fn() } as never,
+        outputId: "output-many-tasks",
+        userId: user.id,
+      })) ?? [];
+
+    expect(reconciled.filter((item) => item.sectionKey === "todos")).toHaveLength(4);
+  });
 });
 
 describe("buildDailyBriefCandidateContext", () => {
