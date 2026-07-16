@@ -18,10 +18,18 @@ export function isSqliteVecAvailable(): boolean {
   return sqliteVecAvailable;
 }
 
+export function createPostgresPoolConfig(config: Config) {
+  return {
+    connectionString: config.DATABASE_URL,
+    max: config.POSTGRES_POOL_MAX,
+    ssl: { rejectUnauthorized: false },
+  };
+}
+
 export async function createDatabase(config: Config): Promise<Kysely<DB>> {
   if (config.DB_TYPE === "postgres") {
     const { Pool } = await import("pg");
-    const pool = new Pool({ connectionString: config.DATABASE_URL, max: 5, ssl: { rejectUnauthorized: false } });
+    const pool = new Pool(createPostgresPoolConfig(config));
     return new Kysely<DB>({
       dialect: new PostgresDialect({ pool }),
     });
