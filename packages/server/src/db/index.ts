@@ -18,12 +18,21 @@ export function isSqliteVecAvailable(): boolean {
   return sqliteVecAvailable;
 }
 
+/**
+ * Single source of truth for Postgres connection parameters. The WhatsApp
+ * gateway child opens its own pool with this factory so TLS and tuning can
+ * never drift from the app's pool: a divergence would make the gateway fail to
+ * reach the very database the app is connected to.
+ */
+export async function createPgPool(config: Config, options: { max: number }) {
+  const { Pool } = await import("pg");
+  return new Pool({ connectionString: config.DATABASE_URL, max: options.max, ssl: { rejectUnauthorized: false } });
+}
+
 export async function createDatabase(config: Config): Promise<Kysely<DB>> {
   if (config.DB_TYPE === "postgres") {
-    const { Pool } = await import("pg");
-    const pool = new Pool({ connectionString: config.DATABASE_URL, max: 5, ssl: { rejectUnauthorized: false } });
     return new Kysely<DB>({
-      dialect: new PostgresDialect({ pool }),
+      dialect: new PostgresDialect({ pool: await createPgPool(config, { max: 5 }) }),
     });
   }
 

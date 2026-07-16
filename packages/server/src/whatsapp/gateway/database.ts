@@ -2,18 +2,13 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Kysely, PostgresDialect, SqliteDialect } from "kysely";
 import type { Config } from "../../config";
+import { createPgPool } from "../../db";
 import type { DB } from "../../db/schema";
 
 /** Opens the gateway's independent, low-concurrency database handle. */
 export async function createWhatsAppGatewayDatabase(config: Config): Promise<Kysely<DB>> {
   if (config.DB_TYPE === "postgres") {
-    const { Pool } = await import("pg");
-    const pool = new Pool({
-      connectionString: config.DATABASE_URL,
-      max: 2,
-      ssl: { rejectUnauthorized: false },
-    });
-    return new Kysely<DB>({ dialect: new PostgresDialect({ pool }) });
+    return new Kysely<DB>({ dialect: new PostgresDialect({ pool: await createPgPool(config, { max: 2 }) }) });
   }
 
   const Database = (await import("better-sqlite3")).default;
