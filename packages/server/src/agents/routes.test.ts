@@ -744,6 +744,9 @@ describe("agentRoutes", () => {
         runAgent: vi.fn(async () => {
           throw new Error("runAgent should not be called");
         }) as unknown as AgentRunServiceDeps["runAgent"],
+        runScheduledAgent: vi.fn(async () => {
+          throw new Error("runScheduledAgent should not be called");
+        }) as unknown as AgentRunServiceDeps["runScheduledAgent"],
         getWhatsApp: () => ({ getGroupMetadata }),
       });
       const app = createRoutesTestApp(service, user.id, user.email ?? undefined);
@@ -850,6 +853,9 @@ describe("agentRoutes", () => {
         runAgent: vi.fn(async () => {
           throw new Error("runAgent should not be called");
         }) as unknown as AgentRunServiceDeps["runAgent"],
+        runScheduledAgent: vi.fn(async () => {
+          throw new Error("runScheduledAgent should not be called");
+        }) as unknown as AgentRunServiceDeps["runScheduledAgent"],
       });
       const app = createRoutesTestApp(service, user.id, user.email ?? undefined);
 
@@ -936,6 +942,7 @@ describe("agentRoutes", () => {
         users,
         settings: createSettingsRepository(db),
         runAgent,
+        runScheduledAgent: runAgent,
         getSlack: () => ({
           listChannels: vi.fn(async () => [
             { id: "C_A", name: "alpha", type: "public_channel", isMember: true },
@@ -987,6 +994,9 @@ describe("agentRoutes", () => {
         runAgent: vi.fn(async () => {
           throw new Error("runAgent should not be called");
         }) as unknown as AgentRunServiceDeps["runAgent"],
+        runScheduledAgent: vi.fn(async () => {
+          throw new Error("runScheduledAgent should not be called");
+        }) as unknown as AgentRunServiceDeps["runScheduledAgent"],
         getSlack: () => ({
           listChannels: vi.fn(async () => [{ id: "C_SOURCE", name: "source", type: "public_channel", isMember: true }]),
           isUserInChannel: vi.fn(async () => true),

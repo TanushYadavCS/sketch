@@ -74,6 +74,7 @@ export interface AgentRunServiceDeps {
   users: ReturnType<typeof createUserRepository>;
   settings: ReturnType<typeof createSettingsRepository>;
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
+  runScheduledAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: QueueManager;
@@ -2129,7 +2130,8 @@ export class AgentRunService {
       });
       const integrationMcpServers = this.deps.buildMcpServers ? await this.deps.buildMcpServers(user.email) : {};
       const workspaceDir = join(this.deps.config.DATA_DIR, "workspaces", user.id);
-      const result = await this.deps.runAgent({
+      const executeAgent = output.trigger_type === "scheduled" ? this.deps.runScheduledAgent : this.deps.runAgent;
+      const result = await executeAgent({
         db: this.deps.db,
         workspaceKey: user.id,
         userMessage,

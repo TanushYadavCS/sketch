@@ -3,6 +3,7 @@ import type { Logger } from "../logger";
 
 interface AgentRunLimiterOptions {
   limit: number;
+  queue: "interactive" | "scheduled";
   logger: Pick<Logger, "info">;
   now?: () => number;
 }
@@ -20,12 +21,14 @@ export class AgentRunLimiter {
   private active = 0;
   private readonly waiting: Waiter[] = [];
   private readonly limit: number;
+  private readonly queue: "interactive" | "scheduled";
   private readonly logger: Pick<Logger, "info">;
   private readonly now: () => number;
   private readonly activeRunContext = new AsyncLocalStorage<ActiveRunContext>();
 
   constructor(options: AgentRunLimiterOptions) {
     this.limit = options.limit;
+    this.queue = options.queue;
     this.logger = options.logger;
     this.now = options.now ?? Date.now;
   }
@@ -42,6 +45,7 @@ export class AgentRunLimiter {
     this.logger.info(
       {
         event: "agent_run_limiter_start",
+        queue: this.queue,
         limit: this.limit,
         active: this.active,
         waiting: this.waiting.length,
@@ -59,6 +63,7 @@ export class AgentRunLimiter {
       this.logger.info(
         {
           event: "agent_run_limiter_finish",
+          queue: this.queue,
           limit: this.limit,
           active: this.active,
           waiting: this.waiting.length,
@@ -76,6 +81,7 @@ export class AgentRunLimiter {
     this.logger.info(
       {
         event: "agent_run_limiter_start",
+        queue: this.queue,
         limit: this.limit,
         active: this.active,
         waiting: this.waiting.length,
@@ -92,6 +98,7 @@ export class AgentRunLimiter {
       this.logger.info(
         {
           event: "agent_run_limiter_finish",
+          queue: this.queue,
           limit: this.limit,
           active: this.active,
           waiting: this.waiting.length,
@@ -120,6 +127,7 @@ export class AgentRunLimiter {
       this.logger.info(
         {
           event: "agent_run_limiter_wait",
+          queue: this.queue,
           limit: this.limit,
           active: this.active,
           waiting: this.waiting.length,

@@ -27,7 +27,7 @@ function captureLogger() {
 describe("AgentRunLimiter", () => {
   it("caps concurrent work and starts queued runs FIFO", async () => {
     const { logger, entries } = captureLogger();
-    const limiter = createAgentRunLimiter({ limit: 2, logger });
+    const limiter = createAgentRunLimiter({ limit: 2, queue: "interactive", logger });
     const releases = Array.from({ length: 5 }, () => deferred<void>());
     const started: number[] = [];
     const finished: number[] = [];
@@ -73,7 +73,7 @@ describe("AgentRunLimiter", () => {
 
   it("continues queued work after a running task fails", async () => {
     const { logger } = captureLogger();
-    const limiter = createAgentRunLimiter({ limit: 1, logger });
+    const limiter = createAgentRunLimiter({ limit: 1, queue: "interactive", logger });
     const failFirst = deferred<void>();
     const started: number[] = [];
 
@@ -98,9 +98,54 @@ describe("AgentRunLimiter", () => {
     expect(limiter.snapshot()).toEqual({ limit: 1, active: 0, waiting: 0 });
   });
 
+  it("keeps interactive and scheduled queues independent", async () => {
+    const { logger } = captureLogger();
+    const interactive = createAgentRunLimiter({ limit: 2, queue: "interactive", logger });
+    const scheduled = createAgentRunLimiter({ limit: 2, queue: "scheduled", logger });
+    const interactiveReleases = Array.from({ length: 3 }, () => deferred<void>());
+    const scheduledReleases = Array.from({ length: 3 }, () => deferred<void>());
+    const interactiveStarted: number[] = [];
+    const scheduledStarted: number[] = [];
+
+    const scheduledRuns = scheduledReleases.map((release, index) =>
+      scheduled.run(async () => {
+        scheduledStarted.push(index);
+        await release.promise;
+      }),
+    );
+    await vi.waitFor(() => expect(scheduledStarted).toEqual([0, 1]));
+    expect(scheduled.snapshot()).toEqual({ limit: 2, active: 2, waiting: 1 });
+
+    const interactiveRuns = interactiveReleases.map((release, index) =>
+      interactive.run(async () => {
+        interactiveStarted.push(index);
+        await release.promise;
+      }),
+    );
+    await vi.waitFor(() => expect(interactiveStarted).toEqual([0, 1]));
+    expect(interactive.snapshot()).toEqual({ limit: 2, active: 2, waiting: 1 });
+    expect(scheduled.snapshot()).toEqual({ limit: 2, active: 2, waiting: 1 });
+
+    interactiveReleases[0].resolve();
+    await vi.waitFor(() => expect(interactiveStarted).toEqual([0, 1, 2]));
+    expect(scheduledStarted).toEqual([0, 1]);
+
+    scheduledReleases[0].resolve();
+    await vi.waitFor(() => expect(scheduledStarted).toEqual([0, 1, 2]));
+
+    interactiveReleases[1].resolve();
+    interactiveReleases[2].resolve();
+    scheduledReleases[1].resolve();
+    scheduledReleases[2].resolve();
+    await Promise.all([...interactiveRuns, ...scheduledRuns]);
+
+    expect(interactive.snapshot()).toEqual({ limit: 2, active: 0, waiting: 0 });
+    expect(scheduled.snapshot()).toEqual({ limit: 2, active: 0, waiting: 0 });
+  });
+
   it("lets nested agent work reuse the active slot without bypassing queued independent work", async () => {
     const { logger, entries } = captureLogger();
-    const limiter = createAgentRunLimiter({ limit: 1, logger });
+    const limiter = createAgentRunLimiter({ limit: 1, queue: "interactive", logger });
     const releaseOuter = deferred<void>();
     const started: string[] = [];
 
@@ -136,7 +181,7 @@ describe("AgentRunLimiter", () => {
 
   it("does not keep reentrant context active for timers after the parent run finishes", async () => {
     const { logger } = captureLogger();
-    const limiter = createAgentRunLimiter({ limit: 1, logger });
+    const limiter = createAgentRunLimiter({ limit: 1, queue: "interactive", logger });
     const releaseBlocker = deferred<void>();
     const timerDone = deferred<void>();
     const started: string[] = [];
@@ -171,7 +216,7 @@ describe("AgentRunLimiter", () => {
 
   it("logs limiter wait, start, and finish fields", async () => {
     const { logger, entries } = captureLogger();
-    const limiter = createAgentRunLimiter({ limit: 1, logger });
+    const limiter = createAgentRunLimiter({ limit: 1, queue: "scheduled", logger });
     const releaseFirst = deferred<void>();
 
     const first = limiter.run(async () => {
@@ -185,6 +230,7 @@ describe("AgentRunLimiter", () => {
 
     for (const entry of entries) {
       expect(entry.fields).toMatchObject({
+        queue: "scheduled",
         limit: expect.any(Number),
         active: expect.any(Number),
         waiting: expect.any(Number),

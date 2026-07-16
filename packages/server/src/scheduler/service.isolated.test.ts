@@ -106,8 +106,10 @@ function buildDeps(
     slack?: ReturnType<typeof buildMockSlack> | null;
     whatsapp?: ReturnType<typeof buildMockWhatsApp>;
     runAgent?: ReturnType<typeof vi.fn>;
+    runScheduledAgent?: ReturnType<typeof vi.fn>;
     queueManager?: QueueManager;
     limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
+    limitScheduledAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   } = {},
 ) {
   const mockRunAgent =
@@ -130,9 +132,11 @@ function buildDeps(
       get: vi.fn().mockResolvedValue({ org_name: "TestOrg", bot_name: "Sketch" }),
     },
     runAgent: mockRunAgent,
+    runScheduledAgent: overrides.runScheduledAgent ?? mockRunAgent,
     buildMcpServers: vi.fn().mockResolvedValue({}),
     loadIntegrationProvider: vi.fn().mockResolvedValue(null),
     limitAgentExecution: overrides.limitAgentExecution ?? ((work) => work()),
+    limitScheduledAgentExecution: overrides.limitScheduledAgentExecution ?? ((work) => work()),
     automationRunsRepo: {
       create: vi.fn().mockResolvedValue("run-1"),
       update: vi.fn().mockResolvedValue(undefined),
@@ -496,7 +500,7 @@ describe("executeTask() invokes automation runtime", () => {
     );
   });
 
-  it("forwards sketch-mode agent dependencies to executeAutomation", async () => {
+  it("forwards scheduled sketch-mode agent dependencies to executeAutomation", async () => {
     const deps = buildDeps(db);
     const scheduler = new TaskScheduler(deps as never);
 
@@ -506,12 +510,12 @@ describe("executeTask() invokes automation runtime", () => {
 
     expect(lastExecuteAutomationParams).toEqual(
       expect.objectContaining({
-        runAgent: deps.runAgent,
+        runAgent: deps.runScheduledAgent,
         buildMcpServers: deps.buildMcpServers,
         inboxMessagesRepo: deps.inboxMessagesRepo,
         sendDm: deps.sendDm,
         userRepo: deps.userRepo,
-        limitAgentExecution: deps.limitAgentExecution,
+        limitAgentExecution: deps.limitScheduledAgentExecution,
       }),
     );
   });
@@ -1211,6 +1215,38 @@ describe("executeTask() single-flight guard", () => {
 describe("executeTaskById() queueing", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("routes timer firings to scheduled execution and manual runs to interactive execution", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
+    const executeAutomationMock = vi.mocked(executeAutomation);
+    const calls: ExecuteAutomationParams[] = [];
+    executeAutomationMock.mockImplementation(async (params: ExecuteAutomationParams) => {
+      calls.push(params);
+      return { runId: `run-${calls.length}`, status: "completed", finalOutput: null, stepOutputs: {} };
+    });
+    const interactiveRunAgent = vi.fn();
+    const scheduledRunAgent = vi.fn();
+    const interactiveLimit = <T>(work: () => Promise<T>): Promise<T> => work();
+    const scheduledLimit = <T>(work: () => Promise<T>): Promise<T> => work();
+    const deps = buildDeps(db, {
+      runAgent: interactiveRunAgent,
+      runScheduledAgent: scheduledRunAgent,
+      limitAgentExecution: interactiveLimit,
+      limitScheduledAgentExecution: scheduledLimit,
+    });
+    const scheduler = new TaskScheduler(deps as never);
+    const row = await repo.add({ ...baseTaskFields });
+
+    await scheduler.executeTask(row as ScheduledTaskRow);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].runAgent).toBe(scheduledRunAgent);
+    expect(calls[0].limitAgentExecution).toBe(scheduledLimit);
+
+    await scheduler.executeTaskById(row.id);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].runAgent).toBe(interactiveRunAgent);
+    expect(calls[1].limitAgentExecution).toBe(interactiveLimit);
   });
 
   it("serializes manual runs through the scheduler queue", async () => {

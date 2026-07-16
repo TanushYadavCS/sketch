@@ -50,15 +50,18 @@ function createService(
   const runAgent = vi.fn(async () => {
     throw new Error("runAgent should not be called by these tests");
   }) as unknown as AgentRunServiceDeps["runAgent"];
+  const interactiveRunAgent = overrides.runAgent ?? runAgent;
+  const scheduledRunAgent = overrides.runScheduledAgent ?? interactiveRunAgent;
   return new AgentRunService({
     db,
     config: createTestConfig(),
     logger: createTestLogger(),
     users: createUserRepository(db),
     settings: createSettingsRepository(db),
-    runAgent,
     queueManager: createPausedQueueManager(tasks),
     ...overrides,
+    runAgent: interactiveRunAgent,
+    runScheduledAgent: scheduledRunAgent,
   });
 }
 
@@ -111,16 +114,19 @@ function createWritingService(
       trace: { progressEvents: [], finalText: "Done" },
     };
   }) as unknown as AgentRunServiceDeps["runAgent"];
+  const interactiveRunAgent = overrides.runAgent ?? runAgent;
+  const scheduledRunAgent = overrides.runScheduledAgent ?? interactiveRunAgent;
   return new AgentRunService({
     db,
     config: createTestConfig(),
     logger: createTestLogger(),
     users: createUserRepository(db),
     settings: createSettingsRepository(db),
-    runAgent,
     queueManager: createPausedQueueManager(tasks),
     outputDelivery,
     ...overrides,
+    runAgent: interactiveRunAgent,
+    runScheduledAgent: scheduledRunAgent,
   });
 }
 
@@ -685,6 +691,7 @@ describe("AgentRunService", () => {
       users,
       settings: createSettingsRepository(db),
       runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      runScheduledAgent: runAgent as unknown as AgentRunServiceDeps["runScheduledAgent"],
       queueManager: createPausedQueueManager(tasks),
     });
 
@@ -896,6 +903,7 @@ describe("AgentRunService", () => {
       users,
       settings: createSettingsRepository(db),
       runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      runScheduledAgent: runAgent as unknown as AgentRunServiceDeps["runScheduledAgent"],
       queueManager: createPausedQueueManager(tasks),
     });
 
@@ -1853,6 +1861,7 @@ describe("AgentRunService", () => {
       users,
       settings: createSettingsRepository(db),
       runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      runScheduledAgent: runAgent as unknown as AgentRunServiceDeps["runScheduledAgent"],
       queueManager: createPausedQueueManager(tasks),
       getSlack: () => ({ listChannels, isUserInChannel }),
     });
@@ -3373,6 +3382,44 @@ describe("AgentRunService", () => {
         output: expect.objectContaining({ id: row.id, outputDate: OUTPUT_DATE }),
       }),
     );
+  });
+
+  it("routes scheduled generations separately from manual generations", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const interactiveRunAgent = vi.fn(async () => {
+      throw new Error("interactive test stop");
+    }) as unknown as AgentRunServiceDeps["runAgent"];
+    const scheduledRunAgent = vi.fn(async () => {
+      throw new Error("scheduled test stop");
+    }) as unknown as AgentRunServiceDeps["runAgent"];
+    const service = createService(db, tasks, {
+      runAgent: interactiveRunAgent,
+      runScheduledAgent: scheduledRunAgent,
+    });
+
+    await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    await tasks.shift()?.();
+
+    expect(scheduledRunAgent).toHaveBeenCalledTimes(1);
+    expect(interactiveRunAgent).not.toHaveBeenCalled();
+
+    await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: "2026-06-16",
+      triggerType: "manual",
+    });
+    await tasks.shift()?.();
+
+    expect(interactiveRunAgent).toHaveBeenCalledTimes(1);
+    expect(scheduledRunAgent).toHaveBeenCalledTimes(1);
   });
 
   it("uses the latest delivery config after a scheduled run completes", async () => {

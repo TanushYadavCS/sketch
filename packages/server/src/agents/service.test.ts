@@ -210,6 +210,9 @@ async function runAndCapture(
       });
       return runResult();
     },
+    runScheduledAgent: async () => {
+      throw new Error("runScheduledAgent should not be called");
+    },
     queueManager: createPausedQueueManager(queued),
   });
 
