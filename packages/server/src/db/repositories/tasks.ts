@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import { fileAccessFilterSql } from "../../connectors/search";
+import { EntityRedirectError } from "../../entities/redirect";
 import type { DB, EntitiesTable, TasksTable } from "../schema";
 import type { AgentKnowledgeRefs, AgentOutputItemInput } from "./agent-outputs";
 import type { FileViewer } from "./connectors";
@@ -381,6 +382,10 @@ export function createTaskRepository(db: Kysely<DB>) {
 
     async loadOpenDurableTasksForBrief(opts: LoadOpenDurableTasksForBriefOptions): Promise<DurableTaskForBrief[]> {
       const assigneeEntityIds = [...new Set(opts.assigneeEntityIds ?? [])].filter(Boolean);
+      const canonicalAssigneeEntityIds = [
+        ...new Set((await resolveCanonicalEntityIds(db, assigneeEntityIds)).values()),
+      ];
+      const eligibleAssigneeEntityIds = await loadMergedEntityPredecessorIds(db, canonicalAssigneeEntityIds);
       const visibleFileEvidence =
         opts.userEmails.length === 0
           ? sql<boolean>`false`
@@ -398,9 +403,9 @@ export function createTaskRepository(db: Kysely<DB>) {
         .where("tasks.status", "in", ["open", "in_progress"])
         .where((eb) => {
           const assignedToReader =
-            assigneeEntityIds.length === 0
+            eligibleAssigneeEntityIds.length === 0
               ? sql<boolean>`false`
-              : eb("tasks.assignee_entity_id", "in", assigneeEntityIds);
+              : eb("tasks.assignee_entity_id", "in", eligibleAssigneeEntityIds);
           return eb.or([
             eb.and([eb("tasks.provenance", "=", "structural"), assignedToReader, visibleFileEvidence]),
             eb.and([
@@ -417,7 +422,7 @@ export function createTaskRepository(db: Kysely<DB>) {
       return loadDurableTaskMetadata(db, tasks, {
         userId: opts.userId,
         userEmails: opts.userEmails,
-        assigneeEntityIds,
+        assigneeEntityIds: canonicalAssigneeEntityIds,
       });
     },
 
@@ -503,13 +508,15 @@ async function loadDurableTaskMetadata(
       ...evidenceRows.filter((row) => row.kind === "entity").map((row) => row.ref_id),
     ]),
   ].filter((id): id is string => Boolean(id));
+  const canonicalEntityIdsById = await resolveCanonicalEntityIds(db, entityIds);
+  const canonicalEntityIds = [...new Set(canonicalEntityIdsById.values())];
   const entities =
-    entityIds.length === 0
+    canonicalEntityIds.length === 0
       ? []
       : await db
           .selectFrom("entities")
           .select(["id", "name", "source_type"])
-          .where("id", "in", entityIds)
+          .where("id", "in", canonicalEntityIds)
           .where(whereLiveEntity())
           .execute();
   const entitiesById = new Map(entities.map((entity) => [entity.id, entity]));
@@ -534,14 +541,19 @@ async function loadDurableTaskMetadata(
   const assigneeEntityIds = new Set(opts.assigneeEntityIds);
 
   return tasks.map((task) => {
-    const parentEntity = task.parent_entity_id ? (entitiesById.get(task.parent_entity_id) ?? null) : null;
-    const assigneeEntity = task.assignee_entity_id ? (entitiesById.get(task.assignee_entity_id) ?? null) : null;
+    const parentEntityId = task.parent_entity_id ? canonicalEntityIdsById.get(task.parent_entity_id) : null;
+    const assigneeEntityId = task.assignee_entity_id ? canonicalEntityIdsById.get(task.assignee_entity_id) : null;
+    const parentEntity = parentEntityId ? (entitiesById.get(parentEntityId) ?? null) : null;
+    const assigneeEntity = assigneeEntityId ? (entitiesById.get(assigneeEntityId) ?? null) : null;
     const taskEvidence = evidenceByTaskId.get(task.id) ?? [];
     const entityRefs = new Set<string>();
     if (parentEntity) entityRefs.add(parentEntity.id);
     if (assigneeEntity) entityRefs.add(assigneeEntity.id);
     for (const evidence of taskEvidence) {
-      if (evidence.kind === "entity" && entitiesById.has(evidence.ref_id)) entityRefs.add(evidence.ref_id);
+      const canonicalEntityId = canonicalEntityIdsById.get(evidence.ref_id);
+      if (evidence.kind === "entity" && canonicalEntityId && entitiesById.has(canonicalEntityId)) {
+        entityRefs.add(canonicalEntityId);
+      }
     }
     const fileRefs = new Set(
       taskEvidence
@@ -551,7 +563,7 @@ async function loadDurableTaskMetadata(
     return {
       ...task,
       createdByReader: task.created_by_user_id === opts.userId,
-      assignedToReader: Boolean(task.assignee_entity_id && assigneeEntityIds.has(task.assignee_entity_id)),
+      assignedToReader: Boolean(assigneeEntityId && assigneeEntityIds.has(assigneeEntityId)),
       parentEntity,
       assigneeEntity,
       knowledgeRefs: {
@@ -560,6 +572,76 @@ async function loadDurableTaskMetadata(
       },
     };
   });
+}
+
+async function resolveCanonicalEntityIds(db: Kysely<DB>, entityIds: string[]): Promise<Map<string, string>> {
+  const sourceIds = [...new Set(entityIds)].filter(Boolean);
+  if (sourceIds.length === 0) return new Map();
+
+  const redirects = new Map<string, string | null>();
+  let frontier = sourceIds;
+  for (let depth = 0; depth < 32 && frontier.length > 0; depth++) {
+    const rows = await db
+      .selectFrom("entities")
+      .select(["id", "merged_into_entity_id"])
+      .where("id", "in", frontier)
+      .execute();
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    const next = new Set<string>();
+    for (const entityId of frontier) {
+      const mergedIntoEntityId = rowsById.get(entityId)?.merged_into_entity_id ?? null;
+      redirects.set(entityId, mergedIntoEntityId);
+      if (mergedIntoEntityId && !redirects.has(mergedIntoEntityId)) next.add(mergedIntoEntityId);
+    }
+    frontier = [...next];
+  }
+  if (frontier.length > 0) {
+    throw new EntityRedirectError("ENTITY_REDIRECT_TOO_DEEP", "entity merge redirect chain exceeded limit", {
+      entityIds: sourceIds,
+    });
+  }
+
+  const canonicalIds = new Map<string, string>();
+  for (const sourceId of sourceIds) {
+    let current = sourceId;
+    const seen = new Set<string>();
+    for (let depth = 0; depth < 32; depth++) {
+      if (seen.has(current)) {
+        throw new EntityRedirectError("ENTITY_REDIRECT_CYCLE", "entity merge redirect cycle detected", {
+          entityId: sourceId,
+        });
+      }
+      seen.add(current);
+      const target = redirects.get(current);
+      if (!target) {
+        canonicalIds.set(sourceId, current);
+        break;
+      }
+      current = target;
+    }
+    if (!canonicalIds.has(sourceId)) {
+      throw new EntityRedirectError("ENTITY_REDIRECT_TOO_DEEP", "entity merge redirect chain exceeded limit", {
+        entityId: sourceId,
+      });
+    }
+  }
+  return canonicalIds;
+}
+
+async function loadMergedEntityPredecessorIds(db: Kysely<DB>, entityIds: string[]): Promise<string[]> {
+  const resolvedIds = new Set(entityIds);
+  let frontier = [...resolvedIds];
+  for (let depth = 0; depth < 32 && frontier.length > 0; depth++) {
+    const rows = await db.selectFrom("entities").select("id").where("merged_into_entity_id", "in", frontier).execute();
+    frontier = rows.map((row) => row.id).filter((id) => !resolvedIds.has(id));
+    for (const id of frontier) resolvedIds.add(id);
+  }
+  if (frontier.length > 0) {
+    throw new EntityRedirectError("ENTITY_REDIRECT_TOO_DEEP", "entity merge redirect chain exceeded limit", {
+      entityIds,
+    });
+  }
+  return [...resolvedIds];
 }
 
 export async function upsertLlmTask(

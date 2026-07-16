@@ -1135,6 +1135,112 @@ describe("createTaskRepository sqlite", () => {
     });
   });
 
+  it("keeps structural tasks assigned to a merged-away reader person eligible", async () => {
+    await seedUser(db, "merged-reader-u1", "merged-reader@example.com");
+    await seedPerson(db, "person-reader-survivor", "Reader Survivor", ["merged-reader@example.com"]);
+    await seedPerson(db, "person-reader-merged", "Reader Merged");
+    await mergeEntity(db, "person-reader-merged", "person-reader-survivor");
+    await seedIndexedFile(db, "merged-reader-file");
+
+    const repo = createTaskRepository(db);
+    const task = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "linear",
+      externalRef: "SKE-405",
+      title: "Merged reader structural",
+      status: "open",
+      statusRaw: "Todo",
+      statusAuthority: "external",
+      assigneeEntityId: "person-reader-merged",
+      assigneeName: "Reader Merged",
+      priority: "high",
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "merged-reader-structural",
+    });
+    await repo.upsertEvidence(task.taskId, "file", "merged-reader-file");
+
+    const rows = await repo.loadOpenDurableTasksForBrief({
+      userId: "merged-reader-u1",
+      userEmails: ["merged-reader@example.com"],
+      assigneeEntityIds: ["person-reader-survivor"],
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: task.taskId,
+      assignedToReader: true,
+      assigneeEntity: {
+        id: "person-reader-survivor",
+        name: "Reader Survivor",
+        source_type: "person",
+      },
+    });
+  });
+
+  it("returns canonical survivor IDs for merged task entity refs without duplicates", async () => {
+    await seedUser(db, "canonical-reader-u1", "canonical-reader@example.com");
+    await seedProject(db, "project-parent-survivor", "Parent Survivor");
+    await seedProject(db, "project-parent-merged", "Parent Merged");
+    await seedPerson(db, "person-assignee-survivor", "Assignee Survivor");
+    await seedPerson(db, "person-assignee-merged", "Assignee Merged");
+    await seedProject(db, "entity-evidence-survivor", "Evidence Survivor");
+    await seedProject(db, "entity-evidence-merged", "Evidence Merged");
+    await mergeEntity(db, "project-parent-merged", "project-parent-survivor");
+    await mergeEntity(db, "person-assignee-merged", "person-assignee-survivor");
+    await mergeEntity(db, "entity-evidence-merged", "entity-evidence-survivor");
+
+    const repo = createTaskRepository(db);
+    const task = await repo.upsertTask({
+      parentEntityId: "project-parent-merged",
+      parentSourceRef: null,
+      parentName: "Parent Merged",
+      source: "brief",
+      externalRef: null,
+      title: "Canonical merged refs",
+      status: "open",
+      statusRaw: "todo",
+      statusAuthority: "local",
+      assigneeEntityId: "person-assignee-merged",
+      assigneeName: "Assignee Merged",
+      priority: "medium",
+      dueAt: null,
+      provenance: "brief",
+      sourceTaskId: "canonical-merged-refs",
+      createdByUserId: "canonical-reader-u1",
+    });
+    await repo.upsertEvidence(task.taskId, "entity", "entity-evidence-merged");
+    await repo.upsertEvidence(task.taskId, "entity", "entity-evidence-survivor");
+
+    const rows = await repo.loadOpenDurableTasksForBrief({
+      userId: "canonical-reader-u1",
+      userEmails: ["canonical-reader@example.com"],
+      assigneeEntityIds: ["person-assignee-survivor"],
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: task.taskId,
+      assignedToReader: true,
+      parentEntity: {
+        id: "project-parent-survivor",
+        name: "Parent Survivor",
+        source_type: "project",
+      },
+      assigneeEntity: {
+        id: "person-assignee-survivor",
+        name: "Assignee Survivor",
+        source_type: "person",
+      },
+      knowledgeRefs: {
+        entityIds: ["entity-evidence-survivor", "person-assignee-survivor", "project-parent-survivor"],
+        fileIds: [],
+      },
+    });
+  });
+
   it("loads recent user-owned summary tasks for Daily Brief including completed protection rows", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedUser(db, "summary-u2", "other@example.com");
@@ -1536,6 +1642,18 @@ async function seedPerson(db: Kysely<DB>, id: string, name: string, aliases: str
       deleted_at: null,
       merged_into_entity_id: null,
     })
+    .execute();
+}
+
+async function mergeEntity(db: Kysely<DB>, mergedId: string, survivorId: string): Promise<void> {
+  await db
+    .updateTable("entities")
+    .set({
+      deleted_at: new Date().toISOString(),
+      merged_into_entity_id: survivorId,
+      updated_at: new Date().toISOString(),
+    })
+    .where("id", "=", mergedId)
     .execute();
 }
 
