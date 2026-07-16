@@ -65,7 +65,7 @@ export function AutomationArtifactCard({
           className="h-9 rounded-[8px] bg-brand-accent px-4 font-mono text-[11px] font-bold uppercase tracking-[0.12em] text-[#161300] shadow-none hover:bg-brand-accent/90 sm:px-5"
           onClick={openBuilder}
         >
-          Open Builder
+          Open automation
         </Button>
         <Button
           type="button"
