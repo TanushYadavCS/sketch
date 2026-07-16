@@ -144,6 +144,13 @@ export type Config = z.infer<typeof configSchema>;
  * (e.g. when `concurrently` runs it from packages/server/).
  */
 export function loadConfig(): Config {
+  if (process.env.MAX_CONCURRENT_AGENT_RUNS !== undefined) {
+    console.error("Invalid configuration:");
+    console.error(
+      "  MAX_CONCURRENT_AGENT_RUNS: replaced by MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS and MAX_CONCURRENT_SCHEDULED_AGENT_RUNS",
+    );
+    process.exit(1);
+  }
   const result = configSchema.safeParse(process.env);
   if (!result.success) {
     console.error("Invalid configuration:");

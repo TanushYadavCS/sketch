@@ -3423,6 +3423,37 @@ describe("AgentRunService", () => {
     expect(scheduledRunAgent).toHaveBeenCalledTimes(1);
   });
 
+  it("uses independent per-agent queues for scheduled and manual generations", async () => {
+    const queueKeys: string[] = [];
+    const queueManager = {
+      getQueue: (key: string) => {
+        queueKeys.push(key);
+        return { enqueue: () => true };
+      },
+    } as unknown as QueueManager;
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const service = createService(db, [], { queueManager });
+
+    await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: "2026-06-16",
+      triggerType: "manual",
+    });
+
+    expect(queueKeys).toEqual([
+      `agent-scheduled-${DAILY_BRIEF_AGENT_KEY}-${user.id}`,
+      `agent-manual-${DAILY_BRIEF_AGENT_KEY}-${user.id}`,
+    ]);
+  });
+
   it("promotes a queued scheduled generation when a manual request coalesces onto it", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);

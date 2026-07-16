@@ -2014,7 +2014,7 @@ export class AgentRunService {
       }
     };
     if (this.deps.queueManager) {
-      const accepted = this.deps.queueManager.getQueue(`agent-${agentKey}-${userId}`).enqueue(task);
+      const accepted = this.deps.queueManager.getQueue(`agent-${triggerType}-${agentKey}-${userId}`).enqueue(task);
       if (!accepted && admission && this.scheduledRunAdmissions.get(outputId) === admission) {
         this.scheduledRunAdmissions.delete(outputId);
       }

@@ -275,6 +275,21 @@ describe("configSchema", () => {
 describe("loadConfig", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("fails fast when the removed shared agent concurrency setting is still present", () => {
+    vi.stubEnv("MAX_CONCURRENT_AGENT_RUNS", "2");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("exit");
+    });
+
+    expect(() => loadConfig()).toThrow("exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "  MAX_CONCURRENT_AGENT_RUNS: replaced by MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS and MAX_CONCURRENT_SCHEDULED_AGENT_RUNS",
+    );
   });
 
   it("resolves DATA_DIR and SQLITE_PATH relative to DOTENV_CONFIG_PATH dir", () => {
