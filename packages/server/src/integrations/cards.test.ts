@@ -610,6 +610,43 @@ describe("integration cards", () => {
     expect(cards).toEqual([]);
   });
 
+  it("keeps explicit fuzzy-query and canonical component cards distinct across slug boundaries", async () => {
+    const cards: Array<{ appId: string }> = [];
+    const provider = {
+      listConnections: async () => [],
+      listApps: async (query?: string) => ({
+        apps:
+          query === "googlesheetsoauth"
+            ? [{ id: "googlesheetsoauth", name: "Google Sheets Compact", description: "Spreadsheets" }]
+            : query === "google-sheets-oauth"
+              ? [{ id: "google-sheets-oauth", name: "Google Sheets", description: "Spreadsheets" }]
+              : [],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__search_apps",
+          input: { queries: ["googlesheetsoauth"] },
+        },
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards.map((card) => card.appId)).toEqual(["googlesheetsoauth", "google-sheets-oauth"]);
+  });
+
   it.each([
     "google--sheets-oauth-query-formula",
     "-google-sheets-oauth-query-formula",

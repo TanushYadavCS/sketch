@@ -120,7 +120,8 @@ export function dedupeIntegrationCards(cards: WebChatIntegrationConnectionData[]
   const seen = new Set<string>();
   const deduped: WebChatIntegrationConnectionData[] = [];
   for (const card of cards) {
-    const key = `${card.state ?? "connect"}:${normalizeIntegrationLookup(card.appId)}`;
+    const appKey = normalizeExactIntegrationSlug(card.appId) ?? normalizeIntegrationLookup(card.appId);
+    const key = `${card.state ?? "connect"}:${appKey}`;
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(card);
