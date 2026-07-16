@@ -308,7 +308,7 @@ describe("integration cards", () => {
       collector: { collect: (card) => cards.push(card) },
     });
 
-    expect(queries).toEqual(["google-calendar-oauth-create", "google-calendar-oauth"]);
+    expect(queries).toEqual(["google-calendar-oauth-create", undefined, "google-calendar-oauth"]);
     expect(cards).toMatchObject([{ appId: "google-calendar-oauth", appName: "Google Calendar", state: "connect" }]);
   });
 
@@ -347,7 +347,7 @@ describe("integration cards", () => {
       collector: { collect: (card) => cards.push(card) },
     });
 
-    expect(listApps.mock.calls.map(([query]) => query)).toEqual(["google-sheets-oauth-query"]);
+    expect(listApps.mock.calls.map(([query]) => query)).toEqual(["google-sheets-oauth-query", undefined]);
     expect(cards).toEqual([]);
   });
 
@@ -361,6 +361,56 @@ describe("integration cards", () => {
           appId: "google-sheets",
           appName: "Google Sheets",
           app: { name: "Google Sheets", nameSlug: "google-sheets" },
+          healthy: true,
+          status: "active",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+      listApps: async (query?: string) => ({
+        apps:
+          query === "google-sheets-oauth"
+            ? [{ id: "google-sheets-oauth", name: "Google Sheets", description: "Spreadsheets" }]
+            : [],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([{ appId: "google-sheets-oauth", appName: "Google Sheets", state: "connect" }]);
+  });
+
+  it("does not match separatorless or punctuation connection slugs to a canonical component app", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [
+        {
+          id: "conn-compact",
+          providerId: "provider-1",
+          appId: "googlesheetsoauth",
+          appName: "Google Sheets Compact",
+          healthy: true,
+          status: "active",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+        {
+          id: "conn-punctuation",
+          providerId: "provider-1",
+          appId: "google_sheets_oauth",
+          appName: "Google Sheets Punctuation",
+          app: { name: "Google Sheets Punctuation", nameSlug: "google.sheets.oauth" },
           healthy: true,
           status: "active",
           createdAt: "2026-01-01T00:00:00Z",
@@ -526,6 +576,73 @@ describe("integration cards", () => {
     expect(cards).toEqual([]);
   });
 
+  it("does not collect compact or punctuation app IDs for an exact canonical component candidate", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [],
+      listApps: async (query?: string) => ({
+        apps:
+          query === undefined
+            ? []
+            : [
+                { id: "googlesheetsoauth", name: "Google Sheets Compact", description: "Spreadsheets" },
+                { id: "google_sheets_oauth", name: "Google Sheets Underscore", description: "Spreadsheets" },
+                { id: "google.sheets.oauth", name: "Google Sheets Dotted", description: "Spreadsheets" },
+              ],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toEqual([]);
+  });
+
+  it.each([
+    "google--sheets-oauth-query-formula",
+    "-google-sheets-oauth-query-formula",
+    "google-sheets-oauth-query-formula-",
+  ])("does not collect a card for malformed component key %s", async (componentKey) => {
+    const cards: unknown[] = [];
+    const listApps = vi.fn(async () => ({
+      apps: [{ id: "google-sheets-oauth", name: "Google Sheets", description: "Spreadsheets" }],
+      pageInfo: { endCursor: null, hasMore: false },
+    }));
+    const provider = {
+      listConnections: async () => [],
+      listApps,
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(listApps).not.toHaveBeenCalled();
+    expect(cards).toEqual([]);
+  });
+
   it("resolves a canonical app before an unknown action segment", async () => {
     const cards: unknown[] = [];
     const provider = {
@@ -553,6 +670,47 @@ describe("integration cards", () => {
       collector: { collect: (card) => cards.push(card) },
     });
 
+    expect(cards).toMatchObject([{ appId: "google-sheets-oauth", appName: "Google Sheets", state: "connect" }]);
+  });
+
+  it("falls back to a cached unfiltered catalog while preserving longest-prefix resolution", async () => {
+    const cards: unknown[] = [];
+    const listApps = vi.fn(async (query?: string) => ({
+      apps:
+        query === undefined
+          ? [
+              { id: "google", name: "Google", description: "Google" },
+              { id: "google-sheets-oauth", name: "Google Sheets", description: "Spreadsheets" },
+            ]
+          : [],
+      pageInfo: { endCursor: null, hasMore: false },
+    }));
+    const provider = {
+      listConnections: async () => [],
+      listApps,
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-append-values" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(listApps.mock.calls.filter(([query]) => query === undefined)).toHaveLength(1);
+    expect(listApps.mock.calls.map(([query]) => query)).not.toContain("google");
     expect(cards).toMatchObject([{ appId: "google-sheets-oauth", appName: "Google Sheets", state: "connect" }]);
   });
 
@@ -596,6 +754,7 @@ describe("integration cards", () => {
 
     expect(listApps.mock.calls.map(([query]) => query)).toEqual([
       "google-sheets-oauth-query",
+      undefined,
       "google-sheets-oauth",
       "google-sheets-oauth-frobnicate",
     ]);

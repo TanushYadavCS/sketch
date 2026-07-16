@@ -34,6 +34,20 @@ describe("appendAutomationBuilderLinks", () => {
     );
   });
 
+  it("uses a plural heading when one automation link is present and another is appended", () => {
+    const secondArtifact: AutomationArtifact = {
+      ...artifact,
+      taskId: "task-456",
+      title: "Weekly pipeline review",
+      builderUrl: "https://sketch.test/scheduled-tasks/task-456/edit",
+    };
+    const text = `First automation: ${artifact.builderUrl}`;
+
+    expect(appendAutomationBuilderLinks(text, [artifact, secondArtifact])).toBe(
+      `${text}\n\nOpen your automations:\n- Weekly pipeline review: https://sketch.test/scheduled-tasks/task-456/edit`,
+    );
+  });
+
   it("creates fallback text for artifact-only responses", () => {
     expect(appendAutomationBuilderLinks(null, [artifact])).toBe(
       "Your automation is ready.\n\nOpen your automation:\n- Daily account brief: https://sketch.test/scheduled-tasks/task-123/edit",

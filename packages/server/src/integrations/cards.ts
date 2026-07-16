@@ -56,6 +56,11 @@ export function normalizeIntegrationLookup(value: string | undefined): string {
     .replace(/[^a-z0-9]+/g, "");
 }
 
+function normalizeExactIntegrationSlug(value: string | undefined): string | null {
+  const normalized = (value ?? "").trim().toLowerCase();
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(normalized) ? normalized : null;
+}
+
 export function connectionMatchesApp(connection: IntegrationConnection, app: IntegrationApp): boolean {
   const appKeys = [app.id, app.name].map(normalizeIntegrationLookup);
   const connectionKeys = [connection.appId, connection.app?.nameSlug, connection.appName].map(
@@ -205,9 +210,21 @@ function uniqueQueries(queries: string[]): string[] {
   return result;
 }
 
+function uniqueComponentKeys(componentKeys: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const componentKey of componentKeys) {
+    const normalized = normalizeExactIntegrationSlug(componentKey);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
 function componentKeysFromValue(componentKey: string | null): string[] {
-  const value = componentKey?.trim();
-  return value ? [value] : [];
+  const normalized = normalizeExactIntegrationSlug(componentKey ?? undefined);
+  return normalized ? [normalized] : [];
 }
 
 function firstStringValue(record: Record<string, unknown> | undefined, keys: string[]): string | null {
@@ -471,7 +488,7 @@ function genericFailureLookups(
 
   return {
     queries: uniqueQueries(queries),
-    componentKeys: uniqueQueries(componentKeys),
+    componentKeys: uniqueComponentKeys(componentKeys),
   };
 }
 
@@ -497,7 +514,7 @@ export function extractIntegrationLookupsFromProgressEvent(
     const failureLookups = genericFailureLookups(event.toolName, event.input);
     return {
       queries: uniqueQueries([...lookup.queries, ...failureLookups.queries]),
-      componentKeys: uniqueQueries([...lookup.componentKeys, ...failureLookups.componentKeys]),
+      componentKeys: uniqueComponentKeys([...lookup.componentKeys, ...failureLookups.componentKeys]),
       listConnected: false,
     };
   }
@@ -506,12 +523,9 @@ export function extractIntegrationLookupsFromProgressEvent(
 }
 
 function componentKeyPrefixes(componentKey: string): string[] {
-  const parts = componentKey
-    .trim()
-    .toLowerCase()
-    .split("-")
-    .map((part) => part.trim())
-    .filter(Boolean);
+  const normalized = normalizeExactIntegrationSlug(componentKey);
+  if (!normalized) return [];
+  const parts = normalized.split("-");
   const prefixes: string[] = [];
   for (let length = parts.length - 1; length > 0; length -= 1) {
     prefixes.push(parts.slice(0, length).join("-"));
@@ -520,9 +534,10 @@ function componentKeyPrefixes(componentKey: string): string[] {
 }
 
 function connectionMatchesCandidateSlug(connection: IntegrationConnection, candidate: string): boolean {
-  const candidateKey = normalizeIntegrationLookup(candidate);
+  const candidateKey = normalizeExactIntegrationSlug(candidate);
+  if (!candidateKey) return false;
   return [connection.appId, connection.app?.nameSlug]
-    .map(normalizeIntegrationLookup)
+    .map(normalizeExactIntegrationSlug)
     .some((connectionKey) => connectionKey === candidateKey);
 }
 
@@ -540,6 +555,7 @@ async function resolveComponentKeyCard(
   connections: IntegrationConnection[],
   componentKey: string,
   appCache: Map<string, Promise<IntegrationApp | null>>,
+  loadAppCatalog: () => Promise<IntegrationApp[]>,
 ): Promise<WebChatIntegrationConnectionData | null> {
   for (const candidate of componentKeyPrefixes(componentKey)) {
     const exactConnections = connections.filter((connection) => connectionMatchesCandidateSlug(connection, candidate));
@@ -548,16 +564,20 @@ async function resolveComponentKeyCard(
       return healthyConnection ? null : cardFromApp(appFromConnection(exactConnections[0]), null);
     }
 
-    const candidateKey = normalizeIntegrationLookup(candidate);
+    const candidateKey = normalizeExactIntegrationSlug(candidate);
+    if (!candidateKey) continue;
     let appRequest = appCache.get(candidateKey);
     if (!appRequest) {
       appRequest = provider
         .listApps(candidate, 5, undefined)
-        .then((result) => result.apps.find((app) => normalizeIntegrationLookup(app.id) === candidateKey) ?? null);
+        .then((result) => result.apps.find((app) => normalizeExactIntegrationSlug(app.id) === candidateKey) ?? null);
       appCache.set(candidateKey, appRequest);
     }
 
-    const app = await appRequest;
+    const queriedApp = await appRequest;
+    const app =
+      queriedApp ??
+      (await loadAppCatalog()).find((catalogApp) => normalizeExactIntegrationSlug(catalogApp.id) === candidateKey);
     if (!app) continue;
     const healthyConnection = connections.find(
       (connection) => connectionMatchesCandidateSlug(connection, app.id) && isActiveIntegrationConnection(connection),
@@ -583,7 +603,7 @@ export async function collectIntegrationCardsFromProgressEvents(params: {
   for (const event of params.events) {
     const lookup = extractIntegrationLookupsFromProgressEvent(event);
     for (const query of lookup.queries) queries.add(query);
-    for (const componentKey of lookup.componentKeys) componentKeys.add(componentKey);
+    for (const componentKey of uniqueComponentKeys(lookup.componentKeys)) componentKeys.add(componentKey);
     listConnected ||= lookup.listConnected;
   }
 
@@ -601,8 +621,13 @@ export async function collectIntegrationCardsFromProgressEvents(params: {
     cards.push(...result.cards.filter((card) => (card.state ?? "connect") === "connect"));
   }
   const appCache = new Map<string, Promise<IntegrationApp | null>>();
+  let appCatalogRequest: Promise<IntegrationApp[]> | null = null;
+  const loadAppCatalog = () => {
+    appCatalogRequest ??= provider.listApps(undefined, 20, undefined).then((result) => result.apps);
+    return appCatalogRequest;
+  };
   for (const componentKey of componentKeys) {
-    const card = await resolveComponentKeyCard(provider, connections, componentKey, appCache);
+    const card = await resolveComponentKeyCard(provider, connections, componentKey, appCache, loadAppCatalog);
     if (card) cards.push(card);
   }
   for (const card of dedupeIntegrationCards(cards)) {
