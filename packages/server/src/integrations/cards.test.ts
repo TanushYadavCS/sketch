@@ -351,6 +351,84 @@ describe("integration cards", () => {
     expect(cards).toEqual([]);
   });
 
+  it("collects a canonical app card when a healthy same-name connection has a different slug", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [
+        {
+          id: "conn-sheets",
+          providerId: "provider-1",
+          appId: "google-sheets",
+          appName: "Google Sheets",
+          app: { name: "Google Sheets", nameSlug: "google-sheets" },
+          healthy: true,
+          status: "active",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+      listApps: async (query?: string) => ({
+        apps:
+          query === "google-sheets-oauth"
+            ? [{ id: "google-sheets-oauth", name: "Google Sheets", description: "Spreadsheets" }]
+            : [],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([{ appId: "google-sheets-oauth", appName: "Google Sheets", state: "connect" }]);
+  });
+
+  it("collects a reconnect card for an unhealthy exact canonical connection", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [
+        {
+          id: "conn-sheets",
+          providerId: "provider-1",
+          appId: "google-sheets-oauth",
+          appName: "Google Sheets",
+          healthy: false,
+          status: "error",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+      listApps: async () => ({
+        apps: [],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([{ appId: "google-sheets-oauth", appName: "Google Sheets", state: "connect" }]);
+  });
+
   it("collects a card for an unconnected canonical component app", async () => {
     const cards: unknown[] = [];
     const provider = {

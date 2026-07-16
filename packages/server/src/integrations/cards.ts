@@ -559,7 +559,10 @@ async function resolveComponentKeyCard(
 
     const app = await appRequest;
     if (!app) continue;
-    return connectionForApp(connections, app) ? null : cardFromApp(app, null);
+    const healthyConnection = connections.find(
+      (connection) => connectionMatchesCandidateSlug(connection, app.id) && isActiveIntegrationConnection(connection),
+    );
+    return healthyConnection ? null : cardFromApp(app, null);
   }
 
   return null;
