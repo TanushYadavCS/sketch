@@ -693,10 +693,16 @@ export async function createServer(config: Config, options?: CreateServerOptions
     agentRunService,
     limitAgentExecution,
     ...(whatsapp instanceof GatewayClientFacade
-      ? { whatsappWakeToken: whatsapp.gatewayToken, onWhatsAppWake: () => whatsappInboundConsumer.wake() }
+      ? {
+          whatsappWakeToken: whatsapp.gatewayToken,
+          onWhatsAppWake: () => whatsappInboundConsumer.wake(),
+          onWhatsAppSocketStateChange: (change: Parameters<WhatsAppGatewaySupervisor["handleSocketStateChange"]>[0]) =>
+            whatsappSupervisor?.handleSocketStateChange(change),
+        }
       : {}),
   });
   const server = serve({ fetch: app.fetch, port: config.PORT });
+  await whatsappSupervisor?.refreshHealth();
   localDeviceGateway.attach(server);
   logger.info({ port: config.PORT }, "HTTP server started");
 

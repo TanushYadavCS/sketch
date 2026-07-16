@@ -42,4 +42,23 @@ describe("WhatsApp gateway wake route", () => {
     });
     expect(response.status).toBe(403);
   });
+
+  it("accepts authenticated socket state changes from the gateway", async () => {
+    const changes: unknown[] = [];
+    const app = createApp(db, createTestConfig(), {
+      whatsappWakeToken: "wake-secret",
+      onWhatsAppSocketStateChange: (change) => {
+        changes.push(change);
+      },
+    });
+
+    const response = await app.request("http://127.0.0.1/internal/whatsapp/socket-state", {
+      method: "POST",
+      headers: { Authorization: "Bearer wake-secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerToken: "owner-1", generation: 3, socketState: "connected" }),
+    });
+
+    expect(response.status).toBe(204);
+    expect(changes).toEqual([{ ownerToken: "owner-1", generation: 3, socketState: "connected" }]);
+  });
 });

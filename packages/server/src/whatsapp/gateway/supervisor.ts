@@ -8,7 +8,11 @@ import type { Config } from "../../config";
 import { createWhatsAppSessionLeaseRepository } from "../../db/repositories/whatsapp-session-lease";
 import type { DB, WhatsAppSessionLeaseTable } from "../../db/schema";
 import type { Logger } from "../../logger";
-import { WHATSAPP_FACADE_CONTRACT_VERSION, type WhatsAppFacadeHealth } from "../facade-contract";
+import {
+  WHATSAPP_FACADE_CONTRACT_VERSION,
+  type WhatsAppFacadeHealth,
+  type WhatsAppSocketStateChange,
+} from "../facade-contract";
 import { GatewayClientFacade } from "../gateway-client-facade";
 import { WHATSAPP_GATEWAY_DEFAULT_PORT, WHATSAPP_GATEWAY_HOST } from "./http-server";
 import { loadBootId, loadHostId, loadPidStartTime } from "./identity";
@@ -181,6 +185,22 @@ export class WhatsAppGatewaySupervisor {
   }
 
   /**
+   * The app accepts socket-state pushes only through its authenticated loopback
+   * route. The lease owner and generation fence stale child notifications, while
+   * child exit clears the cached health and the periodic poll remains a fallback.
+   */
+  handleSocketStateChange(change: WhatsAppSocketStateChange): void {
+    if (!this.client || !this.lease || !this.lastHealth) return;
+    if (this.lease.owner_token !== change.ownerToken || this.lease.generation !== change.generation) return;
+    this.lastHealth = { ...this.lastHealth, socketState: change.socketState };
+  }
+
+  async refreshHealth(): Promise<void> {
+    const scriptPath = this.options.gatewayScriptPath ?? defaultGatewayScriptPath();
+    await this.pollHealth(scriptPath);
+  }
+
+  /**
    * Concurrent pairing requests share one in-flight spawn: the pre-spawn checks
    * (`this.child`) sit after an await on `fileHash`, so without the memo two
    * simultaneous callers could both pass them and double-spawn the gateway.
@@ -322,9 +342,17 @@ export class WhatsAppGatewaySupervisor {
 
   private async pollHealth(scriptPath: string): Promise<void> {
     if (this.stopping || this.restarting || !this.client) return;
+    const client = this.client;
+    const lease = this.lease;
     try {
       const expectedHash = await fileHash(scriptPath);
-      const health = await this.client.health();
+      const health = await client.health();
+      if (
+        this.client !== client ||
+        this.lease?.owner_token !== lease?.owner_token ||
+        this.lease?.generation !== lease?.generation
+      )
+        return;
       if (whatsappGatewayHealthDecision(health, expectedHash) === "restart") {
         await this.restart("gateway contract skew");
         return;
@@ -365,15 +393,15 @@ export class WhatsAppGatewaySupervisor {
     const expectedExit = this.expectedExits.delete(child);
     const exitedLease = this.lease;
     const wasReady = this.client !== null && exitedLease !== null;
+    this.child = null;
+    this.client = null;
+    this.lease = null;
+    this.lastHealth = null;
     if (exitedLease && child.pid === exitedLease.pid) {
       await this.leases
         .release({ ownerToken: exitedLease.owner_token, generation: exitedLease.generation })
         .catch((error) => this.options.logger.warn({ error }, "Failed to release the exited gateway lease"));
     }
-    this.child = null;
-    this.client = null;
-    this.lease = null;
-    this.lastHealth = null;
     if (expectedExit || this.stopping) return;
     const decision = whatsappGatewayExitDecision(code, this.restartAttempt + 1);
     if (decision.action === "re-pair") {

@@ -82,7 +82,11 @@ import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
-import type { WhatsAppSocketFacade } from "./whatsapp/facade-contract";
+import {
+  type WhatsAppSocketFacade,
+  type WhatsAppSocketStateChange,
+  whatsAppSocketStateChangeSchema,
+} from "./whatsapp/facade-contract";
 import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
 import type { ManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import type { WatiWhatsAppProvider } from "./whatsapp/providers/wati";
@@ -130,6 +134,7 @@ interface AppDeps {
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   whatsappWakeToken?: string;
   onWhatsAppWake?: () => Promise<void> | void;
+  onWhatsAppSocketStateChange?: (change: WhatsAppSocketStateChange) => Promise<void> | void;
   getWhatsAppHealth?: () => { missingProviderIdEvents: number };
 }
 
@@ -156,6 +161,22 @@ function resolveBodyLimitBytes(config: Config): number {
 
 function isLoopbackAddress(address: string): boolean {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function authorizeWhatsAppGateway(context: Context, token: string): Response | null {
+  const remoteAddress = (context.env as Partial<HttpBindings> | undefined)?.incoming?.socket.remoteAddress;
+  const requestHost = new URL(context.req.url).hostname;
+  const loopback = remoteAddress
+    ? isLoopbackAddress(remoteAddress)
+    : requestHost === "localhost" || isLoopbackAddress(requestHost);
+  if (!loopback) return context.json({ error: "loopback_only" }, 403);
+  const header = context.req.header("authorization");
+  const actual = Buffer.from(header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : "");
+  const expected = Buffer.from(token);
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    return context.json({ error: "unauthorized" }, 401);
+  }
+  return null;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -209,21 +230,21 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     const whatsappWakeToken = deps.whatsappWakeToken;
     const onWhatsAppWake = deps.onWhatsAppWake;
     app.post("/internal/whatsapp/wake", async (context) => {
-      const remoteAddress = (context.env as Partial<HttpBindings> | undefined)?.incoming?.socket.remoteAddress;
-      const requestHost = new URL(context.req.url).hostname;
-      const loopback = remoteAddress
-        ? isLoopbackAddress(remoteAddress)
-        : requestHost === "localhost" || isLoopbackAddress(requestHost);
-      if (!loopback) {
-        return context.json({ error: "loopback_only" }, 403);
-      }
-      const header = context.req.header("authorization");
-      const actual = Buffer.from(header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : "");
-      const expected = Buffer.from(whatsappWakeToken);
-      if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-        return context.json({ error: "unauthorized" }, 401);
-      }
+      const rejected = authorizeWhatsAppGateway(context, whatsappWakeToken);
+      if (rejected) return rejected;
       await onWhatsAppWake();
+      return context.body(null, 204);
+    });
+  }
+
+  if (deps?.whatsappWakeToken && deps.onWhatsAppSocketStateChange) {
+    const whatsappWakeToken = deps.whatsappWakeToken;
+    const onWhatsAppSocketStateChange = deps.onWhatsAppSocketStateChange;
+    app.post("/internal/whatsapp/socket-state", async (context) => {
+      const rejected = authorizeWhatsAppGateway(context, whatsappWakeToken);
+      if (rejected) return rejected;
+      const change = whatsAppSocketStateChangeSchema.parse(await context.req.json());
+      await onWhatsAppSocketStateChange(change);
       return context.body(null, 204);
     });
   }

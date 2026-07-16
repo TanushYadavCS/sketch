@@ -27,10 +27,11 @@ function fakeChild(pid: number): ChildProcess {
 type SupervisorInternals = {
   child: ChildProcess | null;
   client: GatewayClientFacade | null;
-  lease: null;
+  lease: { owner_token: string; generation: number; pid?: number } | null;
   lastHealth: Awaited<ReturnType<GatewayClientFacade["health"]>> | null;
   loggedOut: boolean;
   restarting: boolean;
+  stopping: boolean;
   startedSuccessfully: boolean;
   onChildExit(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): Promise<void>;
   restart(reason: string): Promise<void>;
@@ -395,6 +396,103 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
     });
     internals.loggedOut = true;
     expect(supervisor.isConnected).toBe(false);
+    await db.destroy();
+  });
+
+  it("updates connectivity immediately for connected and disconnected socket state pushes", async () => {
+    const db = await createTestDb();
+    const supervisor = new WhatsAppGatewaySupervisor({
+      db,
+      config: createTestConfig({ WHATSAPP_RUNTIME_MODE: "gateway" }),
+      logger: createTestLogger(),
+    });
+    const internals = supervisor as unknown as SupervisorInternals;
+    internals.client = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+    });
+    internals.lease = { owner_token: "current-owner", generation: 4 };
+    internals.lastHealth = {
+      socketState: "disconnected",
+      queueDepth: 0,
+      insertFailures: 0,
+      uptime: 1,
+      scriptHash: "hash",
+      contractVersion: "1.0",
+    };
+
+    supervisor.handleSocketStateChange({ ownerToken: "current-owner", generation: 4, socketState: "connected" });
+    expect(supervisor.isConnected).toBe(true);
+
+    supervisor.handleSocketStateChange({ ownerToken: "current-owner", generation: 4, socketState: "disconnected" });
+    expect(supervisor.isConnected).toBe(false);
+    await db.destroy();
+  });
+
+  it("ignores socket state pushes from stale gateway children", async () => {
+    const db = await createTestDb();
+    const supervisor = new WhatsAppGatewaySupervisor({
+      db,
+      config: createTestConfig({ WHATSAPP_RUNTIME_MODE: "gateway" }),
+      logger: createTestLogger(),
+    });
+    const internals = supervisor as unknown as SupervisorInternals;
+    internals.client = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+    });
+    internals.lease = { owner_token: "current-owner", generation: 5 };
+    internals.lastHealth = {
+      socketState: "disconnected",
+      queueDepth: 0,
+      insertFailures: 0,
+      uptime: 1,
+      scriptHash: "hash",
+      contractVersion: "1.0",
+    };
+
+    supervisor.handleSocketStateChange({ ownerToken: "old-owner", generation: 4, socketState: "connected" });
+
+    expect(supervisor.isConnected).toBe(false);
+    expect(internals.lastHealth.socketState).toBe("disconnected");
+    await db.destroy();
+  });
+
+  it("does not resurrect connectivity when the current child exits after a connected push", async () => {
+    const db = await createTestDb();
+    const supervisor = new WhatsAppGatewaySupervisor({
+      db,
+      config: createTestConfig({ WHATSAPP_RUNTIME_MODE: "gateway" }),
+      logger: createTestLogger(),
+    });
+    const internals = supervisor as unknown as SupervisorInternals;
+    const child = fakeChild(301);
+    internals.child = child;
+    internals.client = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+    });
+    internals.lease = { owner_token: "current-owner", generation: 6, pid: 301 };
+    internals.lastHealth = {
+      socketState: "disconnected",
+      queueDepth: 0,
+      insertFailures: 0,
+      uptime: 1,
+      scriptHash: "hash",
+      contractVersion: "1.0",
+    };
+    supervisor.handleSocketStateChange({ ownerToken: "current-owner", generation: 6, socketState: "connected" });
+    expect(supervisor.isConnected).toBe(true);
+
+    internals.stopping = true;
+    await internals.onChildExit(child, 1, null);
+    supervisor.handleSocketStateChange({ ownerToken: "current-owner", generation: 6, socketState: "connected" });
+
+    expect(supervisor.isConnected).toBe(false);
+    expect(internals.lastHealth).toBeNull();
     await db.destroy();
   });
 });

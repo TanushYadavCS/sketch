@@ -120,6 +120,14 @@ export const whatsAppPairingEventSchema = z.discriminatedUnion("type", [
 
 export const whatsAppSocketStateSchema = z.enum(["disconnected", "connecting", "connected", "logged-out"]);
 
+export const whatsAppSocketStateChangeSchema = z.object({
+  ownerToken: z.string().min(1),
+  generation: z.number().int().positive(),
+  socketState: whatsAppSocketStateSchema,
+});
+
+export type WhatsAppSocketStateChange = z.infer<typeof whatsAppSocketStateChangeSchema>;
+
 export const whatsAppFacadeHealthSchema = z.object({
   socketState: whatsAppSocketStateSchema,
   queueDepth: z.number().int().nonnegative(),
