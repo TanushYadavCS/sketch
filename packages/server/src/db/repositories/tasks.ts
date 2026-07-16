@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
-import { fileAccessFilterSql } from "../../connectors/search";
 import { EntityRedirectError } from "../../entities/redirect";
 import type { DB, EntitiesTable, TasksTable } from "../schema";
 import type { AgentKnowledgeRefs, AgentOutputItemInput } from "./agent-outputs";
@@ -395,7 +394,7 @@ export function createTaskRepository(db: Kysely<DB>) {
             WHERE task_evidence.task_id = tasks.id
               AND task_evidence.kind = 'file'
               AND indexed_files.is_archived = 0
-              AND ${fileAccessFilterSql(opts.userEmails)}
+              AND ${fileVisibilityForEmails(opts.userEmails)}
           )`;
       const tasks = await db
         .selectFrom("tasks")
@@ -537,7 +536,7 @@ async function loadDurableTaskMetadata(
           .select("id")
           .where("id", "in", evidenceFileIds)
           .where("is_archived", "=", 0)
-          .where(fileAccessFilterSql(opts.userEmails))
+          .where(fileVisibilityForEmails(opts.userEmails))
           .execute();
   const visibleFileIds = new Set(visibleFiles.map((file) => file.id));
   const evidenceByTaskId = new Map<string, Array<{ kind: string; ref_id: string }>>();
@@ -580,6 +579,15 @@ async function loadDurableTaskMetadata(
       },
     };
   });
+}
+
+function fileVisibilityForEmails(userEmails: string[], alias = "indexed_files") {
+  const emails = [...new Set(userEmails)].filter(Boolean);
+  if (emails.length === 0) return sql<boolean>`false`;
+  return sql<boolean>`(${sql.join(
+    emails.map((email) => fileVisibilityPredicate({ email, isAdmin: false }, alias)),
+    sql` OR `,
+  )})`;
 }
 
 async function resolveCanonicalEntityIds(db: Kysely<DB>, entityIds: string[]): Promise<Map<string, string>> {

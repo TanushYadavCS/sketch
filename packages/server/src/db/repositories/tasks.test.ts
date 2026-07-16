@@ -1297,6 +1297,68 @@ describe("createTaskRepository sqlite", () => {
     expect(rows[0]?.knowledgeRefs.fileIds).toEqual(["file-active"]);
   });
 
+  it("includes structural evidence visible only through an entity shared to a reader email", async () => {
+    await seedUser(db, "entity-share-reader-u1", "entity-share-reader@example.com");
+    await seedPerson(db, "person-entity-share-reader", "Entity Share Reader", ["entity-share-reader@example.com"]);
+    await seedProject(db, "entity-shared-project", "Entity Shared Project");
+    await seedIndexedFile(db, "file-visible-via-entity-share");
+    await db
+      .insertInto("file_access")
+      .values({ indexed_file_id: "file-visible-via-entity-share", email: "other@example.com" })
+      .execute();
+    await db
+      .insertInto("entity_share_emails")
+      .values({
+        entity_id: "entity-shared-project",
+        email: "entity-share-alias@example.com",
+        granted_by_user_id: "entity-share-reader-u1",
+      })
+      .execute();
+    await db
+      .insertInto("entity_mentions")
+      .values({
+        id: "mention-file-visible-via-entity-share",
+        entity_id: "entity-shared-project",
+        indexed_file_id: "file-visible-via-entity-share",
+        chunk_index: null,
+        context_snippet: null,
+        confidence: "EXTRACTED",
+        source: "test",
+        relation: "mentioned",
+        mentioned_at: new Date().toISOString(),
+      })
+      .execute();
+
+    const repo = createTaskRepository(db);
+    const task = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "linear",
+      externalRef: "SKE-408",
+      title: "Entity-share-visible structural",
+      status: "open",
+      statusRaw: "Todo",
+      statusAuthority: "external",
+      assigneeEntityId: "person-entity-share-reader",
+      assigneeName: "Entity Share Reader",
+      priority: "medium",
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "entity-share-visible-structural",
+    });
+    await repo.upsertEvidence(task.taskId, "file", "file-visible-via-entity-share");
+
+    const rows = await repo.loadOpenDurableTasksForBrief({
+      userId: "entity-share-reader-u1",
+      userEmails: ["entity-share-reader@example.com", "entity-share-alias@example.com"],
+      assigneeEntityIds: ["person-entity-share-reader"],
+    });
+
+    expect(rows.map((row) => row.id)).toEqual([task.taskId]);
+    expect(rows[0]?.knowledgeRefs.fileIds).toEqual(["file-visible-via-entity-share"]);
+  });
+
   it("loads recent user-owned summary tasks for Daily Brief including completed protection rows", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedUser(db, "summary-u2", "other@example.com");
