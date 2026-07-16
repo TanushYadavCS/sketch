@@ -18,6 +18,7 @@ import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION } from "./definitions/
 import { AgentRunService } from "./service";
 
 const OUTPUT_DATE = "2026-06-15";
+const PREVIOUS_DATE = "2026-06-14";
 
 describe("Daily Brief durable-task hooks", () => {
   let db: Kysely<DB>;
@@ -130,6 +131,38 @@ describe("Daily Brief durable-task hooks", () => {
       "Reader local",
     ]);
     expect(run.context.identityUnresolvedTaskCount).toBe(1);
+  });
+
+  it("scrubs completed prior todos and excludes done durable tasks from runtime context", async () => {
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Daily Brief User",
+      email: "brief-owner@example.com",
+      emailVerified: true,
+    });
+    await seedCompletedOutput(db, user.id, OUTPUT_DATE);
+    await seedCompletedOutput(db, user.id, PREVIOUS_DATE);
+    await seedDurableTask(db, {
+      sourceTaskId: "reader-open-local",
+      title: "Open reader-owned durable task",
+      provenance: "summary",
+      createdByUserId: user.id,
+    });
+    await seedDurableTask(db, {
+      sourceTaskId: "reader-done-local",
+      title: "Done reader-owned durable task",
+      provenance: "summary",
+      status: "done",
+      createdByUserId: user.id,
+    });
+
+    const run = await runAndCapture(db, user.id, OUTPUT_DATE, []);
+
+    expect(priorTitles(run.context.sameDayPreviousOutput)).toEqual(["Open prior todo"]);
+    expect(priorTitles(run.context.previousDayOutput)).toEqual(["Open prior todo"]);
+    expect((run.context.openDurableTasks as Array<{ title: string }>).map((task) => task.title)).toEqual([
+      "Open reader-owned durable task",
+    ]);
   });
 
   it("adds recent Summarizer outputs and user-owned summary tasks to Daily Brief context without replaying old summaries", async () => {
@@ -415,6 +448,11 @@ async function runAndCapture(
   };
 }
 
+function priorTitles(output: unknown): string[] {
+  const items = (output as { items?: Array<{ title: string }> } | null)?.items ?? [];
+  return items.map((item) => item.title);
+}
+
 async function countTasks(db: Kysely<DB>): Promise<number> {
   const row = await db
     .selectFrom("tasks")
@@ -637,7 +675,7 @@ async function seedDurableTask(
     sourceTaskId: string;
     title: string;
     provenance: "structural" | "brief" | "summary";
-    status?: "open" | "in_progress";
+    status?: "open" | "in_progress" | "done";
     priority?: string | null;
     externalRef?: string | null;
     assigneeEntityId?: string | null;
