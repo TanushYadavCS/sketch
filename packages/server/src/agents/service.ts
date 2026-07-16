@@ -140,6 +140,7 @@ export interface AgentConfigView {
   delivery: AgentDeliveryConfig | null;
   deliveryModel: AgentDeliveryModel;
   sourceConfig: AgentSourceConfigDef | null;
+  availableSources: AgentSourceConfig[];
   sources: AgentSourceConfig[];
   routes: AgentConfigRouteView[];
   sections: AgentSectionView[];
@@ -509,11 +510,13 @@ function normalizeRouteSources(value: unknown): AgentSourceKey[] {
     const source = parseSourceKey(entry as AgentSourceKey);
     if (
       (source.platform !== "slack" && source.platform !== "whatsapp") ||
-      (source.targetType !== "channel" && source.targetType !== "group") ||
+      (source.targetType !== "channel" && source.targetType !== "dm" && source.targetType !== "group") ||
       !source.targetId
     ) {
       continue;
     }
+    if (source.platform === "slack" && source.targetType === "group") continue;
+    if (source.platform === "whatsapp" && source.targetType === "channel") continue;
     const key = sourceKeyForTarget(source);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -878,11 +881,19 @@ export class AgentRunService {
 
     const sources: AgentSourceConfig[] = [];
     const sourceKeys = new Set<string>();
+    const availableSources: AgentSourceConfig[] = [];
+    const availableSourceKeys = new Set<string>();
     const routes: AgentConfigRouteView[] = [];
     let enabled = false;
 
     for (const owner of owners) {
       const config = await this.resolveConfig(def, owner.userId);
+      for (const source of await this.listAvailableSourcesForUser(def, owner.userId)) {
+        const key = sourceKeyForTarget(source);
+        if (availableSourceKeys.has(key)) continue;
+        availableSourceKeys.add(key);
+        availableSources.push(source);
+      }
       enabled = enabled || config.enabled;
       for (const source of config.sources) {
         const key = sourceKeyForTarget(source);
@@ -908,6 +919,7 @@ export class AgentRunService {
       delivery: viewerConfig.delivery,
       deliveryModel: viewerConfig.deliveryModel,
       sourceConfig: def.sourceConfig ?? null,
+      availableSources,
       sources,
       routes,
       createTasks: viewerConfig.createTasks,
@@ -1020,6 +1032,7 @@ export class AgentRunService {
     const def = getAgentDefinition(agentKey);
     if (!def) return null;
     const config = await this.resolveConfig(def, userId);
+    const availableSources = await this.listAvailableSourcesForUser(def, userId);
     return {
       agentKey: def.key,
       title: def.title,
@@ -1035,6 +1048,7 @@ export class AgentRunService {
       delivery: config.delivery,
       deliveryModel: config.deliveryModel,
       sourceConfig: def.sourceConfig ?? null,
+      availableSources,
       sources: config.sources,
       routes: config.configuredRoutes,
       createTasks: config.createTasks,
@@ -1533,6 +1547,12 @@ export class AgentRunService {
     if (!user) throw new AgentSourceTargetError("User not found");
 
     if (source.platform === "slack") {
+      if (source.targetType === "dm") {
+        if (!config.supportsSlackDms) throw new AgentSourceTargetError("Slack DM sources are not supported");
+        const resolved = await this.repo.findDmSourceForUser(userId, "slack", source.targetId);
+        if (!resolved) throw new AgentSourceTargetError("DM source is not available for this user");
+        return resolved;
+      }
       if (!config.supportsSlackChannels || source.targetType !== "channel") {
         throw new AgentSourceTargetError("Slack sources must be channels");
       }
@@ -1552,6 +1572,12 @@ export class AgentRunService {
       };
     }
 
+    if (source.targetType === "dm") {
+      if (!config.supportsWhatsAppDms) throw new AgentSourceTargetError("WhatsApp DM sources are not supported");
+      const resolved = await this.repo.findDmSourceForUser(userId, "whatsapp", source.targetId);
+      if (!resolved) throw new AgentSourceTargetError("DM source is not available for this user");
+      return resolved;
+    }
     if (!config.supportsWhatsAppGroups || source.targetType !== "group") {
       throw new AgentSourceTargetError("WhatsApp sources must be groups");
     }
@@ -1568,6 +1594,16 @@ export class AgentRunService {
       targetId: group.jid,
       label: group.name,
     };
+  }
+
+  private async listAvailableSourcesForUser(def: AgentDefinition, userId: string): Promise<AgentSourceConfig[]> {
+    if (!def.sourceConfig || (!def.sourceConfig.supportsSlackDms && !def.sourceConfig.supportsWhatsAppDms)) return [];
+    const sources = await this.repo.listDmSourceOptionsForUser(userId);
+    return sources.filter(
+      (source) =>
+        (source.platform === "slack" && def.sourceConfig?.supportsSlackDms) ||
+        (source.platform === "whatsapp" && def.sourceConfig?.supportsWhatsAppDms),
+    );
   }
 
   private async resolveSourcesForRun(
@@ -2063,6 +2099,7 @@ export class AgentRunService {
                 delivery: config.delivery,
                 sources: scope.sources,
                 sourceKey: scope.sourceKey,
+                routeId: scope.route?.id ?? scope.sourceKey,
                 firstRunLookbackHours,
                 floorWindowToPeriod: output.trigger_type === "manual",
                 deliveryPlatform: deliveryPlatformForRoute(scope.route, scope.sources),
@@ -2214,7 +2251,33 @@ export class AgentRunService {
     if (resolvedSources.length !== 1) {
       throw new AgentDeliveryTargetError("Combined routes cannot use self destination");
     }
-    return this.resolveDeliveryConfigForUser(userId, sourceAsDelivery(resolvedSources[0]));
+    const [source] = resolvedSources;
+    if (source.targetType !== "dm") {
+      return this.resolveDeliveryConfigForUser(userId, sourceAsDelivery(source));
+    }
+    const user = await this.deps.users.findById(userId);
+    if (!user) throw new AgentDeliveryTargetError("User not found");
+    if (source.platform === "slack") {
+      if (!user.slack_user_id) throw new AgentDeliveryTargetError("Slack delivery is not available for this user");
+      return this.resolveDeliveryConfigForUser(userId, {
+        enabled: true,
+        platform: "slack",
+        targetType: "dm",
+        targetId: user.slack_user_id,
+        label: user.name,
+      });
+    }
+    if (!user.whatsapp_number) {
+      throw new AgentDeliveryTargetError("WhatsApp delivery is not available for this user");
+    }
+    return {
+      enabled: true,
+      platform: "whatsapp",
+      targetType: "dm",
+      targetId: user.whatsapp_number,
+      label: user.name,
+      recipientUserId: user.id,
+    };
   }
 
   private async resolveMemberRouteDelivery(
@@ -2359,6 +2422,7 @@ export class AgentRunService {
             outputId: params.outputId,
             items: itemsForHooks,
             createTasks: params.createTasks,
+            runtimeContext: params.runtimeContext,
           });
         }
         params.onSaved();
@@ -2369,7 +2433,14 @@ export class AgentRunService {
   private async validateItemRefs(def: AgentDefinition, items: AgentOutputItemInput[]): Promise<void> {
     const errors: string[] = [];
     for (const item of items) {
-      if (def.requiresKnowledgeRefs && item.knowledgeRefs.entityIds.length + item.knowledgeRefs.fileIds.length === 0) {
+      const serverOwnedFollowup =
+        item.structuredPayload?.serverOwnedFollowup === true &&
+        (item.sectionKey === "looks_resolved" || item.sectionKey === "untracked_followups");
+      if (
+        def.requiresKnowledgeRefs &&
+        !serverOwnedFollowup &&
+        item.knowledgeRefs.entityIds.length + item.knowledgeRefs.fileIds.length === 0
+      ) {
         errors.push(`${item.sectionKey}:${item.title} has no entityIds or fileIds`);
       }
       const entityCount = await this.repo.countKnownEntities(item.knowledgeRefs.entityIds);

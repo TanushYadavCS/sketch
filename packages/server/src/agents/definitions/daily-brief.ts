@@ -1,19 +1,29 @@
+import { createHash } from "node:crypto";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
+import { normalizeName } from "../../connectors/name-normalize";
 import { filterAccessibleFileIds } from "../../connectors/search";
 import {
   type AgentKnowledgeRefs,
   type AgentOutputItemInput,
   type AgentOutputWithItems,
+  type AgentRoute,
   type AgentStructuredPayload,
+  type AgentUserConfig,
   createAgentOutputRepository,
 } from "../../db/repositories/agent-outputs";
-import { whereLiveEntity } from "../../db/repositories/entities";
+import { createConversationFollowupsRepository } from "../../db/repositories/conversation-followups";
+import { createEntityRepository, whereLiveEntity } from "../../db/repositories/entities";
+import {
+  type ActiveTaskDurabilityRoute,
+  createTaskDurabilityTransitionRepository,
+} from "../../db/repositories/task-durability-transition";
 import { createTaskRepository } from "../../db/repositories/tasks";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
 import { parseTimestampMs } from "../../timestamps";
+import { type FollowupReminderView, reconcileFollowupReminderItems } from "../followup-reminder";
 import type {
   AgentApiItem,
   AgentDefinition,
@@ -39,6 +49,8 @@ export const DAILY_BRIEF_SECTION_LABELS = {
   todos: ["todo", "in_progress", "blocked", "waiting", "done"],
   customer_updates: ["owed_follow_up", "warm", "inbound", "stuck", "cold", "at_risk"],
   active_projects: ["active", "at_risk", "blocked", "needs_attention"],
+  untracked_followups: ["untracked"],
+  looks_resolved: ["looks_resolved"],
 } as const satisfies Record<string, readonly string[]>;
 
 export const DAILY_BRIEF_MEETINGS_SECTION_KEY = "meetings";
@@ -56,6 +68,8 @@ export const DAILY_BRIEF_ACTION_LABELS = {
     "Plan re-engagement",
   ],
   active_projects: ["Catch me up"],
+  untracked_followups: ["Discuss with Sketch"],
+  looks_resolved: ["Review with Sketch"],
 } as const satisfies Record<string, readonly string[]>;
 
 const TASK_SOURCE_PREFIX: Record<string, string> = {
@@ -513,6 +527,8 @@ function normalizeStoredLabel(sectionKey: string, value: string | null): string 
     | undefined;
   if (labels?.includes(value ?? "")) return value as string;
   if (sectionKey === DAILY_BRIEF_MEETINGS_SECTION_KEY) return "meeting";
+  if (sectionKey === "untracked_followups") return "untracked";
+  if (sectionKey === "looks_resolved") return "looks_resolved";
   if (sectionKey === "customer_updates") return "warm";
   if (sectionKey === "active_projects") return "active";
   return "todo";
@@ -520,6 +536,8 @@ function normalizeStoredLabel(sectionKey: string, value: string | null): string 
 
 function defaultActionLabel(sectionKey: string, label: string | null): string {
   if (sectionKey === DAILY_BRIEF_MEETINGS_SECTION_KEY) return "Prep with Sketch";
+  if (sectionKey === "untracked_followups") return "Discuss with Sketch";
+  if (sectionKey === "looks_resolved") return "Review with Sketch";
   const normalizedLabel = normalizeStoredLabel(sectionKey, label);
   if (sectionKey === "active_projects") return "Catch me up";
   if (sectionKey === "customer_updates") {
@@ -686,6 +704,8 @@ const DAILY_BRIEF_INSTRUCTIONS = [
 ].join("\n");
 
 const DURABLE_TASKS_INSTRUCTION = [
+  "- The runtime context includes followupReminder when conversation-derived follow-up tracking is available. Treat its pending, untracked, and looksResolved lists as authoritative; the server reconciles those sections after generation.",
+  "- Never place a looksResolved task in todos. Preserve exact taskId, sourceKey, and sourceAnchorKey identities from runtime context in structuredPayload when rendering related todos.",
   "- The runtime context may include openDurableTasks and summaryTasks: tasks that already exist with the shown status. Render those as-is and only create todos for genuinely new work; do not duplicate an existing task.",
   "- Some summary tasks may also appear in openDurableTasks. Treat matching ids, titles, or parents as one existing task, not as separate pieces of work.",
   "- Use recentSummaries to understand what Summarizer already extracted from chat. Treat those action items as already-derived context, not as raw source material to derive again.",
@@ -974,28 +994,590 @@ function compactRecentSummary(summary: AgentOutputWithItems) {
   };
 }
 
+function routeSourceKey(sources: readonly string[]): string {
+  if (sources.length === 1) return sources[0];
+  const hash = createHash("sha256")
+    .update([...sources].sort().join("|"))
+    .digest("hex")
+    .slice(0, 12);
+  return `route:${hash}`;
+}
+
+function activeSummaryRoutes(config: AgentUserConfig): ActiveTaskDurabilityRoute[] {
+  if (!config.enabled || config.prefs?.createTasks !== true) return [];
+  const prefs = config.prefs;
+  const configuredRoutes = prefs?.routes;
+  let routes: Array<Pick<AgentRoute, "id" | "sources" | "enabled">>;
+  if (configuredRoutes) {
+    routes = configuredRoutes;
+  } else {
+    const sources = (prefs?.sources ?? []).map(
+      (source) => `${source.platform}:${source.targetType}:${source.targetId}` as const,
+    );
+    if (prefs?.deliveryModel?.mode === "combined" && sources.length > 0) {
+      const sourceKey = routeSourceKey(sources);
+      routes = [{ id: sourceKey, sources, enabled: true }];
+    } else {
+      routes = sources.map((sourceKey) => ({ id: sourceKey, sources: [sourceKey], enabled: true }));
+    }
+  }
+  return routes.flatMap((route) => {
+    const sourceKeys = [...new Set(route.sources)].filter(Boolean);
+    if (!route.enabled || sourceKeys.length === 0) return [];
+    return [{ routeId: route.id, sourceKey: routeSourceKey(sourceKeys), sourceKeys }];
+  });
+}
+
+function activeReminderSourceKeys(activeRoutes: ActiveTaskDurabilityRoute[]): string[] {
+  return [...new Set(activeRoutes.flatMap((route) => [route.sourceKey, ...route.sourceKeys]))];
+}
+
+async function loadRecentSummariesForBrief(
+  outputRepo: ReturnType<typeof createAgentOutputRepository>,
+  userId: string,
+  since: string,
+  durabilityEnabled: boolean,
+  activeRoutes: ActiveTaskDurabilityRoute[],
+): Promise<AgentOutputWithItems[]> {
+  if (!durabilityEnabled) {
+    return outputRepo.listCompletedForUserSince(CONVERSATION_SUMMARY_AGENT_KEY, userId, since, {
+      limit: DAILY_BRIEF_SUMMARY_OUTPUT_LIMIT,
+    });
+  }
+  if (activeRoutes.length === 0) return [];
+  const outputs = (
+    await Promise.all(
+      activeRoutes.map((route) =>
+        outputRepo.listCompletedForScopeSince(CONVERSATION_SUMMARY_AGENT_KEY, userId, route.sourceKey, since, {
+          limit: DAILY_BRIEF_SUMMARY_OUTPUT_LIMIT,
+        }),
+      ),
+    )
+  ).flat();
+  return [...new Map(outputs.map((output) => [output.output.id, output])).values()];
+}
+
+async function loadLegacySummariesForBrief(
+  db: Kysely<DB>,
+  outputRepo: ReturnType<typeof createAgentOutputRepository>,
+  userId: string,
+  since: string,
+  currentSummaries: AgentOutputWithItems[],
+  activeRoutes: ActiveTaskDurabilityRoute[],
+): Promise<AgentOutputWithItems[]> {
+  const historical = await listAllBriefSummaries(outputRepo, userId, since);
+  const candidates = [
+    ...new Map([...currentSummaries, ...historical].map((output) => [output.output.id, output])).values(),
+  ];
+  return selectBriefOutputsPerActiveRoute(db, candidates, activeRoutes, DAILY_BRIEF_SUMMARY_OUTPUT_LIMIT);
+}
+
+async function listAllBriefSummaries(
+  outputRepo: ReturnType<typeof createAgentOutputRepository>,
+  userId: string,
+  since: string,
+): Promise<AgentOutputWithItems[]> {
+  const outputs: AgentOutputWithItems[] = [];
+  let before: { generatedAt: string; id: string } | undefined;
+  while (true) {
+    const page = await outputRepo.listCompletedForUserSince(CONVERSATION_SUMMARY_AGENT_KEY, userId, since, {
+      limit: 50,
+      ...(before ? { before } : {}),
+    });
+    outputs.push(...page);
+    if (page.length < 50) break;
+    const oldest = page.reduce((candidate, output) =>
+      `${output.output.generated_at ?? ""}:${output.output.id}` <
+      `${candidate.output.generated_at ?? ""}:${candidate.output.id}`
+        ? output
+        : candidate,
+    );
+    if (!oldest.output.generated_at) break;
+    before = { generatedAt: oldest.output.generated_at, id: oldest.output.id };
+  }
+  return outputs;
+}
+
+async function selectBriefOutputsPerActiveRoute(
+  db: Kysely<DB>,
+  outputs: AgentOutputWithItems[],
+  activeRoutes: ActiveTaskDurabilityRoute[],
+  limit: number,
+): Promise<AgentOutputWithItems[]> {
+  const messageIdsByOutput = new Map(
+    outputs.map((output) => [
+      output.output.id,
+      compactRecentSummary(output).actionItems.flatMap((item) =>
+        item.messageIds
+          .map((value) => (typeof value === "number" ? value : Number(value)))
+          .filter((value) => Number.isSafeInteger(value) && value > 0),
+      ),
+    ]),
+  );
+  const allMessageIds = [...new Set([...messageIdsByOutput.values()].flat())];
+  const rows =
+    allMessageIds.length === 0
+      ? []
+      : await db
+          .selectFrom("conversation_messages")
+          .select(["id", "conversation_id"])
+          .where("id", "in", allMessageIds)
+          .execute();
+  const conversationByMessage = new Map(rows.map((row) => [row.id, row.conversation_id]));
+  const ordered = [...outputs].sort((a, b) => (b.output.generated_at ?? "").localeCompare(a.output.generated_at ?? ""));
+  const selected = new Map<string, AgentOutputWithItems>();
+  for (const route of activeRoutes) {
+    const routeConversationIds = await resolveActiveBriefConversationIds(db, [route]);
+    let count = 0;
+    for (const output of ordered) {
+      const belongs =
+        output.output.source_key === route.sourceKey ||
+        (messageIdsByOutput.get(output.output.id) ?? []).some((id) =>
+          routeConversationIds.has(conversationByMessage.get(id) ?? -1),
+        );
+      if (!belongs) continue;
+      selected.set(output.output.id, output);
+      count += 1;
+      if (count >= limit) break;
+    }
+  }
+  return [...selected.values()];
+}
+
+type DailyBriefLegacyCandidate = {
+  title: string;
+  sourceKey: string;
+  sourceAnchorKey: string | null;
+};
+
+async function buildLegacyCandidates(
+  db: Kysely<DB>,
+  summaries: AgentOutputWithItems[],
+  activeRoutes?: ActiveTaskDurabilityRoute[],
+): Promise<DailyBriefLegacyCandidate[]> {
+  const candidates = summaries.flatMap((summary) =>
+    compactRecentSummary(summary).actionItems.map((item) => ({
+      title: item.title,
+      sourceKey: summary.output.source_key,
+      messageIds: item.messageIds
+        .map((value) => (typeof value === "number" ? value : Number(value)))
+        .filter((value) => Number.isSafeInteger(value) && value > 0),
+    })),
+  );
+  const messageIds = [...new Set(candidates.flatMap((candidate) => candidate.messageIds))];
+  const rows =
+    messageIds.length === 0
+      ? []
+      : await db
+          .selectFrom("conversation_messages as m")
+          .innerJoin("conversations as c", "c.id", "m.conversation_id")
+          .select(["m.id", "m.conversation_id", "m.provider_thread_id", "m.is_thread_reply", "c.platform"])
+          .where("m.id", "in", messageIds)
+          .execute();
+  const anchorByMessageId = new Map(
+    rows.map((row) => [
+      row.id,
+      `${row.platform}:${row.conversation_id}:${
+        row.platform === "slack" && row.is_thread_reply === 1 ? (row.provider_thread_id ?? "root") : "root"
+      }`,
+    ]),
+  );
+  const resolved = candidates.map((candidate) => {
+    const anchors = new Set(candidate.messageIds.flatMap((id) => anchorByMessageId.get(id) ?? []));
+    return {
+      title: candidate.title,
+      sourceKey: candidate.sourceKey,
+      sourceAnchorKey: anchors.size === 1 ? (anchors.values().next().value ?? null) : null,
+    };
+  });
+  if (!activeRoutes) return resolved;
+  const activeRouteKeys = new Set(activeRoutes.flatMap((route) => [route.sourceKey, ...route.sourceKeys]));
+  const activeConversationIds = await resolveActiveBriefConversationIds(db, activeRoutes);
+  return resolved.filter((candidate) => {
+    if (activeRouteKeys.has(candidate.sourceKey)) return true;
+    const conversationId = candidate.sourceAnchorKey ? Number(candidate.sourceAnchorKey.split(":")[1]) : Number.NaN;
+    return Number.isSafeInteger(conversationId) && activeConversationIds.has(conversationId);
+  });
+}
+
+async function resolveActiveBriefConversationIds(
+  db: Kysely<DB>,
+  activeRoutes: ActiveTaskDurabilityRoute[],
+): Promise<Set<number>> {
+  const result = new Set<number>();
+  for (const sourceKey of activeRoutes.flatMap((route) => route.sourceKeys)) {
+    const match = /^(slack|whatsapp):(channel|group|dm):(.+)$/.exec(sourceKey);
+    if (!match) continue;
+    const [, platform, kind, targetId] = match;
+    if (kind === "dm") {
+      const id = Number(targetId);
+      if (Number.isSafeInteger(id) && id > 0) result.add(id);
+      continue;
+    }
+    const rows = await db
+      .selectFrom("conversations")
+      .select("id")
+      .where("platform", "=", platform)
+      .where("kind", "=", kind)
+      .where("provider_conversation_id", "=", targetId)
+      .execute();
+    for (const row of rows) result.add(row.id);
+  }
+  return result;
+}
+
+function isTransitionSuppressed(
+  candidate: DailyBriefLegacyCandidate,
+  suppressed: { title: string; sourceKey: string; sourceAnchorKey: string },
+): boolean {
+  if (normalizeName(candidate.title) !== normalizeName(suppressed.title)) return false;
+  if (candidate.sourceAnchorKey && suppressed.sourceAnchorKey) {
+    return candidate.sourceAnchorKey === suppressed.sourceAnchorKey;
+  }
+  if (candidate.sourceKey !== suppressed.sourceKey) return false;
+  return candidate.sourceKey.startsWith("route:")
+    ? Boolean(candidate.sourceAnchorKey && candidate.sourceAnchorKey === suppressed.sourceAnchorKey)
+    : true;
+}
+
+function scopeCombinedLegacyCandidate(candidate: DailyBriefLegacyCandidate) {
+  return {
+    title: candidate.title,
+    sourceKey:
+      candidate.sourceKey.startsWith("route:") && candidate.sourceAnchorKey
+        ? `${candidate.sourceKey}:${candidate.sourceAnchorKey}`
+        : candidate.sourceKey,
+    sourceAnchorKey: candidate.sourceAnchorKey,
+  };
+}
+
+type ReminderSourceIdentity = {
+  sourceKey?: string | null;
+  sourceAnchorKey?: string | null;
+};
+
+function exactReminderIdentity(item: { title: string } & ReminderSourceIdentity): string | null {
+  const sourceAnchorKey = item.sourceAnchorKey?.trim();
+  if (sourceAnchorKey) return JSON.stringify(["anchor", normalizeName(item.title), sourceAnchorKey]);
+  const sourceKey = item.sourceKey?.trim();
+  return sourceKey ? JSON.stringify(["source", normalizeName(item.title), sourceKey]) : null;
+}
+
+function dedupeReminderCandidates<T extends { candidateId: string; title: string } & ReminderSourceIdentity>(
+  candidates: T[],
+): T[] {
+  const candidateIds = new Set<string>();
+  const sourceIdentities = new Set<string>();
+  return candidates.filter((candidate) => {
+    const sourceIdentity = exactReminderIdentity(candidate);
+    if (sourceIdentity && sourceIdentities.has(sourceIdentity)) return false;
+    if (candidateIds.has(candidate.candidateId)) return false;
+    candidateIds.add(candidate.candidateId);
+    if (sourceIdentity) sourceIdentities.add(sourceIdentity);
+    return true;
+  });
+}
+
+async function loadSeedSourceIdentities(
+  db: Kysely<DB>,
+  userId: string,
+  reviewCodes: string[],
+): Promise<Map<string, ReminderSourceIdentity>> {
+  if (reviewCodes.length === 0) return new Map();
+  const rows = await db
+    .selectFrom("task_seed_candidates")
+    .select(["review_code", "source_key", "source_anchor_key"])
+    .where("user_id", "=", userId)
+    .where("review_code", "in", [...new Set(reviewCodes)])
+    .execute();
+  return new Map(
+    rows.map((row) => [row.review_code, { sourceKey: row.source_key, sourceAnchorKey: row.source_anchor_key }]),
+  );
+}
+
+async function loadTaskSourceIdentities(
+  db: Kysely<DB>,
+  taskIds: string[],
+): Promise<Map<string, ReminderSourceIdentity>> {
+  if (taskIds.length === 0) return new Map();
+  const tasks = await db
+    .selectFrom("tasks")
+    .select(["id", "origin_agent_output_id", "source_anchor_key"])
+    .where("id", "in", [...new Set(taskIds)])
+    .execute();
+  const outputIds = [
+    ...new Set(tasks.flatMap((task) => (task.origin_agent_output_id ? [task.origin_agent_output_id] : []))),
+  ];
+  const outputs =
+    outputIds.length === 0
+      ? []
+      : await db.selectFrom("agent_outputs").select(["id", "source_key"]).where("id", "in", outputIds).execute();
+  const sourceKeyByOutputId = new Map(outputs.map((output) => [output.id, output.source_key]));
+  return new Map(
+    tasks.map((task) => [
+      task.id,
+      {
+        sourceKey: task.origin_agent_output_id ? (sourceKeyByOutputId.get(task.origin_agent_output_id) ?? null) : null,
+        sourceAnchorKey: task.source_anchor_key,
+      },
+    ]),
+  );
+}
+
+async function loadActiveSummaryTaskIds(
+  db: Kysely<DB>,
+  taskIds: string[],
+  activeRouteOutputSourceKeys: Set<string>,
+  activeMemberSourceKeys: Set<string>,
+  assigneeEntityIds: string[],
+  userId: string,
+): Promise<Set<string>> {
+  if (taskIds.length === 0) return new Set();
+  const rows = await db
+    .selectFrom("tasks as t")
+    .leftJoin("agent_outputs as o", "o.id", "t.origin_agent_output_id")
+    .leftJoin("conversations as c", "c.id", "t.source_conversation_id")
+    .select([
+      "t.id",
+      "t.assignee_entity_id as assigneeEntityId",
+      "t.created_by_user_id as createdByUserId",
+      "o.source_key as originSourceKey",
+      "c.id as conversationId",
+      "c.platform",
+      "c.kind",
+      "c.provider_conversation_id as providerConversationId",
+    ])
+    .where("t.id", "in", [...new Set(taskIds)])
+    .execute();
+  return new Set(
+    rows.flatMap((row) => {
+      if (row.createdByUserId !== userId && row.assigneeEntityId && assigneeEntityIds.includes(row.assigneeEntityId)) {
+        return [row.id];
+      }
+      if (row.originSourceKey && activeRouteOutputSourceKeys.has(row.originSourceKey)) return [row.id];
+      if (!row.platform || !row.kind || row.conversationId === null) return [];
+      const targetId = row.kind === "dm" ? String(row.conversationId) : row.providerConversationId;
+      return targetId && activeMemberSourceKeys.has(`${row.platform}:${row.kind}:${targetId}`) ? [row.id] : [];
+    }),
+  );
+}
+
+async function loadSuppressedConversationTasks(
+  db: Kysely<DB>,
+  userId: string,
+  assigneeEntityIds: string[],
+): Promise<Array<{ id: string; title: string }>> {
+  return db
+    .selectFrom("tasks")
+    .select(["id", "title"])
+    .where("valid_to", "is", null)
+    .where("provenance", "=", "summary")
+    .where("source_anchor_key", "is not", null)
+    .where("status", "in", ["done", "dropped"])
+    .where((eb) =>
+      eb.or([
+        eb("created_by_user_id", "=", userId),
+        ...(assigneeEntityIds.length > 0 ? [eb("assignee_entity_id", "in", assigneeEntityIds)] : []),
+      ]),
+    )
+    .orderBy("updated_at", "desc")
+    .limit(DAILY_BRIEF_SUMMARY_TASK_LIMIT)
+    .execute();
+}
+
+function legacyReminderCandidates(
+  items: Array<{ title: string; sourceKey?: string | null }>,
+  candidates: DailyBriefLegacyCandidate[],
+  summary: string,
+) {
+  const candidatesByRepositoryIdentity = new Map<string, DailyBriefLegacyCandidate[]>();
+  for (const candidate of candidates) {
+    const scoped = scopeCombinedLegacyCandidate(candidate);
+    const key = JSON.stringify([normalizeName(scoped.title), scoped.sourceKey]);
+    const queued = candidatesByRepositoryIdentity.get(key) ?? [];
+    queued.push(candidate);
+    candidatesByRepositoryIdentity.set(key, queued);
+  }
+  return items.map((item, index) => {
+    const key = JSON.stringify([normalizeName(item.title), item.sourceKey ?? null]);
+    const candidate = candidatesByRepositoryIdentity.get(key)?.shift();
+    return {
+      candidateId: `legacy-${index}`,
+      title: item.title,
+      summary,
+      reviewCode: null,
+      parentEntityId: null,
+      assigneeEntityId: null,
+      sourceKey: candidate?.sourceKey ?? item.sourceKey ?? null,
+      sourceAnchorKey: candidate?.sourceAnchorKey ?? null,
+    };
+  });
+}
+
 async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Record<string, unknown>> {
   const taskRepo = createTaskRepository(args.db);
   const outputRepo = createAgentOutputRepository(args.db);
+  const followups = createConversationFollowupsRepository(args.db);
+  const transitionRepo = createTaskDurabilityTransitionRepository(args.db);
+  const entities = createEntityRepository(args.db);
   const summarySince = dailyBriefSummarySince(args.baseContext);
   const userEmails = await args.users.getAllEmailsForUser(args.userId);
-  const [openDurableTasks, recentSummaries, summaryTasks] = await Promise.all([
+  const verifiedEmails = await args.users.getVerifiedEmailsForUser(args.userId);
+  const summaryConfig = await outputRepo.getConfig(CONVERSATION_SUMMARY_AGENT_KEY, args.userId);
+  const durabilityEnabled = summaryConfig.enabled && summaryConfig.prefs?.createTasks === true;
+  const activeRoutes = activeSummaryRoutes(summaryConfig);
+  const activeRouteOutputSourceKeys = new Set(activeRoutes.map((route) => route.sourceKey));
+  const activeMemberSourceKeys = new Set(activeRoutes.flatMap((route) => route.sourceKeys));
+  const [openDurableTasks, recentSummaries, summaryTasks, transitionResult, peopleResult] = await Promise.all([
     taskRepo.loadOpenDurableTasksForBrief({
       userId: args.userId,
       userEmails,
       limit: args.maxItemsPerSection * 4,
     }),
-    outputRepo.listCompletedForUserSince(CONVERSATION_SUMMARY_AGENT_KEY, args.userId, summarySince, {
-      limit: DAILY_BRIEF_SUMMARY_OUTPUT_LIMIT,
-    }),
+    loadRecentSummariesForBrief(outputRepo, args.userId, summarySince, durabilityEnabled, activeRoutes),
     taskRepo.loadSummaryTasksForBrief({
       userId: args.userId,
       since: summarySince,
       limit: DAILY_BRIEF_SUMMARY_TASK_LIMIT,
     }),
+    durabilityEnabled
+      ? transitionRepo
+          .getUserTransition({
+            agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+            userId: args.userId,
+            activeRoutes,
+          })
+          .then((value) => ({ status: "ok" as const, value }))
+          .catch(() => ({ status: "error" as const }))
+      : Promise.resolve({
+          status: "ok" as const,
+          value: {
+            mode: "hybrid" as const,
+            routes: [],
+            untracked: [],
+            suppressedLegacy: [],
+          },
+        }),
+    entities
+      .getPersonEntitiesByEmails(verifiedEmails)
+      .then((value) => ({ status: "ok" as const, value }))
+      .catch(() => ({ status: "error" as const })),
   ]);
+  const assigneeEntityIds =
+    peopleResult.status === "ok"
+      ? [...new Set([...peopleResult.value.values()].flat().map((person) => person.id))]
+      : [];
+  const activeSummaryTaskIds = durabilityEnabled
+    ? await loadActiveSummaryTaskIds(
+        args.db,
+        [
+          ...openDurableTasks.filter((task) => task.provenance === "summary").map((task) => task.id),
+          ...summaryTasks.map((task) => task.id),
+        ],
+        activeRouteOutputSourceKeys,
+        activeMemberSourceKeys,
+        assigneeEntityIds,
+        args.userId,
+      ).catch(() => new Set<string>())
+    : new Set<string>();
+  const belongsToActiveSummaryRoute = (taskId: string) => activeSummaryTaskIds.has(taskId);
+  const scopedOpenDurableTasks = durabilityEnabled
+    ? openDurableTasks.filter((task) => task.provenance !== "summary" || belongsToActiveSummaryRoute(task.id))
+    : openDurableTasks;
+  const scopedRecentSummaries = durabilityEnabled
+    ? recentSummaries.filter((summary) => activeRouteOutputSourceKeys.has(summary.output.source_key))
+    : recentSummaries;
+  const scopedSummaryTasks = durabilityEnabled
+    ? summaryTasks.filter((task) => belongsToActiveSummaryRoute(task.id))
+    : summaryTasks;
+  const legacySummaries = durabilityEnabled
+    ? await loadLegacySummariesForBrief(
+        args.db,
+        outputRepo,
+        args.userId,
+        summarySince,
+        scopedRecentSummaries,
+        activeRoutes,
+      )
+    : scopedRecentSummaries;
+  const legacyCandidates = await buildLegacyCandidates(
+    args.db,
+    legacySummaries,
+    durabilityEnabled ? activeRoutes : undefined,
+  );
+  let followupReminder: FollowupReminderView | null;
+  if (transitionResult.status === "error" || peopleResult.status === "error") {
+    followupReminder = {
+      status: "error",
+      code: transitionResult.status === "error" ? "durable_transition_failed" : "durable_identity_failed",
+      retryable: true,
+      fallback: legacyCandidates.map((candidate, index) => ({
+        candidateId: `legacy-${index}`,
+        title: candidate.title,
+        summary: "Recovered from a recent summary.",
+        reviewCode: null,
+        parentEntityId: null,
+        assigneeEntityId: null,
+        sourceKey: candidate.sourceKey,
+        sourceAnchorKey: candidate.sourceAnchorKey,
+      })),
+    };
+  } else {
+    const transitionFiltered = legacyCandidates.filter(
+      (candidate) =>
+        !transitionResult.value.suppressedLegacy.some((suppressed) => isTransitionSuppressed(candidate, suppressed)),
+    );
+    const durableFiltered = transitionFiltered.filter((candidate) => {
+      if (!candidate.sourceKey.startsWith("route:") || !candidate.sourceAnchorKey) return true;
+      return !scopedSummaryTasks.some(
+        (task) =>
+          normalizeName(task.title) === normalizeName(candidate.title) &&
+          task.source_anchor_key === candidate.sourceAnchorKey,
+      );
+    });
+    const reminderResult = await followups.queryPersonalReminders({
+      userId: args.userId,
+      assigneeEntityIds,
+      activeSourceKeys: durabilityEnabled ? activeReminderSourceKeys(activeRoutes) : [],
+      legacyCandidates:
+        durabilityEnabled && transitionResult.value.mode === "hybrid"
+          ? durableFiltered.map(scopeCombinedLegacyCandidate)
+          : [],
+      suppressedLegacyCandidates: transitionResult.value.suppressedLegacy
+        .filter((candidate) => !candidate.sourceKey.startsWith("route:"))
+        .map((candidate) => ({ title: candidate.title, sourceKey: candidate.sourceKey })),
+      now: new Date().toISOString(),
+    });
+    const reminderTaskIds =
+      reminderResult.status === "ok"
+        ? [...reminderResult.pending, ...reminderResult.looksResolved].map((item) => item.taskId)
+        : [];
+    const [seedIdentityByCode, suppressedTasks] = await Promise.all([
+      loadSeedSourceIdentities(
+        args.db,
+        args.userId,
+        transitionResult.value.untracked.map((item) => item.code),
+      ).catch(() => new Map<string, ReminderSourceIdentity>()),
+      loadSuppressedConversationTasks(args.db, args.userId, assigneeEntityIds).catch(
+        () => [] as Array<{ id: string; title: string }>,
+      ),
+    ]);
+    const taskIdentityById = await loadTaskSourceIdentities(args.db, [
+      ...reminderTaskIds,
+      ...suppressedTasks.map((task) => task.id),
+    ]).catch(() => new Map<string, ReminderSourceIdentity>());
+    followupReminder = buildFollowupReminderView(reminderResult, transitionResult.value, {
+      legacyCandidates,
+      queriedLegacyCandidates: durabilityEnabled && transitionResult.value.mode === "hybrid" ? durableFiltered : [],
+      seedIdentityByCode,
+      taskIdentityById,
+      suppressedTasks,
+    });
+  }
+  const durableOnly =
+    durabilityEnabled && transitionResult.status === "ok" && transitionResult.value.mode === "durable_only";
   return {
-    openDurableTasks: openDurableTasks.map((task) => ({
+    openDurableTasks: scopedOpenDurableTasks.map((task) => ({
       id: task.id,
       title: task.title,
       status: task.status,
@@ -1005,8 +1587,8 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
       parentEntityId: task.parent_entity_id,
       updatedAt: task.updated_at,
     })),
-    recentSummaries: recentSummaries.map(compactRecentSummary),
-    summaryTasks: summaryTasks.map((task) => ({
+    recentSummaries: durableOnly ? [] : scopedRecentSummaries.map(compactRecentSummary),
+    summaryTasks: scopedSummaryTasks.map((task) => ({
       id: task.id,
       title: task.title,
       status: task.status,
@@ -1015,8 +1597,85 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
       parentEntityId: task.parent_entity_id,
       updatedAt: task.updated_at,
     })),
+    ...(followupReminder ? { followupReminder } : {}),
     sameDayPreviousOutput: dropCompletedTodos(args.baseContext.sameDayPreviousOutput as FormattedPriorOutput | null),
     previousDayOutput: dropCompletedTodos(args.baseContext.previousDayOutput as FormattedPriorOutput | null),
+  };
+}
+
+function buildFollowupReminderView(
+  reminderResult: Awaited<
+    ReturnType<ReturnType<typeof createConversationFollowupsRepository>["queryPersonalReminders"]>
+  >,
+  transition: Awaited<ReturnType<ReturnType<typeof createTaskDurabilityTransitionRepository>["getUserTransition"]>>,
+  identities: {
+    legacyCandidates: DailyBriefLegacyCandidate[];
+    queriedLegacyCandidates: DailyBriefLegacyCandidate[];
+    seedIdentityByCode: Map<string, ReminderSourceIdentity>;
+    taskIdentityById: Map<string, ReminderSourceIdentity>;
+    suppressedTasks: Array<{ id: string; title: string }>;
+  },
+): FollowupReminderView | null {
+  if (transition.routes.length === 0 && reminderResult.status === "ok") {
+    if (
+      reminderResult.pending.length === 0 &&
+      reminderResult.looksResolved.length === 0 &&
+      reminderResult.untracked.length === 0 &&
+      identities.suppressedTasks.length === 0
+    ) {
+      return null;
+    }
+  }
+  const transitionItems = transition.untracked.map((item) => ({
+    candidateId: item.code,
+    title: item.title,
+    summary: item.label,
+    reviewCode: item.code,
+    parentEntityId: null,
+    assigneeEntityId: null,
+    ...identities.seedIdentityByCode.get(item.code),
+  }));
+  if (reminderResult.status === "error") {
+    return {
+      status: "error",
+      code: reminderResult.code,
+      retryable: true,
+      fallback: dedupeReminderCandidates([
+        ...transitionItems,
+        ...legacyReminderCandidates(
+          identities.legacyCandidates.map(scopeCombinedLegacyCandidate),
+          identities.legacyCandidates,
+          "Recovered from a recent summary.",
+        ),
+      ]),
+    };
+  }
+  const pending = reminderResult.pending.map((item) => ({
+    ...item,
+    ...identities.taskIdentityById.get(item.taskId),
+  }));
+  const looksResolved = reminderResult.looksResolved.map((item) => ({
+    ...item,
+    ...identities.taskIdentityById.get(item.taskId),
+  }));
+  return {
+    status: "ok",
+    mode: transition.mode,
+    pending,
+    looksResolved,
+    untracked: dedupeReminderCandidates([
+      ...transitionItems,
+      ...legacyReminderCandidates(
+        reminderResult.untracked,
+        identities.queriedLegacyCandidates,
+        "Reconstructed from a recent summary.",
+      ),
+    ]),
+    suppressed: identities.suppressedTasks.map((task) => ({
+      taskId: task.id,
+      title: task.title,
+      ...identities.taskIdentityById.get(task.id),
+    })),
   };
 }
 
@@ -1071,6 +1730,18 @@ export const dailyBriefDefinition: AgentDefinition = {
       enabledByDefault: true,
       labels: DAILY_BRIEF_SECTION_LABELS.active_projects,
     },
+    {
+      key: "untracked_followups",
+      title: "Untracked follow-ups",
+      enabledByDefault: true,
+      labels: DAILY_BRIEF_SECTION_LABELS.untracked_followups,
+    },
+    {
+      key: "looks_resolved",
+      title: "Looks resolved",
+      enabledByDefault: true,
+      labels: DAILY_BRIEF_SECTION_LABELS.looks_resolved,
+    },
   ],
   allowedTools: DAILY_BRIEF_ALLOWED_TOOLS,
   itemsPerSectionRange: { min: 1, max: 10 },
@@ -1085,8 +1756,17 @@ export const dailyBriefDefinition: AgentDefinition = {
   },
   reconcileItems: async ({ items, runtimeContext }) => {
     const sections = Array.isArray(runtimeContext.sections) ? (runtimeContext.sections as string[]) : [];
-    if (!sections.includes(DAILY_BRIEF_MEETINGS_SECTION_KEY)) return items;
-    return reconcileMeetingItems(items, parseTodaysMeetings(runtimeContext.todaysMeetings));
+    const withMeetings = sections.includes(DAILY_BRIEF_MEETINGS_SECTION_KEY)
+      ? reconcileMeetingItems(items, parseTodaysMeetings(runtimeContext.todaysMeetings))
+      : items;
+    const followupReminder = runtimeContext.followupReminder;
+    if (!followupReminder || typeof followupReminder !== "object") {
+      return withMeetings.filter(
+        (item) => item.sectionKey !== "looks_resolved" && item.sectionKey !== "untracked_followups",
+      );
+    }
+    const reminder = followupReminder as FollowupReminderView;
+    return reconcileFollowupReminderItems(withMeetings, reminder);
   },
   enrichItems,
   toApiItem,

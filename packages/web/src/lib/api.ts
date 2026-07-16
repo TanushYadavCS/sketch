@@ -1147,7 +1147,7 @@ export interface AgentDeliveryMention {
 
 export interface AgentSourceConfig {
   platform: "slack" | "whatsapp";
-  targetType: "channel" | "group";
+  targetType: "channel" | "dm" | "group";
   targetId: string;
   label: string | null;
 }
@@ -1214,7 +1214,9 @@ export interface AgentRouteMember {
 export interface AgentSourceConfigMeta {
   maxSources: number;
   supportsSlackChannels: boolean;
+  supportsSlackDms?: boolean;
   supportsWhatsAppGroups: boolean;
+  supportsWhatsAppDms?: boolean;
 }
 
 export interface AgentConfig {
@@ -1231,6 +1233,7 @@ export interface AgentConfig {
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
   sourceConfig: AgentSourceConfigMeta | null;
+  availableSources?: AgentSourceConfig[];
   sources: AgentSourceConfig[];
   routes: AgentRoute[];
   sections: AgentSectionConfig[];

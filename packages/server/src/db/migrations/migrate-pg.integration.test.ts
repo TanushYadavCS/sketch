@@ -174,6 +174,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[136]).toBe("141-fact-materialization-quarantine");
     expect(names[137]).toBe("142-verdict-safe-fact-upserts");
     expect(names[138]).toBe("143-indexed-corroboration");
+    expect(names[139]).toBe("144-task-durability-steel-thread");
   });
 
   it("creates the bounded open-materializable partial index", async () => {
@@ -193,6 +194,101 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(indexDef).toContain("deleted_at is null");
     expect(indexDef).toContain("materialized_at is null");
     expect(indexDef).toContain("materialization_attempts < 5");
+  });
+
+  it("creates the durable conversation follow-up schema", async () => {
+    const taskColumns = await sql<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }>`
+      SELECT column_name, data_type, is_nullable
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'tasks'
+        AND column_name IN (
+          'source_platform',
+          'source_conversation_id',
+          'source_provider_thread_id',
+          'source_anchor_key',
+          'origin_agent_output_id'
+        )
+    `.execute(db);
+    expect(taskColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ column_name: "source_platform", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "source_conversation_id", data_type: "integer", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "source_provider_thread_id", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "source_anchor_key", data_type: "text", is_nullable: "YES" }),
+        expect.objectContaining({ column_name: "origin_agent_output_id", data_type: "text", is_nullable: "YES" }),
+      ]),
+    );
+
+    const tables = await sql<{ table_name: string }>`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name IN (
+          'task_message_evidence',
+          'task_completion_recommendations',
+          'task_completion_recommendation_evidence',
+          'task_completion_recommendation_deliveries',
+          'task_durability_route_state',
+          'task_seed_candidates'
+        )
+    `.execute(db);
+    expect(tables.rows.map((row) => row.table_name)).toHaveLength(6);
+
+    const recommendationColumns = await sql<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>`
+      SELECT column_name, data_type, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'task_completion_recommendations'
+    `.execute(db);
+    expect(recommendationColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ column_name: "review_code", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "evidence_fingerprint", data_type: "text", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "delivery_count", data_type: "integer", is_nullable: "NO" }),
+        expect.objectContaining({ column_name: "expires_at", data_type: "text", is_nullable: "NO" }),
+      ]),
+    );
+    expect(recommendationColumns.rows.find((row) => row.column_name === "delivery_count")?.column_default).toBe("0");
+
+    const indexes = await sql<{ indexname: string }>`
+      SELECT indexname
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename IN (
+          'tasks',
+          'task_message_evidence',
+          'task_completion_recommendations',
+          'task_completion_recommendation_deliveries',
+          'task_durability_route_state',
+          'task_seed_candidates'
+        )
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.indexname)).toEqual(
+      expect.arrayContaining([
+        "idx_tasks_conversation_anchor_status",
+        "idx_task_message_evidence_anchor",
+        "task_completion_recommendations_review_code_uidx",
+        "task_completion_recommendations_fingerprint_uidx",
+        "idx_task_completion_recommendations_task_state_expiry",
+        "task_completion_recommendations_pending_task_uidx",
+        "task_completion_recommendation_deliveries_uidx",
+        "task_durability_route_state_uidx",
+        "idx_task_durability_route_state_source",
+        "task_seed_candidates_review_code_uidx",
+        "task_seed_candidates_fingerprint_uidx",
+        "idx_task_seed_candidates_route_state",
+      ]),
+    );
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {

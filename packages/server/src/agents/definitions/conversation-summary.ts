@@ -5,7 +5,14 @@ import {
   type AgentStructuredPayload,
   createAgentOutputRepository,
 } from "../../db/repositories/agent-outputs";
+import {
+  type SummarizerTaskChange,
+  type TaskMemoryItem,
+  createConversationFollowupsRepository,
+} from "../../db/repositories/conversation-followups";
 import { type StoredConversationMessage, createConversationRepository } from "../../db/repositories/conversations";
+import { createEntityRepository } from "../../db/repositories/entities";
+import { createTaskDurabilityTransitionRepository } from "../../db/repositories/task-durability-transition";
 import { createTaskRepository } from "../../db/repositories/tasks";
 import type { DB } from "../../db/schema";
 import type {
@@ -25,6 +32,7 @@ export const CONVERSATION_SUMMARY_TASK_CANDIDATE_LIMIT = 25;
 
 const CONVERSATION_SUMMARY_ALLOWED_TOOLS = ["mcp__sketch__WriteAgentOutput"];
 const CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION = "task_candidates";
+const CONVERSATION_SUMMARY_TASK_CHANGE_SECTION = "task_changes";
 
 const SECTION_LABELS = {
   highlights: ["highlight"],
@@ -32,6 +40,7 @@ const SECTION_LABELS = {
   action_items: ["action_item"],
   open_questions: ["open_question"],
   task_candidates: ["action_item"],
+  task_changes: ["action_item"],
 } as const satisfies Record<string, readonly string[]>;
 
 type ConversationRow = {
@@ -50,14 +59,17 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
-function sourceKind(source: AgentSourceConfig): "channel" | "group" {
+function sourceKind(source: AgentSourceConfig): "channel" | "dm" | "group" {
+  if (source.targetType === "dm") return "dm";
   return source.platform === "slack" ? "channel" : "group";
 }
 
 function sourceLabel(source: AgentSourceConfig, conversation: ConversationRow | undefined): string {
   if (source.label) return source.label;
   if (conversation?.display_name) return conversation.display_name;
-  if (source.platform === "slack") return source.targetId;
+  if (source.targetType === "dm") {
+    return source.platform === "slack" ? "Slack direct message" : "WhatsApp direct message";
+  }
   return source.targetId;
 }
 
@@ -143,7 +155,26 @@ function firstRunLookbackHours(params: AgentRuntimeContextParams): number {
     : CONVERSATION_SUMMARY_FIRST_RUN_LOOKBACK_HOURS;
 }
 
-async function findConversation(db: Kysely<DB>, source: AgentSourceConfig): Promise<ConversationRow | undefined> {
+async function findConversation(
+  db: Kysely<DB>,
+  userId: string,
+  source: AgentSourceConfig,
+): Promise<ConversationRow | undefined> {
+  if (source.targetType === "dm") {
+    const resolved = await createAgentOutputRepository(db).findDmSourceForUser(
+      userId,
+      source.platform,
+      source.targetId,
+    );
+    if (!resolved) return undefined;
+    return db
+      .selectFrom("conversations")
+      .select(["id", "display_name"])
+      .where("id", "=", Number(resolved.targetId))
+      .where("platform", "=", source.platform)
+      .where("kind", "=", "dm")
+      .executeTakeFirst();
+  }
   return db
     .selectFrom("conversations")
     .select(["id", "display_name"])
@@ -197,7 +228,7 @@ export async function buildConversationSummaryRuntimeContext(
 
   const summarySources = await Promise.all(
     sources.map(async (source) => {
-      const conversation = await findConversation(params.db, source);
+      const conversation = await findConversation(params.db, params.user.id, source);
       const result = conversation
         ? await conversations.listMessagesInWindow(conversation.id, {
             afterReceivedAt: windowStart,
@@ -219,6 +250,45 @@ export async function buildConversationSummaryRuntimeContext(
       };
     }),
   );
+  const conversationIds = summarySources.flatMap((source) =>
+    typeof source.conversationId === "number" ? [source.conversationId] : [],
+  );
+  const allowedMessageIds = summarySources.flatMap((source) =>
+    source.messages.flatMap((message) => (typeof message.id === "number" ? [message.id] : [])),
+  );
+  let taskMemory: TaskMemoryItem[] = [];
+  let assigneeEntityIds: string[] = [];
+  let durabilityTransition: Record<string, unknown> | null = null;
+  if (params.agentConfig?.createTasks) {
+    const sourceKey = params.agentConfig.sourceKey;
+    const routeId = params.agentConfig.routeId ?? sourceKey;
+    const transition = createTaskDurabilityTransitionRepository(params.db);
+    durabilityTransition = await transition.ensureRouteTransition({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: params.user.id,
+      routeId,
+      sourceKey,
+      allowedConversationIds: conversationIds,
+      now: params.now.toISOString(),
+    });
+    const identityEmails = [
+      ...new Set(
+        [params.user.email, ...(params.contentUserEmails ?? [])].filter(
+          (email): email is string => typeof email === "string" && email.length > 0,
+        ),
+      ),
+    ];
+    const peopleByEmail = await createEntityRepository(params.db)
+      .getPersonEntitiesByEmails(identityEmails)
+      .catch(() => new Map());
+    assigneeEntityIds = [...new Set([...peopleByEmail.values()].flat().map((person) => person.id))];
+    taskMemory = await createConversationFollowupsRepository(params.db).loadTaskMemory({
+      userId: params.user.id,
+      conversationIds,
+      assigneeEntityIds,
+      limit: CONVERSATION_SUMMARY_TASK_CANDIDATE_LIMIT * 2,
+    });
+  }
 
   return {
     summaryWindow: {
@@ -236,10 +306,18 @@ export async function buildConversationSummaryRuntimeContext(
     taskExtraction: {
       createTasks: params.agentConfig?.createTasks ?? false,
       sectionKey: CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION,
+      changeSectionKey: CONVERSATION_SUMMARY_TASK_CHANGE_SECTION,
       visibleSectionKey: "action_items",
       maxCandidates: CONVERSATION_SUMMARY_TASK_CANDIDATE_LIMIT,
       label: "action_item",
     },
+    allowedConversationIds: conversationIds,
+    allowedMessageIds,
+    authorizedAssigneeEntityIds: assigneeEntityIds,
+    taskMemory,
+    durabilityTransition,
+    durabilityRouteId: params.agentConfig?.routeId ?? params.agentConfig?.sourceKey ?? null,
+    durabilitySourceKey: params.agentConfig?.sourceKey ?? null,
     summarySources,
   };
 }
@@ -247,7 +325,7 @@ export async function buildConversationSummaryRuntimeContext(
 const CONVERSATION_SUMMARY_INSTRUCTIONS = [
   "You are Sketch's Summarizer.",
   "",
-  "Generate a concise summary from the configured Slack channels and WhatsApp groups in the runtime context.",
+  "Generate a concise summary from the configured Slack and WhatsApp conversations in the runtime context.",
   "The runtime context contains the complete source material available for this run. Do not use external knowledge or infer facts that are not supported by those messages.",
   "Call WriteAgentOutput exactly once when the summary is ready.",
   "",
@@ -255,6 +333,7 @@ const CONVERSATION_SUMMARY_INSTRUCTIONS = [
   "- Pass a flat `items` array. Every item carries a `sectionKey` field.",
   "- Emit visible summary items only for section keys listed in the runtime context `sections` field.",
   "- If runtime context `taskExtraction.createTasks` is true, also emit internal `task_candidates` items for task creation. Do not emit `task_candidates` when createTasks is false.",
+  "- When taskExtraction.createTasks is true, prefer internal `task_changes` items over task_candidates. task_changes are a minimal diff against runtime `taskMemory`.",
   "- Use empty knowledgeRefs arrays unless a runtime message explicitly provides a valid Sketch entity or file id.",
   "- Put sourceLabels and messageIds in structuredPayload when useful, e.g. { sourceLabels: ['#sales'], messageIds: [12, 13] }.",
   "- When action_items belong to an explicit project or parent from the messages, copy parentEntityId, parentSourceRef, or parentName into each action item's structuredPayload. Prefer parentEntityId when present.",
@@ -266,6 +345,7 @@ const CONVERSATION_SUMMARY_INSTRUCTIONS = [
   "- action_items: concrete follow-ups, asks, blockers, or owners that need action.",
   "- open_questions: unresolved questions, risks, or unclear next steps.",
   "- task_candidates: internal extraction-only items for all concrete tasks that should be created from the source messages.",
+  "- task_changes: internal extraction-only new, changed, or resolved verdicts for durable follow-ups.",
   "",
   "Labels:",
   "- highlights.label must be: highlight.",
@@ -273,12 +353,18 @@ const CONVERSATION_SUMMARY_INSTRUCTIONS = [
   "- action_items.label must be: action_item.",
   "- open_questions.label must be: open_question.",
   "- task_candidates.label must be: action_item.",
+  "- task_changes.label must be: action_item.",
   "",
   "Task extraction:",
   "- When taskExtraction.createTasks is true, emit one task_candidates item for every distinct concrete follow-up, owner commitment, ask, blocker, or next step supported by the messages.",
   "- Do not limit task_candidates to maxItemsPerSection; use taskExtraction.maxCandidates as the task-candidate ceiling for this run.",
   "- Keep visible action_items concise for the digest. Use task_candidates for exhaustive task creation, including candidates that are lower priority or omitted from the visible digest.",
-  "- Each task_candidates structuredPayload must include messageIds for the source message ids when available and sourceLabels for the channels or groups that support it.",
+  "- Each task_candidates structuredPayload must include messageIds for the source message ids when available and sourceLabels for the configured conversations that support it.",
+  "- Each task_changes structuredPayload must include changeKind ('new', 'changed', or 'resolved') and messageIds copied only from runtime messages.",
+  "- changed and resolved task_changes must include matchedTaskId chosen only from runtime taskMemory. Never invent or copy an ID from anywhere else.",
+  "- new task_changes use the item title/summary/priority and ownership/parent fields in structuredPayload.",
+  "- resolved requires explicit completion evidence and a concise rationale. Reactions, acknowledgements, and ambiguous progress are not completion.",
+  "- Similar wording alone is insufficient across unrelated sources or Slack threads. The server validates source, parent, ownership, and allowed IDs.",
   "- Include owner, assigneeName, dueAt, parentEntityId, parentSourceRef, or parentName in structuredPayload when the messages make them clear.",
   "- Do not emit a task_candidates item for FYI-only updates, completed work, already-canceled work, or vague discussion with no follow-up.",
   "",
@@ -417,20 +503,165 @@ async function enrichItems(_db: Kysely<DB>, items: AgentOutputItemInput[]): Prom
 
 async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
   if (!args.createTasks) return;
-  const taskRepo = createTaskRepository(args.db);
-  const parentHint = collectOutputParentHint(args.items);
-  const taskCandidateItems = args.items.filter(
-    (item) => item.sectionKey === CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION,
+  const routeId = readRuntimeString(args.runtimeContext.durabilityRouteId);
+  const sourceKey = readRuntimeString(args.runtimeContext.durabilitySourceKey);
+  const durabilityEnabled = Boolean(routeId && sourceKey);
+  const taskChangeItems = args.items.filter((item) => item.sectionKey === CONVERSATION_SUMMARY_TASK_CHANGE_SECTION);
+  const changes = taskChangeItems.flatMap(parseTaskChange);
+  const hasLegacyTaskSignals = args.items.some(
+    (item) => item.sectionKey === CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION || item.sectionKey === "action_items",
   );
-  const actionItems = args.items.filter((item) => item.sectionKey === "action_items");
-  const promotableItems = taskCandidateItems.length > 0 ? taskCandidateItems : actionItems;
-  for (const item of promotableItems) {
-    try {
-      await taskRepo.promoteSummaryTask({ userId: args.userId, item: withParentHint(item, parentHint) });
-    } catch (err) {
-      args.logger.warn({ err, outputId: args.outputId, userId: args.userId }, "Summarizer: task promotion failed");
+  const allowedMessageIds = readRuntimeNumberArray(args.runtimeContext.allowedMessageIds);
+  const allowedConversationIds = readRuntimeNumberArray(args.runtimeContext.allowedConversationIds);
+  let invalidDurabilityOutput =
+    durabilityEnabled &&
+    (taskChangeItems.length !== changes.length ||
+      (changes.length === 0 && (taskChangeItems.length > 0 || hasLegacyTaskSignals)) ||
+      (changes.length > 0 && (allowedMessageIds.length === 0 || allowedConversationIds.length === 0)));
+  const taskMemory = Array.isArray(args.runtimeContext.taskMemory)
+    ? (args.runtimeContext.taskMemory as TaskMemoryItem[])
+    : [];
+  const authorizedAssigneeEntityIds = readRuntimeStringArray(args.runtimeContext.authorizedAssigneeEntityIds);
+  if (changes.length > 0 && allowedMessageIds.length > 0 && allowedConversationIds.length > 0) {
+    const results = await createConversationFollowupsRepository(args.db).applyTaskChanges({
+      userId: args.userId,
+      outputId: args.outputId,
+      taskMemory,
+      authorizedAssigneeEntityIds,
+      allowedMessageIds,
+      allowedConversationIds,
+      changes,
+      ...(routeId && sourceKey
+        ? {
+            routeGuard: {
+              agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+              routeId,
+              sourceKey,
+            },
+          }
+        : {}),
+      now: new Date().toISOString(),
+    });
+    for (const result of results) {
+      if (result.status === "rejected") {
+        if (durabilityEnabled) invalidDurabilityOutput = true;
+        args.logger.warn(
+          { outputId: args.outputId, userId: args.userId, reason: result.reason },
+          "Summarizer: durable task change rejected",
+        );
+      }
+    }
+  } else if (!durabilityEnabled) {
+    const taskRepo = createTaskRepository(args.db);
+    const parentHint = collectOutputParentHint(args.items);
+    const taskCandidateItems = args.items.filter(
+      (item) => item.sectionKey === CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION,
+    );
+    const actionItems = args.items.filter((item) => item.sectionKey === "action_items");
+    const promotableItems = taskCandidateItems.length > 0 ? taskCandidateItems : actionItems;
+    for (const item of promotableItems) {
+      try {
+        await taskRepo.promoteSummaryTask({ userId: args.userId, item: withParentHint(item, parentHint) });
+      } catch (err) {
+        args.logger.warn({ err, outputId: args.outputId, userId: args.userId }, "Summarizer: task promotion failed");
+      }
     }
   }
+  if (invalidDurabilityOutput) {
+    args.logger.warn(
+      { outputId: args.outputId, userId: args.userId, routeId },
+      "Summarizer: durability output omitted a valid task diff",
+    );
+  }
+  if (routeId && sourceKey && !invalidDurabilityOutput) {
+    try {
+      await createTaskDurabilityTransitionRepository(args.db).recordIncrementalSuccess({
+        agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+        userId: args.userId,
+        routeId,
+        expectedSourceKey: sourceKey,
+        now: new Date().toISOString(),
+      });
+    } catch (err) {
+      args.logger.warn(
+        { err, outputId: args.outputId, userId: args.userId, routeId, sourceKey },
+        "Summarizer: durability transition update failed",
+      );
+    }
+  }
+}
+
+function parseTaskChange(item: AgentOutputItemInput): SummarizerTaskChange[] {
+  const payload = item.structuredPayload ?? {};
+  const kind = readRuntimeString(payload.changeKind) ?? readRuntimeString(payload.kind);
+  const evidenceMessageIds = readRuntimeNumberArray(payload.messageIds);
+  if (kind === "new" && evidenceMessageIds.length > 0) {
+    return [{ kind, evidenceMessageIds, item }];
+  }
+  const taskId = readRuntimeString(payload.matchedTaskId) ?? readRuntimeString(payload.taskId);
+  if (!taskId || evidenceMessageIds.length === 0) return [];
+  if (kind === "resolved") {
+    return [
+      {
+        kind,
+        taskId,
+        evidenceMessageIds,
+        rationale: readRuntimeString(payload.rationale) ?? item.summary,
+        metadata: {
+          parentEntityId: readRuntimeString(payload.parentEntityId),
+          assigneeEntityId: readRuntimeString(payload.assigneeEntityId),
+          assigneeName: readRuntimeString(payload.assigneeName),
+          proposedAssigneeName:
+            readRuntimeString(payload.proposedAssigneeName) ??
+            readRuntimeString(payload.ownerName) ??
+            readRuntimeString(payload.owner),
+        },
+      },
+    ];
+  }
+  if (kind !== "changed") return [];
+  return [
+    {
+      kind,
+      taskId,
+      evidenceMessageIds,
+      metadata: {
+        title: item.title,
+        priority: item.priority,
+        parentEntityId: readRuntimeString(payload.parentEntityId),
+        assigneeEntityId: readRuntimeString(payload.assigneeEntityId),
+        assigneeName: readRuntimeString(payload.assigneeName),
+        proposedAssigneeName:
+          readRuntimeString(payload.proposedAssigneeName) ??
+          readRuntimeString(payload.ownerName) ??
+          readRuntimeString(payload.owner),
+      },
+    },
+  ];
+}
+
+function readRuntimeString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readRuntimeNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value.flatMap((entry) => {
+        if (typeof entry === "number" && Number.isInteger(entry)) return [entry];
+        if (typeof entry === "string" && /^\d+$/.test(entry.trim())) return [Number(entry)];
+        return [];
+      }),
+    ),
+  ];
+}
+
+function readRuntimeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(value.flatMap((entry) => (typeof entry === "string" && entry.trim().length > 0 ? [entry.trim()] : []))),
+  ];
 }
 
 function toApiItem(item: AgentStoredItem): AgentApiItem {
@@ -456,7 +687,7 @@ export const conversationSummaryDefinition: AgentDefinition = {
   key: CONVERSATION_SUMMARY_AGENT_KEY,
   version: CONVERSATION_SUMMARY_AGENT_VERSION,
   title: "Summarizer",
-  tagline: "Summarizes selected Slack channels and WhatsApp groups.",
+  tagline: "Summarizes selected Slack and WhatsApp conversations.",
   description:
     "Reads configured shared conversations and produces focused summaries with highlights, decisions, action items, and open questions.",
   category: "Briefings",
@@ -472,11 +703,13 @@ export const conversationSummaryDefinition: AgentDefinition = {
     { key: "action_items", title: "Action items", enabledByDefault: true, labels: SECTION_LABELS.action_items },
     { key: "open_questions", title: "Open questions", enabledByDefault: true, labels: SECTION_LABELS.open_questions },
   ],
-  internalOutputSections: [CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION],
+  internalOutputSections: [CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION, CONVERSATION_SUMMARY_TASK_CHANGE_SECTION],
   sourceConfig: {
     maxSources: CONVERSATION_SUMMARY_MAX_SOURCES,
     supportsSlackChannels: true,
+    supportsSlackDms: true,
     supportsWhatsAppGroups: true,
+    supportsWhatsAppDms: true,
   },
   allowedTools: CONVERSATION_SUMMARY_ALLOWED_TOOLS,
   itemsPerSectionRange: { min: 1, max: 12 },

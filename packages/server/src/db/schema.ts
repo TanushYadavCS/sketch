@@ -1057,6 +1057,11 @@ export interface TasksTable {
   valid_from: string | null;
   valid_to: string | null;
   milestone_series_key: string | null;
+  source_platform: string | null;
+  source_conversation_id: number | null;
+  source_provider_thread_id: string | null;
+  source_anchor_key: string | null;
+  origin_agent_output_id: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
@@ -1065,6 +1070,86 @@ export interface TaskEvidenceTable {
   task_id: string;
   kind: string;
   ref_id: string;
+}
+
+export interface TaskMessageEvidenceTable {
+  task_id: string;
+  conversation_message_id: number;
+  source_platform: string;
+  source_conversation_id: number;
+  source_provider_thread_id: string | null;
+  source_anchor_key: string;
+  created_at: Generated<string>;
+}
+
+export interface TaskCompletionRecommendationsTable {
+  id: string;
+  task_id: string;
+  proposed_status: string;
+  review_state: Generated<string>;
+  review_code: string;
+  evidence_fingerprint: string;
+  origin_agent_output_id: string | null;
+  rationale: string;
+  delivery_count: Generated<number>;
+  expires_at: string;
+  reviewed_at: string | null;
+  reviewed_by_user_id: string | null;
+  review_surface: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface TaskCompletionRecommendationEvidenceTable {
+  recommendation_id: string;
+  conversation_message_id: number;
+  created_at: Generated<string>;
+}
+
+export interface TaskCompletionRecommendationDeliveriesTable {
+  recommendation_id: string;
+  agent_output_delivery_id: string;
+  created_at: Generated<string>;
+}
+
+export interface TaskDurabilityRouteStateTable {
+  agent_key: string;
+  user_id: string;
+  route_id: string;
+  source_key: string;
+  mode: Generated<string>;
+  seed_state: Generated<string>;
+  seed_started_at: string | null;
+  seed_reviewed_at: string | null;
+  incremental_success_at: string | null;
+  last_error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface TaskSeedCandidatesTable {
+  id: string;
+  agent_key: string;
+  user_id: string;
+  route_id: string;
+  source_key: string;
+  origin_agent_output_id: string | null;
+  origin_agent_output_item_id: string | null;
+  title: string;
+  normalized_title: string;
+  proposed_assignee_name: string | null;
+  source_platform: string;
+  source_conversation_id: number;
+  source_provider_thread_id: string | null;
+  source_anchor_key: string;
+  evidence_fingerprint: string;
+  review_code: string;
+  review_state: Generated<string>;
+  accepted_task_id: string | null;
+  reviewed_at: string | null;
+  reviewed_by_user_id: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
 }
 
 export interface WorkCyclesTable {
@@ -1199,6 +1284,12 @@ export interface DB {
   normalization_backfill_state: NormalizationBackfillStateTable;
   tasks: TasksTable;
   task_evidence: TaskEvidenceTable;
+  task_message_evidence: TaskMessageEvidenceTable;
+  task_completion_recommendations: TaskCompletionRecommendationsTable;
+  task_completion_recommendation_evidence: TaskCompletionRecommendationEvidenceTable;
+  task_completion_recommendation_deliveries: TaskCompletionRecommendationDeliveriesTable;
+  task_durability_route_state: TaskDurabilityRouteStateTable;
+  task_seed_candidates: TaskSeedCandidatesTable;
   work_cycles: WorkCyclesTable;
   task_cycle_memberships: TaskCycleMembershipsTable;
   sub_entities: SubEntitiesTable;

@@ -4,6 +4,7 @@ import { createWriteAgentOutputTool } from "./tools/agent-output";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
+import { createListFollowupsTool } from "./tools/list-followups";
 import { createListTasksTool } from "./tools/list-tasks";
 import { createLocalClaudeSessionTool } from "./tools/local-claude-session";
 import { createLocalRunCommandTool } from "./tools/local-command";
@@ -80,6 +81,7 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
         ]
       : []),
     ...createSearchTools(deps),
+    createListFollowupsTool(deps),
     createListTasksTool(deps),
   ];
 }

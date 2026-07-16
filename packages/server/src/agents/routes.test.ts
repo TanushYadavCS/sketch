@@ -240,6 +240,62 @@ describe("agentRoutes", () => {
     );
   });
 
+  it("accepts Slack and WhatsApp DM source configs and route source keys", async () => {
+    const service = createService({
+      updateConfigForUser: vi.fn(async () => ({ agentKey: CONVERSATION_SUMMARY_AGENT_KEY, delivery: null })),
+    });
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [
+          { platform: "slack", targetType: "dm", targetId: "41", label: "Slack DM with Alice" },
+          { platform: "whatsapp", targetType: "dm", targetId: "42", label: "WhatsApp DM with Alice" },
+        ],
+        routes: [
+          {
+            id: "slack-dm-route",
+            sources: ["slack:dm:41"],
+            focus: null,
+            sections: null,
+            maxItemsPerSection: null,
+            schedule: null,
+            destination: { kind: "self" },
+            enabled: true,
+          },
+          {
+            id: "whatsapp-dm-route",
+            sources: ["whatsapp:dm:42"],
+            focus: null,
+            sections: null,
+            maxItemsPerSection: null,
+            schedule: null,
+            destination: { kind: "self" },
+            enabled: true,
+          },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(service.updateConfigForUser).toHaveBeenCalledWith(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      "user-1",
+      expect.objectContaining({
+        sources: [
+          expect.objectContaining({ platform: "slack", targetType: "dm", targetId: "41" }),
+          expect.objectContaining({ platform: "whatsapp", targetType: "dm", targetId: "42" }),
+        ],
+        routes: [
+          expect.objectContaining({ sources: ["slack:dm:41"] }),
+          expect.objectContaining({ sources: ["whatsapp:dm:42"] }),
+        ],
+      }),
+    );
+  });
+
   it("passes parsed delivery config to the service for saving", async () => {
     const service = createService({
       updateConfigForUser: vi.fn(async () => ({ agentKey: "daily-brief", delivery: null })),

@@ -59,10 +59,18 @@ export type PromoteBriefTaskResult =
 export interface PromoteSummaryTaskInput {
   userId: string;
   item: AgentOutputItemInput;
+  sourceAnchor?: ConversationTaskSourceAnchor | null;
+  originOutputId?: string | null;
+}
+
+export interface ConversationTaskSourceAnchor {
+  platform: "slack" | "whatsapp";
+  conversationId: number;
+  providerThreadId: string | null;
+  key: string;
 }
 
 export type PromoteSummaryTaskResult =
-  | { status: "skipped"; reason: "ineligible_assignee" }
   | { status: "collated"; taskId: string }
   | { status: "upserted"; taskId: string; created: boolean };
 
@@ -178,10 +186,16 @@ export function createTaskRepository(db: Kysely<DB>) {
       const parent = await resolveBriefTaskParent(db, input.knowledgeRefs.entityIds);
       const parentKey = parent?.id ?? "global";
       const normalizedTitle = normalizeName(input.todo.title);
+      const assignee = await resolveSummaryTaskAssignee(db, input.todo);
       const existing = await findBriefCollationTarget(db, {
         userId: input.userId,
         parentEntityId: parent?.id ?? null,
         normalizedTitle,
+        owner: summaryTaskOwnerIdentity({
+          assigneeEntityId: assignee.entityId,
+          assigneeName: assignee.name,
+          proposedAssigneeName: assignee.proposedName,
+        }),
       });
       if (existing) {
         await promoteBriefTaskEvidence(db, existing.id, input.knowledgeRefs);
@@ -190,22 +204,6 @@ export function createTaskRepository(db: Kysely<DB>) {
 
       if (input.knowledgeRefs.fileIds.length === 0) return { status: "skipped", reason: "missing_file_id" };
 
-      if (parent) {
-        const structural = await db
-          .selectFrom("tasks")
-          .select("id")
-          .where("provenance", "=", "structural")
-          .where("valid_to", "is", null)
-          .where("parent_entity_id", "=", parent.id)
-          .where("normalized_title", "=", normalizedTitle)
-          .executeTakeFirst();
-        if (structural) {
-          await promoteBriefTaskEvidence(db, structural.id, input.knowledgeRefs);
-          return { status: "collated", taskId: structural.id };
-        }
-      }
-
-      const assignee = await resolveSummaryTaskAssignee(db, input.todo);
       if (!assignee.entityId || !assignee.name) return { status: "skipped", reason: "ineligible_assignee" };
 
       const result = await upsertBriefTask(db, {
@@ -226,12 +224,13 @@ export function createTaskRepository(db: Kysely<DB>) {
       const parentKey = parent?.id ?? parent?.parentSourceRef ?? parent?.parentName ?? "global";
       const normalizedTitle = normalizeName(input.item.title);
 
-      if (parent?.id) {
+      if (parent?.id && !input.sourceAnchor) {
         const structural = await db
           .selectFrom("tasks")
           .select("id")
           .where("provenance", "=", "structural")
           .where("valid_to", "is", null)
+          .where("status", "in", ["open", "in_progress"])
           .where("parent_entity_id", "=", parent.id)
           .where("normalized_title", "=", normalizedTitle)
           .executeTakeFirst();
@@ -242,7 +241,6 @@ export function createTaskRepository(db: Kysely<DB>) {
       }
 
       const assignee = await resolveSummaryTaskAssignee(db, input.item);
-      if (!assignee.entityId || !assignee.name) return { status: "skipped", reason: "ineligible_assignee" };
 
       const result = await upsertSummaryTask(db, {
         userId: input.userId,
@@ -252,9 +250,11 @@ export function createTaskRepository(db: Kysely<DB>) {
         parentKey,
         assigneeEntityId: assignee.entityId,
         assigneeName: assignee.name,
-        proposedAssigneeName: null,
+        proposedAssigneeName: assignee.proposedName,
         item: input.item,
         normalizedTitle,
+        sourceAnchor: input.sourceAnchor ?? null,
+        originOutputId: input.originOutputId ?? null,
       });
       await promoteSummaryTaskEvidence(db, result.taskId, input.item);
       return { status: "upserted", ...result };
@@ -386,6 +386,7 @@ export function createTaskRepository(db: Kysely<DB>) {
             eb.and([
               eb("tasks.created_by_user_id", "=", opts.userId),
               eb("tasks.provenance", "in", ["brief", "summary"]),
+              eb("tasks.assignee_entity_id", "is not", null),
             ]),
           ]),
         )
@@ -561,16 +562,32 @@ async function upsertBriefTask(
     normalizedTitle: string;
   },
 ): Promise<{ taskId: string; created: boolean }> {
-  const sourceTaskId = createHash("sha256")
-    .update([input.userId, input.parentKey, input.normalizedTitle].join(BRIEF_TASK_ID_SEPARATOR))
+  const owner = summaryTaskOwnerIdentity({
+    assigneeEntityId: input.assigneeEntityId,
+    assigneeName: input.assigneeName,
+    proposedAssigneeName: null,
+  });
+  const baseSourceTaskId = createHash("sha256")
+    .update([input.userId, input.parentKey, owner.key, input.normalizedTitle].join(BRIEF_TASK_ID_SEPARATOR))
     .digest("hex");
   const now = new Date().toISOString();
-  const existing = await db
+  let existing = await db
     .selectFrom("tasks")
     .selectAll()
     .where("source", "=", "brief")
-    .where("source_task_id", "=", sourceTaskId)
+    .where("source_task_id", "=", baseSourceTaskId)
+    .where("valid_to", "is", null)
+    .where("status", "in", ["open", "in_progress"])
     .executeTakeFirst();
+  if (!existing) {
+    existing = await findActiveBriefTaskByIdentity(db, {
+      userId: input.userId,
+      parentEntityId: input.parentEntityId,
+      normalizedTitle: input.normalizedTitle,
+      owner,
+    });
+  }
+  const sourceTaskId = existing?.source_task_id ?? (await allocateRecurringSourceTaskId(db, "brief", baseSourceTaskId));
   const newStatus = briefStatusFromLabel(input.todo.label);
   const status = (existing?.status as TaskStatus | undefined) ?? newStatus;
   const statusRaw = existing?.status_raw ?? input.todo.label;
@@ -638,31 +655,45 @@ async function upsertSummaryTask(
     proposedAssigneeName: string | null;
     item: AgentOutputItemInput;
     normalizedTitle: string;
+    sourceAnchor: ConversationTaskSourceAnchor | null;
+    originOutputId: string | null;
   },
 ): Promise<{ taskId: string; created: boolean }> {
-  const sourceTaskId = createHash("sha256")
-    .update([input.userId, input.parentKey, input.normalizedTitle].join(SUMMARY_TASK_ID_SEPARATOR))
-    .digest("hex");
+  const owner = summaryTaskOwnerIdentity(input);
+  const identityParts = input.sourceAnchor
+    ? [input.userId, input.sourceAnchor.key, input.parentKey, owner.key, input.normalizedTitle]
+    : [input.userId, input.parentKey, owner.key, input.normalizedTitle];
+  const baseSourceTaskId = createHash("sha256").update(identityParts.join(SUMMARY_TASK_ID_SEPARATOR)).digest("hex");
   const now = new Date().toISOString();
   let existing = await db
     .selectFrom("tasks")
     .selectAll()
     .where("source", "=", "summary")
-    .where("source_task_id", "=", sourceTaskId)
+    .where("source_task_id", "=", baseSourceTaskId)
+    .where("valid_to", "is", null)
+    .where("status", "in", ["open", "in_progress"])
     .executeTakeFirst();
-  if (!existing && input.parentEntityId) {
-    existing = await findSummaryTaskByResolvedParent(db, {
+  if (!existing) {
+    existing = await findActiveSummaryTaskByIdentity(db, {
       userId: input.userId,
       parentEntityId: input.parentEntityId,
+      parentSourceRef: input.parentSourceRef,
+      parentName: input.parentName,
       normalizedTitle: input.normalizedTitle,
+      sourceAnchorKey: input.sourceAnchor?.key ?? null,
+      owner,
     });
   }
   if (!existing && input.parentEntityId) {
     existing = await findReanchorableSummaryTask(db, {
       userId: input.userId,
       normalizedTitle: input.normalizedTitle,
+      sourceAnchorKey: input.sourceAnchor?.key ?? null,
+      owner,
     });
   }
+  const sourceTaskId =
+    existing?.source_task_id ?? (await allocateRecurringSourceTaskId(db, "summary", baseSourceTaskId));
   const status = (existing?.status as TaskStatus | undefined) ?? "open";
   const statusRaw = existing?.status_raw ?? input.item.label;
   const statusAuthority = existing?.status_authority ?? "local";
@@ -690,6 +721,11 @@ async function upsertSummaryTask(
     completed_at: existing?.completed_at ?? null,
     valid_from: existing?.valid_from ?? now,
     valid_to: null,
+    source_platform: input.sourceAnchor?.platform ?? existing?.source_platform ?? null,
+    source_conversation_id: input.sourceAnchor?.conversationId ?? existing?.source_conversation_id ?? null,
+    source_provider_thread_id: input.sourceAnchor?.providerThreadId ?? existing?.source_provider_thread_id ?? null,
+    source_anchor_key: input.sourceAnchor?.key ?? existing?.source_anchor_key ?? null,
+    origin_agent_output_id: input.originOutputId ?? existing?.origin_agent_output_id ?? null,
     updated_at: now,
   };
 
@@ -711,7 +747,12 @@ async function upsertSummaryTask(
 
 async function findBriefCollationTarget(
   db: Kysely<DB>,
-  input: { userId: string; parentEntityId: string | null; normalizedTitle: string },
+  input: {
+    userId: string;
+    parentEntityId: string | null;
+    normalizedTitle: string;
+    owner: SummaryTaskOwnerIdentity;
+  },
 ): Promise<Pick<Selectable<TasksTable>, "id"> | undefined> {
   if (input.parentEntityId) {
     const structural = await db
@@ -719,6 +760,7 @@ async function findBriefCollationTarget(
       .select("id")
       .where("provenance", "=", "structural")
       .where("valid_to", "is", null)
+      .where("status", "in", ["open", "in_progress"])
       .where("parent_entity_id", "=", input.parentEntityId)
       .where("normalized_title", "=", input.normalizedTitle)
       .executeTakeFirst();
@@ -727,18 +769,19 @@ async function findBriefCollationTarget(
 
   let summaryQuery = db
     .selectFrom("tasks")
-    .select("id")
+    .selectAll()
     .where("provenance", "=", "summary")
     .where("created_by_user_id", "=", input.userId)
     .where("normalized_title", "=", input.normalizedTitle)
-    .where("valid_to", "is", null);
+    .where("valid_to", "is", null)
+    .where("status", "in", ["open", "in_progress"]);
   summaryQuery = input.parentEntityId
     ? summaryQuery.where((eb) =>
         eb.or([eb("parent_entity_id", "=", input.parentEntityId), eb("parent_entity_id", "is", null)]),
       )
     : summaryQuery.where("parent_entity_id", "is", null);
   if (input.parentEntityId) {
-    return summaryQuery
+    const rows = await summaryQuery
       .orderBy(sql<number>`CASE
         WHEN parent_entity_id = ${input.parentEntityId} THEN 0
         WHEN parent_entity_id IS NULL THEN 1
@@ -746,16 +789,42 @@ async function findBriefCollationTarget(
       END`)
       .orderBy("updated_at", "desc")
       .orderBy("id", "asc")
-      .executeTakeFirst();
+      .execute();
+    return rows.find((task) => summaryTaskOwnerMatches(task, input.owner));
   }
-  return summaryQuery.orderBy("updated_at", "desc").orderBy("id", "asc").executeTakeFirst();
+  const rows = await summaryQuery.orderBy("updated_at", "desc").orderBy("id", "asc").execute();
+  return rows.find((task) => summaryTaskOwnerMatches(task, input.owner));
+}
+
+async function findActiveBriefTaskByIdentity(
+  db: Kysely<DB>,
+  input: {
+    userId: string;
+    parentEntityId: string | null;
+    normalizedTitle: string;
+    owner: SummaryTaskOwnerIdentity;
+  },
+): Promise<Selectable<TasksTable> | undefined> {
+  let query = db
+    .selectFrom("tasks")
+    .selectAll()
+    .where("source", "=", "brief")
+    .where("created_by_user_id", "=", input.userId)
+    .where("normalized_title", "=", input.normalizedTitle)
+    .where("valid_to", "is", null)
+    .where("status", "in", ["open", "in_progress"]);
+  query = input.parentEntityId
+    ? query.where("parent_entity_id", "=", input.parentEntityId)
+    : query.where("parent_entity_id", "is", null);
+  const rows = await query.orderBy("updated_at", "desc").orderBy("id", "asc").execute();
+  return rows.find((task) => summaryTaskOwnerMatches(task, input.owner));
 }
 
 async function findReanchorableSummaryTask(
   db: Kysely<DB>,
-  input: { userId: string; normalizedTitle: string },
+  input: { userId: string; normalizedTitle: string; sourceAnchorKey: string | null; owner: SummaryTaskOwnerIdentity },
 ): Promise<Selectable<TasksTable> | undefined> {
-  return db
+  let query = db
     .selectFrom("tasks")
     .selectAll()
     .where("source", "=", "summary")
@@ -763,22 +832,104 @@ async function findReanchorableSummaryTask(
     .where("normalized_title", "=", input.normalizedTitle)
     .where("parent_entity_id", "is", null)
     .where("valid_to", "is", null)
-    .executeTakeFirst();
+    .where("status", "in", ["open", "in_progress"]);
+  query = input.sourceAnchorKey
+    ? query.where("source_anchor_key", "=", input.sourceAnchorKey)
+    : query.where("source_anchor_key", "is", null);
+  const rows = await query.orderBy("updated_at", "desc").orderBy("id", "asc").execute();
+  return rows.find((task) => summaryTaskOwnerMatches(task, input.owner));
 }
 
-async function findSummaryTaskByResolvedParent(
+async function findActiveSummaryTaskByIdentity(
   db: Kysely<DB>,
-  input: { userId: string; parentEntityId: string; normalizedTitle: string },
+  input: {
+    userId: string;
+    parentEntityId: string | null;
+    parentSourceRef: string | null;
+    parentName: string | null;
+    normalizedTitle: string;
+    sourceAnchorKey: string | null;
+    owner: SummaryTaskOwnerIdentity;
+  },
 ): Promise<Selectable<TasksTable> | undefined> {
-  return db
+  let query = db
     .selectFrom("tasks")
     .selectAll()
     .where("source", "=", "summary")
     .where("created_by_user_id", "=", input.userId)
-    .where("parent_entity_id", "=", input.parentEntityId)
     .where("normalized_title", "=", input.normalizedTitle)
     .where("valid_to", "is", null)
-    .executeTakeFirst();
+    .where("status", "in", ["open", "in_progress"]);
+  if (input.parentEntityId) {
+    query = query.where("parent_entity_id", "=", input.parentEntityId);
+  } else {
+    query = query.where("parent_entity_id", "is", null);
+    query = input.parentSourceRef
+      ? query.where("parent_source_ref", "=", input.parentSourceRef)
+      : query.where("parent_source_ref", "is", null);
+    query = input.parentName
+      ? query.where("parent_name", "=", input.parentName)
+      : query.where("parent_name", "is", null);
+  }
+  query = input.sourceAnchorKey
+    ? query.where("source_anchor_key", "=", input.sourceAnchorKey)
+    : query.where("source_anchor_key", "is", null);
+  const rows = await query.orderBy("updated_at", "desc").orderBy("id", "asc").execute();
+  return rows.find((task) => summaryTaskOwnerMatches(task, input.owner));
+}
+
+interface SummaryTaskOwnerIdentity {
+  key: string;
+  entityId: string | null;
+  nameKey: string | null;
+}
+
+function summaryTaskOwnerIdentity(input: {
+  assigneeEntityId: string | null;
+  assigneeName: string | null;
+  proposedAssigneeName: string | null;
+}): SummaryTaskOwnerIdentity {
+  const name = input.proposedAssigneeName ?? input.assigneeName;
+  const nameKey = name ? normalizeName(name) : null;
+  return {
+    key: input.assigneeEntityId ? `entity:${input.assigneeEntityId}` : nameKey ? `name:${nameKey}` : "unassigned",
+    entityId: input.assigneeEntityId,
+    nameKey,
+  };
+}
+
+function summaryTaskOwnerMatches(task: Selectable<TasksTable>, owner: SummaryTaskOwnerIdentity): boolean {
+  const taskOwner = summaryTaskOwnerIdentity({
+    assigneeEntityId: task.assignee_entity_id,
+    assigneeName: task.assignee_name,
+    proposedAssigneeName: task.proposed_assignee_name,
+  });
+  if (taskOwner.key === "unassigned") return true;
+  if (owner.key === "unassigned") return false;
+  if (taskOwner.entityId && owner.entityId) return taskOwner.entityId === owner.entityId;
+  if (taskOwner.nameKey && owner.nameKey) return taskOwner.nameKey === owner.nameKey;
+  return taskOwner.key === owner.key;
+}
+
+async function allocateRecurringSourceTaskId(
+  db: Kysely<DB>,
+  source: string,
+  baseSourceTaskId: string,
+): Promise<string> {
+  const rows = await db
+    .selectFrom("tasks")
+    .select("source_task_id")
+    .where("source", "=", source)
+    .where((eb) =>
+      eb.or([eb("source_task_id", "=", baseSourceTaskId), eb("source_task_id", "like", `${baseSourceTaskId}:%`)]),
+    )
+    .execute();
+  if (rows.length === 0) return baseSourceTaskId;
+  const used = new Set(rows.map((row) => row.source_task_id));
+  for (let recurrence = 1; ; recurrence += 1) {
+    const candidate = `${baseSourceTaskId}:${recurrence}`;
+    if (!used.has(candidate)) return candidate;
+  }
 }
 
 async function resolveBriefTaskParent(db: Kysely<DB>, entityIds: string[]) {

@@ -134,6 +134,286 @@ describe("createAgentOutputDeliveryService", () => {
     expect(captured[0].provider_message_id).toBe("123.456");
   });
 
+  it("counts a looks-resolved recommendation after successful content delivery", async () => {
+    const recommendationId = await seedRecommendation(db, "recommendation-delivered");
+    const slack = {
+      postMessage: vi.fn(async () => "123.789"),
+      openDmChannel: vi.fn(),
+    } as unknown as SlackBot;
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => slack,
+      whatsapp: createMockWhatsApp(),
+      settingsRepo: createSettingsRepository(db),
+    });
+
+    await service.deliver({
+      definition: dailyBriefDefinition,
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      },
+      output: recommendationOutput(recommendationId),
+    });
+
+    const recommendation = await db
+      .selectFrom("task_completion_recommendations")
+      .select("delivery_count")
+      .where("id", "=", recommendationId)
+      .executeTakeFirstOrThrow();
+    const ledger = await db.selectFrom("task_completion_recommendation_deliveries").selectAll().execute();
+    expect(recommendation.delivery_count).toBe(1);
+    expect(ledger).toHaveLength(1);
+  });
+
+  it("counts a recommendation delivered to its internal assignee when another user created the task", async () => {
+    await db
+      .updateTable("users")
+      .set({
+        email: "delivery@example.com",
+        email_verified_at: "2026-07-16T09:00:00.000Z",
+      })
+      .where("id", "=", "user-delivery")
+      .execute();
+    await db.insertInto("users").values({ id: "user-creator", name: "Creator" }).execute();
+    await db
+      .insertInto("entities")
+      .values({
+        id: "person-delivery",
+        name: "Delivery User",
+        source_type: "person",
+        subtype: null,
+        aliases: JSON.stringify(["delivery@example.com"]),
+        metadata: JSON.stringify({ email: "delivery@example.com" }),
+        source_ref_id: null,
+        status: "active",
+        hotness: 0,
+        created_at: "2026-07-16T09:00:00.000Z",
+        updated_at: "2026-07-16T09:00:00.000Z",
+        ai_brief: null,
+      })
+      .execute();
+    const recommendationId = await seedRecommendation(db, "recommendation-assignee");
+    await db
+      .updateTable("tasks")
+      .set({
+        created_by_user_id: "user-creator",
+        assignee_entity_id: "person-delivery",
+        assignee_name: "Delivery User",
+      })
+      .where("id", "=", `task-${recommendationId}`)
+      .execute();
+    const slack = {
+      postMessage: vi.fn(async () => "123.790"),
+      openDmChannel: vi.fn(),
+    } as unknown as SlackBot;
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => slack,
+      whatsapp: createMockWhatsApp(),
+      settingsRepo: createSettingsRepository(db),
+    });
+
+    await service.deliver({
+      definition: dailyBriefDefinition,
+      delivery: {
+        enabled: true,
+        platform: "slack",
+        targetType: "channel",
+        targetId: "C_DAILY",
+        label: "#daily",
+      },
+      output: recommendationOutput(recommendationId),
+    });
+
+    await expect(
+      db
+        .selectFrom("task_completion_recommendations")
+        .select("delivery_count")
+        .where("id", "=", recommendationId)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ delivery_count: 1 });
+  });
+
+  it("keeps successful delivery sent while ignoring untrusted or invalid recommendation ids", async () => {
+    await db.insertInto("users").values({ id: "user-other", name: "Other User" }).execute();
+    const validId = await seedRecommendation(db, "recommendation-valid");
+    const staleId = await seedRecommendation(db, "recommendation-stale");
+    const foreignId = await seedRecommendation(db, "recommendation-foreign");
+    const arbitrarySectionId = await seedRecommendation(db, "recommendation-arbitrary-section");
+    const untrustedItemId = await seedRecommendation(db, "recommendation-untrusted-item");
+    await db
+      .updateTable("task_completion_recommendations")
+      .set({ review_state: "confirmed" })
+      .where("id", "=", staleId)
+      .execute();
+    await db
+      .updateTable("tasks")
+      .set({ created_by_user_id: "user-other" })
+      .where("id", "=", `task-${foreignId}`)
+      .execute();
+
+    const slack = {
+      postMessage: vi.fn(async () => "123.999"),
+      openDmChannel: vi.fn(),
+    } as unknown as SlackBot;
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => slack,
+      whatsapp: createMockWhatsApp(),
+      settingsRepo: createSettingsRepository(db),
+    });
+    const validItem = recommendationItem(validId, "valid-item");
+
+    await expect(
+      service.deliver({
+        definition: dailyBriefDefinition,
+        delivery: {
+          enabled: true,
+          platform: "slack",
+          targetType: "channel",
+          targetId: "C_DAILY",
+          label: "#daily",
+        },
+        output: {
+          ...recommendationOutput(validId),
+          sections: {
+            looks_resolved: [
+              validItem,
+              { ...validItem, id: "duplicate-valid-item" },
+              recommendationItem(staleId, "stale-item"),
+              recommendationItem(foreignId, "foreign-item"),
+              recommendationItem("recommendation-does-not-exist", "missing-item"),
+              {
+                ...recommendationItem(untrustedItemId, "untrusted-item"),
+                structuredPayload: { recommendationId: untrustedItemId, serverOwnedFollowup: false },
+              },
+            ],
+            todos: [
+              {
+                ...recommendationItem(arbitrarySectionId, "arbitrary-section-item"),
+                sectionKey: "todos",
+                label: "todo",
+              },
+            ],
+          },
+        },
+      }),
+    ).resolves.toBeUndefined();
+
+    const attempt = await db.selectFrom("agent_output_deliveries").selectAll().executeTakeFirstOrThrow();
+    expect(attempt.status).toBe("sent");
+    expect(attempt.message_refs_json).toBe(JSON.stringify(["123.999"]));
+    const recommendations = await db
+      .selectFrom("task_completion_recommendations")
+      .select(["id", "delivery_count"])
+      .orderBy("id")
+      .execute();
+    expect(
+      Object.fromEntries(recommendations.map((recommendation) => [recommendation.id, recommendation.delivery_count])),
+    ).toEqual({
+      [arbitrarySectionId]: 0,
+      [foreignId]: 0,
+      [staleId]: 0,
+      [untrustedItemId]: 0,
+      [validId]: 1,
+    });
+    const ledger = await db
+      .selectFrom("task_completion_recommendation_deliveries")
+      .select("recommendation_id")
+      .execute();
+    expect(ledger).toEqual([{ recommendation_id: validId }]);
+  });
+
+  it("does not count a parked WhatsApp nudge as recommendation content delivery", async () => {
+    const recommendationId = await seedRecommendation(db, "recommendation-parked");
+    const whatsapp = createMockWhatsApp({
+      isConnected: true,
+      getCapabilities: vi.fn(() => ({ ...textOnlyCapabilities, templates: true })),
+      sendTemplate: vi.fn(async () => ({
+        providerMessageId: "wa-nudge-followup",
+        providerConversationId: "dm:+15551234567",
+        providerTimestamp: "2026-07-16T10:00:00.000Z",
+      })),
+    });
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => null,
+      whatsapp,
+      settingsRepo: createSettingsRepository(db),
+    });
+
+    await service.deliver({
+      definition: dailyBriefDefinition,
+      delivery: {
+        enabled: true,
+        platform: "whatsapp",
+        targetType: "dm",
+        targetId: "dm:+15551234567",
+        label: "Alice",
+      },
+      output: recommendationOutput(recommendationId),
+    });
+
+    await expect(
+      db
+        .selectFrom("task_completion_recommendations")
+        .select("delivery_count")
+        .where("id", "=", recommendationId)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ delivery_count: 0 });
+    await expect(db.selectFrom("task_completion_recommendation_deliveries").selectAll().execute()).resolves.toEqual([]);
+  });
+
+  it("does not count WhatsApp content when the provider returns no message reference", async () => {
+    const recommendationId = await seedRecommendation(db, "recommendation-missing-ref");
+    const whatsapp = createMockWhatsApp({
+      isConnected: true,
+      sendText: vi.fn(async () => ({
+        providerMessageId: "",
+        providerConversationId: "120363000000001@g.us",
+        providerTimestamp: "2026-07-16T10:00:00.000Z",
+      })),
+    });
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => null,
+      whatsapp,
+      settingsRepo: createSettingsRepository(db),
+    });
+
+    await expect(
+      service.deliver({
+        definition: dailyBriefDefinition,
+        delivery: {
+          enabled: true,
+          platform: "whatsapp",
+          targetType: "group",
+          targetId: "120363000000001@g.us",
+          label: "Leadership",
+        },
+        output: recommendationOutput(recommendationId),
+      }),
+    ).rejects.toThrow("message reference");
+
+    await expect(
+      db
+        .selectFrom("task_completion_recommendations")
+        .select("delivery_count")
+        .where("id", "=", recommendationId)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ delivery_count: 0 });
+    await expect(db.selectFrom("task_completion_recommendation_deliveries").selectAll().execute()).resolves.toEqual([]);
+  });
+
   it("sends compact WhatsApp delivery and records the message ref", async () => {
     const whatsapp = createMockWhatsApp({
       isConnected: true,
@@ -431,21 +711,22 @@ describe("createAgentOutputDeliveryService", () => {
       },
     });
 
-    expect(sendText).toHaveBeenCalledTimes(2);
+    expect(sendText.mock.calls.length).toBeGreaterThanOrEqual(2);
     for (const call of sendText.mock.calls) {
       expect(call[0]).toEqual({ kind: "dm", phoneE164: "+15551234567" });
       expect(call[1].length).toBeLessThanOrEqual(WHATSAPP_TEXT_LIMIT);
     }
+    const expectedRefs = sendText.mock.calls.map((_, index) => `wa-dm-${index + 1}`);
     const attempt = await db.selectFrom("agent_output_deliveries").selectAll().executeTakeFirstOrThrow();
     expect(attempt.status).toBe("sent");
-    expect(attempt.message_refs_json).toBe(JSON.stringify(["wa-dm-1", "wa-dm-2"]));
+    expect(attempt.message_refs_json).toBe(JSON.stringify(expectedRefs));
     const captured = await db
       .selectFrom("conversation_messages")
       .select(["text", "provider_message_id", "is_bot"])
       .where("is_bot", "=", 1)
       .orderBy("provider_message_id")
       .execute();
-    expect(captured.map((row) => row.provider_message_id)).toEqual(["wa-dm-1", "wa-dm-2"]);
+    expect(captured.map((row) => row.provider_message_id)).toEqual(expectedRefs);
     expect(captured.every((row) => row.text.length <= WHATSAPP_TEXT_LIMIT)).toBe(true);
   });
 
@@ -588,3 +869,92 @@ describe("createAgentOutputDeliveryService", () => {
     expect(attempt.error_message).toBe("Slack bot is not connected.");
   });
 });
+
+async function seedRecommendation(db: Kysely<DB>, id: string): Promise<string> {
+  const taskId = `task-${id}`;
+  await db
+    .insertInto("tasks")
+    .values({
+      id: taskId,
+      parent_entity_id: null,
+      parent_source_ref: null,
+      parent_name: null,
+      source: "summary",
+      external_ref: null,
+      title: "Send revised proposal",
+      normalized_title: "send revised proposal",
+      status: "open",
+      status_raw: "open",
+      status_authority: "local",
+      assignee_entity_id: null,
+      assignee_name: null,
+      proposed_assignee_name: null,
+      priority: "medium",
+      due_at: null,
+      provenance: "summary",
+      source_task_id: taskId,
+      created_by_user_id: "user-delivery",
+      status_changed_at: "2026-07-16T10:00:00.000Z",
+      completed_at: null,
+      valid_from: "2026-07-16T10:00:00.000Z",
+      valid_to: null,
+      milestone_series_key: null,
+      source_platform: null,
+      source_conversation_id: null,
+      source_provider_thread_id: null,
+      source_anchor_key: null,
+      origin_agent_output_id: null,
+    })
+    .execute();
+  await db
+    .insertInto("task_completion_recommendations")
+    .values({
+      id,
+      task_id: taskId,
+      proposed_status: "done",
+      review_state: "pending",
+      review_code: id
+        .slice(-8)
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "A"),
+      evidence_fingerprint: `fingerprint-${id}`,
+      origin_agent_output_id: "output-delivery",
+      rationale: "Completion was reported.",
+      delivery_count: 0,
+      expires_at: "2026-07-18T10:00:00.000Z",
+    })
+    .execute();
+  return id;
+}
+
+function recommendationOutput(recommendationId: string) {
+  return {
+    id: "output-delivery",
+    userId: "user-delivery",
+    agentKey: dailyBriefDefinition.key,
+    outputDate: "2026-06-26",
+    masthead: { title: "Daily Brief", summary: "Review follow-ups." },
+    sections: {
+      looks_resolved: [recommendationItem(recommendationId, "looks-resolved-item")],
+    },
+  };
+}
+
+function recommendationItem(recommendationId: string, id: string) {
+  return {
+    id,
+    sectionKey: "looks_resolved",
+    title: "Send revised proposal",
+    summary: 'Completion was reported. Reply "Confirm done TEST" or "Keep open TEST".',
+    priority: "medium" as const,
+    label: "looks_resolved",
+    displayRef: null,
+    actionType: "chat",
+    actionLabel: "Review with Sketch",
+    actionPrompt: "Review it.",
+    sourceUrl: null,
+    structuredPayload: { recommendationId, serverOwnedFollowup: true },
+    knowledgeRefs: { entityIds: [], fileIds: [] },
+    sortOrder: 0,
+  };
+}

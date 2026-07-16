@@ -143,6 +143,7 @@ describe("AI SDK custom Sketch tool provider", () => {
       mcp__sketch__local_run_command: { command: "pwd" },
       mcp__sketch__local_claude_session: { action: "list" },
       mcp__sketch__ManageScheduledTasks: { action: "list" },
+      mcp__sketch__ListFollowups: {},
       mcp__sketch__ListTasks: { parentEntityId: "entity-1", limit: 1 },
       mcp__sketch__GetTeamDirectory: {},
       mcp__sketch__SetUserTimezone: { timezone: "Asia/Kolkata" },

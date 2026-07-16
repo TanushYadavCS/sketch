@@ -149,6 +149,15 @@ function whatsappSource(jid: string, name: string): AgentSourceConfig {
   return { platform: "whatsapp", targetType: "group", targetId: jid, label: name };
 }
 
+function dmSource(platform: "slack" | "whatsapp", conversationId: number): AgentSourceConfig {
+  return {
+    platform,
+    targetType: "dm",
+    targetId: String(conversationId),
+    label: "Spoofed phone label",
+  } as unknown as AgentSourceConfig;
+}
+
 function perSourceSelfModel(): AgentDeliveryModel {
   return { mode: "per_source", defaultRoute: "self", perSource: {}, combined: null };
 }
@@ -746,7 +755,7 @@ describe("AgentRunService", () => {
     if (!row) throw new Error("Expected a generated output row");
     await tasks[0]();
 
-    expect(contexts[row.id].sections).toEqual(["meetings", "todos"]);
+    expect(contexts[row.id].sections).toEqual(["meetings", "todos", "untracked_followups", "looks_resolved"]);
     expect(contexts[row.id].maxItemsPerSection).toBe(2);
     expect(contexts[row.id].focus).toBe("Prioritize urgent work");
   });
@@ -934,7 +943,7 @@ describe("AgentRunService", () => {
     expect(contexts.map((context) => context.createTasks)).toEqual([false, true]);
   });
 
-  it("promotes Summarizer internal task candidates without persisting them as visible output items", async () => {
+  it("keeps legacy Summarizer task candidates hidden without promoting them in a durability-enabled run", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
     const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
@@ -1023,19 +1032,15 @@ describe("AgentRunService", () => {
       .where("created_by_user_id", "=", user.id)
       .execute();
     const evidence = await db.selectFrom("task_evidence").select(["kind", "ref_id"]).orderBy("ref_id", "asc").execute();
+    const transition = await db
+      .selectFrom("task_durability_route_state")
+      .select(["mode", "incremental_success_at"])
+      .executeTakeFirstOrThrow();
 
     expect(visibleItems).toEqual([{ section_key: "highlights", title: "Launch thread moved forward" }]);
-    expect(summaryTasks).toEqual([
-      {
-        title: "Mina: send the launch checklist",
-        provenance: "summary",
-        source: "summary",
-      },
-    ]);
-    expect(evidence).toEqual([
-      { kind: "conversation_message", ref_id: "701" },
-      { kind: "conversation_message", ref_id: "702" },
-    ]);
+    expect(summaryTasks).toEqual([]);
+    expect(evidence).toEqual([]);
+    expect(transition).toEqual({ mode: "hybrid", incremental_success_at: null });
   });
 
   it("persists delivery config with the other agent preferences", async () => {
@@ -1464,6 +1469,166 @@ describe("AgentRunService", () => {
       ]),
     ).rejects.toThrow("Slack channel is not available for this user");
     expect(isUserInChannel).toHaveBeenCalledWith("C_PRIVATE", "U_AGENT");
+  });
+
+  it("resolves persisted Slack and WhatsApp DM sources only for the configured user", async () => {
+    const users = createUserRepository(db);
+    const alice = await users.create({
+      name: "Alice",
+      email: "alice@example.com",
+      slackUserId: "U_ALICE",
+      whatsappNumber: "+15551234567",
+    });
+    const bob = await users.create({
+      name: "Bob",
+      email: "bob@example.com",
+      slackUserId: "U_BOB",
+      whatsappNumber: "+15557654321",
+    });
+    const conversations = createConversationRepository(db);
+    const aliceSlack = await conversations.getOrCreate(
+      { platform: "slack", kind: "dm", providerConversationId: "D_ALICE" },
+      "Alice",
+    );
+    const aliceWhatsApp = await conversations.getOrCreate(
+      { platform: "whatsapp", kind: "dm", providerConversationId: "dm:+15551234567" },
+      "+15551234567",
+    );
+    const bobSlack = await conversations.getOrCreate(
+      { platform: "slack", kind: "dm", providerConversationId: "D_BOB" },
+      "Bob",
+    );
+    await conversations.insertMessage({
+      conversationId: aliceSlack.id,
+      providerMessageId: "alice-slack-message",
+      senderJid: "U_ALICE",
+      senderName: "Alice",
+      senderUserId: alice.id,
+      text: "Alice Slack DM",
+      receivedAt: "2026-06-15T07:00:00.000Z",
+    });
+    await conversations.insertMessage({
+      conversationId: aliceWhatsApp.id,
+      providerMessageId: "alice-whatsapp-message",
+      senderJid: "15551234567@s.whatsapp.net",
+      senderName: "Alice",
+      senderUserId: alice.id,
+      text: "Alice WhatsApp DM",
+      receivedAt: "2026-06-15T07:05:00.000Z",
+    });
+    await conversations.insertMessage({
+      conversationId: bobSlack.id,
+      providerMessageId: "bob-slack-message",
+      senderJid: "U_BOB",
+      senderName: "Bob",
+      senderUserId: bob.id,
+      text: "Bob Slack DM",
+      receivedAt: "2026-06-15T07:10:00.000Z",
+    });
+    const service = createService(db, []);
+
+    const updated = await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, alice.id, {
+      sources: [dmSource("slack", aliceSlack.id), dmSource("whatsapp", aliceWhatsApp.id)],
+    });
+
+    expect(updated?.sources).toEqual([
+      {
+        platform: "slack",
+        targetType: "dm",
+        targetId: String(aliceSlack.id),
+        label: "Slack DM with Alice",
+      },
+      {
+        platform: "whatsapp",
+        targetType: "dm",
+        targetId: String(aliceWhatsApp.id),
+        label: "WhatsApp DM with Alice",
+      },
+    ]);
+    expect((updated as (typeof updated & { availableSources?: AgentSourceConfig[] }) | null)?.availableSources).toEqual(
+      updated?.sources,
+    );
+    expect(JSON.stringify(updated)).not.toContain("15551234567");
+
+    await expect(
+      service.resolveSourceConfigsForUser(CONVERSATION_SUMMARY_AGENT_KEY, alice.id, [dmSource("slack", bobSlack.id)]),
+    ).rejects.toThrow("DM source is not available for this user");
+  });
+
+  it("delivers self-routed DM summaries back to the configured user identity", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Alice",
+      email: "alice@example.com",
+      slackUserId: "U_ALICE",
+      whatsappNumber: "+15551234567",
+    });
+    const conversations = createConversationRepository(db);
+    const slackDm = await conversations.getOrCreate(
+      { platform: "slack", kind: "dm", providerConversationId: "D_ALICE" },
+      "Alice",
+    );
+    const whatsappDm = await conversations.getOrCreate(
+      { platform: "whatsapp", kind: "dm", providerConversationId: "dm:+15551234567" },
+      "Alice",
+    );
+    for (const [conversationId, providerMessageId] of [
+      [slackDm.id, "slack-dm-message"],
+      [whatsappDm.id, "whatsapp-dm-message"],
+    ] as const) {
+      await conversations.insertMessage({
+        conversationId,
+        providerMessageId,
+        senderJid: providerMessageId,
+        senderName: "Alice",
+        senderUserId: user.id,
+        text: providerMessageId,
+        receivedAt: "2026-06-15T07:00:00.000Z",
+      });
+    }
+    const outputDelivery = { deliver: vi.fn(async () => {}) } satisfies AgentOutputDeliveryPublisher;
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Summarizer", summary: "Summary" },
+        rawPayload: emptySummaryPayload(),
+        items: [],
+      });
+      return successfulRunResult();
+    });
+    const service = createService(db, tasks, {
+      runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      outputDelivery,
+      ...allowSlackDelivery([]),
+    });
+    const sources = [dmSource("slack", slackDm.id), dmSource("whatsapp", whatsappDm.id)];
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      sources,
+      routes: sources.map((source) => sourceRoute(source)),
+    });
+
+    await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    for (const task of tasks) await task();
+
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: expect.objectContaining({ platform: "slack", targetType: "dm", targetId: "U_ALICE" }),
+      }),
+    );
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: expect.objectContaining({ platform: "whatsapp", targetType: "dm", targetId: "+15551234567" }),
+      }),
+    );
   });
 
   it("normalizes delivery models with defaultRoute and full-key legacy matching", async () => {

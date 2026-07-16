@@ -20,9 +20,11 @@ This is a general Sketch capability for conversation-derived work. The first sup
 
 - Slack channels.
 - Slack direct messages.
-- Slack threads.
+- Slack threads as thread-scoped evidence inside configured channels or direct messages.
 - WhatsApp groups.
 - WhatsApp direct messages.
+
+Selecting one standalone Slack thread as its own Summarizer route is outside this first slice. Thread replies are still persisted with their thread identity, loaded into source-relevant memory, and kept separate from unrelated threads.
 
 Ashish's Goosebumps WhatsApp experience is:
 
@@ -160,7 +162,7 @@ Before extracting task changes, Summarizer loads open and in-progress tasks rele
 
 - Tasks owned by the run's user.
 - Tasks linked to a configured source conversation.
-- For Slack thread-scoped sources, tasks linked to that thread.
+- For Slack thread-scoped evidence, tasks linked to that thread.
 - Tasks linked to the resolved parent, when available.
 
 The model receives:
