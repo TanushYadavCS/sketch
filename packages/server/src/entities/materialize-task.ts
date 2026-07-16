@@ -2,7 +2,7 @@ import { normalizeName } from "../connectors/name-normalize";
 import { TEST_ACCOUNT_ENTITY_ID, type TaskStatus, createTaskRepository } from "../db/repositories/tasks";
 import { assignMembership, closeOpenMembershipForTask, upsertWorkCycle } from "../db/repositories/work-cycles";
 import { readJsonObject } from "./materialize-json";
-import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 
 const STATUS_TYPE_MAP: Record<string, Record<string, TaskStatus>> = {
   linear: {
@@ -86,7 +86,7 @@ function normalizeStatus(source: string, statusType: string): TaskStatus {
 function resolveProject(
   deps: MaterializeDeps,
   project: { name: string; source: string; sourceId: string } | undefined,
-): EntityRow | null {
+): IndexEntityRow | null {
   if (!project) return null;
   const byRef = deps.index.bySourceRef.get(`${project.source}:${project.sourceId}`);
   if (byRef && byRef.source_type === "project" && byRef.id !== TEST_ACCOUNT_ENTITY_ID) return byRef;
@@ -97,7 +97,7 @@ function resolveProject(
 function resolveAssignee(
   deps: MaterializeDeps,
   assignee: { name: string; email?: string; source?: string; sourceId?: string } | undefined,
-): EntityRow | null {
+): IndexEntityRow | null {
   if (!assignee) return null;
   if (assignee.source && assignee.sourceId) {
     const byRef = deps.index.bySourceRef.get(`${assignee.source}:${assignee.sourceId}`);
@@ -110,7 +110,7 @@ function resolveAssignee(
 function resolveCycleScope(
   deps: MaterializeDeps,
   scopeRef: { source: string; sourceId: string } | undefined,
-): EntityRow | null {
+): IndexEntityRow | null {
   if (!scopeRef) return null;
   return deps.index.bySourceRef.get(`${scopeRef.source}:${scopeRef.sourceId}`) ?? null;
 }

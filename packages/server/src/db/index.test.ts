@@ -9,7 +9,7 @@
 import { CompiledQuery, Kysely } from "kysely";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestConfig } from "../test-utils";
-import { createDatabase } from "./index";
+import { createDatabase, createPostgresPoolConfig } from "./index";
 import type { DB } from "./schema";
 
 describe("createDatabase", () => {
@@ -42,5 +42,16 @@ describe("createDatabase", () => {
     // After creating a SQLite DB, sqliteVecAvailable should be set (true if extension loaded, false otherwise)
     const { sqliteVecAvailable } = await import("./index");
     expect(typeof sqliteVecAvailable).toBe("boolean");
+  });
+});
+
+describe("createPostgresPoolConfig", () => {
+  it("uses the configured PostgreSQL connection pool limit", () => {
+    const config = createTestConfig({ DATABASE_URL: "postgres://localhost/sketch", POSTGRES_POOL_MAX: 12 });
+
+    expect(createPostgresPoolConfig(config)).toMatchObject({
+      connectionString: "postgres://localhost/sketch",
+      max: 12,
+    });
   });
 });

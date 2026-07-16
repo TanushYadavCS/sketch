@@ -13,6 +13,7 @@ export const configSchema = z.object({
   DB_TYPE: z.enum(["sqlite", "postgres"]).default("sqlite"),
   SQLITE_PATH: z.string().default("./data/sketch.db"),
   DATABASE_URL: z.string().optional(),
+  POSTGRES_POOL_MAX: z.coerce.number().int().min(1).max(100).default(5),
 
   // Slack context
   SLACK_CHANNEL_HISTORY_LIMIT: z.coerce.number().default(5),

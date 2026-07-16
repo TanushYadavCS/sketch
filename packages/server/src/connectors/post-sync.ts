@@ -13,24 +13,77 @@ export interface PostSyncGraphPipelineParams {
   db: Kysely<DB>;
   syncLogger: Logger;
   affectedIndexedFileIds: string[];
+  sources: string[];
+  workCycleReconciles: PostSyncWorkCycleReconcile[];
   coMentionContributesToThreshold?: number;
   floorRetryMaxFilesPerDomain?: number;
-  source?: string;
-  syncRunId?: string;
-  connectorConfigId?: string;
-  runCycleReconcile?: boolean;
+}
+
+export interface PostSyncWorkCycleReconcile {
+  connectorConfigId: string;
+  syncRunId: string;
+}
+
+export interface PostSyncGraphInputs {
+  affectedIndexedFileIds: string[];
+  sources: string[];
+  workCycleReconciles: PostSyncWorkCycleReconcile[];
+}
+
+export interface PostSyncGraphInputCollector {
+  add(inputs: PostSyncGraphInputs): void;
+  restore(inputs: PostSyncGraphInputs): void;
+  take(): PostSyncGraphInputs;
+  hasInputs(): boolean;
+}
+
+export function createPostSyncGraphInputCollector(): PostSyncGraphInputCollector {
+  const affectedIndexedFileIds = new Set<string>();
+  const sources = new Set<string>();
+  const workCycleReconciles = new Map<string, PostSyncWorkCycleReconcile>();
+
+  return {
+    add(inputs) {
+      for (const indexedFileId of inputs.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
+      for (const source of inputs.sources) sources.add(source);
+      for (const input of inputs.workCycleReconciles) {
+        workCycleReconciles.set(input.connectorConfigId, input);
+      }
+    },
+    restore(inputs) {
+      for (const indexedFileId of inputs.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
+      for (const source of inputs.sources) sources.add(source);
+      for (const input of inputs.workCycleReconciles) {
+        if (!workCycleReconciles.has(input.connectorConfigId)) {
+          workCycleReconciles.set(input.connectorConfigId, input);
+        }
+      }
+    },
+    take() {
+      const snapshot = {
+        affectedIndexedFileIds: [...affectedIndexedFileIds],
+        sources: [...sources],
+        workCycleReconciles: [...workCycleReconciles.values()],
+      };
+      affectedIndexedFileIds.clear();
+      sources.clear();
+      workCycleReconciles.clear();
+      return snapshot;
+    },
+    hasInputs() {
+      return affectedIndexedFileIds.size > 0 || sources.size > 0 || workCycleReconciles.size > 0;
+    },
+  };
 }
 
 export async function runPostSyncGraphPipeline({
   db,
   syncLogger,
   affectedIndexedFileIds,
+  sources,
+  workCycleReconciles,
   coMentionContributesToThreshold,
   floorRetryMaxFilesPerDomain,
-  source,
-  syncRunId,
-  connectorConfigId,
-  runCycleReconcile,
 }: PostSyncGraphPipelineParams): Promise<void> {
   const materializeSummary = await materializeUnmaterializedFacts(db, syncLogger);
   if (materializeSummary.factsRead > 0) {
@@ -38,7 +91,10 @@ export async function runPostSyncGraphPipeline({
   }
   const taskRepo = createTaskRepository(db);
   const reanchoredTasks = await taskRepo.reanchorNullParentTasks();
-  const expiredTasks = await taskRepo.expireOrphanedTasks(source);
+  let expiredTasks = 0;
+  for (const source of sources) {
+    expiredTasks += await taskRepo.expireOrphanedTasks(source);
+  }
   if (reanchoredTasks.count > 0 || expiredTasks > 0) {
     syncLogger.info({ reanchoredTasks: reanchoredTasks.count, expiredTasks }, "Post-sync task sweep complete");
   }
@@ -60,7 +116,7 @@ export async function runPostSyncGraphPipeline({
       },
     );
   }
-  if (runCycleReconcile && connectorConfigId && syncRunId) {
+  for (const { connectorConfigId, syncRunId } of workCycleReconciles) {
     const closedWorkCycles = await reconcileWorkCycles(db, {
       connectorConfigId,
       syncRunId,

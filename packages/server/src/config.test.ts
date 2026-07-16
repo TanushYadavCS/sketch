@@ -27,6 +27,7 @@ describe("configSchema", () => {
         expect(result.data.LOG_LEVEL).toBe("info");
         expect(result.data.DATA_DIR).toBe("./data");
         expect(result.data.SQLITE_PATH).toBe("./data/sketch.db");
+        expect(result.data.POSTGRES_POOL_MAX).toBe(5);
         expect(result.data.SLACK_CHANNEL_HISTORY_LIMIT).toBe(5);
         expect(result.data.SLACK_THREAD_HISTORY_LIMIT).toBe(50);
         expect(result.data.WHATSAPP_DM_PROVIDER).toBe("baileys");
@@ -217,6 +218,14 @@ describe("configSchema", () => {
         expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(2);
       }
     });
+
+    it("coerces POSTGRES_POOL_MAX string to number", () => {
+      const result = configSchema.safeParse({ POSTGRES_POOL_MAX: "12" });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.POSTGRES_POOL_MAX).toBe(12);
+      }
+    });
   });
 
   describe("invalid configs", () => {
@@ -248,6 +257,11 @@ describe("configSchema", () => {
     it("rejects agent concurrency below one", () => {
       const result = configSchema.safeParse({ MAX_CONCURRENT_AGENT_RUNS: "0" });
       expect(result.success).toBe(false);
+    });
+
+    it("rejects PostgreSQL pool sizes outside the supported range", () => {
+      expect(configSchema.safeParse({ POSTGRES_POOL_MAX: "0" }).success).toBe(false);
+      expect(configSchema.safeParse({ POSTGRES_POOL_MAX: "101" }).success).toBe(false);
     });
 
     it("rejects invalid Wati endpoint URLs", () => {

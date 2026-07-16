@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [1.1.0] -- 2026-07-13
+
+- Indexes opted-in WhatsApp group conversations into the context graph with gap-watermark chunking, LLM salience gating, identity resolution, and access-scoped privacy controls.
+- Gates structured task creation for Summarizer and Daily Brief via agent writers, disabling enrichment-driven task minting and preserving UI status editing for Sketch-native tasks.
+- Daily Brief now consumes completed Summarizer outputs and recent tasks to inform briefs without re-deriving action items, collating against existing tasks to reduce duplicates.
+- Fixes duplicate and mis-typed WhatsApp entity extraction by letting v13 own all entity typing and removing redundant salience seeding.
+- Repairs sentinel fact owners and introduces a quarantine mechanism for fact materializations that fail after multiple attempts, eliminating persistent foreign key errors and reducing sweep churn.
+
 ## [1.0.2] -- 2026-07-10
 
 - Streams Gmail sync in two passes (address-only reciprocity then paged body fetches) to bound peak residency to one page instead of the full 5,000-message corpus.

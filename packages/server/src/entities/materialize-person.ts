@@ -3,7 +3,7 @@ import { inferAffiliationFromEmail } from "./affiliations";
 import { registerEntity } from "./materialize-deps";
 import { isString, readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
-import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 import { proposeEntity } from "./propose";
 import { type RankedCandidate, rankPersonLlmMention } from "./rank";
 
@@ -50,7 +50,7 @@ export async function materializePersonSeed(
   );
   if (result.kind === "queued") return { kind: "queued", reviewId: result.reviewId };
   if (result.kind === "suppressed") return { kind: "skipped", reason: result.reason };
-  const entity = result.entity as unknown as EntityRow;
+  const entity = result.entity;
   deps.index.bySourceRef.set(`${fact.subject_source}:${fact.subject_source_id}`, entity);
   registerEntity(deps.index, entity);
   await inferAffiliationFromEmail(
@@ -147,7 +147,7 @@ export async function materializePersonFact(
   const mentionSource = fact.fact_type === "llm_extracted" ? "llm_extraction" : `${fact.source}_${fact.fact_type}`;
   const subtype = fact.subject_email ? "external" : "external";
 
-  let entity: EntityRow | null = null;
+  let entity: IndexEntityRow | null = null;
   if (fact.subject_source && fact.subject_source_id) {
     const refKey = `${fact.subject_source}:${fact.subject_source_id}`;
     const cached = deps.index.bySourceRef.get(refKey);
@@ -185,7 +185,7 @@ export async function materializePersonFact(
         (entityId) => [...(worksAtByPerson.get(entityId) ?? [])],
       );
       if (decision.kind === "confident_match") {
-        entity = decision.entity as unknown as EntityRow;
+        entity = decision.entity;
         resultKind = "entity_linked";
       } else if (decision.kind === "ambiguous_existing") {
         precomputedCandidates = decision.candidates;
@@ -228,7 +228,7 @@ export async function materializePersonFact(
         return { kind: "queued", reviewId: result.reviewId };
       }
       if (result.kind === "suppressed") return { kind: "skipped", reason: result.reason };
-      entity = result.entity as unknown as EntityRow;
+      entity = result.entity;
       resultKind = result.kind === "created" ? "entity_created" : "entity_linked";
       registerEntity(deps.index, entity);
       if (fact.subject_source && fact.subject_source_id) {

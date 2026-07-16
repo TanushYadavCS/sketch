@@ -37,7 +37,12 @@ import {
 } from "./enrichment-providers";
 import { createGeminiGenerator } from "./gemini-generate";
 import { applyMicrosoftOAuthConfig, resolveMicrosoftOAuthConfig } from "./microsoft-graph";
-import { runPostSyncGraphPipeline } from "./post-sync";
+import {
+  type PostSyncGraphInputCollector,
+  createPostSyncGraphInputCollector,
+  runPostSyncGraphPipeline,
+} from "./post-sync";
+import { getPostSyncCoordinator } from "./post-sync-coordinator";
 import { getConnector } from "./registry";
 import { emitFactsForSyncedItem } from "./sync-facts";
 import { getSyncIdentityForItem, syncIdentityKey } from "./sync-identity";
@@ -101,6 +106,11 @@ export async function seedTeamDirectoryEntities(db: Kysely<DB>, logger: Logger):
 
 export { getConnector } from "./registry";
 
+export interface RunConnectorSyncOptions {
+  postSyncMode?: "inline" | "deferred";
+  postSyncInputCollector?: PostSyncGraphInputCollector;
+}
+
 /**
  * Run a sync for a single connector config.
  */
@@ -139,6 +149,7 @@ export async function runConnectorSync(
       | "OPENROUTER_API_KEY"
     >
   >,
+  options: RunConnectorSyncOptions = {},
 ): Promise<SyncResult> {
   if (isRecreateActive()) {
     logger.info({ connectorId: connectorConfigId }, "Skipping connector sync during entity recreate");
@@ -208,6 +219,10 @@ export async function runConnectorSync(
   };
   activeSyncs.set(config.id, progress);
 
+  const affectedIndexedFileIds = new Set<string>();
+  let syncReconciled = false;
+  const syncRunId = randomUUID();
+
   try {
     const resolvedCredentials = await resolveConnectorCredentials({
       db,
@@ -244,13 +259,10 @@ export async function runConnectorSync(
     };
 
     const seenSyncIdentityKeys = new Set<string>();
-    const affectedIndexedFileIds = new Set<string>();
     const dirtyCrmRollupGroupIds = new Set<string>();
-    let syncReconciled = false;
 
     const existingHashes = await loadExistingContentHashes(db, connectorType, config.id);
     const resolveNameToEmail = await buildSyncNameResolver(db);
-    const syncRunId = randomUUID();
     const factContext = {
       connectorConfigId: config.id,
       createdByUserId: config.created_by,
@@ -423,17 +435,17 @@ export async function runConnectorSync(
       for (const indexedFileId of reconcileResult.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
     }
 
-    await runPostSyncGraphPipeline({
-      db,
-      syncLogger,
-      affectedIndexedFileIds: [...affectedIndexedFileIds],
-      coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
-      floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
-      source: connectorType,
-      syncRunId,
-      connectorConfigId: config.id,
-      runCycleReconcile: syncReconciled,
-    });
+    if (options.postSyncMode !== "deferred") {
+      await runPostSyncGraphPipeline({
+        db,
+        syncLogger,
+        affectedIndexedFileIds: [...affectedIndexedFileIds],
+        sources: [connectorType],
+        workCycleReconciles: syncReconciled ? [{ connectorConfigId: config.id, syncRunId }] : [],
+        coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+        floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
+      });
+    }
 
     if (connectorType === "zoho_crm") {
       await refreshCrmRollupsForSync({
@@ -487,6 +499,14 @@ export async function runConnectorSync(
     });
 
     throw err;
+  } finally {
+    if (options.postSyncMode === "deferred") {
+      options.postSyncInputCollector?.add({
+        affectedIndexedFileIds: [...affectedIndexedFileIds],
+        sources: [connectorType],
+        workCycleReconciles: syncReconciled ? [{ connectorConfigId: config.id, syncRunId }] : [],
+      });
+    }
   }
 }
 
@@ -652,13 +672,36 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
 
   await seedTeamDirectoryEntities(db, logger);
 
+  const postSyncInputs = createPostSyncGraphInputCollector();
+
   await runWithConcurrency(configs, SYNC_CONCURRENCY, async (config) => {
+    postSyncInputs.add({ affectedIndexedFileIds: [], sources: [config.connector_type], workCycleReconciles: [] });
     try {
-      await runConnectorSync(db, config.id, logger, deps?.appConfig);
+      await runConnectorSync(db, config.id, logger, deps?.appConfig, {
+        postSyncMode: "deferred",
+        postSyncInputCollector: postSyncInputs,
+      });
     } catch (err) {
       logger.error({ err, connectorId: config.id }, "Scheduled sync failed for connector");
     }
   });
+
+  const postSyncCoordinator = getPostSyncCoordinator(db);
+  const postSyncContext = {
+    db,
+    logger,
+    coMentionContributesToThreshold: deps?.appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+    floorRetryMaxFilesPerDomain: deps?.appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
+  };
+  try {
+    if (postSyncInputs.hasInputs()) {
+      await postSyncCoordinator.enqueue(postSyncInputs.take(), postSyncContext);
+    } else {
+      await postSyncCoordinator.drain(postSyncContext);
+    }
+  } catch (err) {
+    logger.error({ err }, "Scheduled post-sync graph pipeline failed");
+  }
 
   try {
     const entityRepo = createEntityRepository(db);

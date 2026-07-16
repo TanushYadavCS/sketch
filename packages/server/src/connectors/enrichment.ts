@@ -640,6 +640,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               if (floor.emitted > 0) {
                 await materializeUnmaterializedFacts(db, logger, {
                   embeddingProvider: deps.embeddingProvider,
+                  factTypes: ["llm_relation"],
                 });
               }
               await resetSummaryRetry(db, file.id, fileVersion);
@@ -929,6 +930,7 @@ async function enrichTextDocument(
       if (floor.emitted > 0) {
         await materializeUnmaterializedFacts(db, logger, {
           embeddingProvider,
+          factTypes: ["llm_relation"],
         });
       }
       await resetSummaryRetry(db, file.id, fileVersion);

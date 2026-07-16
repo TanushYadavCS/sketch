@@ -1011,9 +1011,24 @@ export interface IndexedFileFactsTable {
   last_seen_sync_run_id: string | null;
   deleted_at: string | null;
   content_hash: string | null;
+  materialization_input_hash: string | null;
+  normalized_subject_name: string | null;
+  normalized_mention_name: string | null;
+  raw_mention_type: string | null;
+  mention_type: string | null;
+  feature_corroboration_key: string | null;
+  normalization_projected_at: string | null;
   materialized_at: string | null;
   materialization_attempts: Generated<number>;
   created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface NormalizationBackfillStateTable {
+  id: string;
+  status: string;
+  cursor_created_at: string | null;
+  cursor_id: string | null;
   updated_at: Generated<string>;
 }
 
@@ -1181,6 +1196,7 @@ export interface DB {
   entity_review_domain_candidates: EntityReviewDomainCandidatesTable;
   entity_alias_rejections: EntityAliasRejectionsTable;
   indexed_file_facts: IndexedFileFactsTable;
+  normalization_backfill_state: NormalizationBackfillStateTable;
   tasks: TasksTable;
   task_evidence: TaskEvidenceTable;
   work_cycles: WorkCyclesTable;

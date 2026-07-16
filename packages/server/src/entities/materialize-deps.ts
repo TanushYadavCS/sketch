@@ -12,7 +12,8 @@ import { DEFAULT_FACT_BATCH_SIZE, forEachFactBatch } from "./fact-batches";
 import { type MentionType, normalizeMentionType } from "./graph";
 import { normalizeEntityMatchName } from "./match-normalize";
 import { parseAliasesString, readJsonObject, readPersonEmailFromMetadata } from "./materialize-json";
-import type { EntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
+import { ENTITY_INDEX_COLUMNS } from "./materialize-types";
+import type { EntityRow, IndexEntityRow, IndexedFileFactRow, LookupIndex, MaterializeDeps } from "./materialize-types";
 import {
   type CandidatePoolEntry,
   addToCandidatePool,
@@ -70,19 +71,31 @@ export function configureMaterializeDefaults(opts: {
 
 async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   const supportedTypes: ProposeEntityType[] = ["person", "company", "product", "project", "team", "deal", "tool"];
-  const entities = await db
+  const supportedTypeSet = new Set<string>(supportedTypes);
+  /**
+   * One shared row instance per live entity, keyed by id. The type, name,
+   * alias, and source-ref indexes all point at these instances, so an in-pass
+   * `registerEntity` update reflows through every bucket and no full row is
+   * duplicated per source ref. All live entities are loaded (not just the
+   * supported types) because `bySourceRef` also resolves system entities such
+   * as `clickup_workspace`/`clickup_space`, which are never bucketed by name.
+   */
+  const entityRows = await db
     .selectFrom("entities")
-    .selectAll()
-    .where("source_type", "in", supportedTypes)
+    .select([...ENTITY_INDEX_COLUMNS])
     .where(whereLiveEntity())
     .execute();
-  const entitiesByType = new Map<ProposeEntityType, EntityRow[]>();
+  const byId = new Map<string, IndexEntityRow>();
+  for (const e of entityRows) byId.set(e.id, e);
+
+  const entitiesByType = new Map<ProposeEntityType, IndexEntityRow[]>();
   for (const t of supportedTypes) entitiesByType.set(t, []);
-  const byNormalizedName = new Map<string, EntityRow[]>();
-  const byNormalizedAlias = new Map<string, EntityRow[]>();
+  const byNormalizedName = new Map<string, IndexEntityRow[]>();
+  const byNormalizedAlias = new Map<string, IndexEntityRow[]>();
   const dedupEntriesByType = new Map<ProposeEntityType, CandidatePoolEntry[]>();
   for (const t of supportedTypes) dedupEntriesByType.set(t, []);
-  for (const e of entities) {
+  for (const e of entityRows) {
+    if (!supportedTypeSet.has(e.source_type)) continue;
     if (!canUseEntityAsMatchTarget(e.source_type, e.provenance_tier)) continue;
     const entityType = e.source_type as ProposeEntityType;
     entitiesByType.get(entityType)?.push(e);
@@ -103,17 +116,13 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
     }
   }
 
-  const sourceRefs = await db
-    .selectFrom("entity_source_refs")
-    .innerJoin("entities", "entities.id", "entity_source_refs.entity_id")
-    .select(["entity_source_refs.source as source", "entity_source_refs.source_id as source_id"])
-    .selectAll("entities")
-    .where(whereLiveEntity())
-    .execute();
-  const bySourceRef = new Map<string, EntityRow>();
-  for (const row of sourceRefs) {
+  const sourceRefs = await db.selectFrom("entity_source_refs").select(["entity_id", "source", "source_id"]).execute();
+  const bySourceRef = new Map<string, IndexEntityRow>();
+  for (const ref of sourceRefs) {
+    const row = byId.get(ref.entity_id);
+    if (!row) continue;
     if (!canUseEntityAsMatchTarget(row.source_type, row.provenance_tier)) continue;
-    bySourceRef.set(`${row.source}:${row.source_id}`, row as unknown as EntityRow);
+    bySourceRef.set(`${ref.source}:${ref.source_id}`, row);
   }
   const domainRows = await db
     .selectFrom("entity_domains")
@@ -133,7 +142,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   for (const t of supportedTypes) dedupPoolsByType.set(t, buildCandidatePool(dedupEntriesByType.get(t) ?? []));
   const personScopeKeysByEntityId = await buildPersonScopeKeys(
     db,
-    entities.filter((entity) => entity.source_type === "person"),
+    entityRows.filter((entity) => entity.source_type === "person"),
   );
   return {
     entitiesByType,
@@ -146,7 +155,7 @@ async function buildLookupIndex(db: Kysely<DB>): Promise<LookupIndex> {
   };
 }
 
-async function buildPersonScopeKeys(db: Kysely<DB>, persons: EntityRow[]): Promise<Map<string, string[]>> {
+async function buildPersonScopeKeys(db: Kysely<DB>, persons: IndexEntityRow[]): Promise<Map<string, string[]>> {
   const scopeKeys = new Map<string, Set<string>>();
   for (const person of persons) scopeKeys.set(person.id, new Set());
   const domainsRepo = createEntityDomainsRepository(db);
@@ -214,11 +223,82 @@ async function findLlmExtractedThirdPartyMention(
   }
 }
 
+/**
+ * Indexed equivalent of `findLlmExtractedThirdPartyMention`. Once the
+ * normalization backfill is complete every `llm_extracted` row carries
+ * `raw_mention_type`/`normalized_mention_name`, so the first company/tool match
+ * for a name is a single indexed lookup instead of a keyset scan of every
+ * payload. The returned `name` reparses only the one matched row (the caller
+ * uses only `type`, but parity is preserved).
+ */
+async function findLlmExtractedThirdPartyMentionIndexed(
+  db: Kysely<DB>,
+  name: string,
+): Promise<{ type: Extract<ProposeEntityType, "company" | "tool">; name: string } | null> {
+  const key = normalizeEntityMatchName("company", name);
+  if (!key) return null;
+  const row = await db
+    .selectFrom("indexed_file_facts")
+    .select(["subject_name", "raw", "raw_mention_type"])
+    .where("source", "=", "llm_extraction")
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .where("subject_name", "is not", null)
+    .where("raw_mention_type", "in", ["company", "tool"])
+    .where("normalized_mention_name", "=", key)
+    .orderBy("id", "asc")
+    .limit(1)
+    .executeTakeFirst();
+  if (!row || (row.raw_mention_type !== "company" && row.raw_mention_type !== "tool")) return null;
+  const raw = readJsonObject(row.raw);
+  const mention = typeof raw.mention === "string" ? raw.mention : row.subject_name;
+  if (!mention) return null;
+  return { type: row.raw_mention_type, name: mention };
+}
+
+/**
+ * Indexed equivalent of the `buildActiveLlmFileCounts` map lookup for one
+ * (name, mention-type) pair: a single `COUNT(DISTINCT indexed_file_id)` over the
+ * partial corroboration index. Callers pass the coerced `mentionType`, so a row
+ * whose `raw_mention_type` differs after tool-denylist coercion is excluded here
+ * exactly as the whole-table map missed it.
+ */
+async function countActiveLlmFilesIndexed(
+  db: Kysely<DB>,
+  normalizedName: string,
+  mentionType: MentionType,
+): Promise<number> {
+  const row = await db
+    .selectFrom("indexed_file_facts")
+    .select((eb) => eb.fn.count("indexed_file_id").distinct().as("c"))
+    .where("fact_type", "=", "llm_extracted")
+    .where("deleted_at", "is", null)
+    .where("raw_mention_type", "=", mentionType)
+    .where("normalized_subject_name", "=", normalizedName)
+    .executeTakeFirst();
+  return Number(row?.c ?? 0);
+}
+
+/**
+ * Reads whether the Fix 2b normalization backfill has populated projection
+ * columns for every pre-existing row. Until then, corroboration and third-party
+ * reads must fall back to the legacy JS scans, which parse `raw` and so see rows
+ * the not-yet-populated columns would miss.
+ */
+async function isNormalizationBackfillComplete(db: Kysely<DB>): Promise<boolean> {
+  const row = await db
+    .selectFrom("normalization_backfill_state")
+    .select("status")
+    .where("id", "=", "v1")
+    .executeTakeFirst();
+  return row?.status === "complete";
+}
+
 function isNameDedupEntityType(entityType: ProposeEntityType): entityType is NameDedupEntityType {
   return entityType === "project" || entityType === "product" || entityType === "person" || entityType === "company";
 }
 
-export function registerEntity(index: LookupIndex, entity: EntityRow): void {
+export function registerEntity(index: LookupIndex, entity: IndexEntityRow): void {
   const existingPersonScopeKeys = index.personScopeKeysByEntityId.get(entity.id);
   unregisterEntity(index, entity.id);
   const entityType = entity.source_type as ProposeEntityType;
@@ -260,7 +340,7 @@ export function registerEntity(index: LookupIndex, entity: EntityRow): void {
   }
 }
 
-function removeEntityFromMapBuckets<T extends EntityRow>(map: Map<string, T[]>, entityId: string): void {
+function removeEntityFromMapBuckets<T extends IndexEntityRow>(map: Map<string, T[]>, entityId: string): void {
   for (const [key, bucket] of map) {
     const filtered = bucket.filter((entity) => entity.id !== entityId);
     if (filtered.length === 0) map.delete(key);
@@ -328,14 +408,22 @@ async function buildActiveLlmFileCounts(db: Kysely<DB>): Promise<Map<string, num
   return new Map([...filesByName.entries()].map(([key, files]) => [key, files.size]));
 }
 
-export async function refreshResolvedEntityIndex(db: Kysely<DB>, index: LookupIndex, entity: Entity): Promise<void> {
+export async function refreshResolvedEntityIndex(
+  db: Kysely<DB>,
+  index: LookupIndex,
+  entity: IndexEntityRow,
+): Promise<void> {
   const sourceRefs = await db
     .selectFrom("entity_source_refs")
     .select(["source", "source_id"])
     .where("entity_id", "=", entity.id)
     .execute();
-  const refreshed = await db.selectFrom("entities").selectAll().where("id", "=", entity.id).executeTakeFirst();
-  const row = (refreshed ?? entity) as EntityRow;
+  const refreshed = await db
+    .selectFrom("entities")
+    .select([...ENTITY_INDEX_COLUMNS])
+    .where("id", "=", entity.id)
+    .executeTakeFirst();
+  const row: IndexEntityRow = refreshed ?? entity;
   for (const [key, indexedEntity] of index.bySourceRef) {
     if (indexedEntity.id === entity.id) index.bySourceRef.delete(key);
   }
@@ -370,6 +458,7 @@ export async function buildMaterializeDeps(
   const suppressionRepo = createEntitySuppressionRepository(db);
   const domainsRepo = createEntityDomainsRepository(db);
   const index = await buildLookupIndex(db);
+  const normalizationBackfillComplete = await isNormalizationBackfillComplete(db);
   const llmPromotionThreshold =
     typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1
       ? Math.floor(opts.llmPromotionThreshold)
@@ -405,7 +494,7 @@ export async function buildMaterializeDeps(
       const byEntity = new Map<
         string,
         {
-          entity: EntityRow;
+          entity: IndexEntityRow;
           score: number;
           reason: "strict-normalized" | "token-set" | "minhash";
         }
@@ -426,7 +515,10 @@ export async function buildMaterializeDeps(
     },
     getCompanyIdsByDomain: (domain) => index.companyIdsByDomain.get(domain.toLowerCase()) ?? [],
     getPersonScopeKeys: (entityId) => index.personScopeKeysByEntityId.get(entityId) ?? [],
-    findLlmExtractedThirdPartyMention: (name) => findLlmExtractedThirdPartyMention(db, name),
+    findLlmExtractedThirdPartyMention: (name) =>
+      normalizationBackfillComplete
+        ? findLlmExtractedThirdPartyMentionIndexed(db, name)
+        : findLlmExtractedThirdPartyMention(db, name),
   };
   if (embeddingProvider) {
     lookup.retrieveEmbeddingCandidates = async (entityType, name): Promise<RankedCandidate[]> => {
@@ -474,8 +566,8 @@ export async function buildMaterializeDeps(
     structuralAutoBirthTypes,
     birthGateDryRun,
     embeddingProvider,
-    readEmail: (e: Entity) => readPersonEmailFromMetadata(e.metadata),
-    onEntityResolved: (entity: Entity) => refreshResolvedEntityIndex(db, index, entity),
+    readEmail: (e: IndexEntityRow) => readPersonEmailFromMetadata(e.metadata),
+    onEntityResolved: (entity: IndexEntityRow) => refreshResolvedEntityIndex(db, index, entity),
     getIndexedFileSourceTime: (indexedFileId: string) =>
       db
         .selectFrom("indexed_files")
@@ -500,7 +592,11 @@ export async function buildMaterializeDeps(
       }
       return null;
     },
+    normalizationBackfillComplete,
     countActiveLlmFilesForName: async (normalizedName, mentionType) => {
+      if (normalizationBackfillComplete) {
+        return countActiveLlmFilesIndexed(db, normalizedName, mentionType);
+      }
       activeLlmFileCounts ??= buildActiveLlmFileCounts(db);
       const counts = await activeLlmFileCounts;
       return counts.get(llmFileCountKey(normalizedName, mentionType)) ?? 0;

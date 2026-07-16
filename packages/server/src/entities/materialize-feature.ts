@@ -4,7 +4,7 @@ import { type SubEntityRow, createSubEntityRepository } from "../db/repositories
 import { type SubEntityParentInput, resolveParent } from "./materialize-commitment";
 import { normalizeEntityMatchName } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
-import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 
 export type FeatureReconcileReason = "minted" | "feature_parent_absent" | "below_threshold" | "noise_rejected";
 
@@ -160,17 +160,26 @@ function isLlmFeatureSource(source: string): boolean {
   return source === "llm_extraction" || source === "llm";
 }
 
+/**
+ * Corroborating feature facts for one key. Once the normalization backfill has
+ * populated `feature_corroboration_key`, the indexed predicate restricts the read
+ * to matching rows instead of every feature fact; the subsequent source/key
+ * filter is unchanged, so the two paths return identical entries (including
+ * tombstone invalidation, since both filter `deleted_at IS NULL`).
+ */
 async function loadCorroboratingFeatureFacts(
   deps: MaterializeDeps,
   corroborationKey: string,
 ): Promise<Array<{ fact: IndexedFileFactRow; feature: FeatureInput }>> {
-  const rows = await deps.db
+  let query = deps.db
     .selectFrom("indexed_file_facts")
     .selectAll()
     .where("fact_type", "=", "feature")
-    .where("deleted_at", "is", null)
-    .orderBy("updated_at", "desc")
-    .execute();
+    .where("deleted_at", "is", null);
+  if (deps.normalizationBackfillComplete) {
+    query = query.where("feature_corroboration_key", "=", corroborationKey);
+  }
+  const rows = await query.orderBy("updated_at", "desc").execute();
   const out: Array<{ fact: IndexedFileFactRow; feature: FeatureInput }> = [];
   for (const row of rows) {
     if (!isLlmFeatureSource(row.source)) continue;
@@ -188,7 +197,7 @@ function resolveSupportedFeature(
   deps: MaterializeDeps,
   entries: Array<{ fact: IndexedFileFactRow; feature: FeatureInput }>,
 ): {
-  feature: { fact: IndexedFileFactRow; feature: FeatureInput; parent: EntityRow } | null;
+  feature: { fact: IndexedFileFactRow; feature: FeatureInput; parent: IndexEntityRow } | null;
   reason: Exclude<FeatureReconcileReason, "minted" | "below_threshold">;
 } {
   let sawNonNoise = false;
@@ -204,7 +213,7 @@ function resolveSupportedFeature(
 export function resolveFeatureParentByName(
   deps: MaterializeDeps,
   parentName: string | null | undefined,
-): EntityRow | null {
+): IndexEntityRow | null {
   const productKey = normalizeEntityMatchName("product", parentName ?? "");
   const projectKey = normalizeEntityMatchName("project", parentName ?? "");
   const matches = [
@@ -247,7 +256,7 @@ async function replaceCurrentEvidence(
 async function closeCurrentFeatureSubEntity(
   deps: MaterializeDeps,
   corroborationKey: string,
-  supported: { feature: FeatureInput; parent: EntityRow } | null,
+  supported: { feature: FeatureInput; parent: IndexEntityRow } | null,
 ): Promise<void> {
   const current = supported
     ? await findCurrentFeatureByParentAndName(

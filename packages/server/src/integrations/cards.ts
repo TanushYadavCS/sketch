@@ -31,6 +31,12 @@ export interface IntegrationProgressEventLike {
   isError?: boolean;
 }
 
+export interface ExtractedIntegrationLookups {
+  queries: string[];
+  componentKeys: string[];
+  listConnected: boolean;
+}
+
 const CONNECTED_ACCOUNTS_INQUIRY_PATTERNS = [
   /\b(list|show|display|view|see)\b.*\b(connected\s+(accounts|apps|integrations|connections)|connections|accounts)\b/i,
   /\b(what|which)\b.*\b(accounts|apps|integrations|connections)\b.*\bconnected\b/i,
@@ -48,6 +54,11 @@ export function normalizeIntegrationLookup(value: string | undefined): string {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "");
+}
+
+function normalizeExactIntegrationSlug(value: string | undefined): string | null {
+  const normalized = (value ?? "").trim().toLowerCase();
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(normalized) ? normalized : null;
 }
 
 export function connectionMatchesApp(connection: IntegrationConnection, app: IntegrationApp): boolean {
@@ -109,7 +120,8 @@ export function dedupeIntegrationCards(cards: WebChatIntegrationConnectionData[]
   const seen = new Set<string>();
   const deduped: WebChatIntegrationConnectionData[] = [];
   for (const card of cards) {
-    const key = `${card.state ?? "connect"}:${normalizeIntegrationLookup(card.appId)}`;
+    const appKey = normalizeExactIntegrationSlug(card.appId) ?? normalizeIntegrationLookup(card.appId);
+    const key = `${card.state ?? "connect"}:${appKey}`;
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(card);
@@ -199,66 +211,21 @@ function uniqueQueries(queries: string[]): string[] {
   return result;
 }
 
-const COMPONENT_ACTION_START_SEGMENTS = new Set([
-  "accept",
-  "add",
-  "append",
-  "archive",
-  "assign",
-  "cancel",
-  "close",
-  "complete",
-  "copy",
-  "create",
-  "custom",
-  "delete",
-  "download",
-  "execute",
-  "export",
-  "fetch",
-  "find",
-  "forward",
-  "generate",
-  "get",
-  "import",
-  "insert",
-  "invite",
-  "list",
-  "lookup",
-  "make",
-  "move",
-  "open",
-  "post",
-  "publish",
-  "quick",
-  "reject",
-  "remove",
-  "reply",
-  "run",
-  "schedule",
-  "search",
-  "send",
-  "set",
-  "share",
-  "submit",
-  "sync",
-  "trigger",
-  "unarchive",
-  "update",
-  "upload",
-  "upsert",
-]);
+function uniqueComponentKeys(componentKeys: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const componentKey of componentKeys) {
+    const normalized = normalizeExactIntegrationSlug(componentKey);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
 
-function appFromComponentKey(componentKey: string | null): string[] {
-  const value = componentKey?.trim();
-  if (!value) return [];
-  const parts = value
-    .split("-")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  const actionIndex = parts.findIndex((part, index) => index > 0 && COMPONENT_ACTION_START_SEGMENTS.has(part));
-  const app = (actionIndex > 0 ? parts.slice(0, actionIndex).join("-") : parts[0])?.trim();
-  return app ? [app] : [];
+function componentKeysFromValue(componentKey: string | null): string[] {
+  const normalized = normalizeExactIntegrationSlug(componentKey ?? undefined);
+  return normalized ? [normalized] : [];
 }
 
 function firstStringValue(record: Record<string, unknown> | undefined, keys: string[]): string | null {
@@ -299,27 +266,24 @@ function rawQueryApps(value: unknown): string[] {
   });
 }
 
-export function extractCanvasIntegrationLookups(command: string): {
-  queries: string[];
-  listConnected: boolean;
-} {
-  if (!/\$\{?CANVAS_CLI\}?/.test(command)) return { queries: [], listConnected: false };
+export function extractCanvasIntegrationLookups(command: string): ExtractedIntegrationLookups {
+  if (!/\$\{?CANVAS_CLI\}?/.test(command)) return { queries: [], componentKeys: [], listConnected: false };
   const raw = parseRawJson(command) as Record<string, unknown> | null;
 
   if (/\bsearch-apps\b/.test(command) || /\bsearch_apps\b/.test(command)) {
     const rawQueries = rawStringArray(raw?.queries);
     const queries = rawQueries.length > 0 ? rawQueries : splitQueryList(shellFlagValue(command, "--queries"));
-    return { queries, listConnected: queries.length === 0 };
+    return { queries, componentKeys: [], listConnected: queries.length === 0 };
   }
 
   if (/\bget-components\b/.test(command) || /\bget_components\b/.test(command)) {
     const rawApps = rawStringArray(raw?.apps);
     const queries = rawApps.length > 0 ? rawApps : splitQueryList(shellFlagValue(command, "--apps"));
-    return { queries, listConnected: false };
+    return { queries, componentKeys: [], listConnected: false };
   }
 
   if (/\bsearch-components\b/.test(command) || /\bsearch_components\b/.test(command)) {
-    return { queries: rawQueryApps(raw?.queries), listConnected: false };
+    return { queries: rawQueryApps(raw?.queries), componentKeys: [], listConnected: false };
   }
 
   if (/\bget-component-definition\b/.test(command) || /\bget_component_definition\b/.test(command)) {
@@ -327,7 +291,7 @@ export function extractCanvasIntegrationLookups(command: string): {
       typeof raw?.key === "string"
         ? raw.key
         : shellFlagValueAny(command, ["--key", "--component-key", "--componentKey"]);
-    return { queries: appFromComponentKey(componentKey), listConnected: false };
+    return { queries: [], componentKeys: componentKeysFromValue(componentKey), listConnected: false };
   }
 
   if (/\bdirect-execute-action\b/.test(command) || /\bdirect_execute_action\b/.test(command)) {
@@ -335,7 +299,7 @@ export function extractCanvasIntegrationLookups(command: string): {
       typeof raw?.componentKey === "string"
         ? raw.componentKey
         : shellFlagValueAny(command, ["--component-key", "--componentKey"]);
-    return { queries: appFromComponentKey(componentKey), listConnected: false };
+    return { queries: [], componentKeys: componentKeysFromValue(componentKey), listConnected: false };
   }
 
   if (/\bfetch-remote-options\b/.test(command) || /\bfetch_remote_options\b/.test(command)) {
@@ -343,31 +307,28 @@ export function extractCanvasIntegrationLookups(command: string): {
       typeof raw?.componentKey === "string"
         ? raw.componentKey
         : shellFlagValueAny(command, ["--component-key", "--componentKey"]);
-    return { queries: appFromComponentKey(componentKey), listConnected: false };
+    return { queries: [], componentKeys: componentKeysFromValue(componentKey), listConnected: false };
   }
 
   if (/\bcreate-sketch-trigger-workflow\b/.test(command) || /\bcreate_sketch_trigger_workflow\b/.test(command)) {
     const rawSlug = raw?.triggerAppSlug;
     const triggerAppSlug =
       typeof rawSlug === "string" ? rawSlug : shellFlagValueAny(command, ["--trigger-app-slug", "--triggerAppSlug"]);
-    if (triggerAppSlug) return { queries: [triggerAppSlug], listConnected: false };
+    if (triggerAppSlug) return { queries: [triggerAppSlug], componentKeys: [], listConnected: false };
     const triggerComponentKey =
       typeof raw?.triggerComponentKey === "string"
         ? raw.triggerComponentKey
         : shellFlagValueAny(command, ["--trigger-component-key", "--triggerComponentKey"]);
-    return { queries: appFromComponentKey(triggerComponentKey), listConnected: false };
+    return { queries: [], componentKeys: componentKeysFromValue(triggerComponentKey), listConnected: false };
   }
 
-  return { queries: [], listConnected: false };
+  return { queries: [], componentKeys: [], listConnected: false };
 }
 
 function extractMcpIntegrationLookups(
   toolName: string | undefined,
   input: Record<string, unknown> | undefined,
-): {
-  queries: string[];
-  listConnected: boolean;
-} {
+): ExtractedIntegrationLookups {
   const match = toolName?.match(/^mcp__(.+?)__(.+)$/);
   const normalizedToolName = (match?.[2] ?? toolName ?? "")
     .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
@@ -376,35 +337,35 @@ function extractMcpIntegrationLookups(
 
   if (normalizedToolName === "search-apps") {
     const queries = stringListValue(input?.queries);
-    return { queries, listConnected: queries.length === 0 };
+    return { queries, componentKeys: [], listConnected: queries.length === 0 };
   }
 
   if (normalizedToolName === "get-components") {
-    return { queries: stringListValue(input?.apps), listConnected: false };
+    return { queries: stringListValue(input?.apps), componentKeys: [], listConnected: false };
   }
 
   if (normalizedToolName === "search-components") {
-    return { queries: rawQueryApps(input?.queries), listConnected: false };
+    return { queries: rawQueryApps(input?.queries), componentKeys: [], listConnected: false };
   }
 
   if (normalizedToolName === "get-component-definition") {
     const componentKey = firstStringValue(input, ["key", "componentKey"]);
-    return { queries: appFromComponentKey(componentKey), listConnected: false };
+    return { queries: [], componentKeys: componentKeysFromValue(componentKey), listConnected: false };
   }
 
   if (normalizedToolName === "direct-execute-action" || normalizedToolName === "fetch-remote-options") {
     const componentKey = firstStringValue(input, ["componentKey", "key"]);
-    return { queries: appFromComponentKey(componentKey), listConnected: false };
+    return { queries: [], componentKeys: componentKeysFromValue(componentKey), listConnected: false };
   }
 
   if (normalizedToolName === "create-sketch-trigger-workflow") {
     const triggerAppSlug = typeof input?.triggerAppSlug === "string" ? input.triggerAppSlug : null;
-    if (triggerAppSlug) return { queries: [triggerAppSlug], listConnected: false };
+    if (triggerAppSlug) return { queries: [triggerAppSlug], componentKeys: [], listConnected: false };
     const triggerComponentKey = typeof input?.triggerComponentKey === "string" ? input.triggerComponentKey : null;
-    return { queries: appFromComponentKey(triggerComponentKey), listConnected: false };
+    return { queries: [], componentKeys: componentKeysFromValue(triggerComponentKey), listConnected: false };
   }
 
-  return { queries: [], listConnected: false };
+  return { queries: [], componentKeys: [], listConnected: false };
 }
 
 const TOOL_RESULT_TEXT_LIMIT = 30_000;
@@ -507,34 +468,42 @@ function normalizedMcpToolParts(toolName: string | undefined): { server: string 
   };
 }
 
-function genericFailureQueries(toolName: string | undefined, input: Record<string, unknown> | undefined): string[] {
+function genericFailureLookups(
+  toolName: string | undefined,
+  input: Record<string, unknown> | undefined,
+): Pick<ExtractedIntegrationLookups, "queries" | "componentKeys"> {
   const queries: string[] = [];
+  const componentKeys: string[] = [];
   const directApp = firstStringValue(input, ["app", "appSlug", "appId", "nameSlug", "triggerAppSlug"]);
   if (directApp) queries.push(directApp);
   const componentKey = firstStringValue(input, ["componentKey", "key", "triggerComponentKey"]);
-  queries.push(...appFromComponentKey(componentKey));
+  componentKeys.push(...componentKeysFromValue(componentKey));
 
   const { server, operation } = normalizedMcpToolParts(toolName);
   if (server && !["canvas", "sketch", "plugin-pipedream", "pipedream"].includes(server)) {
     queries.push(server);
   }
   if (server?.includes("pipedream")) {
-    queries.push(...appFromComponentKey(operation));
+    componentKeys.push(...componentKeysFromValue(operation));
   }
 
-  return uniqueQueries(queries);
+  return {
+    queries: uniqueQueries(queries),
+    componentKeys: uniqueComponentKeys(componentKeys),
+  };
 }
 
-export function extractIntegrationLookupsFromProgressEvent(event: IntegrationProgressEventLike): {
-  queries: string[];
-  listConnected: boolean;
-} {
+export function extractIntegrationLookupsFromProgressEvent(
+  event: IntegrationProgressEventLike,
+): ExtractedIntegrationLookups {
   if (event.kind === "tool_result" && !toolResultIndicatesConnectionIssue(event.output)) {
-    return { queries: [], listConnected: false };
+    return { queries: [], componentKeys: [], listConnected: false };
   }
-  if (event.kind !== "tool_use" && event.kind !== "tool_result") return { queries: [], listConnected: false };
+  if (event.kind !== "tool_use" && event.kind !== "tool_result") {
+    return { queries: [], componentKeys: [], listConnected: false };
+  }
 
-  let lookup: { queries: string[]; listConnected: boolean };
+  let lookup: ExtractedIntegrationLookups;
   if (event.toolName === "Bash") {
     const command = typeof event.input?.command === "string" ? event.input.command : "";
     lookup = extractCanvasIntegrationLookups(command);
@@ -543,13 +512,81 @@ export function extractIntegrationLookupsFromProgressEvent(event: IntegrationPro
   }
 
   if (event.kind === "tool_result") {
+    const failureLookups = genericFailureLookups(event.toolName, event.input);
     return {
-      queries: uniqueQueries([...lookup.queries, ...genericFailureQueries(event.toolName, event.input)]),
+      queries: uniqueQueries([...lookup.queries, ...failureLookups.queries]),
+      componentKeys: uniqueComponentKeys([...lookup.componentKeys, ...failureLookups.componentKeys]),
       listConnected: false,
     };
   }
 
   return lookup;
+}
+
+function componentKeyPrefixes(componentKey: string): string[] {
+  const normalized = normalizeExactIntegrationSlug(componentKey);
+  if (!normalized) return [];
+  const parts = normalized.split("-");
+  const prefixes: string[] = [];
+  for (let length = parts.length - 1; length > 0; length -= 1) {
+    prefixes.push(parts.slice(0, length).join("-"));
+  }
+  return prefixes;
+}
+
+function connectionMatchesCandidateSlug(connection: IntegrationConnection, candidate: string): boolean {
+  const candidateKey = normalizeExactIntegrationSlug(candidate);
+  if (!candidateKey) return false;
+  return [connection.appId, connection.app?.nameSlug]
+    .map(normalizeExactIntegrationSlug)
+    .some((connectionKey) => connectionKey === candidateKey);
+}
+
+function appFromConnection(connection: IntegrationConnection): IntegrationApp {
+  return {
+    id: connection.appId,
+    name: connection.appName || connection.app?.name || connection.appId,
+    description: "",
+    ...(connection.icon || connection.app?.imgSrc ? { icon: connection.icon ?? connection.app?.imgSrc } : {}),
+  };
+}
+
+async function resolveComponentKeyCard(
+  provider: IntegrationProvider,
+  connections: IntegrationConnection[],
+  componentKey: string,
+  appCache: Map<string, Promise<IntegrationApp | null>>,
+  loadAppCatalog: () => Promise<IntegrationApp[]>,
+): Promise<WebChatIntegrationConnectionData | null> {
+  for (const candidate of componentKeyPrefixes(componentKey)) {
+    const exactConnections = connections.filter((connection) => connectionMatchesCandidateSlug(connection, candidate));
+    if (exactConnections.length > 0) {
+      const healthyConnection = exactConnections.find(isActiveIntegrationConnection);
+      return healthyConnection ? null : cardFromApp(appFromConnection(exactConnections[0]), null);
+    }
+
+    const candidateKey = normalizeExactIntegrationSlug(candidate);
+    if (!candidateKey) continue;
+    let appRequest = appCache.get(candidateKey);
+    if (!appRequest) {
+      appRequest = provider
+        .listApps(candidate, 5, undefined)
+        .then((result) => result.apps.find((app) => normalizeExactIntegrationSlug(app.id) === candidateKey) ?? null);
+      appCache.set(candidateKey, appRequest);
+    }
+
+    const queriedApp = await appRequest;
+    const app =
+      queriedApp ??
+      (await loadAppCatalog()).find((catalogApp) => normalizeExactIntegrationSlug(catalogApp.id) === candidateKey);
+    if (!app) continue;
+    const healthyConnection = connections.find(
+      (connection) => connectionMatchesCandidateSlug(connection, app.id) && isActiveIntegrationConnection(connection),
+    );
+    return healthyConnection ? null : cardFromApp(app, null);
+  }
+
+  return null;
 }
 
 export async function collectIntegrationCardsFromProgressEvents(params: {
@@ -562,14 +599,16 @@ export async function collectIntegrationCardsFromProgressEvents(params: {
   if (!params.loadIntegrationProvider || !params.collector || !params.userEmail) return;
 
   const queries = new Set<string>();
+  const componentKeys = new Set<string>();
   let listConnected = false;
   for (const event of params.events) {
     const lookup = extractIntegrationLookupsFromProgressEvent(event);
     for (const query of lookup.queries) queries.add(query);
+    for (const componentKey of uniqueComponentKeys(lookup.componentKeys)) componentKeys.add(componentKey);
     listConnected ||= lookup.listConnected;
   }
 
-  if (queries.size === 0 && !listConnected) return;
+  if (queries.size === 0 && componentKeys.size === 0 && !listConnected) return;
 
   const provider = await params.loadIntegrationProvider();
   if (!provider) return;
@@ -581,6 +620,16 @@ export async function collectIntegrationCardsFromProgressEvents(params: {
   for (const query of queries) {
     const result = await resolveIntegrationLookup(provider, connections, { query });
     cards.push(...result.cards.filter((card) => (card.state ?? "connect") === "connect"));
+  }
+  const appCache = new Map<string, Promise<IntegrationApp | null>>();
+  let appCatalogRequest: Promise<IntegrationApp[]> | null = null;
+  const loadAppCatalog = () => {
+    appCatalogRequest ??= provider.listApps(undefined, 20, undefined).then((result) => result.apps);
+    return appCatalogRequest;
+  };
+  for (const componentKey of componentKeys) {
+    const card = await resolveComponentKeyCard(provider, connections, componentKey, appCache, loadAppCatalog);
+    if (card) cards.push(card);
   }
   for (const card of dedupeIntegrationCards(cards)) {
     params.collector.collect(card);

@@ -17,12 +17,13 @@ import { createIndexedFileFactRepository } from "../db/repositories/indexed-file
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { materializeUnmaterializedFacts } from "./materialize";
+import type { IndexEntityRow } from "./materialize-types";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
 import { ResolveError, confirmReview, dismissReview, rejectReview } from "./resolve";
 
 const USER_ID = "user-1";
 
-function readEmail(e: Entity): string | null {
+function readEmail(e: IndexEntityRow): string | null {
   if (!e.metadata) return null;
   try {
     const m = JSON.parse(e.metadata);

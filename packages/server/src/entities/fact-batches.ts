@@ -56,3 +56,49 @@ export async function forEachFactBatch<T extends { id: string; created_at: strin
     if (rows.length < batchSize) break;
   }
 }
+
+/**
+ * Two-phase keyset iteration: page a narrow candidate projection, then load the
+ * full payload rows for one page at a time.
+ *
+ * The backlog sweep classifies every open fact but only needs each fact's `raw`
+ * payload when it actually materializes it. `fetchCandidates` returns the narrow
+ * `(id, created_at, fact_type)` projection used to page and classify; it drives
+ * the cursor and the short-page termination exactly like `forEachFactBatch`, so
+ * pagination is independent of how many candidates pass. `fetchPayload` then
+ * loads the full rows for the passing ids of that page with a single query, and
+ * `handlePage` receives them restored to `(created_at, id)` ascending order (the
+ * candidate order) regardless of the order the payload query returned.
+ *
+ * A candidate whose payload row is absent (concurrently deleted, materialized,
+ * or quarantined between the two phases) is dropped, so ineligible rows are
+ * never handed to `handlePage`. Peak retained payload is bounded by the passing
+ * subset of one page, not the whole backlog.
+ *
+ * `fetchPayload` must issue one `WHERE id IN (...)` query; the id list is bounded
+ * by `batchSize`, so callers must keep `batchSize` within the dialect bind-param
+ * limit (the 250 default is well within both SQLite and Postgres limits).
+ */
+export async function forEachFactCandidatePage<C extends { id: string; created_at: string }, R extends { id: string }>(
+  fetchCandidates: (cursor: FactBatchCursor, limit: number) => Promise<C[]>,
+  fetchPayload: (ids: string[]) => Promise<R[]>,
+  handlePage: (rows: R[]) => Promise<void>,
+  batchSize: number = DEFAULT_FACT_BATCH_SIZE,
+): Promise<void> {
+  await forEachFactBatch(
+    fetchCandidates,
+    async (candidates) => {
+      const passing = candidates.map((c) => c.id);
+      if (passing.length === 0) return;
+      const payload = await fetchPayload(passing);
+      const byId = new Map<string, R>(payload.map((row) => [row.id, row]));
+      const ordered: R[] = [];
+      for (const candidate of candidates) {
+        const row = byId.get(candidate.id);
+        if (row) ordered.push(row);
+      }
+      await handlePage(ordered);
+    },
+    batchSize,
+  );
+}

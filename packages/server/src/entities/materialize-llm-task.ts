@@ -2,7 +2,7 @@ import { normalizeName } from "../connectors/name-normalize";
 import { upsertLlmTask } from "../db/repositories/tasks";
 import { TEST_ACCOUNT_ENTITY_ID } from "../db/repositories/tasks";
 import { readJsonObject } from "./materialize-json";
-import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 
 export async function materializeLlmTask(deps: MaterializeDeps, fact: IndexedFileFactRow): Promise<MaterializeResult> {
   const raw = readLlmTask(readJsonObject(fact.raw));
@@ -40,7 +40,7 @@ export async function materializeLlmTask(deps: MaterializeDeps, fact: IndexedFil
   return { kind: "skipped", reason: "llm_task_ungated" };
 }
 
-function resolveParent(deps: MaterializeDeps, raw: LlmTaskInput): EntityRow | null {
+function resolveParent(deps: MaterializeDeps, raw: LlmTaskInput): IndexEntityRow | null {
   if (raw.parentRef) {
     const byRef = deps.index.bySourceRef.get(`${raw.parentRef.source}:${raw.parentRef.sourceId}`);
     if (isAllowedParent(byRef)) return byRef;
@@ -75,11 +75,11 @@ async function resolveAssignee(
   return { entityId: null, name };
 }
 
-function findEntityById(deps: MaterializeDeps, entityId: string): EntityRow | undefined {
+function findEntityById(deps: MaterializeDeps, entityId: string): IndexEntityRow | undefined {
   return deps.index.entitiesByType.get("project")?.find((entity) => entity.id === entityId);
 }
 
-function isAllowedParent(entity: EntityRow | undefined): entity is EntityRow {
+function isAllowedParent(entity: IndexEntityRow | undefined): entity is IndexEntityRow {
   return Boolean(entity && entity.id !== TEST_ACCOUNT_ENTITY_ID && entity.source_type === "project");
 }
 
@@ -192,7 +192,7 @@ async function upsertTaskEvidence(
   }
 }
 
-function parentKey(raw: LlmTaskInput, parent: EntityRow | null): string {
+function parentKey(raw: LlmTaskInput, parent: IndexEntityRow | null): string {
   if (parent) return parent.id;
   if (raw.parentRef) return `${raw.parentRef.source}:${raw.parentRef.sourceId}`;
   if (raw.parentEntityId) return raw.parentEntityId;

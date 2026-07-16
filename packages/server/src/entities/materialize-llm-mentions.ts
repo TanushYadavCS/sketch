@@ -3,7 +3,7 @@ import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
 import { isString, readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
 import { materializePersonFact } from "./materialize-person";
-import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 import { proposeEntity } from "./propose";
 
 export async function materializeLlmExtractedFact(
@@ -88,7 +88,7 @@ export async function materializeNonPersonLlmEntity(
     return { kind: "skipped", reason: result.reason };
   }
 
-  const entity = result.entity as unknown as EntityRow;
+  const entity = result.entity;
   const created = result.kind === "created";
   registerEntity(deps.index, entity);
 

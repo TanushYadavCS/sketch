@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 137;
+const EXPECTED_MIGRATION_COUNT = 139;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -171,6 +171,28 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[133]).toBe("138-whatsapp-identity-candidates");
     expect(names[134]).toBe("139-tasks-proposed-assignee");
     expect(names[135]).toBe("140-retire-unassigned-agent-tasks");
+    expect(names[136]).toBe("141-fact-materialization-quarantine");
+    expect(names[137]).toBe("142-verdict-safe-fact-upserts");
+    expect(names[138]).toBe("143-indexed-corroboration");
+  });
+
+  it("creates the bounded open-materializable partial index", async () => {
+    const result = await sql<{ indexname: string; indexdef: string }>`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'indexed_file_facts'
+        AND indexname = 'idx_indexed_file_facts_open_materializable'
+    `.execute(db);
+
+    expect(result.rows).toHaveLength(1);
+    const indexDef = result.rows[0].indexdef.toLowerCase();
+    expect(indexDef).toContain("fact_type");
+    expect(indexDef).toContain("created_at");
+    expect(indexDef).toContain("id");
+    expect(indexDef).toContain("deleted_at is null");
+    expect(indexDef).toContain("materialized_at is null");
+    expect(indexDef).toContain("materialization_attempts < 5");
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {
