@@ -24,14 +24,17 @@ describe("integration cards", () => {
   it("extracts app lookups from Canvas CLI commands", () => {
     expect(extractCanvasIntegrationLookups('$CANVAS_CLI search-apps --queries "slack,gmail" --output json')).toEqual({
       queries: ["slack", "gmail"],
+      componentKeys: [],
       listConnected: false,
     });
     expect(extractCanvasIntegrationLookups("$CANVAS_CLI search-apps --queries=slack --output json")).toEqual({
       queries: ["slack"],
+      componentKeys: [],
       listConnected: false,
     });
     expect(extractCanvasIntegrationLookups("$CANVAS_CLI search-apps --output json")).toEqual({
       queries: [],
+      componentKeys: [],
       listConnected: true,
     });
     expect(
@@ -39,7 +42,8 @@ describe("integration cards", () => {
         "$CANVAS_CLI direct-execute-action --component-key github-create-issue --configured-props '{}' --output json",
       ),
     ).toEqual({
-      queries: ["github"],
+      queries: [],
+      componentKeys: ["github-create-issue"],
       listConnected: false,
     });
     expect(
@@ -47,7 +51,8 @@ describe("integration cards", () => {
         "$CANVAS_CLI direct-execute-action --component-key=google-calendar-oauth-create-event --output json",
       ),
     ).toEqual({
-      queries: ["google-calendar-oauth"],
+      queries: [],
+      componentKeys: ["google-calendar-oauth-create-event"],
       listConnected: false,
     });
     expect(
@@ -55,7 +60,17 @@ describe("integration cards", () => {
         "$CANVAS_CLI direct-execute-action --component-key microsoft-teams-send-message --output json",
       ),
     ).toEqual({
-      queries: ["microsoft-teams"],
+      queries: [],
+      componentKeys: ["microsoft-teams-send-message"],
+      listConnected: false,
+    });
+    expect(
+      extractCanvasIntegrationLookups(
+        "$CANVAS_CLI direct-execute-action --component-key=google-sheets-oauth-query-formula --output json",
+      ),
+    ).toEqual({
+      queries: [],
+      componentKeys: ["google-sheets-oauth-query-formula"],
       listConnected: false,
     });
     expect(
@@ -64,12 +79,14 @@ describe("integration cards", () => {
       ),
     ).toEqual({
       queries: ["linear"],
+      componentKeys: [],
       listConnected: false,
     });
     expect(
       extractCanvasIntegrationLookups("$CANVAS_CLI get-component-definition --key github-create-issue --output json"),
     ).toEqual({
-      queries: ["github"],
+      queries: [],
+      componentKeys: ["github-create-issue"],
       listConnected: false,
     });
   });
@@ -81,49 +98,56 @@ describe("integration cards", () => {
         toolName: "mcp__canvas__search_apps",
         input: { queries: ["slack", "gmail"] },
       }),
-    ).toEqual({ queries: ["slack", "gmail"], listConnected: false });
+    ).toEqual({ queries: ["slack", "gmail"], componentKeys: [], listConnected: false });
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_use",
         toolName: "searchApps",
         input: { queries: "notion" },
       }),
-    ).toEqual({ queries: ["notion"], listConnected: false });
+    ).toEqual({ queries: ["notion"], componentKeys: [], listConnected: false });
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_use",
         toolName: "mcp__canvas__search_apps",
         input: {},
       }),
-    ).toEqual({ queries: [], listConnected: true });
+    ).toEqual({ queries: [], componentKeys: [], listConnected: true });
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_use",
         toolName: "mcp__canvas__direct_execute_action",
         input: { componentKey: "github-create-issue" },
       }),
-    ).toEqual({ queries: ["github"], listConnected: false });
+    ).toEqual({ queries: [], componentKeys: ["github-create-issue"], listConnected: false });
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_use",
         toolName: "mcp__canvas__direct_execute_action",
         input: { componentKey: "google-calendar-oauth-create-event" },
       }),
-    ).toEqual({ queries: ["google-calendar-oauth"], listConnected: false });
+    ).toEqual({ queries: [], componentKeys: ["google-calendar-oauth-create-event"], listConnected: false });
+    expect(
+      extractIntegrationLookupsFromProgressEvent({
+        kind: "tool_use",
+        toolName: "mcp__canvas__direct_execute_action",
+        input: { componentKey: "google-sheets-oauth-query-formula" },
+      }),
+    ).toEqual({ queries: [], componentKeys: ["google-sheets-oauth-query-formula"], listConnected: false });
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_use",
         toolName: "mcp__canvas__search_components",
         input: { queries: [{ app: "linear", query: "create issue" }] },
       }),
-    ).toEqual({ queries: ["linear"], listConnected: false });
+    ).toEqual({ queries: ["linear"], componentKeys: [], listConnected: false });
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_use",
         toolName: "mcp__canvas__get_component_definition",
         input: { key: "slack-send-message" },
       }),
-    ).toEqual({ queries: ["slack"], listConnected: false });
+    ).toEqual({ queries: [], componentKeys: ["slack-send-message"], listConnected: false });
   });
 
   it("extracts app lookups from missing-connection tool results only", () => {
@@ -134,7 +158,7 @@ describe("integration cards", () => {
         input: { app: "slack" },
         output: { code: "CONNECTION_NOT_CONNECTED", message: "Slack is not connected" },
       }),
-    ).toEqual({ queries: ["slack"], listConnected: false });
+    ).toEqual({ queries: ["slack"], componentKeys: ["slack-send-message"], listConnected: false });
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_result",
@@ -142,7 +166,7 @@ describe("integration cards", () => {
         input: {},
         output: [{ type: "text", text: "CONNECTION_NOT_CONNECTED" }],
       }),
-    ).toEqual({ queries: ["github"], listConnected: false });
+    ).toEqual({ queries: [], componentKeys: ["github-create-issue"], listConnected: false });
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_result",
@@ -150,7 +174,7 @@ describe("integration cards", () => {
         input: { app: "slack" },
         output: "Rate limit exceeded",
       }),
-    ).toEqual({ queries: [], listConnected: false });
+    ).toEqual({ queries: [], componentKeys: [], listConnected: false });
     expect(
       extractIntegrationLookupsFromProgressEvent({
         kind: "tool_result",
@@ -158,7 +182,7 @@ describe("integration cards", () => {
         input: {},
         output: { filler: "x".repeat(100_000), connectionStatus: "not_connected" },
       }),
-    ).toEqual({ queries: ["github"], listConnected: false });
+    ).toEqual({ queries: [], componentKeys: ["github-create-issue"], listConnected: false });
   });
 
   it("resolves exactly matched apps to connect or connected cards from provider state", async () => {
@@ -284,8 +308,220 @@ describe("integration cards", () => {
       collector: { collect: (card) => cards.push(card) },
     });
 
-    expect(queries).toEqual(["google-calendar-oauth"]);
+    expect(queries).toEqual(["google-calendar-oauth-create", "google-calendar-oauth"]);
     expect(cards).toMatchObject([{ appId: "google-calendar-oauth", appName: "Google Calendar", state: "connect" }]);
+  });
+
+  it("does not collect a card when the canonical component app has a healthy connection", async () => {
+    const cards: unknown[] = [];
+    const listApps = vi.fn(async (_query?: string) => ({
+      apps: [],
+      pageInfo: { endCursor: null, hasMore: false },
+    }));
+    const provider = {
+      listConnections: async () => [
+        {
+          id: "conn-sheets",
+          providerId: "provider-1",
+          appId: "google-sheets-oauth",
+          appName: "Google Sheets",
+          healthy: true,
+          status: "active",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+      listApps,
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(listApps.mock.calls.map(([query]) => query)).toEqual(["google-sheets-oauth-query"]);
+    expect(cards).toEqual([]);
+  });
+
+  it("collects a card for an unconnected canonical component app", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [],
+      listApps: async (query?: string) => ({
+        apps:
+          query === "google-sheets-oauth"
+            ? [{ id: "google-sheets-oauth", name: "Google Sheets", description: "Spreadsheets" }]
+            : [],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([{ appId: "google-sheets-oauth", appName: "Google Sheets", state: "connect" }]);
+  });
+
+  it("collects the longest canonical app even when a shorter prefix is connected", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [
+        {
+          id: "conn-google",
+          providerId: "provider-1",
+          appId: "google",
+          appName: "Google",
+          healthy: true,
+          status: "active",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+      listApps: async (query?: string) => ({
+        apps:
+          query === "google-sheets-oauth"
+            ? [{ id: "google-sheets-oauth", name: "Google Sheets", description: "Spreadsheets" }]
+            : [],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([{ appId: "google-sheets-oauth", appName: "Google Sheets", state: "connect" }]);
+  });
+
+  it("does not collect a fuzzy single app without an exact canonical candidate ID", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [],
+      listApps: async () => ({
+        apps: [{ id: "google-drive", name: "Google Drive", description: "Files" }],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toEqual([]);
+  });
+
+  it("resolves a canonical app before an unknown action segment", async () => {
+    const cards: unknown[] = [];
+    const provider = {
+      listConnections: async () => [],
+      listApps: async (query?: string) => ({
+        apps:
+          query === "google-sheets-oauth"
+            ? [{ id: "google-sheets-oauth", name: "Google Sheets", description: "Spreadsheets" }]
+            : [],
+        pageInfo: { endCursor: null, hasMore: false },
+      }),
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-frobnicate-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(cards).toMatchObject([{ appId: "google-sheets-oauth", appName: "Google Sheets", state: "connect" }]);
+  });
+
+  it("caches shared component-key candidates for the collection run", async () => {
+    const cards: unknown[] = [];
+    const listApps = vi.fn(async (query?: string) => ({
+      apps:
+        query === "google-sheets-oauth"
+          ? [{ id: "google-sheets-oauth", name: "Google Sheets", description: "Spreadsheets" }]
+          : [],
+      pageInfo: { endCursor: null, hasMore: false },
+    }));
+    const provider = {
+      listConnections: async () => [],
+      listApps,
+    } as Pick<IntegrationProvider, "listApps" | "listConnections"> as IntegrationProvider;
+
+    await collectIntegrationCardsFromProgressEvents({
+      events: [
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-frobnicate-formula" },
+        },
+        {
+          kind: "tool_use",
+          toolName: "mcp__canvas__direct_execute_action",
+          input: { componentKey: "google-sheets-oauth-query-formula" },
+        },
+      ],
+      loadIntegrationProvider: async () => provider,
+      userEmail: "alice@example.com",
+      userName: "Alice",
+      collector: { collect: (card) => cards.push(card) },
+    });
+
+    expect(listApps.mock.calls.map(([query]) => query)).toEqual([
+      "google-sheets-oauth-query",
+      "google-sheets-oauth",
+      "google-sheets-oauth-frobnicate",
+    ]);
+    expect(cards).toMatchObject([{ appId: "google-sheets-oauth", appName: "Google Sheets", state: "connect" }]);
   });
 
   it("collects missing app cards from observed Canvas MCP search_apps progress", async () => {
