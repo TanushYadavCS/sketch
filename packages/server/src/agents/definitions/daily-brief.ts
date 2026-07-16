@@ -159,6 +159,9 @@ type RuntimeDurableTask = {
   priority: string | null;
   externalRef: string | null;
   updatedAt: string;
+  createdByReader: boolean;
+  assignedToReader: boolean;
+  suppressModelEnrichment: boolean;
   knowledgeRefs: AgentKnowledgeRefs;
 };
 
@@ -870,6 +873,9 @@ function parseRuntimeDurableTasks(value: unknown): RuntimeDurableTask[] {
       priority: readString(task?.priority),
       externalRef: readString(task?.externalRef),
       updatedAt: readString(task?.updatedAt) ?? "",
+      createdByReader: task?.createdByReader === true,
+      assignedToReader: task?.assignedToReader === true,
+      suppressModelEnrichment: task?.suppressModelEnrichment === true,
       knowledgeRefs: {
         entityIds: uniqueStrings(refs?.entityIds),
         fileIds: uniqueStrings(refs?.fileIds),
@@ -972,7 +978,7 @@ function reconcileTodoItems(
       continue;
     }
     usedIds.add(task.id);
-    accepted.push(canonicalTodoItem(task, item, accepted.length));
+    accepted.push(canonicalTodoItem(task, task.suppressModelEnrichment ? undefined : item, accepted.length));
   }
 
   const remaining = [...allowedById.values()]
@@ -1248,14 +1254,41 @@ async function revalidateRuntimeDurableTasks(
   runtimeContext: Record<string, unknown>,
 ): Promise<unknown> {
   if (readString(runtimeContext.readerTaskSnapshotUserId) !== userId) return runtimeContext.openDurableTasks;
-  const snapshotIds = new Set(parseRuntimeDurableTasks(runtimeContext.openDurableTasks).map((task) => task.id));
-  if (snapshotIds.size === 0) return [];
+  const snapshotById = new Map(
+    parseRuntimeDurableTasks(runtimeContext.openDurableTasks).map((task) => [task.id, task]),
+  );
+  if (snapshotById.size === 0) return [];
   const { tasks } = await loadOpenDurableTasksForReader({
     db,
     userId,
     users: createUserRepository(db),
   });
-  return tasks.filter((task) => snapshotIds.has(task.id)).map(runtimeDurableTask);
+  return tasks.flatMap((task) => {
+    const snapshot = snapshotById.get(task.id);
+    if (!snapshot) return [];
+    const current = parseRuntimeDurableTasks([runtimeDurableTask(task)])[0];
+    if (!current) return [];
+    return [
+      {
+        ...runtimeDurableTask(task),
+        suppressModelEnrichment: !sameRuntimeDurableTask(snapshot, current),
+      },
+    ];
+  });
+}
+
+function sameRuntimeDurableTask(left: RuntimeDurableTask, right: RuntimeDurableTask): boolean {
+  return (
+    left.title === right.title &&
+    left.status === right.status &&
+    left.priority === right.priority &&
+    left.externalRef === right.externalRef &&
+    left.updatedAt === right.updatedAt &&
+    left.createdByReader === right.createdByReader &&
+    left.assignedToReader === right.assignedToReader &&
+    [...left.knowledgeRefs.entityIds].sort().join("\0") === [...right.knowledgeRefs.entityIds].sort().join("\0") &&
+    [...left.knowledgeRefs.fileIds].sort().join("\0") === [...right.knowledgeRefs.fileIds].sort().join("\0")
+  );
 }
 
 async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Record<string, unknown>> {

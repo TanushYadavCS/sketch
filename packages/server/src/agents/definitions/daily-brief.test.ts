@@ -1405,6 +1405,67 @@ describe("dailyBriefDefinition.reconcileItems", () => {
       backfilledTaskCount: 0,
     });
   });
+
+  it("drops model enrichment when canonical task references change during generation", async () => {
+    await seedConnectorConfig(db);
+    const user = await seedUser(db, {
+      id: "user-reference-change",
+      email: "reference-change@example.com",
+      emailVerified: true,
+    });
+    await seedPersonEntity(db, {
+      id: "person-reference-change",
+      name: "Reference Change Person",
+      emails: ["reference-change@example.com"],
+    });
+    await seedIndexedFile(db, { id: "file-reference-revoked", sourceUpdatedAt: NOW.toISOString() });
+    await seedIndexedFile(db, { id: "file-reference-retained", sourceUpdatedAt: NOW.toISOString() });
+    await seedTask(db, {
+      id: "task-reference-change",
+      title: "Task whose evidence access changes",
+      provenance: "structural",
+      assigneeEntityId: "person-reference-change",
+      fileIds: ["file-reference-revoked", "file-reference-retained"],
+    });
+    const snapshot = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: user.id,
+      maxItemsPerSection: 4,
+      baseContext: { outputDate: "2026-06-25", timezone: "UTC" },
+    });
+    await db
+      .insertInto("file_access")
+      .values({ indexed_file_id: "file-reference-revoked", email: "someone-else@example.com" })
+      .execute();
+
+    const result =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items: [todoItem("task-reference-change")],
+        runtimeContext: {
+          ...snapshot,
+          sections: ["todos"],
+          maxItemsPerSection: 4,
+        },
+        logger: reconcileLogger() as never,
+        outputId: "output-reference-change",
+        userId: user.id,
+      })) ?? [];
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        title: "Task whose evidence access changes",
+        summary: "Open and ready for your attention.",
+        actionPrompt: expect.not.stringContaining("Model prompt"),
+        knowledgeRefs: {
+          entityIds: ["person-reference-change"],
+          fileIds: ["file-reference-retained"],
+        },
+      }),
+    ]);
+  });
 });
 
 describe("dailyBriefDefinition.onOutputSaved", () => {
