@@ -155,6 +155,7 @@ describe("real WhatsApp gateway subprocess", () => {
       db,
       logger: createTestLogger(),
       stagingDir: join(directory, "data", "wa-staging"),
+      shouldHandleInboundMessage: () => true,
       handlers: handlersForQueue(queue, () => {
         dispatched += 1;
       }),

@@ -557,6 +557,17 @@ export class InProcessWhatsAppLease {
     this.fence = null;
   }
 
+  async resetHistoryGeneration(): Promise<void> {
+    if (!this.fence) throw new Error("In-process WhatsApp lease is not acquired");
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+    if (!(await this.leases.resetHistoryGeneration(this.fence))) {
+      throw new Error("In-process WhatsApp history generation reset was fenced out");
+    }
+    this.heartbeatTimer = setInterval(() => void this.heartbeat(), 10_000);
+    this.heartbeatTimer.unref?.();
+  }
+
   async withLeaseFence<T>(callback: Parameters<typeof this.leases.withLeaseFence<T>>[1]): Promise<T> {
     if (!this.fence) throw new Error("In-process WhatsApp lease is not acquired");
     return this.leases.withLeaseFence(this.fence, callback);

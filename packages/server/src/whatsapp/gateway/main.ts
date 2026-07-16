@@ -85,7 +85,12 @@ export async function runWhatsAppGateway(): Promise<void> {
   let server: ReturnType<typeof serve> | null = null;
   let bot: WhatsAppBot | null = null;
 
-  const terminate = async (code: number, releaseLease: boolean, reason: string): Promise<void> => {
+  const terminate = async (
+    code: number,
+    releaseLease: boolean,
+    reason: string,
+    resetHistoryGeneration = false,
+  ): Promise<void> => {
     if (terminating) return;
     terminating = true;
     heartbeat?.stop();
@@ -97,7 +102,11 @@ export async function runWhatsAppGateway(): Promise<void> {
     }
     if (releaseLease) {
       try {
-        await leaseRepository.release(fence);
+        if (resetHistoryGeneration) {
+          await leaseRepository.releaseAfterLogout(fence);
+        } else {
+          await leaseRepository.release(fence);
+        }
       } catch (error) {
         logger.warn({ error }, "WhatsApp gateway lease release failed");
       }
@@ -153,11 +162,17 @@ export async function runWhatsAppGateway(): Promise<void> {
     },
     onLoggedOut: async () => {
       socketState = "logged-out";
-      await terminate(WHATSAPP_GATEWAY_LOGGED_OUT_EXIT_CODE, true, "WhatsApp account logged out");
+      await terminate(WHATSAPP_GATEWAY_LOGGED_OUT_EXIT_CODE, true, "WhatsApp account logged out", true);
     },
   });
 
-  const inProcessFacade = new InProcessSocketFacade(bot, logger);
+  const inProcessFacade = new InProcessSocketFacade(bot, logger, async () => {
+    heartbeat?.stop();
+    socketState = "logged-out";
+    initialSyncGeneration = true;
+    if (!(await leaseRepository.resetHistoryGeneration(fence))) throw new WhatsAppLeaseFenceError();
+    heartbeat?.start();
+  });
   const wake = async (): Promise<void> => {
     try {
       const response = await fetch(`http://${WHATSAPP_GATEWAY_HOST}:${config.PORT}/internal/whatsapp/wake`, {

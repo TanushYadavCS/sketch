@@ -54,6 +54,30 @@ describe("InProcessWhatsAppLease", () => {
     await lease.release();
     await db.destroy();
   });
+
+  it("clears history generation while retaining ownership after explicit logout", async () => {
+    const db = await createTestDb();
+    const lease = new InProcessWhatsAppLease({ db, config: createTestConfig(), logger: createTestLogger() });
+    await lease.acquire();
+    await db
+      .updateTable("whatsapp_session_lease")
+      .set({ last_live_at: "2026-07-15T08:00:00.000Z", disconnected_at: "2026-07-15T08:01:00.000Z" })
+      .where("id", "=", "default")
+      .execute();
+
+    await lease.resetHistoryGeneration();
+
+    await expect(
+      db
+        .selectFrom("whatsapp_session_lease")
+        .select(["owner_kind", "last_live_at", "disconnected_at"])
+        .where("id", "=", "default")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ owner_kind: "inprocess", last_live_at: null, disconnected_at: null });
+    await expect(lease.assertOwned()).resolves.toBeUndefined();
+    await lease.release();
+    await db.destroy();
+  });
 });
 
 describe("WhatsApp gateway supervision decisions", () => {

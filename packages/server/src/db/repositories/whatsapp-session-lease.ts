@@ -206,7 +206,7 @@ export function createWhatsAppSessionLeaseRepository(
     );
   }
 
-  async function release(fence: WhatsAppLeaseFence): Promise<boolean> {
+  async function releaseWithHistoryState(fence: WhatsAppLeaseFence, resetHistoryGeneration: boolean): Promise<boolean> {
     return withBoundedSqliteRetry(
       db,
       async () => {
@@ -215,7 +215,42 @@ export function createWhatsAppSessionLeaseRepository(
           .set({
             owner_token: `released:${fence.ownerToken}`,
             heartbeat_at: "1970-01-01T00:00:00.000Z",
+            ...(resetHistoryGeneration ? { last_live_at: null, disconnected_at: null } : {}),
           })
+          .where("id", "=", WHATSAPP_SESSION_LEASE_ID)
+          .where("owner_token", "=", fence.ownerToken)
+          .where("generation", "=", fence.generation)
+          .executeTakeFirst();
+        return Number(result.numUpdatedRows) === 1;
+      },
+      options.sqliteRetry,
+    );
+  }
+
+  async function release(fence: WhatsAppLeaseFence): Promise<boolean> {
+    return releaseWithHistoryState(fence, false);
+  }
+
+  /**
+   * Credential-clearing logout starts a new account history generation, so the
+   * release atomically removes reconnect watermarks while ordinary process
+   * release preserves them for crash recovery.
+   */
+  async function releaseAfterLogout(fence: WhatsAppLeaseFence): Promise<boolean> {
+    return releaseWithHistoryState(fence, true);
+  }
+
+  /**
+   * Explicit logout can keep the current process and lease alive for a later QR
+   * pairing, but must still reset history generation after credentials clear.
+   */
+  async function resetHistoryGeneration(fence: WhatsAppLeaseFence): Promise<boolean> {
+    return withBoundedSqliteRetry(
+      db,
+      async () => {
+        const result = await db
+          .updateTable("whatsapp_session_lease")
+          .set({ last_live_at: null, disconnected_at: null })
           .where("id", "=", WHATSAPP_SESSION_LEASE_ID)
           .where("owner_token", "=", fence.ownerToken)
           .where("generation", "=", fence.generation)
@@ -295,6 +330,8 @@ export function createWhatsAppSessionLeaseRepository(
     markDisconnected,
     deriveDisconnectedAt,
     release,
+    releaseAfterLogout,
+    resetHistoryGeneration,
     withLeaseFence,
   };
 }

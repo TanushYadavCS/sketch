@@ -8,6 +8,7 @@ import { createTestDb, createTestLogger } from "../test-utils";
 import type { WhatsAppAdapterHandlers } from "./adapter";
 import { whatsAppHistoryBatchEnvelopeSchema, whatsAppMessageEnvelopeSchema } from "./facade-contract";
 import { WhatsAppInboundConsumer, moveWhatsAppStagedMedia } from "./inbound-consumer";
+import { createWhatsAppRuntime } from "./runtime";
 
 function messageEnvelope(id: string | null, eventKey = id ? `event-${id}` : null) {
   return whatsAppMessageEnvelopeSchema.parse({
@@ -30,6 +31,44 @@ function messageEnvelope(id: string | null, eventKey = id ? `event-${id}` : null
       mediaStagingError: null,
     },
   });
+}
+
+function groupEnvelope(id: string, eventKey = `event-${id}`) {
+  return whatsAppMessageEnvelopeSchema.parse({
+    ...messageEnvelope(id, eventKey),
+    providerConversationId: "120363000000001@g.us",
+    message: {
+      type: "group",
+      text: "hello group",
+      jid: "120363000000001@g.us",
+      messageId: id,
+      pushName: "Roopak",
+      isMentioned: true,
+      senderJid: "15551234567@s.whatsapp.net",
+      senderPhone: "+15551234567",
+      rawProviderPayload: {
+        key: {
+          id,
+          remoteJid: "120363000000001@g.us",
+          participant: "15551234567@s.whatsapp.net",
+          fromMe: false,
+        },
+      },
+      stagedMediaRef: null,
+      mediaStagingError: null,
+    },
+  });
+}
+
+function providerFilter(dmProviderId: string, groupProviderId: string) {
+  return createWhatsAppRuntime({
+    dmProviderId,
+    groupProviderId,
+    dmProviders: [],
+    groupProviders: [],
+    inboundProviders: [],
+    logger: createTestLogger(),
+  }).shouldHandleInboundMessage;
 }
 
 function handlers(overrides: Partial<WhatsAppAdapterHandlers> = {}): WhatsAppAdapterHandlers {
@@ -71,6 +110,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger: createTestLogger(),
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({
         dispatchCapturedMessage: async (_message, _capture, hooks) => {
           statusAtDispatch = (
@@ -124,6 +164,7 @@ describe("WhatsAppInboundConsumer", () => {
         db,
         logger: createTestLogger(),
         stagingDir,
+        shouldHandleInboundMessage: () => true,
         handlers: handlers({
           dispatchCapturedMessage: async (_message, _capture, hooks) => {
             dispatchStatuses.push(
@@ -179,6 +220,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger,
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({
         dispatchCapturedMessage: async (_message, _capture, hooks) => {
           await db
@@ -208,6 +250,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger: createTestLogger(),
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers(),
     });
     await db.schema.dropTable("whatsapp_inbound_events").execute();
@@ -229,6 +272,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger: createTestLogger(),
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({ dispatchCapturedMessage: async () => false }),
     });
     consumer.start();
@@ -257,6 +301,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger: createTestLogger(),
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({
         captureQueuedMessage: async () => {
           captures += 1;
@@ -284,6 +329,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger: createTestLogger(),
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({
         dispatchCapturedMessage: async () => {
           dispatched = true;
@@ -323,6 +369,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger,
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({
         captureQueuedMessage: async () => {
           captured += 1;
@@ -353,6 +400,129 @@ describe("WhatsAppInboundConsumer", () => {
     );
   });
 
+  it("terminally consumes a Baileys DM when the configured DM provider is Wati", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const envelope = messageEnvelope("filtered-dm", "event-filtered-dm");
+    envelope.kind = "history_message";
+    const inserted = await repo.insert({
+      kind: "history_message",
+      origin: "gateway",
+      eventKey: "event-filtered-dm",
+      providerMessageId: "filtered-dm",
+      envelope: JSON.stringify(envelope),
+    });
+    const logger = createTestLogger();
+    const info = vi.spyOn(logger, "info");
+    const captureQueuedMessage = vi.fn(async () => null);
+    const dispatchCapturedMessage = vi.fn(async () => true);
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger,
+      stagingDir,
+      shouldHandleInboundMessage: providerFilter("wati", "baileys"),
+      handlers: handlers({ captureQueuedMessage, dispatchCapturedMessage }),
+    });
+
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["status", "attempts", "consumed_at"])
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ status: "consumed", attempts: 1, consumed_at: expect.any(String) });
+    expect(captureQueuedMessage).not.toHaveBeenCalled();
+    expect(dispatchCapturedMessage).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(
+      { inboundEventId: inserted.row.id, messageKind: "dm" },
+      "Consumed WhatsApp inbound event disabled by provider configuration",
+    );
+  });
+
+  it("terminally consumes a Baileys group message when groups are disabled", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const inserted = await repo.insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: "event-filtered-group",
+      providerMessageId: "filtered-group",
+      envelope: JSON.stringify(groupEnvelope("filtered-group")),
+    });
+    const captureQueuedMessage = vi.fn(async () => null);
+    const dispatchCapturedMessage = vi.fn(async () => true);
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger: createTestLogger(),
+      stagingDir,
+      shouldHandleInboundMessage: providerFilter("baileys", "none"),
+      handlers: handlers({ captureQueuedMessage, dispatchCapturedMessage }),
+    });
+
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select("status")
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "consumed" });
+    expect(captureQueuedMessage).not.toHaveBeenCalled();
+    expect(dispatchCapturedMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not index a history batch whose message kind is disabled", async () => {
+    const envelope = whatsAppHistoryBatchEnvelopeSchema.parse({
+      version: "1.0",
+      kind: "history_batch",
+      providerTimestamp: "2026-07-15T08:27:00.000Z",
+      batch: {
+        batchId: "filtered-history",
+        chunkIndex: 0,
+        chunkCount: 1,
+        syncType: 1,
+        progress: 100,
+        isLatest: true,
+      },
+      messages: [groupEnvelope("filtered-history-group")],
+    });
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const inserted = await repo.insert({
+      kind: "history_batch",
+      origin: "gateway",
+      envelope: JSON.stringify(envelope),
+      batchId: "filtered-history",
+      chunkIndex: 0,
+      chunkCount: 1,
+    });
+    const handleHistoryMessages = vi.fn(async () => ({ persisted: 0, skippedOld: 0, skippedDup: 0 }));
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger: createTestLogger(),
+      stagingDir,
+      shouldHandleInboundMessage: providerFilter("baileys", "none"),
+      handlers: handlers({ handleHistoryMessages }),
+    });
+
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select("status")
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "consumed" });
+    expect(handleHistoryMessages).not.toHaveBeenCalled();
+  });
+
   it("dead-letters after five failed processing attempts", async () => {
     const repo = createWhatsAppInboundEventsRepository(db);
     const inserted = await repo.insert({
@@ -367,6 +537,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger: createTestLogger(),
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({
         captureQueuedMessage: async () => {
           failures += 1;
@@ -416,6 +587,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger: createTestLogger(),
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({
         captureQueuedMessage: async (_message, params) => {
           await params.attachmentsForWorkspace?.(join(stagingDir, "workspace"));
@@ -454,6 +626,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger,
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({
         captureQueuedMessage: async (message, params) => {
           expect(message.text).toBe("hello");
@@ -517,6 +690,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger: createTestLogger(),
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({
         handleHistoryMessages: async (messages, _metadata, options) => {
           expect(messages.map((message) => message.text)).toEqual(["hello"]);
@@ -567,6 +741,7 @@ describe("WhatsAppInboundConsumer", () => {
       db,
       logger: createTestLogger(),
       stagingDir,
+      shouldHandleInboundMessage: () => true,
       handlers: handlers({
         handleHistoryMessages: async (_messages, metadata, options) => {
           progress.push(metadata?.progress);

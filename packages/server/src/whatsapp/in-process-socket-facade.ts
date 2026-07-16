@@ -56,12 +56,14 @@ export class InProcessSocketFacade implements WhatsAppSocketFacade, InProcessMes
     },
     logout: async (): Promise<void> => {
       await this.bot.disconnect();
+      await this.onLogout?.();
     },
   };
 
   constructor(
     private readonly bot: WhatsAppBot,
     private readonly logger: Logger,
+    private readonly onLogout?: () => Promise<void>,
   ) {}
 
   rememberMessage(params: {

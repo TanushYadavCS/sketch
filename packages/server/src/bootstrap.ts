@@ -321,8 +321,21 @@ export async function createServer(config: Config, options?: CreateServerOptions
               },
             })
         : undefined,
+      onLoggedOut: usesBaileys
+        ? async () => {
+            await inProcessWhatsAppLease?.resetHistoryGeneration();
+          }
+        : undefined,
     });
-    whatsapp = new InProcessSocketFacade(whatsappBot, logger);
+    whatsapp = new InProcessSocketFacade(
+      whatsappBot,
+      logger,
+      usesBaileys
+        ? async () => {
+            await inProcessWhatsAppLease?.resetHistoryGeneration();
+          }
+        : undefined,
+    );
   }
   const gatewayInboundSource = {
     get isConnected() {
@@ -629,6 +642,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     db,
     logger,
     handlers: whatsappHandlers,
+    shouldHandleInboundMessage: whatsappRuntime.shouldHandleInboundMessage,
     stagingDir: join(config.DATA_DIR, "wa-staging"),
   });
   await createWhatsAppInboundEventsRepository(db).resetDispatched();

@@ -182,6 +182,53 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
     ).toBe(true);
   });
 
+  it("treats history after a logout-released lease and re-pair as a fresh initial-sync generation", async () => {
+    const lease = createWhatsAppSessionLeaseRepository(db);
+    const acquired = await lease.acquire({
+      ownerKind: "gateway",
+      ownerToken: "owner-before-logout",
+      gatewayHttpToken: "http-token",
+      hostId: "host-before-logout",
+      bootId: "boot-before-logout",
+      pid: 3,
+      pidStartTime: "3",
+      scriptHash: "hash",
+      contractVersion: "1.0",
+    });
+    const fence = { ownerToken: "owner-before-logout", generation: acquired.lease?.generation ?? 0 };
+    await lease.heartbeat("owner-before-logout", { markLive: true });
+    await lease.markDisconnected(fence);
+    await lease.releaseAfterLogout(fence);
+    const reacquired = await lease.acquire({
+      ownerKind: "gateway",
+      ownerToken: "owner-after-logout",
+      gatewayHttpToken: "http-token",
+      hostId: "host-after-logout",
+      bootId: "boot-after-logout",
+      pid: 4,
+      pidStartTime: "4",
+      scriptHash: "hash",
+      contractVersion: "1.0",
+    });
+    const isInitialSyncGeneration = reacquired.lease?.last_live_at == null;
+    expect(isInitialSyncGeneration).toBe(true);
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => isInitialSyncGeneration,
+      wake: async () => undefined,
+    });
+
+    await capture.captureHistory([groupMessage("old-after-repair", new Date().toISOString())]);
+
+    const rows = await db.selectFrom("whatsapp_inbound_events").select("kind").execute();
+    expect(rows).toEqual([{ kind: "history_batch" }]);
+  });
+
   it("captures reconnect outbound messages in history batches without promoting them for dispatch", async () => {
     const lease = createWhatsAppSessionLeaseRepository(db);
     const acquired = await lease.acquire({

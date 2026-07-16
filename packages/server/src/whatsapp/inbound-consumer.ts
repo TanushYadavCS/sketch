@@ -25,6 +25,7 @@ export interface WhatsAppInboundConsumerOptions {
   db: Kysely<DB>;
   logger: Logger;
   handlers: WhatsAppAdapterHandlers;
+  shouldHandleInboundMessage: (message: WhatsAppInboundMessage) => boolean;
   stagingDir: string;
   pollIntervalMs?: number;
 }
@@ -190,6 +191,10 @@ export class WhatsAppInboundConsumer {
       ...envelope.message,
       rawMessage: envelope.message.rawProviderPayload,
     } as WhatsAppMessage);
+    if (!this.options.shouldHandleInboundMessage(message)) {
+      await this.consumeFiltered(row, claimToken, message.kind);
+      return;
+    }
     let captureCommitted = false;
     const capture = await this.options.handlers.captureQueuedMessage(message, {
       eventKey: envelope.eventKey,
@@ -277,14 +282,20 @@ export class WhatsAppInboundConsumer {
     envelope: WhatsAppHistoryBatchEnvelope,
   ): Promise<void> {
     const envelopeByMessage = new WeakMap<WhatsAppInboundMessage, WhatsAppMessageEnvelope>();
-    const messages = envelope.messages.map((item) => {
-      const message = normalizeBaileysInboundMessage({
-        ...item.message,
-        rawMessage: item.message.rawProviderPayload,
-      } as WhatsAppMessage);
-      envelopeByMessage.set(message, item);
-      return message;
-    });
+    const messages = envelope.messages
+      .map((item) => {
+        const message = normalizeBaileysInboundMessage({
+          ...item.message,
+          rawMessage: item.message.rawProviderPayload,
+        } as WhatsAppMessage);
+        envelopeByMessage.set(message, item);
+        return message;
+      })
+      .filter(this.options.shouldHandleInboundMessage);
+    if (messages.length === 0) {
+      await this.consumeFiltered(row, claimToken, "history batch");
+      return;
+    }
     const isTerminalChunk = row.batch_id ? await this.events.isBatchCompleteExcluding(row.batch_id, row.id) : false;
     const progress =
       !isTerminalChunk && envelope.batch.progress !== null && envelope.batch.progress >= 100
@@ -329,5 +340,23 @@ export class WhatsAppInboundConsumer {
         "WhatsApp history batch completion barrier reached",
       );
     }
+  }
+
+  /**
+   * Provider-disabled events are terminal because retrying cannot change the
+   * configured routing decision. They pass through captured only as a durable
+   * queue state transition and never reach conversation capture or dispatch.
+   */
+  private async consumeFiltered(
+    row: WhatsAppInboundEventRow,
+    claimToken: string,
+    messageKind: WhatsAppInboundMessage["kind"] | "history batch",
+  ): Promise<void> {
+    if (!(await this.events.markCaptured(row.id, claimToken))) return;
+    if (!(await this.events.markConsumed(row.id, claimToken))) return;
+    this.options.logger.info(
+      { inboundEventId: row.id, messageKind },
+      "Consumed WhatsApp inbound event disabled by provider configuration",
+    );
   }
 }

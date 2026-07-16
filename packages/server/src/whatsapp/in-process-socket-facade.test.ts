@@ -3,7 +3,7 @@ import { createTestLogger } from "../test-utils";
 import type { WhatsAppBot } from "./bot";
 import { InProcessSocketFacade } from "./in-process-socket-facade";
 
-function createMockBot() {
+function createMockBot(onLogout?: () => Promise<void>) {
   const bot = {
     isConnected: true,
     phoneNumber: "+15550001111",
@@ -36,7 +36,7 @@ function createMockBot() {
     syncAllGroups: vi.fn(async () => 1),
     resolveJidToPhone: vi.fn(async () => "+15551234567"),
   };
-  return { bot, facade: new InProcessSocketFacade(bot as unknown as WhatsAppBot, createTestLogger()) };
+  return { bot, facade: new InProcessSocketFacade(bot as unknown as WhatsAppBot, createTestLogger(), onLogout) };
 }
 
 describe("InProcessSocketFacade", () => {
@@ -112,6 +112,17 @@ describe("InProcessSocketFacade", () => {
     expect(bot.addReaction).toHaveBeenCalledWith("group@g.us", rawMessage.key, "👀");
     await expect(facade.react("group@g.us", quotedRef, "")).resolves.toEqual({ ok: true });
     expect(bot.removeReaction).toHaveBeenCalledWith("group@g.us", rawMessage.key);
+  });
+
+  it("resets history generation after logout clears credentials", async () => {
+    const onLogout = vi.fn(async () => undefined);
+    const { bot, facade } = createMockBot(onLogout);
+
+    await facade.pairing.logout();
+
+    expect(bot.disconnect).toHaveBeenCalledOnce();
+    expect(onLogout).toHaveBeenCalledOnce();
+    expect(bot.disconnect.mock.invocationCallOrder[0]).toBeLessThan(onLogout.mock.invocationCallOrder[0]);
   });
 
   it("returns the specified unknown-message miss without calling the bot", async () => {

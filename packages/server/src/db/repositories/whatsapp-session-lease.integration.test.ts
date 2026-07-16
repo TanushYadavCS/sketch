@@ -69,6 +69,21 @@ describe("WhatsApp session lease repository on shared Postgres", () => {
       lease: { owner_token: "owner-after-release", generation: 2 },
     });
   });
+
+  it("clears history generation watermarks on logout release", async () => {
+    const repo = createWhatsAppSessionLeaseRepository(db);
+    const acquired = await repo.acquire(owner("owner-logout"));
+    const fence = { ownerToken: "owner-logout", generation: acquired.lease?.generation ?? 0 };
+    await repo.heartbeat("owner-logout", { markLive: true });
+    await repo.markDisconnected(fence);
+
+    await expect(repo.releaseAfterLogout(fence)).resolves.toBe(true);
+    await expect(repo.get()).resolves.toMatchObject({
+      owner_token: "released:owner-logout",
+      last_live_at: null,
+      disconnected_at: null,
+    });
+  });
 });
 
 describe("WhatsApp session lease fence on Postgres", () => {

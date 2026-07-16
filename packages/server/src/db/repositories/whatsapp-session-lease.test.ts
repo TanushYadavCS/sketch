@@ -141,15 +141,34 @@ describe("WhatsApp session lease repository on SQLite", () => {
     const repo = createWhatsAppSessionLeaseRepository(db, { sqlitePath });
     const acquired = await repo.acquire(owner("owner-a"));
     const fence = { ownerToken: "owner-a", generation: acquired.lease?.generation ?? 0 };
+    await repo.heartbeat("owner-a", { markLive: true });
+    await repo.markDisconnected(fence);
     await expect(repo.release(fence)).resolves.toBe(true);
     await expect(repo.get()).resolves.toMatchObject({
       owner_token: "released:owner-a",
       gateway_http_token: "http-owner-a",
       heartbeat_at: "1970-01-01T00:00:00.000Z",
+      last_live_at: expect.any(String),
+      disconnected_at: expect.any(String),
     });
     await expect(repo.acquire(owner("owner-b"))).resolves.toMatchObject({
       acquired: true,
       lease: { owner_token: "owner-b", generation: 2, gateway_http_token: "http-owner-b" },
+    });
+  });
+
+  it("releases after logout and clears history generation watermarks", async () => {
+    const repo = createWhatsAppSessionLeaseRepository(db, { sqlitePath });
+    const acquired = await repo.acquire(owner("owner-logout"));
+    const fence = { ownerToken: "owner-logout", generation: acquired.lease?.generation ?? 0 };
+    await repo.heartbeat("owner-logout", { markLive: true });
+    await repo.markDisconnected(fence);
+
+    await expect(repo.releaseAfterLogout(fence)).resolves.toBe(true);
+    await expect(repo.get()).resolves.toMatchObject({
+      owner_token: "released:owner-logout",
+      last_live_at: null,
+      disconnected_at: null,
     });
   });
 });
