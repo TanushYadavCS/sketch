@@ -351,6 +351,12 @@ describe("buildSystemContext", () => {
       expect(result).not.toContain("write URLs inline");
     });
 
+    it("uses plain-language automation link guidance", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("automation link");
+      expect(result).not.toContain("builder URL");
+    });
+
     it("can mention delivery context without overriding web reply formatting", () => {
       const result = buildSystemContext({ platform: "web", deliveryPlatform: "slack" });
       expect(result).toContain("visible reply is rendered in web chat");

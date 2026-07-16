@@ -32,7 +32,8 @@ export function appendAutomationBuilderLinks(
 
   if (missingLinks.length === 0) return text || null;
 
-  const linkBlock =
-    missingLinks.length === 1 ? `Builder link:\n${missingLinks[0]}` : `Builder links:\n${missingLinks.join("\n")}`;
-  return text ? `${text}\n\n${linkBlock}` : `Automation created.\n\n${linkBlock}`;
+  const linkHeading = missingLinks.length === 1 ? "Open your automation:" : "Open your automations:";
+  const linkBlock = `${linkHeading}\n${missingLinks.join("\n")}`;
+  const fallback = "Your automation is ready.";
+  return text ? `${text}\n\n${linkBlock}` : `${fallback}\n\n${linkBlock}`;
 }
