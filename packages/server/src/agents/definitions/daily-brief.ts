@@ -9,7 +9,7 @@ import {
   createAgentOutputRepository,
 } from "../../db/repositories/agent-outputs";
 import { createEntityRepository, whereLiveEntity } from "../../db/repositories/entities";
-import { createTaskRepository } from "../../db/repositories/tasks";
+import { type DurableTaskForBrief, createTaskRepository } from "../../db/repositories/tasks";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
@@ -1146,7 +1146,7 @@ function compactRecentSummary(summary: AgentOutputWithItems) {
   };
 }
 
-async function resolveReaderTaskIdentity(args: AgentRuntimeContextArgs): Promise<{
+async function resolveReaderTaskIdentity(args: Pick<AgentRuntimeContextArgs, "db" | "userId" | "users">): Promise<{
   verifiedEmails: string[];
   assigneeEntityIds: string[];
 }> {
@@ -1159,14 +1159,17 @@ async function resolveReaderTaskIdentity(args: AgentRuntimeContextArgs): Promise
     ),
   ];
   const entitiesByEmail = await createEntityRepository(args.db).getPersonEntitiesByEmails(verifiedEmails);
-  const assigneeEntityIds = new Set<string>();
+  const matchedEntityIds = new Set<string>();
+  let ambiguous = false;
   for (const email of verifiedEmails) {
     const matches = entitiesByEmail.get(email) ?? [];
-    if (matches.length === 1) assigneeEntityIds.add(matches[0].id);
+    if (matches.length > 1) ambiguous = true;
+    if (matches.length === 1) matchedEntityIds.add(matches[0].id);
   }
+  if (matchedEntityIds.size > 1) ambiguous = true;
   return {
     verifiedEmails,
-    assigneeEntityIds: [...assigneeEntityIds].sort(),
+    assigneeEntityIds: ambiguous ? [] : [...matchedEntityIds].sort(),
   };
 }
 
@@ -1195,17 +1198,72 @@ async function countIdentityUnresolvedStructuralTasks(
   return new Set(evidence.filter((row) => visibleFileIds.has(row.fileId)).map((row) => row.taskId)).size;
 }
 
+function runtimeDurableTask(task: DurableTaskForBrief) {
+  return {
+    id: task.id,
+    title: task.title,
+    status: task.status,
+    statusRaw: task.status_raw,
+    priority: task.priority,
+    provenance: task.provenance,
+    externalRef: task.external_ref,
+    updatedAt: task.updated_at,
+    createdByReader: task.createdByReader,
+    assignedToReader: task.assignedToReader,
+    parentEntity: task.parentEntity
+      ? {
+          id: task.parentEntity.id,
+          name: task.parentEntity.name,
+          sourceType: task.parentEntity.source_type,
+        }
+      : null,
+    assigneeEntity: task.assigneeEntity
+      ? {
+          id: task.assigneeEntity.id,
+          name: task.assigneeEntity.name,
+          sourceType: task.assigneeEntity.source_type,
+        }
+      : null,
+    knowledgeRefs: task.knowledgeRefs,
+  };
+}
+
+async function loadOpenDurableTasksForReader(args: Pick<AgentRuntimeContextArgs, "db" | "userId" | "users">): Promise<{
+  verifiedEmails: string[];
+  assigneeEntityIds: string[];
+  tasks: DurableTaskForBrief[];
+}> {
+  const { verifiedEmails, assigneeEntityIds } = await resolveReaderTaskIdentity(args);
+  const tasks = await createTaskRepository(args.db).loadOpenDurableTasksForBrief({
+    userId: args.userId,
+    userEmails: verifiedEmails,
+    assigneeEntityIds,
+  });
+  return { verifiedEmails, assigneeEntityIds, tasks };
+}
+
+async function revalidateRuntimeDurableTasks(
+  db: Kysely<DB>,
+  userId: string,
+  runtimeContext: Record<string, unknown>,
+): Promise<unknown> {
+  if (readString(runtimeContext.readerTaskSnapshotUserId) !== userId) return runtimeContext.openDurableTasks;
+  const snapshotIds = new Set(parseRuntimeDurableTasks(runtimeContext.openDurableTasks).map((task) => task.id));
+  if (snapshotIds.size === 0) return [];
+  const { tasks } = await loadOpenDurableTasksForReader({
+    db,
+    userId,
+    users: createUserRepository(db),
+  });
+  return tasks.filter((task) => snapshotIds.has(task.id)).map(runtimeDurableTask);
+}
+
 async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Record<string, unknown>> {
   const taskRepo = createTaskRepository(args.db);
   const outputRepo = createAgentOutputRepository(args.db);
   const summarySince = dailyBriefSummarySince(args.baseContext);
-  const { verifiedEmails, assigneeEntityIds } = await resolveReaderTaskIdentity(args);
-  const [openDurableTasks, recentSummaries, summaryTasks, identityUnresolvedTaskCount] = await Promise.all([
-    taskRepo.loadOpenDurableTasksForBrief({
-      userId: args.userId,
-      userEmails: verifiedEmails,
-      assigneeEntityIds,
-    }),
+  const { verifiedEmails, assigneeEntityIds, tasks: openDurableTasks } = await loadOpenDurableTasksForReader(args);
+  const [recentSummaries, summaryTasks, identityUnresolvedTaskCount] = await Promise.all([
     outputRepo.listCompletedForUserSince(CONVERSATION_SUMMARY_AGENT_KEY, args.userId, summarySince, {
       limit: DAILY_BRIEF_SUMMARY_OUTPUT_LIMIT,
     }),
@@ -1218,33 +1276,8 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
     countIdentityUnresolvedStructuralTasks(args.db, verifiedEmails, assigneeEntityIds),
   ]);
   return {
-    openDurableTasks: openDurableTasks.map((task) => ({
-      id: task.id,
-      title: task.title,
-      status: task.status,
-      statusRaw: task.status_raw,
-      priority: task.priority,
-      provenance: task.provenance,
-      externalRef: task.external_ref,
-      updatedAt: task.updated_at,
-      createdByReader: task.createdByReader,
-      assignedToReader: task.assignedToReader,
-      parentEntity: task.parentEntity
-        ? {
-            id: task.parentEntity.id,
-            name: task.parentEntity.name,
-            sourceType: task.parentEntity.source_type,
-          }
-        : null,
-      assigneeEntity: task.assigneeEntity
-        ? {
-            id: task.assigneeEntity.id,
-            name: task.assigneeEntity.name,
-            sourceType: task.assigneeEntity.source_type,
-          }
-        : null,
-      knowledgeRefs: task.knowledgeRefs,
-    })),
+    openDurableTasks: openDurableTasks.map(runtimeDurableTask),
+    readerTaskSnapshotUserId: args.userId,
     recentSummaries: recentSummaries.map(compactRecentSummary),
     summaryTasks: summaryTasks.map((task) => ({
       id: task.id,
@@ -1325,9 +1358,13 @@ export const dailyBriefDefinition: AgentDefinition = {
     ]);
     return { dailyBriefCandidateContext, todaysMeetings };
   },
-  reconcileItems: async ({ items, runtimeContext, logger, outputId, userId }) => {
+  reconcileItems: async ({ db, items, runtimeContext, logger, outputId, userId }) => {
     const sections = Array.isArray(runtimeContext.sections) ? (runtimeContext.sections as string[]) : [];
-    const todoResult = reconcileTodoItems(items, runtimeContext);
+    const currentOpenDurableTasks = await revalidateRuntimeDurableTasks(db, userId, runtimeContext);
+    const todoResult = reconcileTodoItems(items, {
+      ...runtimeContext,
+      openDurableTasks: currentOpenDurableTasks,
+    });
     const reconciled = sections.includes(DAILY_BRIEF_MEETINGS_SECTION_KEY)
       ? reconcileMeetingItems(todoResult.items, parseTodaysMeetings(runtimeContext.todaysMeetings))
       : todoResult.items;

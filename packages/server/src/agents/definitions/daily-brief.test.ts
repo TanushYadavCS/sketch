@@ -395,6 +395,80 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
     expect(context?.identityUnresolvedTaskCount).toBe(1);
   });
 
+  it("fails assignment-based tasks closed when verified emails resolve to different people", async () => {
+    const user = await seedUser(db, {
+      id: "reader-conflicting",
+      email: "primary-conflicting@example.com",
+      emailVerified: true,
+    });
+    await db
+      .insertInto("user_provider_identities")
+      .values({
+        id: "provider-reader-conflicting",
+        user_id: user.id,
+        provider: "google",
+        provider_user_id: "google-reader-conflicting",
+        provider_email: "provider-conflicting@example.com",
+      })
+      .execute();
+    await seedPersonEntity(db, {
+      id: "person-primary-conflicting",
+      name: "Primary Identity",
+      emails: ["primary-conflicting@example.com"],
+    });
+    await seedPersonEntity(db, {
+      id: "person-provider-conflicting",
+      name: "Provider Identity",
+      emails: ["provider-conflicting@example.com"],
+    });
+    await seedIndexedFile(db, { id: "file-conflicting", sourceUpdatedAt: NOW.toISOString() });
+    await seedTask(db, {
+      id: "structural-primary-conflicting",
+      title: "Primary structural task",
+      provenance: "structural",
+      assigneeEntityId: "person-primary-conflicting",
+      fileIds: ["file-conflicting"],
+    });
+    await seedTask(db, {
+      id: "structural-provider-conflicting",
+      title: "Provider structural task",
+      provenance: "structural",
+      assigneeEntityId: "person-provider-conflicting",
+      fileIds: ["file-conflicting"],
+    });
+    await seedTask(db, {
+      id: "local-assigned-conflicting",
+      title: "Assigned local task",
+      provenance: "summary",
+      assigneeEntityId: "person-primary-conflicting",
+      fileIds: ["file-conflicting"],
+    });
+    await seedTask(db, {
+      id: "local-created-conflicting",
+      title: "Reader-created local task",
+      provenance: "summary",
+      createdByUserId: user.id,
+      fileIds: ["file-conflicting"],
+    });
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: user.id,
+      maxItemsPerSection: 4,
+      baseContext: { outputDate: "2026-06-25", timezone: "UTC" },
+    });
+
+    expect((context?.openDurableTasks as Array<{ id: string }>).map((task) => task.id)).toEqual([
+      "local-created-conflicting",
+    ]);
+    expect(context?.summaryTasks).toEqual([
+      expect.objectContaining({ id: "local-created-conflicting", title: "Reader-created local task" }),
+    ]);
+    expect(context?.identityUnresolvedTaskCount).toBe(2);
+  });
+
   it("loads the complete reader-owned allowlist while reconciliation caps displayed todos", async () => {
     const user = await seedUser(db, {
       id: "reader-many-tasks",
@@ -1207,6 +1281,31 @@ describe("dailyBriefDefinition.reconcileItems", () => {
     });
   });
 
+  it("rejects valid model-selected todos beyond the section cap", async () => {
+    const logger = reconcileLogger();
+    const result =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items: [todoItem("task-a"), todoItem("task-b"), todoItem("task-c")],
+        runtimeContext: {
+          sections: ["todos"],
+          maxItemsPerSection: 2,
+          openDurableTasks: [durableTask("task-a"), durableTask("task-b"), durableTask("task-c")],
+          identityUnresolvedTaskCount: 0,
+        },
+        logger: logger as never,
+        outputId: "output-model-cap",
+        userId: "user-model-cap",
+      })) ?? [];
+
+    expect(result.map((item) => item.structuredPayload?.durableTaskId)).toEqual(["task-a", "task-b"]);
+    expect(logger.info.mock.calls[0]?.[0]).toMatchObject({
+      allowedTaskCount: 3,
+      rejectedTaskCount: 1,
+      backfilledTaskCount: 0,
+    });
+  });
+
   it("composes todo projection with meeting reconciliation while leaving customer and project items unchanged", async () => {
     const logger = reconcileLogger();
     const customer = {
@@ -1252,6 +1351,59 @@ describe("dailyBriefDefinition.reconcileItems", () => {
     });
     expect(result[2]).toBe(customer);
     expect(result[3]).toBe(project);
+  });
+
+  it("revalidates the runtime task snapshot before persistence", async () => {
+    await seedConnectorConfig(db);
+    const user = await seedUser(db, {
+      id: "user-revalidate",
+      email: "revalidate@example.com",
+      emailVerified: true,
+    });
+    await seedPersonEntity(db, {
+      id: "person-revalidate",
+      name: "Revalidate Person",
+      emails: ["revalidate@example.com"],
+    });
+    await seedIndexedFile(db, { id: "file-revalidate", sourceUpdatedAt: NOW.toISOString() });
+    await seedTask(db, {
+      id: "task-revalidate",
+      title: "Task that closes during generation",
+      provenance: "structural",
+      assigneeEntityId: "person-revalidate",
+      fileIds: ["file-revalidate"],
+    });
+    const snapshot = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: user.id,
+      maxItemsPerSection: 4,
+      baseContext: { outputDate: "2026-06-25", timezone: "UTC" },
+    });
+    await db.updateTable("tasks").set({ status: "done" }).where("id", "=", "task-revalidate").execute();
+
+    const logger = reconcileLogger();
+    const result =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items: [todoItem("task-revalidate")],
+        runtimeContext: {
+          ...snapshot,
+          sections: ["todos"],
+          maxItemsPerSection: 4,
+        },
+        logger: logger as never,
+        outputId: "output-revalidate",
+        userId: user.id,
+      })) ?? [];
+
+    expect(result).toEqual([]);
+    expect(logger.info.mock.calls[0]?.[0]).toMatchObject({
+      allowedTaskCount: 0,
+      rejectedTaskCount: 1,
+      backfilledTaskCount: 0,
+    });
   });
 });
 
