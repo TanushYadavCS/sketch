@@ -84,14 +84,29 @@ export interface ReanchorNullParentTasksResult {
 export interface LoadOpenDurableTasksForBriefOptions {
   userId: string;
   userEmails: string[];
+  assigneeEntityIds?: string[];
   limit?: number;
 }
 
 export interface LoadSummaryTasksForBriefOptions {
   userId: string;
+  assigneeEntityIds?: string[];
   since: string;
   limit?: number;
 }
+
+export type BriefTaskEntityIdentity = Pick<Selectable<EntitiesTable>, "id" | "name" | "source_type">;
+
+export type DurableTaskForBrief = Selectable<TasksTable> & {
+  createdByReader: boolean;
+  assignedToReader: boolean;
+  parentEntity: BriefTaskEntityIdentity | null;
+  assigneeEntity: BriefTaskEntityIdentity | null;
+  knowledgeRefs: {
+    entityIds: string[];
+    fileIds: string[];
+  };
+};
 
 export interface UpsertLlmTaskInput {
   candidate: { title: string; dueAt?: string | null; assigneeEntityId?: string | null; assigneeName?: string | null };
@@ -364,7 +379,8 @@ export function createTaskRepository(db: Kysely<DB>) {
       return query.execute();
     },
 
-    async loadOpenDurableTasksForBrief(opts: LoadOpenDurableTasksForBriefOptions): Promise<Selectable<TasksTable>[]> {
+    async loadOpenDurableTasksForBrief(opts: LoadOpenDurableTasksForBriefOptions): Promise<DurableTaskForBrief[]> {
+      const assigneeEntityIds = [...new Set(opts.assigneeEntityIds ?? [])].filter(Boolean);
       const visibleFileEvidence =
         opts.userEmails.length === 0
           ? sql<boolean>`false`
@@ -375,41 +391,51 @@ export function createTaskRepository(db: Kysely<DB>) {
               AND task_evidence.kind = 'file'
               AND ${fileAccessFilterSql(opts.userEmails)}
           )`;
-      return db
+      const tasks = await db
         .selectFrom("tasks")
         .selectAll("tasks")
         .where("tasks.valid_to", "is", null)
         .where("tasks.status", "in", ["open", "in_progress"])
-        .where((eb) =>
-          eb.or([
-            eb.and([eb("tasks.provenance", "=", "structural"), visibleFileEvidence]),
+        .where((eb) => {
+          const assignedToReader =
+            assigneeEntityIds.length === 0
+              ? sql<boolean>`false`
+              : eb("tasks.assignee_entity_id", "in", assigneeEntityIds);
+          return eb.or([
+            eb.and([eb("tasks.provenance", "=", "structural"), assignedToReader, visibleFileEvidence]),
             eb.and([
-              eb("tasks.created_by_user_id", "=", opts.userId),
               eb("tasks.provenance", "in", ["brief", "summary"]),
+              eb("tasks.status_authority", "=", "local"),
+              eb.or([eb("tasks.created_by_user_id", "=", opts.userId), assignedToReader]),
             ]),
-          ]),
-        )
+          ]);
+        })
         .orderBy("tasks.updated_at", "desc")
+        .orderBy("tasks.id", "asc")
         .limit(opts.limit ?? 50)
         .execute();
+      return loadDurableTaskMetadata(db, tasks, {
+        userId: opts.userId,
+        userEmails: opts.userEmails,
+        assigneeEntityIds,
+      });
     },
 
     async loadSummaryTasksForBrief(opts: LoadSummaryTasksForBriefOptions): Promise<Selectable<TasksTable>[]> {
+      const assigneeEntityIds = [...new Set(opts.assigneeEntityIds ?? [])].filter(Boolean);
       return db
         .selectFrom("tasks")
         .selectAll()
         .where("valid_to", "is", null)
-        .where("created_by_user_id", "=", opts.userId)
+        .where((eb) =>
+          eb.or([
+            eb("created_by_user_id", "=", opts.userId),
+            ...(assigneeEntityIds.length > 0 ? [eb("assignee_entity_id", "in", assigneeEntityIds)] : []),
+          ]),
+        )
         .where("provenance", "=", "summary")
         .where("updated_at", ">=", opts.since)
         .where("status", "in", ["open", "in_progress", "done", "dropped"])
-        .orderBy(sql<number>`CASE
-          WHEN status = 'open' THEN 0
-          WHEN status = 'in_progress' THEN 1
-          WHEN status = 'done' THEN 2
-          WHEN status = 'dropped' THEN 3
-          ELSE 4
-        END`)
         .orderBy("updated_at", "desc")
         .orderBy("id", "asc")
         .limit(opts.limit ?? 50)
@@ -455,6 +481,85 @@ export function createTaskRepository(db: Kysely<DB>) {
       return db.selectFrom("tasks").selectAll().where("id", "=", input.taskId).executeTakeFirstOrThrow();
     },
   };
+}
+
+async function loadDurableTaskMetadata(
+  db: Kysely<DB>,
+  tasks: Selectable<TasksTable>[],
+  opts: { userId: string; userEmails: string[]; assigneeEntityIds: string[] },
+): Promise<DurableTaskForBrief[]> {
+  if (tasks.length === 0) return [];
+
+  const taskIds = tasks.map((task) => task.id);
+  const evidenceRows = await db
+    .selectFrom("task_evidence")
+    .select(["task_id", "kind", "ref_id"])
+    .where("task_id", "in", taskIds)
+    .where("kind", "in", ["entity", "file"])
+    .execute();
+  const entityIds = [
+    ...new Set([
+      ...tasks.flatMap((task) => [task.parent_entity_id, task.assignee_entity_id]),
+      ...evidenceRows.filter((row) => row.kind === "entity").map((row) => row.ref_id),
+    ]),
+  ].filter((id): id is string => Boolean(id));
+  const entities =
+    entityIds.length === 0
+      ? []
+      : await db
+          .selectFrom("entities")
+          .select(["id", "name", "source_type"])
+          .where("id", "in", entityIds)
+          .where(whereLiveEntity())
+          .execute();
+  const entitiesById = new Map(entities.map((entity) => [entity.id, entity]));
+
+  const evidenceFileIds = [...new Set(evidenceRows.filter((row) => row.kind === "file").map((row) => row.ref_id))];
+  const visibleFiles =
+    evidenceFileIds.length === 0 || opts.userEmails.length === 0
+      ? []
+      : await db
+          .selectFrom("indexed_files")
+          .select("id")
+          .where("id", "in", evidenceFileIds)
+          .where(fileAccessFilterSql(opts.userEmails))
+          .execute();
+  const visibleFileIds = new Set(visibleFiles.map((file) => file.id));
+  const evidenceByTaskId = new Map<string, Array<{ kind: string; ref_id: string }>>();
+  for (const evidence of evidenceRows) {
+    const taskEvidence = evidenceByTaskId.get(evidence.task_id) ?? [];
+    taskEvidence.push(evidence);
+    evidenceByTaskId.set(evidence.task_id, taskEvidence);
+  }
+  const assigneeEntityIds = new Set(opts.assigneeEntityIds);
+
+  return tasks.map((task) => {
+    const parentEntity = task.parent_entity_id ? (entitiesById.get(task.parent_entity_id) ?? null) : null;
+    const assigneeEntity = task.assignee_entity_id ? (entitiesById.get(task.assignee_entity_id) ?? null) : null;
+    const taskEvidence = evidenceByTaskId.get(task.id) ?? [];
+    const entityRefs = new Set<string>();
+    if (parentEntity) entityRefs.add(parentEntity.id);
+    if (assigneeEntity) entityRefs.add(assigneeEntity.id);
+    for (const evidence of taskEvidence) {
+      if (evidence.kind === "entity" && entitiesById.has(evidence.ref_id)) entityRefs.add(evidence.ref_id);
+    }
+    const fileRefs = new Set(
+      taskEvidence
+        .filter((evidence) => evidence.kind === "file" && visibleFileIds.has(evidence.ref_id))
+        .map((evidence) => evidence.ref_id),
+    );
+    return {
+      ...task,
+      createdByReader: task.created_by_user_id === opts.userId,
+      assignedToReader: Boolean(task.assignee_entity_id && assigneeEntityIds.has(task.assignee_entity_id)),
+      parentEntity,
+      assigneeEntity,
+      knowledgeRefs: {
+        entityIds: [...entityRefs].sort(),
+        fileIds: [...fileRefs].sort(),
+      },
+    };
+  });
 }
 
 export async function upsertLlmTask(

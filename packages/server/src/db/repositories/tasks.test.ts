@@ -929,9 +929,216 @@ describe("createTaskRepository sqlite", () => {
     expect(externalUpdate).toBeNull();
   });
 
+  it("loads only reader-owned durable tasks with canonical visible knowledge references", async () => {
+    await seedUser(db, "reader-u1", "reader@example.com");
+    await seedUser(db, "other-u1", "other@example.com");
+    await seedPerson(db, "person-reader", "Reader Person", ["reader@example.com"]);
+    await seedPerson(db, "person-other", "Other Person", ["other@example.com"]);
+    await seedProject(db, "project-parent", "Parent Project");
+    await seedProject(db, "entity-evidence", "Evidence Entity");
+    await seedProject(db, "entity-deleted", "Deleted Evidence Entity");
+    await db
+      .updateTable("entities")
+      .set({ deleted_at: "2026-07-09T00:00:00.000Z" })
+      .where("id", "=", "entity-deleted")
+      .execute();
+    await seedIndexedFile(db, "file-visible");
+    await seedIndexedFile(db, "file-invisible");
+    await db
+      .insertInto("file_access")
+      .values({ indexed_file_id: "file-invisible", email: "other@example.com" })
+      .execute();
+
+    const repo = createTaskRepository(db);
+    const readerStructural = await repo.upsertTask({
+      parentEntityId: "project-parent",
+      parentSourceRef: null,
+      parentName: "Parent Project",
+      source: "linear",
+      externalRef: "SKE-401",
+      title: "Reader structural",
+      status: "open",
+      statusRaw: "Todo",
+      statusAuthority: "external",
+      assigneeEntityId: "person-reader",
+      assigneeName: "Reader Person",
+      priority: "high",
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "reader-structural",
+      createdByUserId: "other-u1",
+    });
+    const otherStructural = await repo.upsertTask({
+      parentEntityId: "project-parent",
+      parentSourceRef: null,
+      parentName: "Parent Project",
+      source: "linear",
+      externalRef: "SKE-402",
+      title: "Other structural",
+      status: "open",
+      statusRaw: "Todo",
+      statusAuthority: "external",
+      assigneeEntityId: "person-other",
+      assigneeName: "Other Person",
+      priority: "medium",
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "other-structural",
+    });
+    const unassignedStructural = await repo.upsertTask({
+      parentEntityId: "project-parent",
+      parentSourceRef: null,
+      parentName: "Parent Project",
+      source: "linear",
+      externalRef: "SKE-403",
+      title: "Unassigned structural",
+      status: "open",
+      statusRaw: "Todo",
+      statusAuthority: "external",
+      assigneeEntityId: null,
+      priority: "low",
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "unassigned-structural",
+    });
+    const invisibleStructural = await repo.upsertTask({
+      parentEntityId: "project-parent",
+      parentSourceRef: null,
+      parentName: "Parent Project",
+      source: "linear",
+      externalRef: "SKE-404",
+      title: "Invisible structural",
+      status: "in_progress",
+      statusRaw: "In Progress",
+      statusAuthority: "external",
+      assigneeEntityId: "person-reader",
+      assigneeName: "Reader Person",
+      priority: "high",
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "invisible-structural",
+    });
+    const readerCreatedLocal = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "brief",
+      externalRef: null,
+      title: "Reader-created local",
+      status: "open",
+      statusRaw: "todo",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "brief",
+      sourceTaskId: "reader-created-local",
+      createdByUserId: "reader-u1",
+    });
+    const readerAssignedLocal = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Reader-assigned local",
+      status: "in_progress",
+      statusRaw: "in_progress",
+      statusAuthority: "local",
+      assigneeEntityId: "person-reader",
+      assigneeName: "Reader Person",
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "reader-assigned-local",
+      createdByUserId: "other-u1",
+    });
+    const unrelatedLocal = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Unrelated local",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "unrelated-local",
+      createdByUserId: "other-u1",
+    });
+
+    for (const taskId of [
+      readerStructural.taskId,
+      otherStructural.taskId,
+      unassignedStructural.taskId,
+      readerCreatedLocal.taskId,
+    ]) {
+      await repo.upsertEvidence(taskId, "file", "file-visible");
+    }
+    await repo.upsertEvidence(readerStructural.taskId, "file", "file-invisible");
+    await repo.upsertEvidence(readerStructural.taskId, "entity", "entity-evidence");
+    await repo.upsertEvidence(readerStructural.taskId, "entity", "entity-evidence");
+    await repo.upsertEvidence(readerStructural.taskId, "entity", "entity-deleted");
+    await repo.upsertEvidence(invisibleStructural.taskId, "file", "file-invisible");
+    await db
+      .updateTable("tasks")
+      .set({ updated_at: "2026-07-10T12:00:00.000Z" })
+      .where("id", "in", [readerStructural.taskId, readerCreatedLocal.taskId, readerAssignedLocal.taskId])
+      .execute();
+
+    const rows = await repo.loadOpenDurableTasksForBrief({
+      userId: "reader-u1",
+      userEmails: ["reader@example.com"],
+      assigneeEntityIds: ["person-reader", "person-reader"],
+    });
+    const withoutReaderEntity = await repo.loadOpenDurableTasksForBrief({
+      userId: "reader-u1",
+      userEmails: ["reader@example.com"],
+      assigneeEntityIds: [],
+    });
+
+    expect(rows.map((task) => task.id)).toEqual(
+      [readerStructural.taskId, readerCreatedLocal.taskId, readerAssignedLocal.taskId].sort(),
+    );
+    expect(rows.map((task) => task.id)).not.toEqual(
+      expect.arrayContaining([
+        otherStructural.taskId,
+        unassignedStructural.taskId,
+        invisibleStructural.taskId,
+        unrelatedLocal.taskId,
+      ]),
+    );
+    expect(withoutReaderEntity.map((task) => task.id)).toEqual([readerCreatedLocal.taskId]);
+
+    const structural = rows.find((task) => task.id === readerStructural.taskId);
+    expect(structural).toMatchObject({
+      createdByReader: false,
+      assignedToReader: true,
+      parentEntity: { id: "project-parent", name: "Parent Project", source_type: "project" },
+      assigneeEntity: { id: "person-reader", name: "Reader Person", source_type: "person" },
+      knowledgeRefs: {
+        entityIds: ["entity-evidence", "person-reader", "project-parent"],
+        fileIds: ["file-visible"],
+      },
+    });
+    expect(rows.find((task) => task.id === readerCreatedLocal.taskId)).toMatchObject({
+      createdByReader: true,
+      assignedToReader: false,
+    });
+    expect(rows.find((task) => task.id === readerAssignedLocal.taskId)).toMatchObject({
+      createdByReader: false,
+      assignedToReader: true,
+    });
+  });
+
   it("loads recent user-owned summary tasks for Daily Brief including completed protection rows", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedUser(db, "summary-u2", "other@example.com");
+    await seedPerson(db, "person-summary-reader", "Summary Reader", ["summary@example.com"]);
     await seedProject(db, "project-x", "Project X");
     const repo = createTaskRepository(db);
     const open = await repo.upsertTask({
@@ -985,6 +1192,24 @@ describe("createTaskRepository sqlite", () => {
       sourceTaskId: "summary-old",
       createdByUserId: "summary-u1",
     });
+    const assigned = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Assigned summary task",
+      status: "done",
+      statusRaw: "done",
+      statusAuthority: "local",
+      assigneeEntityId: "person-summary-reader",
+      assigneeName: "Summary Reader",
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "summary-assigned-reader",
+      createdByUserId: "summary-u2",
+    });
     await repo.upsertTask({
       parentEntityId: null,
       parentSourceRef: null,
@@ -1021,8 +1246,18 @@ describe("createTaskRepository sqlite", () => {
     });
     await db
       .updateTable("tasks")
+      .set({ updated_at: "2026-07-09T13:00:00.000Z" })
+      .where("id", "=", open.taskId)
+      .execute();
+    await db
+      .updateTable("tasks")
       .set({ updated_at: "2026-07-09T12:00:00.000Z" })
-      .where("id", "in", [open.taskId, done.taskId])
+      .where("id", "=", done.taskId)
+      .execute();
+    await db
+      .updateTable("tasks")
+      .set({ updated_at: "2026-07-09T11:00:00.000Z" })
+      .where("id", "=", assigned.taskId)
       .execute();
     await db
       .updateTable("tasks")
@@ -1033,11 +1268,12 @@ describe("createTaskRepository sqlite", () => {
     const rows = await repo.loadSummaryTasksForBrief({
       userId: "summary-u1",
       since: "2026-07-09T00:00:00.000Z",
+      assigneeEntityIds: ["person-summary-reader"],
       limit: 10,
     });
 
-    expect(rows.map((task) => task.id)).toEqual([open.taskId, done.taskId]);
-    expect(rows.map((task) => task.status)).toEqual(["open", "done"]);
+    expect(rows.map((task) => task.id)).toEqual([open.taskId, done.taskId, assigned.taskId]);
+    expect(rows.map((task) => task.status)).toEqual(["open", "done", "done"]);
   });
 
   it("collates Brief todos with matching Summary tasks even when Brief evidence has no file", async () => {
