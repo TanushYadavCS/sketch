@@ -446,6 +446,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .where("agent_key", "=", agentKey)
         .where("id", "=", id)
         .where("status", "=", "running")
+        .where("trigger_type", "=", "scheduled")
         .executeTakeFirst();
       if (affectedRows(result) === 0) return undefined;
       return this.findById(agentKey, id);

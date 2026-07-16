@@ -1886,8 +1886,10 @@ export class AgentRunService {
                 const promoted = await this.repo.promoteRunningToManual(def.key, existingRunning.id);
                 if (!promoted) {
                   resolveReplacement(false);
-                  if (admission) this.enqueueRun(def.key, existingRunning.id, user.id, "scheduled");
                   const current = await this.repo.findById(def.key, existingRunning.id);
+                  if (admission && current?.status === "running" && current.trigger_type === "scheduled") {
+                    this.enqueueRun(def.key, existingRunning.id, user.id, "scheduled");
+                  }
                   rows.push(current ?? existingRunning);
                   continue;
                 }

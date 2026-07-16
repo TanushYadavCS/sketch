@@ -3495,6 +3495,51 @@ describe("AgentRunService", () => {
     expect(scheduledRunAgent).not.toHaveBeenCalled();
   });
 
+  it("runs only one manual replacement when concurrent requests promote the same scheduled generation", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    const interactiveRunAgent = vi.fn(async () => {
+      throw new Error("interactive test stop");
+    }) as unknown as AgentRunServiceDeps["runAgent"];
+    const scheduledRunAgent = vi.fn(async () => {
+      throw new Error("scheduled test stop");
+    }) as unknown as AgentRunServiceDeps["runScheduledAgent"];
+    const service = createService(db, tasks, {
+      runAgent: interactiveRunAgent,
+      runScheduledAgent: scheduledRunAgent,
+    });
+
+    const [scheduled] = await service.requestGenerationForUser({
+      agentKey: DAILY_BRIEF_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "scheduled",
+    });
+    const requests = await Promise.all([
+      service.requestGenerationForUser({
+        agentKey: DAILY_BRIEF_AGENT_KEY,
+        userId: user.id,
+        outputDate: OUTPUT_DATE,
+        triggerType: "manual",
+      }),
+      service.requestGenerationForUser({
+        agentKey: DAILY_BRIEF_AGENT_KEY,
+        userId: user.id,
+        outputDate: OUTPUT_DATE,
+        triggerType: "manual",
+      }),
+    ]);
+
+    expect(requests.flat().map((output) => output.id)).toEqual([scheduled.id, scheduled.id]);
+    expect(requests.flat().every((output) => output.trigger_type === "manual")).toBe(true);
+
+    for (const task of tasks) await task();
+
+    expect(interactiveRunAgent).toHaveBeenCalledTimes(1);
+    expect(scheduledRunAgent).not.toHaveBeenCalled();
+  });
+
   it("keeps the scheduled generation when the manual replacement queue is full", async () => {
     const acceptedTasks: Array<() => Promise<void>> = [];
     let enqueueCalls = 0;
