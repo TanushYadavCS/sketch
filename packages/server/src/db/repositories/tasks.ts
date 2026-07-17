@@ -44,6 +44,13 @@ export interface TaskListOptions {
   limit?: number;
 }
 
+export interface TaskAccessOptions {
+  viewer: FileViewer;
+  userId?: string | null;
+  assigneeEntityIds?: string[];
+  canReadAllLocalTasks?: boolean;
+}
+
 export interface PromoteBriefTaskInput {
   userId: string;
   todo: AgentOutputItemInput;
@@ -366,6 +373,20 @@ export function createTaskRepository(db: Kysely<DB>) {
         .limit(opts.limit ?? 100);
       if (opts.status) query = query.where("tasks.status", "=", opts.status);
       return query.execute();
+    },
+
+    async listVisibleTasksByIds(taskIds: string[], opts: TaskAccessOptions): Promise<Selectable<TasksTable>[]> {
+      const ids = [...new Set(taskIds)].filter(Boolean);
+      if (ids.length === 0) return [];
+      if (ids.length > 100) throw new Error("Task visibility batch exceeds 100 ids.");
+      return visibleTaskQuery(db, opts.viewer, {
+        userId: opts.userId,
+        assigneeEntityIds: opts.assigneeEntityIds,
+        canReadAllLocalTasks: opts.canReadAllLocalTasks === true,
+      })
+        .where("tasks.id", "in", ids)
+        .limit(ids.length)
+        .execute();
     },
 
     async loadOpenDurableTasksForBrief(opts: LoadOpenDurableTasksForBriefOptions): Promise<Selectable<TasksTable>[]> {

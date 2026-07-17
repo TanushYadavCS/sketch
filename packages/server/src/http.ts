@@ -38,6 +38,7 @@ import { entityReviewRoutes } from "./entities/review";
 
 import { oauthRoutes } from "./api/oauth";
 import { systemRoutes } from "./api/system";
+import { taskRoutes } from "./api/tasks";
 import { usageRoutes } from "./api/usage";
 import { userRoutes } from "./api/users";
 import { watiWebhookRoutes } from "./api/wati-webhook";
@@ -551,6 +552,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     );
   }
   app.route("/api/entities", entityRoutes(db, { logger, config }));
+  app.route("/api/tasks", taskRoutes(db));
   app.route("/api/projects", createProjectRoutes(db));
   app.route("/api/products", productRoutes(db));
   app.route("/api/entity-review", entityReviewRoutes(db, { logger }));
