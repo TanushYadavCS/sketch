@@ -1587,6 +1587,9 @@ describe("whatsapp/adapter", () => {
         status: "complete",
         live_start_effective_at: null,
         live_start_message_id: null,
+        graph_last_served_at: null,
+        graph_halted_at: null,
+        graph_halt_reason: null,
         updated_at: "2026-07-07T09:05:00.000Z",
       });
 

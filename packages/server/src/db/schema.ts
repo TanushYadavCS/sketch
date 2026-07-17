@@ -608,6 +608,9 @@ export interface WhatsAppBackfillCheckpointsTable {
   status: string;
   live_start_effective_at: Generated<string | null>;
   live_start_message_id: Generated<number | null>;
+  graph_last_served_at: Generated<string | null>;
+  graph_halted_at: Generated<string | null>;
+  graph_halt_reason: Generated<string | null>;
   updated_at: Generated<string>;
 }
 
@@ -635,6 +638,9 @@ export interface WhatsAppBackfillRangesTable {
   response_deadline_at: string | null;
   terminal_status: string | null;
   last_served_at: string | null;
+  graph_cursor_effective_at: Generated<string | null>;
+  graph_cursor_message_id: Generated<number | null>;
+  graph_completed_at: Generated<string | null>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

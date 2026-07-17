@@ -31,6 +31,12 @@ export interface WhatsAppBackfillRangeEnsureResult {
   adopted: number;
 }
 
+export interface WhatsAppBackfillGraphCandidate {
+  range: WhatsAppBackfillRangeRow;
+  conversationId: number;
+  graphLastServedAt: string | null;
+}
+
 function rangeKey(kind: WhatsAppBackfillRangeKind, connectionKey: string): string {
   return kind === "initial" ? "initial" : `gap:${connectionKey}`;
 }
@@ -503,6 +509,81 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     return Number(result.numUpdatedRows);
   }
 
+  async function findNextGraphCandidate(input: {
+    groupJids: string[];
+    excludedGroupJids: string[];
+  }): Promise<WhatsAppBackfillGraphCandidate | undefined> {
+    if (input.groupJids.length === 0) return undefined;
+    let query = db
+      .selectFrom("whatsapp_backfill_ranges as range")
+      .innerJoin("conversations as conversation", (join) =>
+        join
+          .onRef("conversation.provider_conversation_id", "=", "range.group_jid")
+          .on("conversation.platform", "=", "whatsapp")
+          .on("conversation.kind", "=", "group"),
+      )
+      .innerJoin("whatsapp_groups as group", "group.jid", "range.group_jid")
+      .innerJoin("whatsapp_backfill_checkpoints as checkpoint", "checkpoint.group_jid", "range.group_jid")
+      .selectAll("range")
+      .select(["conversation.id as graph_conversation_id", "checkpoint.graph_last_served_at as graph_last_served_at"])
+      .where("range.status", "in", ["complete", "exhausted"])
+      .where("range.graph_completed_at", "is", null)
+      .where("checkpoint.graph_halted_at", "is", null)
+      .where("group.index_enabled", "=", 1)
+      .where("range.group_jid", "in", input.groupJids)
+      .where(
+        sql<boolean>`NOT EXISTS (
+          SELECT 1
+          FROM whatsapp_backfill_ranges AS older
+          WHERE older.group_jid = range.group_jid
+            AND older.graph_completed_at IS NULL
+            AND (
+              older.lower_bound_at < range.lower_bound_at
+              OR (older.lower_bound_at = range.lower_bound_at AND older.upper_bound_at < range.upper_bound_at)
+              OR (
+                older.lower_bound_at = range.lower_bound_at
+                AND older.upper_bound_at = range.upper_bound_at
+                AND older.created_at < range.created_at
+              )
+              OR (
+                older.lower_bound_at = range.lower_bound_at
+                AND older.upper_bound_at = range.upper_bound_at
+                AND older.created_at = range.created_at
+                AND older.id < range.id
+              )
+            )
+        )`,
+      );
+    if (input.excludedGroupJids.length > 0) {
+      query = query.where("range.group_jid", "not in", input.excludedGroupJids);
+    }
+    const row = await query
+      .orderBy(sql`CASE WHEN checkpoint.graph_last_served_at IS NULL THEN 0 ELSE 1 END`)
+      .orderBy("checkpoint.graph_last_served_at", "asc")
+      .orderBy("range.group_jid", "asc")
+      .orderBy("range.lower_bound_at", "asc")
+      .orderBy("range.upper_bound_at", "asc")
+      .orderBy("range.created_at", "asc")
+      .orderBy("range.id", "asc")
+      .executeTakeFirst();
+    if (!row) return undefined;
+    const { graph_conversation_id, graph_last_served_at, ...range } = row;
+    return {
+      range: range as WhatsAppBackfillRangeRow,
+      conversationId: graph_conversation_id,
+      graphLastServedAt: graph_last_served_at,
+    };
+  }
+
+  async function haltGraphAdmission(groupJid: string, reason: string, now: string): Promise<void> {
+    await db
+      .updateTable("whatsapp_backfill_checkpoints")
+      .set({ graph_halted_at: now, graph_halt_reason: truncateError(reason), updated_at: now })
+      .where("group_jid", "=", groupJid)
+      .where("graph_halted_at", "is", null)
+      .execute();
+  }
+
   return {
     getById,
     getByRequestSession,
@@ -523,5 +604,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     deleteRangeStaging,
     reclaimStale,
     rearmExhausted,
+    findNextGraphCandidate,
+    haltGraphAdmission,
   };
 }
