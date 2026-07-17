@@ -21,6 +21,7 @@ import { createLinearConnector } from "./linear";
 import { createNotionConnector } from "./notion";
 import { createOtterConnector } from "./otter";
 import { createOutlookConnector } from "./outlook";
+import { createSlackIndexingConnector } from "./slack-indexing";
 import { createTeamsConnector } from "./teams";
 import { createWhatsAppConnector } from "./whatsapp";
 import { createZohoCrmConnector } from "./zoho-crm";
@@ -38,6 +39,7 @@ export const connectorFactories: Record<ConnectorType, () => Connector> = {
   otter: createOtterConnector,
   zoho_crm: createZohoCrmConnector,
   whatsapp: createWhatsAppConnector,
+  slack: createSlackIndexingConnector,
 };
 
 export const VALID_CONNECTOR_TYPES: ConnectorType[] = Object.keys(connectorFactories) as ConnectorType[];

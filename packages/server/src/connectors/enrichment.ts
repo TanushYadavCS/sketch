@@ -116,6 +116,7 @@ function minWordsForSmartEnrichment(fileType: string | null, threadContext: stri
   if (fileType === "email_message") return threadContext ? 1 : 10;
   if (fileType === "calendar_event") return 10;
   if (fileType === "whatsapp_conversation_slice") return 1;
+  if (fileType === "slack_conversation_slice") return 1;
   return 100;
 }
 

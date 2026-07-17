@@ -62,6 +62,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
+import { createSettingsBackedSlackIndexingFacade } from "../slack/indexing-facade";
 import {
   type ConnectorPermissions,
   connectorPermissions,
@@ -157,7 +158,9 @@ function syncInBackground(
     >
   >,
 ) {
-  runConnectorSync(db, connectorId, logger, config).catch((err) => {
+  runConnectorSync(db, connectorId, logger, config, {
+    slackIndexingFacade: createSettingsBackedSlackIndexingFacade({ db, encryptionKey: config?.ENCRYPTION_KEY }),
+  }).catch((err) => {
     logger.error({ err, connectorId }, "Background sync failed");
   });
 }
@@ -332,6 +335,7 @@ function defaultAuthTypeForConnector(connectorType: ConnectorType): AuthType {
     case "otter":
       return "api_key";
     case "whatsapp":
+    case "slack":
       return "system";
   }
 }

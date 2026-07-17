@@ -98,6 +98,23 @@ export interface SlackBotConfig {
   signingSecret?: string; // Required for http mode
 }
 
+/**
+ * Channel-membership system messages that Slack delivers with a `user` field,
+ * so they pass the human-sender gate and would otherwise be captured as
+ * conversation content. Exact blocklist rather than "any subtype": user
+ * content subtypes like `file_share` and `thread_broadcast` must keep flowing.
+ */
+export const SYSTEM_MESSAGE_SUBTYPES = new Set([
+  "channel_join",
+  "channel_leave",
+  "channel_topic",
+  "channel_purpose",
+  "channel_name",
+  "channel_archive",
+  "channel_unarchive",
+  "channel_posting_permissions",
+]);
+
 export class SlackBot {
   private app: App;
   private logger: Logger;
@@ -186,6 +203,8 @@ export class SlackBot {
     this.app.message(async ({ message }) => {
       if (!("user" in message) || !message.user) return;
       if (message.user === this.botUserId) return;
+      if ("subtype" in message && typeof message.subtype === "string" && SYSTEM_MESSAGE_SUBTYPES.has(message.subtype))
+        return;
 
       const isIm = "channel_type" in message && message.channel_type === "im";
       const threadTs = "thread_ts" in message ? (message.thread_ts as string) : undefined;

@@ -577,7 +577,7 @@ export const KIND_TO_RULES: Record<string, KindRule[]> = {
     { sources: ["clickup"], fileTypes: ["task", "subtask"] },
     { sources: ["linear"], fileTypes: ["issue"] },
   ],
-  message: [{ sources: ["conversation", "whatsapp"] }],
+  message: [{ sources: ["conversation", "whatsapp", "slack"] }],
 };
 
 /** Compile kind rules to a raw SQL fragment for the FTS / hybrid pipelines. */

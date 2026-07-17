@@ -556,6 +556,54 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
     },
 
     /**
+     * All access scopes of one type owned by a connector config. Powers ACL
+     * reconciliation runs that must see scopes for quiet channels no current
+     * emission would touch.
+     */
+    async listAccessScopesForConnector(
+      connectorConfigId: string,
+      scopeType: string,
+    ): Promise<Array<{ id: string; providerScopeId: string; label: string | null }>> {
+      const rows = await db
+        .selectFrom("access_scopes")
+        .select(["id", "provider_scope_id", "label"])
+        .where("connector_config_id", "=", connectorConfigId)
+        .where("scope_type", "=", scopeType)
+        .execute();
+      return rows.map((row) => ({ id: row.id, providerScopeId: row.provider_scope_id, label: row.label }));
+    },
+
+    /**
+     * Archives every indexed file attached to the given scopes and severs the
+     * per-file grants and conversation-slice links, so a later re-emission can
+     * relink cleanly. Used when a channel loses visibility (bot removed) or
+     * its last teammate member.
+     */
+    async archiveFilesForAccessScopes(scopeIds: string[]): Promise<number> {
+      if (scopeIds.length === 0) return 0;
+      const files = await db
+        .selectFrom("indexed_files")
+        .select(["id"])
+        .where("access_scope_id", "in", scopeIds)
+        .execute();
+      const fileIds = files.map((file) => file.id);
+      if (fileIds.length === 0) return 0;
+
+      await db.deleteFrom("file_access").where("indexed_file_id", "in", fileIds).execute();
+      await db
+        .updateTable("conversation_slices")
+        .set({ indexed_file_id: null })
+        .where("indexed_file_id", "in", fileIds)
+        .execute();
+      await db
+        .updateTable("indexed_files")
+        .set({ is_archived: 1, access_scope_id: null })
+        .where("id", "in", fileIds)
+        .execute();
+      return fileIds.length;
+    },
+
+    /**
      * Replace per-file access emails for an indexed file.
      * Used for Google Drive My Drive files with individual sharing.
      */

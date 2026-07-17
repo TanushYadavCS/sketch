@@ -216,8 +216,8 @@ describe("searchFiles — FTS5 query sanitization", () => {
 });
 
 describe("KIND_TO_RULES", () => {
-  it("maps message kind to local conversation and WhatsApp slice sources", () => {
-    expect(KIND_TO_RULES.message).toEqual([{ sources: ["conversation", "whatsapp"] }]);
+  it("maps message kind to local conversation, WhatsApp, and Slack slice sources", () => {
+    expect(KIND_TO_RULES.message).toEqual([{ sources: ["conversation", "whatsapp", "slack"] }]);
   });
 });
 

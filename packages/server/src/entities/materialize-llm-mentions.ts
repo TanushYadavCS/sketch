@@ -29,14 +29,14 @@ export async function materializeLlmExtractedFact(
   if (fileCount < deps.llmPromotionThreshold) {
     return { kind: "deferred_below_threshold", reason: "below_promotion_threshold" };
   }
-  const whatsappOnlyEvidence =
+  const chatSliceOnlyEvidence =
     (mentionType === "person" || mentionType === "company" || mentionType === "tool") &&
-    (await deps.hasOnlyWhatsAppConversationSliceEvidence(normalized, mentionType));
+    (await deps.hasOnlyChatConversationSliceEvidence(normalized, mentionType));
 
   if (mentionType === "person") {
-    return materializePersonFact(deps, fact, { linkOnly: whatsappOnlyEvidence });
+    return materializePersonFact(deps, fact, { linkOnly: chatSliceOnlyEvidence });
   }
-  return materializeNonPersonLlmEntity(deps, fact, mentionType, { linkOnly: whatsappOnlyEvidence });
+  return materializeNonPersonLlmEntity(deps, fact, mentionType, { linkOnly: chatSliceOnlyEvidence });
 }
 
 export async function materializeNonPersonLlmEntity(
