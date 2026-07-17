@@ -18,7 +18,8 @@ export const configSchema = z.object({
   // Slack context
   SLACK_CHANNEL_HISTORY_LIMIT: z.coerce.number().default(5),
   SLACK_THREAD_HISTORY_LIMIT: z.coerce.number().default(50),
-  MAX_CONCURRENT_AGENT_RUNS: z.coerce.number().int().min(1).default(4),
+  MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS: z.coerce.number().int().min(1).default(4),
+  MAX_CONCURRENT_SCHEDULED_AGENT_RUNS: z.coerce.number().int().min(1).default(4),
 
   // Files
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),
@@ -144,6 +145,13 @@ export type Config = z.infer<typeof configSchema>;
  * (e.g. when `concurrently` runs it from packages/server/).
  */
 export function loadConfig(): Config {
+  if (process.env.MAX_CONCURRENT_AGENT_RUNS !== undefined) {
+    console.error("Invalid configuration:");
+    console.error(
+      "  MAX_CONCURRENT_AGENT_RUNS: replaced by MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS and MAX_CONCURRENT_SCHEDULED_AGENT_RUNS",
+    );
+    process.exit(1);
+  }
   const result = configSchema.safeParse(process.env);
   if (!result.success) {
     console.error("Invalid configuration:");

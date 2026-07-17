@@ -92,13 +92,20 @@ describe("bootstrap", () => {
     expect(h.getSlack()).toBeNull();
   });
 
-  it("configures the process-wide agent limiter from server config", async () => {
+  it("configures independent interactive and scheduled agent limiters", async () => {
     const { createAgentRunLimiter } = await import("./agent/concurrency-limiter");
-    await boot({ MAX_CONCURRENT_AGENT_RUNS: 2 });
+    await boot({ MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS: 2, MAX_CONCURRENT_SCHEDULED_AGENT_RUNS: 3 });
 
     expect(createAgentRunLimiter).toHaveBeenCalledWith(
       expect.objectContaining({
         limit: 2,
+        queue: "interactive",
+      }),
+    );
+    expect(createAgentRunLimiter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limit: 3,
+        queue: "scheduled",
       }),
     );
   });

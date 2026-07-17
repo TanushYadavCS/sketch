@@ -3,13 +3,28 @@ import type { Logger } from "../logger";
 
 interface AgentRunLimiterOptions {
   limit: number;
+  queue: "interactive" | "scheduled";
   logger: Pick<Logger, "info">;
   now?: () => number;
+}
+
+export interface AgentRunAdmissionOptions {
+  signal?: AbortSignal;
+  onStart?: () => void;
+}
+
+export class AgentRunAdmissionCancelledError extends Error {
+  constructor() {
+    super("Agent run admission cancelled");
+    this.name = "AgentRunAdmissionCancelledError";
+  }
 }
 
 interface Waiter {
   queuedAt: number;
   resolve: (waitMs: number) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 interface ActiveRunContext {
@@ -20,28 +35,39 @@ export class AgentRunLimiter {
   private active = 0;
   private readonly waiting: Waiter[] = [];
   private readonly limit: number;
+  private readonly queue: "interactive" | "scheduled";
   private readonly logger: Pick<Logger, "info">;
   private readonly now: () => number;
   private readonly activeRunContext = new AsyncLocalStorage<ActiveRunContext>();
 
   constructor(options: AgentRunLimiterOptions) {
     this.limit = options.limit;
+    this.queue = options.queue;
     this.logger = options.logger;
     this.now = options.now ?? Date.now;
   }
 
-  async run<T>(work: () => Promise<T>): Promise<T> {
+  async run<T>(work: () => Promise<T>, admission: AgentRunAdmissionOptions = {}): Promise<T> {
+    if (admission.signal?.aborted) throw new AgentRunAdmissionCancelledError();
     if (this.activeRunContext.getStore()?.active) {
+      admission.onStart?.();
       return this.runReentrant(work);
     }
 
-    const waitMs = await this.acquire();
+    const admissionResult = this.acquire(admission.signal);
+    const waitMs = typeof admissionResult === "number" ? admissionResult : await admissionResult;
+    if (admission.signal?.aborted) {
+      this.release();
+      throw new AgentRunAdmissionCancelledError();
+    }
+    admission.onStart?.();
     const startedAt = this.now();
     const runContext: ActiveRunContext = { active: true };
 
     this.logger.info(
       {
         event: "agent_run_limiter_start",
+        queue: this.queue,
         limit: this.limit,
         active: this.active,
         waiting: this.waiting.length,
@@ -59,6 +85,7 @@ export class AgentRunLimiter {
       this.logger.info(
         {
           event: "agent_run_limiter_finish",
+          queue: this.queue,
           limit: this.limit,
           active: this.active,
           waiting: this.waiting.length,
@@ -76,6 +103,7 @@ export class AgentRunLimiter {
     this.logger.info(
       {
         event: "agent_run_limiter_start",
+        queue: this.queue,
         limit: this.limit,
         active: this.active,
         waiting: this.waiting.length,
@@ -92,6 +120,7 @@ export class AgentRunLimiter {
       this.logger.info(
         {
           event: "agent_run_limiter_finish",
+          queue: this.queue,
           limit: this.limit,
           active: this.active,
           waiting: this.waiting.length,
@@ -108,18 +137,31 @@ export class AgentRunLimiter {
     return { limit: this.limit, active: this.active, waiting: this.waiting.length };
   }
 
-  private acquire(): Promise<number> {
+  private acquire(signal?: AbortSignal): number | Promise<number> {
+    if (signal?.aborted) throw new AgentRunAdmissionCancelledError();
     if (this.active < this.limit) {
       this.active += 1;
-      return Promise.resolve(0);
+      return 0;
     }
 
     const queuedAt = this.now();
-    return new Promise((resolve) => {
-      this.waiting.push({ queuedAt, resolve });
+    return new Promise((resolve, reject) => {
+      const waiter: Waiter = { queuedAt, resolve, signal };
+      if (signal) {
+        waiter.onAbort = () => {
+          const index = this.waiting.indexOf(waiter);
+          if (index === -1) return;
+          this.waiting.splice(index, 1);
+          signal.removeEventListener("abort", waiter.onAbort as () => void);
+          reject(new AgentRunAdmissionCancelledError());
+        };
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      this.waiting.push(waiter);
       this.logger.info(
         {
           event: "agent_run_limiter_wait",
+          queue: this.queue,
           limit: this.limit,
           active: this.active,
           waiting: this.waiting.length,
@@ -135,6 +177,7 @@ export class AgentRunLimiter {
     const next = this.waiting.shift();
     if (!next) return;
 
+    if (next.signal && next.onAbort) next.signal.removeEventListener("abort", next.onAbort);
     this.active += 1;
     next.resolve(this.now() - next.queuedAt);
   }
