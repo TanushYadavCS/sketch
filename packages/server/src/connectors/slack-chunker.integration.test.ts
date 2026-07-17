@@ -225,6 +225,43 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(second.slicesCreated).toBe(0);
     });
 
+    it("advances past pure-noise suffixes so streams are not rescanned forever", async () => {
+      const conversations = createConversationRepository(db);
+      await conversations.insertMessage({
+        conversationId,
+        providerMessageId: "4000.1",
+        senderJid: "U0EXT",
+        senderName: "Guest",
+        text: "<@U0AAAAA> has joined the channel",
+        providerTimestamp: iso(0),
+        receivedAt: iso(0),
+      });
+      await conversations.insertMessage({
+        conversationId,
+        providerMessageId: "4000.2",
+        senderJid: "bot",
+        senderName: "Sketch",
+        isBot: true,
+        text: "bot reply",
+        providerTimestamp: iso(1),
+        receivedAt: iso(1),
+      });
+
+      const now = new Date(T0 + 600 * 60_000);
+      const first = await chunkSlackConversations({ db, logger, now });
+      expect(first.slicesCreated).toBe(0);
+      expect(first.streamsProcessed).toBe(1);
+
+      const cursor = await createConversationSlicesRepository(db).getStreamCursor(
+        conversationId,
+        SLACK_CHANNEL_STREAM_KEY,
+      );
+      expect(cursor?.last_message_id).not.toBeNull();
+
+      const second = await chunkSlackConversations({ db, logger, now });
+      expect(second.streamsProcessed).toBe(0);
+    });
+
     it("skips DM conversations entirely", async () => {
       const conversations = createConversationRepository(db);
       const dm = await conversations.getOrCreate({

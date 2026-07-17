@@ -379,18 +379,28 @@ async function processStream(
         }
       }
 
+      /**
+       * With an open tail, only flushed content is consumed — the tail is
+       * re-read next run. With no tail, advance past ALL fetched rows, not
+       * just the last kept one: a stream whose pending suffix is pure noise
+       * (bot rows, Sketch chatter, join texts) would otherwise never advance
+       * and streamHasPending would rescan it on every sync forever.
+       */
       const lastSlice = plan.slices[plan.slices.length - 1];
-      if (lastSlice) {
+      const lastFetched = messages[messages.length - 1];
+      const advanceTo =
+        plan.activeTailMessageIds.length > 0 ? (lastSlice?.cursorLastMessageId ?? null) : (lastFetched?.id ?? null);
+      if (advanceTo !== null) {
         const advanced = await txRepo.advanceStreamCursorIfClaimed({
           conversationId,
           streamKey,
-          lastMessageId: lastSlice.cursorLastMessageId,
+          lastMessageId: advanceTo,
           claimToken,
         });
         if (!advanced) throw new StreamClaimLostError();
       }
       const released = await txRepo.releaseStreamCursorClaim({ conversationId, streamKey, claimToken });
-      if (lastSlice && !released) throw new StreamClaimLostError();
+      if (advanceTo !== null && !released) throw new StreamClaimLostError();
 
       return { slicesCreated, messagesProcessed: messages.length };
     });
