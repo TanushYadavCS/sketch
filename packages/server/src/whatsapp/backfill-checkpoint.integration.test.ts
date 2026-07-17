@@ -30,6 +30,7 @@ function createMockRuntime(): WhatsAppRuntime & HistoryHarness {
 
   return {
     isConnected: true,
+    shouldHandleInboundMessage: () => true,
     onMessage: vi.fn(),
     onHistoryMessages: vi.fn((handler) => {
       historyHandler = handler as typeof historyHandler;

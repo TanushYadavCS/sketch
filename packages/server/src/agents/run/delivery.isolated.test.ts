@@ -14,7 +14,7 @@ import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-gr
 import type { DB } from "../../db/schema";
 import type { QueueManager } from "../../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../../test-utils";
-import type { WhatsAppBot } from "../../whatsapp/bot";
+import type { NormalizedGroupMetadata } from "../../whatsapp/facade-contract";
 import { CONVERSATION_SUMMARY_AGENT_KEY, conversationSummaryDefinition } from "../definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "../definitions/daily-brief";
 import type { AgentOutputDeliveryPublisher } from "../output-delivery";
@@ -198,14 +198,14 @@ describe("AgentRunService", () => {
       description: null,
       updated_at: "2026-06-27T00:00:00.000Z",
     });
-    const getGroupMetadata = vi.fn(
+    const groupMetadata = vi.fn(
       async () =>
         ({
           subject: "Leadership",
-          participants: [{ id: "15551234567@s.whatsapp.net" }],
-        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+          participants: [{ jid: "15551234567@s.whatsapp.net" }],
+        }) as NormalizedGroupMetadata,
     );
-    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+    const service = createService(db, [], { getWhatsApp: () => ({ groupMetadata }) });
 
     await expect(
       service.resolveDeliveryConfigForUser(user.id, {
@@ -217,7 +217,7 @@ describe("AgentRunService", () => {
       }),
     ).rejects.toThrow("WhatsApp group");
 
-    expect(getGroupMetadata).not.toHaveBeenCalled();
+    expect(groupMetadata).not.toHaveBeenCalled();
 
     await expect(
       service.resolveDeliveryConfigForUser(user.id, {
@@ -234,7 +234,7 @@ describe("AgentRunService", () => {
       targetId: "120363000000001@g.us",
       label: "Leadership",
     });
-    expect(getGroupMetadata).toHaveBeenCalledWith("120363000000001@g.us");
+    expect(groupMetadata).toHaveBeenCalledWith("120363000000001@g.us", { refresh: false });
   });
 
   it("resolves WhatsApp group delivery when the current user's participant JID is a LID", async () => {
@@ -251,15 +251,17 @@ describe("AgentRunService", () => {
       description: null,
       updated_at: "2026-06-27T00:00:00.000Z",
     });
-    const getGroupMetadata = vi.fn(
+    const groupMetadata = vi.fn(
       async () =>
         ({
           subject: "Leadership",
-          participants: [{ id: "86702773280883@lid" }],
-        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+          participants: [{ jid: "86702773280883@lid" }],
+        }) as NormalizedGroupMetadata,
     );
-    const resolveJidToPhone = vi.fn(async (jid: string) => (jid === "86702773280883@lid" ? "+15551234567" : null));
-    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata, resolveJidToPhone }) });
+    const resolveLid = vi.fn(async (jid: string) =>
+      jid === "86702773280883@lid" ? "15551234567@s.whatsapp.net" : null,
+    );
+    const service = createService(db, [], { getWhatsApp: () => ({ groupMetadata, resolveLid }) });
 
     await expect(
       service.resolveDeliveryConfigForUser(user.id, {
@@ -276,7 +278,7 @@ describe("AgentRunService", () => {
       targetId: "120363000000001@g.us",
       label: "Leadership",
     });
-    expect(resolveJidToPhone).toHaveBeenCalledWith("86702773280883@lid");
+    expect(resolveLid).toHaveBeenCalledWith("86702773280883@lid");
   });
 
   it("resolves WhatsApp delivery mentions to known group participants", async () => {
@@ -294,14 +296,14 @@ describe("AgentRunService", () => {
       description: null,
       updated_at: "2026-06-27T00:00:00.000Z",
     });
-    const getGroupMetadata = vi.fn(
+    const groupMetadata = vi.fn(
       async () =>
         ({
           subject: "Leadership",
-          participants: [{ id: "15551234567@s.whatsapp.net" }, { id: "15557654321@s.whatsapp.net" }],
-        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+          participants: [{ jid: "15551234567@s.whatsapp.net" }, { jid: "15557654321@s.whatsapp.net" }],
+        }) as NormalizedGroupMetadata,
     );
-    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+    const service = createService(db, [], { getWhatsApp: () => ({ groupMetadata }) });
 
     await expect(
       service.resolveDeliveryConfigForUser(user.id, {

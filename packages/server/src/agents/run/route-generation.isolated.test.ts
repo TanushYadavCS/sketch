@@ -220,7 +220,7 @@ describe("AgentRunService", () => {
     });
     const service = createService(db, tasks, {
       runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
-      getWhatsApp: () => ({ getGroupMetadata: vi.fn() }),
+      getWhatsApp: () => ({ groupMetadata: vi.fn() }),
     });
     await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
       enabled: true,

@@ -18,7 +18,7 @@ import type { IntegrationProvider } from "../../integrations/types";
 import type { Logger } from "../../logger";
 import type { QueueManager } from "../../queue";
 import type { SlackBot } from "../../slack/bot";
-import type { WhatsAppBot } from "../../whatsapp/bot";
+import type { WhatsAppSocketFacade } from "../../whatsapp/facade-contract";
 import type { AgentOutputDeliveryPublisher } from "../output-delivery";
 import type { AgentApiItem, AgentDefinition, AgentSourceConfigDef } from "../types";
 
@@ -48,8 +48,8 @@ export interface AgentRunServiceDeps {
   outputDelivery?: AgentOutputDeliveryPublisher;
   getSlack?: () => Pick<SlackBot, "isUserInChannel" | "listChannels"> | null;
   getWhatsApp?: () =>
-    | (Pick<WhatsAppBot, "getGroupMetadata"> & {
-        resolveJidToPhone?: (jid: string) => Promise<string | null>;
+    | (Pick<WhatsAppSocketFacade, "groupMetadata"> & {
+        resolveLid?: (jid: string) => Promise<string | null>;
       })
     | null;
 }

@@ -32,6 +32,8 @@ describe("configSchema", () => {
         expect(result.data.SLACK_THREAD_HISTORY_LIMIT).toBe(50);
         expect(result.data.WHATSAPP_DM_PROVIDER).toBe("baileys");
         expect(result.data.WHATSAPP_GROUP_PROVIDER).toBe("baileys");
+        expect(result.data.WHATSAPP_RUNTIME_MODE).toBe("inprocess");
+        expect(result.data.WHATSAPP_GATEWAY_PORT).toBe(3901);
         expect(result.data.WHATSAPP_HISTORY_LOOKBACK_DAYS).toBe(30);
         expect(result.data.WHATSAPP_SLICE_GAP_MINUTES).toBe(25);
         expect(result.data.WHATSAPP_SLICE_MAX_AGE_MINUTES).toBe(120);
@@ -72,6 +74,15 @@ describe("configSchema", () => {
         expect(result.data.WATI_ACCESS_TOKEN).toBe("access-token");
         expect(result.data.WATI_WEBHOOK_TOKEN).toBe("webhook-token");
         expect(result.data.WATI_CHANNEL_PHONE_NUMBER).toBe("+15551234567");
+      }
+    });
+
+    it("parses WhatsApp gateway runtime configuration", () => {
+      const result = configSchema.safeParse({ WHATSAPP_RUNTIME_MODE: "gateway", WHATSAPP_GATEWAY_PORT: "4901" });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.WHATSAPP_RUNTIME_MODE).toBe("gateway");
+        expect(result.data.WHATSAPP_GATEWAY_PORT).toBe(4901);
       }
     });
 

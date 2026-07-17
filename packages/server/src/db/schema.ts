@@ -480,6 +480,7 @@ export interface ConversationMessagesTable {
   id: Generated<number>;
   conversation_id: number;
   provider_message_id: string;
+  event_key: string | null;
   sender_jid: Generated<string>;
   sender_name: string;
   sender_user_id: string | null;
@@ -493,6 +494,45 @@ export interface ConversationMessagesTable {
   provider_timestamp: string | null;
   received_at: string;
   created_at: Generated<string>;
+}
+
+export interface WhatsAppInboundEventsTable {
+  id: Generated<number>;
+  kind: string;
+  origin: string;
+  event_key: string | null;
+  provider_message_id: string | null;
+  batch_id: string | null;
+  chunk_index: number | null;
+  chunk_count: number | null;
+  envelope: string;
+  received_at: Generated<string>;
+  attempts: Generated<number>;
+  status: Generated<string>;
+  claim_token: string | null;
+  claimed_at: string | null;
+  next_attempt_at: Generated<string>;
+  consumed_at: string | null;
+  last_error: string | null;
+  created_at: Generated<string>;
+}
+
+export interface WhatsAppSessionLeaseTable {
+  id: string;
+  owner_kind: string;
+  owner_token: string;
+  generation: number;
+  gateway_http_token: string | null;
+  host_id: string;
+  boot_id: string;
+  pid: number;
+  pid_start_time: string;
+  script_hash: string;
+  contract_version: string;
+  heartbeat_at: Generated<string>;
+  acquired_at: Generated<string>;
+  last_live_at: string | null;
+  disconnected_at: string | null;
 }
 
 export interface ConversationSlicesTable {
@@ -1127,6 +1167,8 @@ export interface DB {
   channels: ChannelsTable;
   whatsapp_creds: WhatsAppCredsTable;
   whatsapp_keys: WhatsAppKeysTable;
+  whatsapp_inbound_events: WhatsAppInboundEventsTable;
+  whatsapp_session_lease: WhatsAppSessionLeaseTable;
   whatsapp_groups: WhatsAppGroupsTable;
   settings: SettingsTable;
   connector_configs: ConnectorConfigsTable;

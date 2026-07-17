@@ -5,7 +5,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { NormalizedGroupMetadata } from "../whatsapp/facade-contract";
 import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
 import { agentRoutes } from "./routes";
@@ -728,12 +728,12 @@ describe("agentRoutes", () => {
         description: null,
         updated_at: "2026-06-27T00:00:00.000Z",
       });
-      const getGroupMetadata = vi.fn(
+      const groupMetadata = vi.fn(
         async () =>
           ({
             subject: "Leads",
-            participants: [{ id: "15550000000@s.whatsapp.net" }],
-          }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+            participants: [{ jid: "15550000000@s.whatsapp.net" }],
+          }) as NormalizedGroupMetadata,
       );
       const service = new AgentRunService({
         db,
@@ -747,7 +747,7 @@ describe("agentRoutes", () => {
         runScheduledAgent: vi.fn(async () => {
           throw new Error("runScheduledAgent should not be called");
         }) as unknown as AgentRunServiceDeps["runScheduledAgent"],
-        getWhatsApp: () => ({ getGroupMetadata }),
+        getWhatsApp: () => ({ groupMetadata }),
       });
       const app = createRoutesTestApp(service, user.id, user.email ?? undefined);
 

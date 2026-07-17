@@ -9,18 +9,19 @@
  */
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 import { denyIfNotAdmin } from "./auth-helpers";
 
-export function whatsappRoutes(whatsapp: WhatsAppBot) {
+export function whatsappRoutes(whatsapp: WhatsAppSocketFacade) {
   const routes = new Hono();
   let pairingInProgress = false;
   let pairingSettled: Promise<void> | null = null;
 
-  routes.get("/", (c) => {
+  routes.get("/", async (c) => {
+    const status = await whatsapp.pairing.status();
     return c.json({
-      connected: whatsapp.isConnected,
-      phoneNumber: whatsapp.phoneNumber,
+      connected: status.connected,
+      phoneNumber: status.phoneNumber,
     });
   });
 
@@ -28,7 +29,7 @@ export function whatsappRoutes(whatsapp: WhatsAppBot) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
 
-    if (whatsapp.isConnected) {
+    if ((await whatsapp.pairing.status()).connected) {
       return c.json({ error: { code: "ALREADY_CONNECTED", message: "WhatsApp is already connected" } }, 400);
     }
     if (pairingInProgress) {
@@ -38,16 +39,14 @@ export function whatsappRoutes(whatsapp: WhatsAppBot) {
 
     return streamSSE(c, async (stream) => {
       try {
-        pairingSettled = whatsapp.startPairing({
-          onQr: async (qr) => {
-            await stream.writeSSE({ event: "qr", data: JSON.stringify({ qr }) });
-          },
-          onConnected: async (phoneNumber) => {
-            await stream.writeSSE({ event: "connected", data: JSON.stringify({ phoneNumber }) });
-          },
-          onError: async (message) => {
-            await stream.writeSSE({ event: "error", data: JSON.stringify({ message }) });
-          },
+        pairingSettled = whatsapp.pairing.startQr(async (event) => {
+          if (event.type === "qr") {
+            await stream.writeSSE({ event: "qr", data: JSON.stringify({ qr: event.qr }) });
+          } else if (event.type === "connected") {
+            await stream.writeSSE({ event: "connected", data: JSON.stringify({ phoneNumber: event.phoneNumber }) });
+          } else {
+            await stream.writeSSE({ event: "error", data: JSON.stringify({ message: event.message }) });
+          }
         });
         await pairingSettled;
       } finally {
@@ -64,7 +63,7 @@ export function whatsappRoutes(whatsapp: WhatsAppBot) {
     if (!pairingInProgress) {
       return c.json({ error: { code: "NO_PAIRING", message: "No pairing in progress" } }, 400);
     }
-    whatsapp.cancelPairing();
+    await whatsapp.pairing.cancel();
     if (pairingSettled) await pairingSettled;
     return c.json({ success: true });
   });
@@ -73,10 +72,10 @@ export function whatsappRoutes(whatsapp: WhatsAppBot) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
 
-    if (!whatsapp.isConnected) {
+    if (!(await whatsapp.pairing.status()).connected) {
       return c.json({ error: { code: "NOT_CONNECTED", message: "WhatsApp is not connected" } }, 400);
     }
-    await whatsapp.disconnect();
+    await whatsapp.pairing.logout();
     return c.json({ success: true });
   });
 

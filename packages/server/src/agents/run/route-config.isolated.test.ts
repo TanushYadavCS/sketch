@@ -14,7 +14,7 @@ import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-gr
 import type { DB } from "../../db/schema";
 import type { QueueManager } from "../../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../../test-utils";
-import type { WhatsAppBot } from "../../whatsapp/bot";
+import type { NormalizedGroupMetadata } from "../../whatsapp/facade-contract";
 import { CONVERSATION_SUMMARY_AGENT_KEY, conversationSummaryDefinition } from "../definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "../definitions/daily-brief";
 import type { AgentOutputDeliveryPublisher } from "../output-delivery";
@@ -368,14 +368,14 @@ describe("AgentRunService", () => {
       description: null,
       updated_at: "2026-06-27T00:00:00.000Z",
     });
-    const getGroupMetadata = vi.fn(
+    const groupMetadata = vi.fn(
       async () =>
         ({
           subject: "Leadership",
-          participants: [{ id: "15557654321@s.whatsapp.net" }],
-        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+          participants: [{ jid: "15557654321@s.whatsapp.net" }],
+        }) as NormalizedGroupMetadata,
     );
-    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+    const service = createService(db, [], { getWhatsApp: () => ({ groupMetadata }) });
 
     await expect(
       service.resolveDeliveryConfigForUser(user.id, {

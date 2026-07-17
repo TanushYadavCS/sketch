@@ -1,3 +1,4 @@
+import { join } from "node:path";
 /**
  * Server bootstrap — wires config, DB, repos, platform adapters, and HTTP into a
  * running server. Extracted from index.ts so the full stack can be instantiated
@@ -35,6 +36,7 @@ import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
+import { createWhatsAppInboundEventsRepository } from "./db/repositories/whatsapp-inbound-events";
 import { createWhatsAppProviderEventRepository } from "./db/repositories/whatsapp-provider-events";
 import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
 import type { DB } from "./db/schema";
@@ -59,12 +61,19 @@ import { type ProviderContext, createWorkflowStepRecorder, instrumentAgentRun } 
 import { initTelemetry } from "./telemetry/setup";
 import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
+import { createDbAuthState } from "./whatsapp/auth-store";
 import { WhatsAppBot } from "./whatsapp/bot";
+import type { WhatsAppSocketFacade } from "./whatsapp/facade-contract";
+import { GatewayClientFacade } from "./whatsapp/gateway-client-facade";
+import { InProcessWhatsAppLease, WhatsAppGatewaySupervisor } from "./whatsapp/gateway/supervisor";
+import { InProcessSocketFacade } from "./whatsapp/in-process-socket-facade";
+import { WhatsAppInboundConsumer } from "./whatsapp/inbound-consumer";
 import { WORKFLOW_OUTPUT_INBOX_KIND, deliverProactiveDm } from "./whatsapp/proactive-delivery";
 import { whatsappDeliveryTargetFromTarget } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
 import { WHATSAPP_MANAGED_PROVIDER_ID, createManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
+import { startWhatsAppInboundRetention } from "./whatsapp/retention";
 import { createWhatsAppRuntime } from "./whatsapp/runtime";
 import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
 import { startWhatsAppWindowKeepAliveJob } from "./whatsapp/window-keepalive";
@@ -73,7 +82,7 @@ export interface ServerHandle {
   config: Config;
   server: ReturnType<typeof serve>;
   db: Kysely<DB>;
-  whatsapp: WhatsAppBot;
+  whatsapp: WhatsAppSocketFacade;
   whatsappRuntime: ReturnType<typeof createWhatsAppRuntime>;
   getSlack: () => SlackBot | null;
   shutdown: () => Promise<void>;
@@ -275,8 +284,86 @@ export async function createServer(config: Config, options?: CreateServerOptions
   let slack: SlackBot | null = null;
 
   // 8. WhatsApp
-  const whatsapp = new WhatsAppBot({ db, logger, groupMetadataStore: whatsappGroupsRepo });
-  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, logger);
+  const usesBaileys = config.WHATSAPP_DM_PROVIDER === "baileys" || config.WHATSAPP_GROUP_PROVIDER === "baileys";
+  let whatsappSupervisor: WhatsAppGatewaySupervisor | null = null;
+  let inProcessWhatsAppLease: InProcessWhatsAppLease | null = null;
+  let whatsappBot: WhatsAppBot | null = null;
+  let whatsapp: WhatsAppSocketFacade;
+  if (config.WHATSAPP_RUNTIME_MODE === "gateway" && usesBaileys) {
+    whatsappSupervisor = new WhatsAppGatewaySupervisor({ db, config, logger });
+    /**
+     * Keeps one application facade stable across gateway child exits and reads
+     * status from the live supervisor client after startup or pairing.
+     */
+    const createGatewayFacade = async (): Promise<GatewayClientFacade> => {
+      const lease = await db
+        .selectFrom("whatsapp_session_lease")
+        .select("gateway_http_token")
+        .where("id", "=", "default")
+        .executeTakeFirst();
+      return new GatewayClientFacade({
+        baseUrl: `http://127.0.0.1:${config.WHATSAPP_GATEWAY_PORT}`,
+        token: lease?.gateway_http_token ?? "gateway-not-started",
+        logger,
+        beforePairingStart: () => whatsappSupervisor?.ensurePairingReady().then(() => undefined) ?? Promise.resolve(),
+        pairingStatus: async () =>
+          whatsappSupervisor?.facade?.pairing.status() ?? { connected: false, phoneNumber: null },
+      });
+    };
+    if (connect) await whatsappSupervisor.start();
+    whatsapp = await createGatewayFacade();
+  } else {
+    inProcessWhatsAppLease = new InProcessWhatsAppLease({
+      db,
+      config,
+      logger,
+      onOwnershipLost: async () => {
+        await whatsappBot?.stop();
+      },
+    });
+    whatsappBot = new WhatsAppBot({
+      db,
+      logger,
+      groupMetadataStore: whatsappGroupsRepo,
+      beforeSocketOpen: usesBaileys
+        ? async () => {
+            await inProcessWhatsAppLease?.acquire();
+            await inProcessWhatsAppLease?.assertOwned();
+          }
+        : undefined,
+      authStateFactory: usesBaileys
+        ? () =>
+            createDbAuthState(db, logger, {
+              withWriteFence: (callback) => {
+                if (!inProcessWhatsAppLease) throw new Error("In-process WhatsApp lease is unavailable");
+                return inProcessWhatsAppLease.withLeaseFence(callback);
+              },
+            })
+        : undefined,
+      onLoggedOut: usesBaileys
+        ? async () => {
+            await inProcessWhatsAppLease?.resetHistoryGeneration();
+          }
+        : undefined,
+    });
+    whatsapp = new InProcessSocketFacade(
+      whatsappBot,
+      logger,
+      usesBaileys
+        ? async () => {
+            await inProcessWhatsAppLease?.resetHistoryGeneration();
+          }
+        : undefined,
+    );
+  }
+  const gatewayInboundSource = {
+    get isConnected() {
+      return whatsappSupervisor?.isConnected ?? false;
+    },
+    onMessage() {},
+    onHistoryMessages() {},
+  };
+  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, whatsappBot ?? gatewayInboundSource, logger);
   const watiWhatsApp =
     config.WHATSAPP_DM_PROVIDER === WHATSAPP_WATI_PROVIDER_ID
       ? createWatiWhatsAppProvider({
@@ -558,7 +645,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     createBot: (tokens) => createConfiguredSlackBot(tokens, slackAdapterDeps),
   });
 
-  wireWhatsAppHandlers(whatsappRuntime, {
+  const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, {
     db,
     config,
     logger,
@@ -572,6 +659,20 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+  });
+  const whatsappInboundConsumer = new WhatsAppInboundConsumer({
+    db,
+    logger,
+    handlers: whatsappHandlers,
+    shouldHandleInboundMessage: whatsappRuntime.shouldHandleInboundMessage,
+    stagingDir: join(config.DATA_DIR, "wa-staging"),
+  });
+  await createWhatsAppInboundEventsRepository(db).resetDispatched();
+  whatsappInboundConsumer.start();
+  const whatsappInboundRetention = startWhatsAppInboundRetention({
+    db,
+    logger,
+    stagingDir: join(config.DATA_DIR, "wa-staging"),
   });
 
   // 9. HTTP server
@@ -608,12 +709,22 @@ export async function createServer(config: Config, options?: CreateServerOptions
       logger.info("SMTP configuration updated");
     },
     logger,
+    getWhatsAppHealth: () => ({ missingProviderIdEvents: whatsappInboundConsumer.missingProviderIdEvents }),
     localDeviceGateway,
     localClaudeSessionService,
     agentRunService,
     limitAgentExecution,
+    ...(whatsapp instanceof GatewayClientFacade
+      ? {
+          whatsappWakeToken: whatsapp.gatewayToken,
+          onWhatsAppWake: () => whatsappInboundConsumer.wake(),
+          onWhatsAppSocketStateChange: (change: Parameters<WhatsAppGatewaySupervisor["handleSocketStateChange"]>[0]) =>
+            whatsappSupervisor?.handleSocketStateChange(change),
+        }
+      : {}),
   });
   const server = serve({ fetch: app.fetch, port: config.PORT });
+  await whatsappSupervisor?.refreshHealth();
   localDeviceGateway.attach(server);
   logger.info({ port: config.PORT }, "HTTP server started");
 
@@ -621,7 +732,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   if (connect) {
     await startSlackBotIfConfigured().catch(() => {});
 
-    const whatsappConnected = await whatsapp.start();
+    const whatsappConnected = whatsappBot ? await whatsappBot.start() : (await whatsapp.pairing.status()).connected;
     if (whatsappConnected) {
       logger.info("WhatsApp connected");
     } else {
@@ -636,6 +747,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 11. Shutdown handle
   async function shutdown() {
     logger.info("Shutting down...");
+    await whatsappInboundConsumer.stop();
+    whatsappInboundRetention.stop();
     normalizationBackfill.stop();
     await telemetry.shutdown();
     await syncScheduler.stop();
@@ -643,7 +756,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
     agentScheduler.stop();
     scheduler.stop();
     if (slack) await slack.stop();
-    await whatsapp.stop();
+    if (whatsappSupervisor) {
+      await whatsappSupervisor.shutdown();
+    } else {
+      await whatsapp.shutdown();
+      await inProcessWhatsAppLease?.release();
+    }
     server.close();
     await db.destroy();
   }

@@ -2,8 +2,10 @@
  * HTTP app factory — API routes, auth middleware, static file serving.
  * Route registration order: API routes → static assets → SPA catch-all.
  */
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { HttpBindings } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { type Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -80,7 +82,11 @@ import { mountPublicMcpServer } from "./mcp/server/transport";
 import type { QueueManager } from "./queue";
 import type { TaskScheduler } from "./scheduler/service";
 import type { SlackBot } from "./slack/bot";
-import type { WhatsAppBot } from "./whatsapp/bot";
+import {
+  type WhatsAppSocketFacade,
+  type WhatsAppSocketStateChange,
+  whatsAppSocketStateChangeSchema,
+} from "./whatsapp/facade-contract";
 import { phoneE164ToWhatsAppJid } from "./whatsapp/provider";
 import type { ManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import type { WatiWhatsAppProvider } from "./whatsapp/providers/wati";
@@ -89,7 +95,7 @@ import { buildMagicLinkTemplate } from "./whatsapp/templates";
 import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
 
 interface AppDeps {
-  whatsapp?: WhatsAppBot;
+  whatsapp?: WhatsAppSocketFacade;
   whatsappRuntime?: WhatsAppRuntime;
   watiWebhook?: WatiWhatsAppProvider;
   managedWhatsapp?: ManagedWhatsAppProvider;
@@ -126,6 +132,10 @@ interface AppDeps {
   localClaudeSessionService?: LocalClaudeSessionService;
   agentRunService?: AgentRunService;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
+  whatsappWakeToken?: string;
+  onWhatsAppWake?: () => Promise<void> | void;
+  onWhatsAppSocketStateChange?: (change: WhatsAppSocketStateChange) => Promise<void> | void;
+  getWhatsAppHealth?: () => { missingProviderIdEvents: number };
 }
 
 /**
@@ -147,6 +157,26 @@ interface AppDeps {
 function resolveBodyLimitBytes(config: Config): number {
   const maxUploadMb = Math.max(config.MAX_FILE_SIZE_MB, config.MAX_UPLOAD_SIZE_MB);
   return Math.ceil(maxUploadMb * 1.1 * 1024 * 1024);
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function authorizeWhatsAppGateway(context: Context, token: string): Response | null {
+  const remoteAddress = (context.env as Partial<HttpBindings> | undefined)?.incoming?.socket.remoteAddress;
+  const requestHost = new URL(context.req.url).hostname;
+  const loopback = remoteAddress
+    ? isLoopbackAddress(remoteAddress)
+    : requestHost === "localhost" || isLoopbackAddress(requestHost);
+  if (!loopback) return context.json({ error: "loopback_only" }, 403);
+  const header = context.req.header("authorization");
+  const actual = Buffer.from(header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : "");
+  const expected = Buffer.from(token);
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    return context.json({ error: "unauthorized" }, 401);
+  }
+  return null;
 }
 
 export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
@@ -195,6 +225,29 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           sendDm: deps.sendDm,
         })
       : null;
+
+  if (deps?.whatsappWakeToken && deps.onWhatsAppWake) {
+    const whatsappWakeToken = deps.whatsappWakeToken;
+    const onWhatsAppWake = deps.onWhatsAppWake;
+    app.post("/internal/whatsapp/wake", async (context) => {
+      const rejected = authorizeWhatsAppGateway(context, whatsappWakeToken);
+      if (rejected) return rejected;
+      await onWhatsAppWake();
+      return context.body(null, 204);
+    });
+  }
+
+  if (deps?.whatsappWakeToken && deps.onWhatsAppSocketStateChange) {
+    const whatsappWakeToken = deps.whatsappWakeToken;
+    const onWhatsAppSocketStateChange = deps.onWhatsAppSocketStateChange;
+    app.post("/internal/whatsapp/socket-state", async (context) => {
+      const rejected = authorizeWhatsAppGateway(context, whatsappWakeToken);
+      if (rejected) return rejected;
+      const change = whatsAppSocketStateChangeSchema.parse(await context.req.json());
+      await onWhatsAppSocketStateChange(change);
+      return context.body(null, 204);
+    });
+  }
 
   app.route(
     "/",
@@ -344,7 +397,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       try {
         const jid = phoneE164ToWhatsAppJid(user.whatsapp_number);
         const text = `Here's your sign-in link for ${botName}:\n${magicLinkUrl}\n\nThis link expires in 15 minutes and can only be used once.`;
-        await deps.whatsapp.sendText(jid, text);
+        await deps.whatsapp.send(jid, { kind: "text", text }, { idempotencyKey: randomUUID() });
         channels.push("whatsapp");
       } catch (err) {
         logger.warn({ err }, "Failed to send magic link via WhatsApp");
@@ -355,7 +408,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   };
 
   // API routes
-  app.route("/api/health", healthRoutes(db));
+  app.route("/api/health", healthRoutes(db, deps?.getWhatsAppHealth));
   app.route("/api/auth", authRoutes(settings, db, { config, logger, userRepo: users, sendMagicLink }));
   app.route(
     "/api/setup",
@@ -364,7 +417,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       onSlackTokensUpdated: deps?.onSlackTokensUpdated,
       onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
       userRepo: users,
-      whatsappConnected: () => Boolean(deps?.whatsappRuntime?.isConnected || deps?.whatsapp?.isConnected),
+      whatsappConnected: async () =>
+        Boolean(deps?.whatsappRuntime?.isConnected || (await deps?.whatsapp?.pairing.status())?.connected),
     }),
   );
   app.route("/api/settings", settingsRoutes(settings, db, deps?.logger, config));
@@ -563,15 +617,14 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         sendDm: deps?.sendDm,
         managedWhatsappInbound: deps?.managedWhatsapp,
         whatsappStatus: whatsapp
-          ? () => ({
-              connected: whatsapp.isConnected,
-              phoneNumber: whatsapp.phoneNumber,
+          ? async () => ({
+              ...(await whatsapp.pairing.status()),
               pairingInProgress,
             })
           : undefined,
         startWhatsAppPairing: whatsapp
-          ? (c: Context) => {
-              if (whatsapp.isConnected) {
+          ? async (c: Context) => {
+              if ((await whatsapp.pairing.status()).connected) {
                 return c.json({ error: { code: "ALREADY_CONNECTED", message: "WhatsApp is already connected" } }, 400);
               }
               if (pairingInProgress) {
@@ -584,16 +637,17 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
 
               return streamSSE(c, async (stream) => {
                 try {
-                  pairingSettled = whatsapp.startPairing({
-                    onQr: async (qr) => {
-                      await stream.writeSSE({ event: "qr", data: JSON.stringify({ qr }) });
-                    },
-                    onConnected: async (phoneNumber) => {
-                      await stream.writeSSE({ event: "connected", data: JSON.stringify({ phoneNumber }) });
-                    },
-                    onError: async (message) => {
-                      await stream.writeSSE({ event: "error", data: JSON.stringify({ message }) });
-                    },
+                  pairingSettled = whatsapp.pairing.startQr(async (event) => {
+                    if (event.type === "qr") {
+                      await stream.writeSSE({ event: "qr", data: JSON.stringify({ qr: event.qr }) });
+                    } else if (event.type === "connected") {
+                      await stream.writeSSE({
+                        event: "connected",
+                        data: JSON.stringify({ phoneNumber: event.phoneNumber }),
+                      });
+                    } else {
+                      await stream.writeSSE({ event: "error", data: JSON.stringify({ message: event.message }) });
+                    }
                   });
                   await pairingSettled;
                 } finally {
@@ -604,11 +658,11 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
             }
           : undefined,
         cancelWhatsAppPairing: whatsapp
-          ? () => {
-              whatsapp.cancelPairing();
+          ? async () => {
+              await whatsapp.pairing.cancel();
             }
           : undefined,
-        disconnectWhatsApp: whatsapp ? () => whatsapp.disconnect() : undefined,
+        disconnectWhatsApp: whatsapp ? () => whatsapp.pairing.logout() : undefined,
       }),
     );
   }

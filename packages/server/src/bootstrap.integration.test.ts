@@ -63,11 +63,11 @@ describe("bootstrap", () => {
     vi.clearAllMocks();
   });
 
-  async function boot(configOverrides: Record<string, unknown> = {}) {
+  async function boot(configOverrides: Record<string, unknown> = {}, connect = false) {
     // Lazy import so vi.mock hoisting takes effect
     const { createServer } = await import("./bootstrap");
     const config = createTestConfig({ PORT: 0, LOG_LEVEL: "error", ...configOverrides });
-    handle = await createServer(config, { connect: false });
+    handle = await createServer(config, { connect });
     return handle;
   }
 
@@ -119,6 +119,18 @@ describe("bootstrap", () => {
     const body = await res.json();
     expect(body.status).toBe("ok");
     expect(body.db).toBe("ok");
+    expect(body.whatsapp).toEqual({ missingProviderIdEvents: 0 });
+  });
+
+  it("starts in gateway mode when the initial gateway requires pairing", { timeout: 15_000 }, async () => {
+    const { WhatsAppGatewaySupervisor } = await import("./whatsapp/gateway/supervisor");
+    vi.spyOn(WhatsAppGatewaySupervisor.prototype, "start").mockResolvedValue(null);
+
+    const h = await boot({ WHATSAPP_RUNTIME_MODE: "gateway" }, true);
+
+    await expect(h.whatsapp.pairing.status()).resolves.toEqual({ connected: false, phoneNumber: null });
+    const res = await request("/api/health");
+    expect(res.status).toBe(200);
   });
 
   it("sends explicit WhatsApp magic-link templates without proactive parking", async () => {

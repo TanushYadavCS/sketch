@@ -14,7 +14,7 @@ import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-gr
 import type { DB } from "../../db/schema";
 import type { QueueManager } from "../../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../../test-utils";
-import type { WhatsAppBot } from "../../whatsapp/bot";
+import type { NormalizedGroupMetadata } from "../../whatsapp/facade-contract";
 import { CONVERSATION_SUMMARY_AGENT_KEY, conversationSummaryDefinition } from "../definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "../definitions/daily-brief";
 import type { AgentOutputDeliveryPublisher } from "../output-delivery";
@@ -356,14 +356,14 @@ describe("AgentRunService", () => {
       description: null,
       updated_at: "2026-06-27T00:00:00.000Z",
     });
-    const getGroupMetadata = vi.fn(
+    const groupMetadata = vi.fn(
       async () =>
         ({
           subject: "Leadership",
-          participants: [{ id: "86702773280883@lid" }],
-        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+          participants: [{ jid: "86702773280883@lid" }],
+        }) as NormalizedGroupMetadata,
     );
-    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+    const service = createService(db, [], { getWhatsApp: () => ({ groupMetadata }) });
 
     const updated = await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
       sources: [source],
@@ -377,29 +377,29 @@ describe("AgentRunService", () => {
         label: "Leadership",
       },
     ]);
-    expect(getGroupMetadata).not.toHaveBeenCalled();
+    expect(groupMetadata).not.toHaveBeenCalled();
   });
 
   it("rejects WhatsApp group sources that are not known to the bot", async () => {
     const users = createUserRepository(db);
     const user = await users.create({ name: "Agent User", email: "user@example.com" });
-    const getGroupMetadata = vi.fn(
+    const groupMetadata = vi.fn(
       async () =>
         ({
           id: "120363000000404@g.us",
           owner: "15550000000@s.whatsapp.net",
           subject: "Unknown",
           participants: [],
-        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+        }) as NormalizedGroupMetadata,
     );
-    const service = createService(db, [], { getWhatsApp: () => ({ getGroupMetadata }) });
+    const service = createService(db, [], { getWhatsApp: () => ({ groupMetadata }) });
 
     await expect(
       service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
         sources: [whatsappSource("120363000000404@g.us", "Unknown")],
       }),
     ).rejects.toThrow("WhatsApp group is not available as a source");
-    expect(getGroupMetadata).not.toHaveBeenCalled();
+    expect(groupMetadata).not.toHaveBeenCalled();
   });
 
   it("keeps Slack source validation strict to current-user channel membership", async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import type { Kysely } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
@@ -19,7 +20,7 @@ import { providerTimestampFromSlackTs } from "../scheduler/delivery-capture";
 import type { TaskScheduler } from "../scheduler/service";
 import type { SlackBot } from "../slack/bot";
 import { createSlackMessageHandler } from "../slack/message-handler";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 import { createWhatsAppMessageHandler } from "../whatsapp/message-handler";
 import { type WhatsAppSendResult, whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
@@ -41,7 +42,7 @@ export interface LocalClaudeEventDispatcherDeps {
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   getSlack?: () => SlackBot | null;
-  whatsapp?: WhatsAppBot;
+  whatsapp?: WhatsAppSocketFacade;
   whatsappRuntime?: WhatsAppRuntime;
   sendDm?: RunAgentParams["sendDm"];
 }
@@ -103,12 +104,6 @@ function pendingIntegrationConnectionsFromAgentResult(result: unknown) {
     .pendingIntegrationConnections;
 }
 
-function providerTimestampFromWhatsApp(message: { messageTimestamp?: unknown } | null | undefined): string | null {
-  const seconds = Number(message?.messageTimestamp);
-  if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  return new Date(seconds * 1000).toISOString();
-}
-
 export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatcherDeps) {
   async function captureSlackBotReply(params: {
     conversationId: number;
@@ -134,14 +129,13 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
     }
   }
 
-  async function captureWhatsAppBotReply(params: {
+  async function captureWhatsAppReply(params: {
     conversationId: number;
-    sent: WhatsAppSendResult | Awaited<ReturnType<WhatsAppBot["sendText"]>> | null;
+    sent: WhatsAppSendResult | null;
     text: string;
     botName?: string | null;
   }): Promise<void> {
-    const providerMessageId =
-      params.sent && "providerMessageId" in params.sent ? params.sent.providerMessageId : params.sent?.key?.id;
+    const providerMessageId = params.sent?.providerMessageId;
     if (!providerMessageId) return;
     await deps.conversations.insertMessage({
       conversationId: params.conversationId,
@@ -151,10 +145,7 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
       isBot: true,
       addressedToSketch: false,
       text: params.text,
-      providerTimestamp:
-        params.sent && "providerTimestamp" in params.sent
-          ? params.sent.providerTimestamp
-          : providerTimestampFromWhatsApp(params.sent),
+      providerTimestamp: params.sent?.providerTimestamp ?? null,
     });
   }
 
@@ -197,7 +188,7 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
       const onFinalMessage = createWhatsAppMessageHandler(deps.whatsappRuntime, whatsAppTarget);
       if (finalText) {
         const sent = await onFinalMessage(finalText);
-        if (conversationId) await captureWhatsAppBotReply({ conversationId, sent, text: finalText, botName });
+        if (conversationId) await captureWhatsAppReply({ conversationId, sent, text: finalText, botName });
       }
       for (const filePath of pendingUploads) {
         const ext = filePath.split(".").pop() ?? "";
@@ -206,14 +197,19 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
       return;
     }
 
-    if (!deps.whatsapp?.isConnected) return;
+    const whatsapp = deps.whatsapp;
+    if (!whatsapp || !(await whatsapp.pairing.status()).connected) return;
     if (finalText) {
-      const sent = await deps.whatsapp.sendText(target, finalText);
-      if (conversationId) await captureWhatsAppBotReply({ conversationId, sent, text: finalText, botName });
+      const sent = await whatsapp.send(target, { kind: "text", text: finalText }, { idempotencyKey: randomUUID() });
+      if (conversationId) await captureWhatsAppReply({ conversationId, sent, text: finalText, botName });
     }
     for (const filePath of pendingUploads) {
       const ext = filePath.split(".").pop() ?? "";
-      await deps.whatsapp.sendFile(target, filePath, extensionToMime(ext), basename(filePath));
+      await whatsapp.send(
+        target,
+        { kind: "file", filePath, mimeType: extensionToMime(ext), fileName: basename(filePath) },
+        { idempotencyKey: randomUUID() },
+      );
     }
   }
 

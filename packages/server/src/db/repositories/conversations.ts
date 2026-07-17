@@ -1,4 +1,4 @@
-import { type Insertable, type Kysely, type Selectable, sql } from "kysely";
+import { type Insertable, type Kysely, type Selectable, type Transaction, sql } from "kysely";
 import type { Attachment } from "../../files";
 import { isPg } from "../dialect";
 import type { ConversationCursorsTable, ConversationMessagesTable, ConversationsTable, DB } from "../schema";
@@ -6,6 +6,7 @@ import type { ConversationCursorsTable, ConversationMessagesTable, Conversations
 export type ConversationRow = Selectable<ConversationsTable>;
 export type ConversationCursorRow = Selectable<ConversationCursorsTable>;
 export type ConversationMessageRow = Selectable<ConversationMessagesTable>;
+type ConversationDb = Kysely<DB> | Transaction<DB>;
 
 export interface ConversationRef {
   platform: string;
@@ -16,6 +17,7 @@ export interface ConversationRef {
 export interface ConversationMessageInsert {
   conversationId: number;
   providerMessageId: string;
+  eventKey?: string | null;
   senderJid?: string | null;
   senderName: string;
   senderUserId?: string | null;
@@ -34,6 +36,7 @@ export interface StoredConversationMessage {
   id: number;
   conversationId: number;
   providerMessageId: string;
+  eventKey?: string | null;
   senderJid: string;
   senderName: string;
   senderUserId: string | null;
@@ -98,6 +101,7 @@ function toStored(row: ConversationMessageRow): StoredConversationMessage {
     id: row.id,
     conversationId: row.conversation_id,
     providerMessageId: row.provider_message_id,
+    eventKey: row.event_key,
     senderJid: row.sender_jid,
     senderName: row.sender_name,
     senderUserId: row.sender_user_id,
@@ -114,7 +118,7 @@ function toStored(row: ConversationMessageRow): StoredConversationMessage {
   };
 }
 
-function messageUniqueWhere(db: Kysely<DB>, data: ConversationMessageInsert) {
+function legacyMessageUniqueWhere(db: ConversationDb, data: ConversationMessageInsert) {
   return db
     .selectFrom("conversation_messages")
     .selectAll()
@@ -122,6 +126,18 @@ function messageUniqueWhere(db: Kysely<DB>, data: ConversationMessageInsert) {
     .where("provider_message_id", "=", data.providerMessageId)
     .where("sender_jid", "=", data.senderJid ?? "")
     .where("is_bot", "=", data.isBot ? 1 : 0);
+}
+
+async function findExistingMessage(db: ConversationDb, data: ConversationMessageInsert) {
+  if (data.eventKey) {
+    const byEventKey = await db
+      .selectFrom("conversation_messages")
+      .selectAll()
+      .where("event_key", "=", data.eventKey)
+      .executeTakeFirst();
+    if (byEventKey) return byEventKey;
+  }
+  return legacyMessageUniqueWhere(db, data).executeTakeFirst();
 }
 
 function sanitizePostgresWebsearchQuery(input: string): string {
@@ -150,7 +166,44 @@ function whatsappPhoneSenderCandidates(phoneE164?: string | null): string[] {
   );
 }
 
-export function createConversationRepository(db: Kysely<DB>) {
+export function createConversationRepository(db: ConversationDb) {
+  async function insertMessage(
+    data: ConversationMessageInsert,
+  ): Promise<{ row: StoredConversationMessage; inserted: boolean }> {
+    const existing = await findExistingMessage(db, data);
+    if (existing) return { row: toStored(existing), inserted: false };
+
+    const values: Insertable<ConversationMessagesTable> = {
+      conversation_id: data.conversationId,
+      provider_message_id: data.providerMessageId,
+      event_key: data.eventKey ?? null,
+      sender_jid: data.senderJid ?? "",
+      sender_name: data.senderName,
+      sender_user_id: data.senderUserId ?? null,
+      is_bot: data.isBot ? 1 : 0,
+      addressed_to_sketch: data.addressedToSketch ? 1 : 0,
+      text: data.text ?? "",
+      attachments: data.attachments && data.attachments.length > 0 ? JSON.stringify(data.attachments) : null,
+      provider_thread_id: data.providerThreadId ?? null,
+      provider_parent_message_id: data.providerParentMessageId ?? null,
+      is_thread_reply: data.isThreadReply ? 1 : 0,
+      provider_timestamp: data.providerTimestamp ?? null,
+      received_at: data.receivedAt ?? new Date().toISOString(),
+    };
+
+    try {
+      await db.insertInto("conversation_messages").values(values).execute();
+    } catch {
+      const row = await findExistingMessage(db, data);
+      if (row) return { row: toStored(row), inserted: false };
+      throw new Error("Failed to insert conversation message");
+    }
+
+    const row = await findExistingMessage(db, data);
+    if (!row) throw new Error("Inserted conversation message could not be loaded");
+    return { row: toStored(row), inserted: true };
+  }
+
   async function mergeConversationRows(
     sourceId: number,
     target: ConversationRow,
@@ -171,15 +224,19 @@ export function createConversationRepository(db: Kysely<DB>) {
       return target;
     }
 
-    const sourceMessages = await db
-      .selectFrom("conversation_messages")
-      .select(["id", "provider_message_id", "sender_jid", "is_bot"])
-      .where("conversation_id", "=", source.id)
-      .orderBy("id", "asc")
-      .execute();
-
-    for (const message of sourceMessages) {
-      const duplicate = await db
+    async function findMergeDuplicate(
+      message: Pick<ConversationMessageRow, "id" | "provider_message_id" | "event_key" | "sender_jid" | "is_bot">,
+    ) {
+      if (message.event_key) {
+        const eventDuplicate = await db
+          .selectFrom("conversation_messages")
+          .select("id")
+          .where("event_key", "=", message.event_key)
+          .where("id", "!=", message.id)
+          .executeTakeFirst();
+        if (eventDuplicate) return eventDuplicate;
+      }
+      return db
         .selectFrom("conversation_messages")
         .select("id")
         .where("conversation_id", "=", target.id)
@@ -187,6 +244,17 @@ export function createConversationRepository(db: Kysely<DB>) {
         .where("sender_jid", "=", message.sender_jid)
         .where("is_bot", "=", message.is_bot)
         .executeTakeFirst();
+    }
+
+    const sourceMessages = await db
+      .selectFrom("conversation_messages")
+      .select(["id", "provider_message_id", "event_key", "sender_jid", "is_bot"])
+      .where("conversation_id", "=", source.id)
+      .orderBy("id", "asc")
+      .execute();
+
+    for (const message of sourceMessages) {
+      const duplicate = await findMergeDuplicate(message);
 
       if (duplicate) {
         await db.deleteFrom("conversation_messages").where("id", "=", message.id).execute();
@@ -200,14 +268,7 @@ export function createConversationRepository(db: Kysely<DB>) {
           .where("id", "=", message.id)
           .execute();
       } catch {
-        const conflicting = await db
-          .selectFrom("conversation_messages")
-          .select("id")
-          .where("conversation_id", "=", target.id)
-          .where("provider_message_id", "=", message.provider_message_id)
-          .where("sender_jid", "=", message.sender_jid)
-          .where("is_bot", "=", message.is_bot)
-          .executeTakeFirst();
+        const conflicting = await findMergeDuplicate(message);
         if (!conflicting) throw new Error("Failed to move legacy conversation message");
         await db.deleteFrom("conversation_messages").where("id", "=", message.id).execute();
       }
@@ -428,39 +489,19 @@ export function createConversationRepository(db: Kysely<DB>) {
       return row ? toStored(row) : undefined;
     },
 
-    async insertMessage(
-      data: ConversationMessageInsert,
-    ): Promise<{ row: StoredConversationMessage; inserted: boolean }> {
-      const existing = await messageUniqueWhere(db, data).executeTakeFirst();
-      if (existing) return { row: toStored(existing), inserted: false };
+    async findMessageByEventKey(eventKey: string): Promise<StoredConversationMessage | undefined> {
+      const row = await db
+        .selectFrom("conversation_messages")
+        .selectAll()
+        .where("event_key", "=", eventKey)
+        .executeTakeFirst();
+      return row ? toStored(row) : undefined;
+    },
 
-      const values: Insertable<ConversationMessagesTable> = {
-        conversation_id: data.conversationId,
-        provider_message_id: data.providerMessageId,
-        sender_jid: data.senderJid ?? "",
-        sender_name: data.senderName,
-        sender_user_id: data.senderUserId ?? null,
-        is_bot: data.isBot ? 1 : 0,
-        addressed_to_sketch: data.addressedToSketch ? 1 : 0,
-        text: data.text ?? "",
-        attachments: data.attachments && data.attachments.length > 0 ? JSON.stringify(data.attachments) : null,
-        provider_thread_id: data.providerThreadId ?? null,
-        provider_parent_message_id: data.providerParentMessageId ?? null,
-        is_thread_reply: data.isThreadReply ? 1 : 0,
-        provider_timestamp: data.providerTimestamp ?? null,
-        received_at: data.receivedAt ?? new Date().toISOString(),
-      };
+    insertMessage,
 
-      try {
-        await db.insertInto("conversation_messages").values(values).execute();
-      } catch {
-        const row = await messageUniqueWhere(db, data).executeTakeFirst();
-        if (row) return { row: toStored(row), inserted: false };
-        throw new Error("Failed to insert conversation message");
-      }
-
-      const row = await messageUniqueWhere(db, data).executeTakeFirstOrThrow();
-      return { row: toStored(row), inserted: true };
+    async captureOrGet(data: ConversationMessageInsert): Promise<StoredConversationMessage> {
+      return (await insertMessage(data)).row;
     },
 
     async listMessages(

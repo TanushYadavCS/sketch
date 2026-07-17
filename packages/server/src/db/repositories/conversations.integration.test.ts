@@ -139,6 +139,44 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       expect(botSide.row.id).not.toBe(first.row.id);
     });
 
+    it("deduplicates WhatsApp captures by event key across PN and LID sender forms", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "group",
+        providerConversationId: "group@g.us",
+      });
+      const eventKey = "canonical-event-key";
+      const pn = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "MSG-EVENT",
+        eventKey,
+        senderJid: "15551234567@s.whatsapp.net",
+        senderName: "Alice",
+      });
+      const lid = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "MSG-EVENT",
+        eventKey,
+        senderJid: "987654321@lid",
+        senderName: "Alice",
+      });
+
+      expect(pn.inserted).toBe(true);
+      expect(lid.inserted).toBe(false);
+      expect(lid.row.id).toBe(pn.row.id);
+      await expect(
+        repo.captureOrGet({
+          conversationId: conversation.id,
+          providerMessageId: "MSG-EVENT",
+          eventKey,
+          senderJid: "another-sender@lid",
+          senderName: "Alice",
+        }),
+      ).resolves.toMatchObject({ id: pn.row.id, eventKey });
+      await expect(repo.findMessageByEventKey(eventKey)).resolves.toMatchObject({ id: pn.row.id, eventKey });
+    });
+
     it("finds the latest message by provider message id within a conversation", async () => {
       const repo = createConversationRepository(db);
       const conversation = await repo.getOrCreate({
@@ -487,6 +525,7 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       const legacyMessage = await repo.insertMessage({
         conversationId: legacy.id,
         providerMessageId: "legacy-1",
+        eventKey: "legacy-event-key",
         senderJid: "1234567890",
         senderName: "Alice",
         text: "old context",
@@ -494,6 +533,7 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       await repo.insertMessage({
         conversationId: legacy.id,
         providerMessageId: "duplicate",
+        eventKey: "legacy-duplicate-event-key",
         senderJid: "1234567890",
         senderName: "Alice",
         text: "legacy duplicate",
@@ -541,6 +581,9 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
         "legacy-1",
       ]);
       expect(messages.messages.every((message) => message.conversationId === canonical.id)).toBe(true);
+      expect(messages.messages.find((message) => message.providerMessageId === "legacy-1")?.eventKey).toBe(
+        "legacy-event-key",
+      );
       const cursor = await repo.getCursor({
         conversationId: canonical.id,
         scopeType: "whatsapp_dm",

@@ -14,7 +14,7 @@ import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-gr
 import type { DB } from "../../db/schema";
 import type { QueueManager } from "../../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../../test-utils";
-import type { WhatsAppBot } from "../../whatsapp/bot";
+import type { NormalizedGroupMetadata } from "../../whatsapp/facade-contract";
 import { CONVERSATION_SUMMARY_AGENT_KEY, conversationSummaryDefinition } from "../definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "../definitions/daily-brief";
 import type { AgentOutputDeliveryPublisher } from "../output-delivery";
@@ -178,12 +178,12 @@ describe("AgentRunService", () => {
       description: null,
       updated_at: "2026-06-27T00:00:00.000Z",
     });
-    const getGroupMetadata = vi.fn(
+    const groupMetadata = vi.fn(
       async () =>
         ({
           subject: "Leads",
-          participants: [{ id: "15550000000@s.whatsapp.net" }],
-        }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+          participants: [{ jid: "15550000000@s.whatsapp.net" }],
+        }) as NormalizedGroupMetadata,
     );
     const isUserInChannel = vi.fn(async () => {
       throw new Error("Slack membership should not be checked");
@@ -210,7 +210,7 @@ describe("AgentRunService", () => {
       runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
       outputDelivery,
       getSlack: () => ({ listChannels, isUserInChannel }),
-      getWhatsApp: () => ({ getGroupMetadata }),
+      getWhatsApp: () => ({ groupMetadata }),
     });
 
     await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {

@@ -26,12 +26,23 @@ export function createPostgresPoolConfig(config: Config) {
   };
 }
 
+/**
+ * Single source of truth for Postgres connections shared with the WhatsApp
+ * gateway child, so TLS and tuning can never drift from the app's pool: a
+ * divergence would make the gateway fail to reach the very database the app
+ * is connected to. Callers may cap `max` below the configured
+ * POSTGRES_POOL_MAX for low-concurrency processes.
+ */
+export async function createPgPool(config: Config, options: { max?: number } = {}) {
+  const { Pool } = await import("pg");
+  const poolConfig = createPostgresPoolConfig(config);
+  return new Pool(options.max === undefined ? poolConfig : { ...poolConfig, max: options.max });
+}
+
 export async function createDatabase(config: Config): Promise<Kysely<DB>> {
   if (config.DB_TYPE === "postgres") {
-    const { Pool } = await import("pg");
-    const pool = new Pool(createPostgresPoolConfig(config));
     return new Kysely<DB>({
-      dialect: new PostgresDialect({ pool }),
+      dialect: new PostgresDialect({ pool: await createPgPool(config) }),
     });
   }
 

@@ -13,7 +13,7 @@ import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import type { SlackBot } from "../slack/bot";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 
 const API_KEY = "sk_live_test_key";
 
@@ -564,11 +564,10 @@ describe("agent invoke API", () => {
       .execute();
     const runAgent = vi.fn().mockResolvedValue(makeAgentResult());
     const whatsapp = {
-      isConnected: true,
-      sendText: vi.fn().mockResolvedValue(null),
-      sendFile: vi.fn().mockResolvedValue(undefined),
-      getGroupMetadata: vi.fn().mockResolvedValue({ subject: "Ops" }),
-    } as unknown as WhatsAppBot;
+      pairing: { status: vi.fn().mockResolvedValue({ connected: true, phoneNumber: "+15550001111" }) },
+      send: vi.fn().mockResolvedValue(null),
+      groupMetadata: vi.fn().mockResolvedValue({ subject: "Ops" }),
+    } as unknown as WhatsAppSocketFacade;
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
       logger: createTestLogger(),
       whatsapp,
@@ -588,8 +587,16 @@ describe("agent invoke API", () => {
     });
     expect(res.status).toBe(200);
     await readSse(res);
-    expect(whatsapp.sendText).toHaveBeenCalledWith("123@g.us", "group run");
-    expect(whatsapp.sendText).toHaveBeenCalledWith("123@g.us", "agent response");
+    expect(whatsapp.send).toHaveBeenCalledWith(
+      "123@g.us",
+      { kind: "text", text: "group run" },
+      { idempotencyKey: expect.any(String) },
+    );
+    expect(whatsapp.send).toHaveBeenCalledWith(
+      "123@g.us",
+      { kind: "text", text: "agent response" },
+      { idempotencyKey: expect.any(String) },
+    );
     const call = runAgent.mock.calls[0][0] as RunAgentParams;
     expect(call.workspaceKey).toBe("wa-group-123@g.us");
     expect(call.platform).toBe("whatsapp");
@@ -616,11 +623,10 @@ describe("agent invoke API", () => {
       }),
     );
     const whatsapp = {
-      isConnected: true,
-      sendText: vi.fn().mockResolvedValue(null),
-      sendFile: vi.fn().mockResolvedValue(undefined),
-      getGroupMetadata: vi.fn().mockResolvedValue({ subject: "Ops" }),
-    } as unknown as WhatsAppBot;
+      pairing: { status: vi.fn().mockResolvedValue({ connected: true, phoneNumber: "+15550001111" }) },
+      send: vi.fn().mockResolvedValue(null),
+      groupMetadata: vi.fn().mockResolvedValue({ subject: "Ops" }),
+    } as unknown as WhatsAppSocketFacade;
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir, BASE_URL: "https://sketch.test" }), {
       logger: createTestLogger(),
       whatsapp,
@@ -641,9 +647,13 @@ describe("agent invoke API", () => {
     expect(res.status).toBe(200);
     await readSse(res);
 
-    expect(whatsapp.sendText).toHaveBeenCalledWith(
+    expect(whatsapp.send).toHaveBeenCalledWith(
       "123@g.us",
-      "GitHub needs connection\n\nTo continue, connect GitHub: https://sketch.test/integrations?connect=github",
+      {
+        kind: "text",
+        text: "GitHub needs connection\n\nTo continue, connect GitHub: https://sketch.test/integrations?connect=github",
+      },
+      { idempotencyKey: expect.any(String) },
     );
   });
 
@@ -651,11 +661,10 @@ describe("agent invoke API", () => {
     const { requester } = await seedTenant(db);
     const runAgent = vi.fn().mockResolvedValue(makeAgentResult());
     const whatsapp = {
-      isConnected: true,
-      sendText: vi.fn().mockResolvedValue(null),
-      sendFile: vi.fn().mockResolvedValue(undefined),
-      getGroupMetadata: vi.fn().mockResolvedValue({ subject: "Outside" }),
-    } as unknown as WhatsAppBot;
+      pairing: { status: vi.fn().mockResolvedValue({ connected: true, phoneNumber: "+15550001111" }) },
+      send: vi.fn().mockResolvedValue(null),
+      groupMetadata: vi.fn().mockResolvedValue({ subject: "Outside" }),
+    } as unknown as WhatsAppSocketFacade;
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
       logger: createTestLogger(),
       whatsapp,
@@ -676,8 +685,8 @@ describe("agent invoke API", () => {
     expect(res.status).toBe(200);
     const error = sseData(await readSse(res), "error");
     expect(error).toEqual({ error: { code: "TARGET_NOT_FOUND", message: "WhatsApp group not found" } });
-    expect(whatsapp.sendText).not.toHaveBeenCalled();
-    expect(whatsapp.getGroupMetadata).not.toHaveBeenCalled();
+    expect(whatsapp.send).not.toHaveBeenCalled();
+    expect(whatsapp.groupMetadata).not.toHaveBeenCalled();
     expect(runAgent).not.toHaveBeenCalled();
   });
 
