@@ -11,6 +11,7 @@ import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
 import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
 import { createSearchTools } from "./tools/search";
+import { createSlackChannelHistoryTool } from "./tools/slack-channel-history";
 import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
 import {
@@ -39,6 +40,7 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
     createReadChatHistoryTool(deps),
     createSearchChatHistoryTool(deps),
     createWhatsAppGroupHistoryTool(deps),
+    createSlackChannelHistoryTool(deps),
     createProviderConfigTool(deps),
     createSearchDeliveryTargetsTool(deps),
     createLocalRunCommandTool(deps),

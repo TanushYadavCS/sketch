@@ -469,6 +469,7 @@ export function buildSystemContext(params: {
     "SearchChatHistory is scoped to the active chat conversation. It is not org-wide knowledge search and does not replace the existing Search tool for indexed docs, tasks, meetings, or connector data.",
     "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory around that row id.",
     "For indexed WhatsApp group slices found through Search, use WhatsAppGroupHistory with the sliceId when the user needs the exact raw group messages before, during, or after the slice. WhatsAppGroupHistory can include adjacent dropped banter that was intentionally not indexed, and it is access-scoped server-side.",
+    "For indexed Slack channel slices found through Search, use SlackChannelHistory with the sliceId the same way: it returns the raw channel or thread messages around the slice and is access-scoped server-side by channel membership.",
   );
 
   sections.push(
