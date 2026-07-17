@@ -1,22 +1,23 @@
 /**
- * Shared review UI for the Your Org surface. One row component + one sheet
- * controller are reused by both the full Review tab and every entity tab's
- * capped "Needs your review" band, so the two surfaces can never drift.
+ * Shared review UI for the Your Org surface. Both surfaces share the same
+ * query, sheets, and mutation pipeline; only the row density differs. The
+ * Review tab is the sit-down triage surface and keeps the full
+ * {@link ReviewRowCard}; the capped per-tab band renders
+ * {@link ReviewRowCompact} — a single line with quiet text actions, because
+ * the band sits above a directory and must not read as a second queue.
  *
- * The row uses the existing {@link ReviewActions} bar verbatim for inline
- * confirm / pick / dismiss, and row-body clicks open the existing reconcile
- * sheet ({@link ReviewDetailSheet}) for rows with a suggested match or the
- * birth inspect sheet ({@link BirthInspectSheet}) for rows without one.
+ * Row-body clicks open the existing reconcile sheet
+ * ({@link ReviewDetailSheet}) for rows with a suggested match or the birth
+ * inspect sheet ({@link BirthInspectSheet}) for rows without one — evidence,
+ * match reason, and pick-a-different-existing all live there.
  */
-import { humanSourceType } from "@/components/entity-review/entity-format";
 import { BirthInspectSheet, ReviewDetailSheet } from "@/components/entity-review/review-band";
-import { ReviewActions } from "@/components/review-actions";
+import { useReviewMutations } from "@/components/review-actions";
 import type { EntityReviewQueueRow } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EntityAvatar } from "@/lib/entity-ui";
-import { formatRelativeTime } from "@/routes/files/file-list";
 import { CaretRightIcon } from "@phosphor-icons/react";
-import { Badge } from "@sketch/ui/components/badge";
+import { cn } from "@sketch/ui/lib/utils";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
@@ -52,48 +53,107 @@ export function useReviewRowSheets() {
   return { openRow, sheets, refresh };
 }
 
-export function ReviewRowCard({
+function CompactAction({
+  label,
+  emphasis,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  emphasis?: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className={cn(
+        "px-1.5 py-0.5 text-[11px] disabled:opacity-40",
+        emphasis
+          ? "font-medium text-foreground hover:underline"
+          : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * One-line review row: name, muted suggested-match, quiet Confirm/Dismiss
+ * text actions. Everything else (evidence detail, match reason, pick
+ * existing) is one click away in the sheet. `detail` adds the candidate email
+ * and a per-source evidence summary — the Review tab turns it on; the capped
+ * bands stay tightest.
+ */
+export function ReviewRowCompact({
   row,
   onOpen,
   onResolved,
+  detail,
 }: {
   row: EntityReviewQueueRow;
   onOpen: (row: EntityReviewQueueRow) => void;
   onResolved: () => void;
+  detail?: boolean;
 }) {
+  const mutations = useReviewMutations(row, onResolved);
+  const hasCandidate = Boolean(row.candidate);
+  const suggestion = hasCandidate
+    ? `→ ${row.candidate?.name}${detail && row.candidate?.email ? ` · ${row.candidate.email}` : ""}`
+    : "new — no suggested match";
+  const evidence =
+    detail && row.sourceBreakdown.length > 0
+      ? row.sourceBreakdown.map((b) => `${b.count}× ${b.source}`).join(", ")
+      : null;
   return (
-    <div className="border-b border-border last:border-b-0" data-testid={`org-review-row-${row.id}`}>
-      <button
-        type="button"
+    <div className="border-b border-border/60 last:border-b-0" data-testid={`org-review-row-${row.id}`}>
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => onOpen(row)}
-        className="group flex w-full items-center gap-2.5 px-3 pt-2.5 text-left"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") onOpen(row);
+        }}
+        className="group flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left"
       >
-        <EntityAvatar entity={{ id: row.id, name: row.proposed_name, sourceType: row.entity_type }} size="sm" />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="truncate text-sm font-medium">{row.proposed_name}</span>
-            <Badge variant="outline" className="text-[9px] uppercase tracking-wider">
-              {humanSourceType(row.entity_type)}
-            </Badge>
-          </div>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">{formatRelativeTime(row.last_seen_at)}</p>
-        </div>
+        <EntityAvatar entity={{ id: row.id, name: row.proposed_name, sourceType: row.entity_type }} size="xs" />
+        <span className="shrink-0 truncate text-[12.5px] font-medium">{row.proposed_name}</span>
+        <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground">{suggestion}</span>
+        {evidence ? (
+          <span className="hidden shrink-0 text-[10.5px] text-muted-foreground/70 sm:inline">{evidence}</span>
+        ) : null}
+        <span className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+          <CompactAction
+            label={hasCandidate ? "Confirm" : "Add"}
+            emphasis
+            disabled={mutations.isPending}
+            onClick={() => mutations.confirm()}
+          />
+          <span className="text-muted-foreground/40">·</span>
+          <CompactAction label="Dismiss" disabled={mutations.isPending} onClick={() => mutations.dismiss()} />
+        </span>
         <CaretRightIcon
-          size={13}
+          size={12}
           aria-hidden
           className="shrink-0 text-muted-foreground/30 group-hover:text-muted-foreground"
         />
-      </button>
-      <div className="px-3 pb-2 pl-[42px]">
-        <ReviewActions row={row} onResolved={onResolved} />
       </div>
+      {mutations.errorCopy ? (
+        <p className="px-3 pb-1.5 text-[11px] text-destructive">{mutations.errorCopy.message}</p>
+      ) : null}
     </div>
   );
 }
 
 /**
  * Type-scoped capped review band. Renders the top 3 pending rows for a tab
- * (same query + row component as the Review tab, just capped) with a
+ * (same query, sheets, and mutations as the Review tab; compact rows) with a
  * "See all → Review" affordance. Renders nothing when the scoped queue is
  * empty. `null` when the tab has no reviews keeps the entity list flush to the
  * top.
@@ -125,7 +185,7 @@ export function ReviewBandCapped({ types, onSeeAll }: { types: string[]; onSeeAl
         </button>
       </div>
       {rows.slice(0, 3).map((row) => (
-        <ReviewRowCard key={row.id} row={row} onOpen={openRow} onResolved={refresh} />
+        <ReviewRowCompact key={row.id} row={row} onOpen={openRow} onResolved={refresh} />
       ))}
       {rows.length > 3 ? (
         <button

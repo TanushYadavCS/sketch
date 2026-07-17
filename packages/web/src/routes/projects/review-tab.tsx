@@ -1,8 +1,9 @@
 /**
  * Review tab — the full triage list. Every pending review row across all
  * types, grouped into bands by source ({@link reviewBandLabel}, a D3
- * `contextLabel` drop-in). Rows reuse {@link ReviewRowCard} (shared with the
- * per-tab capped bands); row clicks open the reconcile / birth sheets.
+ * `contextLabel` drop-in). Rows reuse {@link ReviewRowCompact} (shared with
+ * the per-tab capped bands, `detail` on for candidate email + evidence
+ * summary); row clicks open the reconcile / birth sheets.
  *
  * Per-band "Dismiss all" is intentionally absent: the server exposes no batch
  * dismiss (only `confirm-batch` / `reject-batch` + single-row `dismiss`), so a
@@ -14,7 +15,7 @@ import { Input } from "@sketch/ui/components/input";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { ReviewEmpty, ReviewRowCard, useReviewRowSheets } from "./org-review";
+import { ReviewEmpty, ReviewRowCompact, useReviewRowSheets } from "./org-review";
 import { reviewBandLabel } from "./review-band-label";
 
 export function ReviewTab() {
@@ -87,7 +88,7 @@ export function ReviewTab() {
                 </span>
               </div>
               {bandRows.map((row) => (
-                <ReviewRowCard key={row.id} row={row} onOpen={openRow} onResolved={refresh} />
+                <ReviewRowCompact key={row.id} row={row} onOpen={openRow} onResolved={refresh} detail />
               ))}
             </section>
           ))}
