@@ -80,6 +80,7 @@ function durableTaskItem(task: FollowupReminderTask, sortOrder: number): AgentOu
     actionType: "chat",
     actionLabel: "Plan with Sketch",
     actionPrompt: `Help me plan the next step for "${task.title}".`,
+    canonicalTaskId: task.taskId,
     structuredPayload: {
       serverOwnedFollowup: true,
       taskId: task.taskId,
@@ -104,6 +105,7 @@ function recommendationItem(recommendation: FollowupReminderRecommendation, sort
     actionType: "chat",
     actionLabel: "Review with Sketch",
     actionPrompt: `Review whether "${recommendation.title}" is complete.`,
+    canonicalTaskId: recommendation.taskId,
     structuredPayload: {
       serverOwnedFollowup: true,
       taskId: recommendation.taskId,

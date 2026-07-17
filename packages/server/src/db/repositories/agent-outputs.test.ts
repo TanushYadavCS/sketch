@@ -98,6 +98,78 @@ describe("createAgentOutputRepository output scopes", () => {
     expect(await repo.findById("daily_brief", running.row.id)).toMatchObject({ trigger_type: "manual" });
   });
 
+  it("persists only trusted direct task links and returns stable persisted item references", async () => {
+    await db.insertInto("users").values({ id: "user-1", name: "Agent User" }).execute();
+    await db
+      .insertInto("tasks")
+      .values({
+        id: "task-direct",
+        source: "brief",
+        title: "Direct task",
+        normalized_title: "direct task",
+        status: "open",
+        status_authority: "local",
+        provenance: "brief",
+        source_task_id: "direct-task",
+        created_by_user_id: "user-1",
+      })
+      .execute();
+    const repo = createAgentOutputRepository(db);
+    const running = await repo.createRunning({
+      agentKey: "daily_brief",
+      agentVersion: "test",
+      userId: "user-1",
+      outputDate: "2026-07-17",
+      timezone: "UTC",
+      triggerType: "manual",
+    });
+
+    const persisted = await repo.completeOutput({
+      outputId: running.row.id,
+      masthead: { title: "Brief", summary: "Summary" },
+      rawPayload: {},
+      items: [
+        {
+          sectionKey: "todos",
+          title: "Direct task",
+          summary: "Server-linked.",
+          priority: "medium",
+          label: "todo",
+          canonicalTaskId: "task-direct",
+          structuredPayload: { taskId: "task-payload-conflict" },
+          knowledgeRefs: { entityIds: [], fileIds: [] },
+          sortOrder: 0,
+        },
+        {
+          sectionKey: "todos",
+          title: "Payload-only task",
+          summary: "Model payload is not trusted.",
+          priority: "medium",
+          label: "todo",
+          structuredPayload: { taskId: "task-direct", canonicalTaskId: "task-direct" },
+          knowledgeRefs: { entityIds: [], fileIds: [] },
+          sortOrder: 1,
+        },
+      ],
+    });
+
+    expect(persisted).toEqual([
+      { id: expect.any(String), sectionKey: "todos", sortOrder: 0 },
+      { id: expect.any(String), sectionKey: "todos", sortOrder: 1 },
+    ]);
+    expect(persisted[0]?.id).not.toBe(persisted[1]?.id);
+    const rows = await db
+      .selectFrom("agent_output_items")
+      .select(["id", "task_id", "sort_order"])
+      .where("agent_output_id", "=", running.row.id)
+      .orderBy("sort_order", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { id: persisted[0]?.id, task_id: "task-direct", sort_order: 0 },
+      { id: persisted[1]?.id, task_id: null, sort_order: 1 },
+    ]);
+  });
+
   it("lists bounded completed outputs for a user and agent since a timestamp oldest first with items", async () => {
     const repo = createAgentOutputRepository(db);
     const base = {

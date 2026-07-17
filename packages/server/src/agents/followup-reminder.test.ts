@@ -63,11 +63,14 @@ describe("reconcileFollowupReminderItems", () => {
     ]);
     expect(result[1]).toMatchObject({
       label: "todo",
+      canonicalTaskId: "task-1",
       structuredPayload: { serverOwnedFollowup: true, taskId: "task-1", trackingState: "durable" },
       knowledgeRefs: { entityIds: ["project-1", "person-1"], fileIds: [] },
     });
+    expect(result[2]).not.toHaveProperty("canonicalTaskId");
     expect(result[2]?.summary).toContain("Track S4E9");
     expect(result[2]?.summary).toContain("Dismiss S4E9");
+    expect(result[3]).toMatchObject({ canonicalTaskId: "task-2" });
     expect(result[3]?.summary).toContain("Confirm done R7K2");
     expect(result[3]?.summary).toContain("Keep open R7K2");
   });

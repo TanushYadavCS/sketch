@@ -118,6 +118,60 @@ describe("createAgentOutputRepository output scopes on Postgres", () => {
     expect(rows[0]?.items.map((item) => item.title)).toEqual(["Latest action"]);
     expect(rows.map((entry) => entry.output.id)).not.toContain(first);
   });
+
+  it("persists trusted direct links and returns item references on Postgres", async () => {
+    await db.insertInto("users").values({ id: "user-direct", name: "Direct User" }).execute();
+    await db
+      .insertInto("tasks")
+      .values({
+        id: "task-direct",
+        source: "brief",
+        title: "Direct task",
+        normalized_title: "direct task",
+        status: "open",
+        status_authority: "local",
+        provenance: "brief",
+        source_task_id: "direct-task",
+        created_by_user_id: "user-direct",
+      })
+      .execute();
+    const repo = createAgentOutputRepository(db);
+    const running = await repo.createRunning({
+      agentKey: "daily_brief",
+      agentVersion: "test",
+      userId: "user-direct",
+      outputDate: "2026-07-17",
+      timezone: "UTC",
+      triggerType: "manual",
+    });
+
+    const persisted = await repo.completeOutput({
+      outputId: running.row.id,
+      masthead: { title: "Brief", summary: "Summary" },
+      rawPayload: {},
+      items: [
+        {
+          sectionKey: "todos",
+          title: "Direct task",
+          summary: "Server-linked.",
+          priority: "medium",
+          label: "todo",
+          canonicalTaskId: "task-direct",
+          knowledgeRefs: { entityIds: [], fileIds: [] },
+          sortOrder: 0,
+        },
+      ],
+    });
+
+    expect(persisted).toEqual([{ id: expect.any(String), sectionKey: "todos", sortOrder: 0 }]);
+    await expect(
+      db
+        .selectFrom("agent_output_items")
+        .select(["id", "task_id"])
+        .where("agent_output_id", "=", running.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ id: persisted[0]?.id, task_id: "task-direct" });
+  });
 });
 
 async function seedCompletedOutput(

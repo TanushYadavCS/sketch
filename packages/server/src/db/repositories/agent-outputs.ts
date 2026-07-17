@@ -36,7 +36,14 @@ export interface AgentOutputItemInput {
   actionPrompt?: string | null;
   sourceUrl?: string | null;
   structuredPayload?: AgentStructuredPayload | null;
+  canonicalTaskId?: string | null;
   knowledgeRefs: AgentKnowledgeRefs;
+  sortOrder: number;
+}
+
+export interface PersistedAgentOutputItemRef {
+  id: string;
+  sectionKey: string;
   sortOrder: number;
 }
 
@@ -1036,8 +1043,27 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
       rawPayload: unknown;
       items: AgentOutputItemInput[];
       agentRunId?: string | null;
-    }): Promise<void> {
+    }): Promise<PersistedAgentOutputItemRef[]> {
       const now = new Date().toISOString();
+      const rows: NewAgentOutputItem[] = params.items.map((item) => ({
+        id: randomUUID(),
+        agent_output_id: params.outputId,
+        task_id: item.canonicalTaskId ?? null,
+        section_key: item.sectionKey,
+        title: item.title,
+        summary: item.summary,
+        priority: item.priority,
+        label: item.label,
+        display_ref: item.displayRef ?? null,
+        action_type: item.actionType ?? null,
+        action_label: item.actionLabel ?? null,
+        action_prompt: item.actionPrompt ?? null,
+        knowledge_refs_json: JSON.stringify(item.knowledgeRefs),
+        source_url: item.sourceUrl ?? null,
+        structured_payload_json: item.structuredPayload ? JSON.stringify(item.structuredPayload) : null,
+        sort_order: item.sortOrder,
+        created_at: now,
+      }));
       await db.transaction().execute(async (trx) => {
         const updated = await trx
           .updateTable("agent_outputs")
@@ -1057,28 +1083,15 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
           throw new Error("Agent output generation is no longer running.");
         }
         await trx.deleteFrom("agent_output_items").where("agent_output_id", "=", params.outputId).execute();
-        if (params.items.length > 0) {
-          const rows: NewAgentOutputItem[] = params.items.map((item) => ({
-            id: randomUUID(),
-            agent_output_id: params.outputId,
-            section_key: item.sectionKey,
-            title: item.title,
-            summary: item.summary,
-            priority: item.priority,
-            label: item.label,
-            display_ref: item.displayRef ?? null,
-            action_type: item.actionType ?? null,
-            action_label: item.actionLabel ?? null,
-            action_prompt: item.actionPrompt ?? null,
-            knowledge_refs_json: JSON.stringify(item.knowledgeRefs),
-            source_url: item.sourceUrl ?? null,
-            structured_payload_json: item.structuredPayload ? JSON.stringify(item.structuredPayload) : null,
-            sort_order: item.sortOrder,
-            created_at: now,
-          }));
+        if (rows.length > 0) {
           await trx.insertInto("agent_output_items").values(rows).execute();
         }
       });
+      return rows.map((row) => ({
+        id: String(row.id),
+        sectionKey: String(row.section_key),
+        sortOrder: Number(row.sort_order),
+      }));
     },
 
     async markFailed(outputId: string, message: string): Promise<void> {
