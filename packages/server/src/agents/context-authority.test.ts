@@ -164,6 +164,37 @@ describe("context authority snapshot", () => {
     );
   });
 
+  it("does not treat a provider auth mechanism as an application alias", async () => {
+    const provider = {
+      listConnections: async () => [
+        providerConnection({
+          appId: "google-calendar-oauth",
+          appName: "Google Calendar",
+          app: { name: "Google Calendar", nameSlug: "google-calendar-oauth" },
+        }),
+      ],
+    } as Pick<IntegrationProvider, "listConnections"> as IntegrationProvider;
+
+    const authority = await buildContextAuthoritySnapshot({
+      db,
+      userId: "user-1",
+      userEmail: "agent@example.com",
+      userName: "Agent User",
+      now: NOW,
+      getIntegrationStatus: async () => ({ kind: "ok", provider }),
+    });
+    const item = outputItem({
+      title: "OAuth is not connected",
+      summary: "Reconnect OAuth before continuing.",
+    });
+
+    expect(authority.connectedApps[0]?.aliases).not.toContain("oauth");
+    expect(reconcileItemsWithContextAuthority([item], authority)).toEqual({
+      items: [item],
+      suppressedCount: 0,
+    });
+  });
+
   it("preserves independent unavailable state and fails open when either read fails", async () => {
     await db.destroy();
     const provider = {
@@ -260,6 +291,8 @@ describe("context authority reconciliation", () => {
     ["Gmail isn't connected", "Reconnect Gmail before continuing."],
     ["Gmail connection issue", "Reconnect to Gmail because authentication is required."],
     ["Gmail has a connection issue", "Gmail is not connected."],
+    ["Authentication required: Google Calendar", "Reconnect Google Calendar before continuing."],
+    ["Reconnect both Google Calendar and Gmail", "Google Calendar and Gmail are not connected."],
   ])("suppresses explicit disconnected or authentication-required wording: %s", (title, summary) => {
     const result = reconcileItemsWithContextAuthority([outputItem({ title, summary })], connected);
 

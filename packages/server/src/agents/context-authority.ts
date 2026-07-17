@@ -170,6 +170,8 @@ const ALLOWED_RESIDUAL_WORDS = new Set([
   "with",
 ]);
 
+const NON_APPLICATION_ALIASES = new Set(["oauth", "oauth2", "oidc", "openid", "saml", "sso"]);
+
 function normalizePhrase(value: string): string {
   return value
     .normalize("NFKC")
@@ -193,6 +195,7 @@ function aliasesForNames(names: string[]): string[] {
     const words = normalized.split(" ");
     for (let index = 0; index < words.length; index += 1) {
       const suffix = words.slice(index).join(" ");
+      if (NON_APPLICATION_ALIASES.has(suffix)) continue;
       if (index === 0 || suffix.replaceAll(" ", "").length >= 5) {
         aliases.push(suffix, suffix.replaceAll(" ", ""));
       }
@@ -329,6 +332,7 @@ function cleanTarget(value: string): string {
 
 function targetFragments(value: string): string[] {
   return value
+    .replace(/^\s*both\s+(?=.+\s+and\s+)/iu, "")
     .split(/\s*(?:,|&|\/|\band\b)\s*/iu)
     .map(cleanTarget)
     .filter(Boolean);
