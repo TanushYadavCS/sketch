@@ -5,10 +5,10 @@
  * `works_at` edges; people the graph can't place fall into Unaffiliated.
  *
  * Row anatomy follows the prototype: avatar, AI badge, role · internal/external,
- * masked contact points with source chips (leaf-mocked via
- * {@link mockContactPoints} until D1), mentions, last active. The "member" chip
- * from the wireframe is omitted: the entities API exposes no email and there is
- * no clean workspace-member join in this run (see report).
+ * contact points with source chips (real emails from `metadata.email`, built by
+ * {@link contactPointsFromMetadata}; phones/WhatsApp arrive with D1), mentions,
+ * last active. Rows render through the shared {@link OrgRow} primitive so their
+ * density matches the rest of the surface.
  *
  * Search and the "Needs placement" chip both auto-expand the tail.
  */
@@ -23,9 +23,9 @@ import { Skeleton } from "@sketch/ui/components/skeleton";
 import { cn } from "@sketch/ui/lib/utils";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ContactLine } from "./contact-line";
-import { mockContactPoints } from "./org-contact-mock";
+import { ContactLine, contactPointsFromMetadata } from "./contact-line";
 import { ReviewBandCapped } from "./org-review";
+import { OrgRow } from "./org-row";
 
 const PAGE = 200;
 
@@ -170,7 +170,7 @@ export function PeopleTab({ onSeeAllReview }: { onSeeAllReview: () => void }) {
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border border-border" data-testid="org-people-table">
-          <div className="flex items-center gap-3 border-b border-border bg-muted/30 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="flex items-center gap-2.5 border-b border-border bg-muted/30 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
             <span className="min-w-0 flex-1">Name</span>
             <span className="hidden w-56 sm:block">Contact</span>
             <span className="w-14 text-center">Mentions</span>
@@ -187,7 +187,6 @@ export function PeopleTab({ onSeeAllReview }: { onSeeAllReview: () => void }) {
               </div>
             ))}
 
-          {/* Unaffiliated tail — collapsed by default; search / needs-placement expand it. */}
           {unaffiliated.length > 0 || needsPlacementOnly ? (
             <div>
               <button
@@ -203,9 +202,7 @@ export function PeopleTab({ onSeeAllReview }: { onSeeAllReview: () => void }) {
                   <CaretDownIcon size={11} className={cn("transition-transform", !showTail && "-rotate-90")} />
                 </span>
               </button>
-              {showTail
-                ? unaffiliated.map((person) => <PersonRow key={person.id} person={person} />)
-                : null}
+              {showTail ? unaffiliated.map((person) => <PersonRow key={person.id} person={person} />) : null}
               {showTail && peopleQuery.hasNextPage ? (
                 <button
                   type="button"
@@ -250,45 +247,46 @@ function PersonRow({ person }: { person: EntityListItem }) {
   const isAi = meta.origin === "ai";
   const role = (meta.role ?? meta.title ?? null) as string | null;
   const subtype = person.subtype === "internal" ? "Internal" : person.subtype === "external" ? "External" : null;
-  const subtitle = [role, subtype].filter(Boolean).join(" · ");
-  const contacts = mockContactPoints(person.id, person.name);
+  const subtitle = [role, subtype].filter(Boolean).join(" · ") || null;
+  const contacts = contactPointsFromMetadata(person.metadata);
 
   return (
-    <button
-      type="button"
-      onClick={() => openEntity(person.id)}
-      className="flex w-full items-center gap-3 border-b border-border px-3 py-2.5 text-left last:border-b-0 hover:bg-muted/30"
-      data-testid={`org-person-${person.id}`}
-    >
-      <EntityAvatar entity={{ id: person.id, name: person.name, sourceType: "person" }} size="sm" />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="truncate text-sm font-medium">{person.name}</span>
-          {isAi ? (
-            <Badge
-              variant="secondary"
-              className="gap-0.5 bg-violet-100 px-1 py-0 text-[9px] text-violet-700 dark:bg-violet-900 dark:text-violet-300"
-            >
-              <SparkleIcon size={8} weight="fill" />
-              AI
-            </Badge>
-          ) : null}
+    <OrgRow
+      testId={`org-person-${person.id}`}
+      onOpen={() => openEntity(person.id)}
+      avatar={<EntityAvatar entity={{ id: person.id, name: person.name, sourceType: "person" }} size="sm" />}
+      primary={person.name}
+      primaryChips={
+        isAi ? (
+          <Badge
+            variant="secondary"
+            className="gap-0.5 bg-violet-100 px-1 py-0 text-[9px] text-violet-700 dark:bg-violet-900 dark:text-violet-300"
+          >
+            <SparkleIcon size={8} weight="fill" />
+            AI
+          </Badge>
+        ) : null
+      }
+      secondary={subtitle}
+      middle={
+        <div className="hidden w-56 flex-col gap-0.5 sm:flex">
+          {contacts.length === 0 ? (
+            <span className="text-[11px] text-muted-foreground/50">No contact points</span>
+          ) : (
+            contacts.map((c) => <ContactLine key={`${c.kind}-${c.value}`} contact={c} />)
+          )}
         </div>
-        {subtitle ? <p className="truncate text-[11px] text-muted-foreground">{subtitle}</p> : null}
-      </div>
-      <div className="hidden w-56 flex-col gap-0.5 sm:flex">
-        {contacts.length === 0 ? (
-          <span className="text-[11px] text-muted-foreground/50">No contact points</span>
-        ) : (
-          contacts.map((c) => <ContactLine key={`${c.kind}-${c.value}`} contact={c} />)
-        )}
-      </div>
-      <span className="w-14 text-center font-mono text-xs text-muted-foreground">
-        {person.mentionCount > 0 ? person.mentionCount : "-"}
-      </span>
-      <span className="w-16 text-right text-xs text-muted-foreground">
-        {person.lastMentionAt ? formatRelativeTime(person.lastMentionAt) : "-"}
-      </span>
-    </button>
+      }
+      meta={
+        <>
+          <span className="w-14 text-center font-mono text-xs text-muted-foreground">
+            {person.mentionCount > 0 ? person.mentionCount : "-"}
+          </span>
+          <span className="w-16 text-right text-xs text-muted-foreground">
+            {person.lastMentionAt ? formatRelativeTime(person.lastMentionAt) : "-"}
+          </span>
+        </>
+      }
+    />
   );
 }

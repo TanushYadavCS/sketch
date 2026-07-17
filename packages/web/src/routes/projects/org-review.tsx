@@ -74,9 +74,7 @@ function CompactAction({
       }}
       className={cn(
         "px-1.5 py-0.5 text-[11px] disabled:opacity-40",
-        emphasis
-          ? "font-medium text-foreground hover:underline"
-          : "text-muted-foreground hover:text-foreground",
+        emphasis ? "font-medium text-foreground hover:underline" : "text-muted-foreground hover:text-foreground",
       )}
     >
       {label}
@@ -103,7 +101,7 @@ export function ReviewRowCompact({
   detail?: boolean;
 }) {
   const mutations = useReviewMutations(row, onResolved);
-  const hasCandidate = Boolean(row.candidate);
+  const hasCandidate = row.candidate_entity_id !== null;
   const suggestion = hasCandidate
     ? `→ ${row.candidate?.name}${detail && row.candidate?.email ? ` · ${row.candidate.email}` : ""}`
     : "new — no suggested match";
@@ -113,22 +111,25 @@ export function ReviewRowCompact({
       : null;
   return (
     <div className="border-b border-border/60 last:border-b-0" data-testid={`org-review-row-${row.id}`}>
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => onOpen(row)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") onOpen(row);
-        }}
-        className="group flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left"
-      >
-        <EntityAvatar entity={{ id: row.id, name: row.proposed_name, sourceType: row.entity_type }} size="xs" />
-        <span className="shrink-0 truncate text-[12.5px] font-medium">{row.proposed_name}</span>
-        <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground">{suggestion}</span>
-        {evidence ? (
-          <span className="hidden shrink-0 text-[10.5px] text-muted-foreground/70 sm:inline">{evidence}</span>
-        ) : null}
-        <span className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+      <div className="flex w-full items-center">
+        <button
+          type="button"
+          onClick={() => onOpen(row)}
+          className="group flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left"
+        >
+          <EntityAvatar entity={{ id: row.id, name: row.proposed_name, sourceType: row.entity_type }} size="xs" />
+          <span className="shrink-0 truncate text-[12.5px] font-medium">{row.proposed_name}</span>
+          <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground">{suggestion}</span>
+          {evidence ? (
+            <span className="hidden shrink-0 text-[10.5px] text-muted-foreground/70 sm:inline">{evidence}</span>
+          ) : null}
+          <CaretRightIcon
+            size={12}
+            aria-hidden
+            className="shrink-0 text-muted-foreground/30 group-hover:text-muted-foreground"
+          />
+        </button>
+        <span className="flex shrink-0 items-center gap-0.5 pr-3">
           <CompactAction
             label={hasCandidate ? "Confirm" : "Add"}
             emphasis
@@ -138,11 +139,6 @@ export function ReviewRowCompact({
           <span className="text-muted-foreground/40">·</span>
           <CompactAction label="Dismiss" disabled={mutations.isPending} onClick={() => mutations.dismiss()} />
         </span>
-        <CaretRightIcon
-          size={12}
-          aria-hidden
-          className="shrink-0 text-muted-foreground/30 group-hover:text-muted-foreground"
-        />
       </div>
       {mutations.errorCopy ? (
         <p className="px-3 pb-1.5 text-[11px] text-destructive">{mutations.errorCopy.message}</p>

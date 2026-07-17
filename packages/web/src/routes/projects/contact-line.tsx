@@ -1,11 +1,24 @@
 /**
  * ContactLine + SourceChip — the leaf that renders one contact point on a
- * People row. Anatomy mirrors the prototype: an icon by kind, the (masked)
- * value, and a provenance chip. Fed by {@link mockContactPoints} today; swaps
- * to real D1 contact points with no change to this component.
+ * People row: an icon by kind, the (masked) value, and a provenance chip.
+ *
+ * Contact points are built from the entity's real `metadata` today (see
+ * {@link contactPointsFromMetadata}) — only emails the graph actually holds.
+ * This component is the D1 swap point: when backend story D1 lands, feed it
+ * `entity.contactPoints` from the API instead of the metadata-derived array.
+ * D1 adds phone / WhatsApp points already server-masked (last digits only);
+ * this leaf renders every kind unchanged, so only the producer swaps.
  */
 import { EnvelopeIcon, PhoneIcon, WhatsappLogoIcon } from "@phosphor-icons/react";
-import type { OrgContactPoint, OrgContactSource } from "./org-contact-mock";
+
+export type OrgContactSource = "connector" | "signature" | "manual" | "crm";
+
+export interface OrgContactPoint {
+  kind: "email" | "phone" | "whatsapp";
+  /** Masked for phone-like kinds, full for email — mirrors D1's serializer. */
+  value: string;
+  source: OrgContactSource;
+}
 
 const SOURCE_LABEL: Record<OrgContactSource, string> = {
   connector: "synced",
@@ -13,6 +26,20 @@ const SOURCE_LABEL: Record<OrgContactSource, string> = {
   manual: "manual",
   crm: "CRM",
 };
+
+/**
+ * Real contact points for a person, derived from `metadata`. Today the graph
+ * only carries a synced email (`metadata.email`); phones / WhatsApp arrive with
+ * D1. Returns an empty array when there is nothing real to show — the row then
+ * renders its muted "No contact points" state rather than inventing anything.
+ */
+export function contactPointsFromMetadata(metadata: Record<string, unknown> | null): OrgContactPoint[] {
+  const email = metadata?.email;
+  if (typeof email === "string" && email.trim().length > 0) {
+    return [{ kind: "email", value: email.trim(), source: "connector" }];
+  }
+  return [];
+}
 
 function SourceChip({ source }: { source: OrgContactSource }) {
   return (

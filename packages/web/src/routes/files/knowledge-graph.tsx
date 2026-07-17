@@ -46,19 +46,6 @@ export const NODE_COLOR: Record<CoarseType, string> = {
 
 const ACCENT = "#FEED01";
 
-const TYPE_LABEL: Record<CoarseType, string> = {
-  person: "People",
-  company: "Companies",
-  project: "Projects",
-  product: "Products",
-  team: "Teams",
-  tool: "Tools",
-  system: "Spaces",
-  other: "Other",
-};
-
-const LEGEND: CoarseType[] = ["person", "company", "project", "product", "team"];
-
 interface GraphNode extends NodeObject {
   id: string;
   name: string;
@@ -94,13 +81,10 @@ export function KnowledgeGraphView() {
         adjacency: new Map<string, Set<string>>(),
       };
     }
-    const focusNodes = data.nodes;
-    const focusEdges = data.edges;
-
     const degree = new Map<string, number>();
     const seen = new Set<string>();
     const allLinks: { source: string; target: string }[] = [];
-    for (const e of focusEdges) {
+    for (const e of data.edges) {
       if (e.source === e.target) continue;
       const key = e.source < e.target ? `${e.source}|${e.target}` : `${e.target}|${e.source}`;
       if (seen.has(key)) continue;
@@ -110,16 +94,13 @@ export function KnowledgeGraphView() {
       degree.set(e.target, (degree.get(e.target) ?? 0) + 1);
     }
 
-    // Every connected component stays on the canvas. The old largest-component
-    // trim made the Org graph read as one tidy constellation while silently
-    // hiding most of the org — worse than the scatter it avoided.
     const keptLinks = allLinks;
     const adj = new Map<string, Set<string>>();
     for (const l of keptLinks) {
       (adj.get(l.source) ?? adj.set(l.source, new Set()).get(l.source))?.add(l.target);
       (adj.get(l.target) ?? adj.set(l.target, new Set()).get(l.target))?.add(l.source);
     }
-    const keptNodes = focusNodes
+    const keptNodes = data.nodes
       .filter((n) => degree.has(n.id))
       .map((n) => {
         const type = coarseType(n.sourceType);

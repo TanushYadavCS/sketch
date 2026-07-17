@@ -16,30 +16,47 @@ import { api } from "@/lib/api";
 import { type CoarseType, KnowledgeGraphView, NODE_COLOR } from "@/routes/files/knowledge-graph";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
-import { cn } from "@sketch/ui/lib/utils";
 import { useQuery } from "@tanstack/react-query";
-import { createRoute } from "@tanstack/react-router";
+import { createRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
 import { dashboardRoute } from "../dashboard";
 import { OrgEntityTab, ProductsTab, TeamsEmpty } from "./entity-tab";
 import { PeopleTab } from "./people-tab";
 import { ReviewTab } from "./review-tab";
 
-export const projectsRoute = createRoute({
-  getParentRoute: () => dashboardRoute,
-  path: "/projects",
-  component: ProjectsPage,
-});
-
 type OrgTab = "people" | "companies" | "teams" | "projects" | "products" | "review" | "graph";
 
-const TAB_TYPE: Record<Exclude<OrgTab, "review" | "graph">, string> = {
+const ORG_TABS: OrgTab[] = ["people", "companies", "teams", "projects", "products", "review", "graph"];
+
+const TAB_TYPE: Record<Exclude<OrgTab, "review" | "graph">, CoarseType> = {
   people: "person",
   companies: "company",
   teams: "team",
   projects: "project",
   products: "product",
 };
+
+export const projectsRoute = createRoute({
+  getParentRoute: () => dashboardRoute,
+  path: "/projects",
+  validateSearch: (search: Record<string, unknown>): { tab: OrgTab } => ({
+    tab: typeof search.tab === "string" && ORG_TABS.includes(search.tab as OrgTab) ? (search.tab as OrgTab) : "people",
+  }),
+  component: RoutedProjectsPage,
+});
+
+function RoutedProjectsPage() {
+  const { tab } = useSearch({ from: projectsRoute.id });
+  const navigate = useNavigate();
+  return (
+    <ProjectsPage
+      activeTab={tab}
+      onActiveTabChange={(nextTab) => {
+        void navigate({ to: "/projects", search: { tab: nextTab }, replace: true });
+      }}
+    />
+  );
+}
 
 function useEntityCount(type: string) {
   const { data } = useQuery({
@@ -50,10 +67,18 @@ function useEntityCount(type: string) {
   return data?.total ?? null;
 }
 
-export function ProjectsPage() {
-  const [tab, setTab] = useState<OrgTab>("people");
+export function ProjectsPage({
+  activeTab,
+  onActiveTabChange,
+}: {
+  activeTab?: OrgTab;
+  onActiveTabChange?: (tab: OrgTab) => void;
+} = {}) {
+  const [localTab, setLocalTab] = useState<OrgTab>("people");
   const [addOpen, setAddOpen] = useState(false);
   const [addType, setAddType] = useState("person");
+  const tab = activeTab ?? localTab;
+  const setTab = onActiveTabChange ?? setLocalTab;
 
   const peopleCount = useEntityCount("person");
   const companiesCount = useEntityCount("company");
@@ -99,9 +124,7 @@ export function ProjectsPage() {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <QuietAddButton
-            onClick={() => openAdd(tab === "review" || tab === "graph" ? "person" : TAB_TYPE[tab])}
-          >
+          <QuietAddButton onClick={() => openAdd(tab === "review" || tab === "graph" ? "person" : TAB_TYPE[tab])}>
             Add
           </QuietAddButton>
         </div>
@@ -114,7 +137,7 @@ export function ProjectsPage() {
             label={t.count !== null ? `${t.label} · ${t.count}` : t.label}
             isActive={tab === t.key}
             onClick={() => setTab(t.key)}
-            dot={tab === "graph" && t.key !== "review" ? NODE_COLOR[TAB_TYPE[t.key] as CoarseType] : undefined}
+            dot={tab === "graph" && t.key !== "review" ? NODE_COLOR[TAB_TYPE[t.key]] : undefined}
           />
         ))}
         <div aria-hidden className="h-4 w-px self-center bg-border" />
@@ -144,8 +167,7 @@ export function ProjectsPage() {
         )}
       </TabContentContainer>
 
-      <AddEntityDialog open={addOpen} onOpenChange={setAddOpen} defaultType={addType} />
+      <AddEntityDialog key={addType} open={addOpen} onOpenChange={setAddOpen} defaultType={addType} />
     </div>
   );
 }
-

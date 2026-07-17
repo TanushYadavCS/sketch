@@ -4,10 +4,11 @@
  * a type-scoped capped review band. Companies / Teams / Projects use the
  * generic {@link OrgEntityTab}; Products has its own two-section split.
  */
-import { api } from "@/lib/api";
+import { type CuratedProduct, api } from "@/lib/api";
 import { useEntityUi } from "@/lib/entity-ui";
 import { EntityTable } from "@/routes/files/entity-explorer";
-import { MagnifyingGlassIcon } from "@phosphor-icons/react";
+import { CaretRightIcon, CubeIcon, MagnifyingGlassIcon } from "@phosphor-icons/react";
+import { Badge } from "@sketch/ui/components/badge";
 import { Input } from "@sketch/ui/components/input";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useQuery } from "@tanstack/react-query";
@@ -107,9 +108,9 @@ export function ProductsTab({
   onDeclare: () => void;
 }) {
   const { openEntity } = useEntityUi();
-  const ours = useEntityList("product", "");
+  const ours = useQuery({ queryKey: ["products"], queryFn: () => api.products.list() });
   const tools = useEntityList("tool", "");
-  const products = ours.data?.entities ?? [];
+  const products = ours.data?.products ?? [];
   const toolEntities = tools.data?.entities ?? [];
 
   return (
@@ -123,17 +124,28 @@ export function ProductsTab({
         ) : products.length === 0 ? (
           <OrgEmpty>
             <span>No products yet.</span>{" "}
-            <button type="button" onClick={onDeclare} className="font-medium text-foreground underline-offset-2 hover:underline">
+            <button
+              type="button"
+              onClick={onDeclare}
+              className="font-medium text-foreground underline-offset-2 hover:underline"
+            >
               + Declare a product
             </button>
           </OrgEmpty>
         ) : (
-          <EntityTable entities={products} onSelect={openEntity} />
+          <div className="overflow-hidden rounded-lg border border-border">
+            {products.map((product) => (
+              <ProductRow key={product.id} product={product} onSelect={openEntity} />
+            ))}
+          </div>
         )}
       </section>
 
       <section>
-        <SectionLabel label="Tools we use" note={toolEntities.length > 0 ? `${toolEntities.length} tracked` : "coming soon"} />
+        <SectionLabel
+          label="Tools we use"
+          note={toolEntities.length > 0 ? `${toolEntities.length} tracked` : "coming soon"}
+        />
         {tools.isLoading ? (
           <Skeleton className="h-12 w-full" />
         ) : toolEntities.length === 0 ? (
@@ -145,6 +157,46 @@ export function ProductsTab({
         )}
       </section>
     </div>
+  );
+}
+
+function ProductRow({ product, onSelect }: { product: CuratedProduct; onSelect: (id: string) => void }) {
+  const cold = product.hotness <= 0;
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(product.id)}
+      className="group flex w-full items-center gap-3 border-b border-border px-3 py-2.5 text-left last:border-b-0 hover:bg-muted/30"
+    >
+      <CubeIcon size={14} aria-hidden className="shrink-0 text-muted-foreground" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium">{product.name}</span>
+          <TierBadge tier={product.provenance_tier} />
+        </div>
+        {cold ? <p className="text-[11px] text-muted-foreground">Not seen in any source yet</p> : null}
+      </div>
+      <CaretRightIcon
+        size={12}
+        aria-hidden
+        className="shrink-0 text-muted-foreground/30 group-hover:text-muted-foreground"
+      />
+    </button>
+  );
+}
+
+function TierBadge({ tier }: { tier: string }) {
+  const label = tier === "human_confirmed" ? "confirmed" : tier;
+  const tone =
+    tier === "declared"
+      ? "border-emerald-300 text-emerald-700 dark:border-emerald-700 dark:text-emerald-400"
+      : tier === "human_confirmed"
+        ? "border-sky-300 text-sky-700 dark:border-sky-700 dark:text-sky-400"
+        : "text-muted-foreground";
+  return (
+    <Badge variant="outline" className={`text-[9px] uppercase tracking-wider ${tone}`}>
+      {label}
+    </Badge>
   );
 }
 
@@ -172,7 +224,6 @@ export function OrgEmpty({ children }: { children: ReactNode }) {
   );
 }
 
-/** Teach empty state for the Teams tab — points at the review queue. */
 export function TeamsEmpty({ pendingCount, onSeeAllReview }: { pendingCount: number; onSeeAllReview: () => void }) {
   return (
     <OrgEmpty>

@@ -17,7 +17,7 @@ export const reviewEntitiesRoute = createRoute({
 function ReviewEntitiesRedirect() {
   const navigate = useNavigate();
   useEffect(() => {
-    navigate({ to: "/projects", replace: true });
+    navigate({ to: "/projects", search: { tab: "review" }, replace: true });
   }, [navigate]);
   return null;
 }
