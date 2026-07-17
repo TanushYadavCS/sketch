@@ -61,7 +61,7 @@ const CONNECTION_CLAIM_PATTERNS = [
   /\b(?:connect|reconnect|authenticate|reauthorize|authorize)\s+(?:to\s+)?(.{1,120}?)(?=\b(?:before|after|to|so that|because|for)\b|[.;!?]|$)/giu,
   /(.{1,120}?)\s+(?:needs?|requires?)\s+(?:authentication|authorization|reauthorization|reconnection)\b/giu,
   /(.{1,120}?)\s+(?:credentials?|tokens?|authorization|authentication)\s+(?:(?:are|is)\s+)?(?:missing|expired|invalid|required)\b/giu,
-  /\b(?:authentication|authorization|reauthorization)\s+(?:is\s+)?required\s+(?:for|on)\s+(.{1,120}?)(?=[.;!?]|$)/giu,
+  /\b(?:authentication|authorization|reauthorization)\s+(?:is\s+)?required(?:(?:\s+(?:for|on)\s+)|(?:\s*[:—-]\s*))(.{1,120}?)(?=[.;!?]|$)/giu,
 ];
 
 const GENERIC_TARGETS = new Set([
@@ -332,7 +332,7 @@ function cleanTarget(value: string): string {
 
 function targetFragments(value: string): string[] {
   return value
-    .replace(/^\s*both\s+(?=.+\s+and\s+)/iu, "")
+    .replace(/^\s*both\s+(?=.+(?:\s+and\s+|\s*&\s*))/iu, "")
     .split(/\s*(?:,|&|\/|\band\b)\s*/iu)
     .map(cleanTarget)
     .filter(Boolean);

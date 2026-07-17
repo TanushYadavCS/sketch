@@ -293,8 +293,18 @@ describe("context authority reconciliation", () => {
     ["Gmail has a connection issue", "Gmail is not connected."],
     ["Authentication required: Google Calendar", "Reconnect Google Calendar before continuing."],
     ["Reconnect both Google Calendar and Gmail", "Google Calendar and Gmail are not connected."],
+    ["Reconnect both Google Calendar & Gmail", "Google Calendar and Gmail are not connected."],
   ])("suppresses explicit disconnected or authentication-required wording: %s", (title, summary) => {
     const result = reconcileItemsWithContextAuthority([outputItem({ title, summary })], connected);
+
+    expect(result).toEqual({ items: [], suppressedCount: 1 });
+  });
+
+  it("suppresses a colon-only authentication-required claim", () => {
+    const result = reconcileItemsWithContextAuthority(
+      [outputItem({ title: "Authentication required: Google Calendar", summary: "" })],
+      connected,
+    );
 
     expect(result).toEqual({ items: [], suppressedCount: 1 });
   });
