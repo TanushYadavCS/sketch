@@ -15,7 +15,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { type ForceGraphMethods, type LinkObject, type NodeObject } from "react-force-graph-2d";
 
-type CoarseType = "person" | "company" | "project" | "product" | "team" | "tool" | "system" | "other";
+export type CoarseType = "person" | "company" | "project" | "product" | "team" | "tool" | "system" | "other";
 
 function coarseType(sourceType: string): CoarseType {
   if (sourceType === "person") return "person";
@@ -68,7 +68,12 @@ function endpointId(end: string | number | NodeObject | undefined): string {
   return String(end);
 }
 
-export function KnowledgeGraphView() {
+/**
+ * @param focusType when set, the graph is restricted to nodes of that coarse
+ *   type plus their direct neighbours — the Your Org tab strip drives this so
+ *   the active tab focuses the graph. `null`/undefined shows the full graph.
+ */
+export function KnowledgeGraphView({ focusType = null }: { focusType?: CoarseType | null } = {}) {
   const ui = useEntityUiOptional();
   const [containerRef, size] = useSize();
   const fgRef = useRef<ForceGraphMethods<GraphNode> | undefined>(undefined);
@@ -90,10 +95,27 @@ export function KnowledgeGraphView() {
         adjacency: new Map<string, Set<string>>(),
       };
     }
+    // Focus filter: keep nodes of the active tab's type plus their direct
+    // neighbours, and edges between kept nodes. Keeps `works_at`-style edges
+    // meaningful (a person filter still shows their companies).
+    let focusNodes = data.nodes;
+    let focusEdges = data.edges;
+    if (focusType) {
+      const nodeType = new Map(data.nodes.map((n) => [n.id, coarseType(n.sourceType)]));
+      const keepIds = new Set<string>();
+      for (const n of data.nodes) if (nodeType.get(n.id) === focusType) keepIds.add(n.id);
+      for (const e of data.edges) {
+        if (nodeType.get(e.source) === focusType) keepIds.add(e.target);
+        if (nodeType.get(e.target) === focusType) keepIds.add(e.source);
+      }
+      focusNodes = data.nodes.filter((n) => keepIds.has(n.id));
+      focusEdges = data.edges.filter((e) => keepIds.has(e.source) && keepIds.has(e.target));
+    }
+
     const degree = new Map<string, number>();
     const seen = new Set<string>();
     const allLinks: { source: string; target: string }[] = [];
-    for (const e of data.edges) {
+    for (const e of focusEdges) {
       if (e.source === e.target) continue;
       const key = e.source < e.target ? `${e.source}|${e.target}` : `${e.target}|${e.source}`;
       if (seen.has(key)) continue;
@@ -134,7 +156,9 @@ export function KnowledgeGraphView() {
         biggestRoot = root;
       }
     }
-    const keep = (id: string) => find(id) === biggestRoot;
+    // When focused, keep every connected node in the focus set; otherwise trim
+    // to the single largest component so the full graph reads as one constellation.
+    const keep = focusType ? () => true : (id: string) => find(id) === biggestRoot;
 
     const keptLinks = allLinks.filter((l) => keep(l.source) && keep(l.target));
     const adj = new Map<string, Set<string>>();
@@ -142,14 +166,14 @@ export function KnowledgeGraphView() {
       (adj.get(l.source) ?? adj.set(l.source, new Set()).get(l.source))?.add(l.target);
       (adj.get(l.target) ?? adj.set(l.target, new Set()).get(l.target))?.add(l.source);
     }
-    const keptNodes = data.nodes
+    const keptNodes = focusNodes
       .filter((n) => degree.has(n.id) && keep(n.id))
       .map((n) => {
         const type = coarseType(n.sourceType);
         return { id: n.id, name: n.name, type, color: NODE_COLOR[type], val: 1 + (degree.get(n.id) ?? 0) };
       });
     return { nodes: keptNodes, links: keptLinks, adjacency: adj };
-  }, [data]);
+  }, [data, focusType]);
 
   const graphData = useMemo(() => ({ nodes, links }), [nodes, links]);
 
