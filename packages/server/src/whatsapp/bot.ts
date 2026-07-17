@@ -105,6 +105,7 @@ export interface WhatsAppHistoryBatchMetadata {
   isLatest?: boolean;
   progress?: number | null;
   syncType?: proto.HistorySync.HistorySyncType | null;
+  peerDataRequestSessionId?: string | null;
 }
 
 export type WhatsAppHistoryMessagesHandler = (
@@ -376,6 +377,15 @@ export class WhatsAppBot {
     return this.sock;
   }
 
+  async fetchMessageHistory(input: {
+    count: number;
+    oldestMessageKey: { remoteJid: string; id: string; fromMe: boolean };
+    oldestMessageTimestamp: number;
+  }): Promise<string> {
+    if (!this.sock) throw new Error("WhatsApp socket is unavailable for history sync");
+    return this.sock.fetchMessageHistory(input.count, input.oldestMessageKey, input.oldestMessageTimestamp);
+  }
+
   // --- Sending ---
 
   async sendText(jid: string, text: string, options?: MiscMessageGenerationOptions): Promise<WAMessage | null> {
@@ -633,82 +643,92 @@ export class WhatsAppBot {
     socket: WASocket = this.sock as WASocket,
     socketGeneration = this.activeSocketGeneration,
   ): void {
-    socket.ev.on("messaging-history.set", async ({ messages, isLatest, progress, syncType }) => {
-      if (socketGeneration !== this.activeSocketGeneration || socket !== this.sock) {
-        return;
-      }
-
-      let skippedNontext = 0;
-      let skippedNonGroup = 0;
-      let skippedNoSender = 0;
-      const groupMessages: WhatsAppGroupMessage[] = [];
-
-      for (const msg of messages) {
-        if (!msg.message) {
-          skippedNontext += 1;
-          continue;
+    socket.ev.on(
+      "messaging-history.set",
+      async ({ messages, isLatest, progress, syncType, peerDataRequestSessionId }) => {
+        if (socketGeneration !== this.activeSocketGeneration || socket !== this.sock) {
+          return;
         }
 
-        const jid = msg.key.remoteJid;
-        if (!jid?.endsWith("@g.us")) {
-          skippedNonGroup += 1;
-          continue;
+        let skippedNontext = 0;
+        let skippedNonGroup = 0;
+        let skippedNoSender = 0;
+        const groupMessages: WhatsAppGroupMessage[] = [];
+
+        for (const msg of messages) {
+          if (!msg.message) {
+            skippedNontext += 1;
+            continue;
+          }
+
+          const jid = msg.key.remoteJid;
+          if (!jid?.endsWith("@g.us")) {
+            skippedNonGroup += 1;
+            continue;
+          }
+
+          const messageType = getContentType(msg.message);
+          const text = extractText(msg);
+          const hasMedia = hasMediaContent(messageType);
+
+          if (!text && !hasMedia) {
+            skippedNontext += 1;
+            continue;
+          }
+
+          const groupMessage = await this.buildGroupMessage(msg, jid, text, messageType, hasMedia);
+          if (groupMessage) {
+            groupMessages.push(groupMessage);
+          } else {
+            skippedNoSender += 1;
+          }
         }
 
-        const messageType = getContentType(msg.message);
-        const text = extractText(msg);
-        const hasMedia = hasMediaContent(messageType);
-
-        if (!text && !hasMedia) {
-          skippedNontext += 1;
-          continue;
+        let result: WhatsAppHistoryBatchResult = { persisted: 0, skippedOld: 0, skippedDup: 0 };
+        try {
+          if ((groupMessages.length > 0 || peerDataRequestSessionId) && this.historyHandler) {
+            result = await this.historyHandler(groupMessages, {
+              socketGeneration,
+              isLatest,
+              progress,
+              syncType,
+              peerDataRequestSessionId,
+            });
+          }
+        } catch (err) {
+          this.logger.warn(
+            {
+              err,
+              total: messages.length,
+              candidates: groupMessages.length,
+              skippedNontext,
+              skippedNonGroup,
+              skippedNoSender,
+            },
+            "Failed to persist WhatsApp history batch",
+          );
+          return;
         }
 
-        const groupMessage = await this.buildGroupMessage(msg, jid, text, messageType, hasMedia);
-        if (groupMessage) {
-          groupMessages.push(groupMessage);
-        } else {
-          skippedNoSender += 1;
-        }
-      }
-
-      let result: WhatsAppHistoryBatchResult = { persisted: 0, skippedOld: 0, skippedDup: 0 };
-      try {
-        if (groupMessages.length > 0 && this.historyHandler) {
-          result = await this.historyHandler(groupMessages, { socketGeneration, isLatest, progress, syncType });
-        }
-      } catch (err) {
-        this.logger.warn(
+        this.logger.info(
           {
-            err,
             total: messages.length,
             candidates: groupMessages.length,
+            persisted: result.persisted,
+            skippedOld: result.skippedOld,
+            skippedDup: result.skippedDup,
             skippedNontext,
             skippedNonGroup,
             skippedNoSender,
+            isLatest,
+            progress,
+            syncType,
+            peerDataRequestSessionId,
           },
-          "Failed to persist WhatsApp history batch",
+          "WhatsApp history batch processed",
         );
-        return;
-      }
-
-      this.logger.info(
-        {
-          total: messages.length,
-          candidates: groupMessages.length,
-          persisted: result.persisted,
-          skippedOld: result.skippedOld,
-          skippedDup: result.skippedDup,
-          skippedNontext,
-          skippedNonGroup,
-          skippedNoSender,
-          isLatest,
-          progress,
-          syncType,
-        },
-        "WhatsApp history batch processed",
-      );
-    });
+      },
+    );
   }
 
   private registerMessageHandler(

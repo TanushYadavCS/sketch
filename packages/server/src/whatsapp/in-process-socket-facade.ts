@@ -7,6 +7,7 @@ import type { WhatsAppBot } from "./bot";
 import {
   WHATSAPP_FACADE_CONTRACT_VERSION,
   type WhatsAppFacadeHealth,
+  type WhatsAppHistorySyncRequest,
   type WhatsAppMediaDownloadRef,
   type WhatsAppPairingEvent,
   type WhatsAppQuotedRef,
@@ -158,6 +159,10 @@ export class InProcessSocketFacade implements WhatsAppSocketFacade, InProcessMes
   async resolveLid(jid: string): Promise<string | null> {
     const phoneE164 = await this.bot.resolveJidToPhone(jid);
     return phoneE164 ? phoneE164ToWhatsAppJid(phoneE164) : null;
+  }
+
+  fetchMessageHistory(request: WhatsAppHistorySyncRequest): Promise<string> {
+    return this.bot.fetchMessageHistory(request);
   }
 
   async shutdown(): Promise<void> {

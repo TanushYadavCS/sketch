@@ -125,6 +125,34 @@ describe("GatewayClientFacade", () => {
     expect(request).toMatchObject({ input: "http://127.0.0.1:3901/process", init: { method: "DELETE" } });
   });
 
+  it("round-trips the full history cursor through the gateway contract", async () => {
+    let request: { input: string; body: unknown; authorization: string | null } | null = null;
+    const facade = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+      fetch: async (input, init) => {
+        request = {
+          input: String(input),
+          body: JSON.parse(String(init?.body)),
+          authorization: new Headers(init?.headers).get("authorization"),
+        };
+        return json({ requestSessionId: "request-session-8" });
+      },
+    });
+    const cursor = {
+      count: 50,
+      oldestMessageKey: { remoteJid: "group@g.us", id: "oldest-8", fromMe: true },
+      oldestMessageTimestamp: 1_768_464_420,
+    };
+    await expect(facade.fetchMessageHistory(cursor)).resolves.toBe("request-session-8");
+    expect(request).toEqual({
+      input: "http://127.0.0.1:3901/history-sync-requests",
+      body: cursor,
+      authorization: "Bearer secret",
+    });
+  });
+
   it("keeps a QR stream open after the query timeout once response headers arrive", async () => {
     const state: {
       stream?: ReadableStreamDefaultController<Uint8Array>;

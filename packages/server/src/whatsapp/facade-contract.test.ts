@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  WHATSAPP_FACADE_CONTRACT_VERSION,
   normalizedGroupMetadataSchema,
   stagedMediaRefSchema,
   whatsAppComposingRequestSchema,
@@ -7,6 +8,8 @@ import {
   whatsAppGroupMetadataRequestSchema,
   whatsAppGroupSyncSummarySchema,
   whatsAppHistoryBatchEnvelopeSchema,
+  whatsAppHistorySyncRequestSchema,
+  whatsAppHistorySyncResponseSchema,
   whatsAppInboundEnvelopeVersionSchema,
   whatsAppMediaDownloadRefSchema,
   whatsAppMessageEnvelopeSchema,
@@ -24,6 +27,26 @@ import {
 } from "./facade-contract";
 
 describe("WhatsApp socket facade contract", () => {
+  it("advertises the history-sync facade contract revision", () => {
+    expect(WHATSAPP_FACADE_CONTRACT_VERSION).toBe("1.1");
+    expect(
+      whatsAppHistorySyncRequestSchema.parse({
+        count: 50,
+        oldestMessageKey: { remoteJid: "group@g.us", id: "oldest", fromMe: true },
+        oldestMessageTimestamp: 1_768_464_420,
+      }),
+    ).toMatchObject({ count: 50, oldestMessageKey: { fromMe: true } });
+    expect(whatsAppHistorySyncResponseSchema.parse({ requestSessionId: "request-1" })).toEqual({
+      requestSessionId: "request-1",
+    });
+    expect(() =>
+      whatsAppHistorySyncRequestSchema.parse({
+        count: 51,
+        oldestMessageKey: { remoteJid: "group@g.us", id: "oldest", fromMe: false },
+        oldestMessageTimestamp: 1_768_464_420,
+      }),
+    ).toThrow();
+  });
   it("accepts compatible minor envelope versions and rejects unknown majors", () => {
     expect(whatsAppInboundEnvelopeVersionSchema.parse("1.7")).toBe("1.7");
     expect(() => whatsAppInboundEnvelopeVersionSchema.parse("2.0")).toThrow();

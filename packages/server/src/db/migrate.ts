@@ -145,6 +145,7 @@ import * as m142 from "./migrations/142-verdict-safe-fact-upserts";
 import * as m143 from "./migrations/143-indexed-corroboration";
 import * as m144 from "./migrations/144-whatsapp-gateway-queue";
 import * as m145 from "./migrations/145-whatsapp-history-capture-foundation";
+import * as m146 from "./migrations/146-whatsapp-history-top-up";
 import type { DB } from "./schema";
 
 /**
@@ -299,6 +300,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "143-indexed-corroboration": m143,
           "144-whatsapp-gateway-queue": m144,
           "145-whatsapp-history-capture-foundation": m145,
+          "146-whatsapp-history-top-up": m146,
         };
       },
     },

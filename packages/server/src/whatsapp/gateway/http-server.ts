@@ -11,6 +11,8 @@ import {
   whatsAppGroupMetadataResponseSchema,
   whatsAppGroupSyncOptionsSchema,
   whatsAppGroupSyncSummarySchema,
+  whatsAppHistorySyncRequestSchema,
+  whatsAppHistorySyncResponseSchema,
   whatsAppMediaDownloadRefSchema,
   whatsAppMediaDownloadResponseSchema,
   whatsAppOkResponseSchema,
@@ -93,6 +95,12 @@ export function createWhatsAppGatewayHttpApp(deps: {
     const input = await parseBody(context.req.raw, whatsAppResolveLidRequestSchema);
     const phoneJid = await deps.facade.resolveLid(input.jid);
     return context.json(whatsAppResolveLidResponseSchema.parse({ phoneJid }));
+  });
+
+  app.post("/history-sync-requests", async (context) => {
+    const input = await parseBody(context.req.raw, whatsAppHistorySyncRequestSchema);
+    const requestSessionId = await deps.facade.fetchMessageHistory(input);
+    return context.json(whatsAppHistorySyncResponseSchema.parse({ requestSessionId }));
   });
 
   app.post("/pairing-sessions", (context) =>

@@ -2,6 +2,7 @@ import type { ZodType } from "zod";
 import type { Logger } from "../logger";
 import {
   type WhatsAppFacadeHealth,
+  type WhatsAppHistorySyncRequest,
   type WhatsAppMediaDownloadRef,
   type WhatsAppPairingEvent,
   type WhatsAppPairingStatus,
@@ -12,6 +13,7 @@ import {
   whatsAppFacadeHealthSchema,
   whatsAppGroupMetadataResponseSchema,
   whatsAppGroupSyncSummarySchema,
+  whatsAppHistorySyncResponseSchema,
   whatsAppMediaDownloadResponseSchema,
   whatsAppOkResponseSchema,
   whatsAppPairingEventSchema,
@@ -186,6 +188,15 @@ export class GatewayClientFacade implements WhatsAppSocketFacade {
       whatsAppResolveLidResponseSchema,
     );
     return response.phoneJid;
+  }
+
+  async fetchMessageHistory(request: WhatsAppHistorySyncRequest): Promise<string> {
+    const response = await this.request(
+      "/history-sync-requests",
+      { method: "POST", body: JSON.stringify(request) },
+      whatsAppHistorySyncResponseSchema,
+    );
+    return response.requestSessionId;
   }
 
   async shutdown(timeoutMs = WHATSAPP_GATEWAY_QUERY_TIMEOUT_MS): Promise<void> {

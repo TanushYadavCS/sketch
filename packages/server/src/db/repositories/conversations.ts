@@ -31,6 +31,7 @@ export interface ConversationMessageInsert {
   providerParentMessageId?: string | null;
   isThreadReply?: boolean;
   providerTimestamp?: string | null;
+  providerFromMe?: boolean;
   receivedAt?: string;
   source?: ConversationMessageSource;
   connectionKey?: string | null;
@@ -53,6 +54,7 @@ export interface StoredConversationMessage {
   providerParentMessageId: string | null;
   isThreadReply: boolean;
   providerTimestamp: string | null;
+  providerFromMe?: boolean;
   receivedAt: string;
   source: ConversationMessageSource;
   effectiveAt: string;
@@ -122,6 +124,7 @@ function toStored(row: ConversationMessageRow): StoredConversationMessage {
     providerParentMessageId: row.provider_parent_message_id,
     isThreadReply: row.is_thread_reply === 1,
     providerTimestamp: row.provider_timestamp,
+    providerFromMe: row.provider_from_me === 1,
     receivedAt: row.received_at,
     source: row.source === "history" ? "history" : "live",
     effectiveAt: row.effective_at ?? effectiveWhatsAppMessageTimestamp(row.provider_timestamp, row.received_at),
@@ -180,11 +183,27 @@ function whatsappPhoneSenderCandidates(phoneE164?: string | null): string[] {
 }
 
 export function createConversationRepository(db: ConversationDb) {
+  async function stampBackfillRangeIfUnowned(
+    row: ConversationMessageRow,
+    backfillRangeId: string | null | undefined,
+  ): Promise<ConversationMessageRow> {
+    if (!backfillRangeId || row.backfill_range_id) return row;
+    await db
+      .updateTable("conversation_messages")
+      .set({ backfill_range_id: backfillRangeId })
+      .where("id", "=", row.id)
+      .where("backfill_range_id", "is", null)
+      .execute();
+    return db.selectFrom("conversation_messages").selectAll().where("id", "=", row.id).executeTakeFirstOrThrow();
+  }
+
   async function insertMessage(
     data: ConversationMessageInsert,
   ): Promise<{ row: StoredConversationMessage; inserted: boolean }> {
     const existing = await findExistingMessage(db, data);
-    if (existing) return { row: toStored(existing), inserted: false };
+    if (existing) {
+      return { row: toStored(await stampBackfillRangeIfUnowned(existing, data.backfillRangeId)), inserted: false };
+    }
 
     const receivedAt = data.receivedAt ?? new Date().toISOString();
     const values: Insertable<ConversationMessagesTable> = {
@@ -202,6 +221,7 @@ export function createConversationRepository(db: ConversationDb) {
       provider_parent_message_id: data.providerParentMessageId ?? null,
       is_thread_reply: data.isThreadReply ? 1 : 0,
       provider_timestamp: data.providerTimestamp ?? null,
+      provider_from_me: data.providerFromMe ? 1 : 0,
       received_at: receivedAt,
       source: data.source ?? "live",
       effective_at: effectiveWhatsAppMessageTimestamp(data.providerTimestamp, receivedAt),
@@ -213,7 +233,9 @@ export function createConversationRepository(db: ConversationDb) {
       await db.insertInto("conversation_messages").values(values).execute();
     } catch {
       const row = await findExistingMessage(db, data);
-      if (row) return { row: toStored(row), inserted: false };
+      if (row) {
+        return { row: toStored(await stampBackfillRangeIfUnowned(row, data.backfillRangeId)), inserted: false };
+      }
       throw new Error("Failed to insert conversation message");
     }
 
@@ -616,6 +638,7 @@ export function createConversationRepository(db: ConversationDb) {
             m.provider_parent_message_id,
             m.is_thread_reply,
             m.provider_timestamp,
+            m.provider_from_me,
             m.received_at,
             m.source,
             m.effective_at,
@@ -660,6 +683,7 @@ export function createConversationRepository(db: ConversationDb) {
           m.provider_parent_message_id,
           m.is_thread_reply,
           m.provider_timestamp,
+          m.provider_from_me,
           m.received_at,
           m.source,
           m.effective_at,

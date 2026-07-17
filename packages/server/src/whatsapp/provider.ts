@@ -73,6 +73,7 @@ export interface WhatsAppHistoryBatchMetadata {
   isLatest?: boolean;
   progress?: number | null;
   syncType?: number | string | null;
+  peerDataRequestSessionId?: string | null;
 }
 
 export type WhatsAppHistoryMessagesHandler = (

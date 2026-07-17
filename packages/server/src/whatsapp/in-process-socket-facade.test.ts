@@ -35,6 +35,7 @@ function createMockBot(onLogout?: () => Promise<void>) {
     })),
     syncAllGroups: vi.fn(async () => 1),
     resolveJidToPhone: vi.fn(async () => "+15551234567"),
+    fetchMessageHistory: vi.fn(async () => "request-session-9"),
   };
   return { bot, facade: new InProcessSocketFacade(bot as unknown as WhatsAppBot, createTestLogger(), onLogout) };
 }
@@ -70,6 +71,13 @@ describe("InProcessSocketFacade", () => {
     expect(bot.getProviderGroupMetadata).toHaveBeenCalledWith("group@g.us", { refresh: true });
     await expect(facade.syncAllGroups({ force: true })).resolves.toEqual({ synced: 1 });
     await expect(facade.resolveLid("86702773280883@lid")).resolves.toBe("15551234567@s.whatsapp.net");
+    const historyRequest = {
+      count: 50,
+      oldestMessageKey: { remoteJid: "group@g.us", id: "oldest-1", fromMe: false },
+      oldestMessageTimestamp: 1_752_750_000,
+    };
+    await expect(facade.fetchMessageHistory(historyRequest)).resolves.toBe("request-session-9");
+    expect(bot.fetchMessageHistory).toHaveBeenCalledWith(historyRequest);
 
     const pairingEvents: unknown[] = [];
     await facade.pairing.startQr(async (event) => {

@@ -89,10 +89,10 @@ export async function runWhatsAppGateway(): Promise<void> {
     baseUrl: `http://${WHATSAPP_GATEWAY_HOST}:${config.PORT}`,
     token: gatewayHttpToken,
   });
-  const setSocketState = (nextState: WhatsAppGatewaySocketState): void => {
+  const setSocketState = (nextState: WhatsAppGatewaySocketState, socketGeneration: number): void => {
     if (socketState === nextState) return;
     socketState = nextState;
-    appNotifier.socketStateChanged({ ownerToken, generation: fence.generation, socketState });
+    appNotifier.socketStateChanged({ ownerToken, generation: fence.generation, socketGeneration, socketState });
   };
 
   const terminate = async (
@@ -145,20 +145,20 @@ export async function runWhatsAppGateway(): Promise<void> {
       }),
     getMessage: async (_key: proto.IMessageKey) => undefined,
     reconnectDelayMs: whatsappGatewayReconnectDelayMs,
-    onConnectionOpen: async () => {
+    onConnectionOpen: async (socketGeneration) => {
       if (terminating) return;
-      setSocketState("connected");
       try {
         await leaseRepository.deriveDisconnectedAt(fence);
       } catch (error) {
         logger.warn({ error }, "WhatsApp gateway could not derive the reconnect watermark");
       }
+      setSocketState("connected", socketGeneration);
       await heartbeat?.tick();
     },
-    onConnectionClose: async () => {
+    onConnectionClose: async (_statusCode, socketGeneration) => {
       if (terminating) return;
       const wasConnected = socketState === "connected";
-      setSocketState("disconnected");
+      setSocketState("disconnected", socketGeneration);
       try {
         const owned = await leaseRepository.markDisconnected(fence);
         if (!owned) {
@@ -170,15 +170,15 @@ export async function runWhatsAppGateway(): Promise<void> {
       }
       if (wasConnected) initialSyncGeneration = false;
     },
-    onLoggedOut: async () => {
-      setSocketState("logged-out");
+    onLoggedOut: async (socketGeneration) => {
+      setSocketState("logged-out", socketGeneration);
       await terminate(WHATSAPP_GATEWAY_LOGGED_OUT_EXIT_CODE, true, "WhatsApp account logged out", true);
     },
   });
 
   const inProcessFacade = new InProcessSocketFacade(bot, logger, async () => {
     heartbeat?.stop();
-    setSocketState("logged-out");
+    setSocketState("logged-out", 1);
     initialSyncGeneration = true;
     if (!(await leaseRepository.resetHistoryGeneration(fence))) throw new WhatsAppLeaseFenceError();
     heartbeat?.start();
@@ -238,7 +238,7 @@ export async function runWhatsAppGateway(): Promise<void> {
   });
 
   const connected = await bot.start();
-  if (!connected) setSocketState("disconnected");
+  if (!connected) socketState = "disconnected";
   logger.info({ host: WHATSAPP_GATEWAY_HOST, port, socketState }, "WhatsApp gateway ready");
 }
 

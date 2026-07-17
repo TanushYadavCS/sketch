@@ -106,6 +106,7 @@ function asHistoryMetadata(metadata: WhatsAppHistoryBatchMetadata | undefined) {
     syncType: metadata?.syncType ?? null,
     progress: metadata?.progress ?? null,
     isLatest: metadata?.isLatest ?? null,
+    peerDataRequestSessionId: metadata?.peerDataRequestSessionId ?? null,
   };
 }
 
@@ -186,6 +187,7 @@ export class WhatsAppGatewayCapture {
           batchId,
           chunkIndex: chunk.chunkIndex,
           chunkCount: chunks.length,
+          requestSessionId: metadata.peerDataRequestSessionId ?? null,
           status: chunk.dead ? ("dead" as const) : ("pending" as const),
           lastError: chunk.dead ? "history message exceeds 200KB after raw payload compaction" : null,
         })),

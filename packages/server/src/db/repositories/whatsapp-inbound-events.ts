@@ -23,6 +23,8 @@ export interface WhatsAppInboundEventInsert {
   batchId?: string | null;
   chunkIndex?: number | null;
   chunkCount?: number | null;
+  requestSessionId?: string | null;
+  backfillRangeId?: string | null;
   status?: "pending" | "dead";
   lastError?: string | null;
 }
@@ -144,6 +146,8 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
       batch_id: data.batchId ?? null,
       chunk_index: data.chunkIndex ?? null,
       chunk_count: data.chunkCount ?? null,
+      request_session_id: data.requestSessionId ?? null,
+      backfill_range_id: data.backfillRangeId ?? null,
       last_error: oversized ? "serialized envelope exceeds 256KB" : truncateError(data.lastError),
     };
 
@@ -414,6 +418,32 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
     );
   }
 
+  async function deferCorrelation(id: number, claimToken: string, error: string): Promise<boolean> {
+    return withBoundedSqliteRetry(
+      db,
+      async () => {
+        const nextAttemptAt = isPg(db)
+          ? sql<string>`(CURRENT_TIMESTAMP + INTERVAL '1 second')::text`
+          : sql<string>`datetime(CURRENT_TIMESTAMP, '+1 second')`;
+        const result = await db
+          .updateTable("whatsapp_inbound_events")
+          .set({
+            status: "captured",
+            attempts: sql`CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END`,
+            next_attempt_at: nextAttemptAt,
+            consumed_at: null,
+            last_error: truncateError(error),
+          })
+          .where("id", "=", id)
+          .where("claim_token", "=", claimToken)
+          .where("status", "=", "processing")
+          .executeTakeFirst();
+        return Number(result.numUpdatedRows) === 1;
+      },
+      retryOptions,
+    );
+  }
+
   async function markDead(id: number, claimToken: string, error: string): Promise<boolean> {
     return withBoundedSqliteRetry(
       db,
@@ -485,6 +515,7 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
           .selectFrom("whatsapp_inbound_events")
           .select("id")
           .where("status", "=", "consumed")
+          .where("backfill_range_id", "is", null)
           .where(consumedCutoff)
           .orderBy("id")
           .limit(WHATSAPP_INBOUND_SWEEP_BATCH_SIZE)
@@ -535,6 +566,7 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
     consumeDispatched,
     resetDispatched,
     revertToCaptured,
+    deferCorrelation,
     markDead,
     isBatchComplete,
     isBatchCompleteExcluding,

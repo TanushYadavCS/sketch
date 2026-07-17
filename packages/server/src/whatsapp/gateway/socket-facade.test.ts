@@ -14,6 +14,7 @@ function delegate(send: WhatsAppSocketFacade["send"]): WhatsAppSocketFacade & In
     groupMetadata: async () => null,
     syncAllGroups: async () => ({ synced: 0 }),
     resolveLid: async () => null,
+    fetchMessageHistory: async () => "request-session-1",
     pairing: {
       startQr: async () => undefined,
       status: async () => ({ connected: false, phoneNumber: null }),

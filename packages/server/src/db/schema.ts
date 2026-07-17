@@ -492,6 +492,7 @@ export interface ConversationMessagesTable {
   provider_parent_message_id: string | null;
   is_thread_reply: Generated<number>;
   provider_timestamp: string | null;
+  provider_from_me: Generated<number>;
   received_at: string;
   source: Generated<string>;
   effective_at: Generated<string | null>;
@@ -509,6 +510,8 @@ export interface WhatsAppInboundEventsTable {
   batch_id: string | null;
   chunk_index: number | null;
   chunk_count: number | null;
+  request_session_id: Generated<string | null>;
+  backfill_range_id: Generated<string | null>;
   envelope: string;
   received_at: Generated<string>;
   attempts: Generated<number>;
@@ -605,6 +608,34 @@ export interface WhatsAppBackfillCheckpointsTable {
   status: string;
   live_start_effective_at: Generated<string | null>;
   live_start_message_id: Generated<number | null>;
+  updated_at: Generated<string>;
+}
+
+export interface WhatsAppBackfillRangesTable {
+  id: string;
+  group_jid: string;
+  range_key: string;
+  kind: string;
+  connection_key: string;
+  status: string;
+  lower_bound_at: string;
+  upper_bound_at: string;
+  cursor_remote_jid: string | null;
+  cursor_message_id: string | null;
+  cursor_from_me: number | null;
+  cursor_provider_timestamp: string | null;
+  attempts: Generated<number>;
+  next_retry_at: string | null;
+  last_error: string | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  request_session_id: string | null;
+  request_lease_generation: number | null;
+  requested_at: string | null;
+  response_deadline_at: string | null;
+  terminal_status: string | null;
+  last_served_at: string | null;
+  created_at: Generated<string>;
   updated_at: Generated<string>;
 }
 
@@ -1219,6 +1250,7 @@ export interface DB {
   whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
   whatsapp_group_participants: WhatsAppGroupParticipantsTable;
   whatsapp_backfill_checkpoints: WhatsAppBackfillCheckpointsTable;
+  whatsapp_backfill_ranges: WhatsAppBackfillRangesTable;
   whatsapp_window_keepalives: WhatsAppWindowKeepAlivesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;

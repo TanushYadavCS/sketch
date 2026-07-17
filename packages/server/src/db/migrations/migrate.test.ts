@@ -24,7 +24,7 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 141;
+const EXPECTED_MIGRATION_COUNT = 142;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({

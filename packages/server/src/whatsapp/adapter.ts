@@ -87,6 +87,7 @@ export interface WhatsAppAdapterHandlers {
       eventKey: string | null;
       source: ConversationMessageSource;
       connectionKey: string | null;
+      fromMe?: boolean;
       attachments?: Attachment[];
       attachmentsForWorkspace?: (workspaceDir: string) => Promise<Attachment[]>;
       commitCapture?: (
@@ -107,7 +108,9 @@ export interface WhatsAppAdapterHandlers {
       captureMetadataForMessage?: (message: WhatsAppInboundMessage) => {
         eventKey: string | null;
         connectionKey: string | null;
+        fromMe?: boolean;
       };
+      range?: { id: string; lowerBoundAt: string; upperBoundAt: string };
     },
   ): Promise<WhatsAppHistorySyncResult>;
 }
@@ -343,6 +346,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     source?: ConversationMessageSource;
     connectionKey?: string | null;
     backfillRangeId?: string | null;
+    providerFromMe?: boolean;
     attachments?: Attachment[];
     conversationRepository?: ConversationRepository;
     queued?: boolean;
@@ -382,6 +386,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       providerParentMessageId: params.message.quotedMessage?.providerMessageId ?? null,
       isThreadReply: Boolean(params.message.quotedMessage?.providerMessageId),
       providerTimestamp: providerTimestamp ?? null,
+      providerFromMe: params.providerFromMe ?? false,
       receivedAt: receivedAt ?? undefined,
       source: params.source ?? "live",
       connectionKey: params.connectionKey ?? params.message.connectionKey ?? null,
@@ -492,11 +497,16 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       captureMetadataForMessage?: (message: WhatsAppInboundMessage) => {
         eventKey: string | null;
         connectionKey: string | null;
+        fromMe?: boolean;
       };
+      range?: { id: string; lowerBoundAt: string; upperBoundAt: string };
     },
   ): Promise<WhatsAppHistorySyncResult> => {
     const result = emptyHistoryResult();
-    const cutoffMs = Date.now() - config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS;
+    const cutoffMs = options.range
+      ? Date.parse(options.range.lowerBoundAt)
+      : Date.now() - config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS;
+    const upperBoundMs = options.range ? Date.parse(options.range.upperBoundAt) : Number.POSITIVE_INFINITY;
     let candidateCount = 0;
     let candidateBeforeCutoff = 0;
     let candidateAtOrAfterCutoff = 0;
@@ -575,7 +585,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         candidateAtOrAfterCutoff += 1;
       }
 
-      if (receivedAtMs < cutoffMs) {
+      if (receivedAtMs < cutoffMs || receivedAtMs >= upperBoundMs) {
         result.skippedOld += 1;
         continue;
       }
@@ -593,6 +603,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           eventKey: captureMetadata?.eventKey ?? null,
           source: "history",
           connectionKey: captureMetadata?.connectionKey ?? message.connectionKey ?? null,
+          backfillRangeId: options.range?.id ?? null,
+          providerFromMe: captureMetadata?.fromMe ?? false,
           receivedAt,
           skipControlMessages: false,
           attachments: [],
@@ -667,7 +679,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       captureMetadataForMessage?: (message: WhatsAppInboundMessage) => {
         eventKey: string | null;
         connectionKey: string | null;
+        fromMe?: boolean;
       };
+      range?: { id: string; lowerBoundAt: string; upperBoundAt: string };
     },
   ) => {
     const result = emptyHistoryResult();
@@ -686,6 +700,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         await processHistoryGroupBatch(groupJid, groupMessages, metadata, {
           checkpoint: options?.checkpoint ?? true,
           captureMetadataForMessage: options?.captureMetadataForMessage,
+          range: options?.range,
         }),
       );
     }
@@ -1225,6 +1240,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       eventKey: string | null;
       source: ConversationMessageSource;
       connectionKey: string | null;
+      fromMe?: boolean;
       attachments?: Attachment[];
       attachmentsForWorkspace?: (workspaceDir: string) => Promise<Attachment[]>;
       commitCapture?: (
@@ -1263,6 +1279,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           eventKey: params.eventKey,
           source: params.source,
           connectionKey: params.connectionKey,
+          providerFromMe: params.fromMe ?? false,
           attachments,
           conversationRepository,
           queued: true,
@@ -1291,6 +1308,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         eventKey: params.eventKey,
         source: params.source,
         connectionKey: params.connectionKey,
+        providerFromMe: params.fromMe ?? false,
         attachments,
         conversationRepository,
         queued: true,

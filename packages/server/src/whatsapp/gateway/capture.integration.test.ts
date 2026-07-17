@@ -234,6 +234,37 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
     });
   });
 
+  it("persists the on-demand request session on empty durable history batches", async () => {
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => false,
+      wake: async () => undefined,
+      onPersistFailure: () => undefined,
+      leaseGeneration: 7,
+    });
+
+    await capture.captureHistory([], {
+      socketGeneration: 20,
+      syncType: 6,
+      peerDataRequestSessionId: "request-session-empty",
+    });
+
+    const row = await db
+      .selectFrom("whatsapp_inbound_events")
+      .select(["request_session_id", "envelope"])
+      .executeTakeFirstOrThrow();
+    expect(row.request_session_id).toBe("request-session-empty");
+    expect(JSON.parse(row.envelope)).toMatchObject({
+      batch: { peerDataRequestSessionId: "request-session-empty" },
+      messages: [],
+    });
+  });
+
   it("treats history after a logout-released lease and re-pair as a fresh initial-sync generation", async () => {
     const lease = createWhatsAppSessionLeaseRepository(db);
     const acquired = await lease.acquire({
