@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { type NameDedupEntityType, retrieveEntityNameCandidates } from "../connectors/embeddings/trunk-name-embeddings";
 import type { EmbeddingProvider } from "../connectors/embeddings/types";
+import { WHATSAPP_CONNECTOR_TYPE, WHATSAPP_CONVERSATION_SLICE_FILE_TYPE } from "../connectors/types";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -416,7 +417,8 @@ async function buildActiveLlmEvidenceProfiles(db: Kysely<DB>): Promise<Map<strin
         const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
         if (!normalizedName) continue;
         const key = llmFileCountKey(normalizedName, mentionType);
-        const isWhatsAppSlice = row.file_source === "whatsapp" && row.file_type === "whatsapp_conversation_slice";
+        const isWhatsAppSlice =
+          row.file_source === WHATSAPP_CONNECTOR_TYPE && row.file_type === WHATSAPP_CONVERSATION_SLICE_FILE_TYPE;
         const profile = evidenceByName.get(key);
         if (profile) {
           profile.fileIds.add(row.indexed_file_id);
@@ -637,7 +639,9 @@ export async function buildMaterializeDeps(
           .execute();
         return (
           rows.length > 0 &&
-          rows.every((row) => row.source === "whatsapp" && row.file_type === "whatsapp_conversation_slice")
+          rows.every(
+            (row) => row.source === WHATSAPP_CONNECTOR_TYPE && row.file_type === WHATSAPP_CONVERSATION_SLICE_FILE_TYPE,
+          )
         );
       }
       activeLlmEvidenceProfiles ??= buildActiveLlmEvidenceProfiles(db);

@@ -25,6 +25,9 @@ export type ConnectorType =
   | "zoho_crm"
   | "whatsapp";
 
+export const WHATSAPP_CONNECTOR_TYPE = "whatsapp" satisfies ConnectorType;
+export const WHATSAPP_CONVERSATION_SLICE_FILE_TYPE = "whatsapp_conversation_slice";
+
 export type AuthType = "oauth" | "api_key" | "service_account" | "system";
 
 export type SyncStatus = "pending" | "active" | "syncing" | "paused" | "error" | "disabled";

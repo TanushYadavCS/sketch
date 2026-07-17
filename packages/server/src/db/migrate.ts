@@ -147,6 +147,7 @@ import * as m144 from "./migrations/144-whatsapp-gateway-queue";
 import * as m145 from "./migrations/145-whatsapp-history-capture-foundation";
 import * as m146 from "./migrations/146-whatsapp-history-top-up";
 import * as m147 from "./migrations/147-whatsapp-backfill-graph-admission";
+import * as m148 from "./migrations/148-whatsapp-pending-slices-index";
 import type { DB } from "./schema";
 
 /**
@@ -303,6 +304,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "145-whatsapp-history-capture-foundation": m145,
           "146-whatsapp-history-top-up": m146,
           "147-whatsapp-backfill-graph-admission": m147,
+          "148-whatsapp-pending-slices-index": m148,
         };
       },
     },

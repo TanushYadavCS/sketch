@@ -883,8 +883,14 @@ async function admitWhatsAppBackfillGraphPages(options: ChunkWhatsAppGroupsOptio
   let slicesCreated = 0;
   let rangesCompleted = 0;
   let skippedForPressure = false;
+  const rangeRepo = createWhatsAppBackfillRangeRepository(options.db);
 
   while (messagesRead < knobs.cycleMessages) {
+    const candidate = await rangeRepo.findNextGraphCandidate({
+      groupJids: [...groupsByJid.keys()],
+      excludedGroupJids: servedGroupJids,
+    });
+    if (!candidate) break;
     const backlog = await readWhatsAppBackfillGraphBacklog(options.db);
     if (exceedsWhatsAppBackfillGraphPressure(backlog, knobs)) {
       skippedForPressure = true;
@@ -899,11 +905,6 @@ async function admitWhatsAppBackfillGraphPages(options: ChunkWhatsAppGroupsOptio
       );
       break;
     }
-    const candidate = await createWhatsAppBackfillRangeRepository(options.db).findNextGraphCandidate({
-      groupJids: [...groupsByJid.keys()],
-      excludedGroupJids: servedGroupJids,
-    });
-    if (!candidate) break;
     const group = groupsByJid.get(candidate.range.group_jid);
     if (!group) break;
     const result = await admitWhatsAppBackfillGraphChat({

@@ -369,6 +369,26 @@ describe("WhatsApp backfill graph admission scheduling", () => {
     await db.destroy();
   });
 
+  it("returns before checking pipeline pressure when there is no graph candidate", async () => {
+    const testLogger = logger();
+
+    await runAdmission(db, [], {
+      db,
+      groups: [],
+      logger: testLogger,
+      backfillGraphKnobs: { pendingSlicesMax: -1 },
+    });
+
+    expect(testLogger.info).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "Skipped WhatsApp backfill graph admission under pipeline backpressure",
+    );
+    expect(testLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ chatsServed: 0, skippedForPressure: false }),
+      "Completed WhatsApp backfill graph admission run",
+    );
+  });
+
   it("uses deterministic least-recently-served selection, a global budget, and between-chat backpressure", async () => {
     const a = await seedGraphChat(db, { groupJid: "a@g.us", graphLastServedAt: null });
     const b = await seedGraphChat(db, {

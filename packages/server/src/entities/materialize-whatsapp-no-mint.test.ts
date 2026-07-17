@@ -67,6 +67,10 @@ async function seedMention(db: Kysely<DB>, fileId: string, name: string, type: s
   });
 }
 
+async function setNormalizationBackfillComplete(db: Kysely<DB>): Promise<void> {
+  await db.updateTable("normalization_backfill_state").set({ status: "complete" }).where("id", "=", "v1").execute();
+}
+
 describe("WhatsApp-only LLM evidence no-mint policy", () => {
   let db!: Kysely<DB>;
 
@@ -79,26 +83,37 @@ describe("WhatsApp-only LLM evidence no-mint policy", () => {
     await db.destroy();
   });
 
-  it("does not mint recurring unknown person, company, or tool entities from WhatsApp slices", async () => {
-    for (const fileId of ["wa-1", "wa-2"]) {
-      await seedFile(db, fileId, "whatsapp", "whatsapp_conversation_slice");
-      await seedMention(db, fileId, "Unknown Recurring Person", "person");
-      await seedMention(db, fileId, "Unknown Recurring Company", "company");
-      await seedMention(db, fileId, "Unknown Recurring Tool", "tool");
-    }
+  it.each([
+    { profile: "legacy profile path", indexed: false },
+    { profile: "indexed profile path", indexed: true },
+  ])(
+    "does not mint recurring unknown person, company, or tool entities from WhatsApp slices via $profile",
+    async ({ indexed }) => {
+      if (indexed) await setNormalizationBackfillComplete(db);
+      for (const fileId of ["wa-1", "wa-2"]) {
+        await seedFile(db, fileId, "whatsapp", "whatsapp_conversation_slice");
+        await seedMention(db, fileId, "Unknown Recurring Person", "person");
+        await seedMention(db, fileId, "Unknown Recurring Company", "company");
+        await seedMention(db, fileId, "Unknown Recurring Tool", "tool");
+      }
 
-    await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 2 });
+      await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 2 });
 
-    const entities = await db
-      .selectFrom("entities")
-      .select(["name", "source_type"])
-      .where("name", "like", "Unknown Recurring%")
-      .execute();
-    expect(entities).toEqual([]);
-    await expect(db.selectFrom("entity_review_queue").select("id").execute()).resolves.toEqual([]);
-  });
+      const entities = await db
+        .selectFrom("entities")
+        .select(["name", "source_type"])
+        .where("name", "like", "Unknown Recurring%")
+        .execute();
+      expect(entities).toEqual([]);
+      await expect(db.selectFrom("entity_review_queue").select("id").execute()).resolves.toEqual([]);
+    },
+  );
 
-  it("keeps existing mixed-evidence minting behavior", async () => {
+  it.each([
+    { profile: "legacy profile path", indexed: false },
+    { profile: "indexed profile path", indexed: true },
+  ])("keeps existing mixed-evidence minting behavior via $profile", async ({ indexed }) => {
+    if (indexed) await setNormalizationBackfillComplete(db);
     await seedFile(db, "wa-mixed", "whatsapp", "whatsapp_conversation_slice");
     await seedFile(db, "drive-mixed", "google_drive", "document");
     await seedMention(db, "wa-mixed", "Mixed Evidence Company", "company");

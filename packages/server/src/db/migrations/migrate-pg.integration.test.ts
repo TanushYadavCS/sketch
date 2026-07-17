@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 143;
+const EXPECTED_MIGRATION_COUNT = 144;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -178,6 +178,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[140]).toBe("145-whatsapp-history-capture-foundation");
     expect(names[141]).toBe("146-whatsapp-history-top-up");
     expect(names[142]).toBe("147-whatsapp-backfill-graph-admission");
+    expect(names[143]).toBe("148-whatsapp-pending-slices-index");
   });
 
   it("creates the bounded open-materializable partial index", async () => {
