@@ -5,7 +5,7 @@ import { createWhatsAppBackfillRangeRepository } from "../db/repositories/whatsa
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { WhatsAppAdapterHandlers } from "./adapter";
-import { WhatsAppBackfillWorker } from "./backfill-worker";
+import { WHATSAPP_BACKFILL_SWEEP_MS, WhatsAppBackfillWorker } from "./backfill-worker";
 import type { WhatsAppHistoryBatchEnvelope, WhatsAppMessageEnvelope, WhatsAppSocketFacade } from "./facade-contract";
 import type { WhatsAppInboundMessage } from "./provider";
 
@@ -14,6 +14,7 @@ const KEY_1 = "000000000001:000000000001";
 const KEY_2 = "000000000001:000000000002";
 const KEY_3 = "000000000001:000000000003";
 const KEY_4 = "000000000001:000000000004";
+const KEY_5 = "000000000001:000000000005";
 
 function facade(fetchMessageHistory: WhatsAppSocketFacade["fetchMessageHistory"]): WhatsAppSocketFacade {
   return {
@@ -157,6 +158,7 @@ function worker(
     fetch?: WhatsAppSocketFacade["fetchMessageHistory"];
     handlers?: WhatsAppAdapterHandlers;
     onRequestAccepted?: () => Promise<void> | void;
+    tickMs?: number;
   } = {},
 ) {
   return new WhatsAppBackfillWorker({
@@ -169,6 +171,7 @@ function worker(
     now: input.now ?? (() => NOW),
     sleep: async () => undefined,
     onRequestAccepted: input.onRequestAccepted,
+    tickMs: input.tickMs,
   });
 }
 
@@ -324,6 +327,108 @@ describe("WhatsAppBackfillWorker", () => {
         .where("provider_message_id", "=", "orphan-anchor")
         .executeTakeFirstOrThrow(),
     ).resolves.toEqual({ backfill_range_id: orphanRange.id });
+  });
+
+  it("reconciles on startup, connected transitions, and sweep cadence but not a plain drain", async () => {
+    const conversation = await seedGroup(db);
+    await seedLease(db);
+    const conversations = createConversationRepository(db);
+    const live = await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "cadence-live",
+      eventKey: "event-cadence-live",
+      senderName: "Live",
+      providerTimestamp: "2026-07-17T11:00:00.000Z",
+      source: "live",
+      connectionKey: KEY_2,
+    });
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "in_progress",
+        live_start_effective_at: live.row.effectiveAt,
+        live_start_message_id: live.row.id,
+      })
+      .execute();
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "startup-orphan",
+      eventKey: "event-startup-orphan",
+      senderName: "History",
+      providerTimestamp: "2026-07-17T10:30:00.000Z",
+      source: "history",
+      connectionKey: KEY_1,
+    });
+    let clock = NOW;
+    const topUp = worker(db, { now: () => clock, tickMs: 60_000 });
+
+    topUp.start();
+    await vi.waitFor(async () => {
+      const row = await db
+        .selectFrom("conversation_messages")
+        .select("backfill_range_id")
+        .where("provider_message_id", "=", "startup-orphan")
+        .executeTakeFirstOrThrow();
+      expect(row.backfill_range_id).not.toBeNull();
+    });
+    await topUp.stop();
+
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "connected-orphan",
+      eventKey: "event-connected-orphan",
+      senderName: "History",
+      providerTimestamp: "2026-07-17T11:30:00.000Z",
+      source: "history",
+      connectionKey: KEY_4,
+    });
+    await topUp.runOnce();
+    await expect(
+      db
+        .selectFrom("conversation_messages")
+        .select("backfill_range_id")
+        .where("provider_message_id", "=", "connected-orphan")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ backfill_range_id: null });
+
+    await topUp.handleConnected({ leaseGeneration: 1, socketGeneration: 3 });
+    await expect(
+      db
+        .selectFrom("conversation_messages")
+        .select("backfill_range_id")
+        .where("provider_message_id", "=", "connected-orphan")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ backfill_range_id: expect.any(String) });
+
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "between-sweeps-orphan",
+      eventKey: "event-between-sweeps-orphan",
+      senderName: "History",
+      providerTimestamp: "2026-07-17T11:45:00.000Z",
+      source: "history",
+      connectionKey: KEY_5,
+    });
+    await topUp.runOnce();
+    await expect(
+      db
+        .selectFrom("conversation_messages")
+        .select("backfill_range_id")
+        .where("provider_message_id", "=", "between-sweeps-orphan")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ backfill_range_id: null });
+
+    clock += WHATSAPP_BACKFILL_SWEEP_MS;
+    await topUp.runOnce();
+    await expect(
+      db
+        .selectFrom("conversation_messages")
+        .select("backfill_range_id")
+        .where("provider_message_id", "=", "between-sweeps-orphan")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ backfill_range_id: expect.any(String) });
   });
 
   it("matches correlation, materializes out-of-order pages ascending, dedups, and stamps the range", async () => {

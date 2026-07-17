@@ -30,6 +30,7 @@ export const WHATSAPP_BACKFILL_TICK_MS = 1_000;
 export const WHATSAPP_BACKFILL_SWEEP_MS = 5 * 60_000;
 export const WHATSAPP_BACKFILL_STALE_CLAIM_MS = 2 * 60_000;
 export const WHATSAPP_BACKFILL_FETCH_SPACING_MS = 500;
+export const WHATSAPP_BACKFILL_MATERIALIZE_BATCH_SIZE = 200;
 const DAY_MS = 24 * 60 * 60_000;
 
 export function isOnDemandWhatsAppHistory(syncType: number | string | null | undefined): boolean {
@@ -96,7 +97,7 @@ export class WhatsAppBackfillWorker {
   private active: Promise<void> | null = null;
   private rerun = false;
   private running = false;
-  private lastSweepAt = 0;
+  private lastSweepAt = Number.NEGATIVE_INFINITY;
   private lastFetchAt = 0;
 
   constructor(private readonly options: WhatsAppBackfillWorkerOptions) {
@@ -108,9 +109,10 @@ export class WhatsAppBackfillWorker {
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.lastSweepAt = Number.NEGATIVE_INFINITY;
     this.timer = setInterval(() => void this.wake(), this.options.tickMs ?? WHATSAPP_BACKFILL_TICK_MS);
     this.timer.unref?.();
-    void this.reconcile(true).then(() => this.wake());
+    void this.wake();
   }
 
   async stop(): Promise<void> {
@@ -146,7 +148,8 @@ export class WhatsAppBackfillWorker {
   }
 
   async handleConnected(input: { leaseGeneration: number; socketGeneration: number }): Promise<void> {
-    const now = new Date(this.now()).toISOString();
+    const nowMs = this.now();
+    const now = new Date(nowMs).toISOString();
     const connectionKey = createWhatsAppConnectionKey(input.leaseGeneration, input.socketGeneration);
     const lease = await this.options.db
       .selectFrom("whatsapp_session_lease")
@@ -175,7 +178,8 @@ export class WhatsAppBackfillWorker {
         adopted += result.adopted;
       }
     }
-    await this.reconcileOwnership(now);
+    await this.reconcileState(nowMs, now);
+    this.lastSweepAt = nowMs;
     this.options.logger.info(
       { connectionKey, rangesCreated: created, rowsAdopted: adopted, rangesRearmed: rearmed },
       "WhatsApp backfill connected transition reconciled",
@@ -253,17 +257,15 @@ export class WhatsAppBackfillWorker {
 
   async reconcile(forceSweep = false): Promise<void> {
     const nowMs = this.now();
+    const sweepMs = this.options.sweepMs ?? WHATSAPP_BACKFILL_SWEEP_MS;
+    if (!forceSweep && nowMs - this.lastSweepAt < sweepMs) return;
     const now = new Date(nowMs).toISOString();
-    await this.reconcileInitialRanges(nowMs, now);
-    await this.reconcileOwnership(now);
-    await this.ranges.refreshAwaitingAnchors(now);
-    if (forceSweep || nowMs - this.lastSweepAt >= (this.options.sweepMs ?? WHATSAPP_BACKFILL_SWEEP_MS)) {
-      const olderThan = new Date(nowMs - (this.options.sweepMs ?? WHATSAPP_BACKFILL_SWEEP_MS)).toISOString();
-      const rearmed = await this.ranges.rearmExhausted(now, olderThan);
-      this.lastSweepAt = nowMs;
-      if (rearmed > 0)
-        this.options.logger.info({ rangesRearmed: rearmed }, "WhatsApp exhausted backfill ranges re-armed");
-    }
+    await this.reconcileState(nowMs, now);
+    const olderThan = new Date(nowMs - sweepMs).toISOString();
+    const rearmed = await this.ranges.rearmExhausted(now, olderThan);
+    this.lastSweepAt = nowMs;
+    if (rearmed > 0)
+      this.options.logger.info({ rangesRearmed: rearmed }, "WhatsApp exhausted backfill ranges re-armed");
   }
 
   private async drain(): Promise<void> {
@@ -381,22 +383,29 @@ export class WhatsAppBackfillWorker {
       })
       .filter(this.options.shouldHandleInboundMessage);
 
-    await this.options.handlers.handleHistoryMessages(
-      messages,
-      { syncType: proto.HistorySync.HistorySyncType.ON_DEMAND },
-      {
-        checkpoint: false,
-        range: { id: range.id, lowerBoundAt: range.lower_bound_at, upperBoundAt: range.upper_bound_at },
-        captureMetadataForMessage: (message) => {
-          const envelope = metadata.get(message);
-          return {
-            eventKey: envelope?.eventKey ?? null,
-            connectionKey: envelope?.connectionKey ?? range.connection_key,
-            fromMe: envelope?.fromMe ?? false,
-          };
+    const batches = messages.length === 0 ? [messages] : [];
+    for (let offset = 0; offset < messages.length; offset += WHATSAPP_BACKFILL_MATERIALIZE_BATCH_SIZE) {
+      batches.push(messages.slice(offset, offset + WHATSAPP_BACKFILL_MATERIALIZE_BATCH_SIZE));
+    }
+    for (const [index, batch] of batches.entries()) {
+      await this.options.handlers.handleHistoryMessages(
+        batch,
+        { syncType: proto.HistorySync.HistorySyncType.ON_DEMAND },
+        {
+          checkpoint: false,
+          range: { id: range.id, lowerBoundAt: range.lower_bound_at, upperBoundAt: range.upper_bound_at },
+          captureMetadataForMessage: (message) => {
+            const envelope = metadata.get(message);
+            return {
+              eventKey: envelope?.eventKey ?? null,
+              connectionKey: envelope?.connectionKey ?? range.connection_key,
+              fromMe: envelope?.fromMe ?? false,
+            };
+          },
         },
-      },
-    );
+      );
+      if (index < batches.length - 1) await this.sleep(0);
+    }
     const terminal = await this.ranges.markMaterialized(range.id, new Date(this.now()).toISOString());
     if (!terminal || (terminal.status !== "complete" && terminal.status !== "exhausted")) return;
     const stagedRowsDeleted = await this.ranges.deleteRangeStaging(range.id);
@@ -446,6 +455,12 @@ export class WhatsAppBackfillWorker {
         );
       }
     }
+  }
+
+  private async reconcileState(nowMs: number, now: string): Promise<void> {
+    await this.reconcileInitialRanges(nowMs, now);
+    await this.reconcileOwnership(now);
+    await this.ranges.refreshAwaitingAnchors(now);
   }
 
   private async reconcileOwnership(now: string): Promise<void> {

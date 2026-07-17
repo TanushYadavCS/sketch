@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createConversationRepository } from "../db/repositories/conversations";
-import { createWhatsAppInboundEventsRepository } from "../db/repositories/whatsapp-inbound-events";
+import {
+  WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS,
+  createWhatsAppInboundEventsRepository,
+} from "../db/repositories/whatsapp-inbound-events";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { WhatsAppAdapterHandlers } from "./adapter";
 import { whatsAppHistoryBatchEnvelopeSchema, whatsAppMessageEnvelopeSchema } from "./facade-contract";
@@ -863,7 +866,93 @@ describe("WhatsAppInboundConsumer", () => {
     expect(checkpoints).toEqual([false, true]);
   });
 
-  it("stages on-demand history without blocking the following live dispatch", async () => {
+  it("dead-letters an uncorrelated on-demand response after its bounded deferral window", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const history = whatsAppHistoryBatchEnvelopeSchema.parse({
+      version: "1.1",
+      kind: "history_batch",
+      providerTimestamp: "2026-07-15T08:20:00.000Z",
+      connectionKey: "000000000001:000000000002",
+      batch: {
+        batchId: "batch-orphaned-on-demand",
+        chunkIndex: 0,
+        chunkCount: 1,
+        syncType: 6,
+        progress: null,
+        isLatest: null,
+        peerDataRequestSessionId: "request-orphaned-on-demand",
+      },
+      messages: [],
+    });
+    const inserted = await repo.insert({
+      kind: "history_batch",
+      origin: "gateway",
+      envelope: JSON.stringify(history),
+      batchId: "batch-orphaned-on-demand",
+      chunkIndex: 0,
+      chunkCount: 1,
+      requestSessionId: "request-orphaned-on-demand",
+    });
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const backfillWorker = {
+      correlateOnDemandSession: vi.fn(async () => false),
+      handleOnDemandResponse: vi.fn(async () => true),
+      adoptPassiveHistory: vi.fn(async () => undefined),
+    };
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger,
+      stagingDir,
+      shouldHandleInboundMessage: () => true,
+      handlers: handlers(),
+      backfillWorker,
+    });
+
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["status", "attempts"])
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "captured", attempts: 0 });
+
+    await db
+      .updateTable("whatsapp_inbound_events")
+      .set({ received_at: "2000-01-01T00:00:00.000Z", next_attempt_at: "2000-01-01T00:00:00.000Z" })
+      .where("id", "=", inserted.row.id)
+      .execute();
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["status", "attempts", "last_error"])
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      status: "dead",
+      attempts: 1,
+      last_error: "awaiting WhatsApp history request correlation",
+    });
+    expect(backfillWorker.correlateOnDemandSession).toHaveBeenCalledTimes(2);
+    expect(backfillWorker.handleOnDemandResponse).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      {
+        inboundEventId: inserted.row.id,
+        requestSessionId: "request-orphaned-on-demand",
+        correlationWindowMs: WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS,
+      },
+      "Uncorrelated WhatsApp on-demand history response dead-lettered",
+    );
+  });
+
+  it("stages a correlated on-demand response without blocking the following live dispatch", async () => {
     const repo = createWhatsAppInboundEventsRepository(db);
     const history = whatsAppHistoryBatchEnvelopeSchema.parse({
       version: "1.1",
@@ -922,6 +1011,7 @@ describe("WhatsAppInboundConsumer", () => {
     await consumer.stop();
 
     expect(handleHistoryMessages).not.toHaveBeenCalled();
+    expect(backfillWorker.correlateOnDemandSession).toHaveBeenCalledWith("request-on-demand");
     expect(backfillWorker.handleOnDemandResponse).toHaveBeenCalledWith("request-on-demand");
     expect(dispatchCapturedMessage).toHaveBeenCalledTimes(1);
     await expect(

@@ -5,7 +5,10 @@ import { type Kysely, sql } from "kysely";
 import { createConversationSlicesRepository } from "../db/repositories/conversation-slices";
 import { createConversationRepository } from "../db/repositories/conversations";
 import { createWhatsAppBackfillRangeRepository } from "../db/repositories/whatsapp-backfill-ranges";
-import { createWhatsAppInboundEventsRepository } from "../db/repositories/whatsapp-inbound-events";
+import {
+  WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS,
+  createWhatsAppInboundEventsRepository,
+} from "../db/repositories/whatsapp-inbound-events";
 import type { WhatsAppInboundEventRow } from "../db/repositories/whatsapp-inbound-events";
 import type { DB } from "../db/schema";
 import type { Attachment } from "../files";
@@ -387,7 +390,21 @@ export class WhatsAppInboundConsumer {
     if (!requestSessionId) throw new Error("ON_DEMAND WhatsApp history response lacked request session correlation");
     const correlated = await this.options.backfillWorker?.correlateOnDemandSession(requestSessionId);
     if (!correlated) {
-      await this.events.deferCorrelation(row.id, claimToken, "awaiting WhatsApp history request correlation");
+      const result = await this.events.deferCorrelation(
+        row.id,
+        claimToken,
+        "awaiting WhatsApp history request correlation",
+      );
+      if (result === "dead") {
+        this.options.logger.warn(
+          {
+            inboundEventId: row.id,
+            requestSessionId,
+            correlationWindowMs: WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS,
+          },
+          "Uncorrelated WhatsApp on-demand history response dead-lettered",
+        );
+      }
       return;
     }
     if (!(await this.events.markCaptured(row.id, claimToken))) return;
