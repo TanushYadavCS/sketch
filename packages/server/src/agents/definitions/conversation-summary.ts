@@ -8,6 +8,7 @@ import {
 import { type StoredConversationMessage, createConversationRepository } from "../../db/repositories/conversations";
 import { createTaskRepository } from "../../db/repositories/tasks";
 import type { DB } from "../../db/schema";
+import { readContextAuthoritySnapshot, reconcileItemsWithContextAuthority } from "../context-authority";
 import type {
   AgentApiItem,
   AgentDefinition,
@@ -249,6 +250,7 @@ const CONVERSATION_SUMMARY_INSTRUCTIONS = [
   "",
   "Generate a concise summary from the configured Slack channels and WhatsApp groups in the runtime context.",
   "The runtime context contains the complete source material available for this run. Do not use external knowledge or infer facts that are not supported by those messages.",
+  "Runtime context `contextAuthority` is server-owned current state. Do not report a confirmed-connected app as disconnected or requiring authentication. `absent` or `unavailable` does not prove disconnection.",
   "Call WriteAgentOutput exactly once when the summary is ready.",
   "",
   "Output shape:",
@@ -481,8 +483,24 @@ export const conversationSummaryDefinition: AgentDefinition = {
   allowedTools: CONVERSATION_SUMMARY_ALLOWED_TOOLS,
   itemsPerSectionRange: { min: 1, max: 12 },
   requiresKnowledgeRefs: false,
+  usesContextAuthority: true,
   buildInstructions,
   buildRuntimeContext: buildConversationSummaryRuntimeContext,
+  reconcileItems: async ({ items, runtimeContext, logger }) => {
+    const reconciled = reconcileItemsWithContextAuthority(
+      items,
+      readContextAuthoritySnapshot(runtimeContext.contextAuthority),
+    );
+    logger?.info(
+      {
+        event: "agent_context_authority_reconciliation",
+        agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+        suppressedCount: reconciled.suppressedCount,
+      },
+      "Agent: context authority reconciliation complete",
+    );
+    return reconciled.items;
+  },
   enrichItems,
   onOutputSaved,
   toApiItem,

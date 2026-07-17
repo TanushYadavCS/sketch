@@ -14,6 +14,7 @@ import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
 import { parseTimestampMs } from "../../timestamps";
+import { readContextAuthoritySnapshot, reconcileItemsWithContextAuthority } from "../context-authority";
 import type {
   AgentApiItem,
   AgentDefinition,
@@ -630,6 +631,7 @@ const DAILY_BRIEF_INSTRUCTIONS = [
   "",
   "Generate a concise Daily Brief from indexed organizational knowledge.",
   "Use the existing Sketch knowledge tools first. Search broadly, resolve relevant entities, then drill into entities and files only where needed.",
+  "Runtime context `contextAuthority` is server-owned current state. Do not report a confirmed-connected app as disconnected or requiring authentication. `absent` or `unavailable` does not prove disconnection.",
   "Call WriteAgentOutput exactly once when the complete brief is ready.",
   "",
   "Output shape:",
@@ -1075,6 +1077,7 @@ export const dailyBriefDefinition: AgentDefinition = {
   allowedTools: DAILY_BRIEF_ALLOWED_TOOLS,
   itemsPerSectionRange: { min: 1, max: 10 },
   requiresKnowledgeRefs: true,
+  usesContextAuthority: true,
   buildInstructions,
   buildRuntimeContext: async (params) => {
     const [dailyBriefCandidateContext, todaysMeetings] = await Promise.all([
@@ -1083,10 +1086,22 @@ export const dailyBriefDefinition: AgentDefinition = {
     ]);
     return { dailyBriefCandidateContext, todaysMeetings };
   },
-  reconcileItems: async ({ items, runtimeContext }) => {
+  reconcileItems: async ({ items, runtimeContext, logger }) => {
+    const authorityReconciled = reconcileItemsWithContextAuthority(
+      items,
+      readContextAuthoritySnapshot(runtimeContext.contextAuthority),
+    );
+    logger?.info(
+      {
+        event: "agent_context_authority_reconciliation",
+        agentKey: DAILY_BRIEF_AGENT_KEY,
+        suppressedCount: authorityReconciled.suppressedCount,
+      },
+      "Agent: context authority reconciliation complete",
+    );
     const sections = Array.isArray(runtimeContext.sections) ? (runtimeContext.sections as string[]) : [];
-    if (!sections.includes(DAILY_BRIEF_MEETINGS_SECTION_KEY)) return items;
-    return reconcileMeetingItems(items, parseTodaysMeetings(runtimeContext.todaysMeetings));
+    if (!sections.includes(DAILY_BRIEF_MEETINGS_SECTION_KEY)) return authorityReconciled.items;
+    return reconcileMeetingItems(authorityReconciled.items, parseTodaysMeetings(runtimeContext.todaysMeetings));
   },
   enrichItems,
   toApiItem,

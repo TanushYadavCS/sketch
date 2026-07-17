@@ -1,5 +1,5 @@
 import type { Kysely, Selectable } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentOutputItemInput } from "../../db/repositories/agent-outputs";
 import type { DB, UsersTable } from "../../db/schema";
 import { createTestDb } from "../../test-utils";
@@ -707,5 +707,73 @@ describe("dailyBriefDefinition.reconcileItems", () => {
     });
 
     expect(result).toBe(items);
+  });
+
+  it("suppresses only obsolete connection-only items before existing reconciliation", async () => {
+    const connectedApp = {
+      key: "connector:google_calendar",
+      names: ["google_calendar"],
+      aliases: ["google calendar", "googlecalendar", "calendar"],
+      source: "connector",
+      updatedAt: NOW.toISOString(),
+    };
+    const items: AgentOutputItemInput[] = [
+      {
+        sectionKey: "todos",
+        title: "Connect Google Calendar",
+        summary: "Google Calendar is not connected.",
+        priority: "medium",
+        label: "todo",
+        knowledgeRefs: { entityIds: ["project-1"], fileIds: [] },
+        sortOrder: 0,
+      },
+      {
+        sectionKey: "customer_updates",
+        title: "Connection correction",
+        summary: "The prior brief was wrong; Google Calendar is already connected.",
+        priority: "medium",
+        label: "warm",
+        knowledgeRefs: { entityIds: ["project-1"], fileIds: [] },
+        sortOrder: 0,
+      },
+      {
+        sectionKey: "customer_updates",
+        title: "Calendar access and customer risk",
+        summary: "Google Calendar is not connected, and Acme renewal needs review.",
+        priority: "high",
+        label: "at_risk",
+        knowledgeRefs: { entityIds: ["project-1"], fileIds: [] },
+        sortOrder: 0,
+      },
+    ];
+    const info = vi.fn();
+
+    const result = await dailyBriefDefinition.reconcileItems?.({
+      db,
+      items,
+      runtimeContext: {
+        sections: ["todos", "customer_updates"],
+        contextAuthority: {
+          capturedAt: NOW.toISOString(),
+          connectors: { status: "available", apps: [connectedApp] },
+          integrations: { status: "absent", apps: [] },
+          connectedApps: [connectedApp],
+        },
+      },
+      logger: { info } as never,
+    });
+
+    expect(result?.map((item) => item.title)).toEqual(["Connection correction", "Calendar access and customer risk"]);
+    expect(info).toHaveBeenCalledWith(
+      {
+        event: "agent_context_authority_reconciliation",
+        agentKey: dailyBriefDefinition.key,
+        suppressedCount: 1,
+      },
+      "Agent: context authority reconciliation complete",
+    );
+    const serializedLogs = JSON.stringify(info.mock.calls);
+    expect(serializedLogs).not.toContain("Google Calendar");
+    expect(serializedLogs).not.toContain("Acme");
   });
 });

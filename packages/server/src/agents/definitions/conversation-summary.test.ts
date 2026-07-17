@@ -1,5 +1,5 @@
 import type { Kysely, Selectable } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentOutputItemInput, AgentSourceConfig } from "../../db/repositories/agent-outputs";
 import type { DB, UsersTable } from "../../db/schema";
 import { createTestConfig, createTestDb, createTestLogger } from "../../test-utils";
@@ -146,6 +146,69 @@ describe("conversationSummaryDefinition", () => {
       supportsWhatsAppGroups: true,
     });
     expect(conversationSummaryDefinition.requiresKnowledgeRefs).toBe(false);
+    expect(conversationSummaryDefinition.usesContextAuthority).toBe(true);
+  });
+
+  it("suppresses only obsolete connection-only items and logs an aggregate count", async () => {
+    const db = await createTestDb();
+    const connectedApp = {
+      key: "integration:gmail",
+      names: ["gmail"],
+      aliases: ["gmail"],
+      source: "integration",
+      updatedAt: NOW.toISOString(),
+    };
+    const items = [
+      outputItem({
+        sectionKey: "task_candidates",
+        title: "Reconnect Gmail",
+        summary: "Gmail is not connected.",
+        label: "action_item",
+      }),
+      outputItem({
+        title: "Connection correction",
+        summary: "The previous summary was stale; Gmail is already connected.",
+      }),
+      outputItem({
+        title: "Gmail is not connected and Acme renewal is at risk",
+        summary: "Reconnect Gmail, and ask the account owner to review the renewal.",
+      }),
+    ];
+    const info = vi.fn();
+    try {
+      const result = await conversationSummaryDefinition.reconcileItems?.({
+        db,
+        items,
+        runtimeContext: {
+          contextAuthority: {
+            capturedAt: NOW.toISOString(),
+            connectors: { status: "absent", apps: [] },
+            integrations: { status: "available", apps: [connectedApp] },
+            connectedApps: [connectedApp],
+          },
+        },
+        logger: { info } as never,
+      });
+
+      expect(result?.map((item) => item.title)).toEqual([
+        "Connection correction",
+        "Gmail is not connected and Acme renewal is at risk",
+      ]);
+      expect(info).toHaveBeenCalledWith(
+        {
+          event: "agent_context_authority_reconciliation",
+          agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+          suppressedCount: 1,
+        },
+        "Agent: context authority reconciliation complete",
+      );
+      const serializedLogs = JSON.stringify(info.mock.calls);
+      expect(serializedLogs).not.toContain("Gmail");
+      expect(serializedLogs).not.toContain("Connect");
+      expect(serializedLogs).not.toContain("Acme");
+    } finally {
+      await db.destroy();
+    }
   });
 
   it("carries parent hints from the same output into promoted action-item tasks", async () => {
