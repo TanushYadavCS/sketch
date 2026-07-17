@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { proto } from "@whiskeysockets/baileys";
-import { type Kysely, sql } from "kysely";
+import type { Kysely } from "kysely";
 import type { Config } from "../config";
 import { createWhatsAppBackfillRangeRepository } from "../db/repositories/whatsapp-backfill-ranges";
 import type {
@@ -19,7 +19,7 @@ import {
   type WhatsAppSocketFacade,
   whatsAppHistoryBatchEnvelopeSchema,
 } from "./facade-contract";
-import type { WhatsAppInboundMessage } from "./provider";
+import { type WhatsAppInboundMessage, phoneE164ToWhatsAppJid } from "./provider";
 import { validWhatsAppProviderTimestamp } from "./provider-timestamp";
 import { normalizeBaileysInboundMessage } from "./providers/baileys";
 
@@ -87,6 +87,7 @@ export interface WhatsAppBackfillWorkerOptions {
   responseDeadlineMs?: number;
   maxResponseAttempts?: number;
   onRequestAccepted?: () => Promise<void> | void;
+  onMaterializationBatchYield?: () => Promise<void>;
 }
 
 export class WhatsAppBackfillWorker {
@@ -151,37 +152,12 @@ export class WhatsAppBackfillWorker {
     const nowMs = this.now();
     const now = new Date(nowMs).toISOString();
     const connectionKey = createWhatsAppConnectionKey(input.leaseGeneration, input.socketGeneration);
-    const lease = await this.options.db
-      .selectFrom("whatsapp_session_lease")
-      .select("disconnected_at")
-      .where("id", "=", "default")
-      .executeTakeFirst();
+    await this.persistNotifiedTransition(input, connectionKey, now);
     const rearmed = await this.ranges.rearmExhausted(now);
-    let created = 0;
-    let adopted = 0;
-    if (lease?.disconnected_at) {
-      const groups = await this.options.db
-        .selectFrom("whatsapp_backfill_checkpoints as checkpoint")
-        .innerJoin("whatsapp_groups as group", "group.jid", "checkpoint.group_jid")
-        .select("checkpoint.group_jid")
-        .where("checkpoint.live_start_message_id", "is not", null)
-        .execute();
-      for (const group of groups) {
-        const result = await this.ranges.ensureGapRange({
-          groupJid: group.group_jid,
-          connectionKey,
-          lowerBoundAt: lease.disconnected_at,
-          upperBoundAt: now,
-          now,
-        });
-        if (result.created) created += 1;
-        adopted += result.adopted;
-      }
-    }
     await this.reconcileState(nowMs, now);
     this.lastSweepAt = nowMs;
     this.options.logger.info(
-      { connectionKey, rangesCreated: created, rowsAdopted: adopted, rangesRearmed: rearmed },
+      { connectionKey, continuationsCreated: rearmed },
       "WhatsApp backfill connected transition reconciled",
     );
     void this.wake();
@@ -237,18 +213,10 @@ export class WhatsAppBackfillWorker {
 
   async adoptPassiveHistory(groupJids: string[]): Promise<void> {
     const unique = [...new Set(groupJids)];
-    let adopted = 0;
-    for (const groupJid of unique) {
-      const ranges = await this.options.db
-        .selectFrom("whatsapp_backfill_ranges")
-        .selectAll()
-        .where("group_jid", "=", groupJid)
-        .orderBy(sql`CASE WHEN kind = 'initial' THEN 0 ELSE 1 END`)
-        .orderBy("connection_key", "asc")
-        .execute();
-      for (const range of ranges) adopted += await this.ranges.adoptRange(range);
-    }
-    const refreshed = await this.ranges.refreshAwaitingAnchors(new Date(this.now()).toISOString());
+    const now = new Date(this.now()).toISOString();
+    const accountJid = await this.accountJid();
+    const adopted = await this.reconcileOwnership(now, unique, accountJid);
+    const refreshed = await this.ranges.refreshAwaitingAnchors(now, accountJid);
     if (adopted > 0 || refreshed > 0) {
       this.options.logger.info({ rowsAdopted: adopted, rangesAnchored: refreshed }, "WhatsApp history rows adopted");
     }
@@ -265,7 +233,7 @@ export class WhatsAppBackfillWorker {
     const rearmed = await this.ranges.rearmExhausted(now, olderThan);
     this.lastSweepAt = nowMs;
     if (rearmed > 0)
-      this.options.logger.info({ rangesRearmed: rearmed }, "WhatsApp exhausted backfill ranges re-armed");
+      this.options.logger.info({ continuationsCreated: rearmed }, "WhatsApp exhausted backfill continuations created");
   }
 
   private async drain(): Promise<void> {
@@ -404,18 +372,29 @@ export class WhatsAppBackfillWorker {
           },
         },
       );
-      if (index < batches.length - 1) await this.sleep(0);
+      if (index < batches.length - 1) {
+        await (this.options.onMaterializationBatchYield?.() ?? this.sleep(0));
+      }
     }
-    const terminal = await this.ranges.markMaterialized(range.id, new Date(this.now()).toISOString());
+    const finalized = await this.options.db
+      .transaction()
+      .execute((trx) =>
+        createWhatsAppBackfillRangeRepository(trx).finalizeMaterialized(range.id, new Date(this.now()).toISOString()),
+      );
+    const terminal = finalized.range;
     if (!terminal || (terminal.status !== "complete" && terminal.status !== "exhausted")) return;
-    const stagedRowsDeleted = await this.ranges.deleteRangeStaging(range.id);
     this.options.logger.info(
-      { rangeId: range.id, status: terminal.status, messages: messages.length, stagedRowsDeleted },
+      {
+        rangeId: range.id,
+        status: terminal.status,
+        messages: messages.length,
+        stagedRowsDeleted: finalized.stagedRowsDeleted,
+      },
       "WhatsApp backfill range materialized ascending",
     );
   }
 
-  private async reconcileInitialRanges(nowMs: number, now: string): Promise<void> {
+  private async reconcileInitialRanges(nowMs: number, now: string, accountJid: string | null): Promise<void> {
     const checkpoints = await this.options.db
       .selectFrom("whatsapp_backfill_checkpoints as checkpoint")
       .innerJoin("whatsapp_groups as group", "group.jid", "checkpoint.group_jid")
@@ -447,6 +426,7 @@ export class WhatsAppBackfillWorker {
         liveStartMessageId: checkpoint.live_start_message_id,
         lowerBoundAt: new Date(nowMs - this.options.config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS).toISOString(),
         now,
+        accountJid,
       });
       if (result.created || result.adopted > 0) {
         this.options.logger.info(
@@ -458,13 +438,19 @@ export class WhatsAppBackfillWorker {
   }
 
   private async reconcileState(nowMs: number, now: string): Promise<void> {
-    await this.reconcileInitialRanges(nowMs, now);
-    await this.reconcileOwnership(now);
-    await this.ranges.refreshAwaitingAnchors(now);
+    const accountJid = await this.accountJid();
+    await this.reconcileInitialRanges(nowMs, now, accountJid);
+    await this.reconcileConnectionTransitions(now, accountJid);
+    await this.reconcileOwnership(now, undefined, accountJid);
+    await this.ranges.refreshAwaitingAnchors(now, accountJid);
   }
 
-  private async reconcileOwnership(now: string): Promise<void> {
-    const orphans = await this.options.db
+  private async reconcileOwnership(
+    now: string,
+    groupJids: string[] | undefined,
+    accountJid: string | null,
+  ): Promise<number> {
+    let query = this.options.db
       .selectFrom("conversation_messages as message")
       .innerJoin("conversations as conversation", "conversation.id", "message.conversation_id")
       .innerJoin("whatsapp_groups as group", "group.jid", "conversation.provider_conversation_id")
@@ -478,37 +464,117 @@ export class WhatsAppBackfillWorker {
       .where("message.source", "=", "history")
       .where("message.backfill_range_id", "is", null)
       .where("message.connection_key", "is not", null)
-      .where("checkpoint.live_start_message_id", "is not", null)
-      .execute();
+      .where("checkpoint.live_start_message_id", "is not", null);
+    if (groupJids && groupJids.length > 0)
+      query = query.where("conversation.provider_conversation_id", "in", groupJids);
+    const orphans = await query.execute();
+    let adopted = 0;
     for (const orphan of orphans) {
       if (!orphan.connection_key) continue;
-      const initial = await this.options.db
-        .selectFrom("whatsapp_backfill_ranges")
-        .selectAll()
-        .where("group_jid", "=", orphan.group_jid)
-        .where("kind", "=", "initial")
-        .executeTakeFirst();
-      if (initial && orphan.connection_key <= initial.connection_key) {
-        const adopted = await this.ranges.adoptRange(initial);
-        if (adopted > 0) {
-          this.options.logger.info({ rangeId: initial.id, rowsAdopted: adopted }, "WhatsApp history rows adopted");
-        }
-        continue;
-      }
-      const result = await this.ranges.ensureGapRange({
+      let result = await this.ranges.reconcileUnownedConnection({
         groupJid: orphan.group_jid,
         connectionKey: orphan.connection_key,
-        lowerBoundAt: new Date(this.now() - this.options.config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS).toISOString(),
-        upperBoundAt: now,
         now,
       });
-      if (result.created || result.adopted > 0) {
+      if (result.adopted === 0 && !result.supplementalCreated) {
+        const range = await this.ranges.ensureGapRange({
+          groupJid: orphan.group_jid,
+          connectionKey: orphan.connection_key,
+          lowerBoundAt: new Date(
+            this.now() - this.options.config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS,
+          ).toISOString(),
+          upperBoundAt: now,
+          now,
+          accountJid,
+        });
+        result = await this.ranges.reconcileUnownedConnection({
+          groupJid: orphan.group_jid,
+          connectionKey: orphan.connection_key,
+          now,
+        });
+        result.adopted += range.adopted;
+      }
+      adopted += result.adopted;
+      if (result.supplementalCreated || result.adopted > 0) {
         this.options.logger.info(
-          { rangeId: result.row.id, connectionKey: orphan.connection_key, rowsAdopted: result.adopted },
-          "WhatsApp orphaned connection key reconciled to a gap range",
+          {
+            groupJid: orphan.group_jid,
+            connectionKey: orphan.connection_key,
+            rowsAdopted: result.adopted,
+            supplementalCreated: result.supplementalCreated,
+          },
+          "WhatsApp orphaned connection key reconciled",
         );
       }
     }
+    return adopted;
+  }
+
+  private async reconcileConnectionTransitions(now: string, accountJid: string | null): Promise<void> {
+    const transitions = await this.options.db
+      .selectFrom("whatsapp_connection_transitions")
+      .selectAll()
+      .where("reconciled_at", "is", null)
+      .orderBy("connected_at", "asc")
+      .orderBy("connection_key", "asc")
+      .execute();
+    if (transitions.length === 0) return;
+    const groups = await this.options.db
+      .selectFrom("whatsapp_backfill_checkpoints as checkpoint")
+      .innerJoin("whatsapp_groups as group", "group.jid", "checkpoint.group_jid")
+      .select("checkpoint.group_jid")
+      .where("checkpoint.live_start_message_id", "is not", null)
+      .execute();
+    for (const transition of transitions) {
+      if (transition.disconnected_at) {
+        for (const group of groups) {
+          await this.ranges.ensureGapRange({
+            groupJid: group.group_jid,
+            connectionKey: transition.connection_key,
+            lowerBoundAt: transition.disconnected_at,
+            upperBoundAt: transition.connected_at,
+            now,
+            accountJid,
+          });
+        }
+      }
+      await this.options.db
+        .updateTable("whatsapp_connection_transitions")
+        .set({ reconciled_at: now })
+        .where("connection_key", "=", transition.connection_key)
+        .where("reconciled_at", "is", null)
+        .execute();
+    }
+  }
+
+  private async persistNotifiedTransition(
+    input: { leaseGeneration: number; socketGeneration: number },
+    connectionKey: string,
+    connectedAt: string,
+  ): Promise<void> {
+    const lease = await this.options.db
+      .selectFrom("whatsapp_session_lease")
+      .select(["generation", "disconnected_at"])
+      .where("id", "=", "default")
+      .executeTakeFirst();
+    if (lease?.generation !== input.leaseGeneration) return;
+    await this.options.db
+      .insertInto("whatsapp_connection_transitions")
+      .values({
+        connection_key: connectionKey,
+        lease_generation: input.leaseGeneration,
+        socket_generation: input.socketGeneration,
+        disconnected_at: lease.disconnected_at,
+        connected_at: connectedAt,
+        reconciled_at: null,
+      })
+      .onConflict((oc) => oc.column("connection_key").doNothing())
+      .execute();
+  }
+
+  private async accountJid(): Promise<string | null> {
+    const status = await this.options.facade.pairing.status().catch(() => null);
+    return status?.phoneNumber ? phoneE164ToWhatsAppJid(status.phoneNumber) : null;
   }
 
   private rangeAnchor(range: WhatsAppBackfillRangeRow): WhatsAppBackfillAnchor | null {

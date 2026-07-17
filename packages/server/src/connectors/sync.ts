@@ -144,6 +144,7 @@ export async function runConnectorSync(
       | "WHATSAPP_SALIENCE_BATCH_LIMIT"
       | "WHATSAPP_EMISSION_REFRESH_DAYS"
       | "WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES"
+      | "WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS"
       | "WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES"
       | "WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX"
       | "WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX"
@@ -204,6 +205,8 @@ export async function runConnectorSync(
               emissionRefreshDays: storedScopeConfig.emissionRefreshDays ?? appConfig?.WHATSAPP_EMISSION_REFRESH_DAYS,
               backfillGraphPageMessages:
                 storedScopeConfig.backfillGraphPageMessages ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES,
+              backfillGraphPageTokens:
+                storedScopeConfig.backfillGraphPageTokens ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS,
               backfillGraphCycleMessages:
                 storedScopeConfig.backfillGraphCycleMessages ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES,
               backfillGraphPendingSlicesMax:

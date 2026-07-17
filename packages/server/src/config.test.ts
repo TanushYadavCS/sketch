@@ -41,6 +41,7 @@ describe("configSchema", () => {
         expect(result.data.WHATSAPP_SALIENCE_BATCH_LIMIT).toBe(50);
         expect(result.data.WHATSAPP_EMISSION_REFRESH_DAYS).toBe(7);
         expect(result.data.WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES).toBe(500);
+        expect(result.data.WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS).toBe(20_000);
         expect(result.data.WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES).toBe(1500);
         expect(result.data.WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX).toBe(200);
         expect(result.data.WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX).toBe(500);
@@ -104,6 +105,7 @@ describe("configSchema", () => {
         WHATSAPP_SALIENCE_BATCH_LIMIT: "7",
         WHATSAPP_EMISSION_REFRESH_DAYS: "3",
         WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES: "100",
+        WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS: "12000",
         WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES: "300",
         WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX: "20",
         WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX: "30",
@@ -122,6 +124,7 @@ describe("configSchema", () => {
         expect(result.data.WHATSAPP_SALIENCE_BATCH_LIMIT).toBe(7);
         expect(result.data.WHATSAPP_EMISSION_REFRESH_DAYS).toBe(3);
         expect(result.data.WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES).toBe(100);
+        expect(result.data.WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS).toBe(12_000);
         expect(result.data.WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES).toBe(300);
         expect(result.data.WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX).toBe(20);
         expect(result.data.WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX).toBe(30);

@@ -10,6 +10,7 @@ import {
 } from "../db/repositories/whatsapp-inbound-events";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { WhatsAppAdapterHandlers } from "./adapter";
+import { WhatsAppBackfillWorker } from "./backfill-worker";
 import { whatsAppHistoryBatchEnvelopeSchema, whatsAppMessageEnvelopeSchema } from "./facade-contract";
 import { WhatsAppInboundConsumer, moveWhatsAppStagedMedia } from "./inbound-consumer";
 import { createWhatsAppRuntime } from "./runtime";
@@ -1025,6 +1026,184 @@ describe("WhatsAppInboundConsumer", () => {
       { id: staged.row.id, status: "consumed" },
       { id: liveRow.row.id, status: "consumed" },
     ]);
+  });
+
+  it("dispatches live traffic before a real multi-batch materialization loop completes", async () => {
+    const conversation = await createConversationRepository(db).getOrCreate(
+      { platform: "whatsapp", kind: "group", providerConversationId: "120363000000001@g.us" },
+      "Backfill Group",
+    );
+    await db
+      .insertInto("whatsapp_groups")
+      .values({ jid: "120363000000001@g.us", name: "Backfill Group", description: null })
+      .execute();
+    await db
+      .insertInto("whatsapp_backfill_ranges")
+      .values({
+        id: "range-live-fairness",
+        group_jid: "120363000000001@g.us",
+        range_key: "gap:live-fairness",
+        kind: "gap",
+        connection_key: "000000000001:000000000002",
+        status: "materializing",
+        terminal_status: "complete",
+        lower_bound_at: "2026-07-15T08:00:00.000Z",
+        upper_bound_at: "2026-07-15T09:00:00.000Z",
+      })
+      .execute();
+    const historyMessages = Array.from({ length: 401 }, (_, index) =>
+      whatsAppMessageEnvelopeSchema.parse({
+        ...groupEnvelope(`history-${index}`, `event-history-${index}`),
+        kind: "history_message",
+        connectionKey: "000000000001:000000000002",
+      }),
+    );
+    const history = whatsAppHistoryBatchEnvelopeSchema.parse({
+      version: "1.1",
+      kind: "history_batch",
+      providerTimestamp: "2026-07-15T08:27:00.000Z",
+      connectionKey: "000000000001:000000000002",
+      batch: {
+        batchId: "batch-live-fairness",
+        chunkIndex: 0,
+        chunkCount: 1,
+        syncType: 6,
+        progress: null,
+        isLatest: null,
+        peerDataRequestSessionId: "request-live-fairness",
+      },
+      messages: historyMessages,
+    });
+    await db
+      .insertInto("whatsapp_inbound_events")
+      .values({
+        kind: "history_batch",
+        origin: "gateway",
+        envelope: JSON.stringify(history),
+        batch_id: "batch-live-fairness",
+        request_session_id: "request-live-fairness",
+        backfill_range_id: "range-live-fairness",
+        status: "consumed",
+        consumed_at: "2026-07-15T08:30:00.000Z",
+      })
+      .execute();
+
+    let releaseYield!: () => void;
+    let observedYield!: () => void;
+    const yieldObserved = new Promise<void>((resolve) => {
+      observedYield = resolve;
+    });
+    const yieldRelease = new Promise<void>((resolve) => {
+      releaseYield = resolve;
+    });
+    const batchSizes: number[] = [];
+    const dispatchBeforeCompletion: boolean[] = [];
+    let materializationComplete = false;
+    const testHandlers = handlers({
+      handleHistoryMessages: async (messages, _metadata, options) => {
+        batchSizes.push(messages.length);
+        for (const message of messages) {
+          const metadata = options?.captureMetadataForMessage?.(message);
+          await createConversationRepository(db).insertMessage({
+            conversationId: conversation.id,
+            providerMessageId: message.providerMessageId,
+            eventKey: metadata?.eventKey,
+            senderJid: message.senderProviderId,
+            senderName: message.senderName,
+            text: message.text,
+            providerTimestamp: message.providerTimestamp,
+            providerFromMe: metadata?.fromMe,
+            source: "history",
+            connectionKey: metadata?.connectionKey,
+            backfillRangeId: options?.range?.id,
+          });
+        }
+        return { persisted: messages.length, skippedOld: 0, skippedDup: 0 };
+      },
+      dispatchCapturedMessage: async (_message, _capture, hooks) => {
+        dispatchBeforeCompletion.push(!materializationComplete);
+        await hooks.onRunStart();
+        return true;
+      },
+    });
+    let yielded = false;
+    const backfillWorker = new WhatsAppBackfillWorker({
+      db,
+      config: { WHATSAPP_HISTORY_LOOKBACK_DAYS: 30 },
+      logger: createTestLogger(),
+      facade: {
+        send: async () => null,
+        sendComposing: async () => undefined,
+        react: async () => ({ ok: true }),
+        downloadMedia: async () => null,
+        groupMetadata: async () => null,
+        syncAllGroups: async () => ({ synced: 0 }),
+        resolveLid: async () => null,
+        fetchMessageHistory: async () => "unused",
+        pairing: {
+          startQr: async () => undefined,
+          status: async () => ({ connected: true, phoneNumber: "+15551234567" }),
+          cancel: async () => undefined,
+          logout: async () => undefined,
+        },
+        shutdown: async () => undefined,
+        health: async () => ({
+          socketState: "connected",
+          queueDepth: 0,
+          insertFailures: 0,
+          uptime: 1,
+          scriptHash: "test",
+          contractVersion: "1.1",
+        }),
+      },
+      handlers: testHandlers,
+      shouldHandleInboundMessage: () => true,
+      now: () => Date.parse("2026-07-15T08:30:00.000Z"),
+      sleep: async () => undefined,
+      onMaterializationBatchYield: async () => {
+        if (!yielded) {
+          yielded = true;
+          observedYield();
+          await yieldRelease;
+        }
+      },
+    });
+    const materialization = backfillWorker.runOnce().then(() => {
+      materializationComplete = true;
+    });
+    await yieldObserved;
+
+    const live = messageEnvelope("live-during-materialization", "event-live-during-materialization");
+    await createWhatsAppInboundEventsRepository(db).insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: live.eventKey,
+      providerMessageId: live.providerMessageId,
+      envelope: JSON.stringify(live),
+    });
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger: createTestLogger(),
+      stagingDir,
+      shouldHandleInboundMessage: () => true,
+      handlers: testHandlers,
+    });
+    consumer.start();
+    await consumer.wake();
+
+    expect(dispatchBeforeCompletion).toEqual([true]);
+    expect(batchSizes).toEqual([200]);
+    releaseYield();
+    await materialization;
+    await consumer.stop();
+    expect(batchSizes).toEqual([200, 200, 1]);
+    await expect(
+      db
+        .selectFrom("whatsapp_backfill_ranges")
+        .select("status")
+        .where("id", "=", "range-live-fairness")
+        .executeTakeFirst(),
+    ).resolves.toEqual({ status: "complete" });
   });
 });
 

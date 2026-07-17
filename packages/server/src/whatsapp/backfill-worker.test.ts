@@ -158,6 +158,7 @@ function worker(
     fetch?: WhatsAppSocketFacade["fetchMessageHistory"];
     handlers?: WhatsAppAdapterHandlers;
     onRequestAccepted?: () => Promise<void> | void;
+    onMaterializationBatchYield?: () => Promise<void>;
     tickMs?: number;
   } = {},
 ) {
@@ -171,6 +172,7 @@ function worker(
     now: input.now ?? (() => NOW),
     sleep: async () => undefined,
     onRequestAccepted: input.onRequestAccepted,
+    onMaterializationBatchYield: input.onMaterializationBatchYield,
     tickMs: input.tickMs,
   });
 }
@@ -327,6 +329,77 @@ describe("WhatsAppBackfillWorker", () => {
         .where("provider_message_id", "=", "orphan-anchor")
         .executeTakeFirstOrThrow(),
     ).resolves.toEqual({ backfill_range_id: orphanRange.id });
+  });
+
+  it("reconciles every durable connected transition after notification loss", async () => {
+    const conversation = await seedGroup(db);
+    await seedLease(db);
+    const live = await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "durable-live",
+      eventKey: "event-durable-live",
+      senderName: "Live",
+      providerTimestamp: "2026-07-17T10:00:00.000Z",
+      source: "live",
+      connectionKey: KEY_2,
+    });
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "in_progress",
+        live_start_effective_at: live.row.effectiveAt,
+        live_start_message_id: live.row.id,
+      })
+      .execute();
+    await db
+      .insertInto("whatsapp_connection_transitions")
+      .values([
+        {
+          connection_key: KEY_3,
+          lease_generation: 1,
+          socket_generation: 3,
+          disconnected_at: "2026-07-17T10:30:00.000Z",
+          connected_at: "2026-07-17T10:45:00.000Z",
+        },
+        {
+          connection_key: KEY_4,
+          lease_generation: 1,
+          socket_generation: 4,
+          disconnected_at: "2026-07-17T11:00:00.000Z",
+          connected_at: "2026-07-17T11:15:00.000Z",
+        },
+      ])
+      .execute();
+
+    const topUp = worker(db);
+    await topUp.reconcile(true);
+    await topUp.reconcile(true);
+
+    await expect(
+      db
+        .selectFrom("whatsapp_backfill_ranges")
+        .select(["range_key", "lower_bound_at", "upper_bound_at"])
+        .where("range_key", "in", [`gap:${KEY_3}`, `gap:${KEY_4}`])
+        .orderBy("range_key")
+        .execute(),
+    ).resolves.toEqual([
+      {
+        range_key: `gap:${KEY_3}`,
+        lower_bound_at: "2026-07-17T10:30:00.000Z",
+        upper_bound_at: "2026-07-17T10:45:00.000Z",
+      },
+      {
+        range_key: `gap:${KEY_4}`,
+        lower_bound_at: "2026-07-17T11:00:00.000Z",
+        upper_bound_at: "2026-07-17T11:15:00.000Z",
+      },
+    ]);
+    await expect(db.selectFrom("whatsapp_connection_transitions").select("reconciled_at").execute()).resolves.toEqual([
+      { reconciled_at: expect.any(String) },
+      { reconciled_at: expect.any(String) },
+    ]);
   });
 
   it("reconciles on startup, connected transitions, and sweep cadence but not a plain drain", async () => {
@@ -537,6 +610,188 @@ describe("WhatsAppBackfillWorker", () => {
       },
     ]);
     await expect(ranges.getById("range-materialize")).resolves.toMatchObject({ status: "complete" });
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select("id")
+        .where("backfill_range_id", "=", "range-materialize")
+        .execute(),
+    ).resolves.toEqual([]);
+  });
+
+  it("finalizes a materialized range and deletes staging in one rollback-safe transaction", async () => {
+    await db
+      .insertInto("whatsapp_backfill_ranges")
+      .values({
+        id: "range-atomic-finalize",
+        group_jid: "group@g.us",
+        range_key: "gap:atomic-finalize",
+        kind: "gap",
+        connection_key: KEY_3,
+        status: "materializing",
+        terminal_status: "complete",
+        lower_bound_at: "2026-07-17T09:00:00.000Z",
+        upper_bound_at: "2026-07-17T10:00:00.000Z",
+      })
+      .execute();
+    await db
+      .insertInto("whatsapp_inbound_events")
+      .values({
+        kind: "history_batch",
+        origin: "gateway",
+        envelope: JSON.stringify(historyEnvelope({ batchId: "atomic", requestSessionId: "atomic", messages: [] })),
+        backfill_range_id: "range-atomic-finalize",
+      })
+      .execute();
+
+    await expect(
+      db.transaction().execute(async (trx) => {
+        await createWhatsAppBackfillRangeRepository(trx).finalizeMaterialized(
+          "range-atomic-finalize",
+          "2026-07-17T12:00:00.000Z",
+        );
+        throw new Error("simulated commit failure");
+      }),
+    ).rejects.toThrow("simulated commit failure");
+    await expect(
+      db
+        .selectFrom("whatsapp_backfill_ranges")
+        .select("status")
+        .where("id", "=", "range-atomic-finalize")
+        .executeTakeFirst(),
+    ).resolves.toEqual({ status: "materializing" });
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select("id")
+        .where("backfill_range_id", "=", "range-atomic-finalize")
+        .execute(),
+    ).resolves.toHaveLength(1);
+  });
+
+  it("moves passive history behind an advanced cursor into chained supplemental ranges", async () => {
+    const conversation = await seedGroup(db);
+    const conversations = createConversationRepository(db);
+    const live = await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "supplemental-live",
+      eventKey: "event-supplemental-live",
+      senderName: "Live",
+      providerTimestamp: "2026-07-17T11:00:00.000Z",
+      source: "live",
+      connectionKey: KEY_2,
+    });
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "in_progress",
+        live_start_effective_at: live.row.effectiveAt,
+        live_start_message_id: live.row.id,
+      })
+      .execute();
+    await db
+      .insertInto("whatsapp_backfill_ranges")
+      .values({
+        id: "range-advanced",
+        group_jid: "group@g.us",
+        range_key: `gap:${KEY_3}`,
+        kind: "gap",
+        connection_key: KEY_3,
+        status: "complete",
+        terminal_status: "complete",
+        lower_bound_at: "2026-07-17T09:00:00.000Z",
+        upper_bound_at: "2026-07-17T11:00:00.000Z",
+        graph_cursor_effective_at: "2026-07-17T10:00:00.000Z",
+        graph_cursor_message_id: 999,
+      })
+      .execute();
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "late-behind-cursor",
+      eventKey: "event-late-behind-cursor",
+      senderName: "History",
+      providerTimestamp: "2026-07-17T09:30:00.000Z",
+      source: "history",
+      connectionKey: KEY_3,
+    });
+
+    const topUp = worker(db);
+    await topUp.adoptPassiveHistory(["group@g.us"]);
+    const first = await db
+      .selectFrom("conversation_messages")
+      .select("backfill_range_id")
+      .where("provider_message_id", "=", "late-behind-cursor")
+      .executeTakeFirstOrThrow();
+    expect(first.backfill_range_id).not.toBe("range-advanced");
+    const supplemental = await db
+      .selectFrom("whatsapp_backfill_ranges")
+      .selectAll()
+      .where("id", "=", first.backfill_range_id as string)
+      .executeTakeFirstOrThrow();
+    expect(supplemental).toMatchObject({
+      status: "complete",
+      parent_range_id: "range-advanced",
+      graph_cursor_effective_at: null,
+      graph_cursor_message_id: null,
+      graph_completed_at: null,
+    });
+
+    await db
+      .updateTable("whatsapp_backfill_ranges")
+      .set({ graph_completed_at: "2026-07-17T12:00:00.000Z" })
+      .where("id", "=", supplemental.id)
+      .execute();
+    await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "late-after-completion",
+      eventKey: "event-late-after-completion",
+      senderName: "History",
+      providerTimestamp: "2026-07-17T09:45:00.000Z",
+      source: "history",
+      connectionKey: KEY_3,
+    });
+    await topUp.adoptPassiveHistory(["group@g.us"]);
+    const second = await db
+      .selectFrom("conversation_messages")
+      .select("backfill_range_id")
+      .where("provider_message_id", "=", "late-after-completion")
+      .executeTakeFirstOrThrow();
+    expect(second.backfill_range_id).not.toBe(supplemental.id);
+    await expect(
+      db
+        .selectFrom("whatsapp_backfill_ranges")
+        .select("parent_range_id")
+        .where("id", "=", second.backfill_range_id as string)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ parent_range_id: supplemental.id });
+  });
+
+  it("corrects a legacy manual outgoing anchor from the runtime account JID", async () => {
+    const conversation = await seedGroup(db);
+    const message = await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "manual-outgoing-anchor",
+      senderJid: "15551234567@s.whatsapp.net",
+      senderName: "Self",
+      providerTimestamp: "2026-07-17T11:00:00.000Z",
+      providerFromMe: false,
+      source: "live",
+      connectionKey: KEY_2,
+    });
+
+    const range = await createWhatsAppBackfillRangeRepository(db).ensureInitialRange({
+      groupJid: "group@g.us",
+      connectionKey: KEY_2,
+      liveStartEffectiveAt: message.row.effectiveAt,
+      liveStartMessageId: message.row.id,
+      lowerBoundAt: "2026-06-17T12:00:00.000Z",
+      now: "2026-07-17T12:00:00.000Z",
+      accountJid: "15551234567@s.whatsapp.net",
+    });
+
+    expect(range.row.cursor_from_me).toBe(1);
   });
 
   it("retries deadline expiry, exhausts after the bound, and re-arms on connected", async () => {
@@ -605,10 +860,41 @@ describe("WhatsAppBackfillWorker", () => {
       db.selectFrom("whatsapp_backfill_ranges").selectAll().where("id", "=", "range-timeout").executeTakeFirstOrThrow(),
     ).resolves.toMatchObject({ status: "exhausted", terminal_status: "exhausted" });
 
+    await db
+      .updateTable("whatsapp_backfill_ranges")
+      .set({
+        graph_cursor_effective_at: "2026-07-17T10:30:00.000Z",
+        graph_cursor_message_id: 42,
+        graph_completed_at: "2026-07-17T11:30:00.000Z",
+      })
+      .where("id", "=", "range-timeout")
+      .execute();
     await topUp.handleConnected({ leaseGeneration: 1, socketGeneration: 3 });
     await expect(
       db.selectFrom("whatsapp_backfill_ranges").selectAll().where("id", "=", "range-timeout").executeTakeFirstOrThrow(),
-    ).resolves.toMatchObject({ status: "pending", attempts: 0, terminal_status: null });
+    ).resolves.toMatchObject({
+      status: "exhausted",
+      terminal_status: "exhausted",
+      graph_cursor_effective_at: "2026-07-17T10:30:00.000Z",
+      graph_cursor_message_id: 42,
+      graph_completed_at: "2026-07-17T11:30:00.000Z",
+    });
+    await expect(
+      db
+        .selectFrom("whatsapp_backfill_ranges")
+        .selectAll()
+        .where("range_key", "=", "continuation:range-timeout")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({
+      status: "pending",
+      attempts: 0,
+      terminal_status: null,
+      parent_range_id: "range-timeout",
+      graph_cursor_effective_at: null,
+      graph_cursor_message_id: null,
+      graph_completed_at: null,
+      cursor_message_id: "anchor",
+    });
   });
 
   it("reclaims a stale request after gateway respawn without charging the accepted-attempt budget", async () => {

@@ -149,8 +149,9 @@ export async function runWhatsAppGateway(): Promise<void> {
       if (terminating) return;
       try {
         await leaseRepository.deriveDisconnectedAt(fence);
+        await leaseRepository.recordConnectedTransition(fence, socketGeneration, new Date().toISOString());
       } catch (error) {
-        logger.warn({ error }, "WhatsApp gateway could not derive the reconnect watermark");
+        logger.warn({ error }, "WhatsApp gateway could not persist the connected transition");
       }
       setSocketState("connected", socketGeneration);
       await heartbeat?.tick();

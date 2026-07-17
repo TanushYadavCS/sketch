@@ -542,6 +542,16 @@ export interface WhatsAppSessionLeaseTable {
   disconnected_at: string | null;
 }
 
+export interface WhatsAppConnectionTransitionsTable {
+  connection_key: string;
+  lease_generation: number;
+  socket_generation: number;
+  disconnected_at: string | null;
+  connected_at: string;
+  reconciled_at: string | null;
+  created_at: Generated<string>;
+}
+
 export interface ConversationSlicesTable {
   id: string;
   conversation_id: number;
@@ -641,6 +651,7 @@ export interface WhatsAppBackfillRangesTable {
   graph_cursor_effective_at: Generated<string | null>;
   graph_cursor_message_id: Generated<number | null>;
   graph_completed_at: Generated<string | null>;
+  parent_range_id: Generated<string | null>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
@@ -1212,6 +1223,7 @@ export interface DB {
   whatsapp_keys: WhatsAppKeysTable;
   whatsapp_inbound_events: WhatsAppInboundEventsTable;
   whatsapp_session_lease: WhatsAppSessionLeaseTable;
+  whatsapp_connection_transitions: WhatsAppConnectionTransitionsTable;
   whatsapp_groups: WhatsAppGroupsTable;
   settings: SettingsTable;
   connector_configs: ConnectorConfigsTable;

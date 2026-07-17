@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createConversationRepository } from "../db/repositories/conversations";
+import { createWhatsAppBackfillRangeRepository } from "../db/repositories/whatsapp-backfill-ranges";
 import { type WhatsAppGroupIndexingConfig, createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestPgDb } from "../test-utils";
@@ -81,13 +82,14 @@ async function insertHistory(
   rangeId: string,
   providerMessageId: string,
   effectiveAt: string,
+  text = providerMessageId,
 ): Promise<number> {
   const result = await createConversationRepository(db).insertMessage({
     conversationId,
     providerMessageId,
     senderJid: `${providerMessageId}@s.whatsapp.net`,
     senderName: "History Sender",
-    text: providerMessageId,
+    text,
     providerTimestamp: effectiveAt,
     receivedAt: effectiveAt,
     source: "history",
@@ -204,6 +206,121 @@ function runPortableSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
           .where("id", "=", seeded.rangeId)
           .executeTakeFirstOrThrow(),
       ).resolves.toEqual({ graph_cursor_message_id: third, graph_completed_at: NOW.toISOString() });
+    });
+
+    it("closes a graph read page at the token bound before the message-count bound", async () => {
+      const seeded = await seedGraphChat(db, { groupJid: "token-page@g.us" });
+      const first = await insertHistory(
+        db,
+        seeded.conversationId,
+        seeded.rangeId,
+        "token-history-1",
+        "2026-07-01T09:00:00.000Z",
+        "a".repeat(40),
+      );
+      const second = await insertHistory(
+        db,
+        seeded.conversationId,
+        seeded.rangeId,
+        "token-history-2",
+        "2026-07-01T09:01:00.000Z",
+        "b".repeat(40),
+      );
+      const third = await insertHistory(
+        db,
+        seeded.conversationId,
+        seeded.rangeId,
+        "token-history-3",
+        "2026-07-01T09:02:00.000Z",
+        "c".repeat(40),
+      );
+
+      const testLogger = logger();
+      await runAdmission(db, [seeded.group], {
+        db,
+        groups: [seeded.group],
+        logger: testLogger,
+        backfillGraphKnobs: { pageMessages: 500, pageTokens: 20, cycleMessages: 500 },
+      });
+      expect(testLogger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ messagesRead: 2 }),
+        "Completed WhatsApp backfill graph admission run",
+      );
+      await expect(
+        db
+          .selectFrom("whatsapp_backfill_ranges")
+          .select(["graph_cursor_message_id", "graph_completed_at"])
+          .where("id", "=", seeded.rangeId)
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ graph_cursor_message_id: second, graph_completed_at: null });
+
+      await runAdmission(db, [seeded.group]);
+      const memberships = (
+        await db
+          .selectFrom("conversation_slices")
+          .select("denoised_message_ids")
+          .where("conversation_id", "=", seeded.conversationId)
+          .execute()
+      ).flatMap((slice) => JSON.parse(slice.denoised_message_ids ?? "[]") as number[]);
+      expect(memberships.sort((left, right) => left - right)).toEqual([first, second, third]);
+    });
+
+    it("routes a cursor-behind orphan into a fresh supplemental range", async () => {
+      const seeded = await seedGraphChat(db, { groupJid: "supplemental@g.us" });
+      await db
+        .updateTable("whatsapp_backfill_ranges")
+        .set({
+          graph_cursor_effective_at: "2026-07-01T10:00:00.000Z",
+          graph_cursor_message_id: 999,
+        })
+        .where("id", "=", seeded.rangeId)
+        .execute();
+      const orphan = await createConversationRepository(db).insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: "portable-late-history",
+        senderJid: "sender@s.whatsapp.net",
+        senderName: "History Sender",
+        text: "late",
+        providerTimestamp: "2026-07-01T09:00:00.000Z",
+        receivedAt: "2026-07-01T09:00:00.000Z",
+        source: "history",
+        connectionKey: "000000000001:000000000001",
+      });
+
+      const result = await createWhatsAppBackfillRangeRepository(db).reconcileUnownedConnection({
+        groupJid: seeded.group.jid,
+        connectionKey: "000000000001:000000000001",
+        now: NOW.toISOString(),
+      });
+
+      expect(result).toEqual({ adopted: 1, supplementalCreated: true });
+      const stored = await db
+        .selectFrom("conversation_messages")
+        .select("backfill_range_id")
+        .where("id", "=", orphan.row.id)
+        .executeTakeFirstOrThrow();
+      expect(stored.backfill_range_id).not.toBe(seeded.rangeId);
+      await expect(
+        db
+          .selectFrom("whatsapp_backfill_ranges")
+          .select(["parent_range_id", "graph_cursor_effective_at", "graph_cursor_message_id"])
+          .where("id", "=", stored.backfill_range_id as string)
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({
+        parent_range_id: seeded.rangeId,
+        graph_cursor_effective_at: null,
+        graph_cursor_message_id: null,
+      });
+      await expect(
+        db
+          .selectFrom("whatsapp_backfill_ranges")
+          .select(["graph_cursor_effective_at", "graph_cursor_message_id"])
+          .where("id", "=", seeded.rangeId)
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({
+        graph_cursor_effective_at: "2026-07-01T10:00:00.000Z",
+        graph_cursor_message_id: 999,
+      });
     });
 
     it("rolls back slice insertion and resumes the same page after a mid-page crash", async () => {

@@ -47,6 +47,7 @@ function nonNegativeInteger(value: unknown): number | undefined {
 function backfillGraphKnobsFromScopeConfig(scopeConfig: Record<string, unknown>): Partial<WhatsAppBackfillGraphKnobs> {
   return {
     pageMessages: positiveInteger(scopeConfig.backfillGraphPageMessages),
+    pageTokens: positiveInteger(scopeConfig.backfillGraphPageTokens),
     cycleMessages: positiveInteger(scopeConfig.backfillGraphCycleMessages),
     pendingSlicesMax: nonNegativeInteger(scopeConfig.backfillGraphPendingSlicesMax),
     pendingFilesMax: nonNegativeInteger(scopeConfig.backfillGraphPendingFilesMax),

@@ -16,11 +16,13 @@ import {
   WHATSAPP_PROVIDER_TIMESTAMP_MAX_FUTURE_MS,
   effectiveWhatsAppMessageTimestamp,
 } from "../whatsapp/provider-timestamp";
+import { estimateTokens } from "./chunking";
 
 export const DEFAULT_WHATSAPP_SLICE_GAP_MINUTES = 25;
 export const DEFAULT_WHATSAPP_SLICE_MAX_AGE_MINUTES = 120;
 export const DEFAULT_WHATSAPP_SLICE_MAX_MESSAGES = 50;
 export const DEFAULT_WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES = 500;
+export const DEFAULT_WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS = 20_000;
 export const DEFAULT_WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES = 1500;
 export const DEFAULT_WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX = 200;
 export const DEFAULT_WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX = 500;
@@ -40,6 +42,7 @@ export interface WhatsAppChunkerKnobs {
 
 export interface WhatsAppBackfillGraphKnobs {
   pageMessages: number;
+  pageTokens: number;
   cycleMessages: number;
   pendingSlicesMax: number;
   pendingFilesMax: number;
@@ -549,6 +552,7 @@ function resolveWhatsAppBackfillGraphKnobs(
 ): WhatsAppBackfillGraphKnobs {
   return {
     pageMessages: overrides.pageMessages ?? DEFAULT_WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES,
+    pageTokens: overrides.pageTokens ?? DEFAULT_WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS,
     cycleMessages: overrides.cycleMessages ?? DEFAULT_WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES,
     pendingSlicesMax: overrides.pendingSlicesMax ?? DEFAULT_WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX,
     pendingFilesMax: overrides.pendingFilesMax ?? DEFAULT_WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX,
@@ -607,6 +611,7 @@ async function admitWhatsAppBackfillGraphChat(input: {
   conversationId: number;
   rangeId: string;
   pageLimit: number;
+  pageTokenLimit: number;
   now: Date;
   logger: Logger;
   claimStaleMs?: number;
@@ -640,6 +645,14 @@ async function admitWhatsAppBackfillGraphChat(input: {
       const range = await txRangeRepo.getById(input.rangeId);
       if (!range || !["complete", "exhausted"].includes(range.status) || range.graph_completed_at) {
         throw new ConversationSliceClaimLostError();
+      }
+      if (range.parent_range_id) {
+        const parent = await trx
+          .selectFrom("whatsapp_backfill_ranges")
+          .select("graph_completed_at")
+          .where("id", "=", range.parent_range_id)
+          .executeTakeFirst();
+        if (!parent?.graph_completed_at) throw new ConversationSliceClaimLostError();
       }
       const checkpoint = await trx
         .selectFrom("whatsapp_backfill_checkpoints")
@@ -711,7 +724,19 @@ async function admitWhatsAppBackfillGraphChat(input: {
           ]),
         );
       }
-      const rows = await pageQuery.orderBy("effective_at", "asc").orderBy("id", "asc").limit(input.pageLimit).execute();
+      const boundedRows = await pageQuery
+        .orderBy("effective_at", "asc")
+        .orderBy("id", "asc")
+        .limit(input.pageLimit)
+        .execute();
+      const rows: typeof boundedRows = [];
+      let pageTokens = 0;
+      for (const row of boundedRows) {
+        const rowTokens = estimateTokens(row.text);
+        if (rows.length > 0 && pageTokens + rowTokens > input.pageTokenLimit) break;
+        rows.push(row);
+        pageTokens += rowTokens;
+      }
       const messages: WhatsAppChunkerMessage[] = rows.map((row) => ({
         id: row.id,
         providerMessageId: row.provider_message_id,
@@ -913,6 +938,7 @@ async function admitWhatsAppBackfillGraphPages(options: ChunkWhatsAppGroupsOptio
       conversationId: candidate.conversationId,
       rangeId: candidate.range.id,
       pageLimit: Math.min(knobs.pageMessages, knobs.cycleMessages - messagesRead),
+      pageTokenLimit: knobs.pageTokens,
       now: options.now ?? new Date(),
       logger: options.logger,
       claimStaleMs: options.claimStaleMs,

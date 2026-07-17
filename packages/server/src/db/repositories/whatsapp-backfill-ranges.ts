@@ -73,6 +73,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     kind: WhatsAppBackfillRangeKind,
     connectionKey: string,
     liveStartMessageId?: number | null,
+    accountJid?: string | null,
   ): Promise<WhatsAppBackfillAnchor | null> {
     const query = db
       .selectFrom("conversation_messages as message")
@@ -81,6 +82,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
         "conversation.provider_conversation_id as remote_jid",
         "message.provider_message_id as provider_message_id",
         "message.provider_from_me as provider_from_me",
+        "message.sender_jid as sender_jid",
         "message.provider_timestamp as provider_timestamp",
       ])
       .where("conversation.platform", "=", "whatsapp")
@@ -109,7 +111,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     return {
       remoteJid: row.remote_jid,
       id: row.provider_message_id,
-      fromMe: row.provider_from_me === 1,
+      fromMe: row.provider_from_me === 1 || Boolean(accountJid && row.sender_jid === accountJid),
       providerTimestamp: row.provider_timestamp,
     };
   }
@@ -120,6 +122,22 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
       .set({ backfill_range_id: range.id })
       .where("source", "=", "history")
       .where("backfill_range_id", "is", null)
+      .where(
+        sql<boolean>`EXISTS (
+          SELECT 1
+          FROM whatsapp_backfill_ranges AS target
+          WHERE target.id = ${range.id}
+            AND target.graph_completed_at IS NULL
+            AND (
+              (target.graph_cursor_effective_at IS NULL AND target.graph_cursor_message_id IS NULL)
+              OR conversation_messages.effective_at > target.graph_cursor_effective_at
+              OR (
+                conversation_messages.effective_at = target.graph_cursor_effective_at
+                AND conversation_messages.id > target.graph_cursor_message_id
+              )
+            )
+        )`,
+      )
       .where(
         "conversation_id",
         "in",
@@ -194,6 +212,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     liveStartMessageId: number;
     lowerBoundAt: string;
     now: string;
+    accountJid?: string | null;
   }): Promise<WhatsAppBackfillRangeEnsureResult> {
     const connectionKey = input.connectionKey ?? WHATSAPP_BACKFILL_EMPTY_CONNECTION_KEY;
     return ensureRange({
@@ -202,7 +221,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
       connectionKey,
       lowerBoundAt: input.lowerBoundAt,
       upperBoundAt: input.liveStartEffectiveAt,
-      anchor: await findAnchor(input.groupJid, "initial", connectionKey, input.liveStartMessageId),
+      anchor: await findAnchor(input.groupJid, "initial", connectionKey, input.liveStartMessageId, input.accountJid),
       now: input.now,
     });
   }
@@ -213,15 +232,16 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     lowerBoundAt: string;
     upperBoundAt: string;
     now: string;
+    accountJid?: string | null;
   }): Promise<WhatsAppBackfillRangeEnsureResult> {
     return ensureRange({
       ...input,
       kind: "gap",
-      anchor: await findAnchor(input.groupJid, "gap", input.connectionKey),
+      anchor: await findAnchor(input.groupJid, "gap", input.connectionKey, null, input.accountJid),
     });
   }
 
-  async function refreshAwaitingAnchors(now: string): Promise<number> {
+  async function refreshAwaitingAnchors(now: string, accountJid?: string | null): Promise<number> {
     const ranges = await db
       .selectFrom("whatsapp_backfill_ranges")
       .selectAll()
@@ -243,6 +263,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
         range.kind as WhatsAppBackfillRangeKind,
         range.connection_key,
         checkpoint?.live_start_message_id,
+        accountJid,
       );
       if (!anchor) continue;
       const result = await db
@@ -406,7 +427,10 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
       .execute();
   }
 
-  async function markMaterialized(rangeId: string, now: string): Promise<WhatsAppBackfillRangeRow | undefined> {
+  async function finalizeMaterialized(
+    rangeId: string,
+    now: string,
+  ): Promise<{ range: WhatsAppBackfillRangeRow | undefined; stagedRowsDeleted: number }> {
     await db
       .updateTable("whatsapp_backfill_ranges")
       .set({ status: sql`terminal_status`, updated_at: now })
@@ -414,16 +438,16 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
       .where("status", "=", "materializing")
       .where("terminal_status", "is not", null)
       .execute();
-    return getById(rangeId);
-  }
-
-  async function deleteRangeStaging(rangeId: string): Promise<number> {
+    const range = await getById(rangeId);
+    if (!range || (range.status !== "complete" && range.status !== "exhausted")) {
+      return { range, stagedRowsDeleted: 0 };
+    }
     const result = await db
       .deleteFrom("whatsapp_inbound_events")
       .where("backfill_range_id", "=", rangeId)
       .where("kind", "=", "history_batch")
       .executeTakeFirst();
-    return Number(result.numDeletedRows);
+    return { range, stagedRowsDeleted: Number(result.numDeletedRows) };
   }
 
   async function reclaimStale(input: {
@@ -493,20 +517,111 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
   }
 
   async function rearmExhausted(now: string, olderThan?: string): Promise<number> {
-    let update = db
-      .updateTable("whatsapp_backfill_ranges")
-      .set({
-        status: sql`CASE WHEN cursor_message_id IS NULL THEN 'awaiting_anchor' ELSE 'pending' END`,
-        attempts: 0,
-        next_retry_at: now,
-        last_error: null,
-        terminal_status: null,
-        updated_at: now,
+    let query = db.selectFrom("whatsapp_backfill_ranges").selectAll().where("status", "=", "exhausted");
+    if (olderThan) query = query.where("updated_at", "<=", olderThan);
+    const exhausted = await query.orderBy("created_at", "asc").orderBy("id", "asc").execute();
+    let created = 0;
+    for (const parent of exhausted) {
+      const result = await db
+        .insertInto("whatsapp_backfill_ranges")
+        .values({
+          id: randomUUID(),
+          group_jid: parent.group_jid,
+          range_key: `continuation:${parent.id}`,
+          kind: "gap",
+          connection_key: parent.connection_key,
+          parent_range_id: parent.id,
+          status: parent.cursor_message_id ? "pending" : "awaiting_anchor",
+          lower_bound_at: parent.lower_bound_at,
+          upper_bound_at: parent.upper_bound_at,
+          cursor_remote_jid: parent.cursor_remote_jid,
+          cursor_message_id: parent.cursor_message_id,
+          cursor_from_me: parent.cursor_from_me,
+          cursor_provider_timestamp: parent.cursor_provider_timestamp,
+          attempts: 0,
+          next_retry_at: parent.cursor_message_id ? now : null,
+          updated_at: now,
+        })
+        .onConflict((oc) => oc.columns(["group_jid", "range_key"]).doNothing())
+        .executeTakeFirst();
+      created += Number(result.numInsertedOrUpdatedRows ?? 0) > 0 ? 1 : 0;
+    }
+    return created;
+  }
+
+  async function reconcileUnownedConnection(input: {
+    groupJid: string;
+    connectionKey: string;
+    now: string;
+  }): Promise<{ adopted: number; supplementalCreated: boolean }> {
+    const allRanges = await db
+      .selectFrom("whatsapp_backfill_ranges")
+      .selectAll()
+      .where("group_jid", "=", input.groupJid)
+      .orderBy("created_at", "asc")
+      .orderBy("id", "asc")
+      .execute();
+    const ranges = allRanges.filter(
+      (range) =>
+        range.connection_key === input.connectionKey ||
+        (range.kind === "initial" && input.connectionKey <= range.connection_key),
+    );
+    let adopted = 0;
+    for (const range of ranges) adopted += await adoptRange(range);
+    const orphan = await db
+      .selectFrom("conversation_messages as message")
+      .innerJoin("conversations as conversation", "conversation.id", "message.conversation_id")
+      .select("message.id")
+      .where("conversation.platform", "=", "whatsapp")
+      .where("conversation.kind", "=", "group")
+      .where("conversation.provider_conversation_id", "=", input.groupJid)
+      .where("message.source", "=", "history")
+      .where("message.backfill_range_id", "is", null)
+      .where("message.connection_key", "=", input.connectionKey)
+      .orderBy("message.id", "asc")
+      .executeTakeFirst();
+    if (!orphan || ranges.length === 0) return { adopted, supplementalCreated: false };
+    const rangesById = new Map(ranges.map((range) => [range.id, range]));
+    const depth = (range: WhatsAppBackfillRangeRow): number => {
+      let value = 0;
+      let parentRangeId = range.parent_range_id;
+      const visited = new Set<string>();
+      while (parentRangeId && !visited.has(parentRangeId)) {
+        visited.add(parentRangeId);
+        const parentRange = rangesById.get(parentRangeId);
+        if (!parentRange) break;
+        value += 1;
+        parentRangeId = parentRange.parent_range_id;
+      }
+      return value;
+    };
+    const parent = [...ranges].sort((left, right) => depth(right) - depth(left) || left.id.localeCompare(right.id))[0];
+    if (!parent) return { adopted, supplementalCreated: false };
+    const insert = await db
+      .insertInto("whatsapp_backfill_ranges")
+      .values({
+        id: randomUUID(),
+        group_jid: input.groupJid,
+        range_key: `supplemental:${parent.id}:${orphan.id}`,
+        kind: "gap",
+        connection_key: input.connectionKey,
+        parent_range_id: parent.id,
+        status: "complete",
+        lower_bound_at: parent.lower_bound_at,
+        upper_bound_at: parent.upper_bound_at,
+        terminal_status: "complete",
+        updated_at: input.now,
       })
-      .where("status", "=", "exhausted");
-    if (olderThan) update = update.where("updated_at", "<=", olderThan);
-    const result = await update.executeTakeFirst();
-    return Number(result.numUpdatedRows);
+      .onConflict((oc) => oc.columns(["group_jid", "range_key"]).doNothing())
+      .executeTakeFirst();
+    const supplemental = await db
+      .selectFrom("whatsapp_backfill_ranges")
+      .selectAll()
+      .where("group_jid", "=", input.groupJid)
+      .where("range_key", "=", `supplemental:${parent.id}:${orphan.id}`)
+      .executeTakeFirstOrThrow();
+    adopted += await adoptRange(supplemental);
+    return { adopted, supplementalCreated: Number(insert.numInsertedOrUpdatedRows ?? 0) > 0 };
   }
 
   async function findNextGraphCandidate(input: {
@@ -528,6 +643,17 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
       .select(["conversation.id as graph_conversation_id", "checkpoint.graph_last_served_at as graph_last_served_at"])
       .where("range.status", "in", ["complete", "exhausted"])
       .where("range.graph_completed_at", "is", null)
+      .where(
+        sql<boolean>`(
+          range.parent_range_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM whatsapp_backfill_ranges AS parent
+            WHERE parent.id = range.parent_range_id
+              AND parent.graph_completed_at IS NOT NULL
+          )
+        )`,
+      )
       .where("checkpoint.graph_halted_at", "is", null)
       .where("group.index_enabled", "=", 1)
       .where("range.group_jid", "in", input.groupJids)
@@ -600,10 +726,10 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     listRangeEvents,
     applyReceivedPage,
     listMaterializing,
-    markMaterialized,
-    deleteRangeStaging,
+    finalizeMaterialized,
     reclaimStale,
     rearmExhausted,
+    reconcileUnownedConnection,
     findNextGraphCandidate,
     haltGraphAdmission,
   };
