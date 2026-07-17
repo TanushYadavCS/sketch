@@ -1,8 +1,8 @@
-export * from "./service-contracts";
-export { computeDuePeriodKey } from "./service-output-utils";
-export { scopeKeyForRoute, sourceKeyForTarget } from "./service-routing";
+export * from "./run/contracts";
+export { computeDuePeriodKey } from "./run/output-utils";
+export { scopeKeyForRoute, sourceKeyForTarget } from "./run/routing";
 
-import { AgentGenerationService } from "./service-generation";
+import { AgentRunGenerationLayer } from "./run/generation";
 
 /** Runs prebuilt agents while delegating configuration, targeting, output, and generation concerns to focused modules. */
-export class AgentRunService extends AgentGenerationService {}
+export class AgentRunService extends AgentRunGenerationLayer {}

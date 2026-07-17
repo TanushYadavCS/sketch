@@ -1,9 +1,9 @@
 import { join } from "node:path";
-import { AgentRunAdmissionCancelledError } from "../agent/concurrency-limiter";
-import { buildSketchContext } from "../agent/prompt";
-import type { RunAgentParams, RunAgentResult } from "../agent/runner";
-import type { AgentOutputWriter, WriteAgentOutputPayload } from "../agent/tools/agent-output";
-import { ensureWorkspace } from "../agent/workspace";
+import { AgentRunAdmissionCancelledError } from "../../agent/concurrency-limiter";
+import { buildSketchContext } from "../../agent/prompt";
+import type { RunAgentParams, RunAgentResult } from "../../agent/runner";
+import type { AgentOutputWriter, WriteAgentOutputPayload } from "../../agent/tools/agent-output";
+import { ensureWorkspace } from "../../agent/workspace";
 import type {
   AgentDeliveryConfig,
   AgentMasthead,
@@ -11,21 +11,21 @@ import type {
   AgentRoute,
   AgentRouteDestination,
   AgentSourceConfig,
-} from "../db/repositories/agent-outputs";
-import { requireAgentDefinition } from "./registry";
-import type { ScheduledRunAdmission } from "./run-queue";
-import { AgentDeliveryTargetError } from "./service-contracts";
+} from "../../db/repositories/agent-outputs";
+import { requireAgentDefinition } from "../registry";
+import type { AgentDefinition } from "../types";
+import { AgentDeliveryTargetError } from "./contracts";
 import {
   addDays,
   deliveryPlatformForRoute,
   firstRunLookbackHoursForSchedule,
   rawPayloadWithRunMetadata,
-} from "./service-output-utils";
-import { AgentOutputService } from "./service-outputs";
-import { enabledSectionsForScope, maxItemsPerSectionForScope, sourceAsDelivery } from "./service-routing";
-import type { AgentDefinition } from "./types";
+} from "./output-utils";
+import { AgentRunOutputLayer } from "./outputs";
+import type { ScheduledRunAdmission } from "./queue";
+import { enabledSectionsForScope, maxItemsPerSectionForScope, sourceAsDelivery } from "./routing";
 
-export class AgentGenerationService extends AgentOutputService {
+export class AgentRunGenerationLayer extends AgentRunOutputLayer {
   protected async generateExistingOutput(
     agentKey: string,
     outputId: string,

@@ -7,10 +7,11 @@ import type {
   AgentRouteDestination,
   AgentSourceConfig,
   AgentSourceKey,
-} from "../db/repositories/agent-outputs";
-import type { WhatsAppBot } from "../whatsapp/bot";
-import { getAgentDefinition, requireAgentDefinition } from "./registry";
-import { AgentConfigService } from "./service-config";
+} from "../../db/repositories/agent-outputs";
+import type { WhatsAppBot } from "../../whatsapp/bot";
+import { getAgentDefinition, requireAgentDefinition } from "../registry";
+import type { AgentDefinition, AgentSourceConfigDef } from "../types";
+import { AgentRunConfigLayer } from "./config";
 import {
   AgentDeliveryTargetError,
   type AgentRouteMember,
@@ -18,7 +19,7 @@ import {
   type AgentViewerRole,
   type AgentWhatsAppDmMember,
   type ResolvedRoute,
-} from "./service-contracts";
+} from "./contracts";
 import {
   decodeOrgRouteId,
   deliveryKeyForTarget,
@@ -31,8 +32,7 @@ import {
   routeScopeKeyForSources,
   scopeKeyForRoute,
   sourceKeyForTarget,
-} from "./service-routing";
-import type { AgentDefinition, AgentSourceConfigDef } from "./types";
+} from "./routing";
 
 function whatsappNumberToJid(whatsappNumber: string): string {
   return `${normalizeWhatsappNumber(whatsappNumber)}@s.whatsapp.net`;
@@ -74,7 +74,7 @@ function withMentions(mentions: AgentDeliveryMention[]): Pick<AgentDeliveryConfi
   return mentions.length > 0 ? { mentions } : {};
 }
 
-export class AgentTargetService extends AgentConfigService {
+export class AgentRunTargetLayer extends AgentRunConfigLayer {
   protected resolveDeliveryModelForUser(
     sources: AgentSourceConfig[],
     deliveryModel: AgentDeliveryModel,

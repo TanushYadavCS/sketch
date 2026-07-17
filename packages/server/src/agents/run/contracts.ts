@@ -1,7 +1,7 @@
 import type { Kysely, Selectable } from "kysely";
-import type { AgentRunAdmissionOptions } from "../agent/concurrency-limiter";
-import type { McpServerConfig, RunAgentParams, RunAgentResult } from "../agent/runner";
-import type { Config } from "../config";
+import type { AgentRunAdmissionOptions } from "../../agent/concurrency-limiter";
+import type { McpServerConfig, RunAgentParams, RunAgentResult } from "../../agent/runner";
+import type { Config } from "../../config";
 import type {
   AgentDeliveryConfig,
   AgentDeliveryModel,
@@ -10,17 +10,17 @@ import type {
   AgentOutputTriggerType,
   AgentRoute,
   AgentSourceConfig,
-} from "../db/repositories/agent-outputs";
-import type { createSettingsRepository } from "../db/repositories/settings";
-import type { createUserRepository } from "../db/repositories/users";
-import type { DB, UsersTable } from "../db/schema";
-import type { IntegrationProvider } from "../integrations/types";
-import type { Logger } from "../logger";
-import type { QueueManager } from "../queue";
-import type { SlackBot } from "../slack/bot";
-import type { WhatsAppBot } from "../whatsapp/bot";
-import type { AgentOutputDeliveryPublisher } from "./output-delivery";
-import type { AgentApiItem, AgentDefinition, AgentSourceConfigDef } from "./types";
+} from "../../db/repositories/agent-outputs";
+import type { createSettingsRepository } from "../../db/repositories/settings";
+import type { createUserRepository } from "../../db/repositories/users";
+import type { DB, UsersTable } from "../../db/schema";
+import type { IntegrationProvider } from "../../integrations/types";
+import type { Logger } from "../../logger";
+import type { QueueManager } from "../../queue";
+import type { SlackBot } from "../../slack/bot";
+import type { WhatsAppBot } from "../../whatsapp/bot";
+import type { AgentOutputDeliveryPublisher } from "../output-delivery";
+import type { AgentApiItem, AgentDefinition, AgentSourceConfigDef } from "../types";
 
 export type UserRow = Selectable<UsersTable>;
 

@@ -5,9 +5,10 @@ import {
   type AgentUserConfigWithOwner,
   type AgentUserPrefs,
   createAgentOutputRepository,
-} from "../db/repositories/agent-outputs";
-import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
-import { getAgentDefinition, listAgentDefinitions } from "./registry";
+} from "../../db/repositories/agent-outputs";
+import { CONVERSATION_SUMMARY_AGENT_KEY } from "../definitions/conversation-summary";
+import { getAgentDefinition, listAgentDefinitions } from "../registry";
+import type { AgentDefinition } from "../types";
 import type {
   AgentConfigRouteView,
   AgentConfigUpdatePatch,
@@ -18,8 +19,8 @@ import type {
   ResolvedAgentConfig,
   ResolvedRoute,
   UserRow,
-} from "./service-contracts";
-import { localDateInTimezone } from "./service-output-utils";
+} from "./contracts";
+import { localDateInTimezone } from "./output-utils";
 import {
   normalizeDeliveryModelFromValue,
   normalizeLegacyDeliveryModel,
@@ -31,8 +32,7 @@ import {
   sourceKeyForTarget,
   stripOrgRouteOwner,
   synthesizeRoutesFromDeliveryModel,
-} from "./service-routing";
-import type { AgentDefinition } from "./types";
+} from "./routing";
 
 /**
  * Generic engine that runs every prebuilt agent. Behavior is supplied by the
@@ -40,7 +40,7 @@ import type { AgentDefinition } from "./types";
  * outputs are data. Idempotency, scheduling, and the run lifecycle live here so each
  * definition only describes contract and shaping.
  */
-export abstract class AgentConfigService {
+export abstract class AgentRunConfigLayer {
   protected readonly repo: ReturnType<typeof createAgentOutputRepository>;
   protected readonly deps: AgentRunServiceDeps;
 

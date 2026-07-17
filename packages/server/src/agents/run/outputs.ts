@@ -2,10 +2,10 @@ import type {
   AgentOutputRow,
   AgentOutputTriggerType,
   createAgentOutputRepository,
-} from "../db/repositories/agent-outputs";
-import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
-import { requireAgentDefinition } from "./registry";
-import { AgentOutputRunQueue, type ScheduledRunAdmission } from "./run-queue";
+} from "../../db/repositories/agent-outputs";
+import { CONVERSATION_SUMMARY_AGENT_KEY } from "../definitions/conversation-summary";
+import { requireAgentDefinition } from "../registry";
+import type { AgentDefinition } from "../types";
 import type {
   AgentDueGenerationGroup,
   AgentExpectedScope,
@@ -16,21 +16,15 @@ import type {
   RequestAgentGenerationParams,
   ResolvedAgentConfig,
   UserRow,
-} from "./service-contracts";
-import {
-  computeDuePeriodKey,
-  emptySections,
-  isNewerThan,
-  isOlderThan,
-  localDateInTimezone,
-} from "./service-output-utils";
-import { decodeOrgRouteId, labelForRoute, scopeKeyForRoute } from "./service-routing";
-import { AgentTargetService } from "./service-targets";
-import type { AgentDefinition } from "./types";
+} from "./contracts";
+import { computeDuePeriodKey, emptySections, isNewerThan, isOlderThan, localDateInTimezone } from "./output-utils";
+import { AgentOutputRunQueue, type ScheduledRunAdmission } from "./queue";
+import { decodeOrgRouteId, labelForRoute, scopeKeyForRoute } from "./routing";
+import { AgentRunTargetLayer } from "./targets";
 
 const RUNNING_STALE_AFTER_MS = 30 * 60 * 1000;
 const SCHEDULED_FAILURE_SUPPRESS_AFTER_MS = 60 * 60 * 1000;
-export abstract class AgentOutputService extends AgentTargetService {
+export abstract class AgentRunOutputLayer extends AgentRunTargetLayer {
   protected readonly runQueue: AgentOutputRunQueue;
 
   protected abstract generateExistingOutput(

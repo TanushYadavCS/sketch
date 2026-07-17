@@ -12,9 +12,9 @@ import type {
   AgentSourceKey,
   AgentUserConfigWithOwner,
   AgentUserPrefs,
-} from "../db/repositories/agent-outputs";
-import type { AgentConfigRouteView, AgentRouteOwnerView, ResolvedAgentConfig } from "./service-contracts";
-import type { AgentDefinition } from "./types";
+} from "../../db/repositories/agent-outputs";
+import type { AgentDefinition } from "../types";
+import type { AgentConfigRouteView, AgentRouteOwnerView, ResolvedAgentConfig } from "./contracts";
 
 const ROUTE_FREQUENCIES = new Set<AgentRouteFrequency>(["daily", "weekly", "every_n_hours"]);
 const ROUTE_INTERVAL_HOURS = new Set([1, 2, 3, 4, 6, 8, 12]);

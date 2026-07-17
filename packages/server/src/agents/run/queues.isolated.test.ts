@@ -6,19 +6,19 @@ import {
   type AgentRoute,
   type AgentSourceConfig,
   createAgentOutputRepository,
-} from "../db/repositories/agent-outputs";
-import { createConversationRepository } from "../db/repositories/conversations";
-import { createSettingsRepository } from "../db/repositories/settings";
-import { createUserRepository } from "../db/repositories/users";
-import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
-import type { DB } from "../db/schema";
-import type { QueueManager } from "../queue";
-import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
-import type { WhatsAppBot } from "../whatsapp/bot";
-import { CONVERSATION_SUMMARY_AGENT_KEY, conversationSummaryDefinition } from "./definitions/conversation-summary";
-import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "./definitions/daily-brief";
-import type { AgentOutputDeliveryPublisher } from "./output-delivery";
-import { AgentRunService, type AgentRunServiceDeps, scopeKeyForRoute } from "./service";
+} from "../../db/repositories/agent-outputs";
+import { createConversationRepository } from "../../db/repositories/conversations";
+import { createSettingsRepository } from "../../db/repositories/settings";
+import { createUserRepository } from "../../db/repositories/users";
+import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-groups";
+import type { DB } from "../../db/schema";
+import type { QueueManager } from "../../queue";
+import { createTestConfig, createTestDb, createTestLogger } from "../../test-utils";
+import type { WhatsAppBot } from "../../whatsapp/bot";
+import { CONVERSATION_SUMMARY_AGENT_KEY, conversationSummaryDefinition } from "../definitions/conversation-summary";
+import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "../definitions/daily-brief";
+import type { AgentOutputDeliveryPublisher } from "../output-delivery";
+import { AgentRunService, type AgentRunServiceDeps, scopeKeyForRoute } from "../service";
 import {
   NOW,
   OUTPUT_DATE,
@@ -39,7 +39,7 @@ import {
   sourceRoute,
   successfulRunResult,
   whatsappSource,
-} from "./service-test-helpers";
+} from "./test-helpers";
 
 describe("AgentRunService", () => {
   let db: Kysely<DB>;
