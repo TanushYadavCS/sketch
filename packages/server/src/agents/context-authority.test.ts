@@ -259,6 +259,7 @@ describe("context authority reconciliation", () => {
     ["Gmail authentication required", "Authenticate Gmail before continuing."],
     ["Gmail isn't connected", "Reconnect Gmail before continuing."],
     ["Gmail connection issue", "Reconnect to Gmail because authentication is required."],
+    ["Gmail has a connection issue", "Gmail is not connected."],
   ])("suppresses explicit disconnected or authentication-required wording: %s", (title, summary) => {
     const result = reconcileItemsWithContextAuthority([outputItem({ title, summary })], connected);
 
@@ -285,6 +286,11 @@ describe("context authority reconciliation", () => {
       name: "mixed concrete and generic targets",
       title: "Reconnect Gmail",
       summary: "Both integrations require authentication.",
+    },
+    {
+      name: "mixed concrete and singular generic targets",
+      title: "Reconnect Gmail and the integration",
+      summary: "Gmail and the integration are not connected.",
     },
     {
       name: "token prefix collision",

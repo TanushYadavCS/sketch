@@ -95,6 +95,7 @@ const GENERIC_TARGETS = new Set([
 ]);
 
 const CONNECTION_CONTEXT_WORDS = new Set([
+  "a",
   "account",
   "accounts",
   "app",
@@ -111,6 +112,7 @@ const CONNECTION_CONTEXT_WORDS = new Set([
   "connectors",
   "credential",
   "credentials",
+  "has",
   "integration",
   "integrations",
   "issue",
@@ -409,7 +411,9 @@ function isConnectionOnlyText(text: string, matches: ClaimMatch[], snapshot: Con
 }
 
 function minimumConcreteTargetsForGeneric(target: string): number {
-  return /^(?:both|these|those|the|them)\b/u.test(target) ? 2 : 1;
+  if (target === "it") return 1;
+  if (target === "both" || target === "them") return 2;
+  return Number.POSITIVE_INFINITY;
 }
 
 function appMatchesTarget(app: ContextAuthorityApp, target: string): boolean {
