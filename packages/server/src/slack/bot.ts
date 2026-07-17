@@ -203,8 +203,6 @@ export class SlackBot {
     this.app.message(async ({ message }) => {
       if (!("user" in message) || !message.user) return;
       if (message.user === this.botUserId) return;
-      if ("subtype" in message && typeof message.subtype === "string" && SYSTEM_MESSAGE_SUBTYPES.has(message.subtype))
-        return;
 
       const isIm = "channel_type" in message && message.channel_type === "im";
       const threadTs = "thread_ts" in message ? (message.thread_ts as string) : undefined;
@@ -239,6 +237,9 @@ export class SlackBot {
       }
 
       if (mentionsBot) return;
+
+      if ("subtype" in message && typeof message.subtype === "string" && SYSTEM_MESSAGE_SUBTYPES.has(message.subtype))
+        return;
 
       if (threadTs && this.threadMessageHandler) {
         const hasText = text.length > 0;

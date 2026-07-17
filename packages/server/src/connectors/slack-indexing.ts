@@ -49,8 +49,8 @@ export function createSlackIndexingConnector(): Connector {
       assertSystemCredentials(credentials);
       if (!db) throw new Error("Slack indexing connector requires database access");
       if (!connectorConfigId) throw new Error("Slack indexing connector requires its connector config id");
-      if (!slackIndexing) {
-        logger.warn("Slack indexing skipped: no Slack facade configured (missing bot token?)");
+      if (!slackIndexing || !(await slackIndexing.isConfigured())) {
+        logger.warn("Slack indexing skipped: no Slack bot token configured");
         return;
       }
 

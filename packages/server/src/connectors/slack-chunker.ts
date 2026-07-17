@@ -98,10 +98,19 @@ interface SortableSlackMessage extends SlackChunkerMessage {
   rawIndex: number;
 }
 
+/**
+ * Planning order is insert order (row id), never provider timestamps. The
+ * stream cursor is id-based and fetches strictly `id > cursor`, so slices
+ * must be contiguous in id order or a replay after "slice committed, cursor
+ * not advanced" would derive a different first message and insert an
+ * overlapping duplicate. Timestamps are used only for gap/age arithmetic;
+ * an out-of-order older timestamp yields a non-positive delta, which simply
+ * never triggers a gap flush.
+ */
 function toSortableMessages(messages: SlackChunkerMessage[]): SortableSlackMessage[] {
   return messages
     .map((message) => ({ ...message, effectiveMs: Date.parse(message.effectiveAt) || 0, rawIndex: 0 }))
-    .sort((left, right) => left.effectiveMs - right.effectiveMs || left.id - right.id)
+    .sort((left, right) => left.id - right.id)
     .map((message, rawIndex) => ({ ...message, rawIndex }));
 }
 
@@ -121,12 +130,14 @@ function buildSlice(
 
   const rawRange = sortedMessages.slice(firstKept.rawIndex, lastKept.rawIndex + 1);
   const rangeIds = rawRange.map((message) => message.id);
+  const earliestKept = kept.reduce((min, message) => (message.effectiveMs < min.effectiveMs ? message : min));
+  const latestKept = kept.reduce((max, message) => (message.effectiveMs > max.effectiveMs ? message : max));
 
   return {
     firstMessageId: Math.min(...rangeIds),
     lastMessageId: Math.max(...rangeIds),
-    startedAt: firstKept.effectiveAt,
-    endedAt: lastKept.effectiveAt,
+    startedAt: earliestKept.effectiveAt,
+    endedAt: latestKept.effectiveAt,
     messageCount: kept.length,
     denoisedMessageIds: kept.map((message) => message.id),
     flushReason,
@@ -187,8 +198,9 @@ export function planSlackStreamSlices(
 
   if (currentStartIndex !== null) {
     const lastIndex = denoisedMessages.length - 1;
-    const last = denoisedMessages[lastIndex];
-    if (last && last.effectiveMs <= now.getTime() - gapMs) {
+    const tail = denoisedMessages.slice(currentStartIndex);
+    const newestTailMs = Math.max(...tail.map((message) => message.effectiveMs));
+    if (tail.length > 0 && newestTailMs <= now.getTime() - gapMs) {
       slices.push(buildSlice(sortedMessages, denoisedMessages, currentStartIndex, lastIndex, "gap"));
       return { slices, activeTailMessageIds: [] };
     }
@@ -207,26 +219,57 @@ interface StreamActivityRow {
 }
 
 /**
- * One aggregate query resolves per-stream activity: top-level rows fold into
- * the channel stream, replies into their thread stream.
+ * Incremental stream discovery: scans only messages past the router
+ * high-water mark, so a quiet channel costs one indexed range query per run
+ * instead of a full-history aggregate. Top-level rows fold into the channel
+ * stream, replies into their thread stream.
  */
-async function listStreamActivity(db: Kysely<DB>, conversationId: number): Promise<StreamActivityRow[]> {
-  const rows = await db
+async function discoverStreamActivity(
+  db: Kysely<DB>,
+  conversationId: number,
+  afterMessageId: number | null,
+): Promise<{ streams: StreamActivityRow[]; windowMaxId: number | null }> {
+  let query = db
     .selectFrom("conversation_messages")
     .select(({ fn }) => ["is_thread_reply", "provider_thread_id", fn.max("id").as("max_id")])
     .where("conversation_id", "=", conversationId)
     .where("source", "=", "live")
-    .groupBy(["is_thread_reply", "provider_thread_id"])
-    .execute();
+    .groupBy(["is_thread_reply", "provider_thread_id"]);
+  if (afterMessageId !== null) query = query.where("id", ">", afterMessageId);
+  const rows = await query.execute();
 
   const activity = new Map<string, number>();
+  let windowMaxId: number | null = null;
   for (const row of rows) {
     const streamKey =
       row.is_thread_reply === 1 && row.provider_thread_id ? row.provider_thread_id : SLACK_CHANNEL_STREAM_KEY;
     const maxId = Number(row.max_id);
     activity.set(streamKey, Math.max(activity.get(streamKey) ?? 0, maxId));
+    windowMaxId = Math.max(windowMaxId ?? 0, maxId);
   }
-  return [...activity.entries()].map(([streamKey, maxMessageId]) => ({ streamKey, maxMessageId }));
+  return {
+    streams: [...activity.entries()].map(([streamKey, maxMessageId]) => ({ streamKey, maxMessageId })),
+    windowMaxId,
+  };
+}
+
+async function streamHasPending(
+  db: Kysely<DB>,
+  conversationId: number,
+  streamKey: string,
+  afterMessageId: number | null,
+): Promise<boolean> {
+  let query = db
+    .selectFrom("conversation_messages")
+    .select("id")
+    .where("conversation_id", "=", conversationId)
+    .where("source", "=", "live");
+  query =
+    streamKey === SLACK_CHANNEL_STREAM_KEY
+      ? query.where("is_thread_reply", "=", 0)
+      : query.where("is_thread_reply", "=", 1).where("provider_thread_id", "=", streamKey);
+  if (afterMessageId !== null) query = query.where("id", ">", afterMessageId);
+  return (await query.limit(1).executeTakeFirst()) !== undefined;
 }
 
 async function listStreamMessages(
@@ -385,29 +428,35 @@ export async function chunkSlackConversations(
 
   for (const conversation of conversations) {
     const repo = createConversationSlicesRepository(db);
-    const activity = await listStreamActivity(db, conversation.id);
-    if (activity.length === 0) continue;
+    const routerCursor = await repo.getStreamCursor(conversation.id, SLACK_ROUTER_STREAM_KEY);
+    const discovery = await discoverStreamActivity(db, conversation.id, routerCursor?.last_message_id ?? null);
 
-    const routerHighWater = Math.max(...activity.map((row) => row.maxMessageId));
-    await db.transaction().execute(async (trx) => {
-      await createConversationSlicesRepository(trx).ensureStreamCursorsAndAdvanceRouter({
-        conversationId: conversation.id,
-        routerStreamKey: SLACK_ROUTER_STREAM_KEY,
-        streamKeys: activity.map((row) => row.streamKey),
-        routerHighWaterMessageId: routerHighWater,
+    if (discovery.windowMaxId !== null) {
+      const windowMaxId = discovery.windowMaxId;
+      await db.transaction().execute(async (trx) => {
+        await createConversationSlicesRepository(trx).ensureStreamCursorsAndAdvanceRouter({
+          conversationId: conversation.id,
+          routerStreamKey: SLACK_ROUTER_STREAM_KEY,
+          streamKeys: discovery.streams.map((row) => row.streamKey),
+          routerHighWaterMessageId: windowMaxId,
+        });
       });
-    });
+    }
 
+    /**
+     * The work list is every known stream cursor, not just this run's
+     * discovery window: a stream with an open active tail has no new rows
+     * but may now be flushable purely because time passed.
+     */
     const cursors = await repo.listStreamCursors(conversation.id);
-    const cursorByKey = new Map(cursors.map((cursor) => [cursor.stream_key, cursor]));
     let conversationTouched = false;
 
-    for (const { streamKey, maxMessageId } of activity) {
-      const cursor = cursorByKey.get(streamKey);
-      const lastMessageId = cursor?.last_message_id ?? null;
-      if (lastMessageId !== null && lastMessageId >= maxMessageId) continue;
+    for (const cursor of cursors) {
+      if (cursor.stream_key === SLACK_ROUTER_STREAM_KEY) continue;
+      const pending = await streamHasPending(db, conversation.id, cursor.stream_key, cursor.last_message_id);
+      if (!pending) continue;
 
-      const result = await processStream(options, conversation.id, streamKey, now);
+      const result = await processStream(options, conversation.id, cursor.stream_key, now);
       summary.streamsProcessed += 1;
       summary.slicesCreated += result.slicesCreated;
       summary.messagesProcessed += result.messagesProcessed;

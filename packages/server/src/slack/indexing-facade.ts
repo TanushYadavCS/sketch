@@ -22,6 +22,8 @@ export interface SlackIndexingUser {
  * token rotation never leaves a stale client behind.
  */
 export interface SlackIndexingFacade {
+  /** False while no bot token is configured (Slack disconnected) — callers no-op instead of erroring. */
+  isConfigured(): Promise<boolean>;
   listMemberChannels(): Promise<SlackIndexingChannel[]>;
   listChannelMembers(channelId: string): Promise<string[]>;
   getUserInfo(userId: string): Promise<SlackIndexingUser>;
@@ -67,6 +69,10 @@ export function createSlackIndexingFacade(options: CreateSlackIndexingFacadeOpti
   }
 
   return {
+    async isConfigured() {
+      return (await options.getBotToken()) !== null;
+    },
+
     async listMemberChannels() {
       const api = await client();
       const channels: SlackIndexingChannel[] = [];

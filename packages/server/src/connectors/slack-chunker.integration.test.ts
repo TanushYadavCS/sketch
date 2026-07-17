@@ -170,6 +170,61 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(channelCursor?.claim_token).toBeNull();
     });
 
+    it("stays idempotent when a slice committed but the cursor never advanced (crash replay)", async () => {
+      await seed(0);
+      await seed(3);
+      const now = new Date(T0 + 600 * 60_000);
+      const first = await chunkSlackConversations({ db, logger, now });
+      expect(first.slicesCreated).toBe(1);
+
+      await db
+        .updateTable("conversation_slice_stream_cursors")
+        .set({ last_message_id: null })
+        .where("conversation_id", "=", conversationId)
+        .where("stream_key", "=", SLACK_CHANNEL_STREAM_KEY)
+        .execute();
+
+      const replay = await chunkSlackConversations({ db, logger, now });
+      expect(replay.slicesCreated).toBe(0);
+      const count = await db
+        .selectFrom("conversation_slices")
+        .select(({ fn }) => [fn.countAll().as("count")])
+        .where("conversation_id", "=", conversationId)
+        .executeTakeFirstOrThrow();
+      expect(Number(count.count)).toBe(1);
+
+      const cursor = await createConversationSlicesRepository(db).getStreamCursor(
+        conversationId,
+        SLACK_CHANNEL_STREAM_KEY,
+      );
+      expect(cursor?.last_message_id).not.toBeNull();
+    });
+
+    it("handles out-of-order provider timestamps without overlapping slices or lost messages", async () => {
+      await seed(10);
+      await seed(0);
+      const now = new Date(T0 + 600 * 60_000);
+      const first = await chunkSlackConversations({ db, logger, now });
+      expect(first.slicesCreated).toBe(1);
+
+      const slice = await db
+        .selectFrom("conversation_slices")
+        .selectAll()
+        .where("conversation_id", "=", conversationId)
+        .executeTakeFirstOrThrow();
+      expect(JSON.parse(slice.denoised_message_ids ?? "[]")).toHaveLength(2);
+      expect(Date.parse(slice.ended_at)).toBeGreaterThanOrEqual(Date.parse(slice.started_at));
+
+      const cursor = await createConversationSlicesRepository(db).getStreamCursor(
+        conversationId,
+        SLACK_CHANNEL_STREAM_KEY,
+      );
+      expect(cursor?.last_message_id).toBe(slice.last_message_id);
+
+      const second = await chunkSlackConversations({ db, logger, now });
+      expect(second.slicesCreated).toBe(0);
+    });
+
     it("skips DM conversations entirely", async () => {
       const conversations = createConversationRepository(db);
       const dm = await conversations.getOrCreate({

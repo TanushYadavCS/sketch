@@ -32,16 +32,14 @@ export async function ensureSlackConnectorConfig(options: {
       .executeTakeFirst();
     if (existing) return;
 
-    const owner =
-      (await db
-        .selectFrom("users")
-        .select(["id"])
-        .where("role", "=", "admin")
-        .orderBy("created_at", "asc")
-        .executeTakeFirst()) ??
-      (await db.selectFrom("users").select(["id"]).orderBy("created_at", "asc").executeTakeFirst());
+    const owner = await db
+      .selectFrom("users")
+      .select(["id"])
+      .where("role", "=", "admin")
+      .orderBy("created_at", "asc")
+      .executeTakeFirst();
     if (!owner) {
-      logger.info("Slack connector config not provisioned yet: no users exist");
+      logger.info("Slack connector config not provisioned yet: no admin user exists");
       return;
     }
 
