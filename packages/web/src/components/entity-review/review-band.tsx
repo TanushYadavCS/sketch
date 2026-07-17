@@ -269,7 +269,7 @@ function inspectActivityLine(childTaskCount: number, fileCount: number): string 
  * Confirm / Merge… / Dismiss actions. One column — a birth has no candidate to
  * compare against, so the reconcile layout doesn't apply.
  */
-function BirthInspectSheet({
+export function BirthInspectSheet({
   reviewId,
   onResolved,
   onClose,
