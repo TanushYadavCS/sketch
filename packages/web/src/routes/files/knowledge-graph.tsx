@@ -28,8 +28,12 @@ function coarseType(sourceType: string): CoarseType {
   return "other";
 }
 
-/** Brighter, saturated palette tuned for the dark stage (the muted drawer accents read flat here). */
-const NODE_COLOR: Record<CoarseType, string> = {
+/**
+ * Brighter, saturated palette tuned for the dark stage (the muted drawer
+ * accents read flat here). Exported so the Your Org tab strip can act as the
+ * graph's legend — the graph renders no legend of its own.
+ */
+export const NODE_COLOR: Record<CoarseType, string> = {
   person: "#6ea8fe",
   company: "#f6ad3c",
   project: "#b794f6",
@@ -68,12 +72,7 @@ function endpointId(end: string | number | NodeObject | undefined): string {
   return String(end);
 }
 
-/**
- * @param focusType when set, the graph is restricted to nodes of that coarse
- *   type plus their direct neighbours — the Your Org tab strip drives this so
- *   the active tab focuses the graph. `null`/undefined shows the full graph.
- */
-export function KnowledgeGraphView({ focusType = null }: { focusType?: CoarseType | null } = {}) {
+export function KnowledgeGraphView() {
   const ui = useEntityUiOptional();
   const [containerRef, size] = useSize();
   const fgRef = useRef<ForceGraphMethods<GraphNode> | undefined>(undefined);
@@ -95,22 +94,8 @@ export function KnowledgeGraphView({ focusType = null }: { focusType?: CoarseTyp
         adjacency: new Map<string, Set<string>>(),
       };
     }
-    // Focus filter: keep nodes of the active tab's type plus their direct
-    // neighbours, and edges between kept nodes. Keeps `works_at`-style edges
-    // meaningful (a person filter still shows their companies).
-    let focusNodes = data.nodes;
-    let focusEdges = data.edges;
-    if (focusType) {
-      const nodeType = new Map(data.nodes.map((n) => [n.id, coarseType(n.sourceType)]));
-      const keepIds = new Set<string>();
-      for (const n of data.nodes) if (nodeType.get(n.id) === focusType) keepIds.add(n.id);
-      for (const e of data.edges) {
-        if (nodeType.get(e.source) === focusType) keepIds.add(e.target);
-        if (nodeType.get(e.target) === focusType) keepIds.add(e.source);
-      }
-      focusNodes = data.nodes.filter((n) => keepIds.has(n.id));
-      focusEdges = data.edges.filter((e) => keepIds.has(e.source) && keepIds.has(e.target));
-    }
+    const focusNodes = data.nodes;
+    const focusEdges = data.edges;
 
     const degree = new Map<string, number>();
     const seen = new Set<string>();
@@ -125,55 +110,23 @@ export function KnowledgeGraphView({ focusType = null }: { focusType?: CoarseTyp
       degree.set(e.target, (degree.get(e.target) ?? 0) + 1);
     }
 
-    // Keep only sizeable connected components so stray 2-node threads don't scatter.
-    const parent = new Map<string, string>();
-    const find = (x: string): string => {
-      let root = x;
-      while (parent.get(root) !== root) root = parent.get(root) ?? root;
-      let cur = x;
-      while (parent.get(cur) !== root) {
-        const next = parent.get(cur) ?? root;
-        parent.set(cur, root);
-        cur = next;
-      }
-      return root;
-    };
-    for (const id of degree.keys()) parent.set(id, id);
-    for (const l of allLinks) {
-      const a = find(l.source);
-      const b = find(l.target);
-      if (a !== b) parent.set(a, b);
-    }
-    // Keep only the largest connected component — the org brain — so the canvas
-    // is one centred constellation instead of a main mass plus drifting satellites.
-    const compSize = new Map<string, number>();
-    for (const id of degree.keys()) compSize.set(find(id), (compSize.get(find(id)) ?? 0) + 1);
-    let biggestRoot = "";
-    let biggest = 0;
-    for (const [root, n] of compSize) {
-      if (n > biggest) {
-        biggest = n;
-        biggestRoot = root;
-      }
-    }
-    // When focused, keep every connected node in the focus set; otherwise trim
-    // to the single largest component so the full graph reads as one constellation.
-    const keep = focusType ? () => true : (id: string) => find(id) === biggestRoot;
-
-    const keptLinks = allLinks.filter((l) => keep(l.source) && keep(l.target));
+    // Every connected component stays on the canvas. The old largest-component
+    // trim made the Org graph read as one tidy constellation while silently
+    // hiding most of the org — worse than the scatter it avoided.
+    const keptLinks = allLinks;
     const adj = new Map<string, Set<string>>();
     for (const l of keptLinks) {
       (adj.get(l.source) ?? adj.set(l.source, new Set()).get(l.source))?.add(l.target);
       (adj.get(l.target) ?? adj.set(l.target, new Set()).get(l.target))?.add(l.source);
     }
     const keptNodes = focusNodes
-      .filter((n) => degree.has(n.id) && keep(n.id))
+      .filter((n) => degree.has(n.id))
       .map((n) => {
         const type = coarseType(n.sourceType);
         return { id: n.id, name: n.name, type, color: NODE_COLOR[type], val: 1 + (degree.get(n.id) ?? 0) };
       });
     return { nodes: keptNodes, links: keptLinks, adjacency: adj };
-  }, [data, focusType]);
+  }, [data]);
 
   const graphData = useMemo(() => ({ nodes, links }), [nodes, links]);
 
@@ -302,23 +255,6 @@ export function KnowledgeGraphView({ focusType = null }: { focusType?: CoarseTyp
           <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-white/55 shadow-sm backdrop-blur">
             {nodes.length} entities · {links.length} links
           </span>
-        </div>
-
-        {/* Legend */}
-        <div className="absolute bottom-3 left-3 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 shadow-sm backdrop-blur">
-          {LEGEND.map((t) => (
-            <span
-              key={t}
-              className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.05em] text-white/55"
-            >
-              <span
-                className="h-2 w-2 rounded-full"
-                style={{ backgroundColor: NODE_COLOR[t], boxShadow: `0 0 6px ${NODE_COLOR[t]}` }}
-                aria-hidden
-              />
-              {TYPE_LABEL[t]}
-            </span>
-          ))}
         </div>
 
         {isLoading && (

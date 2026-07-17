@@ -4,9 +4,11 @@ interface TabButtonProps {
   label: string;
   isActive: boolean;
   onClick: () => void;
+  /** Optional color-key dot before the label, for tab strips that double as a legend. */
+  dot?: string;
 }
 
-export function TabButton({ label, isActive, onClick }: TabButtonProps) {
+export function TabButton({ label, isActive, onClick, dot }: TabButtonProps) {
   return (
     <button
       type="button"
@@ -16,6 +18,13 @@ export function TabButton({ label, isActive, onClick }: TabButtonProps) {
         isActive ? "font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
       )}
     >
+      {dot ? (
+        <span
+          aria-hidden
+          className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full align-middle"
+          style={{ backgroundColor: dot }}
+        />
+      ) : null}
       {label}
       {isActive ? <span className="absolute inset-x-0 bottom-0 h-0.5 rounded-full bg-[#FEED01]" /> : null}
     </button>

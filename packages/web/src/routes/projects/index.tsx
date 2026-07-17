@@ -1,9 +1,10 @@
 /**
  * Your Org — the single home for the entity graph. Six type tabs (People,
- * Companies, Teams, Projects, Products, Review) with a List/Graph view toggle.
- * Tabs choose *what*; the toggle chooses *how*. In Graph view the tab strip
- * stays visible and the active tab acts as a focus filter on the knowledge
- * graph (Review = the unfiltered graph).
+ * Companies, Teams, Projects, Products, Review) plus a divider-separated Graph
+ * tab: the full knowledge graph as its own lens, not a per-tab view toggle.
+ * (A List/Graph toggle was tried and rejected — switching type tabs while in
+ * graph view read as incoherent, and the graph endpoint's hotness/component
+ * filtering breaks the toggle's same-content promise.)
  *
  * Entity rows open the shared {@link EntityDrawer} via `openEntity`. The drawer
  * stays read-only in this run — the teach layer (contact-point CRUD, company
@@ -12,7 +13,7 @@
 import { AddEntityDialog } from "@/components/entity-review/add-entity-dialog";
 import { QuietAddButton } from "@/components/quiet-add-button";
 import { api } from "@/lib/api";
-import { type CoarseType, KnowledgeGraphView } from "@/routes/files/knowledge-graph";
+import { type CoarseType, KnowledgeGraphView, NODE_COLOR } from "@/routes/files/knowledge-graph";
 import { TabButton } from "@sketch/ui/components/tab-button";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { cn } from "@sketch/ui/lib/utils";
@@ -30,24 +31,14 @@ export const projectsRoute = createRoute({
   component: ProjectsPage,
 });
 
-type OrgTab = "people" | "companies" | "teams" | "projects" | "products" | "review";
-type OrgView = "list" | "graph";
+type OrgTab = "people" | "companies" | "teams" | "projects" | "products" | "review" | "graph";
 
-const TAB_TYPE: Record<Exclude<OrgTab, "review">, string> = {
+const TAB_TYPE: Record<Exclude<OrgTab, "review" | "graph">, string> = {
   people: "person",
   companies: "company",
   teams: "team",
   projects: "project",
   products: "product",
-};
-
-const FOCUS_TYPE: Record<OrgTab, CoarseType | null> = {
-  people: "person",
-  companies: "company",
-  teams: "team",
-  projects: "project",
-  products: "product",
-  review: null,
 };
 
 function useEntityCount(type: string) {
@@ -61,7 +52,6 @@ function useEntityCount(type: string) {
 
 export function ProjectsPage() {
   const [tab, setTab] = useState<OrgTab>("people");
-  const [view, setView] = useState<OrgView>("list");
   const [addOpen, setAddOpen] = useState(false);
   const [addType, setAddType] = useState("person");
 
@@ -87,7 +77,7 @@ export function ProjectsPage() {
     setAddOpen(true);
   };
 
-  const tabs: { key: OrgTab; label: string; count: number | null }[] = [
+  const tabs: { key: Exclude<OrgTab, "graph">; label: string; count: number | null }[] = [
     { key: "people", label: "People", count: peopleCount },
     { key: "companies", label: "Companies", count: companiesCount },
     { key: "teams", label: "Teams", count: teamsCount },
@@ -109,8 +99,11 @@ export function ProjectsPage() {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <ViewToggle value={view} onChange={setView} />
-          <QuietAddButton onClick={() => openAdd(tab === "review" ? "person" : TAB_TYPE[tab])}>Add</QuietAddButton>
+          <QuietAddButton
+            onClick={() => openAdd(tab === "review" || tab === "graph" ? "person" : TAB_TYPE[tab])}
+          >
+            Add
+          </QuietAddButton>
         </div>
       </div>
 
@@ -121,13 +114,16 @@ export function ProjectsPage() {
             label={t.count !== null ? `${t.label} · ${t.count}` : t.label}
             isActive={tab === t.key}
             onClick={() => setTab(t.key)}
+            dot={tab === "graph" && t.key !== "review" ? NODE_COLOR[TAB_TYPE[t.key] as CoarseType] : undefined}
           />
         ))}
+        <div aria-hidden className="h-4 w-px self-center bg-border" />
+        <TabButton label="⬡ Graph" isActive={tab === "graph"} onClick={() => setTab("graph")} />
       </div>
 
       <TabContentContainer className="mt-5">
-        {view === "graph" ? (
-          <KnowledgeGraphView focusType={FOCUS_TYPE[tab]} />
+        {tab === "graph" ? (
+          <KnowledgeGraphView />
         ) : tab === "people" ? (
           <PeopleTab onSeeAllReview={goReview} />
         ) : tab === "companies" ? (
@@ -153,28 +149,3 @@ export function ProjectsPage() {
   );
 }
 
-function ViewToggle({ value, onChange }: { value: OrgView; onChange: (v: OrgView) => void }) {
-  const options: { key: OrgView; label: string }[] = [
-    { key: "list", label: "List" },
-    { key: "graph", label: "Graph" },
-  ];
-  return (
-    <div className="inline-flex rounded-lg border-[0.5px] border-border bg-card p-0.5 dark:bg-[#111110]">
-      {options.map((opt) => (
-        <button
-          key={opt.key}
-          type="button"
-          onClick={() => onChange(opt.key)}
-          className={cn(
-            "rounded-md px-3 py-1 text-xs transition-colors",
-            value === opt.key
-              ? "bg-accent font-medium text-foreground dark:bg-[#1C1C1A]"
-              : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
-  );
-}
