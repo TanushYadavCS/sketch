@@ -32,6 +32,8 @@ describe("configSchema", () => {
         expect(result.data.SLACK_THREAD_HISTORY_LIMIT).toBe(50);
         expect(result.data.WHATSAPP_DM_PROVIDER).toBe("baileys");
         expect(result.data.WHATSAPP_GROUP_PROVIDER).toBe("baileys");
+        expect(result.data.WHATSAPP_RUNTIME_MODE).toBe("inprocess");
+        expect(result.data.WHATSAPP_GATEWAY_PORT).toBe(3901);
         expect(result.data.WHATSAPP_HISTORY_LOOKBACK_DAYS).toBe(30);
         expect(result.data.WHATSAPP_SLICE_GAP_MINUTES).toBe(25);
         expect(result.data.WHATSAPP_SLICE_MAX_AGE_MINUTES).toBe(120);
@@ -39,7 +41,8 @@ describe("configSchema", () => {
         expect(result.data.WHATSAPP_SALIENCE_BATCH_LIMIT).toBe(50);
         expect(result.data.WHATSAPP_EMISSION_REFRESH_DAYS).toBe(7);
         expect(result.data.WHATSAPP_WINDOW_KEEPALIVE_ENABLED).toBe(false);
-        expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(4);
+        expect(result.data.MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS).toBe(4);
+        expect(result.data.MAX_CONCURRENT_SCHEDULED_AGENT_RUNS).toBe(4);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
         expect(result.data.VISION_ENABLED).toBe(false);
         expect(result.data.AGENT_RUNTIME).toBe("sdk");
@@ -71,6 +74,15 @@ describe("configSchema", () => {
         expect(result.data.WATI_ACCESS_TOKEN).toBe("access-token");
         expect(result.data.WATI_WEBHOOK_TOKEN).toBe("webhook-token");
         expect(result.data.WATI_CHANNEL_PHONE_NUMBER).toBe("+15551234567");
+      }
+    });
+
+    it("parses WhatsApp gateway runtime configuration", () => {
+      const result = configSchema.safeParse({ WHATSAPP_RUNTIME_MODE: "gateway", WHATSAPP_GATEWAY_PORT: "4901" });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.WHATSAPP_RUNTIME_MODE).toBe("gateway");
+        expect(result.data.WHATSAPP_GATEWAY_PORT).toBe(4901);
       }
     });
 
@@ -211,11 +223,15 @@ describe("configSchema", () => {
       }
     });
 
-    it("coerces MAX_CONCURRENT_AGENT_RUNS string to number", () => {
-      const result = configSchema.safeParse({ MAX_CONCURRENT_AGENT_RUNS: "2" });
+    it("coerces agent concurrency strings to numbers", () => {
+      const result = configSchema.safeParse({
+        MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS: "2",
+        MAX_CONCURRENT_SCHEDULED_AGENT_RUNS: "3",
+      });
       expect(result.success).toBe(true);
       if (result.success) {
-        expect(result.data.MAX_CONCURRENT_AGENT_RUNS).toBe(2);
+        expect(result.data.MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS).toBe(2);
+        expect(result.data.MAX_CONCURRENT_SCHEDULED_AGENT_RUNS).toBe(3);
       }
     });
 
@@ -254,9 +270,9 @@ describe("configSchema", () => {
       expect(configSchema.safeParse({ TEAMS_MAX_INFLIGHT: "32" }).success).toBe(false);
     });
 
-    it("rejects agent concurrency below one", () => {
-      const result = configSchema.safeParse({ MAX_CONCURRENT_AGENT_RUNS: "0" });
-      expect(result.success).toBe(false);
+    it("rejects either agent concurrency below one", () => {
+      expect(configSchema.safeParse({ MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS: "0" }).success).toBe(false);
+      expect(configSchema.safeParse({ MAX_CONCURRENT_SCHEDULED_AGENT_RUNS: "0" }).success).toBe(false);
     });
 
     it("rejects PostgreSQL pool sizes outside the supported range", () => {
@@ -284,6 +300,21 @@ describe("configSchema", () => {
 describe("loadConfig", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("fails fast when the removed shared agent concurrency setting is still present", () => {
+    vi.stubEnv("MAX_CONCURRENT_AGENT_RUNS", "2");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("exit");
+    });
+
+    expect(() => loadConfig()).toThrow("exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "  MAX_CONCURRENT_AGENT_RUNS: replaced by MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS and MAX_CONCURRENT_SCHEDULED_AGENT_RUNS",
+    );
   });
 
   it("resolves DATA_DIR and SQLITE_PATH relative to DOTENV_CONFIG_PATH dir", () => {

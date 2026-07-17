@@ -1894,6 +1894,51 @@ describe("createConversationFollowupsRepository", () => {
     expect(states.every((row) => row.review_state === "expired")).toBe(true);
   });
 
+  it("keeps the review code from the third delivery actionable", async () => {
+    const conversationId = await seedConversation(db, "slack", "channel", "C-final-delivery-review");
+    const messageId = await seedMessage(db, conversationId, { providerMessageId: "final-delivery-review" });
+    const repo = createConversationFollowupsRepository(db);
+    const [created] = await repo.applyTaskChanges({
+      userId: USER_ID,
+      taskMemory: [],
+      allowedMessageIds: [messageId],
+      allowedConversationIds: [conversationId],
+      changes: [newChange("Review after final delivery", [messageId])],
+      now: NOW,
+    });
+    const taskId = appliedTaskId(created);
+    const memory = await repo.loadTaskMemory({ userId: USER_ID, conversationIds: [conversationId] });
+    const [resolved] = await repo.applyTaskChanges({
+      userId: USER_ID,
+      taskMemory: memory,
+      allowedMessageIds: [messageId],
+      allowedConversationIds: [conversationId],
+      changes: [resolvedChange(taskId, [messageId], "Reported complete.")],
+      now: NOW,
+    });
+    const recommendationId = appliedRecommendationId(resolved);
+    for (const deliveryId of await seedDeliveries(db, 3)) {
+      await repo.recordRecommendationDelivery({
+        recommendationId,
+        agentOutputDeliveryId: deliveryId,
+      });
+    }
+
+    await expect(
+      repo.reviewRecommendation({
+        code: appliedRecommendationCode(resolved),
+        action: "confirm_done",
+        userId: USER_ID,
+        assigneeEntityIds: [],
+        surface: "slack",
+        now: "2026-07-16T11:00:00.000Z",
+      }),
+    ).resolves.toEqual({ status: "confirmed", taskId });
+    await expect(
+      db.selectFrom("tasks").select("status").where("id", "=", taskId).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "done" });
+  });
+
   it("records recommendation deliveries idempotently and does not increment on replay", async () => {
     const conversationId = await seedConversation(db, "whatsapp", "group", "group-delivery");
     const messageId = await seedMessage(db, conversationId, { providerMessageId: "wamid.delivery" });
@@ -1932,7 +1977,7 @@ describe("createConversationFollowupsRepository", () => {
     ).resolves.toEqual({ recorded: false, deliveryCount: 1 });
   });
 
-  it("atomically rejects confirmation when a third delivery lands after review lookup", async () => {
+  it("keeps confirmation actionable when a third delivery lands after review lookup", async () => {
     const conversationId = await seedConversation(db, "slack", "channel", "C-delivery-review-race");
     const messageId = await seedMessage(db, conversationId, { providerMessageId: "72.0" });
     const repo = createConversationFollowupsRepository(db);
@@ -1976,17 +2021,17 @@ describe("createConversationFollowupsRepository", () => {
       agentOutputDeliveryId: deliveryIds[2],
     });
 
-    await expect(review).resolves.toEqual({ status: "stale" });
+    await expect(review).resolves.toEqual({ status: "confirmed", taskId });
     await expect(
       db.selectFrom("tasks").select("status").where("id", "=", taskId).executeTakeFirstOrThrow(),
-    ).resolves.toEqual({ status: "open" });
+    ).resolves.toEqual({ status: "done" });
     await expect(
       db
         .selectFrom("task_completion_recommendations")
         .select(["review_state", "delivery_count"])
         .where("id", "=", recommendationId)
         .executeTakeFirstOrThrow(),
-    ).resolves.toEqual({ review_state: "expired", delivery_count: 3 });
+    ).resolves.toEqual({ review_state: "accepted", delivery_count: 3 });
   });
 
   it("returns an error with fallback candidates when the durable query fails", async () => {

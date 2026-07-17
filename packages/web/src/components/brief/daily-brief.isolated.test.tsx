@@ -31,7 +31,14 @@ function briefWith(meetings: DailyBriefItem[]): DailyBriefData {
     status: "ready",
     generatedAt: null,
     masthead: null,
-    sections: { meetings, todos: [], customer_updates: [], active_projects: [] },
+    sections: {
+      meetings,
+      todos: [],
+      untracked_followups: [],
+      looks_resolved: [],
+      customer_updates: [],
+      active_projects: [],
+    },
   };
 }
 
@@ -67,5 +74,23 @@ describe("DailyBrief Now / Next marker", () => {
     });
 
     expect(within(rowWithBadge()).getByText("Design review")).toBeInTheDocument();
+  });
+
+  it("renders safely when an older API response omits durable follow-up sections", () => {
+    const brief = briefWith([]);
+    const legacyBrief = {
+      ...brief,
+      sections: {
+        meetings: brief.sections.meetings,
+        todos: brief.sections.todos,
+        customer_updates: brief.sections.customer_updates,
+        active_projects: brief.sections.active_projects,
+      },
+    } as unknown as DailyBriefData;
+
+    render(<DailyBrief brief={legacyBrief} running={false} calendarConnected onOpenChat={() => {}} />);
+
+    expect(screen.getByText("Untracked follow-ups")).toBeInTheDocument();
+    expect(screen.getByText("Looks resolved")).toBeInTheDocument();
   });
 });

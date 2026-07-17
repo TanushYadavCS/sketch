@@ -143,7 +143,8 @@ import * as m140 from "./migrations/140-retire-unassigned-agent-tasks";
 import * as m141 from "./migrations/141-fact-materialization-quarantine";
 import * as m142 from "./migrations/142-verdict-safe-fact-upserts";
 import * as m143 from "./migrations/143-indexed-corroboration";
-import * as m144 from "./migrations/144-task-durability-steel-thread";
+import * as m144 from "./migrations/144-whatsapp-gateway-queue";
+import * as m145 from "./migrations/145-task-durability-steel-thread";
 import type { DB } from "./schema";
 
 /**
@@ -296,7 +297,8 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "141-fact-materialization-quarantine": m141,
           "142-verdict-safe-fact-upserts": m142,
           "143-indexed-corroboration": m143,
-          "144-task-durability-steel-thread": m144,
+          "144-whatsapp-gateway-queue": m144,
+          "145-task-durability-steel-thread": m145,
         };
       },
     },

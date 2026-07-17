@@ -1,4 +1,4 @@
-import type { GroupMetadata, proto } from "@whiskeysockets/baileys";
+import { DisconnectReason, type GroupMetadata, type proto } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
@@ -323,6 +323,64 @@ describe("WhatsAppBot reconnect lifecycle", () => {
     expect(createSocket).not.toHaveBeenCalled();
 
     randomSpy.mockRestore();
+  });
+
+  it("uses the gateway reconnect delay hook for restart-required closes", async () => {
+    const reconnectDelayMs = vi.fn().mockReturnValue(1_000);
+    const bot = new WhatsAppBot({ db, logger: createTestLogger(), reconnectDelayMs });
+    const current = createConnectionSocket();
+    const createSocket = vi.fn().mockResolvedValue(undefined);
+    (bot as unknown as { sock: unknown }).sock = current.socket;
+    (bot as unknown as { activeSocketGeneration: number }).activeSocketGeneration = 1;
+    (bot as unknown as { createSocket: typeof createSocket }).createSocket = createSocket;
+    (
+      bot as unknown as {
+        registerConnectionHandler: (
+          socket: unknown,
+          authState: { clearCreds: () => Promise<void> },
+          socketGeneration: number,
+        ) => void;
+      }
+    ).registerConnectionHandler(current.socket as never, { clearCreds: vi.fn().mockResolvedValue(undefined) }, 1);
+
+    await current.emitConnectionUpdate({
+      connection: "close",
+      lastDisconnect: { error: { output: { statusCode: DisconnectReason.restartRequired } } },
+    });
+    expect(reconnectDelayMs).toHaveBeenCalledWith(DisconnectReason.restartRequired);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(createSocket).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(createSocket).toHaveBeenCalledOnce();
+  });
+
+  it("clears fenced auth and surfaces logged-out without scheduling a reconnect", async () => {
+    const onLoggedOut = vi.fn().mockResolvedValue(undefined);
+    const bot = new WhatsAppBot({ db, logger: createTestLogger(), onLoggedOut });
+    const current = createConnectionSocket();
+    const createSocket = vi.fn().mockResolvedValue(undefined);
+    const clearCreds = vi.fn().mockResolvedValue(undefined);
+    (bot as unknown as { sock: unknown }).sock = current.socket;
+    (bot as unknown as { activeSocketGeneration: number }).activeSocketGeneration = 1;
+    (bot as unknown as { createSocket: typeof createSocket }).createSocket = createSocket;
+    (
+      bot as unknown as {
+        registerConnectionHandler: (
+          socket: unknown,
+          authState: { clearCreds: () => Promise<void> },
+          socketGeneration: number,
+        ) => void;
+      }
+    ).registerConnectionHandler(current.socket as never, { clearCreds }, 1);
+
+    await current.emitConnectionUpdate({
+      connection: "close",
+      lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } },
+    });
+    await vi.runAllTimersAsync();
+    expect(clearCreds).toHaveBeenCalledOnce();
+    expect(onLoggedOut).toHaveBeenCalledWith(1);
+    expect(createSocket).not.toHaveBeenCalled();
   });
 });
 

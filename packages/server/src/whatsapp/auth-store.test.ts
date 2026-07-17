@@ -100,6 +100,20 @@ describe("createDbAuthState", () => {
     expect(state2.creds.registrationId).toBe(originalRegId);
   });
 
+  it("routes credential and key write batches through the configured lease fence", async () => {
+    let fencedBatches = 0;
+    const { state, saveCreds, clearCreds } = await createDbAuthState(db, undefined, {
+      withWriteFence: async (callback) => {
+        fencedBatches += 1;
+        return db.transaction().execute(callback);
+      },
+    });
+    await saveCreds();
+    await state.keys.set({ session: { "1": { data: "fenced" } as never } });
+    await clearCreds();
+    expect(fencedBatches).toBe(3);
+  });
+
   it("saveCreds overwrites existing creds (upsert)", async () => {
     const { state, saveCreds } = await createDbAuthState(db);
     await saveCreds();

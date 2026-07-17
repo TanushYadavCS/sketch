@@ -502,6 +502,34 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.userName).toBe("Alice");
     });
 
+    it("runs the durable dispatch hook before queued DM work", async () => {
+      const deps = makeDeps();
+      const { mock } = createMockWhatsApp();
+      const adapter = wireWhatsAppHandlers(mock as never, deps);
+      let releaseRunStart: (() => void) | undefined;
+      const runStartGate = new Promise<void>((resolve) => {
+        releaseRunStart = resolve;
+      });
+      const onRunStart = vi.fn(() => runStartGate);
+      const message = normalizeInboundTestMessage({
+        type: "dm",
+        text: "hello",
+        jid: "1234@s.whatsapp.net",
+        messageId: "queued-m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+
+      await expect(adapter.dispatchCapturedMessage(message, null, { onRunStart })).resolves.toBe(true);
+      expect(onRunStart).toHaveBeenCalledOnce();
+      expect(deps.runAgent).not.toHaveBeenCalled();
+
+      releaseRunStart?.();
+      await flush();
+      expect(deps.runAgent).toHaveBeenCalledOnce();
+    });
+
     it("masks personal DM provider conversation ids in reaction failure logs", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();

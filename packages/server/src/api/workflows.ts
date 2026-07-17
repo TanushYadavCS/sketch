@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { Kysely } from "kysely";
@@ -18,7 +19,7 @@ import type { IntegrationProvider } from "../integrations/types";
 import type { Logger } from "../logger";
 import { createWorkflowDeliveryCapture } from "../scheduler/delivery-capture";
 import type { SlackBot } from "../slack/bot";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 import { deliverProactiveDm } from "../whatsapp/proactive-delivery";
 import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
@@ -62,7 +63,7 @@ interface WorkflowRouteDeps {
   logger: Logger;
   users: ReturnType<typeof createUserRepository>;
   getSlack?: () => SlackBot | null;
-  whatsapp?: WhatsAppBot;
+  whatsapp?: WhatsAppSocketFacade;
   whatsappRuntime?: WhatsAppRuntime;
   runAgent?: typeof runAgent;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
@@ -164,7 +165,7 @@ function assertActiveWorkflow(task: ScheduledTaskRow | undefined): ScheduledTask
   return task;
 }
 
-function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
+async function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
   const resolved = resolveWorkflowDelivery(task);
   if (resolved.mode === "silent") {
     return {
@@ -206,8 +207,9 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
     };
   }
 
-  const whatsapp = deps.whatsappRuntime ?? deps.whatsapp;
-  if (!whatsapp?.isConnected) {
+  const whatsappConnected =
+    deps.whatsappRuntime?.isConnected ?? (await deps.whatsapp?.pairing.status())?.connected ?? false;
+  if (!whatsappConnected) {
     throw new WorkflowApiError("NOT_CONNECTED", "WhatsApp is not connected");
   }
   const delivery: Record<string, unknown> = { mode: "target", platform: "whatsapp", target: resolved.targetId };
@@ -239,7 +241,7 @@ function createDelivery(task: ScheduledTaskRow, deps: WorkflowRouteDeps) {
           });
         }
       } else {
-        await deps.whatsapp?.sendText(resolved.targetId, text);
+        await deps.whatsapp?.send(resolved.targetId, { kind: "text", text }, { idempotencyKey: randomUUID() });
       }
     },
   };
@@ -297,7 +299,7 @@ async function executeWorkflowRun(params: ExecuteWorkflowRunParams) {
     params;
   const delivery =
     parsed.deliveryMode === "target"
-      ? createDelivery(task, deps)
+      ? await createDelivery(task, deps)
       : { delivery: { mode: "silent" }, sendMessage: undefined };
 
   const result = await executeAutomation({

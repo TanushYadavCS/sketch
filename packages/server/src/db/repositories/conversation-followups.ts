@@ -455,7 +455,7 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
           if (!authorized) return { status: "unauthorized" as const };
           if (
             recommendation.expires_at <= input.now ||
-            recommendation.delivery_count >= RECOMMENDATION_DELIVERY_LIMIT ||
+            recommendation.delivery_count > RECOMMENDATION_DELIVERY_LIMIT ||
             !taskIsActionableForCompletionReview(recommendation)
           ) {
             await trx
@@ -488,7 +488,7 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
             .where("id", "=", recommendation.recommendation_id)
             .where("review_state", "=", "pending")
             .where("expires_at", ">", input.now)
-            .where("delivery_count", "<", RECOMMENDATION_DELIVERY_LIMIT)
+            .where("delivery_count", "<=", RECOMMENDATION_DELIVERY_LIMIT)
             .where(
               sql<boolean>`exists (
               select 1

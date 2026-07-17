@@ -45,6 +45,8 @@ import { parseOnceSchedule } from "./parse-once";
 import { getScheduledTaskRowQueueKey } from "./queue-key";
 import type { ScheduledTask } from "./types";
 
+type AgentExecutionQueue = "interactive" | "scheduled";
+
 export interface TaskSchedulerDeps {
   db: Kysely<DB>;
   config: Config;
@@ -54,6 +56,7 @@ export interface TaskSchedulerDeps {
   whatsapp: WhatsAppRuntime;
   settingsRepo: ReturnType<typeof createSettingsRepository>;
   runAgent: typeof runAgent;
+  runScheduledAgent: typeof runAgent;
   buildMcpServers: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
@@ -64,6 +67,7 @@ export interface TaskSchedulerDeps {
   sendDm?: Parameters<typeof runAgent>[0]["sendDm"];
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
+  limitScheduledAgentExecution: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 export class TaskScheduler {
@@ -189,7 +193,7 @@ export class TaskScheduler {
       return;
     }
     this.inflightTaskRuns.add(task.id);
-    this.enqueueTaskRun(task, () => this.getRunnableTask(task.id, false))
+    this.enqueueTaskRun(task, () => this.getRunnableTask(task.id, false), "scheduled")
       .catch((err) => {
         this.deps.logger.error({ err, taskId: task.id }, "Automation execution failed");
       })
@@ -198,7 +202,10 @@ export class TaskScheduler {
       });
   }
 
-  private async executeTaskNow(task: ScheduledTaskRow): Promise<AutomationExecutionResult> {
+  private async executeTaskNow(
+    task: ScheduledTaskRow,
+    executionQueue: AgentExecutionQueue,
+  ): Promise<AutomationExecutionResult> {
     const { config, logger, loadIntegrationProvider } = this.deps;
     const delivery = resolveWorkflowDelivery(task);
     const sendMessage = this.getSendMessage(task);
@@ -218,14 +225,15 @@ export class TaskScheduler {
       loadIntegrationProvider,
       listAgentEnvForRuntime: this.deps.listAgentEnvForRuntime,
       userRepo: this.deps.userRepo,
-      runAgent: this.deps.runAgent,
+      runAgent: executionQueue === "scheduled" ? this.deps.runScheduledAgent : this.deps.runAgent,
       buildMcpServers: this.deps.buildMcpServers,
       getSlack: this.deps.getSlack,
       inboxMessagesRepo: this.deps.inboxMessagesRepo,
       sendDm: this.deps.sendDm,
       sendMessage: sendMessage ?? undefined,
       recordWorkflowStep: this.deps.recordWorkflowStep,
-      limitAgentExecution: this.deps.limitAgentExecution,
+      limitAgentExecution:
+        executionQueue === "scheduled" ? this.deps.limitScheduledAgentExecution : this.deps.limitAgentExecution,
       loadAgentRuntimeProviderConfig: async () =>
         resolveAgentRuntimeProviderConfigFromSettings(await this.deps.settingsRepo.get()),
     });
@@ -248,6 +256,7 @@ export class TaskScheduler {
   private enqueueTaskRun(
     task: ScheduledTaskRow,
     getTask: () => Promise<ScheduledTaskRow | null>,
+    executionQueue: AgentExecutionQueue,
   ): Promise<AutomationExecutionResult | null> {
     const queueKey = this.getQueueKey(task);
     return new Promise<AutomationExecutionResult | null>((resolve, reject) => {
@@ -258,7 +267,7 @@ export class TaskScheduler {
             resolve(null);
             return;
           }
-          resolve(await this.executeTaskNow(current));
+          resolve(await this.executeTaskNow(current, executionQueue));
         } catch (err) {
           reject(err);
         }
@@ -446,7 +455,7 @@ export class TaskScheduler {
     if (!row) throw new Error(`Task ${id} not found`);
     if (row.status === "completed" && row.schedule_type === "once") return null;
     if (row.status !== "active") throw new Error(`Task ${id} is not active`);
-    return this.enqueueTaskRun(row, () => this.getRunnableTask(id, true));
+    return this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive");
   }
 
   async enqueueTaskById(id: string): Promise<void> {
@@ -455,7 +464,7 @@ export class TaskScheduler {
     if (row.status === "completed" && row.schedule_type === "once") return;
     if (row.status !== "active") throw new Error(`Task ${id} is not active`);
 
-    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true)).catch((err) => {
+    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive").catch((err) => {
       this.deps.logger.error({ err, taskId: id }, "Automation background execution failed");
     });
   }

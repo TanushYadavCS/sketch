@@ -53,6 +53,8 @@ function toBriefShape(output: AgentOutputApi | null) {
     sections: {
       meetings: output.sections.meetings ?? [],
       todos: output.sections.todos ?? [],
+      untracked_followups: output.sections.untracked_followups ?? [],
+      looks_resolved: output.sections.looks_resolved ?? [],
       customer_updates: output.sections.customer_updates ?? [],
       active_projects: output.sections.active_projects ?? [],
     },

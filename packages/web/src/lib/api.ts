@@ -1059,7 +1059,7 @@ export interface DailyBriefMeetingPayload {
 
 export interface DailyBriefItem {
   id: string;
-  sectionKey: "meetings" | "todos" | "customer_updates" | "active_projects";
+  sectionKey: "meetings" | "todos" | "untracked_followups" | "looks_resolved" | "customer_updates" | "active_projects";
   title: string;
   summary: string;
   priority: "high" | "medium" | "low";
@@ -1089,6 +1089,8 @@ export interface DailyBrief {
   sections: {
     meetings: DailyBriefItem[];
     todos: DailyBriefItem[];
+    untracked_followups: DailyBriefItem[];
+    looks_resolved: DailyBriefItem[];
     customer_updates: DailyBriefItem[];
     active_projects: DailyBriefItem[];
   };

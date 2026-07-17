@@ -79,7 +79,7 @@ export function DailyBrief({
   const visibleSections = enabledSections
     ? BRIEF_SECTIONS.filter((section) => enabledSections.includes(section.key))
     : BRIEF_SECTIONS;
-  const allItems = visibleSections.flatMap((section) => brief.sections[section.key]);
+  const allItems = visibleSections.flatMap((section) => brief.sections[section.key] ?? []);
   const selectedItem = allItems.find((item) => item.id === selectedItemId) ?? null;
 
   return (
@@ -102,7 +102,7 @@ export function DailyBrief({
 
       <div className="mt-8 flex flex-col gap-8">
         {visibleSections.map((section) => {
-          const items = brief.sections[section.key];
+          const items = brief.sections[section.key] ?? [];
           if (section.key === "meetings") {
             return (
               <BriefSection key={section.key} label={section.label}>

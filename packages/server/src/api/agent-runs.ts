@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -23,7 +24,7 @@ import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import type { SlackBot } from "../slack/bot";
 import { createSlackMessageHandler } from "../slack/message-handler";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 import { createWhatsAppMessageHandler } from "../whatsapp/message-handler";
 import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
@@ -71,7 +72,7 @@ interface AgentRunRouteDeps {
   whatsappGroups: WhatsAppGroupsRepo;
   inboxMessagesRepo: InboxMessagesRepo;
   getSlack?: () => SlackBot | null;
-  whatsapp?: WhatsAppBot;
+  whatsapp?: WhatsAppSocketFacade;
   whatsappRuntime?: WhatsAppRuntime;
   runAgent: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
@@ -414,8 +415,9 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
           return;
         }
 
-        const whatsapp = deps.whatsappRuntime ?? deps.whatsapp;
-        if (!whatsapp?.isConnected) {
+        const whatsappConnected =
+          deps.whatsappRuntime?.isConnected ?? (await deps.whatsapp?.pairing.status())?.connected ?? false;
+        if (!whatsappConnected) {
           await writeEvent("error", badRequest("NOT_CONNECTED", "WhatsApp is not connected"));
           return;
         }
@@ -434,7 +436,11 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
           if (deps.whatsappRuntime) {
             await deps.whatsappRuntime.sendText(groupTarget, parsed.data.message);
           } else {
-            await deps.whatsapp?.sendText(groupJid, parsed.data.message);
+            await deps.whatsapp?.send(
+              groupJid,
+              { kind: "text", text: parsed.data.message },
+              { idempotencyKey: randomUUID() },
+            );
           }
           delivery.target = groupJid;
         }
@@ -477,7 +483,7 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
             const onFinalMessage = createWhatsAppMessageHandler(deps.whatsappRuntime, groupTarget);
             await onFinalMessage(finalText);
           } else {
-            await deps.whatsapp?.sendText(groupJid, finalText);
+            await deps.whatsapp?.send(groupJid, { kind: "text", text: finalText }, { idempotencyKey: randomUUID() });
           }
         }
         if (parsed.data.deliveryMode === "target") {
@@ -486,7 +492,11 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
             if (deps.whatsappRuntime) {
               await deps.whatsappRuntime.sendFile(groupTarget, filePath, extensionToMime(ext), basename(filePath));
             } else {
-              await deps.whatsapp?.sendFile(groupJid, filePath, extensionToMime(ext), basename(filePath));
+              await deps.whatsapp?.send(
+                groupJid,
+                { kind: "file", filePath, mimeType: extensionToMime(ext), fileName: basename(filePath) },
+                { idempotencyKey: randomUUID() },
+              );
             }
           }
         }

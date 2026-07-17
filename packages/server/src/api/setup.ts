@@ -94,7 +94,7 @@ interface SetupDeps {
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
   userRepo?: UserRepo;
-  whatsappConnected?: () => boolean;
+  whatsappConnected?: () => boolean | Promise<boolean>;
 }
 
 async function ensureSettings(settings: SettingsRepo) {
@@ -190,7 +190,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       orgName: row?.org_name ?? null,
       botName: row?.bot_name ?? "Sketch",
       slackConnected: hasSlack,
-      whatsappConnected: deps.whatsappConnected?.() ?? false,
+      whatsappConnected: (await deps.whatsappConnected?.()) ?? false,
       llmConnected: hasLlm,
       llmProvider,
       ...(deps.managedUrl ? { managedUrl: deps.managedUrl } : {}),
