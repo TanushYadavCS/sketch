@@ -43,6 +43,7 @@ interface WhatsAppInboundBase {
   mediaType?: string;
   quotedMessage?: WhatsAppQuotedMessage;
   rawProviderPayload?: unknown;
+  connectionKey?: string | null;
 }
 
 export interface WhatsAppDmInboundMessage extends WhatsAppInboundBase {
@@ -72,6 +73,7 @@ export interface WhatsAppHistoryBatchMetadata {
   isLatest?: boolean;
   progress?: number | null;
   syncType?: number | string | null;
+  peerDataRequestSessionId?: string | null;
 }
 
 export type WhatsAppHistoryMessagesHandler = (

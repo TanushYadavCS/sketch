@@ -144,6 +144,11 @@ import * as m141 from "./migrations/141-fact-materialization-quarantine";
 import * as m142 from "./migrations/142-verdict-safe-fact-upserts";
 import * as m143 from "./migrations/143-indexed-corroboration";
 import * as m144 from "./migrations/144-whatsapp-gateway-queue";
+import * as m145 from "./migrations/145-whatsapp-history-capture-foundation";
+import * as m146 from "./migrations/146-whatsapp-history-top-up";
+import * as m147 from "./migrations/147-whatsapp-backfill-graph-admission";
+import * as m148 from "./migrations/148-whatsapp-pending-slices-index";
+import * as m149 from "./migrations/149-whatsapp-backfill-lifecycle-durability";
 import type { DB } from "./schema";
 
 /**
@@ -297,6 +302,11 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "142-verdict-safe-fact-upserts": m142,
           "143-indexed-corroboration": m143,
           "144-whatsapp-gateway-queue": m144,
+          "145-whatsapp-history-capture-foundation": m145,
+          "146-whatsapp-history-top-up": m146,
+          "147-whatsapp-backfill-graph-admission": m147,
+          "148-whatsapp-pending-slices-index": m148,
+          "149-whatsapp-backfill-lifecycle-durability": m149,
         };
       },
     },

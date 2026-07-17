@@ -23,7 +23,7 @@ import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createConversationSlicesRepository } from "../db/repositories/conversation-slices";
-import type { createConversationRepository } from "../db/repositories/conversations";
+import type { ConversationMessageSource, createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
@@ -56,6 +56,7 @@ import {
   phoneE164ToWhatsAppJid,
   whatsappDeliveryTargetFromTarget,
 } from "./provider";
+import { validWhatsAppProviderTimestamp } from "./provider-timestamp";
 import type { WhatsAppRuntime } from "./runtime";
 import type { WhatsAppTemplateRequest } from "./templates";
 import { phoneToTimezone } from "./timezone";
@@ -84,6 +85,9 @@ export interface WhatsAppAdapterHandlers {
     message: WhatsAppInboundMessage,
     params: {
       eventKey: string | null;
+      source: ConversationMessageSource;
+      connectionKey: string | null;
+      fromMe?: boolean;
       attachments?: Attachment[];
       attachmentsForWorkspace?: (workspaceDir: string) => Promise<Attachment[]>;
       commitCapture?: (
@@ -101,7 +105,12 @@ export interface WhatsAppAdapterHandlers {
     metadata?: WhatsAppHistoryBatchMetadata,
     options?: {
       checkpoint?: boolean;
-      attachmentsForMessage?: (message: WhatsAppInboundMessage, workspaceDir: string) => Promise<Attachment[]>;
+      captureMetadataForMessage?: (message: WhatsAppInboundMessage) => {
+        eventKey: string | null;
+        connectionKey: string | null;
+        fromMe?: boolean;
+      };
+      range?: { id: string; lowerBoundAt: string; upperBoundAt: string };
     },
   ): Promise<WhatsAppHistorySyncResult>;
 }
@@ -109,8 +118,6 @@ export interface WhatsAppAdapterHandlers {
 const INLINE_BACKLOG_LIMIT = 10;
 const WHATSAPP_AGENT_ERROR_MESSAGE = "Something went wrong, try again.";
 const DAY_MS = 24 * 60 * 60 * 1000;
-const PROVIDER_TIMESTAMP_FLOOR_MS = Date.parse("2009-01-01T00:00:00.000Z");
-const MAX_PROVIDER_TIMESTAMP_FUTURE_MS = 48 * 60 * 60 * 1000;
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
@@ -121,24 +128,6 @@ function parseInboxMetadata(value: string | null): Record<string, unknown> | nul
   } catch {
     return null;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isFromMeHistoryMessage(message: WhatsAppInboundMessage): boolean {
-  const raw = message.rawProviderPayload;
-  if (!isRecord(raw) || !isRecord(raw.key)) return false;
-  return raw.key.fromMe === true;
-}
-
-function validProviderTimestamp(providerTimestamp: string | null | undefined, now = new Date()): string | undefined {
-  if (!providerTimestamp) return undefined;
-  const timestampMs = Date.parse(providerTimestamp);
-  if (!Number.isFinite(timestampMs) || timestampMs <= PROVIDER_TIMESTAMP_FLOOR_MS) return undefined;
-  if (timestampMs >= now.getTime() + MAX_PROVIDER_TIMESTAMP_FUTURE_MS) return undefined;
-  return new Date(timestampMs).toISOString();
 }
 
 function providerConversationIdForLog(message: WhatsAppInboundMessage): string {
@@ -354,6 +343,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     receivedAt?: string;
     skipControlMessages?: boolean;
     eventKey?: string | null;
+    source?: ConversationMessageSource;
+    connectionKey?: string | null;
+    backfillRangeId?: string | null;
+    providerFromMe?: boolean;
     attachments?: Attachment[];
     conversationRepository?: ConversationRepository;
     queued?: boolean;
@@ -375,8 +368,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     }
 
     const attachments = params.attachments ?? (await downloadMessageAttachments(params.message, params.workspaceDir));
-    const providerTimestamp = validProviderTimestamp(params.message.providerTimestamp);
-    const receivedAt = params.receivedAt ? validProviderTimestamp(params.receivedAt) : providerTimestamp;
+    const providerTimestamp = validWhatsAppProviderTimestamp(params.message.providerTimestamp);
+    const receivedAt = params.receivedAt
+      ? validWhatsAppProviderTimestamp(params.receivedAt)
+      : (providerTimestamp ?? undefined);
     const conversationRepository = params.conversationRepository ?? repos.conversations;
     const messageInsert = {
       conversationId: conversation.id,
@@ -391,7 +386,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       providerParentMessageId: params.message.quotedMessage?.providerMessageId ?? null,
       isThreadReply: Boolean(params.message.quotedMessage?.providerMessageId),
       providerTimestamp: providerTimestamp ?? null,
-      receivedAt,
+      providerFromMe: params.providerFromMe ?? false,
+      receivedAt: receivedAt ?? undefined,
+      source: params.source ?? "live",
+      connectionKey: params.connectionKey ?? params.message.connectionKey ?? null,
+      backfillRangeId: params.backfillRangeId ?? null,
     };
     const captured = params.queued
       ? { row: await conversationRepository.captureOrGet(messageInsert), inserted: true }
@@ -405,10 +404,11 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     sent: WhatsAppSendResult | null;
     text: string;
     botName?: string | null;
+    connectionKey?: string | null;
   }) => {
     const providerMessageId = params.sent?.providerMessageId;
     if (!providerMessageId) return;
-    const providerTimestamp = validProviderTimestamp(params.sent?.providerTimestamp);
+    const providerTimestamp = validWhatsAppProviderTimestamp(params.sent?.providerTimestamp);
 
     await repos.conversations.insertMessage({
       conversationId: params.conversationId,
@@ -419,6 +419,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       addressedToSketch: false,
       text: params.text,
       providerTimestamp: providerTimestamp ?? null,
+      source: "live",
+      connectionKey: params.connectionKey ?? null,
     });
   };
 
@@ -492,20 +494,30 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     metadata: WhatsAppHistoryBatchMetadata | undefined,
     options: {
       checkpoint: boolean;
-      attachmentsForMessage?: (message: WhatsAppInboundMessage, workspaceDir: string) => Promise<Attachment[]>;
+      captureMetadataForMessage?: (message: WhatsAppInboundMessage) => {
+        eventKey: string | null;
+        connectionKey: string | null;
+        fromMe?: boolean;
+      };
+      range?: { id: string; lowerBoundAt: string; upperBoundAt: string };
     },
   ): Promise<WhatsAppHistorySyncResult> => {
     const result = emptyHistoryResult();
-    const cutoffMs = Date.now() - config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS;
+    const cutoffMs = options.range
+      ? Date.parse(options.range.lowerBoundAt)
+      : Date.now() - config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS;
+    const upperBoundMs = options.range ? Date.parse(options.range.upperBoundAt) : Number.POSITIVE_INFINITY;
     let candidateCount = 0;
     let candidateBeforeCutoff = 0;
     let candidateAtOrAfterCutoff = 0;
-    let candidateMissingTimestamp = 0;
     let minProviderTimestampMs: number | null = null;
     let maxProviderTimestampMs: number | null = null;
     let lastDurableKey: string | null = null;
     const groupRef = stableWhatsAppParticipantJidRef(groupJid);
-    const candidateMessages = groupMessages.filter((message) => !isFromMeHistoryMessage(message));
+    const candidateMessages = groupMessages.filter(
+      (message) =>
+        Boolean(message.providerMessageId) && Boolean(validWhatsAppProviderTimestamp(message.providerTimestamp)),
+    );
     const candidateCheckpointMessages = candidateMessages.map(checkpointMessageFromInbound);
     const existingCheckpoint = await backfillCheckpoints.getBackfillCheckpoint(groupJid);
     const completeCheckpointKey =
@@ -559,24 +571,21 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
 
     for (const message of candidateMessages) {
       candidateCount += 1;
-      const receivedAt = message.providerTimestamp;
-      const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+      const receivedAt = validWhatsAppProviderTimestamp(message.providerTimestamp);
+      if (!message.providerMessageId || !receivedAt) continue;
+      const receivedAtMs = Date.parse(receivedAt);
       const messageKey = encodeWhatsAppBackfillCheckpointKey(checkpointMessageFromInbound(message));
-      if (receivedAt && Number.isFinite(receivedAtMs)) {
-        minProviderTimestampMs =
-          minProviderTimestampMs === null ? receivedAtMs : Math.min(minProviderTimestampMs, receivedAtMs);
-        maxProviderTimestampMs =
-          maxProviderTimestampMs === null ? receivedAtMs : Math.max(maxProviderTimestampMs, receivedAtMs);
-        if (receivedAtMs < cutoffMs) {
-          candidateBeforeCutoff += 1;
-        } else {
-          candidateAtOrAfterCutoff += 1;
-        }
+      minProviderTimestampMs =
+        minProviderTimestampMs === null ? receivedAtMs : Math.min(minProviderTimestampMs, receivedAtMs);
+      maxProviderTimestampMs =
+        maxProviderTimestampMs === null ? receivedAtMs : Math.max(maxProviderTimestampMs, receivedAtMs);
+      if (receivedAtMs < cutoffMs) {
+        candidateBeforeCutoff += 1;
       } else {
-        candidateMissingTimestamp += 1;
+        candidateAtOrAfterCutoff += 1;
       }
 
-      if (!receivedAt || !Number.isFinite(receivedAtMs) || receivedAtMs < cutoffMs) {
+      if (receivedAtMs < cutoffMs || receivedAtMs >= upperBoundMs) {
         result.skippedOld += 1;
         continue;
       }
@@ -584,16 +593,21 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       const user = await resolveUserByPhone(message.senderPhoneE164);
       const workspaceDir = await resolveWorkspaceDir();
       try {
-        const attachments = await options.attachmentsForMessage?.(message, workspaceDir);
+        const captureMetadata = options.captureMetadataForMessage?.(message);
         const capture = await captureUserMessage({
           message,
           workspaceDir,
           senderName: user?.name ?? message.senderName,
           senderUserId: user?.id ?? null,
           addressedToSketch: false,
+          eventKey: captureMetadata?.eventKey ?? null,
+          source: "history",
+          connectionKey: captureMetadata?.connectionKey ?? message.connectionKey ?? null,
+          backfillRangeId: options.range?.id ?? null,
+          providerFromMe: captureMetadata?.fromMe ?? false,
           receivedAt,
           skipControlMessages: false,
-          attachments,
+          attachments: [],
         });
         if (messageKey) {
           lastDurableKey = oldestWhatsAppBackfillCheckpointKey(lastDurableKey, messageKey);
@@ -623,13 +637,14 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     }
 
     const checkpointStatus = isHistorySyncComplete(metadata) ? "complete" : "in_progress";
-    const checkpoint = options.checkpoint
-      ? await backfillCheckpoints.setBackfillCheckpoint({
-          groupJid,
-          lastFetchedKey: lastDurableKey,
-          status: checkpointStatus,
-        })
-      : null;
+    const checkpoint =
+      options.checkpoint && lastDurableKey
+        ? await backfillCheckpoints.setBackfillCheckpoint({
+            groupJid,
+            lastFetchedKey: lastDurableKey,
+            status: checkpointStatus,
+          })
+        : null;
 
     logger.info(
       {
@@ -641,7 +656,6 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         maxProviderTimestamp: maxProviderTimestampMs === null ? null : new Date(maxProviderTimestampMs).toISOString(),
         candidateBeforeCutoff,
         candidateAtOrAfterCutoff,
-        candidateMissingTimestamp,
         persisted: result.persisted,
         skippedOld: result.skippedOld,
         skippedDup: result.skippedDup,
@@ -662,7 +676,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     metadata?: WhatsAppHistoryBatchMetadata,
     options?: {
       checkpoint?: boolean;
-      attachmentsForMessage?: (message: WhatsAppInboundMessage, workspaceDir: string) => Promise<Attachment[]>;
+      captureMetadataForMessage?: (message: WhatsAppInboundMessage) => {
+        eventKey: string | null;
+        connectionKey: string | null;
+        fromMe?: boolean;
+      };
+      range?: { id: string; lowerBoundAt: string; upperBoundAt: string };
     },
   ) => {
     const result = emptyHistoryResult();
@@ -680,7 +699,8 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         result,
         await processHistoryGroupBatch(groupJid, groupMessages, metadata, {
           checkpoint: options?.checkpoint ?? true,
-          attachmentsForMessage: options?.attachmentsForMessage,
+          captureMetadataForMessage: options?.captureMetadataForMessage,
+          range: options?.range,
         }),
       );
     }
@@ -786,6 +806,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             sent,
             text: finalText,
             botName: settingsRow?.bot_name,
+            connectionKey: message.connectionKey,
           });
           await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
           return;
@@ -916,6 +937,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
               sent,
               text: finalText,
               botName: settingsRow?.bot_name,
+              connectionKey: message.connectionKey,
             });
           }
 
@@ -1043,6 +1065,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           sent,
           text: finalText,
           botName: settingsRow?.bot_name,
+          connectionKey: message.connectionKey,
         });
         await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
         return;
@@ -1172,6 +1195,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             sent,
             text: finalText,
             botName: settingsRow?.bot_name,
+            connectionKey: message.connectionKey,
           });
         }
 
@@ -1214,6 +1238,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     message: WhatsAppInboundMessage,
     params: {
       eventKey: string | null;
+      source: ConversationMessageSource;
+      connectionKey: string | null;
+      fromMe?: boolean;
       attachments?: Attachment[];
       attachmentsForWorkspace?: (workspaceDir: string) => Promise<Attachment[]>;
       commitCapture?: (
@@ -1250,6 +1277,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           senderUserId: user.id,
           addressedToSketch: true,
           eventKey: params.eventKey,
+          source: params.source,
+          connectionKey: params.connectionKey,
+          providerFromMe: params.fromMe ?? false,
           attachments,
           conversationRepository,
           queued: true,
@@ -1276,6 +1306,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         senderUserId: user?.id ?? null,
         addressedToSketch: Boolean(message.isMentioned),
         eventKey: params.eventKey,
+        source: params.source,
+        connectionKey: params.connectionKey,
+        providerFromMe: params.fromMe ?? false,
         attachments,
         conversationRepository,
         queued: true,

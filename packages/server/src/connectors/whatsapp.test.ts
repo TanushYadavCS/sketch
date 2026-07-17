@@ -142,4 +142,76 @@ describe("createWhatsAppConnector", () => {
     expect(seen).toEqual([]);
     expect(debug).toHaveBeenCalledWith({ groupCount: 0 }, "Loaded opted-in WhatsApp groups for indexing");
   });
+
+  it("admits terminal backfill history inside the scheduled connector sync sequence", async () => {
+    const groups = createWhatsAppGroupRepository(db);
+    await groups.upsert({
+      jid: "backfill-sync@g.us",
+      name: "Backfill Sync",
+      description: null,
+      tool_progress: null,
+      reasoning_text: null,
+      updated_at: "2026-07-17T09:00:00.000Z",
+    });
+    const group = await groups.setIndexEnabled("backfill-sync@g.us", true);
+    if (!group) throw new Error("failed to enable group");
+    const conversation = await createConversationRepository(db).getOrCreate({
+      platform: "whatsapp",
+      kind: "group",
+      providerConversationId: group.jid,
+    });
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({ group_jid: group.jid, last_fetched_key: null, status: "complete" })
+      .execute();
+    await db
+      .insertInto("whatsapp_backfill_ranges")
+      .values({
+        id: "connector-sync-range",
+        group_jid: group.jid,
+        range_key: "initial",
+        kind: "initial",
+        connection_key: "000000000001:000000000001",
+        status: "complete",
+        terminal_status: "complete",
+        lower_bound_at: "2026-06-17T00:00:00.000Z",
+        upper_bound_at: "2026-07-17T00:00:00.000Z",
+      })
+      .execute();
+    const history = await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "connector-sync-history",
+      senderName: "History Sender",
+      text: "history",
+      providerTimestamp: "2026-07-01T09:00:00.000Z",
+      receivedAt: "2026-07-01T09:00:00.000Z",
+      source: "history",
+      backfillRangeId: "connector-sync-range",
+    });
+    const syncLogger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } as unknown as Logger;
+
+    for await (const _item of createWhatsAppConnector().sync({
+      db,
+      credentials: { type: "system" },
+      scopeConfig: {},
+      cursor: null,
+      logger: syncLogger,
+    })) {
+    }
+
+    await expect(
+      db
+        .selectFrom("conversation_slices")
+        .select(["denoised_message_ids", "salience_verdict"])
+        .where("conversation_id", "=", conversation.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      denoised_message_ids: JSON.stringify([history.row.id]),
+      salience_verdict: null,
+    });
+    expect(syncLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ chatsServed: 1, messagesRead: 1, rangesCompleted: 1 }),
+      "Completed WhatsApp backfill graph admission run",
+    );
+  });
 });

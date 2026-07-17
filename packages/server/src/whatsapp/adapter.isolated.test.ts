@@ -1530,14 +1530,14 @@ describe("whatsapp/adapter", () => {
       const historyHandler = getHistoryHandler();
 
       await expect(historyHandler(batch)).resolves.toEqual({
-        persisted: 1,
+        persisted: 2,
         skippedOld: 1,
         skippedDup: 0,
       });
       await expect(historyHandler(batch)).resolves.toEqual({
         persisted: 0,
         skippedOld: 1,
-        skippedDup: 1,
+        skippedDup: 2,
       });
 
       const setBackfillCheckpoint = deps.repos.conversationSlices?.setBackfillCheckpoint;
@@ -1546,17 +1546,24 @@ describe("whatsapp/adapter", () => {
         groupJid: "group@g.us",
         lastFetchedKey: encodeWhatsAppBackfillCheckpointKey({
           providerTimestamp: recentTimestamp,
-          providerMessageId: "history-recent",
+          providerMessageId: "history-from-me",
         }),
         status: "in_progress",
       });
-      expect(persistedRows).toHaveLength(1);
-      expect(persistedRows[0]).toEqual(
-        expect.objectContaining({
-          providerMessageId: "history-recent",
-          receivedAt: recentTimestamp,
-          addressedToSketch: false,
-        }),
+      expect(persistedRows).toHaveLength(2);
+      expect(persistedRows).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            providerMessageId: "history-recent",
+            receivedAt: recentTimestamp,
+            addressedToSketch: false,
+          }),
+          expect.objectContaining({
+            providerMessageId: "history-from-me",
+            receivedAt: recentTimestamp,
+            addressedToSketch: false,
+          }),
+        ]),
       );
       expect(deps.repos.conversations.getOrCreate).toHaveBeenCalledWith(
         { platform: "whatsapp", kind: "group", providerConversationId: "group@g.us" },
@@ -1578,6 +1585,11 @@ describe("whatsapp/adapter", () => {
         group_jid: "group@g.us",
         last_fetched_key: completeCheckpointKey,
         status: "complete",
+        live_start_effective_at: null,
+        live_start_message_id: null,
+        graph_last_served_at: null,
+        graph_halted_at: null,
+        graph_halt_reason: null,
         updated_at: "2026-07-07T09:05:00.000Z",
       });
 
@@ -1813,6 +1825,10 @@ describe("whatsapp/adapter", () => {
             isThreadReply: false,
             providerTimestamp: null,
             receivedAt: "2025-01-01T00:00:00.000Z",
+            source: "live",
+            effectiveAt: "2025-01-01T00:00:00.000Z",
+            connectionKey: null,
+            backfillRangeId: null,
             createdAt: "2025-01-01T00:00:00.000Z",
           },
         ],
@@ -1868,6 +1884,10 @@ describe("whatsapp/adapter", () => {
         isThreadReply: false,
         providerTimestamp: "2026-01-01T00:00:00.000Z",
         receivedAt: "2026-01-01T00:00:01.000Z",
+        source: "live",
+        effectiveAt: "2026-01-01T00:00:00.000Z",
+        connectionKey: null,
+        backfillRangeId: null,
         createdAt: "2026-01-01T00:00:01.000Z",
       });
       const { mock, getHandler } = createMockWhatsApp();

@@ -3,6 +3,7 @@ import type { Logger } from "../../logger";
 import {
   WHATSAPP_FACADE_CONTRACT_VERSION,
   type WhatsAppFacadeHealth,
+  type WhatsAppHistorySyncRequest,
   type WhatsAppMediaDownloadRef,
   type WhatsAppPairingEvent,
   type WhatsAppQuotedRef,
@@ -134,6 +135,14 @@ export class GatewaySocketFacade implements WhatsAppSocketFacade, InProcessMessa
 
   resolveLid(jid: string): Promise<string | null> {
     return withTimeout(this.deps.delegate.resolveLid(jid), QUERY_TIMEOUT_MS, "WhatsApp LID resolution");
+  }
+
+  fetchMessageHistory(request: WhatsAppHistorySyncRequest): Promise<string> {
+    return withTimeout(
+      this.deps.delegate.fetchMessageHistory(request),
+      QUERY_TIMEOUT_MS,
+      "WhatsApp history sync request",
+    );
   }
 
   shutdown(): Promise<void> {

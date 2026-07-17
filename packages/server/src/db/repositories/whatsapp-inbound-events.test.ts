@@ -42,12 +42,16 @@ describe("WhatsApp inbound events repository on SQLite", () => {
       "consumed_at",
       "last_error",
       "created_at",
+      "request_session_id",
+      "backfill_range_id",
     ]);
     const indexes = await sql<{ name: string }>`PRAGMA index_list(whatsapp_inbound_events)`.execute(db);
     expect(indexes.rows.map((row) => row.name).sort()).toEqual([
+      "whatsapp_inbound_events_backfill_range_idx",
       "whatsapp_inbound_events_batch_id_idx",
       "whatsapp_inbound_events_event_key_uidx",
       "whatsapp_inbound_events_provider_message_id_idx",
+      "whatsapp_inbound_events_request_session_idx",
       "whatsapp_inbound_events_status_id_idx",
     ]);
     const statusIndex = await sql<{ name: string }>`
@@ -59,9 +63,17 @@ describe("WhatsApp inbound events repository on SQLite", () => {
     const batchIndex = await sql<{ name: string }>`
       PRAGMA index_info(whatsapp_inbound_events_batch_id_idx)
     `.execute(db);
+    const requestSessionIndex = await sql<{ name: string }>`
+      PRAGMA index_info(whatsapp_inbound_events_request_session_idx)
+    `.execute(db);
+    const backfillRangeIndex = await sql<{ name: string }>`
+      PRAGMA index_info(whatsapp_inbound_events_backfill_range_idx)
+    `.execute(db);
     expect(statusIndex.rows.map((row) => row.name)).toEqual(["status", "id"]);
     expect(providerIndex.rows.map((row) => row.name)).toEqual(["provider_message_id"]);
     expect(batchIndex.rows.map((row) => row.name)).toEqual(["batch_id"]);
+    expect(requestSessionIndex.rows.map((row) => row.name)).toEqual(["request_session_id"]);
+    expect(backfillRangeIndex.rows.map((row) => row.name)).toEqual(["backfill_range_id"]);
   });
 
   it("uses the canonical conversation, provider id, and fromMe identity and deduplicates inserts", async () => {

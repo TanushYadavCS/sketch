@@ -15,7 +15,7 @@ import {
 import { sanitizeWhatsAppDisplayText } from "../whatsapp/privacy";
 import { phoneE164ToWhatsAppJid } from "../whatsapp/provider";
 import type { GeminiGenerator } from "./gemini-generate";
-import type { SyncedItem } from "./types";
+import { type SyncedItem, WHATSAPP_CONVERSATION_SLICE_FILE_TYPE } from "./types";
 
 export const DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT = 50;
 export const WHATSAPP_EMISSION_REFRESH_DAYS = 7;
@@ -529,7 +529,7 @@ async function syncedItemForKeptSlice(
       providerFileId: context.slice.id,
       providerUrl: null,
       fileName: `WhatsApp: ${titleGroup} - ${formatTimeRange(context.slice)}`,
-      fileType: "whatsapp_conversation_slice",
+      fileType: WHATSAPP_CONVERSATION_SLICE_FILE_TYPE,
       contentCategory: "document",
       content,
       sourcePath: sourcePathForSlice(context),

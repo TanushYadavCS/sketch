@@ -83,6 +83,41 @@ describe("WhatsApp inbound events repository on Postgres", () => {
     await expect(repo.markDispatched(inserted.row.id, "pg-new-process-token")).resolves.toBe(true);
   });
 
+  it("bounds on-demand correlation deferral using the durable receive time", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const inserted = await repo.insert({ origin: "gateway", kind: "history_batch", envelope: "{}" });
+    await repo.claim("pg-correlation-young");
+
+    await expect(repo.deferCorrelation(inserted.row.id, "pg-correlation-young", "awaiting correlation")).resolves.toBe(
+      "deferred",
+    );
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["status", "attempts"])
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "captured", attempts: 0 });
+
+    await db
+      .updateTable("whatsapp_inbound_events")
+      .set({ received_at: "2000-01-01T00:00:00.000Z", next_attempt_at: "2000-01-01T00:00:00.000Z" })
+      .where("id", "=", inserted.row.id)
+      .execute();
+    await repo.claim("pg-correlation-expired");
+
+    await expect(
+      repo.deferCorrelation(inserted.row.id, "pg-correlation-expired", "awaiting correlation"),
+    ).resolves.toBe("dead");
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["status", "attempts", "last_error"])
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "dead", attempts: 1, last_error: "awaiting correlation" });
+  });
+
   it("dead-letters the sixth claim, treats dead chunks as terminal, and sweeps only expired terminal rows", async () => {
     const repo = createWhatsAppInboundEventsRepository(db);
     const first = await repo.insert({

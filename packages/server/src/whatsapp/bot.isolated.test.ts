@@ -1,4 +1,4 @@
-import { DisconnectReason, type GroupMetadata, type proto } from "@whiskeysockets/baileys";
+import { DisconnectReason, type GroupMetadata, proto } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
@@ -154,6 +154,14 @@ describe("WhatsAppBot.phoneNumber", () => {
       user: { id: "14155238886:0@s.whatsapp.net" },
     };
     expect(bot.phoneNumber).toBe("+14155238886");
+  });
+
+  it("exposes the connected account LID", () => {
+    const bot = new WhatsAppBot({ db, logger: createTestLogger() });
+    (bot as unknown as { sock: { user: { id: string; lid: string } } }).sock = {
+      user: { id: "14155238886:0@s.whatsapp.net", lid: "86702773280883@lid" },
+    };
+    expect(bot.accountLid).toBe("86702773280883@lid");
   });
 });
 
@@ -1082,6 +1090,37 @@ describe("WhatsAppBot history sync", () => {
       }),
       "WhatsApp history batch processed",
     );
+  });
+
+  it("threads an empty on-demand response session to the history handler", async () => {
+    const handlers = new Map<string, (payload: Record<string, unknown>) => Promise<void>>();
+    const bot = new WhatsAppBot({ db, logger: createTestLogger() });
+    const mockSock = {
+      user: { id: "99999@s.whatsapp.net", name: "Sketch", lid: undefined },
+      ev: {
+        on: (event: string, handler: (payload: Record<string, unknown>) => Promise<void>) => {
+          handlers.set(event, handler);
+        },
+      },
+    };
+    const historyHandler = vi.fn(async () => ({ persisted: 0, skippedOld: 0, skippedDup: 0 }));
+    (bot as unknown as { sock: typeof mockSock }).sock = mockSock;
+    bot.onHistoryMessages(historyHandler);
+    (bot as unknown as { registerHistoryHandler: () => void }).registerHistoryHandler();
+
+    await handlers.get("messaging-history.set")?.({
+      messages: [],
+      syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+      peerDataRequestSessionId: "request-empty",
+    });
+
+    expect(historyHandler).toHaveBeenCalledWith([], {
+      socketGeneration: 0,
+      isLatest: undefined,
+      progress: undefined,
+      syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+      peerDataRequestSessionId: "request-empty",
+    });
   });
 });
 
