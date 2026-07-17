@@ -191,6 +191,11 @@ describe("context authority snapshot", () => {
 
   it("marks provider construction and connection-list failures unavailable without throwing", async () => {
     await seedConnector("calendar-active", "google_calendar", "active");
+    const rejectingProvider = {
+      listConnections: async () => {
+        throw new Error("connection list unavailable");
+      },
+    } as Pick<IntegrationProvider, "listConnections"> as IntegrationProvider;
 
     const loadFailure = await buildContextAuthoritySnapshot({
       db,
@@ -210,9 +215,18 @@ describe("context authority snapshot", () => {
         throw new Error("provider unavailable");
       },
     });
+    const connectionListFailure = await buildContextAuthoritySnapshot({
+      db,
+      userId: "user-1",
+      userEmail: "agent@example.com",
+      userName: "Agent User",
+      now: NOW,
+      getIntegrationStatus: async () => ({ kind: "ok", provider: rejectingProvider }),
+    });
 
     expect(loadFailure.integrations.status).toBe("unavailable");
     expect(listFailure.integrations.status).toBe("unavailable");
+    expect(connectionListFailure.integrations.status).toBe("unavailable");
   });
 });
 
@@ -243,6 +257,8 @@ describe("context authority reconciliation", () => {
   it.each([
     ["Gmail is disconnected", "Reconnect Gmail before continuing."],
     ["Gmail authentication required", "Authenticate Gmail before continuing."],
+    ["Gmail isn't connected", "Reconnect Gmail before continuing."],
+    ["Gmail connection issue", "Reconnect to Gmail because authentication is required."],
   ])("suppresses explicit disconnected or authentication-required wording: %s", (title, summary) => {
     const result = reconcileItemsWithContextAuthority([outputItem({ title, summary })], connected);
 
@@ -263,6 +279,11 @@ describe("context authority reconciliation", () => {
     {
       name: "generic target",
       title: "Reconnect both integrations",
+      summary: "Both integrations require authentication.",
+    },
+    {
+      name: "mixed concrete and generic targets",
+      title: "Reconnect Gmail",
       summary: "Both integrations require authentication.",
     },
     {

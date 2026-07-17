@@ -56,8 +56,9 @@ const CORRECTION_PATTERNS = [
 
 const CONNECTION_CLAIM_PATTERNS = [
   /(.{1,120}?)\s+(?:is|are)\s+(?:not|no longer)\s+(?:connected|authenticated|authorized)\b/giu,
+  /(.{1,120}?)\s+(?:isn['’]t|aren['’]t)\s+(?:connected|authenticated|authorized)\b/giu,
   /(.{1,120}?)\s+(?:is|are)\s+disconnected\b/giu,
-  /\b(?:connect|reconnect|authenticate|reauthorize|authorize)\s+(.{1,120}?)(?=\b(?:before|after|to|so that|because|for)\b|[.;!?]|$)/giu,
+  /\b(?:connect|reconnect|authenticate|reauthorize|authorize)\s+(?:to\s+)?(.{1,120}?)(?=\b(?:before|after|to|so that|because|for)\b|[.;!?]|$)/giu,
   /(.{1,120}?)\s+(?:needs?|requires?)\s+(?:authentication|authorization|reauthorization|reconnection)\b/giu,
   /(.{1,120}?)\s+(?:credentials?|tokens?|authorization|authentication)\s+(?:(?:are|is)\s+)?(?:missing|expired|invalid|required)\b/giu,
   /\b(?:authentication|authorization|reauthorization)\s+(?:is\s+)?required\s+(?:for|on)\s+(.{1,120}?)(?=[.;!?]|$)/giu,
@@ -129,6 +130,8 @@ const ALLOWED_RESIDUAL_WORDS = new Set([
   "are",
   "as",
   "at",
+  "authentication",
+  "authorization",
   "before",
   "because",
   "brief",
@@ -342,7 +345,12 @@ function findClaimMatches(text: string): ClaimMatch[] {
       });
     }
   }
-  return matches.sort((left, right) => left.start - right.start || right.end - left.end);
+  const selected: ClaimMatch[] = [];
+  for (const match of matches.sort((left, right) => left.start - right.start || left.end - right.end)) {
+    if (selected.some((candidate) => match.start < candidate.end && match.end > candidate.start)) continue;
+    selected.push(match);
+  }
+  return selected;
 }
 
 function residualText(text: string, matches: ClaimMatch[]): string {
@@ -370,10 +378,38 @@ function isGenericConnectionContext(text: string): boolean {
   return tokens.length > 0 && tokens.length <= 5 && tokens.every((token) => CONNECTION_CONTEXT_WORDS.has(token));
 }
 
-function isConnectionOnlyText(text: string, matches: ClaimMatch[]): boolean {
-  if (matches.length === 0) return isGenericConnectionContext(text);
+function containsTokenSequence(tokens: string[], sequence: string[]): number {
+  if (sequence.length === 0 || sequence.length > tokens.length) return -1;
+  for (let index = 0; index <= tokens.length - sequence.length; index += 1) {
+    if (sequence.every((token, offset) => tokens[index + offset] === token)) return index;
+  }
+  return -1;
+}
+
+function isKnownAppConnectionContext(text: string, snapshot: ContextAuthoritySnapshot): boolean {
+  const tokens = normalizePhrase(text).split(" ").filter(Boolean);
+  if (tokens.length === 0 || tokens.length > 8) return false;
+  return snapshot.connectedApps.some((app) =>
+    app.aliases.some((alias) => {
+      const aliasTokens = normalizePhrase(alias).split(" ").filter(Boolean);
+      const aliasIndex = containsTokenSequence(tokens, aliasTokens);
+      if (aliasIndex === -1) return false;
+      const remaining = tokens.filter((_, index) => index < aliasIndex || index >= aliasIndex + aliasTokens.length);
+      return remaining.length > 0 && remaining.every((token) => CONNECTION_CONTEXT_WORDS.has(token));
+    }),
+  );
+}
+
+function isConnectionOnlyText(text: string, matches: ClaimMatch[], snapshot: ContextAuthoritySnapshot): boolean {
+  if (matches.length === 0) {
+    return isGenericConnectionContext(text) || isKnownAppConnectionContext(text, snapshot);
+  }
   const residualTokens = residualText(text, matches).split(" ").filter(Boolean);
   return residualTokens.every((token) => ALLOWED_RESIDUAL_WORDS.has(token));
+}
+
+function minimumConcreteTargetsForGeneric(target: string): number {
+  return /^(?:both|these|those|the|them)\b/u.test(target) ? 2 : 1;
 }
 
 function appMatchesTarget(app: ContextAuthorityApp, target: string): boolean {
@@ -393,10 +429,15 @@ function isObsoleteConnectionClaim(
   );
   if (texts.some((text) => CORRECTION_PATTERNS.some((pattern) => pattern.test(text)))) return false;
   const textMatches = texts.map((text) => ({ text, matches: findClaimMatches(text) }));
-  if (textMatches.some(({ text, matches }) => !isConnectionOnlyText(text, matches))) return false;
+  if (textMatches.some(({ text, matches }) => !isConnectionOnlyText(text, matches, snapshot))) return false;
   const targets = textMatches.flatMap(({ matches }) => matches.flatMap((match) => targetFragments(match.target)));
-  const concreteTargets = uniqueStrings(targets.filter((target) => !GENERIC_TARGETS.has(target)));
+  const normalizedTargets = uniqueStrings(targets);
+  const genericTargets = normalizedTargets.filter((target) => GENERIC_TARGETS.has(target));
+  const concreteTargets = normalizedTargets.filter((target) => !GENERIC_TARGETS.has(target));
   if (concreteTargets.length === 0) return false;
+  if (genericTargets.some((target) => concreteTargets.length < minimumConcreteTargetsForGeneric(target))) {
+    return false;
+  }
   return concreteTargets.every((target) => snapshot.connectedApps.some((app) => appMatchesTarget(app, target)));
 }
 
