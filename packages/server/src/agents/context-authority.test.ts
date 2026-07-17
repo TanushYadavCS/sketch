@@ -241,6 +241,15 @@ describe("context authority reconciliation", () => {
   });
 
   it.each([
+    ["Gmail is disconnected", "Reconnect Gmail before continuing."],
+    ["Gmail authentication required", "Authenticate Gmail before continuing."],
+  ])("suppresses explicit disconnected or authentication-required wording: %s", (title, summary) => {
+    const result = reconcileItemsWithContextAuthority([outputItem({ title, summary })], connected);
+
+    expect(result).toEqual({ items: [], suppressedCount: 1 });
+  });
+
+  it.each([
     {
       name: "unknown target",
       title: "Reconnect Jira",

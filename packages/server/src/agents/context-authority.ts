@@ -56,9 +56,10 @@ const CORRECTION_PATTERNS = [
 
 const CONNECTION_CLAIM_PATTERNS = [
   /(.{1,120}?)\s+(?:is|are)\s+(?:not|no longer)\s+(?:connected|authenticated|authorized)\b/giu,
+  /(.{1,120}?)\s+(?:is|are)\s+disconnected\b/giu,
   /\b(?:connect|reconnect|authenticate|reauthorize|authorize)\s+(.{1,120}?)(?=\b(?:before|after|to|so that|because|for)\b|[.;!?]|$)/giu,
   /(.{1,120}?)\s+(?:needs?|requires?)\s+(?:authentication|authorization|reauthorization|reconnection)\b/giu,
-  /(.{1,120}?)\s+(?:credentials?|tokens?|authorization|authentication)\s+(?:are|is)\s+(?:missing|expired|invalid|required)\b/giu,
+  /(.{1,120}?)\s+(?:credentials?|tokens?|authorization|authentication)\s+(?:(?:are|is)\s+)?(?:missing|expired|invalid|required)\b/giu,
   /\b(?:authentication|authorization|reauthorization)\s+(?:is\s+)?required\s+(?:for|on)\s+(.{1,120}?)(?=[.;!?]|$)/giu,
 ];
 
