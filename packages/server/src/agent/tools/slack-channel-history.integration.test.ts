@@ -171,6 +171,86 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(resultText(result)).toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);
     });
 
+    it("includes a late thread's root even when it predates the reply window by days", async () => {
+      const conversations = createConversationRepository(db);
+      const lateRootTs = "2000.1";
+      await conversations.insertMessage({
+        conversationId,
+        providerMessageId: lateRootTs,
+        senderJid: "U0EXT",
+        senderName: "Guest",
+        text: "ancient root",
+        providerThreadId: lateRootTs,
+        isThreadReply: false,
+        providerTimestamp: "2026-07-10T09:00:00.000Z",
+        receivedAt: "2026-07-10T09:00:00.000Z",
+      });
+      const lateReply = await conversations.insertMessage({
+        conversationId,
+        providerMessageId: "2000.2",
+        senderJid: "U0TEAM",
+        senderName: "Roopak",
+        text: "reply three days later",
+        providerThreadId: lateRootTs,
+        providerParentMessageId: lateRootTs,
+        isThreadReply: true,
+        providerTimestamp: "2026-07-13T09:00:00.000Z",
+        receivedAt: "2026-07-13T09:00:00.000Z",
+      });
+      const lateSlice = await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId,
+        firstMessageId: lateReply.row.id,
+        lastMessageId: lateReply.row.id,
+        startedAt: "2026-07-13T09:00:00.000Z",
+        endedAt: "2026-07-13T09:00:00.000Z",
+        messageCount: 1,
+        denoisedMessageIds: [lateReply.row.id],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+        salienceVerdict: "kept",
+        providerThreadId: lateRootTs,
+      });
+      const connectorRepo = createConnectorRepository(db);
+      const config = await db
+        .selectFrom("connector_configs")
+        .select("id")
+        .where("connector_type", "=", "slack")
+        .executeTakeFirstOrThrow();
+      const scopeId = await connectorRepo.upsertAccessScope(config.id, {
+        scopeType: "slack_channel",
+        providerScopeId: "C1",
+        label: "#general",
+        memberEmails: ["roopak@example.com"],
+      });
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: "file-late",
+          connector_config_id: config.id,
+          provider_file_id: lateSlice.row.id,
+          file_name: "Slack: #general late thread",
+          file_type: "slack_conversation_slice",
+          content_category: "document",
+          source: "slack",
+          access_scope_id: scopeId,
+          synced_at: "2026-07-13T10:00:00.000Z",
+        })
+        .execute();
+      await db
+        .updateTable("conversation_slices")
+        .set({ indexed_file_id: "file-late" })
+        .where("id", "=", lateSlice.row.id)
+        .execute();
+
+      const result = await handleSlackChannelHistory(
+        { sliceId: lateSlice.row.id },
+        depsFor(db, ["roopak@example.com"]),
+      );
+      const payload = JSON.parse(resultText(result));
+      expect(payload.messages[0].text).toBe("ancient root");
+      expect(payload.messages[1].text).toBe("reply three days later");
+    });
+
     it("rejects malformed input and cross-window page tokens", async () => {
       const missing = await handleSlackChannelHistory({}, depsFor(db, ["roopak@example.com"]));
       expect(resultText(missing)).toContain("Provide either");

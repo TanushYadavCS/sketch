@@ -438,6 +438,37 @@ async function listRawMessagesInWindow(
   const page = rows.slice(0, limit);
   const hasMore = rows.length > limit;
   const last = page[page.length - 1];
+
+  /**
+   * A late-created thread's root lives outside the reply window (it can be
+   * days older), so the window filter above misses it. Prepend it on the
+   * first page as context — it does not participate in cursor pagination.
+   */
+  if (anchor.providerThreadId && !cursor) {
+    const rootIncluded = page.some((row) => row.provider_message_id === anchor.providerThreadId);
+    if (!rootIncluded) {
+      const root = await db
+        .selectFrom("conversation_messages")
+        .select([
+          "id",
+          "provider_message_id",
+          "sender_jid",
+          "sender_name",
+          "is_bot",
+          "text",
+          "attachments",
+          "provider_thread_id",
+          "is_thread_reply",
+          "provider_timestamp",
+          "received_at",
+        ])
+        .where("conversation_id", "=", anchor.conversationId)
+        .where("provider_message_id", "=", anchor.providerThreadId)
+        .where("is_thread_reply", "=", 0)
+        .executeTakeFirst();
+      if (root) page.unshift(root);
+    }
+  }
   return {
     messages: page,
     hasMore,
