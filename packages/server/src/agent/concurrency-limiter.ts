@@ -56,6 +56,10 @@ export class AgentRunLimiter {
 
     const admissionResult = this.acquire(admission.signal);
     const waitMs = typeof admissionResult === "number" ? admissionResult : await admissionResult;
+    if (admission.signal?.aborted) {
+      this.release();
+      throw new AgentRunAdmissionCancelledError();
+    }
     admission.onStart?.();
     const startedAt = this.now();
     const runContext: ActiveRunContext = { active: true };

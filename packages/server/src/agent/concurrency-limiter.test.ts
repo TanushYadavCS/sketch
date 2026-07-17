@@ -131,6 +131,49 @@ describe("AgentRunLimiter", () => {
     expect(limiter.snapshot()).toEqual({ limit: 1, active: 0, waiting: 0 });
   });
 
+  it("cancels an admission aborted after its slot is released but before it starts", async () => {
+    const controller = new AbortController();
+    const entries: Array<Record<string, unknown>> = [];
+    let abortAfterRelease = false;
+    const logger = {
+      info: (fields: Record<string, unknown>) => {
+        entries.push(fields);
+        if (abortAfterRelease && fields.event === "agent_run_limiter_finish") controller.abort();
+      },
+    } as Pick<Logger, "info">;
+    const limiter = createAgentRunLimiter({ limit: 1, queue: "scheduled", logger });
+    const releaseFirst = deferred<void>();
+    const onCancelledStart = vi.fn();
+    const started: string[] = [];
+
+    const first = limiter.run(async () => {
+      started.push("first");
+      await releaseFirst.promise;
+    });
+    const cancelled = limiter.run(
+      async () => {
+        started.push("cancelled");
+      },
+      { signal: controller.signal, onStart: onCancelledStart },
+    );
+    const cancelledResult = expect(cancelled).rejects.toBeInstanceOf(AgentRunAdmissionCancelledError);
+    const third = limiter.run(async () => {
+      started.push("third");
+    });
+
+    await vi.waitFor(() => expect(limiter.snapshot()).toEqual({ limit: 1, active: 1, waiting: 2 }));
+    abortAfterRelease = true;
+    releaseFirst.resolve();
+
+    await first;
+    await cancelledResult;
+    await third;
+    expect(onCancelledStart).not.toHaveBeenCalled();
+    expect(started).toEqual(["first", "third"]);
+    expect(entries.some((entry) => entry.event === "agent_run_limiter_start")).toBe(true);
+    expect(limiter.snapshot()).toEqual({ limit: 1, active: 0, waiting: 0 });
+  });
+
   it("keeps interactive and scheduled queues independent", async () => {
     const { logger } = captureLogger();
     const interactive = createAgentRunLimiter({ limit: 2, queue: "interactive", logger });
