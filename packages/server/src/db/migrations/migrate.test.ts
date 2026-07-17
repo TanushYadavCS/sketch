@@ -24,7 +24,7 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 146;
+const EXPECTED_MIGRATION_COUNT = 147;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -214,6 +214,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[143]).toBe("148-whatsapp-pending-slices-index");
     expect(names[144]).toBe("149-whatsapp-backfill-lifecycle-durability");
     expect(names[145]).toBe("150-task-durability-steel-thread");
+    expect(names[146]).toBe("151-agent-output-item-task-links");
   });
 
   it("creates the bounded open-materializable partial index", async () => {
@@ -350,6 +351,72 @@ describe("runMigrations — full sequence", () => {
         }),
       ]),
     );
+  });
+
+  it("creates canonical agent output item task links and nulls them when the task is deleted", async () => {
+    await sql`PRAGMA foreign_keys = ON`.execute(db);
+    await runMigrations(db, { quiet: true });
+
+    const columns = await sql<{ name: string; type: string; notnull: number }>`
+      PRAGMA table_info(agent_output_items)
+    `.execute(db);
+    expect(columns.rows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "task_id", type: "TEXT", notnull: 0 })]),
+    );
+
+    const foreignKeys = await sql<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>`PRAGMA foreign_key_list(agent_output_items)`.execute(db);
+    expect(foreignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: "tasks", from: "task_id", to: "id", on_delete: "SET NULL" }),
+      ]),
+    );
+
+    const indexes = await sql<{ name: string }>`PRAGMA index_list(agent_output_items)`.execute(db);
+    expect(indexes.rows.map((row) => row.name)).toContain("idx_agent_output_items_task_id");
+
+    await sql`
+      INSERT INTO users (id, name) VALUES ('task-link-user', 'Task Link User')
+    `.execute(db);
+    await sql`
+      INSERT INTO agent_outputs (
+        id, agent_key, user_id, output_date, source_key, timezone, status,
+        trigger_type, agent_version
+      ) VALUES (
+        'task-link-output', 'daily_brief', 'task-link-user', '2026-07-17',
+        '__global__', 'UTC', 'completed', 'manual', 'test'
+      )
+    `.execute(db);
+    await sql`
+      INSERT INTO tasks (
+        id, source, title, normalized_title, status, status_authority,
+        provenance, source_task_id
+      ) VALUES (
+        'task-link-task', 'brief', 'Linked task', 'linked task', 'open',
+        'local', 'brief', 'task-link-source'
+      )
+    `.execute(db);
+    await sql`
+      INSERT INTO agent_output_items (
+        id, agent_output_id, section_key, title, summary, priority,
+        knowledge_refs_json, sort_order, task_id
+      ) VALUES (
+        'task-link-item', 'task-link-output', 'todos', 'Snapshot task',
+        'Snapshot summary', 'medium', '{"entityIds":[],"fileIds":[]}', 0,
+        'task-link-task'
+      )
+    `.execute(db);
+
+    await sql`DELETE FROM tasks WHERE id = 'task-link-task'`.execute(db);
+
+    const item = await sql<{ task_id: string | null }>`
+      SELECT task_id FROM agent_output_items WHERE id = 'task-link-item'
+    `.execute(db);
+    expect(item.rows).toEqual([{ task_id: null }]);
   });
 
   it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {

@@ -740,6 +740,7 @@ export interface AgentOutputsTable {
 export interface AgentOutputItemsTable {
   id: string;
   agent_output_id: string;
+  task_id: string | null;
   section_key: string;
   title: string;
   summary: string;
