@@ -12,3 +12,6 @@ tmp/
 .worktrees/
 apps/macos/.build/
 apps/macos/.dist/
+
+# Local feature-design artifacts
+docs/superpowers/specs/

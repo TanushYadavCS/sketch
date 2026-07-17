@@ -6,6 +6,11 @@ import { ConnectorNudgeDialog, type ConnectorNudgeSuggestion } from "@/component
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatIntegrationConnectionFrame } from "@/components/sketch/chat-integration-connection-dialog";
 import {
+  ChatConversationLoadError,
+  ChatConversationSkeleton,
+  ChatRecoveryStatus,
+} from "@/components/sketch/chat-route-state";
+import {
   ChatThread,
   type ChatThreadFile,
   type ChatThreadIntegrationConnection,
@@ -19,9 +24,11 @@ import {
 import type { ConversationRowProps } from "@/components/sketch/conversation-row";
 import { HomePane } from "@/components/sketch/home-pane";
 import { DEFAULT_TILES, type TileDef } from "@/components/sketch/tile-grid";
+import { useWebChatReconciliation } from "@/hooks/use-web-chat-reconciliation";
 import {
   type AutomationArtifact,
   type WebChatConversationSummary,
+  type WebChatMessagesResponse,
   type WebChatToolProgress,
   type WebChatUploadedAttachment,
   type WorkspaceSummary,
@@ -29,14 +36,16 @@ import {
 } from "@/lib/api";
 import {
   createWebChatConversationId,
+  hasPendingWebChatSubmission,
   setPendingWebChatSubmission,
+  shouldUseChatViewTransition,
   takePendingWebChatSubmission,
 } from "@/lib/chat-target";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
 import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, isCancelledError, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -77,6 +86,7 @@ type WebChatMetadata = {
 
 type WebChatMessage = UIMessage<WebChatMetadata, WebChatDataParts> & { createdAt?: string | Date };
 type WebChatPart = WebChatMessage["parts"][number];
+type WebChatLoadedMessagesResponse = Omit<WebChatMessagesResponse, "messages"> & { messages: WebChatMessage[] };
 type ActiveIntegrationConnection = {
   connection: ChatThreadIntegrationConnection;
   popupWindow: Window | null;
@@ -150,6 +160,45 @@ export function buildWebChatRecents(conversations: WebChatConversationSummary[])
 }
 
 const WEB_CHAT_CONVERSATIONS_QUERY_KEY = ["web-chat", "conversations"];
+const WEB_CHAT_MESSAGES_STALE_TIME_MS = 15_000;
+
+export const webChatMessagesQueryKey = (conversationId: string) => ["web-chat", "messages", conversationId] as const;
+
+function freshCachedWebChatMessages(
+  queryClient: QueryClient,
+  conversationId: string,
+): WebChatLoadedMessagesResponse | null {
+  const queryKey = webChatMessagesQueryKey(conversationId);
+  const response = queryClient.getQueryData<WebChatMessagesResponse>(queryKey);
+  const queryState = queryClient.getQueryState(queryKey);
+  if (
+    !response ||
+    !queryState?.dataUpdatedAt ||
+    queryState.dataUpdatedAt + WEB_CHAT_MESSAGES_STALE_TIME_MS <= Date.now()
+  ) {
+    return null;
+  }
+  return { ...response, messages: response.messages as WebChatMessage[] };
+}
+
+function isHistoryLoadAbort(error: unknown): boolean {
+  return isCancelledError(error) || (error instanceof Error && error.name === "AbortError");
+}
+
+export function useKnownNewWebChatConversation(conversationId: string, hasNewConversationIntent: boolean): boolean {
+  const [knownNewConversationId, setKnownNewConversationId] = useState<string | null>(() =>
+    hasNewConversationIntent ? conversationId : null,
+  );
+
+  useEffect(() => {
+    setKnownNewConversationId((currentConversationId) => {
+      if (hasNewConversationIntent) return conversationId;
+      return currentConversationId === conversationId ? currentConversationId : null;
+    });
+  }, [conversationId, hasNewConversationIntent]);
+
+  return hasNewConversationIntent || knownNewConversationId === conversationId;
+}
 
 function removeWebChatConversationFromCache(
   data: { conversations: WebChatConversationSummary[] } | undefined,
@@ -791,12 +840,23 @@ function ChatIndexPage() {
         WEB_CHAT_CONVERSATIONS_QUERY_KEY,
         (data) => removeWebChatConversationFromCache(data, conversationId),
       );
+      queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
       toast.success("Conversation deleted");
     },
     onError: (error) => {
       toast.error(getDeleteConversationError(error));
     },
   });
+  const handleConversationIntent = useCallback(
+    (conversationId: string) => {
+      void queryClient.prefetchQuery({
+        queryKey: webChatMessagesQueryKey(conversationId),
+        queryFn: ({ signal }) => api.webChat.messages(conversationId, { signal }),
+        staleTime: WEB_CHAT_MESSAGES_STALE_TIME_MS,
+      });
+    },
+    [queryClient],
+  );
 
   useEffect(() => {
     if (!search.message) return;
@@ -805,6 +865,7 @@ function ChatIndexPage() {
       params: { conversationId: createWebChatConversationId() },
       search,
       replace: true,
+      viewTransition: shouldUseChatViewTransition(),
     });
   }, [navigate, search]);
 
@@ -816,6 +877,7 @@ function ChatIndexPage() {
       tiles={summaryQuery.data ? buildSummaryTiles(summaryQuery.data) : undefined}
       recents={webChatQuery.data ? buildWebChatRecents(webChatQuery.data.conversations) : []}
       deletingConversationId={deleteConversationMutation.variables ?? null}
+      onConversationIntent={handleConversationIntent}
       onDeleteConversation={(conversation) => {
         deleteConversationMutation.mutate(conversation.id);
       }}
@@ -824,6 +886,7 @@ function ChatIndexPage() {
           to: "/chat/$conversationId" as const,
           params: { conversationId: createWebChatConversationId() },
           search: { message: value.trim() },
+          viewTransition: shouldUseChatViewTransition(),
         };
         if (attachments.length > 0) {
           setPendingWebChatSubmission(target.params.conversationId, { text: value.trim(), attachments });
@@ -839,9 +902,20 @@ export function ChatPage() {
   const { conversationId } = useParams({ from: chatRoute.id });
   const search = useSearch({ from: chatRoute.id }) as ChatSearch;
   const sentInitialMessage = useRef<string | null>(null);
+  const recoveryResponsesRef = useRef(new WeakMap<WebChatMessage[], WebChatLoadedMessagesResponse>());
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
   const toolProgressMutationId = useRef(0);
-  const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const hasNewConversationIntent = Boolean(
+    search.message || search.prefill || hasPendingWebChatSubmission(conversationId),
+  );
+  const knownNewConversation = useKnownNewWebChatConversation(conversationId, hasNewConversationIntent);
+  const freshCachedHistory = knownNewConversation ? null : freshCachedWebChatMessages(queryClient, conversationId);
+  const [loadedConversationId, setLoadedConversationId] = useState<string | null>(() =>
+    freshCachedHistory ? conversationId : null,
+  );
+  const [historyLoadError, setHistoryLoadError] = useState<{ conversationId: string; attempt: number } | null>(null);
+  const [historyLoadAttempt, setHistoryLoadAttempt] = useState(0);
   const [toolProgress, setToolProgress] = useState<WebChatToolProgress>("friendly");
   const [pendingToolProgress, setPendingToolProgress] = useState<WebChatToolProgress | null>(null);
   const [stoppingRun, setStoppingRun] = useState(false);
@@ -852,7 +926,6 @@ export function ChatPage() {
     Record<string, ChatThreadIntegrationConnectionStatus>
   >({});
   const [connectorNudge, setConnectorNudge] = useState<ConnectorNudgeSuggestion | null>(null);
-  const queryClient = useQueryClient();
   const transport = useMemo(
     () =>
       new DefaultChatTransport<WebChatMessage>({
@@ -863,8 +936,39 @@ export function ChatPage() {
   const chat = useChat<WebChatMessage>({
     id: conversationId,
     transport,
+    ...(freshCachedHistory ? { messages: freshCachedHistory.messages } : knownNewConversation ? { messages: [] } : {}),
   });
-  const historyReady = loadedConversationId === conversationId;
+  const historyReady = knownNewConversation || loadedConversationId === conversationId || freshCachedHistory !== null;
+  const historyLoadFailed =
+    historyLoadError?.conversationId === conversationId && historyLoadError.attempt === historyLoadAttempt;
+  const loadMessagesForReconciliation = useCallback(async (targetConversationId: string, signal: AbortSignal) => {
+    const response = await api.webChat.messages(targetConversationId, { signal });
+    const messages = response.messages as WebChatMessage[];
+    const typedResponse = { ...response, messages };
+    recoveryResponsesRef.current.set(messages, typedResponse);
+    return typedResponse;
+  }, []);
+  const setReconciledMessages = useCallback(
+    (messages: WebChatMessage[]) => {
+      chat.setMessages(messages);
+      queryClient.setQueryData(
+        webChatMessagesQueryKey(conversationId),
+        recoveryResponsesRef.current.get(messages) ?? { messages, updatedAt: null },
+      );
+    },
+    [chat.setMessages, conversationId, queryClient],
+  );
+  const recovery = useWebChatReconciliation({
+    conversationId,
+    historyReady,
+    status: chat.status,
+    error: chat.error,
+    messages: chat.messages,
+    hasPendingProgress: hasPendingAssistantProgress,
+    loadMessages: loadMessagesForReconciliation,
+    setMessages: setReconciledMessages,
+    clearError: chat.clearError,
+  });
   const chatTitle = titleFromChatMessages(chat.messages);
   const hasBackgroundRun = hasPendingAssistantProgress(chat.messages);
   const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun || stoppingRun;
@@ -1051,24 +1155,50 @@ export function ChatPage() {
     if (!open) setActiveIntegrationConnection(null);
   }, []);
 
+  const retryHistoryLoad = useCallback(() => {
+    setHistoryLoadError((error) => (error?.conversationId === conversationId ? null : error));
+    setHistoryLoadAttempt((attempt) => attempt + 1);
+  }, [conversationId]);
+
   useEffect(() => {
-    let cancelled = false;
-    setLoadedConversationId(null);
-    chat.setMessages([]);
-    void api.webChat
-      .messages(conversationId)
-      .then(({ messages }) => {
-        if (!cancelled) {
-          chat.setMessages(messages as WebChatMessage[]);
-        }
+    let active = true;
+    const queryKey = webChatMessagesQueryKey(conversationId);
+    setHistoryLoadError((error) => (error?.conversationId === conversationId ? null : error));
+    if (knownNewConversation) {
+      setLoadedConversationId(conversationId);
+      return;
+    }
+    const cachedHistory = freshCachedWebChatMessages(queryClient, conversationId);
+    if (cachedHistory) {
+      chat.setMessages(cachedHistory.messages);
+      setLoadedConversationId(conversationId);
+    } else {
+      chat.setMessages([]);
+      setLoadedConversationId(null);
+    }
+    void queryClient
+      .fetchQuery({
+        queryKey,
+        queryFn: ({ signal }) => api.webChat.messages(conversationId, { signal }),
+        staleTime: WEB_CHAT_MESSAGES_STALE_TIME_MS,
       })
-      .finally(() => {
-        if (!cancelled) setLoadedConversationId(conversationId);
+      .then(({ messages }) => {
+        if (!active) return;
+        chat.setMessages(messages as WebChatMessage[]);
+        setLoadedConversationId(conversationId);
+      })
+      .catch((error: unknown) => {
+        if (!active || isHistoryLoadAbort(error)) return;
+        setHistoryLoadError({ conversationId, attempt: historyLoadAttempt });
+        setLoadedConversationId((currentConversationId) =>
+          currentConversationId === conversationId ? null : currentConversationId,
+        );
       });
     return () => {
-      cancelled = true;
+      active = false;
+      void queryClient.cancelQueries({ queryKey, exact: true });
     };
-  }, [chat.setMessages, conversationId]);
+  }, [chat.setMessages, conversationId, historyLoadAttempt, knownNewConversation, queryClient]);
 
   useEffect(() => {
     if (!historyReady || !threadScrollKey) return;
@@ -1085,22 +1215,6 @@ export function ChatPage() {
   }, [historyReady, threadScrollKey]);
 
   useEffect(() => {
-    if (!historyReady || !hasBackgroundRun || chat.status !== "ready") return;
-    let cancelled = false;
-    const intervalId = window.setInterval(() => {
-      void api.webChat.messages(conversationId).then(({ messages }) => {
-        if (!cancelled) {
-          chat.setMessages(messages as WebChatMessage[]);
-        }
-      });
-    }, 1500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [chat.setMessages, chat.status, conversationId, hasBackgroundRun, historyReady]);
-
-  useEffect(() => {
     if (!historyReady) return;
 
     const pendingSubmission = takePendingWebChatSubmission(conversationId);
@@ -1109,14 +1223,21 @@ export function ChatPage() {
     const initialMessageKey = initialText ? `${conversationId}:${initialText}` : null;
     if (!initialText || sentInitialMessage.current === initialMessageKey) return;
     sentInitialMessage.current = initialMessageKey;
+    queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
     const requestOptions = outgoingRequestOptions(initialAttachments);
     if (requestOptions) {
       void chat.sendMessage(outgoingTextMessage(initialText, initialAttachments), requestOptions);
     } else {
       void chat.sendMessage(outgoingTextMessage(initialText));
     }
-    void navigate({ to: "/chat/$conversationId", params: { conversationId }, search: {}, replace: true });
-  }, [chat.sendMessage, conversationId, historyReady, navigate, search.message]);
+    void navigate({
+      to: "/chat/$conversationId",
+      params: { conversationId },
+      search: {},
+      replace: true,
+      viewTransition: shouldUseChatViewTransition(),
+    });
+  }, [chat.sendMessage, conversationId, historyReady, navigate, queryClient, search.message]);
 
   useEffect(() => {
     if (!search.prefill) return;
@@ -1124,35 +1245,52 @@ export function ChatPage() {
   }, [conversationId, navigate, search.prefill]);
 
   return (
-    <TabContentContainer className="mx-auto box-content flex min-h-[calc(100vh-52px)] max-w-4xl flex-col px-10">
+    <TabContentContainer className="mx-auto box-content flex min-h-[calc(100vh-52px)] max-w-4xl flex-col w-[calc(100%-32px)] px-4 sm:w-[calc(100%-80px)] sm:px-10">
       <ChatHeader title={chatTitle} onBack={() => navigate({ to: "/chat" })} />
 
-      <div className="relative min-h-0 flex-1">
+      <div className="sketch-chat-route-enter relative min-h-0 flex-1">
         <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[28px] bg-gradient-to-b from-background to-transparent" />
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-[28px] bg-gradient-to-t from-background to-transparent" />
         <div
           ref={threadScrollRef}
           className="chat-scrollbar absolute inset-y-0 left-0 right-[-18px] overflow-y-auto pr-[18px]"
         >
-          <ChatThread
-            className="pt-8 pb-12"
-            messages={threadMessages}
-            busy={chatBusy}
-            error={chat.error?.message ?? null}
-            integrationConnectionStatuses={integrationConnectionStatuses}
-            onConnectIntegration={handleConnectIntegration}
-            conversationId={conversationId}
-          />
+          {historyReady ? (
+            <ChatThread
+              className="pt-8 pb-12"
+              messages={threadMessages}
+              busy={chatBusy}
+              error={recovery.suppressError ? null : (chat.error?.message ?? null)}
+              integrationConnectionStatuses={integrationConnectionStatuses}
+              onConnectIntegration={handleConnectIntegration}
+              conversationId={conversationId}
+            />
+          ) : historyLoadFailed ? (
+            <div className="pt-8 pb-12">
+              <ChatConversationLoadError onRetry={retryHistoryLoad} />
+            </div>
+          ) : (
+            <div className="pt-8 pb-12">
+              <ChatConversationSkeleton />
+            </div>
+          )}
         </div>
       </div>
 
       <div className="shrink-0 bg-background">
         <div className="pt-3 pb-[18px]">
+          <ChatRecoveryStatus stage={recovery.stage} onRetry={recovery.retryNow} />
           <ChatInput
             key={conversationId}
             initialValue={search.prefill ?? ""}
-            disabled={chatBusy}
-            disabledPlaceholder="Sketch is thinking..."
+            disabled={!historyReady || chatBusy}
+            disabledPlaceholder={
+              historyLoadFailed
+                ? "Conversation unavailable"
+                : historyReady
+                  ? "Sketch is thinking..."
+                  : "Loading conversation..."
+            }
             running={chatBusy}
             runningPlaceholder="Sketch is thinking..."
             stopping={stoppingRun}
@@ -1163,6 +1301,7 @@ export function ChatPage() {
             onStop={handleStop}
             placeholder="Reply to Sketch..."
             onSubmit={(value, attachments) => {
+              queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
               void chat.sendMessage(outgoingTextMessage(value, attachments), outgoingRequestOptions(attachments));
             }}
           />

@@ -77,6 +77,27 @@ describe("createAgentOutputRepository output scopes", () => {
     ]);
   });
 
+  it("allows only one caller to promote a scheduled running output", async () => {
+    const repo = createAgentOutputRepository(db);
+    const running = await repo.createRunning({
+      agentKey: "daily_brief",
+      agentVersion: "test",
+      userId: "user-1",
+      outputDate: "2026-07-04",
+      timezone: "UTC",
+      triggerType: "scheduled",
+    });
+
+    const promotions = await Promise.all([
+      repo.promoteRunningToManual("daily_brief", running.row.id),
+      repo.promoteRunningToManual("daily_brief", running.row.id),
+    ]);
+
+    expect(promotions.filter((row) => row !== undefined)).toHaveLength(1);
+    expect(promotions.find((row) => row !== undefined)?.trigger_type).toBe("manual");
+    expect(await repo.findById("daily_brief", running.row.id)).toMatchObject({ trigger_type: "manual" });
+  });
+
   it("lists bounded completed outputs for a user and agent since a timestamp oldest first with items", async () => {
     const repo = createAgentOutputRepository(db);
     const base = {

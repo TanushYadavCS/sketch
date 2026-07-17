@@ -6,7 +6,7 @@ import { join } from "node:path";
  */
 import { serve } from "@hono/node-server";
 import type { Kysely } from "kysely";
-import { createAgentRunLimiter } from "./agent/concurrency-limiter";
+import { type AgentRunAdmissionOptions, createAgentRunLimiter } from "./agent/concurrency-limiter";
 import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/environment";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
@@ -175,8 +175,18 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const tracer = telemetry.tracer;
   const priceMap = new OpenRouterPriceMap({ ttlMs: config.OPENROUTER_PRICE_TTL_HOURS * 60 * 60 * 1000, logger });
   const pricing = createPricingService(priceMap, logger);
-  const agentRunLimiter = createAgentRunLimiter({ limit: config.MAX_CONCURRENT_AGENT_RUNS, logger });
-  const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => agentRunLimiter.run(work);
+  const interactiveAgentRunLimiter = createAgentRunLimiter({
+    limit: config.MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS,
+    queue: "interactive",
+    logger,
+  });
+  const scheduledAgentRunLimiter = createAgentRunLimiter({
+    limit: config.MAX_CONCURRENT_SCHEDULED_AGENT_RUNS,
+    queue: "scheduled",
+    logger,
+  });
+  const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => interactiveAgentRunLimiter.run(work);
+  const limitScheduledAgentExecution = <T>(work: () => Promise<T>): Promise<T> => scheduledAgentRunLimiter.run(work);
 
   /**
    * Current LLM provider context, refreshed at startup and on settings change
@@ -187,7 +197,10 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   const recordWorkflowStep = createWorkflowStepRecorder(tracer, pricing, () => providerCtx);
 
-  const trackedRunAgent = async (params: RunAgentParams): Promise<RunAgentResult> => {
+  const runTrackedAgent = async (
+    params: RunAgentParams,
+    limitExecution: <T>(work: () => Promise<T>) => Promise<T>,
+  ): Promise<RunAgentResult> => {
     const resolvedAgentEnv = removeReservedAgentEnv(
       await agentEnvironmentVariables.listForRuntimeContext({
         ...params,
@@ -225,10 +238,16 @@ export async function createServer(config: Config, options?: CreateServerOptions
           }
         : {}),
     };
-    return limitAgentExecution(() =>
+    return limitExecution(() =>
       instrumentAgentRun(tracer, pricing, providerCtx, enrichedParams, () => runAgent(enrichedParams)),
     );
   };
+  const trackedRunAgent = (params: RunAgentParams): Promise<RunAgentResult> =>
+    runTrackedAgent(params, limitAgentExecution);
+  const trackedScheduledRunAgent = (
+    params: RunAgentParams,
+    admission?: AgentRunAdmissionOptions,
+  ): Promise<RunAgentResult> => runTrackedAgent(params, (work) => scheduledAgentRunLimiter.run(work, admission));
 
   // 4. LLM env from DB
   async function applyLlmEnvFromDb() {
@@ -536,6 +555,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     whatsapp: whatsappRuntime,
     settingsRepo,
     runAgent: trackedRunAgent,
+    runScheduledAgent: trackedScheduledRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
     listAgentEnvForRuntime: (context) => agentEnvironmentVariables.listForRuntimeContext(context),
@@ -546,6 +566,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     sendDm: sendDirectMessage,
     recordWorkflowStep,
     limitAgentExecution,
+    limitScheduledAgentExecution,
   });
   await scheduler.start();
 
@@ -578,6 +599,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     users,
     settings: settingsRepo,
     runAgent: trackedRunAgent,
+    runScheduledAgent: trackedScheduledRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
     queueManager,

@@ -18,21 +18,31 @@ export function isSqliteVecAvailable(): boolean {
   return sqliteVecAvailable;
 }
 
+export function createPostgresPoolConfig(config: Config) {
+  return {
+    connectionString: config.DATABASE_URL,
+    max: config.POSTGRES_POOL_MAX,
+    ssl: { rejectUnauthorized: false },
+  };
+}
+
 /**
- * Single source of truth for Postgres connection parameters. The WhatsApp
- * gateway child opens its own pool with this factory so TLS and tuning can
- * never drift from the app's pool: a divergence would make the gateway fail to
- * reach the very database the app is connected to.
+ * Single source of truth for Postgres connections shared with the WhatsApp
+ * gateway child, so TLS and tuning can never drift from the app's pool: a
+ * divergence would make the gateway fail to reach the very database the app
+ * is connected to. Callers may cap `max` below the configured
+ * POSTGRES_POOL_MAX for low-concurrency processes.
  */
-export async function createPgPool(config: Config, options: { max: number }) {
+export async function createPgPool(config: Config, options: { max?: number } = {}) {
   const { Pool } = await import("pg");
-  return new Pool({ connectionString: config.DATABASE_URL, max: options.max, ssl: { rejectUnauthorized: false } });
+  const poolConfig = createPostgresPoolConfig(config);
+  return new Pool(options.max === undefined ? poolConfig : { ...poolConfig, max: options.max });
 }
 
 export async function createDatabase(config: Config): Promise<Kysely<DB>> {
   if (config.DB_TYPE === "postgres") {
     return new Kysely<DB>({
-      dialect: new PostgresDialect({ pool: await createPgPool(config, { max: 5 }) }),
+      dialect: new PostgresDialect({ pool: await createPgPool(config) }),
     });
   }
 

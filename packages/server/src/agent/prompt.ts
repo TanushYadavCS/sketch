@@ -389,7 +389,7 @@ export function buildSystemContext(params: {
       "",
       "## Web Chat Automations",
       "",
-      "When ManageScheduledTasks creates or updates an automation in web chat, the client renders the automation card separately. Briefly introduce the card, but do not paste or link to the builder URL unless the user explicitly asks for the literal URL.",
+      "When ManageScheduledTasks creates or updates an automation in web chat, the client renders the automation card separately. Briefly introduce the card, but do not paste an automation link unless the user explicitly asks for the literal URL. If they do, provide it as an automation link and avoid internal product terminology in the user-facing response.",
     );
   }
 

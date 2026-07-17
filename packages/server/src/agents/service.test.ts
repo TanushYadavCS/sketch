@@ -210,6 +210,9 @@ async function runAndCapture(
       });
       return runResult();
     },
+    runScheduledAgent: async () => {
+      throw new Error("runScheduledAgent should not be called");
+    },
     queueManager: createPausedQueueManager(queued),
   });
 
@@ -250,6 +253,7 @@ function createPausedQueueManager(tasks: Array<() => Promise<void>>): QueueManag
     getQueue: () => ({
       enqueue: (task: () => Promise<void>) => {
         tasks.push(task);
+        return true;
       },
     }),
   } as unknown as QueueManager;

@@ -15,15 +15,42 @@ const artifact: AutomationArtifact = {
 };
 
 describe("appendAutomationBuilderLinks", () => {
-  it("appends missing builder links to final text", () => {
+  it("appends a missing automation link to final text", () => {
     expect(appendAutomationBuilderLinks("Done.", [artifact])).toBe(
-      "Done.\n\nBuilder link:\n- Daily account brief: https://sketch.test/scheduled-tasks/task-123/edit",
+      "Done.\n\nOpen your automation:\n- Daily account brief: https://sketch.test/scheduled-tasks/task-123/edit",
+    );
+  });
+
+  it("appends multiple missing automation links to final text", () => {
+    const secondArtifact: AutomationArtifact = {
+      ...artifact,
+      taskId: "task-456",
+      title: "Weekly pipeline review",
+      builderUrl: "https://sketch.test/scheduled-tasks/task-456/edit",
+    };
+
+    expect(appendAutomationBuilderLinks("Done.", [artifact, secondArtifact])).toBe(
+      "Done.\n\nOpen your automations:\n- Daily account brief: https://sketch.test/scheduled-tasks/task-123/edit\n- Weekly pipeline review: https://sketch.test/scheduled-tasks/task-456/edit",
+    );
+  });
+
+  it("uses a plural heading when one automation link is present and another is appended", () => {
+    const secondArtifact: AutomationArtifact = {
+      ...artifact,
+      taskId: "task-456",
+      title: "Weekly pipeline review",
+      builderUrl: "https://sketch.test/scheduled-tasks/task-456/edit",
+    };
+    const text = `First automation: ${artifact.builderUrl}`;
+
+    expect(appendAutomationBuilderLinks(text, [artifact, secondArtifact])).toBe(
+      `${text}\n\nOpen your automations:\n- Weekly pipeline review: https://sketch.test/scheduled-tasks/task-456/edit`,
     );
   });
 
   it("creates fallback text for artifact-only responses", () => {
     expect(appendAutomationBuilderLinks(null, [artifact])).toBe(
-      "Automation created.\n\nBuilder link:\n- Daily account brief: https://sketch.test/scheduled-tasks/task-123/edit",
+      "Your automation is ready.\n\nOpen your automation:\n- Daily account brief: https://sketch.test/scheduled-tasks/task-123/edit",
     );
   });
 

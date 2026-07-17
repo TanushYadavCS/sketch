@@ -5,6 +5,14 @@ export function createWebChatConversationId(): string {
   return `chat-${uuid ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`;
 }
 
+export function shouldUseChatViewTransition(): boolean {
+  return (
+    typeof window === "undefined" ||
+    typeof window.matchMedia !== "function" ||
+    !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 interface PendingWebChatSubmission {
   text: string;
   attachments: WebChatUploadedAttachment[];
@@ -14,6 +22,10 @@ const pendingWebChatSubmissions = new Map<string, PendingWebChatSubmission>();
 
 export function setPendingWebChatSubmission(conversationId: string, submission: PendingWebChatSubmission): void {
   pendingWebChatSubmissions.set(conversationId, submission);
+}
+
+export function hasPendingWebChatSubmission(conversationId: string): boolean {
+  return pendingWebChatSubmissions.has(conversationId);
 }
 
 export function takePendingWebChatSubmission(conversationId: string): PendingWebChatSubmission | null {

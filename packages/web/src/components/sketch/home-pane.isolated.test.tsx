@@ -18,13 +18,22 @@ vi.mock("@tanstack/react-router", () => ({
     params,
     children,
     className,
+    onMouseEnter,
+    onFocus,
   }: {
     to: string;
     params?: { conversationId?: string };
     children: React.ReactNode;
     className?: string;
+    onMouseEnter?: React.MouseEventHandler<HTMLAnchorElement>;
+    onFocus?: React.FocusEventHandler<HTMLAnchorElement>;
   }) => (
-    <a href={params?.conversationId ? `/chat/${params.conversationId}` : to} className={className}>
+    <a
+      href={params?.conversationId ? `/chat/${params.conversationId}` : to}
+      className={className}
+      onMouseEnter={onMouseEnter}
+      onFocus={onFocus}
+    >
       {children}
     </a>
   ),
@@ -38,11 +47,21 @@ describe("HomePane", () => {
     Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: originalMediaDevices });
   });
 
-  it("uses the shared dashboard tab content width", () => {
+  it("uses the shared dashboard tab content width and fits the viewport at narrow widths", () => {
     const { container } = render(<HomePane firstName="Karan" onSubmit={() => undefined} />);
 
-    expect(container.firstElementChild).toHaveClass("w-full", "mx-auto", "box-content", "max-w-4xl", "px-10", "py-8");
+    expect(container.firstElementChild).toHaveClass(
+      "mx-auto",
+      "box-content",
+      "max-w-4xl",
+      "px-4",
+      "py-8",
+      "sm:px-10",
+      "w-[calc(100%-32px)]",
+      "sm:w-[calc(100%-80px)]",
+    );
     expect(container.firstElementChild?.className).not.toContain("max-w-[");
+    expect(container.firstElementChild?.className).not.toContain("w-full");
   });
 
   it("keeps Home as a launcher and renders the design's empty Recents state", () => {
@@ -128,6 +147,30 @@ describe("HomePane", () => {
     expect(screen.getByRole("link", { name: /Create a PDF for my skills/i })).toHaveAttribute("href", "/chat/web-chat");
     expect(screen.getByText("18m")).toBeInTheDocument();
     expect(screen.queryByText("Your conversations will appear here")).not.toBeInTheDocument();
+  });
+
+  it("forwards conversation intent to recent rows", async () => {
+    const user = userEvent.setup();
+    const onConversationIntent = vi.fn();
+    render(
+      <HomePane
+        firstName="Karan"
+        onSubmit={() => undefined}
+        onConversationIntent={onConversationIntent}
+        recents={[
+          {
+            id: "web-chat",
+            title: "Create a PDF for my skills",
+            channel: "web",
+            occurredAt: "2026-05-26T06:30:00.000Z",
+          },
+        ]}
+      />,
+    );
+
+    await user.hover(screen.getByRole("link", { name: /Create a PDF for my skills/i }));
+
+    expect(onConversationIntent).toHaveBeenCalledWith("web-chat");
   });
 
   it("confirms before deleting a recent conversation", async () => {
