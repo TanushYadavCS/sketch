@@ -279,6 +279,56 @@ describe("hydrateDailyBriefTaskState", () => {
       "Daily Brief: hydrated live task links",
     );
   });
+
+  it("logs rejected legacy reason counts without item titles or content", async () => {
+    const logger = createTestLogger();
+    const debug = vi.spyOn(logger, "debug");
+    await hydrateDailyBriefTaskState({
+      output: output({
+        todos: [
+          item("ordinary", "todos", {
+            title: "Sensitive ordinary title",
+            structuredPayload: { taskId: "ordinary-task" },
+          }),
+          item("malformed", "todos", {
+            title: "Sensitive malformed title",
+            structuredPayload: { serverOwnedFollowup: true, trackingState: "durable", taskId: " " },
+          }),
+          item("missing", "todos", {
+            title: "Sensitive missing title",
+            structuredPayload: { serverOwnedFollowup: true, trackingState: "durable", taskId: "missing-task" },
+          }),
+        ],
+        untracked_followups: [
+          item("untracked", "untracked_followups", {
+            title: "Sensitive untracked title",
+            structuredPayload: { serverOwnedFollowup: true, trackingState: "durable", taskId: "untracked-task" },
+          }),
+        ],
+      }),
+      userId: "user-1",
+      access: ACCESS,
+      loadVisibleTasks: vi.fn(async () => []),
+      logger,
+    });
+
+    expect(debug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        canonicalCandidates: 0,
+        legacyCandidates: 1,
+        legacyHydrated: 0,
+        rejectedLegacyCandidates: 4,
+        rejectedLegacyReasons: {
+          not_server_owned: 1,
+          malformed_task_id: 1,
+          invalid_section_shape: 1,
+          not_visible_or_missing: 1,
+        },
+      }),
+      "Daily Brief: hydrated live task links",
+    );
+    expect(JSON.stringify(debug.mock.calls[0]?.[0])).not.toContain("Sensitive");
+  });
 });
 
 describe("Daily Brief task hydration routes", () => {
