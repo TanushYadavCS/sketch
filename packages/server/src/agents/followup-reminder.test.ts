@@ -316,4 +316,43 @@ describe("reconcileFollowupReminderItems", () => {
       }),
     ]);
   });
+
+  it("caps server-owned reminder reconciliation by section", () => {
+    const result = reconcileFollowupReminderItems(
+      [],
+      {
+        status: "ok",
+        mode: "hybrid",
+        pending: Array.from({ length: 4 }, (_, index) => ({
+          taskId: `task-${index}`,
+          title: `Pending ${index}`,
+          priority: "medium",
+          parentEntityId: null,
+          assigneeEntityId: null,
+        })),
+        looksResolved: Array.from({ length: 4 }, (_, index) => ({
+          recommendationId: `recommendation-${index}`,
+          taskId: `resolved-task-${index}`,
+          title: `Resolved ${index}`,
+          rationale: "Reported complete.",
+          reviewCode: `R${index}`,
+          parentEntityId: null,
+          assigneeEntityId: null,
+        })),
+        untracked: Array.from({ length: 4 }, (_, index) => ({
+          candidateId: `candidate-${index}`,
+          title: `Untracked ${index}`,
+          summary: "Recovered.",
+          reviewCode: null,
+          parentEntityId: null,
+          assigneeEntityId: null,
+        })),
+      },
+      2,
+    );
+
+    expect(result.filter((item) => item.sectionKey === "todos")).toHaveLength(2);
+    expect(result.filter((item) => item.sectionKey === "looks_resolved")).toHaveLength(2);
+    expect(result.filter((item) => item.sectionKey === "untracked_followups")).toHaveLength(2);
+  });
 });

@@ -7,6 +7,12 @@ import { type ConversationTaskSourceAnchor, type TaskStatus, createTaskRepositor
 
 const RECOMMENDATION_EXPIRY_MS = 48 * 60 * 60 * 1000;
 const RECOMMENDATION_DELIVERY_LIMIT = 3;
+const TASK_MEMORY_LIMIT = 50;
+const TASK_MEMORY_EVIDENCE_LIMIT = 20;
+const REMINDER_PENDING_LIMIT = 50;
+const REMINDER_PROPOSAL_LIMIT = 25;
+const REMINDER_UNTRACKED_LIMIT = 25;
+const REMINDER_SUPPRESSION_LIMIT = 100;
 const REVIEW_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const RECOMMENDATION_COLLISION_IDENTITY_KIND = "completion_recommendation_collision_identity";
 
@@ -138,7 +144,7 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
       parentEntityIds?: string[];
       limit?: number;
     }): Promise<TaskMemoryItem[]> {
-      const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
+      const limit = Math.max(1, Math.min(input.limit ?? TASK_MEMORY_LIMIT, TASK_MEMORY_LIMIT));
       const conversationIds = [...new Set(input.conversationIds)];
       const assigneeEntityIds = [...new Set(input.assigneeEntityIds ?? [])].filter(Boolean);
       const parentEntityIds = [...new Set(input.parentEntityIds ?? [])].filter(Boolean);
@@ -162,16 +168,19 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
         .limit(limit)
         .execute();
       if (tasks.length === 0) return [];
-      const evidence = await db
-        .selectFrom("task_message_evidence")
-        .select(["task_id", "conversation_message_id"])
-        .where(
-          "task_id",
-          "in",
-          tasks.map((task) => task.id),
+      const evidence = (
+        await Promise.all(
+          tasks.map((task) =>
+            db
+              .selectFrom("task_message_evidence")
+              .select(["task_id", "conversation_message_id"])
+              .where("task_id", "=", task.id)
+              .orderBy("conversation_message_id", "asc")
+              .limit(TASK_MEMORY_EVIDENCE_LIMIT)
+              .execute(),
+          ),
         )
-        .orderBy("conversation_message_id", "asc")
-        .execute();
+      ).flat();
       const evidenceByTask = new Map<string, number[]>();
       for (const row of evidence) {
         const ids = evidenceByTask.get(row.task_id) ?? [];
@@ -269,99 +278,111 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
       try {
         await expireRecommendations(db, input.now);
         const assigneeIds = [...new Set(input.assigneeEntityIds)].filter(Boolean);
-        const taskQuery = db
-          .selectFrom("tasks")
-          .selectAll()
-          .where("valid_to", "is", null)
-          .where("provenance", "=", "summary")
-          .where("source_anchor_key", "is not", null)
-          .where((eb) => {
-            const predicates = [eb("created_by_user_id", "=", input.userId)];
-            if (assigneeIds.length > 0) predicates.push(eb("assignee_entity_id", "in", assigneeIds));
-            return eb.or(predicates);
-          });
-        let tasks = await taskQuery.orderBy("updated_at", "desc").execute();
-        const originOutputIds = [
-          ...new Set(tasks.flatMap((task) => (task.origin_agent_output_id ? [task.origin_agent_output_id] : []))),
-        ];
-        const originOutputs =
-          originOutputIds.length === 0
-            ? []
-            : await db
-                .selectFrom("agent_outputs")
-                .select(["id", "source_key"])
-                .where("id", "in", originOutputIds)
-                .execute();
-        const sourceKeyByOutputId = new Map(originOutputs.map((output) => [output.id, output.source_key]));
-        if (input.activeSourceKeys) {
-          const activeSourceKeys = new Set(input.activeSourceKeys);
-          const activeConversationIds = await resolveActiveConversationIds(db, input.activeSourceKeys);
-          tasks = tasks.filter(
-            (task) =>
-              Boolean(
-                task.created_by_user_id !== input.userId &&
-                  task.assignee_entity_id &&
-                  assigneeIds.includes(task.assignee_entity_id),
-              ) ||
-              Boolean(
-                (task.origin_agent_output_id &&
-                  activeSourceKeys.has(sourceKeyByOutputId.get(task.origin_agent_output_id) ?? "")) ||
-                  (task.source_conversation_id && activeConversationIds.has(task.source_conversation_id)),
-              ),
-          );
-        }
-        const taskIds = tasks.map((task) => task.id);
-        const recommendations =
-          taskIds.length === 0
-            ? []
-            : await db
-                .selectFrom("task_completion_recommendations")
-                .selectAll()
-                .where("task_id", "in", taskIds)
-                .where("review_state", "=", "pending")
-                .orderBy("created_at", "asc")
-                .execute();
-        const taskById = new Map(tasks.map((task) => [task.id, task]));
-        const recommendedTaskIds = new Set(recommendations.map((recommendation) => recommendation.task_id));
-        const isPersonallyAssigned = (task: Selectable<TasksTable>) =>
-          Boolean(task.assignee_entity_id && assigneeIds.includes(task.assignee_entity_id));
-        const pending = tasks
-          .filter(
-            (task) =>
-              (task.status === "open" || task.status === "in_progress") &&
-              isPersonallyAssigned(task) &&
-              !recommendedTaskIds.has(task.id),
-          )
-          .map((task) => ({
-            taskId: task.id,
-            title: task.title,
-            priority: task.priority,
-            parentEntityId: task.parent_entity_id,
-            assigneeEntityId: task.assignee_entity_id,
-          }));
-        const looksResolved = recommendations.flatMap((recommendation) => {
-          const task = taskById.get(recommendation.task_id);
-          if (!task || !isPersonallyAssigned(task) || (task.status !== "open" && task.status !== "in_progress")) {
-            return [];
+        const activeSourceKeys = input.activeSourceKeys ? [...new Set(input.activeSourceKeys)] : null;
+        const activeConversationIds = activeSourceKeys
+          ? [...(await resolveActiveConversationIds(db, activeSourceKeys))]
+          : [];
+        const taskScope = () => {
+          let query = db
+            .selectFrom("tasks as t")
+            .leftJoin("agent_outputs as o", "o.id", "t.origin_agent_output_id")
+            .where("t.valid_to", "is", null)
+            .where("t.provenance", "=", "summary")
+            .where("t.source_anchor_key", "is not", null)
+            .where((eb) =>
+              eb.or([
+                eb("t.created_by_user_id", "=", input.userId),
+                ...(assigneeIds.length > 0 ? [eb("t.assignee_entity_id", "in", assigneeIds)] : []),
+              ]),
+            );
+          if (activeSourceKeys) {
+            query = query.where((eb) => {
+              const predicates = [
+                ...(assigneeIds.length > 0
+                  ? [
+                      eb.and([
+                        eb("t.created_by_user_id", "!=", input.userId),
+                        eb("t.assignee_entity_id", "in", assigneeIds),
+                      ]),
+                    ]
+                  : []),
+                ...(activeSourceKeys.length > 0 ? [eb("o.source_key", "in", activeSourceKeys)] : []),
+                ...(activeConversationIds.length > 0
+                  ? [eb("t.source_conversation_id", "in", activeConversationIds)]
+                  : []),
+              ];
+              return predicates.length > 0 ? eb.or(predicates) : sql<boolean>`0 = 1`;
+            });
           }
-          return [
-            {
-              recommendationId: recommendation.id,
-              taskId: task.id,
-              title: task.title,
-              rationale: recommendation.rationale,
-              reviewCode: recommendation.review_code,
-              parentEntityId: task.parent_entity_id,
-              assigneeEntityId: task.assignee_entity_id,
-            },
-          ];
-        });
-        const durableTitles = new Set(tasks.map((task) => normalizeName(task.title)));
+          return query;
+        };
+        const pendingRows =
+          assigneeIds.length === 0
+            ? []
+            : await taskScope()
+                .leftJoin("task_completion_recommendations as r", (join) =>
+                  join.onRef("r.task_id", "=", "t.id").on("r.review_state", "=", "pending"),
+                )
+                .selectAll("t")
+                .select("o.source_key as origin_source_key")
+                .where("t.status", "in", ["open", "in_progress"])
+                .where("t.assignee_entity_id", "in", assigneeIds)
+                .where("r.id", "is", null)
+                .orderBy("t.updated_at", "desc")
+                .orderBy("t.id", "asc")
+                .limit(REMINDER_PENDING_LIMIT + 1)
+                .execute();
+        const recommendationRows =
+          assigneeIds.length === 0
+            ? []
+            : await taskScope()
+                .innerJoin("task_completion_recommendations as r", (join) =>
+                  join.onRef("r.task_id", "=", "t.id").on("r.review_state", "=", "pending"),
+                )
+                .selectAll("t")
+                .select([
+                  "o.source_key as origin_source_key",
+                  "r.id as recommendation_id",
+                  "r.rationale as recommendation_rationale",
+                  "r.review_code as recommendation_review_code",
+                  "r.created_at as recommendation_created_at",
+                ])
+                .where("t.status", "in", ["open", "in_progress"])
+                .where("t.assignee_entity_id", "in", assigneeIds)
+                .orderBy("r.created_at", "asc")
+                .orderBy("r.id", "asc")
+                .limit(REMINDER_PROPOSAL_LIMIT + 1)
+                .execute();
+        const suppressionRows = await taskScope()
+          .selectAll("t")
+          .select("o.source_key as origin_source_key")
+          .where("t.status", "in", ["done", "dropped"])
+          .orderBy("t.updated_at", "desc")
+          .orderBy("t.id", "asc")
+          .limit(REMINDER_SUPPRESSION_LIMIT + 1)
+          .execute();
+        const pending = pendingRows.slice(0, REMINDER_PENDING_LIMIT).map((task) => ({
+          taskId: task.id,
+          title: task.title,
+          priority: task.priority,
+          parentEntityId: task.parent_entity_id,
+          assigneeEntityId: task.assignee_entity_id,
+        }));
+        const looksResolved = recommendationRows.slice(0, REMINDER_PROPOSAL_LIMIT).map((task) => ({
+          recommendationId: task.recommendation_id,
+          taskId: task.id,
+          title: task.title,
+          rationale: task.recommendation_rationale,
+          reviewCode: task.recommendation_review_code,
+          parentEntityId: task.parent_entity_id,
+          assigneeEntityId: task.assignee_entity_id,
+        }));
+        const suppression = suppressionRows.slice(0, REMINDER_SUPPRESSION_LIMIT);
+        const durableTasks = [...pendingRows.slice(0, REMINDER_PENDING_LIMIT), ...recommendationRows, ...suppression];
+        const durableTitles = new Set(durableTasks.map((task) => normalizeName(task.title)));
         const durableScopedIdentities = new Set(
-          tasks.flatMap((task) => {
-            const sourceKey = task.origin_agent_output_id
-              ? (sourceKeyByOutputId.get(task.origin_agent_output_id) ?? null)
-              : null;
+          durableTasks.flatMap((task) => {
+            const sourceKey = task.origin_source_key;
             return sourceKey
               ? [
                   legacyIdentity({ title: task.title, sourceKey }),
@@ -373,20 +394,27 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
           }),
         );
         const suppressedLegacyIdentities = new Set(suppressedLegacyCandidates.map(legacyIdentity));
-        const untracked = legacyCandidates.filter((candidate) => {
+        const untrackedRows = legacyCandidates.filter((candidate) => {
           if (suppressedLegacyIdentities.has(legacyIdentity(candidate))) return false;
           if (!candidate.sourceKey) return !durableTitles.has(normalizeName(candidate.title));
           return !durableScopedIdentities.has(legacyIdentity(candidate));
         });
-        return {
-          status: "ok" as const,
+        const untracked = untrackedRows.slice(0, REMINDER_UNTRACKED_LIMIT);
+        const overflow =
+          pendingRows.length > REMINDER_PENDING_LIMIT ||
+          recommendationRows.length > REMINDER_PROPOSAL_LIMIT ||
+          suppressionRows.length > REMINDER_SUPPRESSION_LIMIT ||
+          untrackedRows.length > REMINDER_UNTRACKED_LIMIT;
+        const result = {
           pending,
           looksResolved,
           untracked,
-          suppressedTitles: tasks
-            .filter((task) => task.status === "done" || task.status === "dropped" || recommendedTaskIds.has(task.id))
-            .map((task) => task.title),
+          suppressed: suppression.map((task) => ({ taskId: task.id, title: task.title })),
+          suppressedTitles: suppression.map((task) => task.title),
         };
+        return overflow
+          ? { status: "error" as const, code: "reminder_query_overflow" as const, ...result }
+          : { status: "ok" as const, ...result };
       } catch {
         return {
           status: "error" as const,
@@ -629,6 +657,7 @@ async function resolveActiveConversationIds(db: Kysely<DB>, sourceKeys: string[]
       .where("platform", "=", platform)
       .where("kind", "=", kind)
       .where("provider_conversation_id", "=", targetId)
+      .limit(1)
       .execute();
     for (const row of rows) ids.add(row.id);
   }
@@ -660,6 +689,7 @@ async function deriveNormalizedEvidence(
       "conversations.platform",
     ])
     .where("conversation_messages.id", "in", messageIds)
+    .limit(messageIds.length)
     .execute();
   if (rows.length !== messageIds.length) return { status: "invalid", reason: "outside_allowed_window" };
   const allowedConversations = new Set(input.allowedConversationIds);

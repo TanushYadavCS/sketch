@@ -12,6 +12,9 @@ import { type ConversationTaskSourceAnchor, createTaskRepository } from "./tasks
 
 const SEED_LOOKBACK_DAYS = 7;
 const SEED_OUTPUT_LIMIT = 10;
+const TRANSITION_ROUTE_LIMIT = 100;
+const TRANSITION_PENDING_LIMIT = 25;
+const TRANSITION_SUPPRESSION_LIMIT = 100;
 const REVIEW_CODE_LENGTH = 8;
 const REVIEW_CODE_PATTERN = /^[A-Z0-9]{4,12}$/;
 const UNTRACKED_LABEL = "Reconstructed from recent summaries; not yet tracked.";
@@ -107,6 +110,7 @@ export interface UserTaskDurabilityUntrackedItem {
 
 export interface UserTaskDurabilityTransition {
   mode: TaskDurabilityMode;
+  overflow: boolean;
   routes: UserTaskDurabilityRoute[];
   untracked: UserTaskDurabilityUntrackedItem[];
   suppressedLegacy: Array<{ title: string; sourceKey: string; sourceAnchorKey: string }>;
@@ -516,16 +520,30 @@ export function createTaskDurabilityTransitionRepository(db: Kysely<DB>) {
       const now = toIso(input.now ?? new Date());
       const activeRoutes = input.activeRoutes ? dedupeActiveRoutes(input.activeRoutes) : null;
       const activeRouteById = activeRoutes ? new Map(activeRoutes.map((route) => [route.routeId, route])) : null;
-      const loadedRoutes = await db
-        .selectFrom("task_durability_route_state")
-        .selectAll()
-        .where("agent_key", "=", input.agentKey)
-        .where("user_id", "=", input.userId)
-        .orderBy("route_id", "asc")
-        .execute();
-      let routes = loadedRoutes.filter((route) => {
-        return !activeRouteById || activeRouteById.get(route.route_id)?.sourceKey === route.source_key;
-      });
+      const loadRoutes = async () => {
+        let query = db
+          .selectFrom("task_durability_route_state")
+          .selectAll()
+          .where("agent_key", "=", input.agentKey)
+          .where("user_id", "=", input.userId);
+        if (activeRoutes) {
+          query = query.where((eb) =>
+            activeRoutes.length > 0
+              ? eb.or(
+                  activeRoutes.map((route) =>
+                    eb.and([eb("route_id", "=", route.routeId), eb("source_key", "=", route.sourceKey)]),
+                  ),
+                )
+              : sql<boolean>`0 = 1`,
+          );
+        }
+        return query
+          .orderBy("route_id", "asc")
+          .limit((activeRoutes?.length ?? TRANSITION_ROUTE_LIMIT) + 1)
+          .execute();
+      };
+      let loadedRoutes = await loadRoutes();
+      let routes = loadedRoutes.slice(0, activeRoutes?.length ?? TRANSITION_ROUTE_LIMIT);
       for (const route of routes) {
         const active = activeRouteById?.get(route.route_id);
         await reconcileInvalidPendingCandidates(
@@ -541,18 +559,10 @@ export function createTaskDurabilityTransitionRepository(db: Kysely<DB>) {
         );
       }
       if (routes.length > 0) {
-        const activeKeys = new Set(routes.map((route) => activeRouteIdentity(route.route_id, route.source_key)));
-        routes = (
-          await db
-            .selectFrom("task_durability_route_state")
-            .selectAll()
-            .where("agent_key", "=", input.agentKey)
-            .where("user_id", "=", input.userId)
-            .orderBy("route_id", "asc")
-            .execute()
-        ).filter((route) => activeKeys.has(activeRouteIdentity(route.route_id, route.source_key)));
+        loadedRoutes = await loadRoutes();
+        routes = loadedRoutes.slice(0, activeRoutes?.length ?? TRANSITION_ROUTE_LIMIT);
       }
-      const loadedCandidates = await db
+      let candidateQuery = db
         .selectFrom("task_seed_candidates")
         .select([
           "review_code",
@@ -566,31 +576,62 @@ export function createTaskDurabilityTransitionRepository(db: Kysely<DB>) {
         ])
         .where("agent_key", "=", input.agentKey)
         .where("user_id", "=", input.userId)
-        .where("review_state", "=", "pending")
+        .where("review_state", "=", "pending");
+      if (activeRoutes) {
+        candidateQuery = candidateQuery.where((eb) =>
+          activeRoutes.length > 0
+            ? eb.or(
+                activeRoutes.map((route) =>
+                  eb.and([eb("route_id", "=", route.routeId), eb("source_key", "=", route.sourceKey)]),
+                ),
+              )
+            : sql<boolean>`0 = 1`,
+        );
+      }
+      const loadedCandidates = await candidateQuery
         .orderBy("created_at", "asc")
         .orderBy("id", "asc")
+        .limit(TRANSITION_PENDING_LIMIT + 1)
         .execute();
-      const loadedDismissed = await db
+      let dismissedQuery = db
         .selectFrom("task_seed_candidates")
         .select(["title", "source_key", "source_anchor_key", "route_id"])
         .where("agent_key", "=", input.agentKey)
         .where("user_id", "=", input.userId)
-        .where("review_state", "=", "dismissed")
+        .where("review_state", "=", "dismissed");
+      if (activeRoutes) {
+        dismissedQuery = dismissedQuery.where((eb) =>
+          activeRoutes.length > 0
+            ? eb.or(
+                activeRoutes.map((route) =>
+                  eb.and([eb("route_id", "=", route.routeId), eb("source_key", "=", route.sourceKey)]),
+                ),
+              )
+            : sql<boolean>`0 = 1`,
+        );
+      }
+      const loadedDismissed = await dismissedQuery
         .orderBy("created_at", "asc")
         .orderBy("id", "asc")
+        .limit(TRANSITION_SUPPRESSION_LIMIT + 1)
         .execute();
-      const isActive = (candidate: { route_id: string; source_key: string }) => {
-        return !activeRouteById || activeRouteById.get(candidate.route_id)?.sourceKey === candidate.source_key;
-      };
-      const candidates = loadedCandidates.filter(isActive);
-      const dismissed = loadedDismissed;
+      const candidates = loadedCandidates.slice(0, TRANSITION_PENDING_LIMIT);
+      const dismissed = loadedDismissed.slice(0, TRANSITION_SUPPRESSION_LIMIT);
       const allActiveRowsPresent = !activeRoutes || routes.length === activeRoutes.length;
+      const overflow =
+        loadedRoutes.length > (activeRoutes?.length ?? TRANSITION_ROUTE_LIMIT) ||
+        loadedCandidates.length > TRANSITION_PENDING_LIMIT ||
+        loadedDismissed.length > TRANSITION_SUPPRESSION_LIMIT;
 
       return {
         mode:
-          routes.length > 0 && allActiveRowsPresent && routes.every((route) => route.mode === "durable_only")
+          !overflow &&
+          routes.length > 0 &&
+          allActiveRowsPresent &&
+          routes.every((route) => route.mode === "durable_only")
             ? "durable_only"
             : "hybrid",
+        overflow,
         routes: routes.map((route) => ({
           routeId: route.route_id,
           sourceKey: route.source_key,
@@ -663,7 +704,9 @@ async function reconcileInvalidPendingCandidates(
     .where("route_id", "=", route.routeId)
     .where("source_key", "=", route.sourceKey)
     .where("review_state", "=", "pending")
+    .limit(TRANSITION_PENDING_LIMIT + 1)
     .execute();
+  if (pending.length > TRANSITION_PENDING_LIMIT) return 0;
   if (pending.length === 0) return 0;
 
   const allowedConversationIds =
@@ -733,7 +776,7 @@ async function resolveAllowedConversationIds(
     } else {
       query = query.where("provider_conversation_id", "=", parsed.targetId);
     }
-    const rows = await query.execute();
+    const rows = await query.limit(1).execute();
     for (const row of rows) allowed.add(row.id);
   }
   return allowed;
@@ -858,6 +901,7 @@ async function resolveSeedCandidate(
       "c.provider_conversation_id",
     ])
     .where("m.id", "in", messageIds)
+    .limit(messageIds.length)
     .execute()) as EvidenceMessageRow[];
   if (messages.length !== messageIds.length) return null;
 

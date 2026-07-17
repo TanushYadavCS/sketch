@@ -222,6 +222,66 @@ describe("createConversationFollowupsRepository", () => {
     });
   });
 
+  it("limits task memory to fifty tasks and twenty evidence message ids per task", async () => {
+    const conversationId = await seedConversation(db, "slack", "channel", "C-memory-limits");
+    const messageIds: number[] = [];
+    for (let index = 0; index < 25; index += 1) {
+      messageIds.push(
+        await seedMessage(db, conversationId, {
+          providerMessageId: `memory-limit-${String(index).padStart(2, "0")}`,
+        }),
+      );
+    }
+    const repo = createConversationFollowupsRepository(db);
+    const [created] = await repo.applyTaskChanges({
+      userId: USER_ID,
+      taskMemory: [],
+      allowedMessageIds: messageIds,
+      allowedConversationIds: [conversationId],
+      changes: [newChange("Bounded evidence task", [messageIds[0]])],
+      now: NOW,
+    });
+    const taskId = appliedTaskId(created);
+    await db
+      .insertInto("task_message_evidence")
+      .values(
+        messageIds.slice(1).map((messageId) => ({
+          task_id: taskId,
+          conversation_message_id: messageId,
+          source_platform: "slack",
+          source_conversation_id: conversationId,
+          source_provider_thread_id: null,
+          source_anchor_key: `slack:${conversationId}:root`,
+        })),
+      )
+      .execute();
+    await db.updateTable("tasks").set({ updated_at: "2026-07-17T00:00:00.000Z" }).where("id", "=", taskId).execute();
+    await db
+      .insertInto("tasks")
+      .values(
+        Array.from({ length: 50 }, (_, index) => ({
+          ...summaryTaskRow({
+            id: `memory-task-limit-${index}`,
+            title: `Memory task limit ${index}`,
+            status: "open",
+            conversationId,
+            originOutputId: null,
+          }),
+          updated_at: "2026-07-15T00:00:00.000Z",
+        })),
+      )
+      .execute();
+
+    const memory = await repo.loadTaskMemory({
+      userId: USER_ID,
+      conversationIds: [conversationId],
+      limit: 200,
+    });
+
+    expect(memory).toHaveLength(50);
+    expect(memory.find((task) => task.taskId === taskId)?.evidenceMessageIds).toEqual(messageIds.slice(0, 20));
+  });
+
   it("loads a bounded visible union of source, creator, assignee, and resolved-parent task memory", async () => {
     const sourceConversation = await seedConversation(db, "slack", "channel", "C-memory-source");
     const otherConversation = await seedConversation(db, "slack", "channel", "C-memory-other");
@@ -1476,6 +1536,102 @@ describe("createConversationFollowupsRepository", () => {
     });
   });
 
+  it("returns bounded reminder collections with an explicit overflow signal", async () => {
+    const conversationId = await seedConversation(db, "slack", "channel", "C-reminder-limits");
+    await db
+      .insertInto("agent_outputs")
+      .values({
+        id: "reminder-limit-output",
+        agent_key: "conversation_summary",
+        user_id: USER_ID,
+        output_date: "2026-07-16",
+        source_key: "slack:channel:C-reminder-limits",
+        source_label: "Reminder limits",
+        timezone: "UTC",
+        status: "completed",
+        trigger_type: "manual",
+        agent_version: "test",
+      })
+      .execute();
+    const pendingTasks = Array.from({ length: 51 }, (_, index) =>
+      summaryTaskRow({
+        id: `pending-limit-${index}`,
+        title: `Pending limit ${index}`,
+        status: "open",
+        conversationId,
+        originOutputId: "reminder-limit-output",
+      }),
+    );
+    const proposedTasks = Array.from({ length: 26 }, (_, index) =>
+      summaryTaskRow({
+        id: `proposal-limit-${index}`,
+        title: `Proposal limit ${index}`,
+        status: "open",
+        conversationId,
+        originOutputId: "reminder-limit-output",
+      }),
+    );
+    const suppressedTasks = Array.from({ length: 101 }, (_, index) =>
+      summaryTaskRow({
+        id: `suppressed-limit-${index}`,
+        title: `Suppressed limit ${index}`,
+        status: "done",
+        conversationId,
+        originOutputId: "reminder-limit-output",
+      }),
+    );
+    await db
+      .insertInto("tasks")
+      .values([...pendingTasks, ...proposedTasks, ...suppressedTasks])
+      .execute();
+    await db
+      .insertInto("task_completion_recommendations")
+      .values(
+        proposedTasks.map((task, index) => ({
+          id: `recommendation-limit-${index}`,
+          task_id: task.id,
+          proposed_status: "done",
+          review_state: "pending",
+          review_code: `RL${String(index).padStart(4, "0")}`,
+          evidence_fingerprint: `recommendation-limit-${index}`,
+          origin_agent_output_id: "reminder-limit-output",
+          rationale: "Completion was reported.",
+          expires_at: "2099-01-01T00:00:00.000Z",
+          reviewed_at: null,
+          reviewed_by_user_id: null,
+          review_surface: null,
+        })),
+      )
+      .execute();
+
+    const reminders = await createConversationFollowupsRepository(db).queryPersonalReminders({
+      userId: USER_ID,
+      assigneeEntityIds: [ASSIGNEE_ID],
+      activeSourceKeys: ["slack:channel:C-reminder-limits"],
+      legacyCandidates: Array.from({ length: 26 }, (_, index) => ({
+        title: `Legacy limit ${index}`,
+        sourceKey: "slack:channel:C-reminder-limits",
+      })),
+      now: NOW,
+    });
+
+    expect(reminders).toMatchObject({
+      status: "error",
+      code: "reminder_query_overflow",
+      pending: expect.any(Array),
+      looksResolved: expect.any(Array),
+      untracked: expect.any(Array),
+      suppressedTitles: expect.any(Array),
+    });
+    if (reminders.status !== "error" || reminders.code !== "reminder_query_overflow") {
+      throw new Error("Expected reminder query overflow");
+    }
+    expect(reminders.pending).toHaveLength(50);
+    expect(reminders.looksResolved).toHaveLength(25);
+    expect(reminders.untracked).toHaveLength(25);
+    expect(reminders.suppressedTitles).toHaveLength(100);
+  });
+
   it("returns only tasks assigned to the current user's person entities in personal reminders", async () => {
     const conversationId = await seedConversation(db, "whatsapp", "group", "group-personal-reminders");
     const mineMessage = await seedMessage(db, conversationId, { providerMessageId: "wamid.mine" });
@@ -2311,6 +2467,46 @@ async function assignTask(db: Kysely<DB>, taskId: string): Promise<void> {
     })
     .where("id", "=", taskId)
     .execute();
+}
+
+function summaryTaskRow(input: {
+  id: string;
+  title: string;
+  status: "open" | "done";
+  conversationId: number;
+  originOutputId: string | null;
+}) {
+  return {
+    id: input.id,
+    parent_entity_id: null,
+    parent_source_ref: null,
+    parent_name: null,
+    source: "summary",
+    external_ref: null,
+    title: input.title,
+    normalized_title: input.title.toLowerCase(),
+    status: input.status,
+    status_raw: input.status,
+    status_authority: "local",
+    assignee_entity_id: ASSIGNEE_ID,
+    assignee_name: "Follow-up User",
+    proposed_assignee_name: null,
+    priority: "medium",
+    due_at: null,
+    provenance: "summary",
+    source_task_id: input.id,
+    created_by_user_id: USER_ID,
+    status_changed_at: NOW,
+    completed_at: input.status === "done" ? NOW : null,
+    valid_from: NOW,
+    valid_to: null,
+    milestone_series_key: null,
+    source_platform: "slack",
+    source_conversation_id: input.conversationId,
+    source_provider_thread_id: null,
+    source_anchor_key: `slack:${input.conversationId}:root`,
+    origin_agent_output_id: input.originOutputId,
+  };
 }
 
 async function seedDeliveries(db: Kysely<DB>, count: number): Promise<string[]> {

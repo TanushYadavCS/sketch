@@ -2,7 +2,11 @@ import { join } from "node:path";
 import { AgentRunAdmissionCancelledError } from "../../agent/concurrency-limiter";
 import { buildSketchContext } from "../../agent/prompt";
 import type { RunAgentParams, RunAgentResult } from "../../agent/runner";
-import type { AgentOutputWriter, WriteAgentOutputPayload } from "../../agent/tools/agent-output";
+import {
+  type AgentOutputWriter,
+  type WriteAgentOutputPayload,
+  assertAgentOutputPayloadSize,
+} from "../../agent/tools/agent-output";
 import { ensureWorkspace } from "../../agent/workspace";
 import type {
   AgentDeliveryConfig,
@@ -24,6 +28,29 @@ import {
 import { AgentRunOutputLayer } from "./outputs";
 import type { ScheduledRunAdmission } from "./queue";
 import { enabledSectionsForScope, maxItemsPerSectionForScope, sourceAsDelivery } from "./routing";
+
+const INTERNAL_OUTPUT_SECTION_ITEM_LIMIT = 25;
+
+export function validateAgentOutputLimits(input: {
+  items: AgentOutputItemInput[];
+  visibleSectionKeys: Set<string>;
+  internalSectionKeys: Set<string>;
+  maxItemsPerSection: number;
+}): void {
+  const counts = new Map<string, number>();
+  for (const item of input.items) {
+    if (!input.visibleSectionKeys.has(item.sectionKey) && !input.internalSectionKeys.has(item.sectionKey)) continue;
+    counts.set(item.sectionKey, (counts.get(item.sectionKey) ?? 0) + 1);
+  }
+  for (const [sectionKey, count] of counts) {
+    const limit = input.internalSectionKeys.has(sectionKey)
+      ? INTERNAL_OUTPUT_SECTION_ITEM_LIMIT
+      : input.maxItemsPerSection;
+    if (count > limit) {
+      throw new Error(`Agent output section ${sectionKey} exceeds its ${limit}-item limit.`);
+    }
+  }
+}
 
 export class AgentRunGenerationLayer extends AgentRunOutputLayer {
   protected async generateExistingOutput(
@@ -120,6 +147,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
         outputId,
         userId: user.id,
         enabledSections: new Set(enabledSections),
+        maxItemsPerSection: routeMaxItemsPerSection,
         expectedOutputDate: output.output_date,
         expectedTimezone: output.timezone,
         runtimeContext,
@@ -362,6 +390,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
       outputId: string;
       userId: string;
       enabledSections: Set<string>;
+      maxItemsPerSection: number;
       expectedOutputDate: string;
       expectedTimezone: string;
       runtimeContext: Record<string, unknown>;
@@ -390,18 +419,32 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
             (visibleSectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey)) ||
             internalSectionKeys.has(item.sectionKey),
         );
+        validateAgentOutputLimits({
+          items: filtered,
+          visibleSectionKeys,
+          internalSectionKeys,
+          maxItemsPerSection: params.maxItemsPerSection,
+        });
         const reconciled = def.reconcileItems
           ? await def.reconcileItems({ db: this.deps.db, items: filtered, runtimeContext: params.runtimeContext })
           : filtered;
         const itemsForHooks = await def.enrichItems(this.deps.db, reconciled);
+        validateAgentOutputLimits({
+          items: itemsForHooks,
+          visibleSectionKeys,
+          internalSectionKeys,
+          maxItemsPerSection: params.maxItemsPerSection,
+        });
         const visibleItems = itemsForHooks.filter(
           (item) => visibleSectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey),
         );
         await this.validateItemRefs(def, itemsForHooks);
+        const rawPayload = rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext);
+        assertAgentOutputPayloadSize(rawPayload);
         await this.repo.completeOutput({
           outputId: params.outputId,
           masthead: payload.masthead,
-          rawPayload: rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext),
+          rawPayload,
           items: visibleItems,
         });
         if (def.onOutputSaved) {

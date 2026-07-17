@@ -1621,6 +1621,40 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
     expect(untracked.filter((item) => item.title.startsWith("Second route fallback"))).toHaveLength(10);
   });
 
+  it("marks reminder context non-authoritative when a bounded historical summary page may be incomplete", async () => {
+    await seedUser(db);
+    const sourceKey = "slack:channel:C_HISTORY_OVERFLOW";
+    await seedSummarizerConfig([summaryRoute("route-history-overflow", [sourceKey])]);
+    const evidence = await seedConversationMessage("C_HISTORY_OVERFLOW", "history-overflow-message");
+    for (let index = 0; index < 50; index += 1) {
+      await seedSummaryOutput(
+        sourceKey,
+        [{ title: `History overflow ${index}`, messageIds: [evidence.messageId] }],
+        `2026-06-25T06:${String(index).padStart(2, "0")}:00.000Z`,
+      );
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "error",
+      code: "reminder_history_overflow",
+      retryable: true,
+    });
+  });
+
   it("keeps exact suppression identities when completed tasks are the only reminder state", async () => {
     await seedUser(db);
     const task = await createTaskRepository(db).upsertTask({

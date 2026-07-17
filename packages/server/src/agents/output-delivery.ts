@@ -24,6 +24,15 @@ import { type RenderableAgentOutput, renderAgentOutputForDelivery } from "./outp
 import type { AgentDefinition } from "./types";
 
 const SLACK_TEXT_LIMIT = 39_000;
+const MAX_DELIVERY_CHUNKS = 10;
+
+function boundedDeliveryChunks(text: string, limit: number): string[] {
+  const chunks = chunkText(text, limit);
+  if (chunks.length > MAX_DELIVERY_CHUNKS) {
+    throw new Error(`Agent output delivery requires more than ${MAX_DELIVERY_CHUNKS} message chunks.`);
+  }
+  return chunks;
+}
 
 export interface AgentOutputDeliveryRequest {
   definition: AgentDefinition;
@@ -71,7 +80,7 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
     }
 
     const refs: string[] = [];
-    for (const chunk of chunkText(text, SLACK_TEXT_LIMIT)) {
+    for (const chunk of boundedDeliveryChunks(text, SLACK_TEXT_LIMIT)) {
       const messageRef = await slack.postMessage(targetId, chunk);
       if (!messageRef) throw new Error("Slack delivery did not return a message reference.");
       refs.push(messageRef);
@@ -87,6 +96,7 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
   ): Promise<{ messageRefs: string[]; contentDelivered: boolean }> {
     if (!deps.whatsapp.isConnected) throw new Error("WhatsApp is not connected.");
     const target = whatsappTargetFromDeliveryTarget(delivery.targetId);
+    const chunks = boundedDeliveryChunks(text, WHATSAPP_TEXT_LIMIT);
 
     if (target.kind === "dm") {
       const recipientUserId = delivery.recipientUserId ?? output.userId;
@@ -130,7 +140,7 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
     }
 
     const refs: string[] = [];
-    for (const chunk of chunkText(text, WHATSAPP_TEXT_LIMIT)) {
+    for (const chunk of chunks) {
       const sent = await deps.whatsapp.sendText(target, chunk);
       const messageRef = sent?.providerMessageId;
       if (!messageRef) throw new Error("WhatsApp delivery did not return a message reference.");

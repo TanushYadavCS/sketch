@@ -597,6 +597,91 @@ describe("createTaskDurabilityTransitionRepository", () => {
     expect(await countRows(db, "tasks")).toBe(0);
   });
 
+  it("caps active pending and dismissed reminder state with an explicit overflow signal", async () => {
+    const conversationId = await seedConversation(db, "slack", "C_SEED");
+    const messageId = await seedMessage(db, conversationId, {
+      providerMessageId: "transition-limit-message",
+      threadId: "transition-limit-thread",
+    });
+    await seedOutput(createAgentOutputRepository(db), db, {
+      generatedAt: "2026-07-15T12:00:00.000Z",
+      title: "Transition limit visible",
+      messageIds: [messageId],
+      rawItems: Array.from({ length: 25 }, (_, index) => taskCandidate(`Transition limit raw ${index}`, [messageId])),
+    });
+    const repo = createTaskDurabilityTransitionRepository(db);
+    await repo.ensureRouteTransition({
+      agentKey: AGENT_KEY,
+      userId: USER_ID,
+      routeId: ROUTE_ID,
+      sourceKey: SOURCE_KEY,
+      now: NOW,
+    });
+    const template = await db.selectFrom("task_seed_candidates").selectAll().executeTakeFirstOrThrow();
+    await db
+      .insertInto("task_seed_candidates")
+      .values(
+        Array.from({ length: 101 }, (_, index) => ({
+          ...template,
+          id: `dismissed-limit-${index}`,
+          title: `Dismissed limit ${index}`,
+          normalized_title: `dismissed limit ${index}`,
+          evidence_fingerprint: `dismissed-limit-${index}`,
+          review_code: `D${String(index).padStart(7, "0")}`,
+          review_state: "dismissed",
+          reviewed_at: NOW,
+          reviewed_by_user_id: USER_ID,
+        })),
+      )
+      .execute();
+
+    const transition = await repo.getUserTransition({
+      agentKey: AGENT_KEY,
+      userId: USER_ID,
+      activeRoutes: [{ routeId: ROUTE_ID, sourceKey: SOURCE_KEY, sourceKeys: [SOURCE_KEY] }],
+      now: NOW,
+    });
+
+    expect(transition.overflow).toBe(true);
+    expect(transition.mode).toBe("hybrid");
+    expect(transition.untracked).toHaveLength(25);
+    expect(transition.suppressedLegacy).toHaveLength(100);
+  });
+
+  it("does not count lifetime candidates outside the active route SQL scope toward reminder overflow", async () => {
+    await seedOneCandidate(db);
+    const template = await db.selectFrom("task_seed_candidates").selectAll().executeTakeFirstOrThrow();
+    await db
+      .insertInto("task_seed_candidates")
+      .values(
+        Array.from({ length: 101 }, (_, index) => ({
+          ...template,
+          id: `historical-dismissed-${index}`,
+          route_id: "historical-route",
+          source_key: "slack:channel:C_HISTORICAL",
+          title: `Historical dismissed ${index}`,
+          normalized_title: `historical dismissed ${index}`,
+          evidence_fingerprint: `historical-dismissed-${index}`,
+          review_code: `H${String(index).padStart(7, "0")}`,
+          review_state: "dismissed",
+          reviewed_at: NOW,
+          reviewed_by_user_id: USER_ID,
+        })),
+      )
+      .execute();
+
+    const transition = await createTaskDurabilityTransitionRepository(db).getUserTransition({
+      agentKey: AGENT_KEY,
+      userId: USER_ID,
+      activeRoutes: [{ routeId: ROUTE_ID, sourceKey: SOURCE_KEY, sourceKeys: [SOURCE_KEY] }],
+      now: NOW,
+    });
+
+    expect(transition.overflow).toBe(false);
+    expect(transition.untracked).toHaveLength(1);
+    expect(transition.suppressedLegacy).toEqual([]);
+  });
+
   it("retires pending candidates whose originating evidence is no longer valid", async () => {
     const conversationId = await seedConversation(db, "slack", "C_SEED");
     const messageId = await seedMessage(db, conversationId, {

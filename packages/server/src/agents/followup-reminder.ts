@@ -187,6 +187,7 @@ function uniqueUntracked(items: FollowupReminderUntracked[]): FollowupReminderUn
 export function reconcileFollowupReminderItems(
   items: AgentOutputItemInput[],
   view: FollowupReminderView,
+  maxItemsPerSection = Number.POSITIVE_INFINITY,
 ): AgentOutputItemInput[] {
   const serverSections = new Set(["looks_resolved", "untracked_followups"]);
   const untracked = uniqueUntracked(view.status === "ok" ? view.untracked : view.fallback);
@@ -221,15 +222,20 @@ export function reconcileFollowupReminderItems(
     if (candidateId && candidateIds.has(candidateId)) return false;
     return true;
   });
+  const sectionLimit = Math.max(0, Math.floor(maxItemsPerSection));
+  const remainingTodos = Math.max(0, sectionLimit - retained.filter((item) => item.sectionKey === "todos").length);
 
   if (view.status === "error") {
-    return [...retained, ...untracked.map((candidate, index) => untrackedItem(candidate, index, true))];
+    return [
+      ...retained,
+      ...untracked.slice(0, sectionLimit).map((candidate, index) => untrackedItem(candidate, index, true)),
+    ];
   }
 
   return [
     ...retained,
-    ...view.pending.map(durableTaskItem),
-    ...untracked.map((candidate, index) => untrackedItem(candidate, index, false)),
-    ...view.looksResolved.map(recommendationItem),
+    ...view.pending.slice(0, remainingTodos).map(durableTaskItem),
+    ...untracked.slice(0, sectionLimit).map((candidate, index) => untrackedItem(candidate, index, false)),
+    ...view.looksResolved.slice(0, sectionLimit).map(recommendationItem),
   ];
 }

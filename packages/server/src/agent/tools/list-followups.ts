@@ -31,7 +31,12 @@ type ListFollowupsArgs = z.infer<z.ZodObject<typeof listFollowupsToolSchema>>;
 const SUMMARIZER_AGENT_KEY = "conversation_summary";
 const LEGACY_LOOKBACK_DAYS = 7;
 const LEGACY_OUTPUT_LIMIT_PER_ROUTE = 10;
+const LEGACY_HISTORY_PAGE_SIZE = 25;
+const LEGACY_HISTORY_PAGE_LIMIT = 2;
+const REMINDER_UNTRACKED_LIMIT = 25;
 const LEGACY_LABEL = "Reconstructed from a recent summary; not yet tracked.";
+
+class ReminderHistoryOverflowError extends Error {}
 
 type LegacyCandidate = {
   title: string;
@@ -73,6 +78,7 @@ export async function handleListFollowups(_args: ListFollowupsArgs, deps: Sketch
         activeSourceKeys: [],
         now: new Date().toISOString(),
       });
+      if (assigned.status === "error") return followupErrorResult(assigned.code, []);
       if (assigned.status === "ok" && (assigned.pending.length > 0 || assigned.looksResolved.length > 0)) {
         return {
           content: [
@@ -101,8 +107,11 @@ export async function handleListFollowups(_args: ListFollowupsArgs, deps: Sketch
   let legacyCandidates: LegacyCandidate[];
   try {
     legacyCandidates = await buildLegacyCandidates(deps.db, outputRepo, deps.currentUserId, activeRoutes, now);
-  } catch {
-    return followupErrorResult("durable_query_failed", []);
+  } catch (error) {
+    return followupErrorResult(
+      error instanceof ReminderHistoryOverflowError ? "reminder_history_overflow" : "durable_query_failed",
+      [],
+    );
   }
 
   let transition: UserTaskDurabilityTransition;
@@ -122,6 +131,12 @@ export async function handleListFollowups(_args: ListFollowupsArgs, deps: Sketch
     transitionItems = await transitionFollowupItems(deps.db, transition);
   } catch {
     return followupErrorResult("durable_query_failed", legacyCandidates.map(legacyFollowupItem));
+  }
+  if (transition.overflow) {
+    return followupErrorResult(
+      "durable_transition_overflow",
+      mergeFollowupItems(transitionItems, legacyCandidates.map(legacyFollowupItem)),
+    );
   }
   const transitionFilteredLegacy = legacyCandidates.filter(
     (candidate) => !transition.suppressedLegacy.some((suppressed) => isTransitionSuppressed(candidate, suppressed)),
@@ -173,7 +188,6 @@ export async function handleListFollowups(_args: ListFollowupsArgs, deps: Sketch
       );
     }
 
-    const activeScope = await loadActiveReminderScope(deps.db, deps.currentUserId, assigneeEntityIds, activeRoutes);
     return {
       content: [
         {
@@ -182,12 +196,10 @@ export async function handleListFollowups(_args: ListFollowupsArgs, deps: Sketch
             status: "ok",
             authoritative: true,
             mode: transition.mode,
-            pending: reminders.pending.filter((item) => activeScope.taskIds.has(item.taskId)),
-            looksResolved: reminders.looksResolved.filter((item) => activeScope.taskIds.has(item.taskId)),
+            pending: reminders.pending,
+            looksResolved: reminders.looksResolved,
             untracked,
-            suppressedTitles: reminders.suppressedTitles.filter((title) =>
-              activeScope.suppressedTitles.has(normalizeName(title)),
-            ),
+            suppressedTitles: reminders.suppressedTitles,
           }),
         },
       ],
@@ -296,9 +308,10 @@ async function buildLegacyCandidates(
       ),
     )
   ).flat();
-  const historicalOutputs = await listAllCompletedSummaries(outputRepo, userId, since.toISOString());
+  const historical = await listAllCompletedSummaries(outputRepo, userId, since.toISOString());
+  if (historical.overflow) throw new ReminderHistoryOverflowError();
   const candidateOutputs = [
-    ...new Map([...scopedOutputs, ...historicalOutputs].map((output) => [output.output.id, output])).values(),
+    ...new Map([...scopedOutputs, ...historical.outputs].map((output) => [output.output.id, output])).values(),
   ];
   const outputs = await selectOutputsPerActiveRoute(db, candidateOutputs, activeRoutes, LEGACY_OUTPUT_LIMIT_PER_ROUTE);
   const candidates = await resolveLegacyCandidates(db, outputs);
@@ -315,26 +328,26 @@ async function listAllCompletedSummaries(
   outputRepo: ReturnType<typeof createAgentOutputRepository>,
   userId: string,
   since: string,
-): Promise<AgentOutputWithItems[]> {
+): Promise<{ outputs: AgentOutputWithItems[]; overflow: boolean }> {
   const outputs: AgentOutputWithItems[] = [];
   let before: { generatedAt: string; id: string } | undefined;
-  while (true) {
+  for (let pageIndex = 0; pageIndex < LEGACY_HISTORY_PAGE_LIMIT; pageIndex += 1) {
     const page = await outputRepo.listCompletedForUserSince(SUMMARIZER_AGENT_KEY, userId, since, {
-      limit: 50,
+      limit: LEGACY_HISTORY_PAGE_SIZE,
       ...(before ? { before } : {}),
     });
     outputs.push(...page);
-    if (page.length < 50) break;
+    if (page.length < LEGACY_HISTORY_PAGE_SIZE) return { outputs, overflow: false };
     const oldest = page.reduce((candidate, output) =>
       `${output.output.generated_at ?? ""}:${output.output.id}` <
       `${candidate.output.generated_at ?? ""}:${candidate.output.id}`
         ? output
         : candidate,
     );
-    if (!oldest.output.generated_at) break;
+    if (!oldest.output.generated_at) return { outputs, overflow: true };
     before = { generatedAt: oldest.output.generated_at, id: oldest.output.id };
   }
-  return outputs;
+  return { outputs, overflow: true };
 }
 
 async function selectOutputsPerActiveRoute(
@@ -359,6 +372,7 @@ async function selectOutputsPerActiveRoute(
           .selectFrom("conversation_messages")
           .select(["id", "conversation_id"])
           .where("id", "in", allMessageIds)
+          .limit(allMessageIds.length)
           .execute();
   const conversationByMessage = new Map(rows.map((row) => [row.id, row.conversation_id]));
   const ordered = [...outputs].sort((a, b) => (b.output.generated_at ?? "").localeCompare(a.output.generated_at ?? ""));
@@ -401,6 +415,7 @@ async function resolveActiveRouteConversationIds(
       .where("platform", "=", platform)
       .where("kind", "=", kind)
       .where("provider_conversation_id", "=", targetId)
+      .limit(1)
       .execute();
     for (const row of rows) result.add(row.id);
   }
@@ -428,6 +443,7 @@ async function resolveLegacyCandidates(db: Kysely<DB>, outputs: AgentOutputWithI
           .innerJoin("conversations as c", "c.id", "m.conversation_id")
           .select(["m.id", "m.conversation_id", "m.provider_thread_id", "m.is_thread_reply", "c.platform"])
           .where("m.id", "in", messageIds)
+          .limit(messageIds.length)
           .execute();
   const anchorByMessageId = new Map(
     messages.map((message) => [
@@ -497,6 +513,7 @@ async function transitionFollowupItems(
           .selectFrom("task_seed_candidates")
           .select(["review_code", "source_key", "source_anchor_key"])
           .where("review_code", "in", codes)
+          .limit(codes.length)
           .execute();
   const sourceByCode = new Map(
     rows.map((row) => [
@@ -537,7 +554,7 @@ function mergeFollowupItems(primary: FollowupItem[], secondary: FollowupItem[]):
     seen.add(identity);
     result.push(item);
   }
-  return result;
+  return result.slice(0, REMINDER_UNTRACKED_LIMIT);
 }
 
 function legacyIdentity(title: string, sourceKey: string | null): string {
@@ -548,70 +565,6 @@ function sourcePlatformFromKey(sourceKey: string): "slack" | "whatsapp" | null {
   if (sourceKey.startsWith("slack:")) return "slack";
   if (sourceKey.startsWith("whatsapp:")) return "whatsapp";
   return null;
-}
-
-async function loadActiveReminderScope(
-  db: Kysely<DB>,
-  userId: string,
-  assigneeEntityIds: string[],
-  activeRoutes: ActiveTaskDurabilityRoute[],
-): Promise<{ taskIds: Set<string>; suppressedTitles: Set<string> }> {
-  const assigneeIds = [...new Set(assigneeEntityIds)].filter(Boolean);
-  const rows = await db
-    .selectFrom("tasks as t")
-    .leftJoin("agent_outputs as o", "o.id", "t.origin_agent_output_id")
-    .leftJoin("conversations as c", "c.id", "t.source_conversation_id")
-    .select([
-      "t.id",
-      "t.title",
-      "t.status",
-      "t.assignee_entity_id as assigneeEntityId",
-      "t.created_by_user_id as createdByUserId",
-      "o.source_key as originSourceKey",
-      "c.id as conversationId",
-      "c.platform",
-      "c.kind",
-      "c.provider_conversation_id as providerConversationId",
-    ])
-    .where("t.valid_to", "is", null)
-    .where("t.provenance", "=", "summary")
-    .where("t.source_anchor_key", "is not", null)
-    .where((eb) => {
-      const predicates = [eb("t.created_by_user_id", "=", userId)];
-      if (assigneeIds.length > 0) predicates.push(eb("t.assignee_entity_id", "in", assigneeIds));
-      return eb.or(predicates);
-    })
-    .execute();
-  const routeSourceKeys = new Set(activeRoutes.map((route) => route.sourceKey));
-  const memberSourceKeys = new Set(activeRoutes.flatMap((route) => route.sourceKeys));
-  const activeRows = rows.filter((row) => {
-    if (row.createdByUserId !== userId && row.assigneeEntityId && assigneeIds.includes(row.assigneeEntityId)) {
-      return true;
-    }
-    if (row.originSourceKey && routeSourceKeys.has(row.originSourceKey)) return true;
-    if (!row.platform || !row.kind || row.conversationId === null) return false;
-    const targetId = row.kind === "dm" ? String(row.conversationId) : row.providerConversationId;
-    return Boolean(targetId && memberSourceKeys.has(`${row.platform}:${row.kind}:${targetId}`));
-  });
-  const taskIds = new Set(activeRows.map((row) => row.id));
-  const recommendations =
-    taskIds.size === 0
-      ? []
-      : await db
-          .selectFrom("task_completion_recommendations")
-          .select("task_id")
-          .where("task_id", "in", [...taskIds])
-          .where("review_state", "=", "pending")
-          .execute();
-  const recommendedTaskIds = new Set(recommendations.map((row) => row.task_id));
-  return {
-    taskIds,
-    suppressedTitles: new Set(
-      activeRows
-        .filter((row) => row.status === "done" || row.status === "dropped" || recommendedTaskIds.has(row.id))
-        .map((row) => normalizeName(row.title)),
-    ),
-  };
 }
 
 export function createListFollowupsTool(deps: SketchMcpDeps) {

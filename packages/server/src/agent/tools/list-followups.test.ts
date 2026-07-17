@@ -208,6 +208,36 @@ describe("handleListFollowups", () => {
     );
   });
 
+  it("returns a conservative error when the bounded historical summary page may be incomplete", async () => {
+    const sourceKey = "whatsapp:group:goosebumps";
+    await seedSummarizerConfig(db, [route("route-1", sourceKey)]);
+    const conversationId = await seedConversation(db);
+    const messageId = await seedMessage(db, conversationId, "wamid.history-overflow");
+    const now = Date.now();
+    for (let index = 0; index < 50; index += 1) {
+      await seedSummaryOutput(
+        db,
+        sourceKey,
+        `Historical overflow ${index}`,
+        messageId,
+        new Date(now - index * 60_000).toISOString(),
+      );
+    }
+
+    const result = await handleListFollowups({}, {
+      db,
+      currentUserId: "user-1",
+    } as SketchMcpDeps);
+    const payload = JSON.parse(result.content[0]?.text ?? "{}");
+
+    expect(payload).toMatchObject({
+      status: "error",
+      code: "reminder_history_overflow",
+      authoritative: false,
+      mode: "hybrid",
+    });
+  });
+
   it("preserves transition review candidates and recent-summary fallback when durable reminder reads fail", async () => {
     const sourceKey = "whatsapp:group:goosebumps";
     await seedSummarizerConfig(db, [route("route-1", sourceKey)]);

@@ -134,6 +134,69 @@ describe("createAgentOutputDeliveryService", () => {
     expect(captured[0].provider_message_id).toBe("123.456");
   });
 
+  it("rejects delivery requiring more than ten message chunks before sending", async () => {
+    const slack = {
+      postMessage: vi.fn(async () => "never-sent"),
+      openDmChannel: vi.fn(),
+    } as unknown as SlackBot;
+    const service = createAgentOutputDeliveryService({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => slack,
+      whatsapp: createMockWhatsApp(),
+      settingsRepo: createSettingsRepository(db),
+    });
+    const sections = Array.from({ length: 120 }, (_, index) => ({
+      key: `section-${index}`,
+      title: `Section ${index}`,
+      enabledByDefault: true,
+      labels: ["item"],
+    }));
+    const outputSections = Object.fromEntries(
+      sections.map((section) => [
+        section.key,
+        Array.from({ length: 10 }, (_, index) => ({
+          id: `${section.key}-${index}`,
+          sectionKey: section.key,
+          title: `Title ${"T".repeat(90)}`,
+          summary: `Summary ${"S".repeat(250)}`,
+          priority: "medium" as const,
+          label: "item",
+          displayRef: null,
+          actionType: "generic",
+          actionLabel: null,
+          actionPrompt: null,
+          sourceUrl: null,
+          knowledgeRefs: { entityIds: [], fileIds: [] },
+          structuredPayload: null,
+          sortOrder: index,
+        })),
+      ]),
+    );
+
+    await expect(
+      service.deliver({
+        definition: { ...dailyBriefDefinition, sections },
+        delivery: {
+          enabled: true,
+          platform: "slack",
+          targetType: "channel",
+          targetId: "C_DAILY",
+          label: "#daily",
+        },
+        output: {
+          id: "output-delivery",
+          userId: "user-delivery",
+          agentKey: dailyBriefDefinition.key,
+          outputDate: "2026-06-26",
+          masthead: { title: "Daily Brief", summary: "Start here." },
+          sections: outputSections,
+        },
+      }),
+    ).rejects.toThrow("more than 10 message chunks");
+    expect(slack.postMessage).not.toHaveBeenCalled();
+  });
+
   it("counts a looks-resolved recommendation after successful content delivery", async () => {
     const recommendationId = await seedRecommendation(db, "recommendation-delivered");
     const slack = {
