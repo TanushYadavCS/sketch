@@ -535,6 +535,41 @@ export interface WhatsAppSessionLeaseTable {
   disconnected_at: string | null;
 }
 
+export interface OperationalAlertsTable {
+  id: string;
+  type: string;
+  resource_key: string;
+  severity: string;
+  state: string;
+  payload: string;
+  first_observed_at: string;
+  last_observed_at: string;
+  notify_after: string;
+  opened_at: string | null;
+  resolved_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface OperationalAlertDeliveriesTable {
+  id: string;
+  alert_id: string;
+  recipient_user_id: string;
+  channel: string;
+  destination_fingerprint: string;
+  state: Generated<string>;
+  attempts: Generated<number>;
+  next_attempt_at: Generated<string>;
+  claim_token: string | null;
+  claimed_at: string | null;
+  provider_message_id: string | null;
+  last_error_code: string | null;
+  last_error: string | null;
+  sent_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface ConversationSlicesTable {
   id: string;
   conversation_id: number;
@@ -1169,6 +1204,8 @@ export interface DB {
   whatsapp_keys: WhatsAppKeysTable;
   whatsapp_inbound_events: WhatsAppInboundEventsTable;
   whatsapp_session_lease: WhatsAppSessionLeaseTable;
+  operational_alerts: OperationalAlertsTable;
+  operational_alert_deliveries: OperationalAlertDeliveriesTable;
   whatsapp_groups: WhatsAppGroupsTable;
   settings: SettingsTable;
   connector_configs: ConnectorConfigsTable;

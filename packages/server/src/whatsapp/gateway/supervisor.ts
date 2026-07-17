@@ -84,6 +84,7 @@ export interface WhatsAppGatewaySupervisorOptions {
   nodeArgs?: string[];
   stdio?: SpawnOptions["stdio"];
   onOwnershipLost?: () => Promise<void> | void;
+  onSocketStateChange?: (change: WhatsAppSocketStateChange) => Promise<void> | void;
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -124,6 +125,9 @@ export class WhatsAppGatewaySupervisor {
   private startedSuccessfully = false;
   private respawnScheduled = false;
   private lastHealth: WhatsAppFacadeHealth | null = null;
+  private lastPublishedSocketState: WhatsAppSocketStateChange["socketState"] | null = null;
+  private lastSocketStateChangeAt: string | null = null;
+  private socketStatePublication: Promise<void> = Promise.resolve();
   private pairingSpawn: Promise<GatewayClientFacade> | null = null;
   private readonly expectedExits = new WeakSet<ChildProcess>();
 
@@ -189,10 +193,11 @@ export class WhatsAppGatewaySupervisor {
    * route. The lease owner and generation fence stale child notifications, while
    * child exit clears the cached health and the periodic poll remains a fallback.
    */
-  handleSocketStateChange(change: WhatsAppSocketStateChange): void {
+  async handleSocketStateChange(change: WhatsAppSocketStateChange): Promise<void> {
     if (!this.client || !this.lease || !this.lastHealth) return;
     if (this.lease.owner_token !== change.ownerToken || this.lease.generation !== change.generation) return;
     this.lastHealth = { ...this.lastHealth, socketState: change.socketState };
+    await this.publishSocketStateChange(change);
   }
 
   async refreshHealth(): Promise<void> {
@@ -358,6 +363,15 @@ export class WhatsAppGatewaySupervisor {
         return;
       }
       this.lastHealth = health;
+      if (lease && this.lastPublishedSocketState !== health.socketState) {
+        await this.publishSocketStateChange({
+          ownerToken: lease.owner_token,
+          generation: lease.generation,
+          socketState: health.socketState,
+          occurredAt: new Date(this.now()).toISOString(),
+          reason: "health_poll",
+        });
+      }
       this.healthFailures = 0;
       this.restartAttempt = 0;
     } catch (error) {
@@ -415,11 +429,49 @@ export class WhatsAppGatewaySupervisor {
     if (decision.action === "re-pair") {
       this.loggedOut = true;
       this.stopHealthPolling();
+      if (exitedLease) {
+        await this.publishSocketStateChange({
+          ownerToken: exitedLease.owner_token,
+          generation: exitedLease.generation,
+          socketState: "logged-out",
+          occurredAt: new Date(this.now()).toISOString(),
+          reason: "gateway_logged_out",
+        });
+      }
       this.options.logger.warn("WhatsApp gateway logged out; automatic respawn stopped until re-pairing");
       return;
     }
     if (!wasReady && !this.startedSuccessfully) return;
+    if (exitedLease) {
+      await this.publishSocketStateChange({
+        ownerToken: exitedLease.owner_token,
+        generation: exitedLease.generation,
+        socketState: "disconnected",
+        occurredAt: new Date(this.now()).toISOString(),
+        reason: "gateway_process_exit",
+      });
+    }
     this.scheduleRespawn("unexpected gateway exit", { code, signal });
+  }
+
+  private async publishSocketStateChange(change: WhatsAppSocketStateChange): Promise<void> {
+    const normalized = { ...change, occurredAt: change.occurredAt ?? new Date(this.now()).toISOString() };
+    const publication = this.socketStatePublication.then(async () => {
+      if (this.lastSocketStateChangeAt && normalized.occurredAt < this.lastSocketStateChangeAt) return;
+      this.lastSocketStateChangeAt = normalized.occurredAt;
+      if (this.lastPublishedSocketState === normalized.socketState) return;
+      try {
+        await this.options.onSocketStateChange?.(normalized);
+        this.lastPublishedSocketState = normalized.socketState;
+      } catch (error) {
+        this.options.logger.warn(
+          { error, socketState: normalized.socketState },
+          "WhatsApp socket state observer failed",
+        );
+      }
+    });
+    this.socketStatePublication = publication.catch(() => undefined);
+    await publication;
   }
 
   private scheduleRespawn(reason: string, context: Record<string, unknown> = {}): void {

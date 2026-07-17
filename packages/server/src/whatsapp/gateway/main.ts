@@ -85,14 +85,24 @@ export async function runWhatsAppGateway(): Promise<void> {
   let heartbeat: WhatsAppGatewayHeartbeat | null = null;
   let server: ReturnType<typeof serve> | null = null;
   let bot: WhatsAppBot | null = null;
+  let lastDisconnectStatusCode: number | undefined;
   const appNotifier = new WhatsAppGatewayAppNotifier({
     baseUrl: `http://${WHATSAPP_GATEWAY_HOST}:${config.PORT}`,
     token: gatewayHttpToken,
   });
-  const setSocketState = (nextState: WhatsAppGatewaySocketState): void => {
+  const setSocketState = (
+    nextState: WhatsAppGatewaySocketState,
+    details: { statusCode?: number; reason?: string } = {},
+  ): void => {
     if (socketState === nextState) return;
     socketState = nextState;
-    appNotifier.socketStateChanged({ ownerToken, generation: fence.generation, socketState });
+    appNotifier.socketStateChanged({
+      ownerToken,
+      generation: fence.generation,
+      socketState,
+      occurredAt: new Date().toISOString(),
+      ...details,
+    });
   };
 
   const terminate = async (
@@ -147,6 +157,7 @@ export async function runWhatsAppGateway(): Promise<void> {
     reconnectDelayMs: whatsappGatewayReconnectDelayMs,
     onConnectionOpen: async () => {
       if (terminating) return;
+      lastDisconnectStatusCode = undefined;
       setSocketState("connected");
       try {
         await leaseRepository.deriveDisconnectedAt(fence);
@@ -155,10 +166,11 @@ export async function runWhatsAppGateway(): Promise<void> {
       }
       await heartbeat?.tick();
     },
-    onConnectionClose: async () => {
+    onConnectionClose: async (statusCode) => {
       if (terminating) return;
       const wasConnected = socketState === "connected";
-      setSocketState("disconnected");
+      lastDisconnectStatusCode = statusCode;
+      setSocketState("disconnected", { ...(statusCode === undefined ? {} : { statusCode }) });
       try {
         const owned = await leaseRepository.markDisconnected(fence);
         if (!owned) {
@@ -171,14 +183,17 @@ export async function runWhatsAppGateway(): Promise<void> {
       if (wasConnected) initialSyncGeneration = false;
     },
     onLoggedOut: async () => {
-      setSocketState("logged-out");
+      setSocketState("logged-out", {
+        ...(lastDisconnectStatusCode === undefined ? {} : { statusCode: lastDisconnectStatusCode }),
+        reason: "account_logged_out",
+      });
       await terminate(WHATSAPP_GATEWAY_LOGGED_OUT_EXIT_CODE, true, "WhatsApp account logged out", true);
     },
   });
 
   const inProcessFacade = new InProcessSocketFacade(bot, logger, async () => {
     heartbeat?.stop();
-    setSocketState("logged-out");
+    setSocketState("logged-out", { reason: "history_generation_reset" });
     initialSyncGeneration = true;
     if (!(await leaseRepository.resetHistoryGeneration(fence))) throw new WhatsAppLeaseFenceError();
     heartbeat?.start();
