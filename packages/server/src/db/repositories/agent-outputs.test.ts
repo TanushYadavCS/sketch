@@ -170,6 +170,78 @@ describe("createAgentOutputRepository output scopes", () => {
     ]);
   });
 
+  it("links an exact persisted item idempotently without crossing outputs or overwriting conflicts", async () => {
+    await db.insertInto("users").values({ id: "user-1", name: "Agent User" }).execute();
+    await db
+      .insertInto("tasks")
+      .values([
+        {
+          id: "task-one",
+          source: "brief",
+          title: "Task one",
+          normalized_title: "task one",
+          status: "open",
+          status_authority: "local",
+          provenance: "brief",
+          source_task_id: "task-one",
+          created_by_user_id: "user-1",
+        },
+        {
+          id: "task-two",
+          source: "brief",
+          title: "Task two",
+          normalized_title: "task two",
+          status: "open",
+          status_authority: "local",
+          provenance: "brief",
+          source_task_id: "task-two",
+          created_by_user_id: "user-1",
+        },
+      ])
+      .execute();
+    const repo = createAgentOutputRepository(db);
+    const running = await repo.createRunning({
+      agentKey: "daily_brief",
+      agentVersion: "test",
+      userId: "user-1",
+      outputDate: "2026-07-17",
+      timezone: "UTC",
+      triggerType: "manual",
+    });
+    const [persisted] = await repo.completeOutput({
+      outputId: running.row.id,
+      masthead: { title: "Brief", summary: "Summary" },
+      rawPayload: {},
+      items: [
+        {
+          sectionKey: "todos",
+          title: "Link me",
+          summary: "Link by id.",
+          priority: "medium",
+          label: "todo",
+          knowledgeRefs: { entityIds: [], fileIds: [] },
+          sortOrder: 0,
+        },
+      ],
+    });
+
+    await expect(
+      repo.linkItemToTask({ outputId: "other-output", itemId: persisted.id, taskId: "task-one" }),
+    ).resolves.toBe("missing");
+    await expect(
+      repo.linkItemToTask({ outputId: running.row.id, itemId: persisted.id, taskId: "task-one" }),
+    ).resolves.toBe("linked");
+    await expect(
+      repo.linkItemToTask({ outputId: running.row.id, itemId: persisted.id, taskId: "task-one" }),
+    ).resolves.toBe("already_linked");
+    await expect(
+      repo.linkItemToTask({ outputId: running.row.id, itemId: persisted.id, taskId: "task-two" }),
+    ).rejects.toThrow("different task");
+    await expect(
+      db.selectFrom("agent_output_items").select("task_id").where("id", "=", persisted.id).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ task_id: "task-one" });
+  });
+
   it("lists bounded completed outputs for a user and agent since a timestamp oldest first with items", async () => {
     const repo = createAgentOutputRepository(db);
     const base = {

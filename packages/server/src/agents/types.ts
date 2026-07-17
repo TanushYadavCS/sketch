@@ -40,6 +40,10 @@ export interface AgentOutputSavedArgs {
   userId: string;
   outputId: string;
   items: AgentOutputItemInput[];
+  persistedItems?: Array<{
+    id: string;
+    item: AgentOutputItemInput;
+  }>;
   createTasks: boolean;
   runtimeContext: Record<string, unknown>;
 }

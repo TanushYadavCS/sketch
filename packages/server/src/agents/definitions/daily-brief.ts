@@ -1651,17 +1651,48 @@ function buildFollowupReminderView(
 
 async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
   if (!args.createTasks) return;
-  const taskRepo = createTaskRepository(args.db);
-  for (const item of args.items) {
-    if (item.sectionKey !== "todos") continue;
+  if (!args.persistedItems) {
+    const taskRepo = createTaskRepository(args.db);
+    for (const item of args.items) {
+      if (item.sectionKey !== "todos" || item.canonicalTaskId) continue;
+      try {
+        await taskRepo.promoteBriefTask({
+          userId: args.userId,
+          todo: item,
+          knowledgeRefs: item.knowledgeRefs,
+        });
+      } catch (err) {
+        args.logger.warn({ err, outputId: args.outputId, userId: args.userId }, "Daily Brief: task promotion failed");
+      }
+    }
+    return;
+  }
+
+  for (const persisted of args.persistedItems) {
+    const item = persisted.item;
+    if (item.sectionKey !== "todos" || item.canonicalTaskId) continue;
     try {
-      await taskRepo.promoteBriefTask({
-        userId: args.userId,
-        todo: item,
-        knowledgeRefs: item.knowledgeRefs,
+      await args.db.transaction().execute(async (trx) => {
+        const result = await createTaskRepository(trx).promoteBriefTask({
+          userId: args.userId,
+          todo: item,
+          knowledgeRefs: item.knowledgeRefs,
+        });
+        if (result.status === "skipped") return;
+        const linked = await createAgentOutputRepository(trx).linkItemToTask({
+          outputId: args.outputId,
+          itemId: persisted.id,
+          taskId: result.taskId,
+        });
+        if (linked === "missing") {
+          throw new Error(`Persisted Daily Brief item is missing: ${persisted.id}`);
+        }
       });
     } catch (err) {
-      args.logger.warn({ err, outputId: args.outputId, userId: args.userId }, "Daily Brief: task promotion failed");
+      args.logger.warn(
+        { err, outputId: args.outputId, itemId: persisted.id, userId: args.userId },
+        "Daily Brief: task promotion failed",
+      );
     }
   }
 }

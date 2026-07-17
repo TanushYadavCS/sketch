@@ -1094,6 +1094,43 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
       }));
     },
 
+    async linkItemToTask(params: {
+      outputId: string;
+      itemId: string;
+      taskId: string;
+    }): Promise<"linked" | "already_linked" | "missing"> {
+      const existing = await db
+        .selectFrom("agent_output_items")
+        .select("task_id")
+        .where("id", "=", params.itemId)
+        .where("agent_output_id", "=", params.outputId)
+        .executeTakeFirst();
+      if (!existing) return "missing";
+      if (existing.task_id === params.taskId) return "already_linked";
+      if (existing.task_id) {
+        throw new Error(`Agent output item is already linked to a different task: ${params.itemId}`);
+      }
+
+      const updated = await db
+        .updateTable("agent_output_items")
+        .set({ task_id: params.taskId })
+        .where("id", "=", params.itemId)
+        .where("agent_output_id", "=", params.outputId)
+        .where("task_id", "is", null)
+        .executeTakeFirst();
+      if (affectedRows(updated) > 0) return "linked";
+
+      const raced = await db
+        .selectFrom("agent_output_items")
+        .select("task_id")
+        .where("id", "=", params.itemId)
+        .where("agent_output_id", "=", params.outputId)
+        .executeTakeFirst();
+      if (!raced) return "missing";
+      if (raced.task_id === params.taskId) return "already_linked";
+      throw new Error(`Agent output item is already linked to a different task: ${params.itemId}`);
+    },
+
     async markFailed(outputId: string, message: string): Promise<void> {
       await db
         .updateTable("agent_outputs")

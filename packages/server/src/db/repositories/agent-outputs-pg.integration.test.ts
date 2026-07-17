@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createTestPgDb } from "../../test-utils";
+import { dailyBriefDefinition } from "../../agents/definitions/daily-brief";
+import { createTestConfig, createTestLogger, createTestPgDb } from "../../test-utils";
 import type { DB } from "../schema";
 import type { AgentOutputItemInput } from "./agent-outputs";
 import { createAgentOutputRepository } from "./agent-outputs";
@@ -171,6 +172,90 @@ describe("createAgentOutputRepository output scopes on Postgres", () => {
         .where("agent_output_id", "=", running.row.id)
         .executeTakeFirstOrThrow(),
     ).resolves.toEqual({ id: persisted[0]?.id, task_id: "task-direct" });
+  });
+
+  it("promotes and links a persisted Brief todo in one Postgres transaction", async () => {
+    await db
+      .insertInto("users")
+      .values({
+        id: "user-link",
+        name: "Link User",
+        email: "link@example.com",
+        email_verified_at: "2026-07-17T00:00:00.000Z",
+      })
+      .execute();
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "person-link",
+          name: "Link User",
+          source_type: "person",
+          status: "confirmed",
+          hotness: 0,
+          metadata: JSON.stringify({ email: "link@example.com" }),
+          created_at: "2026-07-17T00:00:00.000Z",
+          updated_at: "2026-07-17T00:00:00.000Z",
+        },
+        {
+          id: "project-link",
+          name: "Link Project",
+          source_type: "project",
+          status: "confirmed",
+          hotness: 0,
+          created_at: "2026-07-17T00:00:00.000Z",
+          updated_at: "2026-07-17T00:00:00.000Z",
+        },
+      ])
+      .execute();
+    const repo = createAgentOutputRepository(db);
+    const running = await repo.createRunning({
+      agentKey: "daily_brief",
+      agentVersion: "test",
+      userId: "user-link",
+      outputDate: "2026-07-17",
+      timezone: "UTC",
+      triggerType: "manual",
+    });
+    const item: AgentOutputItemInput = {
+      sectionKey: "todos",
+      title: "Prepare Postgres launch plan",
+      summary: "Snapshot summary",
+      priority: "medium",
+      label: "todo",
+      structuredPayload: {
+        assigneeEntityId: "person-link",
+        assigneeName: "Link User",
+      },
+      knowledgeRefs: { entityIds: ["project-link"], fileIds: ["file-link"] },
+      sortOrder: 0,
+    };
+    const [persisted] = await repo.completeOutput({
+      outputId: running.row.id,
+      masthead: { title: "Brief", summary: "Summary" },
+      rawPayload: {},
+      items: [item],
+    });
+
+    await dailyBriefDefinition.onOutputSaved?.({
+      db,
+      config: createTestConfig({ DB_TYPE: "postgres" }),
+      logger: createTestLogger(),
+      userId: "user-link",
+      outputId: running.row.id,
+      items: [item],
+      persistedItems: [{ id: persisted.id, item }],
+      createTasks: true,
+      runtimeContext: {},
+    });
+
+    const linked = await db
+      .selectFrom("agent_output_items")
+      .innerJoin("tasks", "tasks.id", "agent_output_items.task_id")
+      .select(["agent_output_items.id", "tasks.parent_entity_id"])
+      .where("agent_output_items.id", "=", persisted.id)
+      .executeTakeFirstOrThrow();
+    expect(linked).toEqual({ id: persisted.id, parent_entity_id: "project-link" });
   });
 });
 
