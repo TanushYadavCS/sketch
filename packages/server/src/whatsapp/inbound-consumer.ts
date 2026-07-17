@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, rename, stat } from "node:fs/promises";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { type Kysely, sql } from "kysely";
+import { createConversationSlicesRepository } from "../db/repositories/conversation-slices";
 import { createConversationRepository } from "../db/repositories/conversations";
 import { createWhatsAppInboundEventsRepository } from "../db/repositories/whatsapp-inbound-events";
 import type { WhatsAppInboundEventRow } from "../db/repositories/whatsapp-inbound-events";
@@ -191,6 +192,7 @@ export class WhatsAppInboundConsumer {
       ...envelope.message,
       rawMessage: envelope.message.rawProviderPayload,
     } as WhatsAppMessage);
+    message.connectionKey = envelope.connectionKey;
     if (!this.options.shouldHandleInboundMessage(message)) {
       await this.consumeFiltered(row, claimToken, message.kind);
       return;
@@ -198,6 +200,8 @@ export class WhatsAppInboundConsumer {
     let captureCommitted = false;
     const capture = await this.options.handlers.captureQueuedMessage(message, {
       eventKey: envelope.eventKey,
+      source: envelope.kind === "message" ? "live" : "history",
+      connectionKey: envelope.connectionKey,
       attachmentsForWorkspace: async (workspaceDir) => {
         if (envelope.message.mediaStagingError) {
           this.options.logger.warn(
@@ -219,6 +223,13 @@ export class WhatsAppInboundConsumer {
       commitCapture: async (captureMessage) => {
         const captured = await this.options.db.transaction().execute(async (trx) => {
           const captured = await captureMessage(createConversationRepository(trx));
+          if (envelope.kind === "message" && message.kind === "group" && captured) {
+            await createConversationSlicesRepository(trx).recordLiveStartOnce({
+              groupJid: message.target.groupId,
+              effectiveAt: captured.captured.effectiveAt,
+              messageId: captured.captured.id,
+            });
+          }
           const transition = await trx
             .updateTable("whatsapp_inbound_events")
             .set({ status: "captured", next_attempt_at: sql`CURRENT_TIMESTAMP`, consumed_at: null })
@@ -288,6 +299,7 @@ export class WhatsAppInboundConsumer {
           ...item.message,
           rawMessage: item.message.rawProviderPayload,
         } as WhatsAppMessage);
+        message.connectionKey = item.connectionKey ?? envelope.connectionKey;
         envelopeByMessage.set(message, item);
         return message;
       })
@@ -310,25 +322,12 @@ export class WhatsAppInboundConsumer {
       },
       {
         checkpoint: isTerminalChunk,
-        attachmentsForMessage: async (message, workspaceDir) => {
+        captureMetadataForMessage: (message) => {
           const item = envelopeByMessage.get(message);
-          if (!item) return [];
-          if (item.message.mediaStagingError) {
-            this.options.logger.warn(
-              { inboundEventId: row.id, mediaStagingError: item.message.mediaStagingError },
-              "Stored WhatsApp media staging failed; continuing without attachment",
-            );
-            return [];
-          }
-          if (!item.message.stagedMediaRef) return [];
-          return [
-            await moveWhatsAppStagedMedia({
-              ref: item.message.stagedMediaRef,
-              eventKey: item.eventKey,
-              workspaceDir,
-              stagingDir: this.options.stagingDir,
-            }),
-          ];
+          return {
+            eventKey: item?.eventKey ?? null,
+            connectionKey: item?.connectionKey ?? envelope.connectionKey,
+          };
         },
       },
     );

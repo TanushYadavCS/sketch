@@ -493,6 +493,10 @@ export interface ConversationMessagesTable {
   is_thread_reply: Generated<number>;
   provider_timestamp: string | null;
   received_at: string;
+  source: Generated<string>;
+  effective_at: Generated<string | null>;
+  connection_key: Generated<string | null>;
+  backfill_range_id: Generated<string | null>;
   created_at: Generated<string>;
 }
 
@@ -599,6 +603,8 @@ export interface WhatsAppBackfillCheckpointsTable {
   group_jid: string;
   last_fetched_key: string | null;
   status: string;
+  live_start_effective_at: Generated<string | null>;
+  live_start_message_id: Generated<number | null>;
   updated_at: Generated<string>;
 }
 

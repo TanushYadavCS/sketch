@@ -50,7 +50,12 @@ class FakeBaileysBuffer {
 
   constructor(
     private readonly capture: WhatsAppGatewayCapture,
-    private readonly metadata: WhatsAppHistoryBatchMetadata = { syncType: 1, progress: 100, isLatest: true },
+    private readonly metadata: WhatsAppHistoryBatchMetadata = {
+      socketGeneration: 1,
+      syncType: 1,
+      progress: 100,
+      isLatest: true,
+    },
   ) {}
 
   connect(): void {
@@ -191,6 +196,44 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
     ).toBe(true);
   });
 
+  it("round-trips the lease and socket generations through live and history envelopes", async () => {
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => true,
+      wake: async () => undefined,
+      onPersistFailure: () => undefined,
+      leaseGeneration: 7,
+    });
+
+    await capture.captureMessage(groupMessage("live-key", "2026-07-17T09:00:00.000Z"), {
+      socketGeneration: 19,
+    });
+    await capture.captureHistory([groupMessage("history-key", "2026-07-17T08:59:00.000Z")], {
+      socketGeneration: 20,
+      syncType: 1,
+    });
+
+    const rows = await db
+      .selectFrom("whatsapp_inbound_events")
+      .select(["kind", "envelope"])
+      .orderBy("id", "asc")
+      .execute();
+    expect(JSON.parse(rows[0]?.envelope ?? "{}")).toMatchObject({
+      kind: "message",
+      connectionKey: "000000000007:000000000019",
+    });
+    expect(JSON.parse(rows[1]?.envelope ?? "{}")).toMatchObject({
+      kind: "history_batch",
+      connectionKey: "000000000007:000000000020",
+      messages: [{ connectionKey: "000000000007:000000000020" }],
+    });
+  });
+
   it("treats history after a logout-released lease and re-pair as a fresh initial-sync generation", async () => {
     const lease = createWhatsAppSessionLeaseRepository(db);
     const acquired = await lease.acquire({
@@ -275,6 +318,93 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
     expect(
       (JSON.parse(rows[0]?.envelope ?? "{}") as { messages: Array<{ fromMe: boolean }> }).messages[0]?.fromMe,
     ).toBe(true);
+  });
+
+  it("never promotes ON_DEMAND history while preserving ordinary reconnect promotion", async () => {
+    const lease = createWhatsAppSessionLeaseRepository(db);
+    const acquired = await lease.acquire({
+      ownerKind: "gateway",
+      ownerToken: "owner-on-demand",
+      gatewayHttpToken: "http-token",
+      hostId: "host-on-demand",
+      bootId: "boot-on-demand",
+      pid: 5,
+      pidStartTime: "5",
+      scriptHash: "hash",
+      contractVersion: "1.0",
+    });
+    const fence = { ownerToken: "owner-on-demand", generation: acquired.lease?.generation ?? 0 };
+    await lease.heartbeat("owner-on-demand", { markLive: true });
+    await lease.markDisconnected(fence);
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => false,
+      wake: async () => undefined,
+      onPersistFailure: () => undefined,
+      leaseGeneration: fence.generation,
+    });
+
+    await capture.captureHistory([groupMessage("on-demand", new Date().toISOString())], {
+      socketGeneration: 2,
+      syncType: 6,
+    });
+    await capture.captureHistory([groupMessage("reconnect", new Date().toISOString())], {
+      socketGeneration: 2,
+      syncType: 1,
+    });
+
+    const rows = await db
+      .selectFrom("whatsapp_inbound_events")
+      .select(["kind", "provider_message_id"])
+      .orderBy("id", "asc")
+      .execute();
+    expect(rows.filter((row) => row.provider_message_id === "on-demand")).toEqual([]);
+    expect(rows.filter((row) => row.provider_message_id === "reconnect")).toEqual([
+      { kind: "history_message", provider_message_id: "reconnect" },
+    ]);
+    expect(rows.filter((row) => row.kind === "history_batch")).toHaveLength(2);
+  });
+
+  it("does not stage history media and excludes messages without durable provider identity", async () => {
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => {
+        throw new Error("history media staging must stay disabled");
+      },
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => true,
+      wake: async () => undefined,
+      onPersistFailure: () => undefined,
+      leaseGeneration: 3,
+    });
+    const media = groupMessage("captioned-media", "2026-07-17T09:00:00.000Z");
+    media.mediaType = "imageMessage";
+    const noId = groupMessage("temporary-id", "2026-07-17T09:00:00.000Z");
+    noId.messageId = "";
+    if (noId.rawMessage.key) noId.rawMessage.key.id = null;
+    const noTimestamp = groupMessage("no-timestamp", "2026-07-17T09:00:00.000Z");
+    noTimestamp.rawMessage.messageTimestamp = null;
+
+    await capture.captureHistory([media, noId, noTimestamp], { socketGeneration: 4, syncType: 1 });
+
+    const row = await db.selectFrom("whatsapp_inbound_events").select("envelope").executeTakeFirstOrThrow();
+    const envelope = JSON.parse(row.envelope) as {
+      messages: Array<{ providerMessageId: string; message: { stagedMediaRef: unknown; mediaStagingError: unknown } }>;
+    };
+    expect(envelope.messages).toEqual([
+      expect.objectContaining({
+        providerMessageId: "captioned-media",
+        message: expect.objectContaining({ stagedMediaRef: null, mediaStagingError: null }),
+      }),
+    ]);
   });
 
   it("dead-letters an indivisible history message that remains over 200KB after compaction", async () => {

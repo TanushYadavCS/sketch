@@ -553,6 +553,10 @@ export class InProcessWhatsAppLease {
     });
   }
 
+  get generation(): number | null {
+    return this.fence?.generation ?? null;
+  }
+
   async acquire(): Promise<void> {
     if (this.fence && (await this.leases.isOwned(this.fence))) return;
     const supervisor = new WhatsAppGatewaySupervisor(this.options);

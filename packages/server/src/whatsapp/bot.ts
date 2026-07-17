@@ -88,7 +88,11 @@ export interface WhatsAppGroupMessage extends WhatsAppBaseMessage {
 
 export type WhatsAppMessage = WhatsAppDmMessage | WhatsAppGroupMessage;
 
-export type WhatsAppMessageHandler = (message: WhatsAppMessage) => Promise<void>;
+export interface WhatsAppCaptureMetadata {
+  socketGeneration: number;
+}
+
+export type WhatsAppMessageHandler = (message: WhatsAppMessage, metadata: WhatsAppCaptureMetadata) => Promise<void>;
 
 export interface WhatsAppHistoryBatchResult {
   persisted: number;
@@ -97,6 +101,7 @@ export interface WhatsAppHistoryBatchResult {
 }
 
 export interface WhatsAppHistoryBatchMetadata {
+  socketGeneration: number;
   isLatest?: boolean;
   progress?: number | null;
   syncType?: proto.HistorySync.HistorySyncType | null;
@@ -104,7 +109,7 @@ export interface WhatsAppHistoryBatchMetadata {
 
 export type WhatsAppHistoryMessagesHandler = (
   messages: WhatsAppGroupMessage[],
-  metadata?: WhatsAppHistoryBatchMetadata,
+  metadata: WhatsAppHistoryBatchMetadata,
 ) => Promise<WhatsAppHistoryBatchResult>;
 
 export interface PairingCallbacks {
@@ -670,7 +675,7 @@ export class WhatsAppBot {
       let result: WhatsAppHistoryBatchResult = { persisted: 0, skippedOld: 0, skippedDup: 0 };
       try {
         if (groupMessages.length > 0 && this.historyHandler) {
-          result = await this.historyHandler(groupMessages, { isLatest, progress, syncType });
+          result = await this.historyHandler(groupMessages, { socketGeneration, isLatest, progress, syncType });
         }
       } catch (err) {
         this.logger.warn(
@@ -738,9 +743,9 @@ export class WhatsAppBot {
         if (!text && !hasMedia) continue;
 
         if (isGroup) {
-          await this.handleGroupMessage(msg, jid, text, messageType, hasMedia);
+          await this.handleGroupMessage(msg, jid, text, messageType, hasMedia, socketGeneration);
         } else {
-          await this.handleDmMessage(msg, jid, isStandardDm, text, messageType, hasMedia);
+          await this.handleDmMessage(msg, jid, isStandardDm, text, messageType, hasMedia, socketGeneration);
         }
       }
     });
@@ -753,6 +758,7 @@ export class WhatsAppBot {
     text: string | null,
     messageType: string | undefined,
     hasMedia: boolean,
+    socketGeneration: number,
   ): Promise<void> {
     let phoneNumber: string | null = null;
 
@@ -769,17 +775,20 @@ export class WhatsAppBot {
     if (this.handler) {
       const quotedMessage = extractQuotedMessage(msg.message ? extractContextInfo(msg.message) : undefined);
       this.lastMessageAt = Date.now();
-      await this.handler({
-        type: "dm",
-        text: text ?? "",
-        phoneNumber,
-        jid,
-        messageId: msg.key?.id ?? "",
-        pushName: msg.pushName ?? "Unknown",
-        rawMessage: msg,
-        mediaType: hasMedia ? (messageType ?? undefined) : undefined,
-        ...(quotedMessage ? { quotedMessage } : {}),
-      });
+      await this.handler(
+        {
+          type: "dm",
+          text: text ?? "",
+          phoneNumber,
+          jid,
+          messageId: msg.key?.id ?? "",
+          pushName: msg.pushName ?? "Unknown",
+          rawMessage: msg,
+          mediaType: hasMedia ? (messageType ?? undefined) : undefined,
+          ...(quotedMessage ? { quotedMessage } : {}),
+        },
+        { socketGeneration },
+      );
     }
   }
 
@@ -789,11 +798,12 @@ export class WhatsAppBot {
     text: string | null,
     messageType: string | undefined,
     hasMedia: boolean,
+    socketGeneration: number,
   ): Promise<void> {
     const groupMessage = await this.buildGroupMessage(msg, groupJid, text, messageType, hasMedia);
     if (groupMessage && this.handler) {
       this.lastMessageAt = Date.now();
-      await this.handler(groupMessage);
+      await this.handler(groupMessage, { socketGeneration });
     }
   }
 

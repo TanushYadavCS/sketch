@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createConversationRepository } from "../db/repositories/conversations";
 import { createWhatsAppInboundEventsRepository } from "../db/repositories/whatsapp-inbound-events";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { WhatsAppAdapterHandlers } from "./adapter";
@@ -400,6 +401,100 @@ describe("WhatsAppInboundConsumer", () => {
     );
   });
 
+  it("records the first live group boundary once and ignores promoted history for the boundary", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const history = groupEnvelope("boundary-history");
+    history.kind = "history_message";
+    const firstLive = groupEnvelope("boundary-live-first");
+    const secondLive = groupEnvelope("boundary-live-second");
+    await repo.insert({
+      kind: "history_message",
+      origin: "gateway",
+      eventKey: history.eventKey,
+      providerMessageId: history.providerMessageId,
+      envelope: JSON.stringify(history),
+    });
+    await repo.insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: firstLive.eventKey,
+      providerMessageId: firstLive.providerMessageId,
+      envelope: JSON.stringify(firstLive),
+    });
+    await repo.insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: secondLive.eventKey,
+      providerMessageId: secondLive.providerMessageId,
+      envelope: JSON.stringify(secondLive),
+    });
+    const effectiveById = new Map([
+      ["boundary-history", "2026-07-15T08:20:00.000Z"],
+      ["boundary-live-first", "2026-07-15T08:27:00.000Z"],
+      ["boundary-live-second", "2026-07-15T08:28:00.000Z"],
+    ]);
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger: createTestLogger(),
+      stagingDir,
+      shouldHandleInboundMessage: () => true,
+      handlers: handlers({
+        captureQueuedMessage: async (message, params) => {
+          if (!params.commitCapture) throw new Error("expected transactional capture");
+          return params.commitCapture(async (conversationRepository) => {
+            const conversation = await conversationRepository.getOrCreate({
+              platform: "whatsapp",
+              kind: "group",
+              providerConversationId: "120363000000001@g.us",
+            });
+            const captured = await conversationRepository.captureOrGet({
+              conversationId: conversation.id,
+              providerMessageId: message.providerMessageId,
+              eventKey: params.eventKey,
+              senderJid: message.senderProviderId,
+              senderName: message.senderName,
+              text: message.text,
+              receivedAt: effectiveById.get(message.providerMessageId),
+              source: params.source,
+              connectionKey: params.connectionKey,
+            });
+            return { conversation, captured, attachments: [], inserted: true, omitted: false };
+          });
+        },
+        dispatchCapturedMessage: async (_message, _capture, hooks) => {
+          await hooks.onRunStart();
+          return true;
+        },
+      }),
+    });
+
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    const messages = await createConversationRepository(db).listMessages(
+      (
+        await db
+          .selectFrom("conversations")
+          .select("id")
+          .where("provider_conversation_id", "=", "120363000000001@g.us")
+          .executeTakeFirstOrThrow()
+      ).id,
+      { includeBotMessages: true },
+    );
+    const firstLiveRow = messages.messages.find((message) => message.providerMessageId === "boundary-live-first");
+    const checkpoint = await db
+      .selectFrom("whatsapp_backfill_checkpoints")
+      .selectAll()
+      .where("group_jid", "=", "120363000000001@g.us")
+      .executeTakeFirstOrThrow();
+    expect(messages.messages.map((message) => message.source)).toEqual(["history", "live", "live"]);
+    expect(checkpoint).toMatchObject({
+      live_start_effective_at: "2026-07-15T08:27:00.000Z",
+      live_start_message_id: firstLiveRow?.id,
+    });
+  });
+
   it("terminally consumes a Baileys DM when the configured DM provider is Wati", async () => {
     const repo = createWhatsAppInboundEventsRepository(db);
     const envelope = messageEnvelope("filtered-dm", "event-filtered-dm");
@@ -685,7 +780,7 @@ describe("WhatsAppInboundConsumer", () => {
       chunkIndex: 0,
       chunkCount: 1,
     });
-    let historyAttachments: unknown;
+    let historyCaptureMetadata: unknown;
     const consumer = new WhatsAppInboundConsumer({
       db,
       logger: createTestLogger(),
@@ -694,10 +789,7 @@ describe("WhatsAppInboundConsumer", () => {
       handlers: handlers({
         handleHistoryMessages: async (messages, _metadata, options) => {
           expect(messages.map((message) => message.text)).toEqual(["hello"]);
-          historyAttachments = await options?.attachmentsForMessage?.(
-            messages[0],
-            join(stagingDir, "history-workspace"),
-          );
+          historyCaptureMetadata = options?.captureMetadataForMessage?.(messages[0]);
           return { persisted: 1, skippedOld: 0, skippedDup: 0 };
         },
       }),
@@ -706,7 +798,10 @@ describe("WhatsAppInboundConsumer", () => {
     await consumer.wake();
     await consumer.stop();
 
-    expect(historyAttachments).toEqual([]);
+    expect(historyCaptureMetadata).toEqual({
+      eventKey: "event-history-staging-error",
+      connectionKey: null,
+    });
     await expect(
       db
         .selectFrom("whatsapp_inbound_events")

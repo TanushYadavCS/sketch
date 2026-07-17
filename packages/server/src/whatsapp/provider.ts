@@ -43,6 +43,7 @@ interface WhatsAppInboundBase {
   mediaType?: string;
   quotedMessage?: WhatsAppQuotedMessage;
   rawProviderPayload?: unknown;
+  connectionKey?: string | null;
 }
 
 export interface WhatsAppDmInboundMessage extends WhatsAppInboundBase {

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import type { WASocket, proto } from "@whiskeysockets/baileys";
+import { type WASocket, proto } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import {
   createWhatsAppEventKey,
@@ -10,13 +10,20 @@ import {
 import type { DB } from "../../db/schema";
 import { downloadWhatsAppMedia } from "../../files";
 import type { Logger } from "../../logger";
-import type { WhatsAppHistoryBatchMetadata, WhatsAppHistoryBatchResult, WhatsAppMessage } from "../bot";
+import type {
+  WhatsAppCaptureMetadata,
+  WhatsAppHistoryBatchMetadata,
+  WhatsAppHistoryBatchResult,
+  WhatsAppMessage,
+} from "../bot";
+import { createWhatsAppConnectionKey } from "../connection-key";
 import {
   type StagedMediaRef,
   type WhatsAppMessageEnvelope,
   whatsAppHistoryBatchEnvelopeSchema,
   whatsAppMessageEnvelopeSchema,
 } from "../facade-contract";
+import { validWhatsAppProviderTimestamp } from "../provider-timestamp";
 
 export const WHATSAPP_HISTORY_CHUNK_MAX_MESSAGES = 100;
 export const WHATSAPP_HISTORY_CHUNK_MAX_BYTES = 200 * 1024;
@@ -43,6 +50,7 @@ export interface WhatsAppGatewayCaptureDeps {
   isInitialSyncGeneration: () => boolean;
   wake: () => Promise<void>;
   onPersistFailure: (error: unknown) => void;
+  leaseGeneration?: number;
   now?: () => Date;
 }
 
@@ -50,6 +58,17 @@ function providerTimestamp(message: WhatsAppMessage, now: () => Date): string {
   const timestamp = message.rawMessage.messageTimestamp;
   const seconds = timestamp == null ? Number.NaN : Number(timestamp);
   return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000).toISOString() : now().toISOString();
+}
+
+function genuineProviderTimestamp(message: WhatsAppMessage, now: () => Date): string | null {
+  const timestamp = message.rawMessage.messageTimestamp;
+  const seconds = timestamp == null ? Number.NaN : Number(timestamp);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return validWhatsAppProviderTimestamp(new Date(seconds * 1000).toISOString(), now());
+}
+
+function isOnDemandHistory(metadata: WhatsAppHistoryBatchMetadata): boolean {
+  return metadata.syncType === proto.HistorySync.HistorySyncType.ON_DEMAND;
 }
 
 function rawProviderIdentity(message: WhatsAppMessage): {
@@ -113,7 +132,10 @@ export class WhatsAppGatewayCapture {
     return Number(row.count);
   }
 
-  async captureMessage(message: WhatsAppMessage): Promise<void> {
+  async captureMessage(
+    message: WhatsAppMessage,
+    metadata: WhatsAppCaptureMetadata = { socketGeneration: 0 },
+  ): Promise<void> {
     const identity = rawProviderIdentity(message);
     const eventKey = createWhatsAppEventKey(
       identity.providerConversationId,
@@ -122,7 +144,11 @@ export class WhatsAppGatewayCapture {
     );
     try {
       if (eventKey && (await this.events.findByEventKey(eventKey))) return;
-      const envelope = await this.prepareMessageEnvelope(message, "message");
+      const envelope = await this.prepareMessageEnvelope(
+        message,
+        "message",
+        createWhatsAppConnectionKey(this.deps.leaseGeneration ?? 0, metadata.socketGeneration),
+      );
       const result = await this.events.insert({
         kind: "message",
         origin: "gateway",
@@ -139,13 +165,19 @@ export class WhatsAppGatewayCapture {
 
   async captureHistory(
     messages: WhatsAppMessage[],
-    metadata?: WhatsAppHistoryBatchMetadata,
+    metadata: WhatsAppHistoryBatchMetadata = { socketGeneration: 0 },
   ): Promise<WhatsAppHistoryBatchResult> {
     const batchId = randomUUID();
     try {
+      const connectionKey = createWhatsAppConnectionKey(this.deps.leaseGeneration ?? 0, metadata.socketGeneration);
       const prepared: PreparedHistoryMessage[] = [];
-      for (const message of messages) prepared.push(await this.prepareHistoryMessage(message));
-      const chunks = this.chunkHistory(batchId, prepared, metadata);
+      for (const message of messages) {
+        const providerMessageId = rawProviderIdentity(message).providerMessageId;
+        const timestamp = genuineProviderTimestamp(message, this.now);
+        if (!providerMessageId || !timestamp) continue;
+        prepared.push(await this.prepareHistoryMessage(message, connectionKey, timestamp));
+      }
+      const chunks = this.chunkHistory(batchId, prepared, connectionKey, metadata);
       const results = await this.events.insertManyAtomic(
         chunks.map((chunk) => ({
           kind: "history_batch" as const,
@@ -172,7 +204,7 @@ export class WhatsAppGatewayCapture {
 
       let replyInserted = 0;
       let replyDeduplicated = 0;
-      if (!this.deps.isInitialSyncGeneration()) {
+      if (!this.deps.isInitialSyncGeneration() && !isOnDemandHistory(metadata)) {
         const lease = await this.deps.db
           .selectFrom("whatsapp_session_lease")
           .select(["disconnected_at", "last_live_at"])
@@ -212,8 +244,12 @@ export class WhatsAppGatewayCapture {
     }
   }
 
-  private async prepareHistoryMessage(message: WhatsAppMessage): Promise<PreparedHistoryMessage> {
-    let envelope = await this.prepareMessageEnvelope(message, "history_message");
+  private async prepareHistoryMessage(
+    message: WhatsAppMessage,
+    connectionKey: string,
+    timestamp: string,
+  ): Promise<PreparedHistoryMessage> {
+    let envelope = await this.prepareMessageEnvelope(message, "history_message", connectionKey, timestamp);
     let oversized = byteLength(envelope) > WHATSAPP_HISTORY_CHUNK_MAX_BYTES - HISTORY_CHUNK_SIZE_RESERVE_BYTES;
     if (oversized) {
       envelope = whatsAppMessageEnvelopeSchema.parse({
@@ -228,6 +264,8 @@ export class WhatsAppGatewayCapture {
   private async prepareMessageEnvelope(
     message: WhatsAppMessage,
     kind: "message" | "history_message",
+    connectionKey: string,
+    timestamp = providerTimestamp(message, this.now),
   ): Promise<WhatsAppMessageEnvelope> {
     const identity = rawProviderIdentity(message);
     const eventKey = createWhatsAppEventKey(
@@ -243,14 +281,15 @@ export class WhatsAppGatewayCapture {
         ...(eventKey ? { eventKey } : {}),
       });
     }
-    const staged = await this.stageMedia(message);
+    const staged = kind === "message" ? await this.stageMedia(message) : { ref: null, error: null };
     return whatsAppMessageEnvelopeSchema.parse({
       version: "1.0",
       kind,
-      providerTimestamp: providerTimestamp(message, this.now),
+      providerTimestamp: timestamp,
       providerConversationId: identity.providerConversationId,
       providerMessageId: identity.providerMessageId,
       eventKey,
+      connectionKey,
       fromMe: identity.fromMe,
       message: {
         ...message,
@@ -301,7 +340,8 @@ export class WhatsAppGatewayCapture {
   private chunkHistory(
     batchId: string,
     prepared: PreparedHistoryMessage[],
-    metadata?: WhatsAppHistoryBatchMetadata,
+    connectionKey: string,
+    metadata: WhatsAppHistoryBatchMetadata,
   ): Array<{ envelope: string; chunkIndex: number; dead: boolean }> {
     const groups: Array<{ messages: WhatsAppMessageEnvelope[]; dead: boolean }> = [];
     let current: WhatsAppMessageEnvelope[] = [];
@@ -318,7 +358,7 @@ export class WhatsAppGatewayCapture {
         continue;
       }
       const candidate = [...current, item.envelope];
-      const provisional = this.historyEnvelope(batchId, 0, 999_999, candidate, metadata);
+      const provisional = this.historyEnvelope(batchId, 0, 999_999, candidate, connectionKey, metadata);
       if (
         current.length > 0 &&
         (candidate.length > WHATSAPP_HISTORY_CHUNK_MAX_MESSAGES ||
@@ -332,7 +372,14 @@ export class WhatsAppGatewayCapture {
     if (groups.length === 0) groups.push({ messages: [], dead: false });
 
     return groups.map((group, chunkIndex) => {
-      const envelope = this.historyEnvelope(batchId, chunkIndex, groups.length, group.messages, metadata);
+      const envelope = this.historyEnvelope(
+        batchId,
+        chunkIndex,
+        groups.length,
+        group.messages,
+        connectionKey,
+        metadata,
+      );
       const serialized = serialize(envelope);
       return {
         envelope: serialized,
@@ -347,7 +394,8 @@ export class WhatsAppGatewayCapture {
     chunkIndex: number,
     chunkCount: number,
     messages: WhatsAppMessageEnvelope[],
-    metadata?: WhatsAppHistoryBatchMetadata,
+    connectionKey: string,
+    metadata: WhatsAppHistoryBatchMetadata,
   ) {
     const timestamp = messages
       .map((message) => message.providerTimestamp)
@@ -356,6 +404,7 @@ export class WhatsAppGatewayCapture {
       version: "1.0",
       kind: "history_batch",
       providerTimestamp: timestamp ?? this.now().toISOString(),
+      connectionKey,
       batch: { batchId, chunkIndex, chunkCount, ...asHistoryMetadata(metadata) },
       messages,
     });

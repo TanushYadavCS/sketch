@@ -363,7 +363,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     onMessage() {},
     onHistoryMessages() {},
   };
-  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, whatsappBot ?? gatewayInboundSource, logger);
+  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, whatsappBot ?? gatewayInboundSource, logger, {
+    getLeaseGeneration: () => inProcessWhatsAppLease?.generation ?? null,
+  });
   const watiWhatsApp =
     config.WHATSAPP_DM_PROVIDER === WHATSAPP_WATI_PROVIDER_ID
       ? createWatiWhatsAppProvider({

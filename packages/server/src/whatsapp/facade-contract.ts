@@ -139,6 +139,7 @@ export const whatsAppFacadeHealthSchema = z.object({
 
 export const whatsAppInboundEnvelopeVersionSchema = z.string().regex(/^1\.\d+$/u);
 export const whatsAppIsoUtcTimestampSchema = z.string().datetime({ offset: true });
+export const whatsAppConnectionKeySchema = z.string().regex(/^\d{12}:\d{12}$/u);
 
 export const whatsAppInboundMessageSchema = z.object({
   type: z.enum(["dm", "group"]),
@@ -170,6 +171,7 @@ export const whatsAppMessageEnvelopeSchema = z.object({
   providerConversationId: z.string().min(1),
   providerMessageId: z.string().nullable(),
   eventKey: z.string().nullable(),
+  connectionKey: whatsAppConnectionKeySchema.nullable().optional().default(null),
   fromMe: z.boolean(),
   message: whatsAppInboundMessageSchema,
 });
@@ -187,6 +189,7 @@ export const whatsAppHistoryBatchEnvelopeSchema = z.object({
   version: whatsAppInboundEnvelopeVersionSchema,
   kind: z.literal("history_batch"),
   providerTimestamp: whatsAppIsoUtcTimestampSchema,
+  connectionKey: whatsAppConnectionKeySchema.nullable().optional().default(null),
   batch: whatsAppHistoryBatchMetadataSchema,
   messages: z.array(whatsAppMessageEnvelopeSchema),
 });

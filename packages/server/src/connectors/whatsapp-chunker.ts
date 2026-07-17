@@ -10,6 +10,10 @@ import {
 import type { WhatsAppGroupIndexingConfig } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { isReasoningTextCommand, isToolProgressCommand } from "../progress-settings";
+import {
+  WHATSAPP_PROVIDER_TIMESTAMP_MAX_FUTURE_MS,
+  effectiveWhatsAppMessageTimestamp,
+} from "../whatsapp/provider-timestamp";
 
 export const DEFAULT_WHATSAPP_SLICE_GAP_MINUTES = 25;
 export const DEFAULT_WHATSAPP_SLICE_MAX_AGE_MINUTES = 120;
@@ -17,8 +21,6 @@ export const DEFAULT_WHATSAPP_SLICE_MAX_MESSAGES = 50;
 
 const MINUTE_MS = 60 * 1000;
 const DEFAULT_CLAIM_STALE_MS = 5 * MINUTE_MS;
-const PROVIDER_TIMESTAMP_FLOOR_MS = Date.parse("2009-01-01T00:00:00.000Z");
-const MAX_PROVIDER_TIMESTAMP_FUTURE_MS = 48 * 60 * 60 * 1000;
 const SYNTHETIC_ATTACHMENT_TEXT = "see attached files.";
 const SINGLE_EMOJI_PATTERN =
   /^(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\p{Emoji_Modifier}|\uFE0E|\uFE0F)*(?:\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\p{Emoji_Modifier}|\uFE0E|\uFE0F)*)*$/u;
@@ -129,25 +131,12 @@ function effectiveTimeMs(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function validProviderTimestamp(providerTimestamp: string | null | undefined, now: Date): string | null {
-  if (!providerTimestamp) return null;
-  const timestampMs = Date.parse(providerTimestamp);
-  if (!Number.isFinite(timestampMs) || timestampMs <= PROVIDER_TIMESTAMP_FLOOR_MS) return null;
-  if (timestampMs >= now.getTime() + MAX_PROVIDER_TIMESTAMP_FUTURE_MS) return null;
-  return new Date(timestampMs).toISOString();
-}
-
-function normalizeReceivedAt(receivedAt: string): string {
-  const receivedAtMs = Date.parse(receivedAt);
-  return Number.isFinite(receivedAtMs) ? new Date(receivedAtMs).toISOString() : receivedAt;
-}
-
 /**
  * Provider timestamp validation lives in TypeScript so SQLite and Postgres use
  * the same floor, skew, and invalid-date behavior without dialect-specific casts.
  */
 function effectiveTimestamp(row: ChunkerTimestampRow, now: Date): string {
-  return validProviderTimestamp(row.provider_timestamp, now) ?? normalizeReceivedAt(row.received_at);
+  return effectiveWhatsAppMessageTimestamp(row.provider_timestamp, row.received_at, now);
 }
 
 function isAfterCursor(message: { id: number; effectiveAt: string }, cursor: ConversationSliceCursorRow): boolean {
@@ -169,7 +158,7 @@ function cursorReceivedAtLowerBound(cursor: ConversationSliceCursorRow): string 
   if (cursor.last_effective_at === null || cursor.last_message_id === null) return null;
   const cursorMs = Date.parse(cursor.last_effective_at);
   if (!Number.isFinite(cursorMs)) return null;
-  return new Date(cursorMs - MAX_PROVIDER_TIMESTAMP_FUTURE_MS).toISOString();
+  return new Date(cursorMs - WHATSAPP_PROVIDER_TIMESTAMP_MAX_FUTURE_MS).toISOString();
 }
 
 function emptyRunSummary(): WhatsAppChunkerRunSummary {
@@ -342,7 +331,8 @@ async function listMessagesAfterCursor(
   let query = db
     .selectFrom("conversation_messages")
     .select(["id", "provider_message_id", "is_bot", "text", "attachments", "provider_timestamp", "received_at"])
-    .where("conversation_id", "=", conversationId);
+    .where("conversation_id", "=", conversationId)
+    .where("source", "=", "live");
   if (lowerBound) query = query.where("received_at", ">", lowerBound);
   const rows = await query.orderBy("id", "asc").execute();
 
@@ -374,6 +364,7 @@ async function countLateArrivals(
     .selectFrom("conversation_messages")
     .select(["id", "provider_timestamp", "received_at"])
     .where("conversation_id", "=", conversationId)
+    .where("source", "=", "live")
     .where("id", ">", cursor.last_message_id);
   if (lowerBound) query = query.where("received_at", ">", lowerBound);
   const rows = await query.execute();

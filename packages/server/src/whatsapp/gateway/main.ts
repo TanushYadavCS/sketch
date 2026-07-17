@@ -193,14 +193,15 @@ export async function runWhatsAppGateway(): Promise<void> {
     isInitialSyncGeneration: () => initialSyncGeneration,
     wake: () => appNotifier.wake(),
     onPersistFailure: () => void terminate(1, false, "durable inbound capture failed"),
+    leaseGeneration: fence.generation,
   });
-  bot.onMessage((message) => capture.captureMessage(message));
+  bot.onMessage((message, metadata) => capture.captureMessage(message, metadata));
   bot.onHistoryMessages((messages, metadata) => capture.captureHistory(messages, metadata));
   if (process.env.WHATSAPP_GATEWAY_TEST_FAKE_SOCKET === "1" && typeof process.send === "function") {
     process.on("message", (input) => {
       if (!input || typeof input !== "object" || !("type" in input) || input.type !== "capture-message") return;
       if (!("message" in input)) return;
-      void capture.captureMessage(input.message as WhatsAppMessage);
+      void capture.captureMessage(input.message as WhatsAppMessage, { socketGeneration: 1 });
     });
   }
 
