@@ -16,13 +16,7 @@
  *    every brief item whose taskId matches the returned task, preserving
  *    snapshot fields and replacing only the task overlay.
  */
-import type {
-  DailyBrief as DailyBriefData,
-  DailyBriefItem,
-  DailyBriefResponse,
-  DailyBriefTaskState,
-  TaskStatus,
-} from "@/lib/api";
+import type { DailyBrief as DailyBriefData, DailyBriefItem, DailyBriefResponse, DailyBriefTaskState } from "@/lib/api";
 import { renderWithProviders } from "@/test/utils";
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
