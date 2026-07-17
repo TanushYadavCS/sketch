@@ -1536,6 +1536,35 @@ describe("createConversationFollowupsRepository", () => {
     });
   });
 
+  it("keeps ownerless tasks assigned to the current user outside active route sources", async () => {
+    const conversationId = await seedConversation(db, "slack", "channel", "C-ownerless-assigned");
+    await db
+      .insertInto("tasks")
+      .values({
+        ...summaryTaskRow({
+          id: "ownerless-assigned-task",
+          title: "Ownerless assigned follow-up",
+          status: "open",
+          conversationId,
+          originOutputId: null,
+        }),
+        created_by_user_id: null,
+      })
+      .execute();
+
+    const reminders = await createConversationFollowupsRepository(db).queryPersonalReminders({
+      userId: USER_ID,
+      assigneeEntityIds: [ASSIGNEE_ID],
+      activeSourceKeys: ["slack:channel:C-different-active-route"],
+      now: NOW,
+    });
+
+    expect(reminders).toMatchObject({
+      status: "ok",
+      pending: [{ taskId: "ownerless-assigned-task", title: "Ownerless assigned follow-up" }],
+    });
+  });
+
   it("returns bounded reminder collections with an explicit overflow signal", async () => {
     const conversationId = await seedConversation(db, "slack", "channel", "C-reminder-limits");
     await db
@@ -1630,6 +1659,27 @@ describe("createConversationFollowupsRepository", () => {
     expect(reminders.looksResolved).toHaveLength(25);
     expect(reminders.untracked).toHaveLength(25);
     expect(reminders.suppressedTitles).toHaveLength(100);
+  });
+
+  it("caps legacy fallback items when durable reminder queries fail", async () => {
+    await db.schema.dropTable("task_completion_recommendations").execute();
+
+    const reminders = await createConversationFollowupsRepository(db).queryPersonalReminders({
+      userId: USER_ID,
+      assigneeEntityIds: [ASSIGNEE_ID],
+      legacyCandidates: Array.from({ length: 30 }, (_, index) => ({
+        title: `Fallback ${index}`,
+        sourceKey: "slack:channel:C-fallback",
+      })),
+      now: NOW,
+    });
+
+    expect(reminders).toMatchObject({
+      status: "error",
+      code: "durable_query_failed",
+      untracked: expect.any(Array),
+    });
+    expect(reminders.untracked).toHaveLength(25);
   });
 
   it("returns only tasks assigned to the current user's person entities in personal reminders", async () => {

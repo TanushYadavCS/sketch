@@ -1655,6 +1655,166 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
     });
   });
 
+  it("does not let inactive summary history consume the active-route scan cap", async () => {
+    await seedUser(db);
+    const activeSource = "slack:channel:C_ACTIVE_HISTORY";
+    const inactiveSource = "slack:channel:C_INACTIVE_HISTORY";
+    await seedSummarizerConfig([summaryRoute("route-active-history", [activeSource])]);
+    const activeEvidence = await seedConversationMessage("C_ACTIVE_HISTORY", "active-history");
+    const inactiveEvidence = await seedConversationMessage("C_INACTIVE_HISTORY", "inactive-history");
+    await seedSummaryOutput(
+      activeSource,
+      [{ title: "Active historical follow-up", messageIds: [activeEvidence.messageId] }],
+      "2026-06-25T06:00:00.000Z",
+    );
+    for (let index = 0; index < 50; index += 1) {
+      await seedSummaryOutput(
+        inactiveSource,
+        [{ title: `Inactive historical follow-up ${index}`, messageIds: [inactiveEvidence.messageId] }],
+        `2026-06-25T07:${String(index).padStart(2, "0")}:00.000Z`,
+      );
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "ok",
+      mode: "hybrid",
+      untracked: [expect.objectContaining({ title: "Active historical follow-up" })],
+    });
+    expect(JSON.stringify(context)).not.toContain("Inactive historical follow-up");
+  });
+
+  it("filters inactive summary tasks in SQL before applying brief task limits", async () => {
+    const assigneeEntityId = await seedTopologyTaskOwner();
+    const activeSource = "slack:channel:C_ACTIVE_TASK_CAP";
+    const inactiveSource = "slack:channel:C_INACTIVE_TASK_CAP";
+    await seedSummarizerConfig([summaryRoute("route-active-task-cap", [activeSource])]);
+    const activeOutputId = await seedSummaryOutput(activeSource, []);
+    const inactiveOutputId = await seedSummaryOutput(inactiveSource, []);
+    const tasks = createTaskRepository(db);
+    const activeTask = await tasks.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Active task behind inactive cap",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId,
+      assigneeName: "Agent User",
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "active-task-behind-inactive-cap",
+      createdByUserId: "user-1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({
+        origin_agent_output_id: activeOutputId,
+        updated_at: "2026-06-25T06:00:00.000Z",
+      })
+      .where("id", "=", activeTask.taskId)
+      .execute();
+    for (let index = 0; index < 50; index += 1) {
+      const inactiveTask = await tasks.upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: `Inactive task ${index}`,
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId,
+        assigneeName: "Agent User",
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: `inactive-task-${index}`,
+        createdByUserId: "user-1",
+      });
+      await db
+        .updateTable("tasks")
+        .set({
+          origin_agent_output_id: inactiveOutputId,
+          updated_at: `2026-06-25T07:${String(index).padStart(2, "0")}:00.000Z`,
+        })
+        .where("id", "=", inactiveTask.taskId)
+        .execute();
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 1,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect((context?.summaryTasks as Array<{ id: string }>).map((task) => task.id)).toContain(activeTask.taskId);
+    expect((context?.openDurableTasks as Array<{ id: string }>).map((task) => task.id)).toContain(activeTask.taskId);
+    expect(JSON.stringify(context)).not.toContain("Inactive task");
+  });
+
+  it("caps fallback reminder items when transition reads fail", async () => {
+    await seedUser(db);
+    const sourceKey = "slack:channel:C_TRANSITION_FALLBACK_CAP";
+    await seedSummarizerConfig([summaryRoute("route-transition-fallback-cap", [sourceKey])]);
+    const evidence = await seedConversationMessage("C_TRANSITION_FALLBACK_CAP", "transition-fallback-cap");
+    await seedSummaryOutput(
+      sourceKey,
+      Array.from({ length: 30 }, (_, index) => ({
+        title: `Transition fallback ${index}`,
+        messageIds: [evidence.messageId],
+      })),
+    );
+    await db.schema.dropTable("task_durability_route_state").execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "error",
+      code: "durable_transition_failed",
+      fallback: expect.any(Array),
+    });
+    expect((context?.followupReminder as { fallback: unknown[] }).fallback).toHaveLength(25);
+  });
+
   it("keeps exact suppression identities when completed tasks are the only reminder state", async () => {
     await seedUser(db);
     const task = await createTaskRepository(db).upsertTask({

@@ -238,6 +238,49 @@ describe("handleListFollowups", () => {
     });
   });
 
+  it("does not let inactive summary history consume the active-route scan cap", async () => {
+    const activeSource = "whatsapp:group:goosebumps";
+    const inactiveSource = "whatsapp:group:archived";
+    await seedSummarizerConfig(db, [route("route-active-history", activeSource)]);
+    const activeConversationId = await seedConversation(db);
+    const inactiveConversationId = await seedConversation(db, {
+      providerConversationId: "archived",
+      displayName: "Archived",
+    });
+    const activeMessageId = await seedMessage(db, activeConversationId, "wamid.active-history");
+    const inactiveMessageId = await seedMessage(db, inactiveConversationId, "wamid.inactive-history");
+    const now = Date.now();
+    await seedSummaryOutput(
+      db,
+      activeSource,
+      "Active historical follow-up",
+      activeMessageId,
+      new Date(now - 60 * 60_000).toISOString(),
+    );
+    for (let index = 0; index < 50; index += 1) {
+      await seedSummaryOutput(
+        db,
+        inactiveSource,
+        `Inactive historical follow-up ${index}`,
+        inactiveMessageId,
+        new Date(now - index * 1_000).toISOString(),
+      );
+    }
+
+    const result = await handleListFollowups({}, {
+      db,
+      currentUserId: "user-1",
+    } as SketchMcpDeps);
+    const payload = JSON.parse(result.content[0]?.text ?? "{}");
+
+    expect(payload).toMatchObject({
+      status: "ok",
+      mode: "hybrid",
+      untracked: [expect.objectContaining({ title: "Active historical follow-up" })],
+    });
+    expect(JSON.stringify(payload)).not.toContain("Inactive historical follow-up");
+  });
+
   it("preserves transition review candidates and recent-summary fallback when durable reminder reads fail", async () => {
     const sourceKey = "whatsapp:group:goosebumps";
     await seedSummarizerConfig(db, [route("route-1", sourceKey)]);

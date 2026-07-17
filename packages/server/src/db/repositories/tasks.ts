@@ -92,12 +92,16 @@ export interface ReanchorNullParentTasksResult {
 export interface LoadOpenDurableTasksForBriefOptions {
   userId: string;
   userEmails: string[];
+  activeSummarySourceKeys?: string[];
+  activeSummaryConversationIds?: number[];
   limit?: number;
 }
 
 export interface LoadSummaryTasksForBriefOptions {
   userId: string;
   since: string;
+  activeSummarySourceKeys?: string[];
+  activeSummaryConversationIds?: number[];
   limit?: number;
 }
 
@@ -375,19 +379,49 @@ export function createTaskRepository(db: Kysely<DB>) {
               AND task_evidence.kind = 'file'
               AND ${fileAccessFilterSql(opts.userEmails)}
           )`;
+      const activeSummarySourceKeys = [...new Set(opts.activeSummarySourceKeys ?? [])].filter(Boolean);
+      const activeSummaryConversationIds = [...new Set(opts.activeSummaryConversationIds ?? [])];
+      const hasActiveSummaryScope =
+        opts.activeSummarySourceKeys !== undefined || opts.activeSummaryConversationIds !== undefined;
       return db
         .selectFrom("tasks")
+        .leftJoin("agent_outputs as summary_origin", "summary_origin.id", "tasks.origin_agent_output_id")
         .selectAll("tasks")
         .where("tasks.valid_to", "is", null)
         .where("tasks.status", "in", ["open", "in_progress"])
         .where((eb) =>
           eb.or([
             eb.and([eb("tasks.provenance", "=", "structural"), visibleFileEvidence]),
-            eb.and([
-              eb("tasks.created_by_user_id", "=", opts.userId),
-              eb("tasks.provenance", "in", ["brief", "summary"]),
-              eb("tasks.assignee_entity_id", "is not", null),
-            ]),
+            ...(hasActiveSummaryScope
+              ? [
+                  eb.and([
+                    eb("tasks.created_by_user_id", "=", opts.userId),
+                    eb("tasks.provenance", "=", "brief"),
+                    eb("tasks.assignee_entity_id", "is not", null),
+                  ]),
+                  eb.and([
+                    eb("tasks.created_by_user_id", "=", opts.userId),
+                    eb("tasks.provenance", "=", "summary"),
+                    eb("tasks.assignee_entity_id", "is not", null),
+                    activeSummarySourceKeys.length > 0 || activeSummaryConversationIds.length > 0
+                      ? eb.or([
+                          ...(activeSummarySourceKeys.length > 0
+                            ? [eb("summary_origin.source_key", "in", activeSummarySourceKeys)]
+                            : []),
+                          ...(activeSummaryConversationIds.length > 0
+                            ? [eb("tasks.source_conversation_id", "in", activeSummaryConversationIds)]
+                            : []),
+                        ])
+                      : sql<boolean>`false`,
+                  ]),
+                ]
+              : [
+                  eb.and([
+                    eb("tasks.created_by_user_id", "=", opts.userId),
+                    eb("tasks.provenance", "in", ["brief", "summary"]),
+                    eb("tasks.assignee_entity_id", "is not", null),
+                  ]),
+                ]),
           ]),
         )
         .orderBy("tasks.updated_at", "desc")
@@ -396,23 +430,43 @@ export function createTaskRepository(db: Kysely<DB>) {
     },
 
     async loadSummaryTasksForBrief(opts: LoadSummaryTasksForBriefOptions): Promise<Selectable<TasksTable>[]> {
-      return db
+      const activeSummarySourceKeys = [...new Set(opts.activeSummarySourceKeys ?? [])].filter(Boolean);
+      const activeSummaryConversationIds = [...new Set(opts.activeSummaryConversationIds ?? [])];
+      const hasActiveSummaryScope =
+        opts.activeSummarySourceKeys !== undefined || opts.activeSummaryConversationIds !== undefined;
+      let query = db
         .selectFrom("tasks")
-        .selectAll()
-        .where("valid_to", "is", null)
-        .where("created_by_user_id", "=", opts.userId)
-        .where("provenance", "=", "summary")
-        .where("updated_at", ">=", opts.since)
-        .where("status", "in", ["open", "in_progress", "done", "dropped"])
+        .leftJoin("agent_outputs as summary_origin", "summary_origin.id", "tasks.origin_agent_output_id")
+        .selectAll("tasks")
+        .where("tasks.valid_to", "is", null)
+        .where("tasks.created_by_user_id", "=", opts.userId)
+        .where("tasks.provenance", "=", "summary")
+        .where("tasks.updated_at", ">=", opts.since)
+        .where("tasks.status", "in", ["open", "in_progress", "done", "dropped"]);
+      if (hasActiveSummaryScope) {
+        query = query.where((eb) =>
+          activeSummarySourceKeys.length > 0 || activeSummaryConversationIds.length > 0
+            ? eb.or([
+                ...(activeSummarySourceKeys.length > 0
+                  ? [eb("summary_origin.source_key", "in", activeSummarySourceKeys)]
+                  : []),
+                ...(activeSummaryConversationIds.length > 0
+                  ? [eb("tasks.source_conversation_id", "in", activeSummaryConversationIds)]
+                  : []),
+              ])
+            : sql<boolean>`false`,
+        );
+      }
+      return query
         .orderBy(sql<number>`CASE
-          WHEN status = 'open' THEN 0
-          WHEN status = 'in_progress' THEN 1
-          WHEN status = 'done' THEN 2
-          WHEN status = 'dropped' THEN 3
+          WHEN tasks.status = 'open' THEN 0
+          WHEN tasks.status = 'in_progress' THEN 1
+          WHEN tasks.status = 'done' THEN 2
+          WHEN tasks.status = 'dropped' THEN 3
           ELSE 4
         END`)
-        .orderBy("updated_at", "desc")
-        .orderBy("id", "asc")
+        .orderBy("tasks.updated_at", "desc")
+        .orderBy("tasks.id", "asc")
         .limit(opts.limit ?? 50)
         .execute();
     },

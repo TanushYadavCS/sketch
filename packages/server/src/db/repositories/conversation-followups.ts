@@ -301,7 +301,7 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
                 ...(assigneeIds.length > 0
                   ? [
                       eb.and([
-                        eb("t.created_by_user_id", "!=", input.userId),
+                        eb.or([eb("t.created_by_user_id", "is", null), eb("t.created_by_user_id", "!=", input.userId)]),
                         eb("t.assignee_entity_id", "in", assigneeIds),
                       ]),
                     ]
@@ -419,7 +419,7 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
         return {
           status: "error" as const,
           code: "durable_query_failed" as const,
-          untracked: legacyCandidates,
+          untracked: legacyCandidates.slice(0, REMINDER_UNTRACKED_LIMIT),
         };
       }
     },

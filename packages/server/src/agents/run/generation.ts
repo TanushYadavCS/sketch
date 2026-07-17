@@ -38,14 +38,22 @@ export function validateAgentOutputLimits(input: {
   maxItemsPerSection: number;
 }): void {
   const counts = new Map<string, number>();
+  let internalItemCount = 0;
   for (const item of input.items) {
     if (!input.visibleSectionKeys.has(item.sectionKey) && !input.internalSectionKeys.has(item.sectionKey)) continue;
+    if (input.internalSectionKeys.has(item.sectionKey)) {
+      internalItemCount += 1;
+      continue;
+    }
     counts.set(item.sectionKey, (counts.get(item.sectionKey) ?? 0) + 1);
   }
+  if (internalItemCount > INTERNAL_OUTPUT_SECTION_ITEM_LIMIT) {
+    throw new Error(
+      `Agent output internal task sections (${[...input.internalSectionKeys].join(", ")}) exceed their shared 25-item limit.`,
+    );
+  }
   for (const [sectionKey, count] of counts) {
-    const limit = input.internalSectionKeys.has(sectionKey)
-      ? INTERNAL_OUTPUT_SECTION_ITEM_LIMIT
-      : input.maxItemsPerSection;
+    const limit = input.maxItemsPerSection;
     if (count > limit) {
       throw new Error(`Agent output section ${sectionKey} exceeds its ${limit}-item limit.`);
     }

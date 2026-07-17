@@ -36,4 +36,18 @@ describe("validateAgentOutputLimits", () => {
       }),
     ).toThrow("task_candidates");
   });
+
+  it("rejects more than twenty-five internal task items across candidate and change sections", () => {
+    expect(() =>
+      validateAgentOutputLimits({
+        items: [
+          ...Array.from({ length: 13 }, (_, index) => item("task_candidates", index)),
+          ...Array.from({ length: 13 }, (_, index) => item("task_changes", index)),
+        ],
+        visibleSectionKeys: new Set(),
+        internalSectionKeys: new Set(["task_candidates", "task_changes"]),
+        maxItemsPerSection: 10,
+      }),
+    ).toThrow("25-item");
+  });
 });

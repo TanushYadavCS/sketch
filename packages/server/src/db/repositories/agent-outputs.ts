@@ -902,9 +902,15 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
       agentKey: string,
       userId: string,
       sinceIso: string,
-      options: { limit?: number; before?: { generatedAt: string; id: string } } = {},
+      options: {
+        limit?: number;
+        before?: { generatedAt: string; id: string };
+        sourceKeys?: string[];
+      } = {},
     ): Promise<AgentOutputWithItems[]> {
       const limit = Math.max(1, Math.min(options.limit ?? 10, 50));
+      const sourceKeys = options.sourceKeys ? [...new Set(options.sourceKeys)].filter(Boolean) : null;
+      if (sourceKeys && sourceKeys.length === 0) return [];
       let query = db
         .selectFrom("agent_outputs")
         .selectAll()
@@ -912,6 +918,7 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .where("user_id", "=", userId)
         .where("status", "=", "completed")
         .where("generated_at", ">", sinceIso);
+      if (sourceKeys) query = query.where("source_key", "in", sourceKeys);
       if (options.before) {
         query = query.where((eb) =>
           eb.or([

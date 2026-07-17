@@ -308,7 +308,12 @@ async function buildLegacyCandidates(
       ),
     )
   ).flat();
-  const historical = await listAllCompletedSummaries(outputRepo, userId, since.toISOString());
+  const historical = await listAllCompletedSummaries(
+    outputRepo,
+    userId,
+    since.toISOString(),
+    activeReminderSourceKeys(activeRoutes),
+  );
   if (historical.overflow) throw new ReminderHistoryOverflowError();
   const candidateOutputs = [
     ...new Map([...scopedOutputs, ...historical.outputs].map((output) => [output.output.id, output])).values(),
@@ -328,12 +333,14 @@ async function listAllCompletedSummaries(
   outputRepo: ReturnType<typeof createAgentOutputRepository>,
   userId: string,
   since: string,
+  activeSourceKeys: string[],
 ): Promise<{ outputs: AgentOutputWithItems[]; overflow: boolean }> {
   const outputs: AgentOutputWithItems[] = [];
   let before: { generatedAt: string; id: string } | undefined;
   for (let pageIndex = 0; pageIndex < LEGACY_HISTORY_PAGE_LIMIT; pageIndex += 1) {
     const page = await outputRepo.listCompletedForUserSince(SUMMARIZER_AGENT_KEY, userId, since, {
       limit: LEGACY_HISTORY_PAGE_SIZE,
+      sourceKeys: activeSourceKeys,
       ...(before ? { before } : {}),
     });
     outputs.push(...page);

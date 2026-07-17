@@ -1070,7 +1070,7 @@ async function loadLegacySummariesForBrief(
   currentSummaries: AgentOutputWithItems[],
   activeRoutes: ActiveTaskDurabilityRoute[],
 ): Promise<AgentOutputWithItems[]> {
-  const historical = await listAllBriefSummaries(outputRepo, userId, since);
+  const historical = await listAllBriefSummaries(outputRepo, userId, since, activeReminderSourceKeys(activeRoutes));
   const candidates = [
     ...new Map([...currentSummaries, ...historical].map((output) => [output.output.id, output])).values(),
   ];
@@ -1081,12 +1081,14 @@ async function listAllBriefSummaries(
   outputRepo: ReturnType<typeof createAgentOutputRepository>,
   userId: string,
   since: string,
+  activeSourceKeys: string[],
 ): Promise<AgentOutputWithItems[]> {
   const outputs: AgentOutputWithItems[] = [];
   let before: { generatedAt: string; id: string } | undefined;
   for (let pageIndex = 0; pageIndex < DAILY_BRIEF_HISTORY_PAGE_LIMIT; pageIndex += 1) {
     const page = await outputRepo.listCompletedForUserSince(CONVERSATION_SUMMARY_AGENT_KEY, userId, since, {
       limit: DAILY_BRIEF_HISTORY_PAGE_SIZE,
+      sourceKeys: activeSourceKeys,
       ...(before ? { before } : {}),
     });
     outputs.push(...page);
@@ -1341,45 +1343,6 @@ async function loadTaskSourceIdentities(
   );
 }
 
-async function loadActiveSummaryTaskIds(
-  db: Kysely<DB>,
-  taskIds: string[],
-  activeRouteOutputSourceKeys: Set<string>,
-  activeMemberSourceKeys: Set<string>,
-  assigneeEntityIds: string[],
-  userId: string,
-): Promise<Set<string>> {
-  if (taskIds.length === 0) return new Set();
-  const rows = await db
-    .selectFrom("tasks as t")
-    .leftJoin("agent_outputs as o", "o.id", "t.origin_agent_output_id")
-    .leftJoin("conversations as c", "c.id", "t.source_conversation_id")
-    .select([
-      "t.id",
-      "t.assignee_entity_id as assigneeEntityId",
-      "t.created_by_user_id as createdByUserId",
-      "o.source_key as originSourceKey",
-      "c.id as conversationId",
-      "c.platform",
-      "c.kind",
-      "c.provider_conversation_id as providerConversationId",
-    ])
-    .where("t.id", "in", [...new Set(taskIds)])
-    .limit(taskIds.length)
-    .execute();
-  return new Set(
-    rows.flatMap((row) => {
-      if (row.createdByUserId !== userId && row.assigneeEntityId && assigneeEntityIds.includes(row.assigneeEntityId)) {
-        return [row.id];
-      }
-      if (row.originSourceKey && activeRouteOutputSourceKeys.has(row.originSourceKey)) return [row.id];
-      if (!row.platform || !row.kind || row.conversationId === null) return [];
-      const targetId = row.kind === "dm" ? String(row.conversationId) : row.providerConversationId;
-      return targetId && activeMemberSourceKeys.has(`${row.platform}:${row.kind}:${targetId}`) ? [row.id] : [];
-    }),
-  );
-}
-
 function legacyReminderCandidates(
   items: Array<{ title: string; sourceKey?: string | null }>,
   candidates: DailyBriefLegacyCandidate[],
@@ -1422,17 +1385,27 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
   const durabilityEnabled = summaryConfig.enabled && summaryConfig.prefs?.createTasks === true;
   const activeRoutes = activeSummaryRoutes(summaryConfig);
   const activeRouteOutputSourceKeys = new Set(activeRoutes.map((route) => route.sourceKey));
-  const activeMemberSourceKeys = new Set(activeRoutes.flatMap((route) => route.sourceKeys));
+  const activeSummaryConversationIds = durabilityEnabled
+    ? [...(await resolveActiveBriefConversationIds(args.db, activeRoutes))]
+    : undefined;
+  const activeSummaryTaskScope = durabilityEnabled
+    ? {
+        activeSummarySourceKeys: [...activeRouteOutputSourceKeys],
+        activeSummaryConversationIds,
+      }
+    : {};
   const [openDurableTasks, recentSummaries, summaryTasks, transitionResult, peopleResult] = await Promise.all([
     taskRepo.loadOpenDurableTasksForBrief({
       userId: args.userId,
       userEmails,
+      ...activeSummaryTaskScope,
       limit: args.maxItemsPerSection * 4,
     }),
     loadRecentSummariesForBrief(outputRepo, args.userId, summarySince, durabilityEnabled, activeRoutes),
     taskRepo.loadSummaryTasksForBrief({
       userId: args.userId,
       since: summarySince,
+      ...activeSummaryTaskScope,
       limit: DAILY_BRIEF_SUMMARY_TASK_LIMIT,
     }),
     durabilityEnabled
@@ -1467,29 +1440,11 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
     peopleResult.status === "ok"
       ? [...new Set([...peopleResult.value.values()].flat().map((person) => person.id))]
       : [];
-  const activeSummaryTaskIds = durabilityEnabled
-    ? await loadActiveSummaryTaskIds(
-        args.db,
-        [
-          ...openDurableTasks.filter((task) => task.provenance === "summary").map((task) => task.id),
-          ...summaryTasks.map((task) => task.id),
-        ],
-        activeRouteOutputSourceKeys,
-        activeMemberSourceKeys,
-        assigneeEntityIds,
-        args.userId,
-      ).catch(() => new Set<string>())
-    : new Set<string>();
-  const belongsToActiveSummaryRoute = (taskId: string) => activeSummaryTaskIds.has(taskId);
-  const scopedOpenDurableTasks = durabilityEnabled
-    ? openDurableTasks.filter((task) => task.provenance !== "summary" || belongsToActiveSummaryRoute(task.id))
-    : openDurableTasks;
+  const scopedOpenDurableTasks = openDurableTasks;
   const scopedRecentSummaries = durabilityEnabled
     ? recentSummaries.filter((summary) => activeRouteOutputSourceKeys.has(summary.output.source_key))
     : recentSummaries;
-  const scopedSummaryTasks = durabilityEnabled
-    ? summaryTasks.filter((task) => belongsToActiveSummaryRoute(task.id))
-    : summaryTasks;
+  const scopedSummaryTasks = summaryTasks;
   let historyOverflow = false;
   let legacySummaries = scopedRecentSummaries;
   if (durabilityEnabled) {
@@ -1522,16 +1477,18 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
           ? transitionResult.code
           : "durable_identity_failed",
       retryable: true,
-      fallback: legacyCandidates.map((candidate, index) => ({
-        candidateId: `legacy-${index}`,
-        title: candidate.title,
-        summary: "Recovered from a recent summary.",
-        reviewCode: null,
-        parentEntityId: null,
-        assigneeEntityId: null,
-        sourceKey: candidate.sourceKey,
-        sourceAnchorKey: candidate.sourceAnchorKey,
-      })),
+      fallback: dedupeReminderCandidates(
+        legacyCandidates.map((candidate, index) => ({
+          candidateId: `legacy-${index}`,
+          title: candidate.title,
+          summary: "Recovered from a recent summary.",
+          reviewCode: null,
+          parentEntityId: null,
+          assigneeEntityId: null,
+          sourceKey: candidate.sourceKey,
+          sourceAnchorKey: candidate.sourceAnchorKey,
+        })),
+      ),
     };
   } else {
     const transitionFiltered = legacyCandidates.filter(
