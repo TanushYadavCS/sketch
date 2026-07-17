@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import { normalizeName } from "../../connectors/name-normalize";
 import {
   type AgentOutputItemInput,
   type AgentSourceConfig,
@@ -54,6 +55,8 @@ type LatestOutputRow = {
   raw_payload_json: string | null;
   updated_at: string;
 };
+
+type NewTaskChange = Extract<SummarizerTaskChange, { kind: "new" }>;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -333,7 +336,7 @@ const CONVERSATION_SUMMARY_INSTRUCTIONS = [
   "- Pass a flat `items` array. Every item carries a `sectionKey` field.",
   "- Emit visible summary items only for section keys listed in the runtime context `sections` field.",
   "- If runtime context `taskExtraction.createTasks` is true, also emit internal `task_candidates` items for task creation. Do not emit `task_candidates` when createTasks is false.",
-  "- When taskExtraction.createTasks is true, prefer internal `task_changes` items over task_candidates. task_changes are a minimal diff against runtime `taskMemory`.",
+  "- When taskExtraction.createTasks is true, use internal `task_changes` only for changed or resolved verdicts against runtime `taskMemory`. New tasks belong only in task_candidates.",
   "- Use empty knowledgeRefs arrays unless a runtime message explicitly provides a valid Sketch entity or file id.",
   "- Put sourceLabels and messageIds in structuredPayload when useful, e.g. { sourceLabels: ['#sales'], messageIds: [12, 13] }.",
   "- When action_items belong to an explicit project or parent from the messages, copy parentEntityId, parentSourceRef, or parentName into each action item's structuredPayload. Prefer parentEntityId when present.",
@@ -344,8 +347,8 @@ const CONVERSATION_SUMMARY_INSTRUCTIONS = [
   "- decisions: explicit or strongly implied decisions, owners, and dates when present.",
   "- action_items: concrete follow-ups, asks, blockers, or owners that need action.",
   "- open_questions: unresolved questions, risks, or unclear next steps.",
-  "- task_candidates: internal extraction-only items for all concrete tasks that should be created from the source messages.",
-  "- task_changes: internal extraction-only new, changed, or resolved verdicts for durable follow-ups.",
+  "- task_candidates: internal extraction-only items for all concrete, valid, still-open new tasks that should be created from the source messages.",
+  "- task_changes: internal extraction-only changed or resolved verdicts against runtime taskMemory.",
   "",
   "Labels:",
   "- highlights.label must be: highlight.",
@@ -356,17 +359,25 @@ const CONVERSATION_SUMMARY_INSTRUCTIONS = [
   "- task_changes.label must be: action_item.",
   "",
   "Task extraction:",
-  "- When taskExtraction.createTasks is true, emit one task_candidates item for every distinct concrete follow-up, owner commitment, ask, blocker, or next step supported by the messages.",
-  "- Do not limit task_candidates to maxItemsPerSection; use taskExtraction.maxCandidates as the task-candidate ceiling for this run.",
-  "- Keep visible action_items concise for the digest. Use task_candidates for exhaustive task creation, including candidates that are lower priority or omitted from the visible digest.",
-  "- Each task_candidates structuredPayload must include messageIds for the source message ids when available and sourceLabels for the configured conversations that support it.",
-  "- Each task_changes structuredPayload must include changeKind ('new', 'changed', or 'resolved') and messageIds copied only from runtime messages.",
-  "- changed and resolved task_changes must include matchedTaskId chosen only from runtime taskMemory. Never invent or copy an ID from anywhere else.",
-  "- new task_changes use the item title/summary/priority and ownership/parent fields in structuredPayload.",
+  "- Minting a task_candidates item creates a durable, tracked commitment that a person is expected to act on. Be strict: emit one only when you are highly confident it is a specific, currently-open commitment with a clear owner. When in doubt, do not emit it — a missed soft follow-up is far better than a task nobody truly owns.",
+  "- Aim for precision, not coverage. Do not try to be exhaustive. Most windows should yield few or zero task_candidates. Leave soft, implied, or ambiguous follow-ups in the visible action_items digest only; never promote them to task_candidates.",
+  "- Emit a task_candidates item only when ALL of these hold: (1) it is a specific concrete action, not a theme, topic, or area of work; (2) it has a single clear owner who explicitly committed (e.g. 'I'll do X', 'sure', 'on it') or was directly asked by name and did not decline — never an inferred or assumed owner; (3) the action is still open at the end of the window; (4) the action is actionable now and is not blocked on a precondition that has not happened yet.",
+  "- Do not emit a task for work that is waiting on someone else. If a message says a third party 'will get back to us', 'will send it', or 'is processing', the person waiting is not an owner and there is no task yet.",
+  "- Do not emit a task that depends on an earlier step that has not happened yet, such as acting on a list that has not been shared. Premature or speculative next steps are not tasks.",
+  "- Emit at most one task per real commitment. Drop restatements, sub-steps, and near-duplicates of another candidate; keep only the primary commitment.",
+  "- Do not create tasks from hypothetical, conditional, speculative, or sizing statements such as 'if we win', 'would need a team', or 'we could'. A task requires a real current commitment or a direct ask to a named person.",
+  "- If a question is answered later in the same window, emit no task for it. Only unresolved questions that require off-channel action qualify.",
+  "- If a later message in the window shows that a directive was carried out, reported on, superseded, completed, or canceled, do not emit it as an open task.",
+  "- Do not emit a task_candidates item for FYI-only updates, status reports, or vague discussion with no committed follow-up.",
+  "- Do not limit task_candidates to maxItemsPerSection; use taskExtraction.maxCandidates as a hard ceiling, treated as a maximum and not a target.",
+  "- Each task_candidates structuredPayload must include at least one valid message id in messageIds and sourceLabels for the configured conversations that support it.",
+  "- Each task_changes structuredPayload must include changeKind ('changed' or 'resolved') and messageIds copied only from runtime messages.",
+  "- Every task_changes item must include matchedTaskId chosen only from runtime taskMemory. Never invent or copy an ID from anywhere else.",
   "- resolved requires explicit completion evidence and a concise rationale. Reactions, acknowledgements, and ambiguous progress are not completion.",
-  "- Similar wording alone is insufficient across unrelated sources or Slack threads. The server validates source, parent, ownership, and allowed IDs.",
+  "- Emit one task per distinct real-world follow-up. Merge candidates that one action would complete, but only when their evidence messages share the same source anchor. Never merge across conversations or Slack root/thread anchors.",
+  "- Set the owner to the person who committed to the work, not the person who asked. When A asks and B accepts, B is the owner.",
+  "- Similar wording alone is insufficient across unrelated sources or Slack threads. The server validates source anchors, parent, ownership, and allowed IDs.",
   "- Include owner, assigneeName, dueAt, parentEntityId, parentSourceRef, or parentName in structuredPayload when the messages make them clear.",
-  "- Do not emit a task_candidates item for FYI-only updates, completed work, already-canceled work, or vague discussion with no follow-up.",
   "",
   "Rules:",
   "- Respect `summaryWindow.start` and `summaryWindow.end`; summarize only messages in that window.",
@@ -508,21 +519,29 @@ async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
   const durabilityEnabled = Boolean(routeId && sourceKey);
   const taskChangeItems = args.items.filter((item) => item.sectionKey === CONVERSATION_SUMMARY_TASK_CHANGE_SECTION);
   const changes = taskChangeItems.flatMap(parseTaskChange);
-  const hasLegacyTaskSignals = args.items.some(
-    (item) => item.sectionKey === CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION || item.sectionKey === "action_items",
+  const taskCandidateItems = args.items.filter(
+    (item) => item.sectionKey === CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION,
   );
+  const actionItems = args.items.filter((item) => item.sectionKey === "action_items");
+  const syntheticNew = taskCandidateItems.flatMap(synthesizeNewTaskChange);
+  const modelUpdates = changes.filter((change) => change.kind !== "new");
+  const mergedNew = deduplicateNewTaskChanges([...changes.filter(isNewTaskChange), ...syntheticNew]);
+  const orderedChanges = [...modelUpdates, ...mergedNew];
   const allowedMessageIds = readRuntimeNumberArray(args.runtimeContext.allowedMessageIds);
   const allowedConversationIds = readRuntimeNumberArray(args.runtimeContext.allowedConversationIds);
   let invalidDurabilityOutput =
     durabilityEnabled &&
     (taskChangeItems.length !== changes.length ||
-      (changes.length === 0 && (taskChangeItems.length > 0 || hasLegacyTaskSignals)) ||
-      (changes.length > 0 && (allowedMessageIds.length === 0 || allowedConversationIds.length === 0)));
+      syntheticNew.length !== taskCandidateItems.length ||
+      (orderedChanges.length === 0 &&
+        (taskChangeItems.length > 0 || taskCandidateItems.length > 0 || actionItems.length > 0)) ||
+      (orderedChanges.length > 0 && (allowedMessageIds.length === 0 || allowedConversationIds.length === 0)));
   const taskMemory = Array.isArray(args.runtimeContext.taskMemory)
     ? (args.runtimeContext.taskMemory as TaskMemoryItem[])
     : [];
   const authorizedAssigneeEntityIds = readRuntimeStringArray(args.runtimeContext.authorizedAssigneeEntityIds);
-  if (changes.length > 0 && allowedMessageIds.length > 0 && allowedConversationIds.length > 0) {
+  const applicableChanges = durabilityEnabled ? orderedChanges : changes;
+  if (applicableChanges.length > 0 && allowedMessageIds.length > 0 && allowedConversationIds.length > 0) {
     const results = await createConversationFollowupsRepository(args.db).applyTaskChanges({
       userId: args.userId,
       outputId: args.outputId,
@@ -530,7 +549,7 @@ async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
       authorizedAssigneeEntityIds,
       allowedMessageIds,
       allowedConversationIds,
-      changes,
+      changes: applicableChanges,
       ...(routeId && sourceKey
         ? {
             routeGuard: {
@@ -554,10 +573,6 @@ async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
   } else if (!durabilityEnabled) {
     const taskRepo = createTaskRepository(args.db);
     const parentHint = collectOutputParentHint(args.items);
-    const taskCandidateItems = args.items.filter(
-      (item) => item.sectionKey === CONVERSATION_SUMMARY_TASK_CANDIDATE_SECTION,
-    );
-    const actionItems = args.items.filter((item) => item.sectionKey === "action_items");
     const promotableItems = taskCandidateItems.length > 0 ? taskCandidateItems : actionItems;
     for (const item of promotableItems) {
       try {
@@ -589,6 +604,54 @@ async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
       );
     }
   }
+}
+
+function synthesizeNewTaskChange(item: AgentOutputItemInput): NewTaskChange[] {
+  const evidenceMessageIds = canonicalizeEvidenceMessageIds(item.structuredPayload?.messageIds);
+  return evidenceMessageIds.length > 0 ? [{ kind: "new", evidenceMessageIds, item }] : [];
+}
+
+function isNewTaskChange(change: SummarizerTaskChange): change is NewTaskChange {
+  return change.kind === "new";
+}
+
+function deduplicateNewTaskChanges(changes: NewTaskChange[]): NewTaskChange[] {
+  const seen = new Set<string>();
+  return changes.flatMap((change) => {
+    const canonical = { ...change, evidenceMessageIds: canonicalizeEvidenceMessageIds(change.evidenceMessageIds) };
+    const key = newTaskChangeDedupKey(canonical);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [canonical];
+  });
+}
+
+function newTaskChangeDedupKey(change: NewTaskChange): string {
+  const payload = change.item.structuredPayload ?? {};
+  const ownerIdentity =
+    identityPart("entity", payload.assigneeEntityId) ??
+    identityPart("name", payload.assigneeName) ??
+    identityPart("name", payload.owner);
+  const parentIdentity =
+    identityPart("entity", payload.parentEntityId) ??
+    identityPart("source", payload.parentSourceRef) ??
+    identityPart("name", payload.parentName);
+  return JSON.stringify([
+    normalizeName(change.item.title),
+    canonicalizeEvidenceMessageIds(change.evidenceMessageIds),
+    ownerIdentity,
+    parentIdentity,
+  ]);
+}
+
+function identityPart(kind: "entity" | "name" | "source", value: unknown): string | null {
+  const text = readRuntimeString(value);
+  if (!text) return null;
+  return `${kind}:${kind === "name" ? normalizeName(text) : text}`;
+}
+
+function canonicalizeEvidenceMessageIds(value: unknown): number[] {
+  return readRuntimeNumberArray(value).sort((left, right) => left - right);
 }
 
 function parseTaskChange(item: AgentOutputItemInput): SummarizerTaskChange[] {
