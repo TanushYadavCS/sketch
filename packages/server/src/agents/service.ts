@@ -2174,15 +2174,17 @@ export class AgentRunService {
         agentAllowedTools: def.allowedTools,
         agentOutputWriter: writer,
       };
-      const result =
-        output.trigger_type === "scheduled" && scheduledAdmission
-          ? await this.deps.runScheduledAgent(agentParams, {
-              signal: scheduledAdmission.controller.signal,
-              onStart: () => {
-                if (scheduledAdmission.state === "queued") scheduledAdmission.state = "active";
-              },
-            })
-          : await this.deps.runAgent(agentParams);
+      let result: RunAgentResult;
+      if (output.trigger_type === "scheduled" && scheduledAdmission) {
+        result = await this.deps.runScheduledAgent(agentParams, {
+          signal: scheduledAdmission.controller.signal,
+          onStart: () => {
+            if (scheduledAdmission.state === "queued") scheduledAdmission.state = "active";
+          },
+        });
+      } else {
+        result = await this.deps.runAgent(agentParams);
+      }
       if (!saved) {
         await this.repo.markFailed(outputId, "Agent did not call WriteAgentOutput.");
       } else {
