@@ -373,6 +373,10 @@ export class WhatsAppBot {
     return `+${this.sock.user.id.split(":")[0].split("@")[0]}`;
   }
 
+  get accountLid(): string | null {
+    return this.sock?.user?.lid ?? null;
+  }
+
   get socket(): WASocket | null {
     return this.sock;
   }

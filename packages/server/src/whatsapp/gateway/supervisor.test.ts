@@ -91,7 +91,7 @@ describe("WhatsApp gateway supervision decisions", () => {
     host_id: "host",
     boot_id: "boot",
     script_hash: "hash",
-    contract_version: "1.1",
+    contract_version: "1.2",
   } as Parameters<typeof classifyWhatsAppGatewayLease>[0]["lease"];
 
   it("adopts only a fresh same-host lease with matching health", () => {
@@ -100,7 +100,7 @@ describe("WhatsApp gateway supervision decisions", () => {
         lease,
         hostId: "host",
         bootId: "boot",
-        health: { scriptHash: "hash", contractVersion: "1.1" },
+        health: { scriptHash: "hash", contractVersion: "1.2" },
         expectedHash: "hash",
         heartbeatFresh: true,
       }),
@@ -110,7 +110,7 @@ describe("WhatsApp gateway supervision decisions", () => {
         lease,
         hostId: "other-host",
         bootId: "boot",
-        health: { scriptHash: "hash", contractVersion: "1.1" },
+        health: { scriptHash: "hash", contractVersion: "1.2" },
         expectedHash: "hash",
         heartbeatFresh: true,
       }),
@@ -123,7 +123,7 @@ describe("WhatsApp gateway supervision decisions", () => {
         lease,
         hostId: "host",
         bootId: "boot",
-        health: { scriptHash: "old", contractVersion: "1.1" },
+        health: { scriptHash: "old", contractVersion: "1.2" },
         expectedHash: "new",
         heartbeatFresh: true,
       }),
@@ -133,7 +133,7 @@ describe("WhatsApp gateway supervision decisions", () => {
         lease,
         hostId: "host",
         bootId: "boot",
-        health: { scriptHash: "hash", contractVersion: "1.1" },
+        health: { scriptHash: "hash", contractVersion: "1.2" },
         expectedHash: "hash",
         heartbeatFresh: false,
       }),
@@ -161,9 +161,9 @@ describe("WhatsApp gateway supervision decisions", () => {
   });
 
   it("restarts for script or contract skew", () => {
-    expect(whatsappGatewayHealthDecision({ scriptHash: "old", contractVersion: "1.1" }, "new")).toBe("restart");
-    expect(whatsappGatewayHealthDecision({ scriptHash: "new", contractVersion: "1.0" }, "new")).toBe("restart");
-    expect(whatsappGatewayHealthDecision({ scriptHash: "new", contractVersion: "1.1" }, "new")).toBe("healthy");
+    expect(whatsappGatewayHealthDecision({ scriptHash: "old", contractVersion: "1.2" }, "new")).toBe("restart");
+    expect(whatsappGatewayHealthDecision({ scriptHash: "new", contractVersion: "1.1" }, "new")).toBe("restart");
+    expect(whatsappGatewayHealthDecision({ scriptHash: "new", contractVersion: "1.2" }, "new")).toBe("healthy");
   });
 });
 

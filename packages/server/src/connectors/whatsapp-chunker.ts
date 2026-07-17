@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { parseSketchCommand } from "../commands";
+import { isPg } from "../db/dialect";
 import {
   type ConversationSliceCursorRow,
   type ConversationSliceFlushReason,
@@ -638,11 +639,12 @@ async function admitWhatsAppBackfillGraphChat(input: {
     await input.onBackfillConversationClaimed?.(input.conversationId);
     const result = await input.db.transaction().execute(async (trx) => {
       const txSliceRepo = createConversationSlicesRepository(trx);
-      const txRangeRepo = createWhatsAppBackfillRangeRepository(trx);
       const cursorClaim = await txSliceRepo.getCursor(input.conversationId);
       if (cursorClaim?.claim_token !== claimToken) throw new ConversationSliceClaimLostError();
 
-      const range = await txRangeRepo.getById(input.rangeId);
+      let rangeQuery = trx.selectFrom("whatsapp_backfill_ranges").selectAll().where("id", "=", input.rangeId);
+      if (isPg(trx)) rangeQuery = rangeQuery.forUpdate();
+      const range = await rangeQuery.executeTakeFirst();
       if (!range || !["complete", "exhausted"].includes(range.status) || range.graph_completed_at) {
         throw new ConversationSliceClaimLostError();
       }

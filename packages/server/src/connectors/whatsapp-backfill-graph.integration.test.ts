@@ -6,6 +6,9 @@ import { createWhatsAppBackfillRangeRepository } from "../db/repositories/whatsa
 import { type WhatsAppGroupIndexingConfig, createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestPgDb } from "../test-utils";
+import type { WhatsAppAdapterHandlers } from "../whatsapp/adapter";
+import { WhatsAppBackfillWorker } from "../whatsapp/backfill-worker";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 import { chunkWhatsAppIndexingGroups } from "./whatsapp-chunker";
 
 const NOW = new Date("2026-07-17T12:00:00.000Z");
@@ -118,6 +121,48 @@ async function runAdmission(
     },
     onBackfillConversationClaimed: overrides.onBackfillConversationClaimed,
     onBackfillSlicesInserted: overrides.onBackfillSlicesInserted,
+  });
+}
+
+function createBackfillWorker(db: Kysely<DB>): WhatsAppBackfillWorker {
+  const facade: WhatsAppSocketFacade = {
+    send: async () => null,
+    sendComposing: async () => undefined,
+    react: async () => ({ ok: true }),
+    downloadMedia: async () => null,
+    groupMetadata: async () => null,
+    syncAllGroups: async () => ({ synced: 0 }),
+    resolveLid: async () => null,
+    fetchMessageHistory: async () => "request-session",
+    pairing: {
+      startQr: async () => undefined,
+      status: async () => ({ connected: true, phoneNumber: "+15551234567", lid: "86702773280883@lid" }),
+      cancel: async () => undefined,
+      logout: async () => undefined,
+    },
+    shutdown: async () => undefined,
+    health: async () => ({
+      socketState: "connected",
+      queueDepth: 0,
+      insertFailures: 0,
+      uptime: 1,
+      scriptHash: "test",
+      contractVersion: "1.2",
+    }),
+  };
+  const handlers: WhatsAppAdapterHandlers = {
+    captureQueuedMessage: async () => null,
+    dispatchCapturedMessage: async () => true,
+    handleHistoryMessages: async () => ({ persisted: 0, skippedOld: 0, skippedDup: 0 }),
+  };
+  return new WhatsAppBackfillWorker({
+    db,
+    config: { WHATSAPP_HISTORY_LOOKBACK_DAYS: 30 },
+    logger: logger(),
+    facade,
+    handlers,
+    shouldHandleInboundMessage: () => true,
+    now: () => NOW.getTime(),
   });
 }
 
@@ -321,6 +366,97 @@ function runPortableSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         graph_cursor_effective_at: "2026-07-01T10:00:00.000Z",
         graph_cursor_message_id: 999,
       });
+    });
+
+    it("recovers the READ COMMITTED adoption interleaving without stranding stamped history", async () => {
+      const seeded = await seedGraphChat(db, { groupJid: "adoption-race@g.us" });
+      const admittedId = await insertHistory(
+        db,
+        seeded.conversationId,
+        seeded.rangeId,
+        "admitted-before-race",
+        "2026-07-01T09:00:00.000Z",
+      );
+      const stranded = await createConversationRepository(db).insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: "adopted-during-stage-transaction",
+        senderJid: "sender@s.whatsapp.net",
+        senderName: "History Sender",
+        text: "must be recovered",
+        providerTimestamp: "2026-07-01T08:00:00.000Z",
+        receivedAt: "2026-07-01T08:00:00.000Z",
+        source: "history",
+        connectionKey: "000000000001:000000000001",
+      });
+      const stageSnapshot = await db
+        .transaction()
+        .execute((trx) =>
+          trx
+            .selectFrom("conversation_messages")
+            .select("id")
+            .where("backfill_range_id", "=", seeded.rangeId)
+            .orderBy("effective_at", "asc")
+            .orderBy("id", "asc")
+            .execute(),
+        );
+      expect(stageSnapshot).toEqual([{ id: admittedId }]);
+
+      await db.transaction().execute(async (trx) => {
+        const ranges = createWhatsAppBackfillRangeRepository(trx);
+        const range = await ranges.getById(seeded.rangeId);
+        if (!range) throw new Error("missing race range");
+        await expect(ranges.adoptRange(range)).resolves.toBe(1);
+      });
+      await db.transaction().execute(async (trx) => {
+        await trx
+          .insertInto("conversation_slices")
+          .values({
+            id: "adoption-race-slice",
+            conversation_id: seeded.conversationId,
+            first_message_id: admittedId,
+            last_message_id: admittedId,
+            started_at: "2026-07-01T09:00:00.000Z",
+            ended_at: "2026-07-01T09:00:00.000Z",
+            message_count: 1,
+            denoised_message_ids: JSON.stringify([admittedId]),
+            flush_reason: "gap",
+            roster_snapshot: "[]",
+          })
+          .execute();
+        await trx
+          .updateTable("whatsapp_backfill_ranges")
+          .set({
+            graph_cursor_effective_at: "2026-07-01T09:00:00.000Z",
+            graph_cursor_message_id: admittedId,
+            graph_completed_at: NOW.toISOString(),
+          })
+          .where("id", "=", seeded.rangeId)
+          .execute();
+        await trx
+          .updateTable("whatsapp_backfill_checkpoints")
+          .set({
+            live_start_effective_at: "2026-07-01T09:00:00.000Z",
+            live_start_message_id: admittedId,
+          })
+          .where("group_jid", "=", seeded.group.jid)
+          .execute();
+      });
+
+      await createBackfillWorker(db).adoptPassiveHistory([seeded.group.jid]);
+
+      const repaired = await db
+        .selectFrom("conversation_messages")
+        .select("backfill_range_id")
+        .where("id", "=", stranded.row.id)
+        .executeTakeFirstOrThrow();
+      expect(repaired.backfill_range_id).not.toBe(seeded.rangeId);
+      await expect(
+        db
+          .selectFrom("whatsapp_backfill_ranges")
+          .select(["parent_range_id", "graph_completed_at"])
+          .where("id", "=", repaired.backfill_range_id as string)
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ parent_range_id: seeded.rangeId, graph_completed_at: null });
     });
 
     it("rolls back slice insertion and resumes the same page after a mid-page crash", async () => {

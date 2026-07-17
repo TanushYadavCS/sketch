@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { proto } from "@whiskeysockets/baileys";
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import type { Config } from "../config";
+import { isIndexableWhatsAppChunkMessage } from "../connectors/whatsapp-chunker";
 import { createWhatsAppBackfillRangeRepository } from "../db/repositories/whatsapp-backfill-ranges";
 import type {
   WhatsAppBackfillAnchor,
@@ -32,6 +33,11 @@ export const WHATSAPP_BACKFILL_STALE_CLAIM_MS = 2 * 60_000;
 export const WHATSAPP_BACKFILL_FETCH_SPACING_MS = 500;
 export const WHATSAPP_BACKFILL_MATERIALIZE_BATCH_SIZE = 200;
 const DAY_MS = 24 * 60 * 60_000;
+
+interface WhatsAppAccountIdentity {
+  jid: string | null;
+  lid: string | null;
+}
 
 export function isOnDemandWhatsAppHistory(syncType: number | string | null | undefined): boolean {
   return syncType === proto.HistorySync.HistorySyncType.ON_DEMAND;
@@ -214,9 +220,9 @@ export class WhatsAppBackfillWorker {
   async adoptPassiveHistory(groupJids: string[]): Promise<void> {
     const unique = [...new Set(groupJids)];
     const now = new Date(this.now()).toISOString();
-    const accountJid = await this.accountJid();
-    const adopted = await this.reconcileOwnership(now, unique, accountJid);
-    const refreshed = await this.ranges.refreshAwaitingAnchors(now, accountJid);
+    const account = await this.accountIdentity();
+    const adopted = await this.reconcileOwnership(now, unique, account);
+    const refreshed = await this.ranges.refreshAwaitingAnchors(now, account.jid, account.lid);
     if (adopted > 0 || refreshed > 0) {
       this.options.logger.info({ rowsAdopted: adopted, rangesAnchored: refreshed }, "WhatsApp history rows adopted");
     }
@@ -394,7 +400,7 @@ export class WhatsAppBackfillWorker {
     );
   }
 
-  private async reconcileInitialRanges(nowMs: number, now: string, accountJid: string | null): Promise<void> {
+  private async reconcileInitialRanges(nowMs: number, now: string, account: WhatsAppAccountIdentity): Promise<void> {
     const checkpoints = await this.options.db
       .selectFrom("whatsapp_backfill_checkpoints as checkpoint")
       .innerJoin("whatsapp_groups as group", "group.jid", "checkpoint.group_jid")
@@ -426,7 +432,8 @@ export class WhatsAppBackfillWorker {
         liveStartMessageId: checkpoint.live_start_message_id,
         lowerBoundAt: new Date(nowMs - this.options.config.WHATSAPP_HISTORY_LOOKBACK_DAYS * DAY_MS).toISOString(),
         now,
-        accountJid,
+        accountJid: account.jid,
+        accountLid: account.lid,
       });
       if (result.created || result.adopted > 0) {
         this.options.logger.info(
@@ -438,18 +445,19 @@ export class WhatsAppBackfillWorker {
   }
 
   private async reconcileState(nowMs: number, now: string): Promise<void> {
-    const accountJid = await this.accountJid();
-    await this.reconcileInitialRanges(nowMs, now, accountJid);
-    await this.reconcileConnectionTransitions(now, accountJid);
-    await this.reconcileOwnership(now, undefined, accountJid);
-    await this.ranges.refreshAwaitingAnchors(now, accountJid);
+    const account = await this.accountIdentity();
+    await this.reconcileInitialRanges(nowMs, now, account);
+    await this.reconcileConnectionTransitions(now, account);
+    await this.reconcileOwnership(now, undefined, account);
+    await this.ranges.refreshAwaitingAnchors(now, account.jid, account.lid);
   }
 
   private async reconcileOwnership(
     now: string,
     groupJids: string[] | undefined,
-    accountJid: string | null,
+    account: WhatsAppAccountIdentity,
   ): Promise<number> {
+    await this.releaseStrandedGraphRows(groupJids);
     let query = this.options.db
       .selectFrom("conversation_messages as message")
       .innerJoin("conversations as conversation", "conversation.id", "message.conversation_id")
@@ -485,7 +493,8 @@ export class WhatsAppBackfillWorker {
           ).toISOString(),
           upperBoundAt: now,
           now,
-          accountJid,
+          accountJid: account.jid,
+          accountLid: account.lid,
         });
         result = await this.ranges.reconcileUnownedConnection({
           groupJid: orphan.group_jid,
@@ -510,7 +519,71 @@ export class WhatsAppBackfillWorker {
     return adopted;
   }
 
-  private async reconcileConnectionTransitions(now: string, accountJid: string | null): Promise<void> {
+  private async releaseStrandedGraphRows(groupJids: string[] | undefined): Promise<number> {
+    let query = this.options.db
+      .selectFrom("conversation_messages as message")
+      .innerJoin("conversations as conversation", "conversation.id", "message.conversation_id")
+      .innerJoin("whatsapp_backfill_ranges as range", "range.id", "message.backfill_range_id")
+      .select([
+        "message.id",
+        "message.provider_message_id",
+        "message.text",
+        "message.attachments",
+        "message.effective_at",
+        "message.is_bot",
+        "message.backfill_range_id",
+      ])
+      .where("message.source", "=", "history")
+      .where("message.effective_at", "is not", null)
+      .where("range.graph_completed_at", "is not", null)
+      .where("range.graph_cursor_effective_at", "is not", null)
+      .where("range.graph_cursor_message_id", "is not", null)
+      .where(
+        sql<boolean>`(
+          message.effective_at < range.graph_cursor_effective_at
+          OR (
+            message.effective_at = range.graph_cursor_effective_at
+            AND message.id <= range.graph_cursor_message_id
+          )
+        )`,
+      )
+      .where(
+        sql<boolean>`NOT EXISTS (
+          SELECT 1
+          FROM conversation_slices AS slice
+          WHERE slice.conversation_id = message.conversation_id
+            AND message.id BETWEEN slice.first_message_id AND slice.last_message_id
+            AND message.effective_at BETWEEN slice.started_at AND slice.ended_at
+        )`,
+      );
+    if (groupJids && groupJids.length > 0)
+      query = query.where("conversation.provider_conversation_id", "in", groupJids);
+    const candidates = await query.execute();
+    const stranded = candidates.filter((message) =>
+      isIndexableWhatsAppChunkMessage({
+        id: message.id,
+        providerMessageId: message.provider_message_id ?? "",
+        effectiveAt: message.effective_at as string,
+        text: message.text,
+        attachments: message.attachments,
+        isBot: message.is_bot === 1,
+      }),
+    );
+    let released = 0;
+    for (const message of stranded) {
+      if (!message.backfill_range_id) continue;
+      const result = await this.options.db
+        .updateTable("conversation_messages")
+        .set({ backfill_range_id: null })
+        .where("id", "=", message.id)
+        .where("backfill_range_id", "=", message.backfill_range_id)
+        .executeTakeFirst();
+      released += Number(result.numUpdatedRows);
+    }
+    return released;
+  }
+
+  private async reconcileConnectionTransitions(now: string, account: WhatsAppAccountIdentity): Promise<void> {
     const transitions = await this.options.db
       .selectFrom("whatsapp_connection_transitions")
       .selectAll()
@@ -534,7 +607,8 @@ export class WhatsAppBackfillWorker {
             lowerBoundAt: transition.disconnected_at,
             upperBoundAt: transition.connected_at,
             now,
-            accountJid,
+            accountJid: account.jid,
+            accountLid: account.lid,
           });
         }
       }
@@ -572,9 +646,12 @@ export class WhatsAppBackfillWorker {
       .execute();
   }
 
-  private async accountJid(): Promise<string | null> {
+  private async accountIdentity(): Promise<WhatsAppAccountIdentity> {
     const status = await this.options.facade.pairing.status().catch(() => null);
-    return status?.phoneNumber ? phoneE164ToWhatsAppJid(status.phoneNumber) : null;
+    return {
+      jid: status?.phoneNumber ? phoneE164ToWhatsAppJid(status.phoneNumber) : null,
+      lid: status?.lid ?? null,
+    };
   }
 
   private rangeAnchor(range: WhatsAppBackfillRangeRow): WhatsAppBackfillAnchor | null {

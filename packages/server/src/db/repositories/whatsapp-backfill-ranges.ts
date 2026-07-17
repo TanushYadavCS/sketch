@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { areJidsSameUser } from "@whiskeysockets/baileys";
 import { type Kysely, type Selectable, type Transaction, sql } from "kysely";
+import { isPg } from "../dialect";
 import type { DB, WhatsAppBackfillRangesTable, WhatsAppInboundEventsTable } from "../schema";
 
 export const WHATSAPP_BACKFILL_EMPTY_CONNECTION_KEY = "000000000000:000000000000";
@@ -54,6 +56,11 @@ function truncateError(error: string): string {
   return error.slice(0, 1024);
 }
 
+function isAccountSender(senderJid: string | null, accountJid?: string | null, accountLid?: string | null): boolean {
+  if (!senderJid) return false;
+  return [accountJid, accountLid].some((identity) => Boolean(identity && areJidsSameUser(senderJid, identity)));
+}
+
 export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
   async function getById(id: string): Promise<WhatsAppBackfillRangeRow | undefined> {
     return db.selectFrom("whatsapp_backfill_ranges").selectAll().where("id", "=", id).executeTakeFirst();
@@ -74,6 +81,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     connectionKey: string,
     liveStartMessageId?: number | null,
     accountJid?: string | null,
+    accountLid?: string | null,
   ): Promise<WhatsAppBackfillAnchor | null> {
     const query = db
       .selectFrom("conversation_messages as message")
@@ -111,13 +119,13 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     return {
       remoteJid: row.remote_jid,
       id: row.provider_message_id,
-      fromMe: row.provider_from_me === 1 || Boolean(accountJid && row.sender_jid === accountJid),
+      fromMe: row.provider_from_me === 1 || isAccountSender(row.sender_jid, accountJid, accountLid),
       providerTimestamp: row.provider_timestamp,
     };
   }
 
-  async function adoptRange(range: WhatsAppBackfillRangeRow): Promise<number> {
-    let update = db
+  async function executeAdoption(executor: BackfillDb, range: WhatsAppBackfillRangeRow): Promise<number> {
+    let update = executor
       .updateTable("conversation_messages")
       .set({ backfill_range_id: range.id })
       .where("source", "=", "history")
@@ -141,7 +149,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
       .where(
         "conversation_id",
         "in",
-        db
+        executor
           .selectFrom("conversations")
           .select("id")
           .where("platform", "=", "whatsapp")
@@ -154,6 +162,21 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
         : update.where("connection_key", "=", range.connection_key);
     const result = await update.executeTakeFirst();
     return Number(result.numUpdatedRows);
+  }
+
+  async function adoptRange(range: WhatsAppBackfillRangeRow): Promise<number> {
+    if (!isPg(db)) return executeAdoption(db, range);
+    if (!db.isTransaction) {
+      return db.transaction().execute((trx) => createWhatsAppBackfillRangeRepository(trx).adoptRange(range));
+    }
+    const locked = await db
+      .selectFrom("whatsapp_backfill_ranges")
+      .select("id")
+      .where("id", "=", range.id)
+      .forUpdate()
+      .executeTakeFirst();
+    if (!locked) return 0;
+    return executeAdoption(db, range);
   }
 
   async function ensureRange(input: {
@@ -213,6 +236,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     lowerBoundAt: string;
     now: string;
     accountJid?: string | null;
+    accountLid?: string | null;
   }): Promise<WhatsAppBackfillRangeEnsureResult> {
     const connectionKey = input.connectionKey ?? WHATSAPP_BACKFILL_EMPTY_CONNECTION_KEY;
     return ensureRange({
@@ -221,7 +245,14 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
       connectionKey,
       lowerBoundAt: input.lowerBoundAt,
       upperBoundAt: input.liveStartEffectiveAt,
-      anchor: await findAnchor(input.groupJid, "initial", connectionKey, input.liveStartMessageId, input.accountJid),
+      anchor: await findAnchor(
+        input.groupJid,
+        "initial",
+        connectionKey,
+        input.liveStartMessageId,
+        input.accountJid,
+        input.accountLid,
+      ),
       now: input.now,
     });
   }
@@ -233,15 +264,20 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
     upperBoundAt: string;
     now: string;
     accountJid?: string | null;
+    accountLid?: string | null;
   }): Promise<WhatsAppBackfillRangeEnsureResult> {
     return ensureRange({
       ...input,
       kind: "gap",
-      anchor: await findAnchor(input.groupJid, "gap", input.connectionKey, null, input.accountJid),
+      anchor: await findAnchor(input.groupJid, "gap", input.connectionKey, null, input.accountJid, input.accountLid),
     });
   }
 
-  async function refreshAwaitingAnchors(now: string, accountJid?: string | null): Promise<number> {
+  async function refreshAwaitingAnchors(
+    now: string,
+    accountJid?: string | null,
+    accountLid?: string | null,
+  ): Promise<number> {
     const ranges = await db
       .selectFrom("whatsapp_backfill_ranges")
       .selectAll()
@@ -264,6 +300,7 @@ export function createWhatsAppBackfillRangeRepository(db: BackfillDb) {
         range.connection_key,
         checkpoint?.live_start_message_id,
         accountJid,
+        accountLid,
       );
       if (!anchor) continue;
       const result = await db

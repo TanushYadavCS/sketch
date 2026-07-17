@@ -28,7 +28,7 @@ import {
 
 describe("WhatsApp socket facade contract", () => {
   it("advertises the history-sync facade contract revision", () => {
-    expect(WHATSAPP_FACADE_CONTRACT_VERSION).toBe("1.1");
+    expect(WHATSAPP_FACADE_CONTRACT_VERSION).toBe("1.2");
     expect(
       whatsAppHistorySyncRequestSchema.parse({
         count: 50,
@@ -198,9 +198,16 @@ describe("WhatsApp socket facade contract", () => {
     expect(whatsAppResolveLidRequestSchema.parse({ jid: "86702773280883@lid" })).toEqual({
       jid: "86702773280883@lid",
     });
-    expect(whatsAppPairingStatusSchema.parse({ connected: true, phoneNumber: "+15551234567" })).toEqual({
+    expect(
+      whatsAppPairingStatusSchema.parse({
+        connected: true,
+        phoneNumber: "+15551234567",
+        lid: "86702773280883@lid",
+      }),
+    ).toEqual({
       connected: true,
       phoneNumber: "+15551234567",
+      lid: "86702773280883@lid",
     });
     expect(whatsAppPairingEventSchema.parse({ type: "qr", qr: "qr-payload" })).toEqual({
       type: "qr",

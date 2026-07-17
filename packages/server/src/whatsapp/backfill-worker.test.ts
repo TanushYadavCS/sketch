@@ -39,7 +39,7 @@ function facade(fetchMessageHistory: WhatsAppSocketFacade["fetchMessageHistory"]
       insertFailures: 0,
       uptime: 1,
       scriptHash: "test",
-      contractVersion: "1.1",
+      contractVersion: "1.2",
     }),
   };
 }
@@ -128,7 +128,7 @@ async function seedLease(db: Kysely<DB>, generation = 1) {
       pid: 10,
       pid_start_time: "10",
       script_hash: "hash",
-      contract_version: "1.1",
+      contract_version: "1.2",
       heartbeat_at: "2026-07-17T12:00:00.000Z",
       acquired_at: "2026-07-17T12:00:00.000Z",
       last_live_at: "2026-07-17T11:59:00.000Z",
@@ -768,12 +768,86 @@ describe("WhatsAppBackfillWorker", () => {
     ).resolves.toEqual({ parent_range_id: supplemental.id });
   });
 
-  it("corrects a legacy manual outgoing anchor from the runtime account JID", async () => {
+  it("recovers stamped history stranded behind a completed graph cursor through a supplemental range", async () => {
+    const conversation = await seedGroup(db);
+    const conversations = createConversationRepository(db);
+    const live = await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "stranded-live",
+      eventKey: "event-stranded-live",
+      senderName: "Live",
+      providerTimestamp: "2026-07-17T11:00:00.000Z",
+      source: "live",
+      connectionKey: KEY_2,
+    });
+    await db
+      .insertInto("whatsapp_backfill_checkpoints")
+      .values({
+        group_jid: "group@g.us",
+        last_fetched_key: null,
+        status: "in_progress",
+        live_start_effective_at: live.row.effectiveAt,
+        live_start_message_id: live.row.id,
+      })
+      .execute();
+    await db
+      .insertInto("whatsapp_backfill_ranges")
+      .values({
+        id: "range-graph-completed",
+        group_jid: "group@g.us",
+        range_key: `gap:${KEY_3}`,
+        kind: "gap",
+        connection_key: KEY_3,
+        status: "complete",
+        terminal_status: "complete",
+        lower_bound_at: "2026-07-17T09:00:00.000Z",
+        upper_bound_at: "2026-07-17T11:00:00.000Z",
+      })
+      .execute();
+    const stranded = await conversations.insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "stamped-behind-completed-cursor",
+      eventKey: "event-stamped-behind-completed-cursor",
+      senderName: "History",
+      text: "recover me",
+      providerTimestamp: "2026-07-17T09:30:00.000Z",
+      source: "history",
+      connectionKey: KEY_3,
+      backfillRangeId: "range-graph-completed",
+    });
+    await db
+      .updateTable("whatsapp_backfill_ranges")
+      .set({
+        graph_cursor_effective_at: "2026-07-17T10:00:00.000Z",
+        graph_cursor_message_id: stranded.row.id,
+        graph_completed_at: "2026-07-17T10:01:00.000Z",
+      })
+      .where("id", "=", "range-graph-completed")
+      .execute();
+
+    await worker(db).reconcile(true);
+
+    const repaired = await db
+      .selectFrom("conversation_messages")
+      .select("backfill_range_id")
+      .where("id", "=", stranded.row.id)
+      .executeTakeFirstOrThrow();
+    expect(repaired.backfill_range_id).not.toBe("range-graph-completed");
+    await expect(
+      db
+        .selectFrom("whatsapp_backfill_ranges")
+        .select(["parent_range_id", "graph_completed_at"])
+        .where("id", "=", repaired.backfill_range_id as string)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ parent_range_id: "range-graph-completed", graph_completed_at: null });
+  });
+
+  it("corrects a legacy manual outgoing anchor from a device-suffixed account JID", async () => {
     const conversation = await seedGroup(db);
     const message = await createConversationRepository(db).insertMessage({
       conversationId: conversation.id,
       providerMessageId: "manual-outgoing-anchor",
-      senderJid: "15551234567@s.whatsapp.net",
+      senderJid: "15551234567:12@s.whatsapp.net",
       senderName: "Self",
       providerTimestamp: "2026-07-17T11:00:00.000Z",
       providerFromMe: false,
@@ -792,6 +866,60 @@ describe("WhatsAppBackfillWorker", () => {
     });
 
     expect(range.row.cursor_from_me).toBe(1);
+  });
+
+  it("corrects a legacy manual outgoing anchor from the runtime account LID", async () => {
+    const conversation = await seedGroup(db);
+    const message = await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "manual-outgoing-lid-anchor",
+      senderJid: "86702773280883@lid",
+      senderName: "Self",
+      providerTimestamp: "2026-07-17T11:00:00.000Z",
+      providerFromMe: false,
+      source: "live",
+      connectionKey: KEY_2,
+    });
+
+    const range = await createWhatsAppBackfillRangeRepository(db).ensureInitialRange({
+      groupJid: "group@g.us",
+      connectionKey: KEY_2,
+      liveStartEffectiveAt: message.row.effectiveAt,
+      liveStartMessageId: message.row.id,
+      lowerBoundAt: "2026-06-17T12:00:00.000Z",
+      now: "2026-07-17T12:00:00.000Z",
+      accountJid: "15551234567@s.whatsapp.net",
+      accountLid: "86702773280883@lid",
+    });
+
+    expect(range.row.cursor_from_me).toBe(1);
+  });
+
+  it("does not mark another group participant as the account anchor", async () => {
+    const conversation = await seedGroup(db);
+    const message = await createConversationRepository(db).insertMessage({
+      conversationId: conversation.id,
+      providerMessageId: "participant-anchor",
+      senderJid: "15557654321@s.whatsapp.net",
+      senderName: "Participant",
+      providerTimestamp: "2026-07-17T11:00:00.000Z",
+      providerFromMe: false,
+      source: "live",
+      connectionKey: KEY_2,
+    });
+
+    const range = await createWhatsAppBackfillRangeRepository(db).ensureInitialRange({
+      groupJid: "group@g.us",
+      connectionKey: KEY_2,
+      liveStartEffectiveAt: message.row.effectiveAt,
+      liveStartMessageId: message.row.id,
+      lowerBoundAt: "2026-06-17T12:00:00.000Z",
+      now: "2026-07-17T12:00:00.000Z",
+      accountJid: "15551234567@s.whatsapp.net",
+      accountLid: "86702773280883@lid",
+    });
+
+    expect(range.row.cursor_from_me).toBe(0);
   });
 
   it("retries deadline expiry, exhausts after the bound, and re-arms on connected", async () => {

@@ -3,7 +3,7 @@ import type { WhatsAppSendResult } from "./provider";
 
 export type { WhatsAppSendResult } from "./provider";
 
-export const WHATSAPP_FACADE_CONTRACT_VERSION = "1.1";
+export const WHATSAPP_FACADE_CONTRACT_VERSION = "1.2";
 
 export const whatsAppFacadeTargetSchema = z.string().min(1);
 
@@ -121,6 +121,7 @@ export const whatsAppHistorySyncResponseSchema = z.object({ requestSessionId: z.
 export const whatsAppPairingStatusSchema = z.object({
   connected: z.boolean(),
   phoneNumber: z.string().nullable(),
+  lid: z.string().nullable().optional(),
 });
 
 export const whatsAppPairingEventSchema = z.discriminatedUnion("type", [

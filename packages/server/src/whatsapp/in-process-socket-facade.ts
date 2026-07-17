@@ -51,7 +51,11 @@ export class InProcessSocketFacade implements WhatsAppSocketFacade, InProcessMes
         onError: (message) => onEvent({ type: "error", message }),
       });
     },
-    status: async () => ({ connected: this.bot.isConnected, phoneNumber: this.bot.phoneNumber }),
+    status: async () => ({
+      connected: this.bot.isConnected,
+      phoneNumber: this.bot.phoneNumber,
+      lid: this.bot.accountLid,
+    }),
     cancel: async (): Promise<void> => {
       this.bot.cancelPairing();
     },

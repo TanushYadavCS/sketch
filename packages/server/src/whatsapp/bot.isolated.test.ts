@@ -155,6 +155,14 @@ describe("WhatsAppBot.phoneNumber", () => {
     };
     expect(bot.phoneNumber).toBe("+14155238886");
   });
+
+  it("exposes the connected account LID", () => {
+    const bot = new WhatsAppBot({ db, logger: createTestLogger() });
+    (bot as unknown as { sock: { user: { id: string; lid: string } } }).sock = {
+      user: { id: "14155238886:0@s.whatsapp.net", lid: "86702773280883@lid" },
+    };
+    expect(bot.accountLid).toBe("86702773280883@lid");
+  });
 });
 
 describe("WhatsAppBot.disconnect", () => {

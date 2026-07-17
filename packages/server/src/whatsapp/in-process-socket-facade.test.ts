@@ -7,6 +7,7 @@ function createMockBot(onLogout?: () => Promise<void>) {
   const bot = {
     isConnected: true,
     phoneNumber: "+15550001111",
+    accountLid: "86702773280883@lid",
     socket: null,
     startPairing: vi.fn(async (callbacks) => {
       await callbacks.onQr("qr-value");
@@ -87,7 +88,11 @@ describe("InProcessSocketFacade", () => {
       { type: "qr", qr: "qr-value" },
       { type: "connected", phoneNumber: "+15550001111" },
     ]);
-    await expect(facade.pairing.status()).resolves.toEqual({ connected: true, phoneNumber: "+15550001111" });
+    await expect(facade.pairing.status()).resolves.toEqual({
+      connected: true,
+      phoneNumber: "+15550001111",
+      lid: "86702773280883@lid",
+    });
     await facade.pairing.cancel();
     await facade.pairing.logout();
     await facade.shutdown();
