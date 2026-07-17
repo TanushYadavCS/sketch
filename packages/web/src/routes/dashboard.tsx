@@ -2,6 +2,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { api } from "@/lib/api";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@sketch/ui/components/sidebar";
 import { Outlet, createRoute, redirect, useRouteContext } from "@tanstack/react-router";
+import type { CSSProperties } from "react";
 import { redirectToManagedLogin } from "./managed-redirect";
 import { rootRoute } from "./root";
 
@@ -76,14 +77,33 @@ function DashboardLayout() {
   const auth = useDashboardAuth();
 
   return (
-    <SidebarProvider>
+    <SidebarProvider
+      defaultOpen={sidebarDefaultOpen()}
+      style={
+        {
+          "--sidebar-width": "16rem",
+          "--sidebar-width-icon": "3rem",
+        } as CSSProperties
+      }
+    >
       <AppSidebar displayName={auth.displayName} displayIdentifier={auth.displayIdentifier} role={auth.role} />
       <SidebarInset>
-        <SidebarTrigger className="absolute left-3 top-3 z-20" />
-        <main className="flex-1 overflow-auto pt-[52px]">
+        <div className="flex h-12 shrink-0 items-center border-b px-3 md:hidden">
+          <SidebarTrigger />
+        </div>
+        <main className="flex-1 overflow-auto">
           <Outlet />
         </main>
       </SidebarInset>
     </SidebarProvider>
   );
+}
+
+export function sidebarDefaultOpen(cookie = typeof document === "undefined" ? "" : document.cookie): boolean {
+  const value = cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("sidebar_state="))
+    ?.slice("sidebar_state=".length);
+  return value !== "false";
 }

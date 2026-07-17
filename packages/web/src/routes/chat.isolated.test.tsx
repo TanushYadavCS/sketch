@@ -1,4 +1,5 @@
 import { setPendingWebChatSubmission, takePendingWebChatSubmission } from "@/lib/chat-target";
+import { WEB_CHAT_CONVERSATIONS_QUERY_KEY } from "@/lib/web-chat-conversations";
 import { renderWithProviders } from "@/test/utils";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, renderHook, screen, waitFor, within } from "@testing-library/react";
@@ -196,83 +197,15 @@ describe("chat route", () => {
     mocks.search = { message: "Plan my day" };
   });
 
-  it("prefetches intended recent conversations with React Query cancellation", async () => {
-    const prefetchQuery = vi.spyOn(QueryClient.prototype, "prefetchQuery");
+  it("redirects the legacy chat index to a clean new conversation", async () => {
     mocks.search = {};
-    renderWithProviders(<ChatIndexPage />);
-
-    await waitFor(() => expect(mocks.homePaneProps).toHaveBeenCalled());
-    const onConversationIntent = mocks.homePaneProps.mock.lastCall?.[0].onConversationIntent as
-      | ((conversationId: string) => void)
-      | undefined;
-    expect(onConversationIntent).toBeTypeOf("function");
-
-    act(() => onConversationIntent?.("chat-alpha"));
-
-    await waitFor(() =>
-      expect(prefetchQuery).toHaveBeenCalledWith(
-        expect.objectContaining({
-          queryKey: webChatMessagesQueryKey("chat-alpha"),
-          staleTime: 15_000,
-        }),
-      ),
-    );
-    await waitFor(() =>
-      expect(mocks.loadMessages).toHaveBeenCalledWith(
-        "chat-alpha",
-        expect.objectContaining({ signal: expect.any(AbortSignal) }),
-      ),
-    );
-  });
-
-  it("uses a view transition when Home starts a chat", async () => {
-    mocks.search = {};
-    renderWithProviders(<ChatIndexPage />);
-
-    await waitFor(() => expect(mocks.homePaneProps).toHaveBeenCalled());
-    const onSubmit = mocks.homePaneProps.mock.lastCall?.[0].onSubmit as
-      | ((value: string, attachments: never[]) => void)
-      | undefined;
-    expect(onSubmit).toBeTypeOf("function");
-
-    act(() => onSubmit?.("Plan my day", []));
-
-    expect(mocks.navigate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: "/chat/$conversationId",
-        viewTransition: true,
-      }),
-    );
-  });
-
-  it("disables the Home transition when reduced motion is preferred", async () => {
-    mockReducedMotionPreference();
-    mocks.search = {};
-    renderWithProviders(<ChatIndexPage />);
-
-    await waitFor(() => expect(mocks.homePaneProps).toHaveBeenCalled());
-    const onSubmit = mocks.homePaneProps.mock.lastCall?.[0].onSubmit as
-      | ((value: string, attachments: never[]) => void)
-      | undefined;
-    expect(onSubmit).toBeTypeOf("function");
-
-    act(() => onSubmit?.("Plan my day", []));
-
-    expect(mocks.navigate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: "/chat/$conversationId",
-        viewTransition: false,
-      }),
-    );
-  });
-
-  it("uses a view transition when /chat?message redirects into a conversation", async () => {
     renderWithProviders(<ChatIndexPage />);
 
     await waitFor(() =>
       expect(mocks.navigate).toHaveBeenCalledWith(
         expect.objectContaining({
           to: "/chat/$conversationId",
+          search: { new: true },
           replace: true,
           viewTransition: true,
         }),
@@ -280,50 +213,34 @@ describe("chat route", () => {
     );
   });
 
-  it("disables the /chat?message redirect transition when reduced motion is preferred", async () => {
+  it("respects reduced motion when opening a clean chat from the legacy index", async () => {
     mockReducedMotionPreference();
+    mocks.search = {};
     renderWithProviders(<ChatIndexPage />);
 
     await waitFor(() =>
       expect(mocks.navigate).toHaveBeenCalledWith(
         expect.objectContaining({
           to: "/chat/$conversationId",
-          replace: true,
+          search: { new: true },
           viewTransition: false,
         }),
       ),
     );
   });
 
-  it("removes deleted conversation history from the shared cache", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: {
-        mutations: { retry: false },
-        queries: { retry: false },
-      },
-    });
-    queryClient.setQueryData(webChatMessagesQueryKey("chat-alpha"), {
-      messages: [{ id: "u-cached", role: "user", parts: [{ type: "text", text: "Cached question" }] }],
-      updatedAt: "2026-07-13T08:00:00.000Z",
-    });
-    mocks.search = {};
+  it("preserves an initial message when the legacy chat index redirects", async () => {
+    renderWithProviders(<ChatIndexPage />);
 
-    render(
-      <QueryClientProvider client={queryClient}>
-        <ChatIndexPage />
-      </QueryClientProvider>,
+    await waitFor(() =>
+      expect(mocks.navigate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: "/chat/$conversationId",
+          search: { message: "Plan my day" },
+          replace: true,
+        }),
+      ),
     );
-
-    await waitFor(() => expect(mocks.homePaneProps).toHaveBeenCalled());
-    const onDeleteConversation = mocks.homePaneProps.mock.lastCall?.[0].onDeleteConversation as
-      | ((conversation: { id: string }) => void)
-      | undefined;
-    expect(onDeleteConversation).toBeTypeOf("function");
-
-    act(() => onDeleteConversation?.({ id: "chat-alpha" }));
-
-    await waitFor(() => expect(mocks.removeConversation).toHaveBeenCalledWith("chat-alpha"));
-    await waitFor(() => expect(queryClient.getQueryData(webChatMessagesQueryKey("chat-alpha"))).toBeUndefined());
   });
 
   it("validates optional initial message search state", () => {
@@ -337,6 +254,9 @@ describe("chat route", () => {
     expect(validateChatSearch({ prefill: "" })).toEqual({});
     expect(validateChatSearch({ message: ["No"] })).toEqual({});
     expect(validateChatSearch({ prefill: ["No"] })).toEqual({});
+    expect(validateChatSearch({ new: true })).toEqual({ new: true });
+    expect(validateChatSearch({ new: "true" })).toEqual({ new: true });
+    expect(validateChatSearch({ new: "false" })).toEqual({});
   });
 
   it("extracts visible user and assistant text from AI SDK UI messages", () => {
@@ -853,6 +773,26 @@ describe("chat route", () => {
 
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Plan my day" })));
     expect(queryClient.getQueryData(webChatMessagesQueryKey("chat-alpha"))).toBeUndefined();
+  });
+
+  it("refreshes sidebar recents after the first new-chat message persists", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false },
+        queries: { retry: false },
+      },
+    });
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    sendMessage.mockResolvedValueOnce(undefined);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatPage />
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Plan my day" })));
+    await waitFor(() => expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }));
   });
 
   it("preserves the initial message during StrictMode effect replay", async () => {

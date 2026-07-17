@@ -1,3 +1,4 @@
+import { QuietAddButton } from "@/components/quiet-add-button";
 import { DeleteSkillDialog } from "@/components/skills/delete-skill-dialog";
 import { DiscardChangesDialog } from "@/components/skills/discard-changes-dialog";
 import { SkillCard } from "@/components/skills/skill-card";
@@ -7,7 +8,6 @@ import { SkillsEmptyState } from "@/components/skills/skills-empty-state";
 import { SkillsFilterBar } from "@/components/skills/skills-filter-bar";
 import { api } from "@/lib/api";
 import { type Skill, categoryMeta, fromApiSkill, isSkillEnabled } from "@/lib/skills-data";
-import { PlusIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -257,8 +257,8 @@ export function SkillsPage() {
     return (
       <div className="mx-auto box-content max-w-4xl px-10 py-8">
         <div>
-          <h1 className="text-xl font-semibold text-foreground">Skills</h1>
-          <p className="mt-2 text-sm text-muted-foreground">Discover and manage your bot&apos;s capabilities.</p>
+          <h1 className="text-[22px] font-medium text-foreground">Skills</h1>
+          <p className="mt-1 text-[13px] text-muted-foreground">Discover and manage your bot&apos;s capabilities.</p>
         </div>
         <div className="mt-6 rounded-xl border border-destructive/20 bg-destructive/5 p-6">
           <h2 className="text-sm font-semibold text-destructive">Couldn&apos;t load skills</h2>
@@ -327,13 +327,10 @@ export function SkillsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-foreground">Skills</h1>
-          <p className="mt-2 text-sm text-muted-foreground">Discover and manage your bot&apos;s capabilities.</p>
+          <h1 className="text-[22px] font-medium text-foreground">Skills</h1>
+          <p className="mt-1 text-[13px] text-muted-foreground">Discover and manage your bot&apos;s capabilities.</p>
         </div>
-        <Button variant="ghost" size="sm" className="gap-1.5 hover:bg-brand-accent/8" onClick={handleCreateClick}>
-          <PlusIcon size={14} weight="bold" />
-          Create Skill
-        </Button>
+        <QuietAddButton onClick={handleCreateClick}>Create Skill</QuietAddButton>
       </div>
 
       {/* Search */}

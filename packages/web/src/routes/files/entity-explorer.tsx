@@ -15,6 +15,7 @@ import { AddEntityDialog } from "@/components/entity-review/add-entity-dialog";
 import { humanSourceType } from "@/components/entity-review/entity-format";
 import { GhostReviewRow, ReviewDetailSheet } from "@/components/entity-review/review-band";
 import { GraphRebuildDialog, type GraphRebuildDialogPrefill } from "@/components/graph-rebuild-dialog";
+import { QuietAddButton } from "@/components/quiet-add-button";
 import { RebuildBanner } from "@/components/rebuild-banner";
 import { countKey, listKey } from "@/components/review-actions";
 import { useRebuildJob } from "@/hooks/use-rebuild-job";
@@ -30,7 +31,6 @@ import {
   CubeIcon,
   DotsThreeIcon,
   MagnifyingGlassIcon,
-  PlusIcon,
   UserIcon,
   XIcon,
 } from "@phosphor-icons/react";
@@ -237,10 +237,7 @@ export function EntityExplorer() {
           {showSystem ? "Hide system entities" : "Show system entities"}
         </Button>
 
-        <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => setShowAddDialog(true)}>
-          <PlusIcon size={12} />
-          Add Entity
-        </Button>
+        <QuietAddButton onClick={() => setShowAddDialog(true)}>Add Entity</QuietAddButton>
 
         {isAdmin && (
           <DropdownMenu>

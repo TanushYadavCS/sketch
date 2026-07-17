@@ -18,11 +18,11 @@
  */
 import { AddEntityDialog } from "@/components/entity-review/add-entity-dialog";
 import { ReviewBand } from "@/components/entity-review/review-band";
+import { QuietAddButton } from "@/components/quiet-add-button";
 import { type CuratedProduct, type EntityListItem, type ProjectSummary, api } from "@/lib/api";
 import { useEntityUi } from "@/lib/entity-ui";
-import { CaretRightIcon, CubeIcon, FolderSimpleIcon, PlusIcon, UsersThreeIcon } from "@phosphor-icons/react";
+import { CaretRightIcon, CubeIcon, FolderSimpleIcon, UsersThreeIcon } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
-import { Button } from "@sketch/ui/components/button";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useQuery } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
@@ -50,10 +50,9 @@ export function ProjectsPage() {
             it should already know.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="h-7 shrink-0 gap-1.5 text-xs" onClick={() => setShowAdd(true)}>
-          <PlusIcon size={12} />
+        <QuietAddButton className="shrink-0" onClick={() => setShowAdd(true)}>
           Add
-        </Button>
+        </QuietAddButton>
       </div>
 
       <ReviewBand types={SPINE_TYPES} />

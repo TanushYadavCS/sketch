@@ -660,7 +660,7 @@ export function WorkspacePage() {
       <div
         className={cn(
           "flex overflow-hidden border-t border-border",
-          isMobile ? "flex-col h-[calc(100vh-52px)]" : "flex-row h-[calc(100vh-52px)]",
+          isMobile ? "flex-col h-[calc(100vh-3rem)]" : "flex-row h-screen",
         )}
       >
         {isMobile ? (
