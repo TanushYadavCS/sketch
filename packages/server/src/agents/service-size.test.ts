@@ -7,7 +7,7 @@ const MAX_SERVICE_LINES = 600;
 describe("agent service module size", () => {
   it("keeps each production service module within the readability limit", () => {
     const files = readdirSync(import.meta.dirname)
-      .filter((file) => /^service(?:-[a-z-]+)?\.ts$/.test(file))
+      .filter((file) => file.startsWith("service") && file.endsWith(".ts"))
       .sort();
 
     const oversized = files.flatMap((file) => {
