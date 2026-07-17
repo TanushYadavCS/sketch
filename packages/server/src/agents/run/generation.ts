@@ -12,6 +12,7 @@ import type {
   AgentRouteDestination,
   AgentSourceConfig,
 } from "../../db/repositories/agent-outputs";
+import { buildContextAuthoritySnapshot } from "../context-authority";
 import { requireAgentDefinition } from "../registry";
 import type { AgentDefinition } from "../types";
 import { AgentDeliveryTargetError } from "./contracts";
@@ -59,11 +60,19 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
         user.auth_role === "admin" && adminCanReadAllFiles
           ? undefined
           : await this.deps.users.getAllEmailsForUser(user.id);
-      const [sameDayPrevious, previousDay, definitionContext] = await Promise.all([
-        this.getPreviousOutputForContext(def, user, output.output_date, scope),
-        this.getPreviousOutputForContext(def, user, addDays(output.output_date, -1), scope),
-        def.buildRuntimeContext
-          ? def.buildRuntimeContext({
+      const contextAuthorityPromise = def.usesContextAuthority
+        ? buildContextAuthoritySnapshot({
+            db: this.deps.db,
+            userId: user.id,
+            userEmail: user.email,
+            userName: user.name,
+            now,
+            getIntegrationStatus: this.deps.getIntegrationStatus,
+          })
+        : Promise.resolve(undefined);
+      const definitionContextPromise = def.buildRuntimeContext
+        ? contextAuthorityPromise.then((contextAuthority) =>
+            def.buildRuntimeContext?.({
               db: this.deps.db,
               user,
               outputDate: output.output_date,
@@ -71,6 +80,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
               now,
               adminCanReadAllFiles,
               contentUserEmails,
+              contextAuthority,
               agentConfig: {
                 enabledSections: routeSections,
                 maxItemsPerSection: routeMaxItemsPerSection,
@@ -83,9 +93,28 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
                 deliveryPlatform: deliveryPlatformForRoute(scope.route, scope.sources),
                 createTasks: config.createTasks,
               },
-            })
-          : Promise.resolve({}),
+            }),
+          )
+        : Promise.resolve({});
+      const [sameDayPrevious, previousDay, contextAuthority, definitionContext] = await Promise.all([
+        this.getPreviousOutputForContext(def, user, output.output_date, scope),
+        this.getPreviousOutputForContext(def, user, addDays(output.output_date, -1), scope),
+        contextAuthorityPromise,
+        definitionContextPromise,
       ]);
+      if (contextAuthority) {
+        this.deps.logger.info(
+          {
+            event: "agent_context_authority_snapshot",
+            agentKey: def.key,
+            connectorReadStatus: contextAuthority.connectors.status,
+            integrationReadStatus: contextAuthority.integrations.status,
+            connectedConnectorCount: contextAuthority.connectors.apps.length,
+            connectedIntegrationCount: contextAuthority.integrations.apps.length,
+          },
+          "Agent: context authority snapshot captured",
+        );
+      }
       const runtimeContext: Record<string, unknown> = {
         agentKey: def.key,
         agentVersion: def.version,
@@ -100,6 +129,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
         createTasks: config.createTasks,
         sameDayPreviousOutput: this.formatOutputForContext(sameDayPrevious),
         previousDayOutput: this.formatOutputForContext(previousDay),
+        ...(contextAuthority ? { contextAuthority } : {}),
         ...definitionContext,
       };
       if (def.augmentRuntimeContext) {
@@ -364,7 +394,12 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
             internalSectionKeys.has(item.sectionKey),
         );
         const reconciled = def.reconcileItems
-          ? await def.reconcileItems({ db: this.deps.db, items: filtered, runtimeContext: params.runtimeContext })
+          ? await def.reconcileItems({
+              db: this.deps.db,
+              items: filtered,
+              runtimeContext: params.runtimeContext,
+              logger: this.deps.logger,
+            })
           : filtered;
         const itemsForHooks = await def.enrichItems(this.deps.db, reconciled);
         const visibleItems = itemsForHooks.filter(

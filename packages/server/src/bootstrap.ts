@@ -602,6 +602,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     runScheduledAgent: trackedScheduledRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
+    getIntegrationStatus,
     queueManager,
     outputDelivery: agentOutputDelivery,
     getSlack: () => slack,

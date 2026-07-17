@@ -433,6 +433,99 @@ describe("AgentRunService", () => {
     expect(contexts[row.id].focus).toBe("Prioritize urgent work");
   });
 
+  it("captures one fail-open authority snapshot for an opted-in scheduled run without logging sensitive values", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({ name: "Agent User", email: "user@example.com" });
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "authority-connector-sensitive-id",
+        connector_type: "google_calendar",
+        auth_type: "oauth",
+        credentials: "authority-secret-credential",
+        sync_status: "active",
+        created_by: user.id,
+      })
+      .execute();
+    const contexts: Record<string, unknown>[] = [];
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      contexts.push(runtimeContextFromUserMessage(params.userMessage));
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Daily Brief", summary: "Summary" },
+        rawPayload: {
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Daily Brief", summary: "Summary" },
+          items: [],
+        },
+        items: [],
+      });
+      return successfulRunResult();
+    });
+    const info = vi.fn();
+    const logger = {
+      info,
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      child: vi.fn(),
+    } as unknown as AgentRunServiceDeps["logger"];
+    const getIntegrationStatus = vi.fn(async () => {
+      throw new Error("provider failure with authority-secret-provider-value");
+    });
+    const definition = dailyBriefDefinition as typeof dailyBriefDefinition & { usesContextAuthority?: boolean };
+    const previousUsesContextAuthority = definition.usesContextAuthority;
+    definition.usesContextAuthority = true;
+    try {
+      const service = createService(db, tasks, {
+        runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+        logger,
+        getIntegrationStatus,
+      } as Partial<AgentRunServiceDeps>);
+
+      const [row] = await service.requestGenerationForUser({
+        agentKey: DAILY_BRIEF_AGENT_KEY,
+        userId: user.id,
+        outputDate: OUTPUT_DATE,
+        triggerType: "scheduled",
+      });
+      if (!row) throw new Error("Expected a generated output row");
+      await tasks[0]();
+    } finally {
+      definition.usesContextAuthority = previousUsesContextAuthority;
+    }
+
+    expect(getIntegrationStatus).toHaveBeenCalledTimes(1);
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]?.contextAuthority).toMatchObject({
+      connectors: {
+        status: "available",
+        apps: [expect.objectContaining({ key: "connector:google_calendar" })],
+      },
+      integrations: { status: "unavailable", apps: [] },
+    });
+    expect(info).toHaveBeenCalledWith(
+      {
+        event: "agent_context_authority_snapshot",
+        agentKey: DAILY_BRIEF_AGENT_KEY,
+        connectorReadStatus: "available",
+        integrationReadStatus: "unavailable",
+        connectedConnectorCount: 1,
+        connectedIntegrationCount: 0,
+      },
+      "Agent: context authority snapshot captured",
+    );
+    const serializedLogs = JSON.stringify(info.mock.calls);
+    expect(serializedLogs).not.toContain("authority-connector-sensitive-id");
+    expect(serializedLogs).not.toContain("authority-secret-credential");
+    expect(serializedLogs).not.toContain("authority-secret-provider-value");
+    expect(serializedLogs).not.toContain("google_calendar");
+  });
+
   it("suppresses recent failed scheduled attempts during the schedule window", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);

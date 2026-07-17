@@ -12,6 +12,7 @@ import type {
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB, UsersTable } from "../db/schema";
 import type { Logger } from "../logger";
+import type { ContextAuthoritySnapshot } from "./context-authority";
 
 /**
  * Context handed to {@link AgentDefinition.augmentRuntimeContext}. The engine builds
@@ -91,6 +92,7 @@ export interface AgentRuntimeContextParams {
   now: Date;
   adminCanReadAllFiles: boolean;
   contentUserEmails: string[] | undefined;
+  contextAuthority?: ContextAuthoritySnapshot;
   agentConfig?: {
     enabledSections: Record<string, boolean>;
     maxItemsPerSection: number;
@@ -128,6 +130,8 @@ export interface AgentDefinition {
   itemsPerSectionRange: { min: number; max: number };
   /** When true, every output item must cite at least one known entity or file. */
   requiresKnowledgeRefs: boolean;
+  /** When true, the run receives one fresh server-built connector authority snapshot. */
+  usesContextAuthority?: boolean;
   /**
    * Fully static instruction string. Per-user values (enabled sections, item cap,
    * focus) are NOT interpolated here; they flow through the runtime context in the
@@ -149,6 +153,7 @@ export interface AgentDefinition {
     db: Kysely<DB>;
     items: AgentOutputItemInput[];
     runtimeContext: Record<string, unknown>;
+    logger?: Logger;
   }): Promise<AgentOutputItemInput[]>;
   /** Normalize a stored item into its API representation (label/action/displayRef fallbacks). */
   toApiItem(item: AgentStoredItem): AgentApiItem;

@@ -14,7 +14,7 @@ import type {
 import type { createSettingsRepository } from "../../db/repositories/settings";
 import type { createUserRepository } from "../../db/repositories/users";
 import type { DB, UsersTable } from "../../db/schema";
-import type { IntegrationProvider } from "../../integrations/types";
+import type { IntegrationProvider, IntegrationStatus } from "../../integrations/types";
 import type { Logger } from "../../logger";
 import type { QueueManager } from "../../queue";
 import type { SlackBot } from "../../slack/bot";
@@ -44,6 +44,7 @@ export interface AgentRunServiceDeps {
   runScheduledAgent: (params: RunAgentParams, admission?: AgentRunAdmissionOptions) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  getIntegrationStatus?: () => Promise<IntegrationStatus>;
   queueManager?: QueueManager;
   outputDelivery?: AgentOutputDeliveryPublisher;
   getSlack?: () => Pick<SlackBot, "isUserInChannel" | "listChannels"> | null;
