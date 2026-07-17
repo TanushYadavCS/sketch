@@ -39,7 +39,7 @@ export function HomePage() {
   const running = briefQuery.data?.running || generateMutation.isPending;
 
   return (
-    <TabContentContainer className="mx-auto box-border min-h-[calc(100vh-52px)] max-w-4xl px-5 py-10 sm:px-10">
+    <TabContentContainer className="mx-auto box-border min-h-[calc(100vh-3rem)] max-w-4xl px-5 py-10 sm:px-10 md:min-h-screen">
       {brief ? (
         <DailyBrief
           brief={brief}
