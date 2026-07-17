@@ -177,6 +177,16 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       return rows.map((row) => decodeConnectorConfigRow(row, encryptionKey));
     },
 
+    async listConnectedAuthorityStatesByOwner(createdBy: string) {
+      return db
+        .selectFrom("connector_configs")
+        .select(["connector_type", "sync_status", "last_synced_at", "updated_at"])
+        .where("created_by", "=", createdBy)
+        .where("sync_status", "in", ["active", "syncing"])
+        .orderBy("connector_type", "asc")
+        .execute();
+    },
+
     /**
      * Archive all connectors owned by a user — flip to disabled and scrub credentials.
      * Used when a user is removed from the workspace. Their indexed_files remain so
