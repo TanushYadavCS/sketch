@@ -116,8 +116,12 @@ export async function loadViewerPersonEntityIds(
   return [...new Set(peopleByEmail.flat().map((person) => person.id))];
 }
 
-export async function resolveTaskAccessContext(db: Kysely<DB>, c: Context): Promise<TaskAccessContext> {
-  const userId = c.get("sub");
+export async function resolveTaskAccessContext(
+  db: Kysely<DB>,
+  c: Context,
+  resolvedUserId?: string,
+): Promise<TaskAccessContext> {
+  const userId = resolvedUserId ?? c.get("sub");
   const viewer = getContentViewer(c);
   const admin = isAdmin(c);
   return {

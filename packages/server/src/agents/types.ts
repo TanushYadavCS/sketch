@@ -75,6 +75,7 @@ export interface AgentSourceConfigDef {
 
 export interface AgentApiItem {
   id: string;
+  taskId?: string | null;
   sectionKey: string;
   title: string;
   summary: string;

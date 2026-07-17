@@ -883,6 +883,7 @@ async function enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promi
 function toApiItem(item: AgentStoredItem): AgentApiItem {
   return {
     id: item.id,
+    taskId: item.task_id,
     sectionKey: item.section_key,
     title: item.title,
     summary: item.summary,
