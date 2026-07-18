@@ -51,8 +51,15 @@ export function PeopleTab({ onSeeAllReview }: { onSeeAllReview: () => void }) {
   }, [search]);
 
   const peopleQuery = useInfiniteQuery({
-    queryKey: ["entities", "person", "org-people"],
-    queryFn: ({ pageParam }) => api.entities.list({ type: "person", sort: "mentions", limit: PAGE, offset: pageParam }),
+    queryKey: ["entities", "person", "org-people", debounced],
+    queryFn: ({ pageParam }) =>
+      api.entities.list({
+        type: "person",
+        search: debounced || undefined,
+        sort: "mentions",
+        limit: PAGE,
+        offset: pageParam,
+      }),
     initialPageParam: 0,
     getNextPageParam: (last, all) => {
       const loaded = all.reduce((n, p) => n + p.entities.length, 0);
@@ -65,6 +72,12 @@ export function PeopleTab({ onSeeAllReview }: { onSeeAllReview: () => void }) {
     queryFn: () => api.entities.list({ type: "company", limit: 200 }),
   });
 
+  const peopleCountQuery = useQuery({
+    queryKey: ["entities", "count", "person"],
+    queryFn: () => api.entities.list({ type: "person", limit: 1 }),
+    refetchInterval: 60000,
+  });
+
   const graphQuery = useQuery({
     queryKey: ["entity-graph", "org-people-worksat"],
     queryFn: () => api.entities.graph({ limit: 1000 }),
@@ -72,7 +85,7 @@ export function PeopleTab({ onSeeAllReview }: { onSeeAllReview: () => void }) {
   });
 
   const people = useMemo(() => peopleQuery.data?.pages.flatMap((p) => p.entities) ?? [], [peopleQuery.data]);
-  const totalPeople = peopleQuery.data?.pages[0]?.total ?? 0;
+  const totalPeople = peopleCountQuery.data?.total ?? (debounced ? 0 : (peopleQuery.data?.pages[0]?.total ?? 0));
 
   const companiesMap = useMemo(() => {
     const map = new Map<string, CompanyInfo>();
@@ -203,17 +216,18 @@ export function PeopleTab({ onSeeAllReview }: { onSeeAllReview: () => void }) {
                 </span>
               </button>
               {showTail ? unaffiliated.map((person) => <PersonRow key={person.id} person={person} />) : null}
-              {showTail && peopleQuery.hasNextPage ? (
-                <button
-                  type="button"
-                  onClick={() => peopleQuery.fetchNextPage()}
-                  disabled={peopleQuery.isFetchingNextPage}
-                  className="w-full border-t border-border px-3 py-2.5 text-center text-xs text-muted-foreground hover:bg-muted/30 hover:text-foreground"
-                >
-                  {peopleQuery.isFetchingNextPage ? "Loading…" : "Load more people"}
-                </button>
-              ) : null}
             </div>
+          ) : null}
+
+          {showTail && peopleQuery.hasNextPage ? (
+            <button
+              type="button"
+              onClick={() => peopleQuery.fetchNextPage()}
+              disabled={peopleQuery.isFetchingNextPage}
+              className="w-full border-t border-border px-3 py-2.5 text-center text-xs text-muted-foreground hover:bg-muted/30 hover:text-foreground"
+            >
+              {peopleQuery.isFetchingNextPage ? "Loading…" : "Load more people"}
+            </button>
           ) : null}
 
           {filteredPeople.length === 0 ? (

@@ -36,6 +36,7 @@ const PERSON = entity({
 const COMPANY = entity({ id: "company-1", name: "Acme", sourceType: "company", subtype: "internal" });
 const PROJECT = entity({ id: "project-1", name: "Atlas Rollout", sourceType: "project" });
 const TOOL = entity({ id: "tool-1", name: "Figma", sourceType: "tool" });
+const SEARCHED_PERSON = entity({ id: "person-2", name: "Zara Khan", sourceType: "person" });
 
 const ENTITIES: Record<string, EntityListItem[]> = {
   person: [PERSON],
@@ -92,6 +93,31 @@ describe("ProjectsPage", () => {
     expect(screen.getByText("Mira Shah")).toBeInTheDocument();
     expect(screen.getByText("mira@example.com")).toBeInTheDocument();
     expect(screen.getByText("Engineer · Internal")).toBeInTheDocument();
+  });
+
+  it("sends People searches to the server", async () => {
+    const requestedSearches: Array<string | null> = [];
+    server.use(
+      http.get("/api/entities", ({ request }) => {
+        const url = new URL(request.url);
+        const type = url.searchParams.get("type") ?? "";
+        if (type !== "person") {
+          const entities = ENTITIES[type] ?? [];
+          return HttpResponse.json({ entities, total: entities.length });
+        }
+        const search = url.searchParams.get("search");
+        requestedSearches.push(search);
+        const entities = search === "zara" ? [SEARCHED_PERSON] : [PERSON];
+        return HttpResponse.json({ entities, total: entities.length });
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<ProjectsPage />);
+
+    await user.type(await screen.findByPlaceholderText("Search people…"), "Zara");
+
+    expect(await screen.findByText("Zara Khan")).toBeInTheDocument();
+    expect(requestedSearches).toContain("zara");
   });
 
   it("opens entity rows from type tabs in the shared drawer", async () => {
