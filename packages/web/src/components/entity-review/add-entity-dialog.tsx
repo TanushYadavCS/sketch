@@ -10,7 +10,7 @@
  */
 import { api } from "@/lib/api";
 import { Button } from "@sketch/ui/components/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@sketch/ui/components/dialog";
 import { Input } from "@sketch/ui/components/input";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -56,6 +56,7 @@ export function AddEntityDialog({
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>Add entity</DialogTitle>
+          <DialogDescription>Declare an entity that Sketch should already know about.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div>

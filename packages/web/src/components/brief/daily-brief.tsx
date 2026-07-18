@@ -1,4 +1,5 @@
 import type { DailyBrief as DailyBriefData, DailyBriefItem } from "@/lib/api";
+import { useEntityUiOptional } from "@/lib/entity-ui";
 import { SparkleIcon } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import { BriefDetailDrawer } from "./brief-detail-drawer";
@@ -73,7 +74,24 @@ export function DailyBrief({
   onOpenChat: (prompt: string) => void;
 }) {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const entityUi = useEntityUiOptional();
   const nextMeetingId = useNextMeetingId(brief.sections.meetings ?? []);
+
+  /**
+   * Active-project rows deep-link into project detail — the shared entity
+   * drawer — via the item's first entity reference. This is the daily path
+   * into a project. Every other section opens the brief detail sheet.
+   */
+  const openItem = (item: DailyBriefItem) => {
+    if (item.sectionKey === "active_projects" && entityUi) {
+      const projectEntityId = item.knowledgeRefs.entityIds[0];
+      if (projectEntityId) {
+        entityUi.openEntity(projectEntityId);
+        return;
+      }
+    }
+    setSelectedItemId(item.id);
+  };
   const subtitle =
     brief.masthead?.summary ?? brief.masthead?.title ?? "Today across your to-dos, customers, and projects.";
   const visibleSections = enabledSections
@@ -138,7 +156,7 @@ export function DailyBrief({
                       key={item.id}
                       item={item}
                       isLast={index === items.length - 1}
-                      onOpenDetail={() => setSelectedItemId(item.id)}
+                      onOpenDetail={() => openItem(item)}
                       onOpenChat={onOpenChat}
                     />
                   ))}

@@ -1,5 +1,7 @@
 import type { DailyBrief as DailyBriefData, DailyBriefItem } from "@/lib/api";
-import { act, render, screen, within } from "@testing-library/react";
+import { useEntityUi } from "@/lib/entity-ui";
+import { renderWithProviders } from "@/test/utils";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DailyBrief } from "./daily-brief";
 
@@ -22,7 +24,26 @@ function meetingItem(id: string, title: string, startTime: string): DailyBriefIt
   };
 }
 
-function briefWith(meetings: DailyBriefItem[]): DailyBriefData {
+function projectItem(id: string, title: string, entityId: string, actionPrompt: string | null = null): DailyBriefItem {
+  return {
+    id,
+    sectionKey: "active_projects",
+    title,
+    summary: "",
+    priority: "medium",
+    label: "Project",
+    displayRef: null,
+    actionType: null,
+    actionLabel: null,
+    actionPrompt,
+    sourceUrl: null,
+    structuredPayload: null,
+    knowledgeRefs: { entityIds: [entityId], fileIds: [] },
+    sortOrder: 0,
+  };
+}
+
+function briefWith(meetings: DailyBriefItem[], activeProjects: DailyBriefItem[] = []): DailyBriefData {
   return {
     id: "brief-1",
     userId: "user-1",
@@ -37,9 +58,14 @@ function briefWith(meetings: DailyBriefItem[]): DailyBriefData {
       untracked_followups: [],
       looks_resolved: [],
       customer_updates: [],
-      active_projects: [],
+      active_projects: activeProjects,
     },
   };
+}
+
+function StackProbe() {
+  const ui = useEntityUi();
+  return <div data-testid="open-stack">{ui.stack.join(",")}</div>;
 }
 
 function rowWithBadge(): HTMLElement {
@@ -92,5 +118,31 @@ describe("DailyBrief Now / Next marker", () => {
 
     expect(screen.getByText("Untracked follow-ups")).toBeInTheDocument();
     expect(screen.getByText("Looks resolved")).toBeInTheDocument();
+  });
+
+  it("opens active-project items through their first entity reference", () => {
+    const activeProject = projectItem("project-item", "Atlas rollout", "entity-project-1");
+    renderWithProviders(
+      <>
+        <DailyBrief brief={briefWith([], [activeProject])} running={false} onOpenChat={() => {}} />
+        <StackProbe />
+      </>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Atlas rollout" }));
+
+    expect(screen.getByTestId("open-stack")).toHaveTextContent("entity-project-1");
+  });
+
+  it("keeps active-project chat actions available alongside entity navigation", () => {
+    const activeProject = projectItem("project-item", "Atlas rollout", "entity-project-1", "Catch me up on Atlas");
+    const onOpenChat = vi.fn();
+    renderWithProviders(<DailyBrief brief={briefWith([], [activeProject])} running={false} onOpenChat={onOpenChat} />);
+
+    const action = screen.getByRole("button", { name: "Catch me up" });
+    expect(action.parentElement).not.toHaveClass("hidden");
+    fireEvent.click(action);
+
+    expect(onOpenChat).toHaveBeenCalledWith("Catch me up on Atlas");
   });
 });

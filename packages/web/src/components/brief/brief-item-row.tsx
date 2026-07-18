@@ -59,7 +59,7 @@ export function BriefItemRow({
         ) : null}
       </button>
 
-      <div className="hidden min-w-0 shrink-0 items-center justify-end py-2.5 sm:flex">
+      <div className="flex min-w-0 shrink-0 items-center justify-end py-2.5">
         {item.actionPrompt ? (
           <BriefActionButton label={actionLabel} onClick={() => onOpenChat(item.actionPrompt as string)} />
         ) : null}

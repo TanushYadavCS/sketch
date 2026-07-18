@@ -15,7 +15,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { type ForceGraphMethods, type LinkObject, type NodeObject } from "react-force-graph-2d";
 
-type CoarseType = "person" | "company" | "project" | "product" | "team" | "tool" | "system" | "other";
+export type CoarseType = "person" | "company" | "project" | "product" | "team" | "tool" | "system" | "other";
 
 function coarseType(sourceType: string): CoarseType {
   if (sourceType === "person") return "person";
@@ -28,8 +28,12 @@ function coarseType(sourceType: string): CoarseType {
   return "other";
 }
 
-/** Brighter, saturated palette tuned for the dark stage (the muted drawer accents read flat here). */
-const NODE_COLOR: Record<CoarseType, string> = {
+/**
+ * Brighter, saturated palette tuned for the dark stage (the muted drawer
+ * accents read flat here). Exported so the Your Org tab strip can act as the
+ * graph's legend — the graph renders no legend of its own.
+ */
+export const NODE_COLOR: Record<CoarseType, string> = {
   person: "#6ea8fe",
   company: "#f6ad3c",
   project: "#b794f6",
@@ -41,19 +45,6 @@ const NODE_COLOR: Record<CoarseType, string> = {
 };
 
 const ACCENT = "#FEED01";
-
-const TYPE_LABEL: Record<CoarseType, string> = {
-  person: "People",
-  company: "Companies",
-  project: "Projects",
-  product: "Products",
-  team: "Teams",
-  tool: "Tools",
-  system: "Spaces",
-  other: "Other",
-};
-
-const LEGEND: CoarseType[] = ["person", "company", "project", "product", "team"];
 
 interface GraphNode extends NodeObject {
   id: string;
@@ -103,47 +94,14 @@ export function KnowledgeGraphView() {
       degree.set(e.target, (degree.get(e.target) ?? 0) + 1);
     }
 
-    // Keep only sizeable connected components so stray 2-node threads don't scatter.
-    const parent = new Map<string, string>();
-    const find = (x: string): string => {
-      let root = x;
-      while (parent.get(root) !== root) root = parent.get(root) ?? root;
-      let cur = x;
-      while (parent.get(cur) !== root) {
-        const next = parent.get(cur) ?? root;
-        parent.set(cur, root);
-        cur = next;
-      }
-      return root;
-    };
-    for (const id of degree.keys()) parent.set(id, id);
-    for (const l of allLinks) {
-      const a = find(l.source);
-      const b = find(l.target);
-      if (a !== b) parent.set(a, b);
-    }
-    // Keep only the largest connected component — the org brain — so the canvas
-    // is one centred constellation instead of a main mass plus drifting satellites.
-    const compSize = new Map<string, number>();
-    for (const id of degree.keys()) compSize.set(find(id), (compSize.get(find(id)) ?? 0) + 1);
-    let biggestRoot = "";
-    let biggest = 0;
-    for (const [root, n] of compSize) {
-      if (n > biggest) {
-        biggest = n;
-        biggestRoot = root;
-      }
-    }
-    const keep = (id: string) => find(id) === biggestRoot;
-
-    const keptLinks = allLinks.filter((l) => keep(l.source) && keep(l.target));
+    const keptLinks = allLinks;
     const adj = new Map<string, Set<string>>();
     for (const l of keptLinks) {
       (adj.get(l.source) ?? adj.set(l.source, new Set()).get(l.source))?.add(l.target);
       (adj.get(l.target) ?? adj.set(l.target, new Set()).get(l.target))?.add(l.source);
     }
     const keptNodes = data.nodes
-      .filter((n) => degree.has(n.id) && keep(n.id))
+      .filter((n) => degree.has(n.id))
       .map((n) => {
         const type = coarseType(n.sourceType);
         return { id: n.id, name: n.name, type, color: NODE_COLOR[type], val: 1 + (degree.get(n.id) ?? 0) };
@@ -278,23 +236,6 @@ export function KnowledgeGraphView() {
           <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-white/55 shadow-sm backdrop-blur">
             {nodes.length} entities · {links.length} links
           </span>
-        </div>
-
-        {/* Legend */}
-        <div className="absolute bottom-3 left-3 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 shadow-sm backdrop-blur">
-          {LEGEND.map((t) => (
-            <span
-              key={t}
-              className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.05em] text-white/55"
-            >
-              <span
-                className="h-2 w-2 rounded-full"
-                style={{ backgroundColor: NODE_COLOR[t], boxShadow: `0 0 6px ${NODE_COLOR[t]}` }}
-                aria-hidden
-              />
-              {TYPE_LABEL[t]}
-            </span>
-          ))}
         </div>
 
         {isLoading && (
