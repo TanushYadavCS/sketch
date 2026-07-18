@@ -13,6 +13,8 @@ function drawerTitle(item: DailyBriefItem): string {
 
 function drawerSubtitle(item: DailyBriefItem): string {
   if (item.sectionKey === "todos") return "Assigned or inferred for you";
+  if (item.sectionKey === "untracked_followups") return "Reconstructed follow-up";
+  if (item.sectionKey === "looks_resolved") return "Completion review";
   if (item.sectionKey === "customer_updates") return "Customer Updates";
   return "Active Projects";
 }

@@ -172,6 +172,84 @@ describe("createTaskRepository sqlite", () => {
     expect(adminListed.map((task) => task.created_by_user_id).sort()).toEqual(["brief-u1", "brief-u2"]);
   });
 
+  it("keeps same-title Brief work separate by owner and creates a new recurrence after completion", async () => {
+    await seedUser(db, "brief-u1", "u1@example.com", { emailVerified: true });
+    await seedUser(db, "brief-u2", "u2@example.com", { emailVerified: true });
+    await seedPerson(db, "person-u1", "Brief Owner One", ["u1@example.com"]);
+    await seedPerson(db, "person-u2", "Brief Owner Two", ["u2@example.com"]);
+    await seedProject(db, "project-x", "Project X");
+    await seedIndexedFile(db, "brief-file-1");
+    const repo = createTaskRepository(db);
+    const refs = { entityIds: ["project-x"], fileIds: ["brief-file-1"] };
+
+    const firstOwner = await repo.promoteBriefTask({
+      userId: "brief-u1",
+      todo: briefTodo({ structuredPayload: { assigneeName: "Brief Owner One" } }),
+      knowledgeRefs: refs,
+    });
+    const secondOwner = await repo.promoteBriefTask({
+      userId: "brief-u1",
+      todo: briefTodo({ structuredPayload: { assigneeName: "Brief Owner Two" } }),
+      knowledgeRefs: refs,
+    });
+    const firstTaskId = firstOwner.status === "upserted" ? firstOwner.taskId : "";
+    await db
+      .updateTable("tasks")
+      .set({
+        status: "done",
+        status_raw: "done",
+        completed_at: "2026-07-16T09:00:00.000Z",
+        status_changed_at: "2026-07-16T09:00:00.000Z",
+      })
+      .where("id", "=", firstTaskId)
+      .execute();
+    const recurrence = await repo.promoteBriefTask({
+      userId: "brief-u1",
+      todo: briefTodo({ structuredPayload: { assigneeName: "Brief Owner One" } }),
+      knowledgeRefs: refs,
+    });
+    const replay = await repo.promoteBriefTask({
+      userId: "brief-u1",
+      todo: briefTodo({ structuredPayload: { assigneeName: "Brief Owner One" } }),
+      knowledgeRefs: refs,
+    });
+    const rows = await db
+      .selectFrom("tasks")
+      .select(["id", "status", "assignee_entity_id"])
+      .where("source", "=", "brief")
+      .where("normalized_title", "=", "ship slack capture")
+      .orderBy("assignee_entity_id")
+      .orderBy("status")
+      .execute();
+
+    expect(firstOwner.status).toBe("upserted");
+    expect(secondOwner).toMatchObject({ status: "upserted", created: true });
+    expect(secondOwner.status === "upserted" ? secondOwner.taskId : "").not.toBe(firstTaskId);
+    expect(recurrence).toMatchObject({ status: "upserted", created: true });
+    expect(recurrence.status === "upserted" ? recurrence.taskId : "").not.toBe(firstTaskId);
+    expect(replay).toMatchObject({
+      status: "upserted",
+      taskId: recurrence.status === "upserted" ? recurrence.taskId : "",
+      created: false,
+    });
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { id: firstTaskId, status: "done", assignee_entity_id: "person-u1" },
+        {
+          id: recurrence.status === "upserted" ? recurrence.taskId : "",
+          status: "open",
+          assignee_entity_id: "person-u1",
+        },
+        {
+          id: secondOwner.status === "upserted" ? secondOwner.taskId : "",
+          status: "open",
+          assignee_entity_id: "person-u2",
+        },
+      ]),
+    );
+    expect(rows).toHaveLength(3);
+  });
+
   it("collates brief todos into structural tasks and keeps orphan expiry off brief tasks", async () => {
     await seedUser(db, "brief-u1", "u1@example.com", { emailVerified: true });
     await seedPerson(db, "person-u1", "Brief Owner One", ["u1@example.com"]);
@@ -368,6 +446,211 @@ describe("createTaskRepository sqlite", () => {
     ).resolves.toHaveLength(1);
   });
 
+  it("keeps same-title Summarizer tasks separate across conversation source anchors", async () => {
+    await seedUser(db, "summary-u1", "summary@example.com");
+    const firstConversation = await seedTaskConversation(db, "slack", "channel", "C_ONE");
+    const secondConversation = await seedTaskConversation(db, "slack", "channel", "C_TWO");
+    const repo = createTaskRepository(db);
+    const item = summaryAction({
+      title: "Send the revised proposal",
+      structuredPayload: { assigneeName: "Ashish", messageIds: ["message-1"] },
+    });
+
+    const first = await repo.promoteSummaryTask({
+      userId: "summary-u1",
+      item,
+      sourceAnchor: {
+        platform: "slack",
+        conversationId: firstConversation,
+        providerThreadId: "thread-1",
+        key: `slack:${firstConversation}:thread-1`,
+      },
+      originOutputId: null,
+    });
+    const second = await repo.promoteSummaryTask({
+      userId: "summary-u1",
+      item,
+      sourceAnchor: {
+        platform: "slack",
+        conversationId: secondConversation,
+        providerThreadId: "thread-2",
+        key: `slack:${secondConversation}:thread-2`,
+      },
+      originOutputId: null,
+    });
+
+    expect(first.status).toBe("upserted");
+    expect(second.status).toBe("upserted");
+    expect(first.status === "upserted" && second.status === "upserted" ? first.taskId : "").not.toBe(
+      second.status === "upserted" ? second.taskId : "",
+    );
+    await expect(
+      db.selectFrom("tasks").select(["source_anchor_key"]).where("title", "=", item.title).execute(),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        { source_anchor_key: `slack:${firstConversation}:thread-1` },
+        { source_anchor_key: `slack:${secondConversation}:thread-2` },
+      ]),
+    );
+  });
+
+  it("keeps same-anchor same-title Summarizer work separate for different owners", async () => {
+    await seedUser(db, "summary-u1", "summary@example.com");
+    const conversationId = await seedTaskConversation(db, "slack", "channel", "C_OWNER_IDENTITY");
+    const repo = createTaskRepository(db);
+    const sourceAnchor = {
+      platform: "slack" as const,
+      conversationId,
+      providerThreadId: "thread-owner",
+      key: `slack:${conversationId}:thread-owner`,
+    };
+
+    const first = await repo.promoteSummaryTask({
+      userId: "summary-u1",
+      item: summaryAction({
+        title: "Send the revised proposal",
+        structuredPayload: { assigneeName: "External Ashish", messageIds: ["message-owner-1"] },
+      }),
+      sourceAnchor,
+    });
+    const second = await repo.promoteSummaryTask({
+      userId: "summary-u1",
+      item: summaryAction({
+        title: "Send the revised proposal",
+        structuredPayload: { assigneeName: "External Vedant", messageIds: ["message-owner-2"] },
+      }),
+      sourceAnchor,
+    });
+
+    expect(first.status).toBe("upserted");
+    expect(second.status).toBe("upserted");
+    expect(first.status === "upserted" && second.status === "upserted" ? first.taskId : "").not.toBe(
+      second.status === "upserted" ? second.taskId : "",
+    );
+    await expect(
+      db
+        .selectFrom("tasks")
+        .select(["id", "proposed_assignee_name"])
+        .where("source_anchor_key", "=", sourceAnchor.key)
+        .where("normalized_title", "=", "send the revised proposal")
+        .orderBy("proposed_assignee_name")
+        .execute(),
+    ).resolves.toEqual([
+      expect.objectContaining({ proposed_assignee_name: "External Ashish" }),
+      expect.objectContaining({ proposed_assignee_name: "External Vedant" }),
+    ]);
+  });
+
+  it("upgrades a proposed Summarizer owner to the matching resolved owner without duplicating", async () => {
+    await seedUser(db, "summary-u1", "summary@example.com");
+    const conversationId = await seedTaskConversation(db, "slack", "channel", "C_OWNER_RESOLUTION");
+    const repo = createTaskRepository(db);
+    const sourceAnchor = {
+      platform: "slack" as const,
+      conversationId,
+      providerThreadId: "thread-owner-resolution",
+      key: `slack:${conversationId}:thread-owner-resolution`,
+    };
+    const first = await repo.promoteSummaryTask({
+      userId: "summary-u1",
+      item: summaryAction({
+        title: "Review the launch brief",
+        structuredPayload: { assigneeName: "Vedant", messageIds: ["message-owner-proposed"] },
+      }),
+      sourceAnchor,
+    });
+    await seedUser(db, "vedant-user", "vedant@example.com", { emailVerified: true });
+    await seedPerson(db, "person-vedant", "Vedant", ["vedant@example.com"]);
+    const resolved = await repo.promoteSummaryTask({
+      userId: "summary-u1",
+      item: summaryAction({
+        title: "Review the launch brief",
+        structuredPayload: {
+          assigneeEntityId: "person-vedant",
+          assigneeName: "Vedant",
+          messageIds: ["message-owner-resolved"],
+        },
+      }),
+      sourceAnchor,
+    });
+    const rows = await db
+      .selectFrom("tasks")
+      .selectAll()
+      .where("source_anchor_key", "=", sourceAnchor.key)
+      .where("normalized_title", "=", "review the launch brief")
+      .execute();
+
+    expect(first.status).toBe("upserted");
+    expect(resolved).toMatchObject({
+      status: "upserted",
+      taskId: first.status === "upserted" ? first.taskId : "",
+      created: false,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      assignee_entity_id: "person-vedant",
+      assignee_name: "Vedant",
+      proposed_assignee_name: null,
+    });
+  });
+
+  it.each(["done", "dropped"] as const)(
+    "creates a new recurrence instead of reusing a %s Summarizer task",
+    async (terminalStatus) => {
+      await seedUser(db, "summary-u1", "summary@example.com");
+      const conversationId = await seedTaskConversation(db, "slack", "channel", `C_RECURRENCE_${terminalStatus}`);
+      const repo = createTaskRepository(db);
+      const sourceAnchor = {
+        platform: "slack" as const,
+        conversationId,
+        providerThreadId: "thread-recurrence",
+        key: `slack:${conversationId}:thread-recurrence`,
+      };
+      const item = summaryAction({
+        title: "Send the weekly customer update",
+        structuredPayload: { assigneeName: "External Ashish", messageIds: ["message-recurrence"] },
+      });
+
+      const first = await repo.promoteSummaryTask({ userId: "summary-u1", item, sourceAnchor });
+      const firstTaskId = first.status === "upserted" ? first.taskId : "";
+      await db
+        .updateTable("tasks")
+        .set({
+          status: terminalStatus,
+          status_raw: terminalStatus,
+          status_changed_at: "2026-07-16T09:00:00.000Z",
+          completed_at: terminalStatus === "done" ? "2026-07-16T09:00:00.000Z" : null,
+        })
+        .where("id", "=", firstTaskId)
+        .execute();
+
+      const recurrence = await repo.promoteSummaryTask({ userId: "summary-u1", item, sourceAnchor });
+      const replay = await repo.promoteSummaryTask({ userId: "summary-u1", item, sourceAnchor });
+      const rows = await db
+        .selectFrom("tasks")
+        .select(["id", "status"])
+        .where("source_anchor_key", "=", sourceAnchor.key)
+        .where("normalized_title", "=", "send the weekly customer update")
+        .orderBy("status")
+        .execute();
+
+      expect(recurrence).toMatchObject({ status: "upserted", created: true });
+      expect(recurrence.status === "upserted" ? recurrence.taskId : "").not.toBe(firstTaskId);
+      expect(replay).toMatchObject({
+        status: "upserted",
+        taskId: recurrence.status === "upserted" ? recurrence.taskId : "",
+        created: false,
+      });
+      expect(rows).toEqual(
+        expect.arrayContaining([
+          { id: firstTaskId, status: terminalStatus },
+          { id: recurrence.status === "upserted" ? recurrence.taskId : "", status: "open" },
+        ]),
+      );
+      expect(rows).toHaveLength(2);
+    },
+  );
+
   it("links Summarizer tasks to one unambiguous project with a qualified name", async () => {
     await seedUser(db, "summary-u1", "summary@example.com", { emailVerified: true });
     await seedPerson(db, "person-summary", "Summary Owner", ["summary@example.com"]);
@@ -504,7 +787,7 @@ describe("createTaskRepository sqlite", () => {
     });
   });
 
-  it("skips Summarizer tasks when the matched user email is unverified", async () => {
+  it("preserves an unverified Summarizer owner as a proposed assignee", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedUser(db, "vedant-user", "vedant@canvasx.ai", { name: "Vedant" });
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
@@ -530,11 +813,17 @@ describe("createTaskRepository sqlite", () => {
       .where("title", "=", "Vedant to test summarizer task creation")
       .execute();
 
-    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
-    expect(rows).toHaveLength(0);
+    expect(result.status).toBe("upserted");
+    expect(rows).toEqual([
+      expect.objectContaining({
+        assignee_entity_id: null,
+        assignee_name: null,
+        proposed_assignee_name: "Vedant",
+      }),
+    ]);
   });
 
-  it("skips graph-only Summarizer assignees instead of minting tasks", async () => {
+  it("preserves graph-only Summarizer assignees as proposed assignees", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     await seedPerson(db, "person-vedant", "Vedant", ["vedant@canvasx.ai"]);
@@ -559,11 +848,17 @@ describe("createTaskRepository sqlite", () => {
       .where("title", "=", "Vedant to test summarizer task creation")
       .execute();
 
-    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
-    expect(rows).toHaveLength(0);
+    expect(result.status).toBe("upserted");
+    expect(rows).toEqual([
+      expect.objectContaining({
+        assignee_entity_id: null,
+        assignee_name: null,
+        proposed_assignee_name: "Vedant",
+      }),
+    ]);
   });
 
-  it("skips same-name roster users when no verified identity links to the person", async () => {
+  it("does not resolve same-name roster users without a verified identity link", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedUser(db, "vedant-user", "vedant@canvasx.ai", { name: "Vedant", emailVerified: true });
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
@@ -589,11 +884,17 @@ describe("createTaskRepository sqlite", () => {
       .where("title", "=", "Vedant to test summarizer task creation")
       .execute();
 
-    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
-    expect(rows).toHaveLength(0);
+    expect(result.status).toBe("upserted");
+    expect(rows).toEqual([
+      expect.objectContaining({
+        assignee_entity_id: null,
+        assignee_name: null,
+        proposed_assignee_name: "Vedant",
+      }),
+    ]);
   });
 
-  it("skips Summarizer task creation when a person name is ambiguous", async () => {
+  it("preserves an ambiguous Summarizer person name without resolving ownership", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     await seedPerson(db, "person-apeksha-1", "Apeksha", ["apeksha@canvasx.ai"]);
@@ -619,11 +920,17 @@ describe("createTaskRepository sqlite", () => {
       .where("title", "=", "Apeksha to deliver dashboard designs")
       .execute();
 
-    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
-    expect(rows).toHaveLength(0);
+    expect(result.status).toBe("upserted");
+    expect(rows).toEqual([
+      expect.objectContaining({
+        assignee_entity_id: null,
+        assignee_name: null,
+        proposed_assignee_name: "Apeksha",
+      }),
+    ]);
   });
 
-  it("skips raw text-only Summarizer assignees instead of minting tasks", async () => {
+  it("preserves raw text-only Summarizer assignees as proposed assignees", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     const repo = createTaskRepository(db);
@@ -647,11 +954,17 @@ describe("createTaskRepository sqlite", () => {
       .where("title", "=", "Roopak to review backend task extraction logic")
       .execute();
 
-    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
-    expect(rows).toHaveLength(0);
+    expect(result.status).toBe("upserted");
+    expect(rows).toEqual([
+      expect.objectContaining({
+        assignee_entity_id: null,
+        assignee_name: null,
+        proposed_assignee_name: "Roopak",
+      }),
+    ]);
   });
 
-  it("skips Summarizer action items with no internal assignee", async () => {
+  it("preserves ownerless Summarizer action items outside personal reminders", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     const repo = createTaskRepository(db);
@@ -673,9 +986,20 @@ describe("createTaskRepository sqlite", () => {
       .where("source", "=", "summary")
       .where("title", "=", "Document acceptance criteria for Sketch task assignment")
       .execute();
+    const personal = await repo.loadOpenDurableTasksForBrief({
+      userId: "summary-u1",
+      userEmails: ["summary@example.com"],
+    });
 
-    expect(result).toEqual({ status: "skipped", reason: "ineligible_assignee" });
-    expect(rows).toHaveLength(0);
+    expect(result.status).toBe("upserted");
+    expect(rows).toEqual([
+      expect.objectContaining({
+        assignee_entity_id: null,
+        assignee_name: null,
+        proposed_assignee_name: null,
+      }),
+    ]);
+    expect(personal.map((task) => task.id)).not.toContain(rows[0]?.id);
   });
 
   it("leaves Summarizer task parents unlinked when qualified project names are ambiguous", async () => {
@@ -755,6 +1079,60 @@ describe("createTaskRepository sqlite", () => {
       { task_id: first.status === "upserted" ? first.taskId : "", kind: "conversation_message", ref_id: "101" },
       { task_id: first.status === "upserted" ? first.taskId : "", kind: "conversation_message", ref_id: "102" },
     ]);
+  });
+
+  it("reanchors a source-anchored null-parent Summarizer task without duplicating it", async () => {
+    await seedUser(db, "summary-u1", "summary@example.com");
+    await seedProject(db, "project-x", "Project X");
+    const conversationId = await seedTaskConversation(db, "slack", "channel", "C_REANCHOR_SOURCE");
+    const repo = createTaskRepository(db);
+    const sourceAnchor = {
+      platform: "slack" as const,
+      conversationId,
+      providerThreadId: "thread-reanchor",
+      key: `slack:${conversationId}:thread-reanchor`,
+    };
+
+    const first = await repo.promoteSummaryTask({
+      userId: "summary-u1",
+      item: summaryAction({
+        title: "Confirm Atlas launch checklist",
+        structuredPayload: { assigneeName: "External Ashish", messageIds: [201] },
+      }),
+      sourceAnchor,
+    });
+    const second = await repo.promoteSummaryTask({
+      userId: "summary-u1",
+      item: summaryAction({
+        title: "Confirm Atlas launch checklist",
+        structuredPayload: {
+          assigneeName: "External Ashish",
+          parentEntityId: "project-x",
+          messageIds: [202],
+        },
+      }),
+      sourceAnchor,
+    });
+    const rows = await db
+      .selectFrom("tasks")
+      .selectAll()
+      .where("source_anchor_key", "=", sourceAnchor.key)
+      .where("normalized_title", "=", "confirm atlas launch checklist")
+      .execute();
+
+    expect(first.status).toBe("upserted");
+    expect(second).toMatchObject({
+      status: "upserted",
+      taskId: first.status === "upserted" ? first.taskId : "",
+      created: false,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: first.status === "upserted" ? first.taskId : "",
+      parent_entity_id: "project-x",
+      parent_name: "Project X",
+      proposed_assignee_name: "External Ashish",
+    });
   });
 
   it("reuses a reanchored Summarizer task when a rerun resolves the parent key", async () => {
@@ -849,7 +1227,7 @@ describe("createTaskRepository sqlite", () => {
     });
   });
 
-  it("loads user-owned summary tasks without file evidence and updates only local task statuses", async () => {
+  it("excludes ownerless summary tasks from personal reminders and updates only local task statuses", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedUser(db, "summary-u2", "other@example.com");
     await seedProject(db, "project-x", "Project X");
@@ -910,7 +1288,7 @@ describe("createTaskRepository sqlite", () => {
       status: "done",
     });
 
-    expect(durable.map((task) => task.id)).toContain(local.taskId);
+    expect(durable.map((task) => task.id)).not.toContain(local.taskId);
     expect(updated).toMatchObject({
       id: local.taskId,
       status: "done",
@@ -1279,6 +1657,32 @@ async function seedProject(db: Kysely<DB>, id: string, name: string): Promise<vo
       merged_into_entity_id: null,
     })
     .execute();
+}
+
+async function seedTaskConversation(
+  db: Kysely<DB>,
+  platform: string,
+  kind: string,
+  providerConversationId: string,
+): Promise<number> {
+  await db
+    .insertInto("conversations")
+    .values({
+      platform,
+      kind,
+      provider_conversation_id: providerConversationId,
+      display_name: providerConversationId,
+    })
+    .execute();
+  return (
+    await db
+      .selectFrom("conversations")
+      .select("id")
+      .where("platform", "=", platform)
+      .where("kind", "=", kind)
+      .where("provider_conversation_id", "=", providerConversationId)
+      .executeTakeFirstOrThrow()
+  ).id;
 }
 
 async function seedPerson(db: Kysely<DB>, id: string, name: string, aliases: string[] = []): Promise<void> {

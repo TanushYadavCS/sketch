@@ -178,6 +178,12 @@ describe("buildSystemContext", () => {
       expect(result).toContain("Sketch will automatically deliver your returned text");
       expect(result).toContain("do not try to find or use a chat-sending tool");
     });
+
+    it("tells reminder automations to use durable follow-up state before chat history", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("must call ListFollowups first");
+      expect(result).toContain("durable follow-up state is authoritative");
+    });
   });
 
   describe("file attachments section", () => {

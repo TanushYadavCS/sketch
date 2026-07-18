@@ -17,6 +17,10 @@ import {
 } from "../agent/runner";
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { ensureAgentSubWorkspace, ensureGroupWorkspace, ensureWorkspace } from "../agent/workspace";
+import {
+  type FollowupReviewCommandHandler,
+  createFollowupReviewCommandHandler,
+} from "../agents/followup-review-command";
 import { appendAutomationBuilderLinks } from "../automation/artifact-links";
 import { getNewSessionConfirmation, parseSketchCommand } from "../commands";
 import type { Config } from "../config";
@@ -168,6 +172,7 @@ export interface WhatsAppAdapterDeps {
     messageRef: string;
     inboxMessageId?: string;
   }>;
+  followupReviewHandler?: FollowupReviewCommandHandler;
 }
 
 function isConversationControlMessage(text: string): boolean {
@@ -258,6 +263,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
   const backfillCheckpoints = repos.conversationSlices ?? createConversationSlicesRepository(db);
+  const handleFollowupReviewCommand = deps.followupReviewHandler ?? createFollowupReviewCommandHandler(db);
   const queuedCaptures = new WeakMap<WhatsAppInboundMessage, WhatsAppQueuedCapture>();
 
   const getOrCreateConversationForMessage = async (
@@ -785,6 +791,28 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         const dmWorkspaceKey = dmWorkspaceKeyEarly;
         const deliveryTarget = message.target;
         const deliveryTargetId = whatsappDeliveryTargetFromTarget(deliveryTarget);
+        const followupReview = await handleFollowupReviewCommand({
+          text: message.text,
+          userId: user.id,
+          surface: "whatsapp",
+        });
+        if (followupReview.handled) {
+          const capture = await captureUserMessage({
+            message,
+            workspaceDir,
+            senderName: user.name,
+            senderUserId: user.id,
+            addressedToSketch: true,
+          });
+          const sent = await whatsapp.sendText(replyTarget, followupReview.message);
+          await captureBotReply({
+            conversationId: capture.conversation.id,
+            sent,
+            text: followupReview.message,
+            botName: settingsRow?.bot_name,
+          });
+          return;
+        }
         const capture = await captureUserMessage({
           message,
           workspaceDir,
@@ -987,13 +1015,32 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       const workspaceDir = boundAgent
         ? await ensureAgentSubWorkspace(config, boundAgent.id, `whatsappgroup-${groupJid}`)
         : await ensureGroupWorkspace(config, groupJid);
-      await captureUserMessage({
+      const capture = await captureUserMessage({
         message,
         workspaceDir,
         senderName: user?.name ?? message.senderName,
         senderUserId: user?.id ?? null,
         addressedToSketch: false,
       });
+      if (user) {
+        const followupReview = await handleFollowupReviewCommand({
+          text: message.text,
+          userId: user.id,
+          surface: "whatsapp",
+        });
+        if (followupReview.handled) {
+          const onFinalMessage = createWhatsAppMessageHandler(whatsapp, message.target, message);
+          const sent = await onFinalMessage(followupReview.message);
+          const settingsRow = await repos.settings.get();
+          await captureBotReply({
+            conversationId: capture.conversation.id,
+            sent,
+            text: followupReview.message,
+            botName: settingsRow?.bot_name,
+          });
+          return true;
+        }
+      }
       return true;
     }
 
@@ -1051,6 +1098,24 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         addressedToSketch: true,
       });
       if (!capture.inserted || !capture.captured) return;
+      if (user) {
+        const followupReview = await handleFollowupReviewCommand({
+          text: message.text,
+          userId: user.id,
+          surface: "whatsapp",
+        });
+        if (followupReview.handled) {
+          const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupTarget, message);
+          const sent = await onFinalMessage(followupReview.message);
+          await captureBotReply({
+            conversationId: capture.conversation.id,
+            sent,
+            text: followupReview.message,
+            botName: settingsRow?.bot_name,
+          });
+          return;
+        }
+      }
       const quotedMessage = await resolveQuotedMessageContext(message, capture.conversation.id);
       if (
         message.quotedMessage &&

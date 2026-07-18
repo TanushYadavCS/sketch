@@ -3,6 +3,8 @@ import { z } from "zod/v4";
 import type { AgentKnowledgeRefs, AgentMasthead, AgentOutputItemInput } from "../../db/repositories/agent-outputs";
 import type { ToolResult } from "./types";
 
+export const MAX_AGENT_OUTPUT_PAYLOAD_BYTES = 256 * 1024;
+
 const knowledgeRefsSchema = z.object({
   entityIds: z.array(z.string()).default([]),
   fileIds: z.array(z.string()).default([]),
@@ -30,16 +32,24 @@ const itemSchema = z.object({
   knowledgeRefs: knowledgeRefsSchema,
 });
 
-export const writeAgentOutputSchema = z.object({
-  outputDate: z.string().min(1),
-  timezone: z.string().min(1),
-  masthead: z.object({
-    title: z.string().min(1),
-    summary: z.string().min(1),
-    generatedFor: z.string().optional(),
-  }),
-  items: z.array(itemSchema),
-});
+export const writeAgentOutputSchema = z
+  .object({
+    outputDate: z.string().min(1),
+    timezone: z.string().min(1),
+    masthead: z.object({
+      title: z.string().min(1),
+      summary: z.string().min(1),
+      generatedFor: z.string().optional(),
+    }),
+    items: z.array(itemSchema),
+  })
+  .superRefine((payload, ctx) => {
+    if (serializedPayloadBytes(payload) <= MAX_AGENT_OUTPUT_PAYLOAD_BYTES) return;
+    ctx.addIssue({
+      code: "custom",
+      message: `Agent output payload exceeds ${MAX_AGENT_OUTPUT_PAYLOAD_BYTES} bytes.`,
+    });
+  });
 
 export type WriteAgentOutputPayload = z.infer<typeof writeAgentOutputSchema>;
 
@@ -51,6 +61,15 @@ export interface AgentOutputWriter {
     rawPayload: WriteAgentOutputPayload;
     items: AgentOutputItemInput[];
   }): Promise<void>;
+}
+
+export function assertAgentOutputPayloadSize(payload: unknown): void {
+  if (serializedPayloadBytes(payload) <= MAX_AGENT_OUTPUT_PAYLOAD_BYTES) return;
+  throw new Error(`Agent output payload exceeds ${MAX_AGENT_OUTPUT_PAYLOAD_BYTES} bytes.`);
+}
+
+function serializedPayloadBytes(payload: unknown): number {
+  return Buffer.byteLength(JSON.stringify(payload) ?? "null", "utf8");
 }
 
 function normalizeRefs(refs: z.infer<typeof knowledgeRefsSchema>): AgentKnowledgeRefs {

@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestPgDb } from "../../test-utils";
 import type { DB } from "../schema";
+import type { AgentOutputItemInput } from "./agent-outputs";
 import { createAgentOutputRepository } from "./agent-outputs";
 
 describe("createAgentOutputRepository output scopes on Postgres", () => {
@@ -75,4 +76,86 @@ describe("createAgentOutputRepository output scopes on Postgres", () => {
       { source_key: "slack:channel:C_B", status: "running" },
     ]);
   });
+
+  it("lists completed outputs for an exact source scope newest first with a bounded limit", async () => {
+    const repo = createAgentOutputRepository(db);
+    const base = {
+      agentKey: "conversation_summary",
+      agentVersion: "test",
+      userId: "user-1",
+      outputDate: "2026-07-04",
+      timezone: "UTC",
+      triggerType: "manual" as const,
+      sourceKey: "whatsapp:group:launch@g.us",
+    };
+
+    const first = await seedCompletedOutput(repo, db, {
+      ...base,
+      generatedAt: "2026-07-04T02:00:00.000Z",
+      title: "First action",
+    });
+    const latest = await seedCompletedOutput(repo, db, {
+      ...base,
+      generatedAt: "2026-07-04T03:00:00.000Z",
+      title: "Latest action",
+    });
+    await seedCompletedOutput(repo, db, {
+      ...base,
+      sourceKey: "whatsapp:group:other@g.us",
+      generatedAt: "2026-07-04T04:00:00.000Z",
+      title: "Other source action",
+    });
+
+    const rows = await repo.listCompletedForScopeSince(
+      "conversation_summary",
+      "user-1",
+      "whatsapp:group:launch@g.us",
+      "2026-07-04T00:00:00.000Z",
+      { limit: 1 },
+    );
+
+    expect(rows.map((entry) => entry.output.id)).toEqual([latest]);
+    expect(rows[0]?.items.map((item) => item.title)).toEqual(["Latest action"]);
+    expect(rows.map((entry) => entry.output.id)).not.toContain(first);
+  });
 });
+
+async function seedCompletedOutput(
+  repo: ReturnType<typeof createAgentOutputRepository>,
+  db: Kysely<DB>,
+  params: {
+    agentKey: string;
+    agentVersion: string;
+    userId: string;
+    outputDate: string;
+    timezone: string;
+    triggerType: "manual";
+    generatedAt: string;
+    title: string;
+    sourceKey: string;
+  },
+): Promise<string> {
+  const running = await repo.createRunning(params);
+  const item: AgentOutputItemInput = {
+    sectionKey: "action_items",
+    title: params.title,
+    summary: `${params.title} summary`,
+    priority: "medium",
+    label: "action_item",
+    knowledgeRefs: { entityIds: [], fileIds: [] },
+    structuredPayload: { messageIds: [params.title], sourceLabels: ["Launch"] },
+    sortOrder: 0,
+  };
+  await repo.completeOutput({
+    outputId: running.row.id,
+    masthead: { title: "Summary", summary: "Summary" },
+    rawPayload: { items: [] },
+    items: [item],
+  });
+  await db
+    .updateTable("agent_outputs")
+    .set({ generated_at: params.generatedAt, updated_at: params.generatedAt })
+    .where("id", "=", running.row.id)
+    .execute();
+  return running.row.id;
+}

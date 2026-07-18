@@ -428,7 +428,7 @@ describe("AgentRunService", () => {
     if (!row) throw new Error("Expected a generated output row");
     await tasks[0]();
 
-    expect(contexts[row.id].sections).toEqual(["meetings", "todos"]);
+    expect(contexts[row.id].sections).toEqual(["meetings", "todos", "untracked_followups", "looks_resolved"]);
     expect(contexts[row.id].maxItemsPerSection).toBe(2);
     expect(contexts[row.id].focus).toBe("Prioritize urgent work");
   });

@@ -329,6 +329,8 @@ describe("AgentRunService", () => {
     expect(rows[0].source_key).toBe(scopeKeyForRoute(route, [sourceA, sourceB]));
     expect(rows[0].source_key).toMatch(/^route:[a-f0-9]{12}$/);
     const context = contexts[rows[0].id];
+    expect(context.durabilityRouteId).toBe(route.id);
+    expect(context.durabilitySourceKey).toBe(rows[0].source_key);
     expect(context.sources).toEqual([
       expect.objectContaining({ targetId: "C_A" }),
       expect.objectContaining({ targetId: "C_B" }),

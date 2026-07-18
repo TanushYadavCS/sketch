@@ -53,6 +53,8 @@ function toBriefShape(output: AgentOutputApi | null) {
     sections: {
       meetings: output.sections.meetings ?? [],
       todos: output.sections.todos ?? [],
+      untracked_followups: output.sections.untracked_followups ?? [],
+      looks_resolved: output.sections.looks_resolved ?? [],
       customer_updates: output.sections.customer_updates ?? [],
       active_projects: output.sections.active_projects ?? [],
     },
@@ -254,15 +256,15 @@ function parseSourceConfigs(value: unknown): AgentSourceConfig[] | undefined {
     if (platform !== "slack" && platform !== "whatsapp") {
       throw new ConfigPatchError("source.platform must be slack or whatsapp");
     }
-    if (targetType !== "channel" && targetType !== "group") {
-      throw new ConfigPatchError("source.targetType must be channel or group");
+    if (targetType !== "channel" && targetType !== "dm" && targetType !== "group") {
+      throw new ConfigPatchError("source.targetType must be channel, dm, or group");
     }
     if (!targetId) throw new ConfigPatchError("source.targetId is required");
-    if (platform === "slack" && targetType !== "channel") {
-      throw new ConfigPatchError("Slack sources must be channels");
+    if (platform === "slack" && targetType === "group") {
+      throw new ConfigPatchError("Slack sources must be channels or DMs");
     }
-    if (platform === "whatsapp" && targetType !== "group") {
-      throw new ConfigPatchError("WhatsApp sources must be groups");
+    if (platform === "whatsapp" && targetType === "channel") {
+      throw new ConfigPatchError("WhatsApp sources must be groups or DMs");
     }
     const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : null;
     return { platform, targetType, targetId, label };
@@ -280,14 +282,14 @@ function parseRouteSourceKey(value: unknown): AgentSourceKey {
   if ((platform !== "slack" && platform !== "whatsapp") || !targetId) {
     throw new ConfigPatchError("route source must be a valid source key");
   }
-  if (targetType !== "channel" && targetType !== "group") {
+  if (targetType !== "channel" && targetType !== "dm" && targetType !== "group") {
     throw new ConfigPatchError("route source must be a valid source key");
   }
-  if (platform === "slack" && targetType !== "channel") {
-    throw new ConfigPatchError("Slack route sources must be channels");
+  if (platform === "slack" && targetType === "group") {
+    throw new ConfigPatchError("Slack route sources must be channels or DMs");
   }
-  if (platform === "whatsapp" && targetType !== "group") {
-    throw new ConfigPatchError("WhatsApp route sources must be groups");
+  if (platform === "whatsapp" && targetType === "channel") {
+    throw new ConfigPatchError("WhatsApp route sources must be groups or DMs");
   }
   return `${platform}:${targetType}:${targetId}`;
 }

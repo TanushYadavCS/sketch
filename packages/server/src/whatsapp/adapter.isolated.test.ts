@@ -340,6 +340,32 @@ vi.mock("../agent/sessions", () => ({
 
 describe("whatsapp/adapter", () => {
   describe("DM handler", () => {
+    it.each([
+      ["confirm done a1b2", "Marked the follow-up done."],
+      ["  track c3d4  ", "Now tracking that follow-up."],
+    ])("handles follow-up review command %s without running the agent", async (text, reply) => {
+      const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: reply });
+      const deps = makeDeps({ followupReviewHandler });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text,
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(followupReviewHandler).toHaveBeenCalledWith({ text, userId: "u1", surface: "whatsapp" });
+      expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", reply);
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
     it("rejects unauthorized users", async () => {
       const deps = makeDeps();
       vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(undefined);
@@ -1375,6 +1401,69 @@ describe("whatsapp/adapter", () => {
   });
 
   describe("group handler", () => {
+    it.each([
+      ["keep open z9y8", "Kept the follow-up open."],
+      ["dismiss ef56", "Dismissed that reconstructed follow-up."],
+    ])("handles non-mentioned follow-up review command %s without running the agent", async (text, reply) => {
+      const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: reply });
+      const deps = makeDeps({ followupReviewHandler });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "group",
+        text,
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        isMentioned: false,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+
+      expect(followupReviewHandler).toHaveBeenCalledWith({ text, userId: "u1", surface: "whatsapp" });
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ text, addressedToSketch: false }),
+      );
+      expect(mock.sendText).toHaveBeenCalledWith("group@g.us", reply, expect.objectContaining({ quoted: {} }));
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
+    it("handles a mentioned group follow-up command without running the agent", async () => {
+      const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: "Marked the follow-up done." });
+      const deps = makeDeps({ followupReviewHandler });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "group",
+        text: "confirm done a1b2",
+        jid: "group@g.us",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        isMentioned: true,
+        senderJid: "5555@s.whatsapp.net",
+        senderPhone: "+5555",
+      });
+      await flush();
+
+      expect(followupReviewHandler).toHaveBeenCalledWith({
+        text: "confirm done a1b2",
+        userId: "u1",
+        surface: "whatsapp",
+      });
+      expect(mock.sendText).toHaveBeenCalledWith(
+        "group@g.us",
+        "Marked the follow-up done.",
+        expect.objectContaining({ quoted: {} }),
+      );
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
     it("stores non-mention group messages without running the agent", async () => {
       const deps = makeDeps();
       const { mock, getHandler } = createMockWhatsApp();

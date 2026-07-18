@@ -66,6 +66,8 @@ export abstract class AgentRunConfigLayer {
     sources: AgentSourceConfig[],
   ): Promise<AgentSourceConfig[]>;
 
+  protected abstract listAvailableSourcesForUser(def: AgentDefinition, userId: string): Promise<AgentSourceConfig[]>;
+
   protected abstract resolveRoutesForRun(
     def: AgentDefinition,
     userId: string,
@@ -140,11 +142,19 @@ export abstract class AgentRunConfigLayer {
 
     const sources: AgentSourceConfig[] = [];
     const sourceKeys = new Set<string>();
+    const availableSources: AgentSourceConfig[] = [];
+    const availableSourceKeys = new Set<string>();
     const routes: AgentConfigRouteView[] = [];
     let enabled = false;
 
     for (const owner of owners) {
       const config = await this.resolveConfig(def, owner.userId);
+      for (const source of await this.listAvailableSourcesForUser(def, owner.userId)) {
+        const key = sourceKeyForTarget(source);
+        if (availableSourceKeys.has(key)) continue;
+        availableSourceKeys.add(key);
+        availableSources.push(source);
+      }
       enabled = enabled || config.enabled;
       for (const source of config.sources) {
         const key = sourceKeyForTarget(source);
@@ -170,6 +180,7 @@ export abstract class AgentRunConfigLayer {
       delivery: viewerConfig.delivery,
       deliveryModel: viewerConfig.deliveryModel,
       sourceConfig: def.sourceConfig ?? null,
+      availableSources,
       sources,
       routes,
       createTasks: viewerConfig.createTasks,
@@ -282,6 +293,7 @@ export abstract class AgentRunConfigLayer {
     const def = getAgentDefinition(agentKey);
     if (!def) return null;
     const config = await this.resolveConfig(def, userId);
+    const availableSources = await this.listAvailableSourcesForUser(def, userId);
     return {
       agentKey: def.key,
       title: def.title,
@@ -297,6 +309,7 @@ export abstract class AgentRunConfigLayer {
       delivery: config.delivery,
       deliveryModel: config.deliveryModel,
       sourceConfig: def.sourceConfig ?? null,
+      availableSources,
       sources: config.sources,
       routes: config.configuredRoutes,
       createTasks: config.createTasks,

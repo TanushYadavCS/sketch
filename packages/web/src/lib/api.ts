@@ -1059,7 +1059,7 @@ export interface DailyBriefMeetingPayload {
 
 export interface DailyBriefItem {
   id: string;
-  sectionKey: "meetings" | "todos" | "customer_updates" | "active_projects";
+  sectionKey: "meetings" | "todos" | "untracked_followups" | "looks_resolved" | "customer_updates" | "active_projects";
   title: string;
   summary: string;
   priority: "high" | "medium" | "low";
@@ -1089,6 +1089,8 @@ export interface DailyBrief {
   sections: {
     meetings: DailyBriefItem[];
     todos: DailyBriefItem[];
+    untracked_followups: DailyBriefItem[];
+    looks_resolved: DailyBriefItem[];
     customer_updates: DailyBriefItem[];
     active_projects: DailyBriefItem[];
   };
@@ -1147,7 +1149,7 @@ export interface AgentDeliveryMention {
 
 export interface AgentSourceConfig {
   platform: "slack" | "whatsapp";
-  targetType: "channel" | "group";
+  targetType: "channel" | "dm" | "group";
   targetId: string;
   label: string | null;
 }
@@ -1214,7 +1216,9 @@ export interface AgentRouteMember {
 export interface AgentSourceConfigMeta {
   maxSources: number;
   supportsSlackChannels: boolean;
+  supportsSlackDms?: boolean;
   supportsWhatsAppGroups: boolean;
+  supportsWhatsAppDms?: boolean;
 }
 
 export interface AgentConfig {
@@ -1231,6 +1235,7 @@ export interface AgentConfig {
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
   sourceConfig: AgentSourceConfigMeta | null;
+  availableSources?: AgentSourceConfig[];
   sources: AgentSourceConfig[];
   routes: AgentRoute[];
   sections: AgentSectionConfig[];

@@ -1,8 +1,15 @@
+import { createHash } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AgentOutputItemInput } from "../../db/repositories/agent-outputs";
+import {
+  type AgentOutputItemInput,
+  type AgentRoute,
+  createAgentOutputRepository,
+} from "../../db/repositories/agent-outputs";
+import { createTaskRepository } from "../../db/repositories/tasks";
+import { createUserRepository } from "../../db/repositories/users";
 import type { DB, UsersTable } from "../../db/schema";
-import { createTestDb } from "../../test-utils";
+import { createTestConfig, createTestDb } from "../../test-utils";
 import {
   DAILY_BRIEF_ENTITY_WINDOW_DAYS,
   DAILY_BRIEF_EVIDENCE_WINDOW_DAYS,
@@ -706,6 +713,1435 @@ describe("dailyBriefDefinition.reconcileItems", () => {
       runtimeContext: { sections: ["todos"], todaysMeetings: skeleton },
     });
 
-    expect(result).toBe(items);
+    expect(result).toEqual(items);
+  });
+
+  it("reconciles exact conversation identities without suppressing unrelated same-title todos", async () => {
+    const result =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items: [
+          {
+            sectionKey: "todos",
+            title: "Send revised proposal",
+            summary: "Reconstructed by the model.",
+            priority: "medium",
+            label: "todo",
+            structuredPayload: {
+              sourceKey: "slack:channel:C_MATCH",
+              sourceAnchorKey: "slack:42:root",
+            },
+            knowledgeRefs: { entityIds: ["project-1"], fileIds: [] },
+            sortOrder: 0,
+          },
+          {
+            sectionKey: "todos",
+            title: "Send revised proposal",
+            summary: "Jira work with the same title.",
+            priority: "medium",
+            label: "todo",
+            structuredPayload: { sourceKey: "jira:project:OPS" },
+            knowledgeRefs: { entityIds: ["project-1"], fileIds: [] },
+            sortOrder: 1,
+          },
+          {
+            sectionKey: "todos",
+            title: "Send revised proposal",
+            summary: "Email work with the same title.",
+            priority: "medium",
+            label: "todo",
+            structuredPayload: { sourceKey: "gmail:thread:abc" },
+            knowledgeRefs: { entityIds: ["project-1"], fileIds: [] },
+            sortOrder: 2,
+          },
+        ],
+        runtimeContext: {
+          sections: ["todos", "looks_resolved", "untracked_followups"],
+          todaysMeetings: [],
+          followupReminder: {
+            status: "ok",
+            mode: "durable_only",
+            pending: [],
+            looksResolved: [
+              {
+                recommendationId: "recommendation-1",
+                taskId: "task-1",
+                title: "Send revised proposal",
+                rationale: "Completion was reported.",
+                reviewCode: "R7K2",
+                parentEntityId: "project-1",
+                assigneeEntityId: "person-1",
+                sourceKey: "slack:channel:C_MATCH",
+                sourceAnchorKey: "slack:42:root",
+              },
+            ],
+            untracked: [],
+          },
+        },
+      })) ?? [];
+
+    expect(result.map((item) => [item.sectionKey, item.structuredPayload?.sourceKey ?? null])).toEqual([
+      ["todos", "jira:project:OPS"],
+      ["todos", "gmail:thread:abc"],
+      ["looks_resolved", "slack:channel:C_MATCH"],
+    ]);
+  });
+});
+
+describe("dailyBriefDefinition.augmentRuntimeContext", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  async function seedSummarizerConfig(routes: AgentRoute[], createTasks = true): Promise<void> {
+    await db
+      .insertInto("agent_user_configs")
+      .values({
+        agent_key: "conversation_summary",
+        user_id: "user-1",
+        enabled: 1,
+        schedule_hour: 8,
+        schedule_minute: 0,
+        timezone: "UTC",
+        max_items_per_section: 5,
+        prefs_json: JSON.stringify({ routes, createTasks }),
+      })
+      .execute();
+  }
+
+  async function seedSummaryOutput(
+    sourceKey: string,
+    items: Array<{ title: string; messageIds: number[] }>,
+    generatedAt = "2026-06-25T07:00:00.000Z",
+  ): Promise<string> {
+    const repo = createAgentOutputRepository(db);
+    const running = await repo.createRunning({
+      agentKey: "conversation_summary",
+      agentVersion: "test",
+      userId: "user-1",
+      outputDate: "2026-06-25",
+      timezone: "UTC",
+      triggerType: "manual",
+      sourceKey,
+      sourceLabel: sourceKey,
+    });
+    await repo.completeOutput({
+      outputId: running.row.id,
+      masthead: { title: "Summary", summary: "Summary" },
+      rawPayload: { items: [] },
+      items: items.map((item, index) => ({
+        sectionKey: "action_items",
+        title: item.title,
+        summary: `${item.title} summary`,
+        priority: "medium",
+        label: "action_item",
+        knowledgeRefs: { entityIds: [], fileIds: [] },
+        structuredPayload: { messageIds: item.messageIds, sourceLabels: [sourceKey] },
+        sortOrder: index,
+      })),
+    });
+    await db
+      .updateTable("agent_outputs")
+      .set({ generated_at: generatedAt, updated_at: generatedAt })
+      .where("id", "=", running.row.id)
+      .execute();
+    return running.row.id;
+  }
+
+  async function seedConversationMessage(
+    providerConversationId: string,
+    providerMessageId: string,
+    options: { platform?: "slack" | "whatsapp"; kind?: "channel" | "group" | "dm" } = {},
+  ): Promise<{
+    conversationId: number;
+    messageId: number;
+  }> {
+    const conversation = await db
+      .insertInto("conversations")
+      .values({
+        platform: options.platform ?? "slack",
+        kind: options.kind ?? "channel",
+        provider_conversation_id: providerConversationId,
+        display_name: providerConversationId,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const message = await db
+      .insertInto("conversation_messages")
+      .values({
+        conversation_id: conversation.id,
+        provider_message_id: providerMessageId,
+        sender_jid: "sender",
+        sender_name: "Sender",
+        sender_user_id: "user-1",
+        addressed_to_sketch: 0,
+        text: providerMessageId,
+        provider_thread_id: null,
+        is_thread_reply: 0,
+        received_at: NOW.toISOString(),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    return { conversationId: conversation.id, messageId: message.id };
+  }
+
+  function summaryRoute(id: string, sources: AgentRoute["sources"], enabled = true): AgentRoute {
+    return {
+      id,
+      sources,
+      focus: null,
+      sections: null,
+      maxItemsPerSection: null,
+      schedule: null,
+      destination: { kind: "off" },
+      enabled,
+    };
+  }
+
+  async function seedTopologyTaskOwner(): Promise<string> {
+    await seedUser(db);
+    await db.updateTable("users").set({ email_verified_at: NOW.toISOString() }).where("id", "=", "user-1").execute();
+    await db
+      .insertInto("entities")
+      .values({
+        id: "person-topology-owner",
+        name: "Agent User",
+        source_type: "person",
+        subtype: null,
+        aliases: JSON.stringify(["agent@example.com"]),
+        metadata: JSON.stringify({ email: "agent@example.com" }),
+        source_ref_id: null,
+        status: "active",
+        hotness: 0,
+        created_at: NOW.toISOString(),
+        updated_at: NOW.toISOString(),
+        ai_brief: null,
+      })
+      .execute();
+    return "person-topology-owner";
+  }
+
+  it("exposes the shared looks-resolved reminder state and transition mode", async () => {
+    await seedUser(db);
+    await db.updateTable("users").set({ email_verified_at: NOW.toISOString() }).where("id", "=", "user-1").execute();
+    await seedSummarizerConfig([
+      {
+        id: "route-1",
+        sources: ["whatsapp:group:goosebumps"],
+        focus: null,
+        sections: null,
+        maxItemsPerSection: null,
+        schedule: null,
+        destination: { kind: "off" },
+        enabled: true,
+      },
+    ]);
+    const conversation = await db
+      .insertInto("conversations")
+      .values({
+        platform: "whatsapp",
+        kind: "group",
+        provider_conversation_id: "goosebumps",
+        display_name: "Goosebumps",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("entities")
+      .values({
+        id: "person-followup",
+        name: "Agent User",
+        source_type: "person",
+        subtype: null,
+        aliases: JSON.stringify(["agent@example.com"]),
+        metadata: JSON.stringify({ email: "agent@example.com" }),
+        source_ref_id: null,
+        status: "active",
+        hotness: 0,
+        created_at: NOW.toISOString(),
+        updated_at: NOW.toISOString(),
+        ai_brief: null,
+      })
+      .execute();
+    const task = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Send revised proposal",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: "person-followup",
+      assigneeName: "Agent User",
+      priority: "high",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "followup-task",
+      createdByUserId: "user-1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({
+        source_platform: "whatsapp",
+        source_conversation_id: conversation.id,
+        source_anchor_key: `whatsapp:${conversation.id}:root`,
+      })
+      .where("id", "=", task.taskId)
+      .execute();
+    await db
+      .insertInto("task_completion_recommendations")
+      .values({
+        id: "recommendation-followup",
+        task_id: task.taskId,
+        proposed_status: "done",
+        review_state: "pending",
+        review_code: "R7K2",
+        evidence_fingerprint: "fingerprint-followup",
+        origin_agent_output_id: null,
+        rationale: "Ashish reported that this is fixed.",
+        delivery_count: 0,
+        expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      })
+      .execute();
+    await db
+      .insertInto("task_durability_route_state")
+      .values({
+        agent_key: "conversation_summary",
+        user_id: "user-1",
+        route_id: "route-1",
+        source_key: "whatsapp:group:goosebumps",
+        mode: "hybrid",
+        seed_state: "reviewed",
+        seed_started_at: NOW.toISOString(),
+        seed_reviewed_at: NOW.toISOString(),
+        incremental_success_at: null,
+        last_error: null,
+      })
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "ok",
+      mode: "hybrid",
+      pending: [],
+      looksResolved: [
+        {
+          recommendationId: "recommendation-followup",
+          taskId: task.taskId,
+          title: "Send revised proposal",
+          reviewCode: "R7K2",
+        },
+      ],
+    });
+  });
+
+  it("keeps the brief runnable with an explicit fallback when transition state cannot be read", async () => {
+    await seedUser(db);
+    await seedSummarizerConfig([]);
+    await db.schema.dropTable("task_durability_route_state").execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toEqual({
+      status: "error",
+      code: "durable_transition_failed",
+      retryable: true,
+      fallback: [],
+    });
+  });
+
+  it("retains explicit legacy untracked fallback before an active route has transition state", async () => {
+    await seedUser(db);
+    const sourceKey = "slack:channel:C_ACTIVE";
+    await seedSummarizerConfig([
+      {
+        id: "route-active",
+        sources: [sourceKey],
+        focus: null,
+        sections: null,
+        maxItemsPerSection: null,
+        schedule: null,
+        destination: { kind: "off" },
+        enabled: true,
+      },
+    ]);
+    const evidence = await seedConversationMessage("C_ACTIVE", "active-message");
+    await seedSummaryOutput(sourceKey, [{ title: "Follow up with Acme", messageIds: [evidence.messageId] }]);
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "ok",
+      mode: "hybrid",
+      untracked: [
+        {
+          title: "Follow up with Acme",
+          reviewCode: null,
+        },
+      ],
+    });
+  });
+
+  it("does not read transition state when Summarizer task creation is disabled", async () => {
+    await seedUser(db);
+    const sourceKey = "slack:channel:C_DISABLED";
+    await seedSummarizerConfig(
+      [
+        {
+          id: "route-disabled",
+          sources: [sourceKey],
+          focus: null,
+          sections: null,
+          maxItemsPerSection: null,
+          schedule: null,
+          destination: { kind: "off" },
+          enabled: true,
+        },
+      ],
+      false,
+    );
+    const evidence = await seedConversationMessage("C_DISABLED", "disabled-message");
+    await seedSummaryOutput(sourceKey, [{ title: "Follow up without durability", messageIds: [evidence.messageId] }]);
+    await db.schema.dropTable("task_durability_route_state").execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toBeUndefined();
+    expect(context?.recentSummaries).toEqual([
+      expect.objectContaining({
+        actionItems: [expect.objectContaining({ title: "Follow up without durability" })],
+      }),
+    ]);
+  });
+
+  it("scopes conversation generation context to active Summarizer routes while retaining general tasks", async () => {
+    await seedUser(db);
+    await seedConnectorConfig(db);
+    await seedIndexedFile(db, { id: "structural-task-file", sourceUpdatedAt: NOW.toISOString() });
+    await db
+      .insertInto("entities")
+      .values({
+        id: "person-owner",
+        name: "Agent User",
+        source_type: "person",
+        subtype: null,
+        aliases: JSON.stringify(["agent@example.com"]),
+        metadata: JSON.stringify({ email: "agent@example.com" }),
+        source_ref_id: null,
+        status: "active",
+        hotness: 0,
+        created_at: NOW.toISOString(),
+        updated_at: NOW.toISOString(),
+        ai_brief: null,
+      })
+      .execute();
+
+    const firstActiveSource = "slack:channel:C_ACTIVE_ONE";
+    const secondActiveSource = "slack:channel:C_ACTIVE_TWO";
+    const activeRouteSourceKey = `route:${createHash("sha256")
+      .update([firstActiveSource, secondActiveSource].sort().join("|"))
+      .digest("hex")
+      .slice(0, 12)}`;
+    const disabledRouteSourceKey = "slack:channel:C_DISABLED";
+    await seedSummarizerConfig([
+      {
+        id: "route-active-combined",
+        sources: [firstActiveSource, secondActiveSource],
+        focus: null,
+        sections: null,
+        maxItemsPerSection: null,
+        schedule: null,
+        destination: { kind: "off" },
+        enabled: true,
+      },
+      {
+        id: "route-disabled",
+        sources: [disabledRouteSourceKey],
+        focus: null,
+        sections: null,
+        maxItemsPerSection: null,
+        schedule: null,
+        destination: { kind: "off" },
+        enabled: false,
+      },
+    ]);
+
+    const activeOutputId = await seedSummaryOutput(activeRouteSourceKey, [
+      { title: "Active route follow-up", messageIds: [] },
+    ]);
+    const disabledOutputId = await seedSummaryOutput(disabledRouteSourceKey, [
+      { title: "Disabled route follow-up", messageIds: [] },
+    ]);
+    const tasks = createTaskRepository(db);
+    const activeSummaryTask = await tasks.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Active route durable task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: "person-owner",
+      assigneeName: "Agent User",
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "active-route-task",
+      createdByUserId: "user-1",
+    });
+    const disabledSummaryTask = await tasks.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Disabled route durable task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: "person-owner",
+      assigneeName: "Agent User",
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "disabled-route-task",
+      createdByUserId: "user-1",
+    });
+    const briefTask = await tasks.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "brief",
+      externalRef: null,
+      title: "General brief task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: "person-owner",
+      assigneeName: "Agent User",
+      priority: "medium",
+      dueAt: null,
+      provenance: "brief",
+      sourceTaskId: "general-brief-task",
+      createdByUserId: "user-1",
+    });
+    const structuralTask = await tasks.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "linear",
+      externalRef: "SKE-STRUCTURAL",
+      title: "General structural task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "external",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "structural",
+      sourceTaskId: "general-structural-task",
+    });
+    await tasks.upsertEvidence(structuralTask.taskId, "file", "structural-task-file");
+    await db
+      .updateTable("tasks")
+      .set({
+        origin_agent_output_id: activeOutputId,
+        updated_at: "2026-06-25T07:30:00.000Z",
+      })
+      .where("id", "=", activeSummaryTask.taskId)
+      .execute();
+    await db
+      .updateTable("tasks")
+      .set({
+        origin_agent_output_id: disabledOutputId,
+        updated_at: "2026-06-25T07:30:00.000Z",
+      })
+      .where("id", "=", disabledSummaryTask.taskId)
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect((context?.recentSummaries as Array<{ outputId: string }>).map((summary) => summary.outputId)).toEqual([
+      activeOutputId,
+    ]);
+    expect((context?.summaryTasks as Array<{ id: string }>).map((task) => task.id)).toEqual([activeSummaryTask.taskId]);
+    const openTaskIds = (context?.openDurableTasks as Array<{ id: string }>).map((task) => task.id);
+    expect(openTaskIds).toEqual(
+      expect.arrayContaining([activeSummaryTask.taskId, briefTask.taskId, structuralTask.taskId]),
+    );
+    expect(openTaskIds).not.toContain(disabledSummaryTask.taskId);
+  });
+
+  it.each([
+    {
+      name: "single to combined",
+      activeRoutes: [summaryRoute("route-combined", ["slack:channel:C_TOPOLOGY", "slack:channel:C_SECONDARY"])],
+      historicalSourceKey: "slack:channel:C_TOPOLOGY",
+      currentSourceKey: `route:${createHash("sha256")
+        .update(["slack:channel:C_TOPOLOGY", "slack:channel:C_SECONDARY"].sort().join("|"))
+        .digest("hex")
+        .slice(0, 12)}`,
+    },
+    {
+      name: "combined to single",
+      activeRoutes: [summaryRoute("route-single", ["slack:channel:C_TOPOLOGY"])],
+      historicalSourceKey: `route:${createHash("sha256")
+        .update(["slack:channel:C_TOPOLOGY", "slack:channel:C_SECONDARY"].sort().join("|"))
+        .digest("hex")
+        .slice(0, 12)}`,
+      currentSourceKey: "slack:channel:C_TOPOLOGY",
+    },
+  ])(
+    "keeps summary tasks active across $name topology changes while limiting recent summaries to current outputs",
+    async ({ activeRoutes, historicalSourceKey, currentSourceKey }) => {
+      const assigneeEntityId = await seedTopologyTaskOwner();
+      await seedSummarizerConfig(activeRoutes);
+      const evidence = await seedConversationMessage("C_TOPOLOGY", `topology-${historicalSourceKey}`);
+      const historicalOutputId = await seedSummaryOutput(historicalSourceKey, [
+        { title: "Durable topology follow-up", messageIds: [evidence.messageId] },
+      ]);
+      const currentOutputId = await seedSummaryOutput(currentSourceKey, [
+        { title: "Current topology summary", messageIds: [] },
+      ]);
+      const task = await createTaskRepository(db).upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: "Durable topology follow-up",
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId,
+        assigneeName: "Agent User",
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: `topology-task-${historicalSourceKey}`,
+        createdByUserId: "user-1",
+      });
+      await db
+        .updateTable("tasks")
+        .set({
+          source_platform: "slack",
+          source_conversation_id: evidence.conversationId,
+          source_anchor_key: `slack:${evidence.conversationId}:root`,
+          origin_agent_output_id: historicalOutputId,
+          updated_at: "2026-06-25T07:30:00.000Z",
+        })
+        .where("id", "=", task.taskId)
+        .execute();
+
+      const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+        db,
+        config: createTestConfig(),
+        users: createUserRepository(db),
+        userId: "user-1",
+        maxItemsPerSection: 5,
+        baseContext: {
+          outputDate: "2026-06-25",
+          timezone: "UTC",
+          sameDayPreviousOutput: null,
+          previousDayOutput: null,
+        },
+      });
+
+      expect((context?.recentSummaries as Array<{ outputId: string }>).map((summary) => summary.outputId)).toEqual([
+        currentOutputId,
+      ]);
+      expect((context?.summaryTasks as Array<{ id: string }>).map((item) => item.id)).toContain(task.taskId);
+      expect((context?.openDurableTasks as Array<{ id: string }>).map((item) => item.id)).toContain(task.taskId);
+      expect(context?.followupReminder).toMatchObject({
+        status: "ok",
+        pending: [expect.objectContaining({ taskId: task.taskId, title: "Durable topology follow-up" })],
+      });
+    },
+  );
+
+  it("keeps a DM summary task active when its route changes from single to combined", async () => {
+    const assigneeEntityId = await seedTopologyTaskOwner();
+    const evidence = await seedConversationMessage("opaque-slack-dm", "dm-topology", { kind: "dm" });
+    const dmSource = `slack:dm:${evidence.conversationId}` as const;
+    const currentSourceKey = `route:${createHash("sha256")
+      .update([dmSource, "slack:channel:C_SECONDARY"].sort().join("|"))
+      .digest("hex")
+      .slice(0, 12)}`;
+    await seedSummarizerConfig([summaryRoute("route-dm-combined", [dmSource, "slack:channel:C_SECONDARY"])]);
+    const historicalOutputId = await seedSummaryOutput(dmSource, [
+      { title: "DM topology follow-up", messageIds: [evidence.messageId] },
+    ]);
+    await seedSummaryOutput(currentSourceKey, [{ title: "Current DM topology summary", messageIds: [] }]);
+    const task = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "DM topology follow-up",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId,
+      assigneeName: "Agent User",
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "dm-topology-task",
+      createdByUserId: "user-1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({
+        source_platform: "slack",
+        source_conversation_id: evidence.conversationId,
+        source_anchor_key: `slack:${evidence.conversationId}:root`,
+        origin_agent_output_id: historicalOutputId,
+        updated_at: "2026-06-25T07:30:00.000Z",
+      })
+      .where("id", "=", task.taskId)
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect((context?.summaryTasks as Array<{ id: string }>).map((item) => item.id)).toContain(task.taskId);
+    expect((context?.openDurableTasks as Array<{ id: string }>).map((item) => item.id)).toContain(task.taskId);
+    expect(context?.followupReminder).toMatchObject({
+      status: "ok",
+      pending: [expect.objectContaining({ taskId: task.taskId, title: "DM topology follow-up" })],
+    });
+  });
+
+  it("keeps a task assigned to the user when it originated outside the user's own Summarizer routes", async () => {
+    const assigneeEntityId = await seedTopologyTaskOwner();
+    await seedUser(db, { id: "user-other", email: "other@example.com" });
+    await seedSummarizerConfig([summaryRoute("route-own", ["slack:channel:C_OWN"])]);
+    const evidence = await seedConversationMessage("C_OTHER_OWNER", "assigned-from-other-route");
+    const task = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Assigned from another route",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId,
+      assigneeName: "Agent User",
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "assigned-from-other-route",
+      createdByUserId: "user-other",
+    });
+    await db
+      .updateTable("tasks")
+      .set({
+        source_platform: "slack",
+        source_conversation_id: evidence.conversationId,
+        source_anchor_key: `slack:${evidence.conversationId}:root`,
+      })
+      .where("id", "=", task.taskId)
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "ok",
+      pending: [expect.objectContaining({ taskId: task.taskId, title: "Assigned from another route" })],
+    });
+  });
+
+  it("keeps historical fallback visible immediately after a single route becomes combined", async () => {
+    await seedUser(db);
+    const memberSource = "slack:channel:C_TOPOLOGY_FALLBACK";
+    await seedSummarizerConfig([summaryRoute("route-combined-fallback", [memberSource, "slack:channel:C_SECONDARY"])]);
+    const evidence = await seedConversationMessage("C_TOPOLOGY_FALLBACK", "historical-topology-fallback");
+    await seedSummaryOutput(memberSource, [
+      { title: "Historical topology fallback", messageIds: [evidence.messageId] },
+    ]);
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "ok",
+      mode: "hybrid",
+      untracked: [expect.objectContaining({ title: "Historical topology fallback" })],
+    });
+  });
+
+  it("keeps up to ten hybrid fallback outputs per active route", async () => {
+    await seedUser(db);
+    const firstSource = "slack:channel:C_ROUTE_FIRST";
+    const secondSource = "slack:channel:C_ROUTE_SECOND";
+    await seedSummarizerConfig([
+      summaryRoute("route-first", [firstSource]),
+      summaryRoute("route-second", [secondSource]),
+    ]);
+    const firstEvidence = await seedConversationMessage("C_ROUTE_FIRST", "route-first-message");
+    const secondEvidence = await seedConversationMessage("C_ROUTE_SECOND", "route-second-message");
+    await seedSummaryOutput(
+      firstSource,
+      [{ title: "First route fallback", messageIds: [firstEvidence.messageId] }],
+      "2026-06-25T06:00:00.000Z",
+    );
+    for (let index = 0; index < 10; index += 1) {
+      await seedSummaryOutput(
+        secondSource,
+        [{ title: `Second route fallback ${index}`, messageIds: [secondEvidence.messageId] }],
+        `2026-06-25T07:${String(index).padStart(2, "0")}:00.000Z`,
+      );
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 20,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({ status: "ok", mode: "hybrid" });
+    const untracked = (context?.followupReminder as { untracked: Array<{ title: string }> }).untracked;
+    expect(untracked).toContainEqual(expect.objectContaining({ title: "First route fallback" }));
+    expect(untracked.filter((item) => item.title.startsWith("Second route fallback"))).toHaveLength(10);
+  });
+
+  it("marks reminder context non-authoritative when a bounded historical summary page may be incomplete", async () => {
+    await seedUser(db);
+    const sourceKey = "slack:channel:C_HISTORY_OVERFLOW";
+    await seedSummarizerConfig([summaryRoute("route-history-overflow", [sourceKey])]);
+    const evidence = await seedConversationMessage("C_HISTORY_OVERFLOW", "history-overflow-message");
+    for (let index = 0; index < 50; index += 1) {
+      await seedSummaryOutput(
+        sourceKey,
+        [{ title: `History overflow ${index}`, messageIds: [evidence.messageId] }],
+        `2026-06-25T06:${String(index).padStart(2, "0")}:00.000Z`,
+      );
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "error",
+      code: "reminder_history_overflow",
+      retryable: true,
+    });
+  });
+
+  it("does not let inactive summary history consume the active-route scan cap", async () => {
+    await seedUser(db);
+    const activeSource = "slack:channel:C_ACTIVE_HISTORY";
+    const inactiveSource = "slack:channel:C_INACTIVE_HISTORY";
+    await seedSummarizerConfig([summaryRoute("route-active-history", [activeSource])]);
+    const activeEvidence = await seedConversationMessage("C_ACTIVE_HISTORY", "active-history");
+    const inactiveEvidence = await seedConversationMessage("C_INACTIVE_HISTORY", "inactive-history");
+    await seedSummaryOutput(
+      activeSource,
+      [{ title: "Active historical follow-up", messageIds: [activeEvidence.messageId] }],
+      "2026-06-25T06:00:00.000Z",
+    );
+    for (let index = 0; index < 50; index += 1) {
+      await seedSummaryOutput(
+        inactiveSource,
+        [{ title: `Inactive historical follow-up ${index}`, messageIds: [inactiveEvidence.messageId] }],
+        `2026-06-25T07:${String(index).padStart(2, "0")}:00.000Z`,
+      );
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "ok",
+      mode: "hybrid",
+      untracked: [expect.objectContaining({ title: "Active historical follow-up" })],
+    });
+    expect(JSON.stringify(context)).not.toContain("Inactive historical follow-up");
+  });
+
+  it("filters inactive summary tasks in SQL before applying brief task limits", async () => {
+    const assigneeEntityId = await seedTopologyTaskOwner();
+    const activeSource = "slack:channel:C_ACTIVE_TASK_CAP";
+    const inactiveSource = "slack:channel:C_INACTIVE_TASK_CAP";
+    await seedSummarizerConfig([summaryRoute("route-active-task-cap", [activeSource])]);
+    const activeOutputId = await seedSummaryOutput(activeSource, []);
+    const inactiveOutputId = await seedSummaryOutput(inactiveSource, []);
+    const tasks = createTaskRepository(db);
+    const activeTask = await tasks.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Active task behind inactive cap",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId,
+      assigneeName: "Agent User",
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "active-task-behind-inactive-cap",
+      createdByUserId: "user-1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({
+        origin_agent_output_id: activeOutputId,
+        updated_at: "2026-06-25T06:00:00.000Z",
+      })
+      .where("id", "=", activeTask.taskId)
+      .execute();
+    for (let index = 0; index < 50; index += 1) {
+      const inactiveTask = await tasks.upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: `Inactive task ${index}`,
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId,
+        assigneeName: "Agent User",
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: `inactive-task-${index}`,
+        createdByUserId: "user-1",
+      });
+      await db
+        .updateTable("tasks")
+        .set({
+          origin_agent_output_id: inactiveOutputId,
+          updated_at: `2026-06-25T07:${String(index).padStart(2, "0")}:00.000Z`,
+        })
+        .where("id", "=", inactiveTask.taskId)
+        .execute();
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 1,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect((context?.summaryTasks as Array<{ id: string }>).map((task) => task.id)).toContain(activeTask.taskId);
+    expect((context?.openDurableTasks as Array<{ id: string }>).map((task) => task.id)).toContain(activeTask.taskId);
+    expect(JSON.stringify(context)).not.toContain("Inactive task");
+  });
+
+  it("caps fallback reminder items when transition reads fail", async () => {
+    await seedUser(db);
+    const sourceKey = "slack:channel:C_TRANSITION_FALLBACK_CAP";
+    await seedSummarizerConfig([summaryRoute("route-transition-fallback-cap", [sourceKey])]);
+    const evidence = await seedConversationMessage("C_TRANSITION_FALLBACK_CAP", "transition-fallback-cap");
+    await seedSummaryOutput(
+      sourceKey,
+      Array.from({ length: 30 }, (_, index) => ({
+        title: `Transition fallback ${index}`,
+        messageIds: [evidence.messageId],
+      })),
+    );
+    await db.schema.dropTable("task_durability_route_state").execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "error",
+      code: "durable_transition_failed",
+      fallback: expect.any(Array),
+    });
+    expect((context?.followupReminder as { fallback: unknown[] }).fallback).toHaveLength(25);
+  });
+
+  it("keeps exact suppression identities when completed tasks are the only reminder state", async () => {
+    await seedUser(db);
+    const task = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Send revised proposal",
+      status: "done",
+      statusRaw: "done",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "completed-only-task",
+      createdByUserId: "user-1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({ source_anchor_key: "slack:42:root", updated_at: "2026-06-20T08:00:00.000Z" })
+      .where("id", "=", task.taskId)
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "ok",
+      suppressed: [
+        {
+          taskId: task.taskId,
+          title: "Send revised proposal",
+          sourceAnchorKey: "slack:42:root",
+        },
+      ],
+    });
+  });
+
+  it("does not duplicate a pending seed proposal as a legacy untracked item", async () => {
+    await seedUser(db);
+    const sourceKey = "slack:channel:C_SEED";
+    await seedSummarizerConfig([
+      {
+        id: "route-seed",
+        sources: [sourceKey],
+        focus: null,
+        sections: null,
+        maxItemsPerSection: null,
+        schedule: null,
+        destination: { kind: "off" },
+        enabled: true,
+      },
+    ]);
+    const evidence = await seedConversationMessage("C_SEED", "seed-message");
+    const outputId = await seedSummaryOutput(sourceKey, [
+      { title: "Follow up with Acme", messageIds: [evidence.messageId] },
+    ]);
+    const sourceAnchorKey = `slack:${evidence.conversationId}:root`;
+    const evidenceFingerprint = createHash("sha256")
+      .update(JSON.stringify(["follow up with acme", sourceAnchorKey, [evidence.messageId]]))
+      .digest("hex");
+    await db
+      .insertInto("task_durability_route_state")
+      .values({
+        agent_key: "conversation_summary",
+        user_id: "user-1",
+        route_id: "route-seed",
+        source_key: sourceKey,
+        mode: "hybrid",
+        seed_state: "pending",
+        seed_started_at: NOW.toISOString(),
+        seed_reviewed_at: null,
+        incremental_success_at: null,
+        last_error: null,
+      })
+      .execute();
+    await db
+      .insertInto("task_seed_candidates")
+      .values({
+        id: "pending-seed",
+        agent_key: "conversation_summary",
+        user_id: "user-1",
+        route_id: "route-seed",
+        source_key: sourceKey,
+        origin_agent_output_id: outputId,
+        origin_agent_output_item_id: null,
+        title: "Follow up with Acme",
+        normalized_title: "follow up with acme",
+        proposed_assignee_name: null,
+        source_platform: "slack",
+        source_conversation_id: evidence.conversationId,
+        source_provider_thread_id: null,
+        source_anchor_key: sourceAnchorKey,
+        evidence_fingerprint: evidenceFingerprint,
+        review_code: "SEED1234",
+        review_state: "pending",
+        accepted_task_id: null,
+        reviewed_at: null,
+        reviewed_by_user_id: null,
+      })
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "ok",
+      mode: "hybrid",
+      untracked: [
+        {
+          candidateId: "SEED1234",
+          title: "Follow up with Acme",
+          reviewCode: "SEED1234",
+          sourceKey,
+          sourceAnchorKey,
+        },
+      ],
+    });
+    expect((context?.followupReminder as { untracked: unknown[] }).untracked).toHaveLength(1);
+  });
+
+  it("uses recent-summary candidates as explicit fallback when a durable-only reminder query fails", async () => {
+    await seedUser(db);
+    const sourceKey = "slack:channel:C_FALLBACK";
+    await seedSummarizerConfig([
+      {
+        id: "route-fallback",
+        sources: [sourceKey],
+        focus: null,
+        sections: null,
+        maxItemsPerSection: null,
+        schedule: null,
+        destination: { kind: "off" },
+        enabled: true,
+      },
+    ]);
+    const evidence = await seedConversationMessage("C_FALLBACK", "fallback-message");
+    const outputId = await seedSummaryOutput(sourceKey, [
+      { title: "Recover this follow-up", messageIds: [evidence.messageId] },
+    ]);
+    await db
+      .insertInto("task_durability_route_state")
+      .values({
+        agent_key: "conversation_summary",
+        user_id: "user-1",
+        route_id: "route-fallback",
+        source_key: sourceKey,
+        mode: "durable_only",
+        seed_state: "reviewed",
+        seed_started_at: NOW.toISOString(),
+        seed_reviewed_at: NOW.toISOString(),
+        incremental_success_at: NOW.toISOString(),
+        last_error: null,
+      })
+      .execute();
+    const task = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Existing durable task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "fallback-task",
+      createdByUserId: "user-1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({
+        source_platform: "slack",
+        source_conversation_id: evidence.conversationId,
+        source_anchor_key: `slack:${evidence.conversationId}:root`,
+        origin_agent_output_id: outputId,
+      })
+      .where("id", "=", task.taskId)
+      .execute();
+    await db.schema.dropTable("task_completion_recommendations").execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "error",
+      code: "durable_query_failed",
+      fallback: [
+        {
+          title: "Recover this follow-up",
+          sourceKey,
+          sourceAnchorKey: `slack:${evidence.conversationId}:root`,
+        },
+      ],
+    });
+  });
+
+  it("suppresses only the dismissed member anchor for same-title combined-route summaries", async () => {
+    await seedUser(db);
+    const firstSource = "slack:channel:C_FIRST";
+    const secondSource = "slack:channel:C_SECOND";
+    const routeSourceKey = `route:${createHash("sha256")
+      .update([firstSource, secondSource].sort().join("|"))
+      .digest("hex")
+      .slice(0, 12)}`;
+    await seedSummarizerConfig([
+      {
+        id: "combined-route",
+        sources: [firstSource, secondSource],
+        focus: null,
+        sections: null,
+        maxItemsPerSection: null,
+        schedule: null,
+        destination: { kind: "off" },
+        enabled: true,
+      },
+    ]);
+    const first = await seedConversationMessage("C_FIRST", "first-message");
+    const second = await seedConversationMessage("C_SECOND", "second-message");
+    const outputId = await seedSummaryOutput(routeSourceKey, [
+      { title: "Send revised proposal", messageIds: [first.messageId] },
+      { title: "Send revised proposal", messageIds: [second.messageId] },
+    ]);
+    await db
+      .insertInto("task_durability_route_state")
+      .values({
+        agent_key: "conversation_summary",
+        user_id: "user-1",
+        route_id: "combined-route",
+        source_key: routeSourceKey,
+        mode: "hybrid",
+        seed_state: "reviewed",
+        seed_started_at: NOW.toISOString(),
+        seed_reviewed_at: NOW.toISOString(),
+        incremental_success_at: null,
+        last_error: null,
+      })
+      .execute();
+    await db
+      .insertInto("task_seed_candidates")
+      .values({
+        id: "dismissed-first-anchor",
+        agent_key: "conversation_summary",
+        user_id: "user-1",
+        route_id: "combined-route",
+        source_key: routeSourceKey,
+        origin_agent_output_id: outputId,
+        origin_agent_output_item_id: null,
+        title: "Send revised proposal",
+        normalized_title: "send revised proposal",
+        proposed_assignee_name: null,
+        source_platform: "slack",
+        source_conversation_id: first.conversationId,
+        source_provider_thread_id: null,
+        source_anchor_key: `slack:${first.conversationId}:root`,
+        evidence_fingerprint: "dismissed-first-fingerprint",
+        review_code: "DISM1234",
+        review_state: "dismissed",
+        accepted_task_id: null,
+        reviewed_at: NOW.toISOString(),
+        reviewed_by_user_id: "user-1",
+      })
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.followupReminder).toMatchObject({
+      status: "ok",
+      mode: "hybrid",
+      untracked: [
+        {
+          title: "Send revised proposal",
+          reviewCode: null,
+        },
+      ],
+    });
   });
 });

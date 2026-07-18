@@ -1,5 +1,5 @@
 import type { Kysely, Selectable } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentOutputItemInput, AgentSourceConfig } from "../../db/repositories/agent-outputs";
 import type { DB, UsersTable } from "../../db/schema";
 import { createTestConfig, createTestDb, createTestLogger } from "../../test-utils";
@@ -143,7 +143,9 @@ describe("conversationSummaryDefinition", () => {
     expect(conversationSummaryDefinition.key).toBe(CONVERSATION_SUMMARY_AGENT_KEY);
     expect(conversationSummaryDefinition.sourceConfig).toMatchObject({
       supportsSlackChannels: true,
+      supportsSlackDms: true,
       supportsWhatsAppGroups: true,
+      supportsWhatsAppDms: true,
     });
     expect(conversationSummaryDefinition.requiresKnowledgeRefs).toBe(false);
   });
@@ -162,6 +164,7 @@ describe("conversationSummaryDefinition", () => {
         userId: "user-1",
         outputId: "summary-output",
         createTasks: true,
+        runtimeContext: {},
         items: [
           outputItem({
             sectionKey: "highlights",
@@ -219,6 +222,7 @@ describe("conversationSummaryDefinition", () => {
         userId: "user-1",
         outputId: "multi-parent-output",
         createTasks: true,
+        runtimeContext: {},
         items: [
           outputItem({
             sectionKey: "highlights",
@@ -267,6 +271,7 @@ describe("conversationSummaryDefinition", () => {
         userId: "user-1",
         outputId: "summary-output",
         createTasks: true,
+        runtimeContext: {},
         items: [
           outputItem({
             sectionKey: "task_candidates",
@@ -318,6 +323,7 @@ describe("conversationSummaryDefinition", () => {
         userId: "user-1",
         outputId: "summary-output",
         createTasks: true,
+        runtimeContext: {},
         items: [
           outputItem({
             sectionKey: "action_items",
@@ -353,6 +359,421 @@ describe("conversationSummaryDefinition", () => {
         expect.objectContaining({ parent_entity_id: "linkedin-workflow-connect" }),
         expect.objectContaining({ parent_entity_id: "linkedin-workflow-connect" }),
       ]);
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("applies a source-validated task diff and completes the no-seed transition", async () => {
+    const db = await createTestDb();
+    try {
+      const user = await seedUser(db);
+      await seedAssignablePerson(db, "mina", "Mina");
+      const conversationId = await seedConversation(db);
+      await seedMessage(db, conversationId, {
+        id: "task-change-message",
+        text: "Mina will send the revised proposal.",
+        receivedAt: "2026-07-01T17:00:00.000Z",
+      });
+      const message = await db
+        .selectFrom("conversation_messages")
+        .select("id")
+        .where("provider_message_id", "=", "task-change-message")
+        .executeTakeFirstOrThrow();
+      const runtimeContext = await buildConversationSummaryRuntimeContext({
+        db,
+        user,
+        outputDate: "2026-07-01",
+        timezone: "UTC",
+        now: NOW,
+        adminCanReadAllFiles: false,
+        contentUserEmails: ["user@example.com"],
+        agentConfig: {
+          enabledSections: {},
+          maxItemsPerSection: 5,
+          focus: null,
+          delivery: null,
+          sources: [source()],
+          sourceKey: "slack:channel:C_SUMMARY",
+          routeId: "summary-route",
+          createTasks: true,
+        },
+      });
+      await db
+        .insertInto("agent_outputs")
+        .values({
+          id: "summary-output-diff",
+          agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+          user_id: user.id,
+          output_date: "2026-07-01",
+          source_key: "slack:channel:C_SUMMARY",
+          source_label: "#summary-room",
+          timezone: "UTC",
+          status: "completed",
+          trigger_type: "manual",
+          agent_version: "test",
+          generated_at: NOW.toISOString(),
+        })
+        .execute();
+
+      await conversationSummaryDefinition.onOutputSaved?.({
+        db,
+        config: createTestConfig(),
+        logger: createTestLogger(),
+        userId: user.id,
+        outputId: "summary-output-diff",
+        createTasks: true,
+        runtimeContext,
+        items: [
+          outputItem({
+            sectionKey: "task_changes",
+            title: "Mina: send the revised proposal",
+            summary: "Mina committed to send the revised proposal.",
+            label: "action_item",
+            structuredPayload: {
+              changeKind: "new",
+              messageIds: [message.id],
+              assigneeName: "Mina",
+            },
+          }),
+        ],
+      });
+
+      const task = await db.selectFrom("tasks").selectAll().executeTakeFirstOrThrow();
+      expect(task).toMatchObject({
+        title: "Mina: send the revised proposal",
+        source_platform: "slack",
+        source_conversation_id: conversationId,
+        source_provider_thread_id: null,
+        origin_agent_output_id: "summary-output-diff",
+      });
+      await expect(db.selectFrom("task_message_evidence").selectAll().execute()).resolves.toEqual([
+        expect.objectContaining({
+          task_id: task.id,
+          conversation_message_id: message.id,
+          source_anchor_key: `slack:${conversationId}:root`,
+        }),
+      ]);
+      await expect(
+        db
+          .selectFrom("task_durability_route_state")
+          .select(["mode", "seed_state", "incremental_success_at"])
+          .where("route_id", "=", "summary-route")
+          .executeTakeFirstOrThrow(),
+      ).resolves.toMatchObject({
+        mode: "durable_only",
+        seed_state: "reviewed",
+        incremental_success_at: expect.any(String),
+      });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("keeps the durability route hybrid when any emitted task change is malformed or rejected", async () => {
+    const db = await createTestDb();
+    try {
+      const user = await seedUser(db);
+      await seedAssignablePerson(db, "mina", "Mina");
+      const conversationId = await seedConversation(db);
+      await seedMessage(db, conversationId, {
+        id: "mixed-task-change-message",
+        text: "Mina will send the revised proposal.",
+        receivedAt: "2026-07-01T17:00:00.000Z",
+      });
+      const message = await db
+        .selectFrom("conversation_messages")
+        .select("id")
+        .where("provider_message_id", "=", "mixed-task-change-message")
+        .executeTakeFirstOrThrow();
+      const runtimeContext = await buildConversationSummaryRuntimeContext({
+        db,
+        user,
+        outputDate: "2026-07-01",
+        timezone: "UTC",
+        now: NOW,
+        adminCanReadAllFiles: false,
+        contentUserEmails: ["user@example.com"],
+        agentConfig: {
+          enabledSections: {},
+          maxItemsPerSection: 5,
+          focus: null,
+          delivery: null,
+          sources: [source()],
+          sourceKey: "slack:channel:C_SUMMARY",
+          routeId: "mixed-signal-route",
+          createTasks: true,
+        },
+      });
+      await db
+        .insertInto("agent_outputs")
+        .values({
+          id: "mixed-signal-output",
+          agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+          user_id: user.id,
+          output_date: "2026-07-01",
+          source_key: "slack:channel:C_SUMMARY",
+          source_label: "#summary-room",
+          timezone: "UTC",
+          status: "completed",
+          trigger_type: "manual",
+          agent_version: "test",
+          generated_at: NOW.toISOString(),
+        })
+        .execute();
+
+      await conversationSummaryDefinition.onOutputSaved?.({
+        db,
+        config: createTestConfig(),
+        logger: createTestLogger(),
+        userId: user.id,
+        outputId: "mixed-signal-output",
+        createTasks: true,
+        runtimeContext,
+        items: [
+          outputItem({
+            sectionKey: "task_changes",
+            title: "Mina: send the revised proposal",
+            summary: "Mina committed to send the revised proposal.",
+            label: "action_item",
+            structuredPayload: {
+              changeKind: "new",
+              messageIds: [message.id],
+              assigneeName: "Mina",
+            },
+          }),
+          outputItem({
+            sectionKey: "task_changes",
+            title: "Malformed task change",
+            summary: "This emitted change is missing evidence.",
+            label: "action_item",
+            structuredPayload: {
+              changeKind: "new",
+            },
+          }),
+          outputItem({
+            sectionKey: "task_changes",
+            title: "Rejected task change",
+            summary: "This emitted change references a task outside memory.",
+            label: "action_item",
+            structuredPayload: {
+              changeKind: "changed",
+              matchedTaskId: "not-in-task-memory",
+              messageIds: [message.id],
+            },
+          }),
+        ],
+      });
+
+      await expect(db.selectFrom("tasks").select("title").execute()).resolves.toEqual([
+        { title: "Mina: send the revised proposal" },
+      ]);
+      await expect(
+        db
+          .selectFrom("task_durability_route_state")
+          .select(["mode", "incremental_success_at"])
+          .where("route_id", "=", "mixed-signal-route")
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ mode: "hybrid", incremental_success_at: null });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it.each([
+    {
+      missingAllowlist: "messages",
+      allowedMessageIds: [],
+      allowedConversationIds: [41],
+    },
+    {
+      missingAllowlist: "conversations",
+      allowedMessageIds: [41],
+      allowedConversationIds: [],
+    },
+  ])(
+    "keeps the durability route hybrid when parsed task changes have no allowed $missingAllowlist",
+    async ({ missingAllowlist, allowedMessageIds, allowedConversationIds }) => {
+      const db = await createTestDb();
+      try {
+        const user = await seedUser(db);
+        const routeId = `missing-${missingAllowlist}-route`;
+        await db
+          .insertInto("task_durability_route_state")
+          .values({
+            agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+            user_id: user.id,
+            route_id: routeId,
+            source_key: "slack:channel:C_SUMMARY",
+            mode: "hybrid",
+            seed_state: "reviewed",
+            seed_started_at: NOW.toISOString(),
+            seed_reviewed_at: NOW.toISOString(),
+            incremental_success_at: null,
+            last_error: null,
+          })
+          .execute();
+        const logger = createTestLogger();
+        const warn = vi.spyOn(logger, "warn");
+
+        await conversationSummaryDefinition.onOutputSaved?.({
+          db,
+          config: createTestConfig(),
+          logger,
+          userId: user.id,
+          outputId: `missing-${missingAllowlist}-output`,
+          createTasks: true,
+          runtimeContext: {
+            durabilityRouteId: routeId,
+            durabilitySourceKey: "slack:channel:C_SUMMARY",
+            allowedMessageIds,
+            allowedConversationIds,
+            taskMemory: [],
+          },
+          items: [
+            outputItem({
+              sectionKey: "task_changes",
+              title: "Mina: send the revised proposal",
+              summary: "Mina committed to send the revised proposal.",
+              label: "action_item",
+              structuredPayload: {
+                changeKind: "new",
+                messageIds: [41],
+                assigneeName: "Mina",
+              },
+            }),
+          ],
+        });
+
+        await expect(db.selectFrom("tasks").selectAll().execute()).resolves.toEqual([]);
+        await expect(
+          db
+            .selectFrom("task_durability_route_state")
+            .select(["mode", "incremental_success_at"])
+            .where("route_id", "=", routeId)
+            .executeTakeFirstOrThrow(),
+        ).resolves.toEqual({ mode: "hybrid", incremental_success_at: null });
+        expect(warn).toHaveBeenCalledWith(
+          {
+            outputId: `missing-${missingAllowlist}-output`,
+            userId: user.id,
+            routeId,
+          },
+          "Summarizer: durability output omitted a valid task diff",
+        );
+      } finally {
+        await db.destroy();
+      }
+    },
+  );
+
+  it("records durability success for a genuine empty output with no task signals", async () => {
+    const db = await createTestDb();
+    try {
+      const user = await seedUser(db);
+      await db
+        .insertInto("task_durability_route_state")
+        .values({
+          agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+          user_id: user.id,
+          route_id: "empty-output-route",
+          source_key: "slack:channel:C_SUMMARY",
+          mode: "hybrid",
+          seed_state: "reviewed",
+          seed_started_at: NOW.toISOString(),
+          seed_reviewed_at: NOW.toISOString(),
+          incremental_success_at: null,
+          last_error: null,
+        })
+        .execute();
+      const logger = createTestLogger();
+      const warn = vi.spyOn(logger, "warn");
+
+      await conversationSummaryDefinition.onOutputSaved?.({
+        db,
+        config: createTestConfig(),
+        logger,
+        userId: user.id,
+        outputId: "empty-output",
+        createTasks: true,
+        runtimeContext: {
+          durabilityRouteId: "empty-output-route",
+          durabilitySourceKey: "slack:channel:C_SUMMARY",
+          allowedMessageIds: [],
+          allowedConversationIds: [],
+          taskMemory: [],
+        },
+        items: [],
+      });
+
+      await expect(
+        db
+          .selectFrom("task_durability_route_state")
+          .select(["mode", "incremental_success_at"])
+          .where("route_id", "=", "empty-output-route")
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({
+        mode: "durable_only",
+        incremental_success_at: expect.any(String),
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("does not fall back to unanchored legacy promotion for a durability-enabled run", async () => {
+    const db = await createTestDb();
+    try {
+      const user = await seedUser(db);
+      await db
+        .insertInto("task_durability_route_state")
+        .values({
+          agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+          user_id: user.id,
+          route_id: "summary-route",
+          source_key: "slack:channel:C_SUMMARY",
+          mode: "hybrid",
+          seed_state: "reviewed",
+          seed_started_at: NOW.toISOString(),
+          seed_reviewed_at: NOW.toISOString(),
+          incremental_success_at: null,
+          last_error: null,
+        })
+        .execute();
+
+      await conversationSummaryDefinition.onOutputSaved?.({
+        db,
+        config: createTestConfig(),
+        logger: createTestLogger(),
+        userId: user.id,
+        outputId: "durability-output-without-diff",
+        createTasks: true,
+        runtimeContext: {
+          durabilityRouteId: "summary-route",
+          durabilitySourceKey: "slack:channel:C_SUMMARY",
+          allowedMessageIds: [],
+          allowedConversationIds: [],
+          taskMemory: [],
+        },
+        items: [
+          outputItem({
+            sectionKey: "task_candidates",
+            title: "Legacy-only candidate",
+            summary: "This item has no validated conversation evidence.",
+            label: "action_item",
+          }),
+        ],
+      });
+
+      await expect(db.selectFrom("tasks").selectAll().execute()).resolves.toEqual([]);
+      await expect(
+        db
+          .selectFrom("task_durability_route_state")
+          .select(["mode", "incremental_success_at"])
+          .where("route_id", "=", "summary-route")
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ mode: "hybrid", incremental_success_at: null });
     } finally {
       await db.destroy();
     }
@@ -434,6 +855,111 @@ describe("buildConversationSummaryRuntimeContext", () => {
         messages: [expect.objectContaining({ text: "Launch decision is ready" })],
       }),
     ]);
+  });
+
+  it("loads an owned WhatsApp DM by opaque conversation id and keeps task evidence normalized", async () => {
+    const conversation = await db
+      .insertInto("conversations")
+      .values({
+        platform: "whatsapp",
+        kind: "dm",
+        provider_conversation_id: "dm:+15551234567",
+        display_name: "+15551234567",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await seedMessage(db, conversation.id, {
+      id: "dm-task-message",
+      text: "Mina will send the revised proposal.",
+      receivedAt: "2026-07-01T17:00:00.000Z",
+    });
+    const message = await db
+      .selectFrom("conversation_messages")
+      .select("id")
+      .where("provider_message_id", "=", "dm-task-message")
+      .executeTakeFirstOrThrow();
+    const dmSource = {
+      platform: "whatsapp",
+      targetType: "dm",
+      targetId: String(conversation.id),
+      label: "WhatsApp DM with Agent User",
+    } as unknown as AgentSourceConfig;
+    const sourceKey = `whatsapp:dm:${conversation.id}`;
+    const context = await buildConversationSummaryRuntimeContext({
+      db,
+      user,
+      outputDate: "2026-07-01",
+      timezone: "UTC",
+      now: NOW,
+      adminCanReadAllFiles: false,
+      contentUserEmails: ["user@example.com"],
+      agentConfig: {
+        enabledSections: {},
+        maxItemsPerSection: 5,
+        focus: null,
+        delivery: null,
+        sources: [dmSource],
+        sourceKey,
+        routeId: sourceKey,
+        createTasks: true,
+      },
+    });
+    await db
+      .insertInto("agent_outputs")
+      .values({
+        id: "whatsapp-dm-output",
+        agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+        user_id: user.id,
+        output_date: "2026-07-01",
+        source_key: sourceKey,
+        source_label: "WhatsApp DM with Agent User",
+        timezone: "UTC",
+        status: "completed",
+        trigger_type: "manual",
+        agent_version: "test",
+        generated_at: NOW.toISOString(),
+      })
+      .execute();
+
+    expect(context.summarySources).toEqual([
+      expect.objectContaining({
+        platform: "whatsapp",
+        targetType: "dm",
+        targetId: String(conversation.id),
+        label: "WhatsApp DM with Agent User",
+        conversationId: conversation.id,
+        messages: [expect.objectContaining({ id: message.id, text: "Mina will send the revised proposal." })],
+      }),
+    ]);
+    expect(JSON.stringify(context.summarySources)).not.toContain("15551234567");
+
+    await conversationSummaryDefinition.onOutputSaved?.({
+      db,
+      config: createTestConfig(),
+      logger: createTestLogger(),
+      userId: user.id,
+      outputId: "whatsapp-dm-output",
+      createTasks: true,
+      runtimeContext: context,
+      items: [
+        outputItem({
+          sectionKey: "task_changes",
+          title: "Mina: send the revised proposal",
+          summary: "Mina committed to send the revised proposal.",
+          label: "action_item",
+          structuredPayload: {
+            changeKind: "new",
+            messageIds: [message.id],
+            assigneeName: "Mina",
+          },
+        }),
+      ],
+    });
+
+    await expect(db.selectFrom("task_message_evidence").selectAll().executeTakeFirstOrThrow()).resolves.toMatchObject({
+      conversation_message_id: message.id,
+      source_anchor_key: `whatsapp:${conversation.id}:root`,
+    });
   });
 
   it("keeps the newest capped messages in chronological order when a source is truncated", async () => {

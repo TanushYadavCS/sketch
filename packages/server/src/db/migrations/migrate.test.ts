@@ -24,7 +24,7 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 145;
+const EXPECTED_MIGRATION_COUNT = 146;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -213,6 +213,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[142]).toBe("147-whatsapp-backfill-graph-admission");
     expect(names[143]).toBe("148-whatsapp-pending-slices-index");
     expect(names[144]).toBe("149-whatsapp-backfill-lifecycle-durability");
+    expect(names[145]).toBe("150-task-durability-steel-thread");
   });
 
   it("creates the bounded open-materializable partial index", async () => {
@@ -233,6 +234,122 @@ describe("runMigrations — full sequence", () => {
     expect(indexSql).toContain("deleted_at is null");
     expect(indexSql).toContain("materialized_at is null");
     expect(indexSql).toContain("materialization_attempts < 5");
+  });
+
+  it("creates the durable conversation follow-up schema", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const taskColumns = await sql<{ name: string; type: string; notnull: number }>`PRAGMA table_info(tasks)`.execute(
+      db,
+    );
+    expect(taskColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "source_platform", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "source_conversation_id", type: "INTEGER", notnull: 0 }),
+        expect.objectContaining({ name: "source_provider_thread_id", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "source_anchor_key", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "origin_agent_output_id", type: "TEXT", notnull: 0 }),
+      ]),
+    );
+
+    for (const table of [
+      "task_message_evidence",
+      "task_completion_recommendations",
+      "task_completion_recommendation_evidence",
+      "task_completion_recommendation_deliveries",
+      "task_durability_route_state",
+      "task_seed_candidates",
+    ]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
+
+    const recommendationColumns = await sql<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>`PRAGMA table_info(task_completion_recommendations)`.execute(db);
+    expect(recommendationColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "review_code", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "evidence_fingerprint", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "delivery_count", type: "INTEGER", notnull: 1, dflt_value: "0" }),
+        expect.objectContaining({ name: "expires_at", type: "TEXT", notnull: 1 }),
+      ]),
+    );
+
+    const routeColumns = await sql<{
+      name: string;
+      type: string;
+      notnull: number;
+    }>`PRAGMA table_info(task_durability_route_state)`.execute(db);
+    expect(routeColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "agent_key", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "user_id", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "route_id", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "source_key", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "mode", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "seed_state", type: "TEXT", notnull: 1 }),
+      ]),
+    );
+
+    const indexes = await sql<{ name: string }>`
+      SELECT name
+      FROM sqlite_master
+      WHERE type='index'
+        AND tbl_name IN (
+          'tasks',
+          'task_message_evidence',
+          'task_completion_recommendations',
+          'task_completion_recommendation_deliveries',
+          'task_durability_route_state',
+          'task_seed_candidates'
+        )
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.name)).toEqual(
+      expect.arrayContaining([
+        "idx_tasks_conversation_anchor_status",
+        "idx_task_message_evidence_anchor",
+        "task_completion_recommendations_review_code_uidx",
+        "task_completion_recommendations_fingerprint_uidx",
+        "idx_task_completion_recommendations_task_state_expiry",
+        "task_completion_recommendations_pending_task_uidx",
+        "task_completion_recommendation_deliveries_uidx",
+        "task_durability_route_state_uidx",
+        "idx_task_durability_route_state_source",
+        "task_seed_candidates_review_code_uidx",
+        "task_seed_candidates_fingerprint_uidx",
+        "idx_task_seed_candidates_route_state",
+      ]),
+    );
+
+    const evidenceForeignKeys = await sql<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>`PRAGMA foreign_key_list(task_message_evidence)`.execute(db);
+    expect(evidenceForeignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: "tasks", from: "task_id", to: "id", on_delete: "CASCADE" }),
+        expect.objectContaining({
+          table: "conversation_messages",
+          from: "conversation_message_id",
+          to: "id",
+          on_delete: "CASCADE",
+        }),
+        expect.objectContaining({
+          table: "conversations",
+          from: "source_conversation_id",
+          to: "id",
+          on_delete: "CASCADE",
+        }),
+      ]),
+    );
   });
 
   it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {
