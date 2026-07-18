@@ -31,6 +31,7 @@ export interface EnsureRouteTransitionInput {
   userId: string;
   routeId: string;
   sourceKey: string;
+  sourceKeys?: string[];
   allowedConversationIds?: number[];
   now: ClockValue;
 }
@@ -213,7 +214,7 @@ export function createTaskDurabilityTransitionRepository(db: Kysely<DB>) {
           userId: input.userId,
           routeId: input.routeId,
           sourceKey: input.sourceKey,
-          sourceKeys: [],
+          sourceKeys: input.sourceKeys ?? [],
           allowedConversationIds: input.allowedConversationIds,
         },
         now,
@@ -235,10 +236,11 @@ export function createTaskDurabilityTransitionRepository(db: Kysely<DB>) {
 
       try {
         const since = sevenDayBoundary(now);
-        const outputs = await outputRepo.listCompletedForScopeSince(
+        const seedSourceKeys = eligibleSeedSourceKeys(input.sourceKey, input.sourceKeys);
+        const outputs = await outputRepo.listCompletedForScopesSince(
           input.agentKey,
           input.userId,
-          input.sourceKey,
+          seedSourceKeys,
           since,
           { limit: SEED_OUTPUT_LIMIT },
         );
@@ -251,6 +253,7 @@ export function createTaskDurabilityTransitionRepository(db: Kysely<DB>) {
             candidate,
             input.sourceKey,
             input.allowedConversationIds ? new Set(input.allowedConversationIds) : null,
+            seedSourceKeys,
           );
           if (value) resolved.push(value);
           else skippedCount += 1;
@@ -377,7 +380,9 @@ export function createTaskDurabilityTransitionRepository(db: Kysely<DB>) {
               )
             : null;
           sourceCandidate = output
-            ? await findOriginatingCandidate(trx, output, seed.evidence_fingerprint, seed.source_key)
+            ? await findOriginatingCandidate(trx, output, seed.evidence_fingerprint, seed.source_key, null, [
+                output.output.source_key,
+              ])
             : null;
           if (!sourceCandidate) {
             await trx
@@ -719,7 +724,14 @@ async function reconcileInvalidPendingCandidates(
       ? await createAgentOutputRepository(db).getByIdForUser(route.agentKey, seed.origin_agent_output_id, route.userId)
       : null;
     const resolved = output
-      ? await findOriginatingCandidate(db, output, seed.evidence_fingerprint, seed.source_key, allowedConversationIds)
+      ? await findOriginatingCandidate(
+          db,
+          output,
+          seed.evidence_fingerprint,
+          seed.source_key,
+          allowedConversationIds,
+          route.sourceKeys,
+        )
       : null;
     if (resolved?.anchor.key === seed.source_anchor_key) continue;
     const deleted = await db
@@ -788,6 +800,35 @@ async function persistSeedCandidate(
   resolved: ResolvedSeedCandidate,
   now: string,
 ): Promise<boolean> {
+  const accepted = await db
+    .selectFrom("task_seed_candidates")
+    .select("id")
+    .where("agent_key", "=", input.agentKey)
+    .where("user_id", "=", input.userId)
+    .where("evidence_fingerprint", "=", resolved.evidenceFingerprint)
+    .where("review_state", "=", "accepted")
+    .executeTakeFirst();
+  if (accepted) return false;
+
+  const activeTasks = await db
+    .selectFrom("tasks")
+    .select(["assignee_name", "proposed_assignee_name", "parent_entity_id", "parent_source_ref", "parent_name"])
+    .where("source", "=", "summary")
+    .where("created_by_user_id", "=", input.userId)
+    .where("normalized_title", "=", normalizeName(resolved.candidate.title))
+    .where("source_anchor_key", "=", resolved.anchor.key)
+    .where("valid_to", "is", null)
+    .where("status", "in", ["open", "in_progress"])
+    .execute();
+  if (
+    activeTasks.some(
+      (task) =>
+        seedOwnerMatchesTask(resolved.proposedAssigneeName, task) &&
+        seedParentMatchesTask(resolved.candidate.structuredPayload, task),
+    )
+  )
+    return false;
+
   const existing = await db
     .selectFrom("task_seed_candidates")
     .select("id")
@@ -845,6 +886,33 @@ async function persistSeedCandidate(
   throw new Error("Unable to allocate a unique task seed review code.");
 }
 
+function seedOwnerMatchesTask(
+  proposedAssigneeName: string | null,
+  task: { assignee_name: string | null; proposed_assignee_name: string | null },
+): boolean {
+  const taskName = task.proposed_assignee_name ?? task.assignee_name;
+  if (!taskName) return true;
+  if (!proposedAssigneeName) return false;
+  return normalizeName(taskName) === normalizeName(proposedAssigneeName);
+}
+
+function seedParentMatchesTask(
+  payload: Record<string, unknown> | null | undefined,
+  task: { parent_entity_id: string | null; parent_source_ref: string | null; parent_name: string | null },
+): boolean {
+  const parentEntityId = readIdentityString(payload?.parentEntityId);
+  if (parentEntityId) return task.parent_entity_id === parentEntityId;
+  const parentSourceRef = readIdentityString(payload?.parentSourceRef);
+  if (parentSourceRef) return task.parent_source_ref === parentSourceRef;
+  const parentName = readIdentityString(payload?.parentName);
+  if (parentName) return task.parent_name !== null && normalizeName(task.parent_name) === normalizeName(parentName);
+  return task.parent_entity_id === null && task.parent_source_ref === null && task.parent_name === null;
+}
+
+function readIdentityString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 async function generateReviewCode(db: Transaction<DB>): Promise<string> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const code = randomUUID().replaceAll("-", "").slice(0, REVIEW_CODE_LENGTH).toUpperCase();
@@ -870,10 +938,11 @@ async function findOriginatingCandidate(
   fingerprint: string,
   sourceKey: string,
   allowedConversationIds: Set<number> | null = null,
+  sourceKeys: string[] = [],
 ): Promise<ResolvedSeedCandidate | null> {
   if (!output) return null;
   for (const candidate of extractSummarizerSeedCandidates([output])) {
-    const resolved = await resolveSeedCandidate(db, candidate, sourceKey, allowedConversationIds);
+    const resolved = await resolveSeedCandidate(db, candidate, sourceKey, allowedConversationIds, sourceKeys);
     if (resolved?.evidenceFingerprint === fingerprint) return resolved;
   }
   return null;
@@ -884,8 +953,9 @@ async function resolveSeedCandidate(
   candidate: SummarizerSeedCandidate,
   sourceKey: string,
   allowedConversationIds: Set<number> | null = null,
+  sourceKeys: string[] = [],
 ): Promise<ResolvedSeedCandidate | null> {
-  if (candidate.sourceKey !== sourceKey) return null;
+  if (!eligibleSeedSourceKeys(sourceKey, sourceKeys).includes(candidate.sourceKey)) return null;
   const messageIds = readInternalMessageIds(candidate.structuredPayload);
   if (!messageIds) return null;
   const messages = (await db
@@ -909,7 +979,7 @@ async function resolveSeedCandidate(
   for (const message of messages) {
     if (message.platform !== "slack" && message.platform !== "whatsapp") return null;
     if (allowedConversationIds && !allowedConversationIds.has(message.conversation_id)) return null;
-    if (!messageMatchesSourceKey(message, sourceKey)) return null;
+    if (!messageMatchesSourceKey(message, candidate.sourceKey)) return null;
     const providerThreadId =
       message.platform === "slack" && message.is_thread_reply === 1 ? message.provider_thread_id : null;
     const key = sourceAnchorKey(message.platform, message.conversation_id, providerThreadId);
@@ -931,6 +1001,13 @@ async function resolveSeedCandidate(
     evidenceFingerprint: createEvidenceFingerprint(candidate.title, anchor.key, messageIds),
     proposedAssigneeName,
   };
+}
+
+function eligibleSeedSourceKeys(routeSourceKey: string, sourceKeys: string[] = []): string[] {
+  const members = routeSourceKey.startsWith("route:")
+    ? sourceKeys.filter((sourceKey) => parseDirectSourceKey(sourceKey) !== null)
+    : [];
+  return [...new Set([routeSourceKey, ...members])];
 }
 
 function readInternalMessageIds(payload: Record<string, unknown> | null | undefined): number[] | null {
