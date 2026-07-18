@@ -64,7 +64,14 @@ class StreamClaimLostError extends Error {
 }
 
 const JOIN_LEAVE_PATTERN = /^<@U[A-Z0-9]+>\s+has\s+(joined|left)\s+the\s+(channel|group)\.?$/iu;
-const EMOJI_ONLY_PATTERN = /^(?:\s|:[a-z0-9_+-]+:|\p{Extended_Pictographic}|\p{Emoji_Component}|‍)+$/u;
+/**
+ * \p{Emoji_Component} would be the natural class for modifiers, but it also
+ * matches ASCII digits, #, and * (keycap bases), which would drop numeric
+ * replies like "42" as emoji-only. Only the non-ASCII component ranges are
+ * allowed: skin tones, regional indicators, ZWJ, variation selector, keycap.
+ */
+const EMOJI_ONLY_PATTERN =
+  /^(?:\s|:[a-z0-9_+-]+:|\p{Extended_Pictographic}|\u{1F3FB}|\u{1F3FC}|\u{1F3FD}|\u{1F3FE}|\u{1F3FF}|[\u{1F1E6}-\u{1F1FF}]|\u{200D}|\u{FE0F}|\u{20E3})+$/u;
 const ATTACHMENT_PLACEHOLDER = "see attached files.";
 
 function hasAttachments(attachments: string | null): boolean {

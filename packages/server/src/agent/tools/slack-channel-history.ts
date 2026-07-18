@@ -296,8 +296,15 @@ async function loadChannelWindowAuthorization(
   const firstWindow = messageWindows[0];
   const lastWindow = messageWindows[messageWindows.length - 1];
   if (!firstWindow || !lastWindow) return null;
+
+  /**
+   * The window form always reads the top-level channel flow. Every slice in
+   * a channel shares the same channel-level access scope, so a thread slice
+   * authorizes the same readers — but anchoring on one must not narrow the
+   * read to that thread, so the anchor's stream is forced to the channel.
+   */
   return {
-    anchor: toDrillAnchor(firstRow),
+    anchor: { ...toDrillAnchor(firstRow), providerThreadId: null },
     window: { start: firstWindow.start, end: lastWindow.end, expandMinutes: window.expandMinutes },
     messageWindows,
   };

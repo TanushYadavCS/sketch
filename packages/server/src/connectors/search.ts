@@ -214,6 +214,7 @@ export async function getFileContent(
       "enrichment_status",
       "access_scope_id",
       "share_with_everyone",
+      "is_archived",
     ])
     .where("id", "=", fileId)
     .executeTakeFirst();
@@ -223,6 +224,13 @@ export async function getFileContent(
   // userEmails === undefined → trusted bypass; userEmails === [] → fail closed.
   if (userEmails !== undefined) {
     if (userEmails.length === 0) return null;
+
+    /**
+     * Archived files are denied on the RBAC path: archival severs the scope
+     * and per-file grants, which would otherwise flip the file into the
+     * unrestricted no-scope tier below. Mirrors filterAccessibleFileIds.
+     */
+    if (file.is_archived === 1) return null;
 
     if (file.share_with_everyone !== 1) {
       const hasScope = file.access_scope_id != null;

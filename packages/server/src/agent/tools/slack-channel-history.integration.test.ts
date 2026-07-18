@@ -274,6 +274,19 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(payload.messages[1].text).toBe("reply three days later");
     });
 
+    it("window form reads the top-level flow even when a thread slice anchors authorization", async () => {
+      const result = await handleSlackChannelHistory(
+        {
+          channelRef: `conversation:${conversationId}`,
+          startedAt: "2026-07-17T09:00:00.000Z",
+          endedAt: "2026-07-17T09:30:00.000Z",
+        },
+        depsFor(db, ["roopak@example.com"]),
+      );
+      const payload = JSON.parse(resultText(result));
+      expect(payload.messages.map((message: { text: string }) => message.text)).toEqual(["root message"]);
+    });
+
     it("rejects malformed input and cross-window page tokens", async () => {
       const missing = await handleSlackChannelHistory({}, depsFor(db, ["roopak@example.com"]));
       expect(resultText(missing)).toContain("Provide either");

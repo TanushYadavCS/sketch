@@ -767,6 +767,17 @@ describe("getFileContent — RBAC", () => {
     expect(file).toBeNull();
   });
 
+  it("denies archived files on the RBAC path even when archival cleared the scope", async () => {
+    await db
+      .updateTable("indexed_files")
+      .set({ is_archived: 1, access_scope_id: null })
+      .where("id", "=", "file-restricted")
+      .execute();
+
+    expect(await getFileContent(db, "file-restricted", ["member@example.com"])).toBeNull();
+    expect((await getFileContent(db, "file-restricted"))?.content).toBe("top secret content");
+  });
+
   it("manual share grants content access; revoking removes it immediately", async () => {
     // outsider isn't in scope-c → blocked.
     expect(await getFileContent(db, "file-restricted", ["outsider@example.com"])).toBeNull();
