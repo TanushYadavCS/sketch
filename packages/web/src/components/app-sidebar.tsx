@@ -388,8 +388,8 @@ export function AppSidebar({
   const identity = useQuery({ queryKey: ["settings", "identity"], queryFn: () => api.settings.identity() });
   const setupStatus = useQuery({ queryKey: ["setup", "status"], queryFn: () => api.setup.status() });
   const yourOrgReview = useQuery({
-    queryKey: ["entity-review", "band-count", "spine"],
-    queryFn: () => api.entityReview.list({ limit: 0, types: ["product", "project", "team"] }),
+    queryKey: ["entity-review", "count", "all"],
+    queryFn: () => api.entityReview.list({ limit: 0 }),
     enabled: role === "admin",
     refetchInterval: 30_000,
   });

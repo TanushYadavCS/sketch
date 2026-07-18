@@ -1,10 +1,8 @@
 /**
  * /review-entities — redirect shim.
  *
- * ECR-03B moved the review surface inline onto Files → Entities. This
- * route now redirects to the entities tab so bookmarks and pasted links
- * don't 404. Delete this file (and route registration in router.ts)
- * after 2026-06-02 — the redirect is here for one release cycle only.
+ * Entity review now lives on the Your Org surface (the Review tab), so this
+ * legacy route redirects there to keep bookmarks and pasted links alive.
  */
 import { createRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
@@ -19,7 +17,7 @@ export const reviewEntitiesRoute = createRoute({
 function ReviewEntitiesRedirect() {
   const navigate = useNavigate();
   useEffect(() => {
-    navigate({ to: "/files", replace: true });
+    navigate({ to: "/projects", search: { tab: "review" }, replace: true });
   }, [navigate]);
   return null;
 }

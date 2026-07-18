@@ -1,296 +1,173 @@
 /**
- * Your Org — the curation home for what the org is made of: the products,
- * projects, and teams the graph tracks, plus the review band where the LLM's
- * proposals get confirmed or merged before they join the curated set.
+ * Your Org — the single home for the entity graph. Six type tabs (People,
+ * Companies, Teams, Projects, Products, Review) plus a divider-separated Graph
+ * tab: the full knowledge graph as its own lens, not a per-tab view toggle.
+ * (A List/Graph toggle was tried and rejected — switching type tabs while in
+ * graph view read as incoherent, and the graph endpoint's hotness/component
+ * filtering breaks the toggle's same-content promise.)
  *
- * Sections:
- * - **Review band** — pending product/project/team rows, split into confirm-new
- *   vs possible-duplicates. The org-taxonomy spine only; person/company review
- *   stays in Files → Entities.
- * - **Products** — the declared closed list (declared + human_confirmed) that
- *   calibrates extraction. `+ Add` declares one.
- * - **Projects** — the lifecycle spine: needs-sources vs active.
- * - **Teams** — structural teams seeded from connectors.
- *
- * Rows open the shared {@link EntityDrawer}. The page is built edit-ready: each
- * type will grow user-editable per-type fields, and a user edit is a `declared`
- * assertion.
+ * Entity rows open the shared {@link EntityDrawer} via `openEntity`. The drawer
+ * stays read-only in this run — the teach layer (contact-point CRUD, company
+ * placement, internal/external) lands in run 2.
  */
 import { AddEntityDialog } from "@/components/entity-review/add-entity-dialog";
-import { ReviewBand } from "@/components/entity-review/review-band";
 import { QuietAddButton } from "@/components/quiet-add-button";
-import { type CuratedProduct, type EntityListItem, type ProjectSummary, api } from "@/lib/api";
-import { useEntityUi } from "@/lib/entity-ui";
-import { CaretRightIcon, CubeIcon, FolderSimpleIcon, UsersThreeIcon } from "@phosphor-icons/react";
-import { Badge } from "@sketch/ui/components/badge";
-import { Skeleton } from "@sketch/ui/components/skeleton";
+import { api } from "@/lib/api";
+import { type CoarseType, KnowledgeGraphView, NODE_COLOR } from "@/routes/files/knowledge-graph";
+import { TabButton } from "@sketch/ui/components/tab-button";
+import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { useQuery } from "@tanstack/react-query";
-import { createRoute } from "@tanstack/react-router";
+import { createRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
 import { dashboardRoute } from "../dashboard";
+import { OrgEntityTab, ProductsTab, TeamsEmpty } from "./entity-tab";
+import { PeopleTab } from "./people-tab";
+import { ReviewTab } from "./review-tab";
 
-const SPINE_TYPES = ["product", "project", "team"];
+type OrgTab = "people" | "companies" | "teams" | "projects" | "products" | "review" | "graph";
+
+const ORG_TABS: OrgTab[] = ["people", "companies", "teams", "projects", "products", "review", "graph"];
+
+const TAB_TYPE: Record<Exclude<OrgTab, "review" | "graph">, CoarseType> = {
+  people: "person",
+  companies: "company",
+  teams: "team",
+  projects: "project",
+  products: "product",
+};
 
 export const projectsRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: "/projects",
-  component: ProjectsPage,
+  validateSearch: (search: Record<string, unknown>): { tab: OrgTab } => ({
+    tab: typeof search.tab === "string" && ORG_TABS.includes(search.tab as OrgTab) ? (search.tab as OrgTab) : "people",
+  }),
+  component: RoutedProjectsPage,
 });
 
-export function ProjectsPage() {
-  const [showAdd, setShowAdd] = useState(false);
+function RoutedProjectsPage() {
+  const { tab } = useSearch({ from: projectsRoute.id });
+  const navigate = useNavigate();
+  return (
+    <ProjectsPage
+      activeTab={tab}
+      onActiveTabChange={(nextTab) => {
+        void navigate({ to: "/projects", search: { tab: nextTab }, replace: true });
+      }}
+    />
+  );
+}
+
+function useEntityCount(type: string) {
+  const { data } = useQuery({
+    queryKey: ["entities", "count", type],
+    queryFn: () => api.entities.list({ type, limit: 1 }),
+    refetchInterval: 60000,
+  });
+  return data?.total ?? null;
+}
+
+export function ProjectsPage({
+  activeTab,
+  onActiveTabChange,
+}: {
+  activeTab?: OrgTab;
+  onActiveTabChange?: (tab: OrgTab) => void;
+} = {}) {
+  const [localTab, setLocalTab] = useState<OrgTab>("people");
+  const [addOpen, setAddOpen] = useState(false);
+  const [addType, setAddType] = useState("person");
+  const tab = activeTab ?? localTab;
+  const setTab = onActiveTabChange ?? setLocalTab;
+
+  const peopleCount = useEntityCount("person");
+  const companiesCount = useEntityCount("company");
+  const teamsCount = useEntityCount("team");
+  const projectsCount = useEntityCount("project");
+  const productsCount = useEntityCount("product");
+  const reviewCountQuery = useQuery({
+    queryKey: ["entity-review", "count", "all"],
+    queryFn: () => api.entityReview.list({ limit: 0 }),
+    refetchInterval: 30000,
+  });
+  const teamReviewQuery = useQuery({
+    queryKey: ["entity-review", "count", "team"],
+    queryFn: () => api.entityReview.list({ limit: 0, types: ["team"] }),
+    refetchInterval: 30000,
+  });
+  const reviewCount = reviewCountQuery.data?.total ?? null;
+
+  const openAdd = (type: string) => {
+    setAddType(type);
+    setAddOpen(true);
+  };
+
+  const tabs: { key: Exclude<OrgTab, "graph">; label: string; count: number | null }[] = [
+    { key: "people", label: "People", count: peopleCount },
+    { key: "companies", label: "Companies", count: companiesCount },
+    { key: "teams", label: "Teams", count: teamsCount },
+    { key: "projects", label: "Projects", count: projectsCount },
+    { key: "products", label: "Products", count: productsCount },
+    { key: "review", label: "Review", count: reviewCount },
+  ];
+
+  const goReview = () => setTab("review");
 
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
-      <div className="mb-7 flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-[22px] font-medium text-foreground">Your org</h1>
+          <h1 className="text-[22px] font-medium text-foreground">Your Org</h1>
           <p className="mt-1 text-[13px] text-muted-foreground">
-            The products, projects, and teams the graph is made of — confirm what the system proposes, and declare what
-            it should already know.
+            Everyone and everything the graph tracks — confirm what the system proposes, and declare what it should
+            already know.
           </p>
         </div>
-        <QuietAddButton className="shrink-0" onClick={() => setShowAdd(true)}>
-          Add
-        </QuietAddButton>
+        <div className="flex shrink-0 items-center gap-2">
+          <QuietAddButton onClick={() => openAdd(tab === "review" || tab === "graph" ? "person" : TAB_TYPE[tab])}>
+            Add
+          </QuietAddButton>
+        </div>
       </div>
 
-      <ReviewBand types={SPINE_TYPES} />
-      <ProductsSection />
-      <ProjectsSection />
-      <TeamsSection />
-      <AddEntityDialog open={showAdd} onOpenChange={setShowAdd} defaultType="product" />
-    </div>
-  );
-}
-
-function ProductsSection() {
-  const { data, isLoading } = useQuery({ queryKey: ["products"], queryFn: () => api.products.list() });
-  const products = data?.products ?? [];
-  return (
-    <section>
-      <GroupLabel label="Products" note={`${products.length} declared`} accent />
-      {isLoading ? (
-        <Skeleton className="h-12 w-full" />
-      ) : products.length === 0 ? (
-        <EmptyHint>No products yet — declare one with “Add”, or confirm a proposal above.</EmptyHint>
-      ) : (
-        <div className="flex flex-col gap-1">
-          {products.map((p) => (
-            <ProductRow key={p.id} product={p} />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function ProductRow({ product }: { product: CuratedProduct }) {
-  const ui = useEntityUi();
-  const cold = product.hotness <= 0;
-  return (
-    <button
-      type="button"
-      onClick={() => ui.openEntity(product.id)}
-      className="group flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left transition-colors hover:bg-muted/40"
-    >
-      <CubeIcon size={16} aria-hidden className="shrink-0 text-muted-foreground/60" />
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
-          <span className="text-[14px] font-medium text-foreground">{product.name}</span>
-          <TierBadge tier={product.provenance_tier} />
-        </div>
-        {cold ? (
-          <p className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground/60">
-            not seen in any source yet
-          </p>
-        ) : null}
+      <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-border">
+        {tabs.map((t) => (
+          <TabButton
+            key={t.key}
+            label={t.count !== null ? `${t.label} · ${t.count}` : t.label}
+            isActive={tab === t.key}
+            onClick={() => setTab(t.key)}
+            dot={tab === "graph" && t.key !== "review" ? NODE_COLOR[TAB_TYPE[t.key]] : undefined}
+          />
+        ))}
+        <div aria-hidden className="h-4 w-px self-center bg-border" />
+        <TabButton label="⬡ Graph" isActive={tab === "graph"} onClick={() => setTab("graph")} />
       </div>
-      <CaretRightIcon
-        size={14}
-        aria-hidden
-        className="shrink-0 text-muted-foreground/30 group-hover:text-muted-foreground"
-      />
-    </button>
-  );
-}
 
-function TierBadge({ tier }: { tier: string }) {
-  const label = tier === "human_confirmed" ? "confirmed" : tier;
-  const tone =
-    tier === "declared"
-      ? "border-emerald-300 text-emerald-700 dark:border-emerald-700 dark:text-emerald-400"
-      : tier === "human_confirmed"
-        ? "border-sky-300 text-sky-700 dark:border-sky-700 dark:text-sky-400"
-        : "text-muted-foreground";
-  return (
-    <Badge variant="outline" className={`text-[9px] uppercase tracking-wider ${tone}`}>
-      {label}
-    </Badge>
-  );
-}
-
-function ProjectsSection() {
-  const { data, isLoading } = useQuery({ queryKey: ["projects", "index"], queryFn: () => api.projects.list() });
-  const projects = data?.projects ?? [];
-  const needsSources = projects.filter((p) => p.sourceCount === 0);
-  const active = projects.filter((p) => p.sourceCount > 0);
-  if (!isLoading && projects.length === 0) {
-    return (
-      <section>
-        <GroupLabel label="Projects" note="0 tracked" />
-        <EmptyHint>
-          No projects yet — they appear here as the graph derives them from your connectors, or when you define one.
-        </EmptyHint>
-      </section>
-    );
-  }
-  return (
-    <>
-      {needsSources.length > 0 ? (
-        <section>
-          <GroupLabel label="Projects · needs sources" note={`${needsSources.length} born · not wired yet`} />
-          <div className="flex flex-col gap-1">
-            {needsSources.map((project) => (
-              <ProjectRow key={project.id} project={project} />
-            ))}
-          </div>
-        </section>
-      ) : null}
-      <section>
-        <GroupLabel label="Projects · active" note={`${active.length} fed by the graph`} />
-        {isLoading ? (
-          <Skeleton className="h-12 w-full" />
-        ) : active.length > 0 ? (
-          <div className="flex flex-col gap-1">
-            {active.map((project) => (
-              <ProjectRow key={project.id} project={project} />
-            ))}
-          </div>
+      <TabContentContainer className="mt-5">
+        {tab === "graph" ? (
+          <KnowledgeGraphView />
+        ) : tab === "people" ? (
+          <PeopleTab onSeeAllReview={goReview} />
+        ) : tab === "companies" ? (
+          <OrgEntityTab type="company" typeLabel="Companies" onSeeAllReview={goReview} />
+        ) : tab === "teams" ? (
+          <OrgEntityTab
+            type="team"
+            typeLabel="Teams"
+            onSeeAllReview={goReview}
+            renderEmpty={() => <TeamsEmpty pendingCount={teamReviewQuery.data?.total ?? 0} onSeeAllReview={goReview} />}
+          />
+        ) : tab === "projects" ? (
+          <OrgEntityTab type="project" typeLabel="Projects" onSeeAllReview={goReview} />
+        ) : tab === "products" ? (
+          <ProductsTab onSeeAllReview={goReview} onDeclare={() => openAdd("product")} />
         ) : (
-          <EmptyHint>Nothing fed yet — open a project to wire its data sources.</EmptyHint>
+          <ReviewTab />
         )}
-      </section>
-    </>
-  );
-}
+      </TabContentContainer>
 
-function ProjectRow({ project }: { project: ProjectSummary }) {
-  const ui = useEntityUi();
-  const needsSources = project.sourceCount === 0;
-  const facts = [
-    project.sourceCount > 0
-      ? `${project.sourceCount} ${project.sourceCount === 1 ? "source" : "sources"}`
-      : "no sources",
-    project.subProjectCount > 0
-      ? `${project.subProjectCount} ${project.subProjectCount === 1 ? "sub-project" : "sub-projects"}`
-      : null,
-  ].filter(Boolean);
-  return (
-    <button
-      type="button"
-      onClick={() => ui.openEntity(project.id)}
-      className="group flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left transition-colors hover:bg-muted/40"
-    >
-      {needsSources ? (
-        <span aria-hidden className="size-2 shrink-0 rounded-full bg-brand-accent" />
-      ) : (
-        <FolderSimpleIcon size={16} aria-hidden className="shrink-0 text-muted-foreground/60" />
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
-          <span className="text-[14px] font-medium text-foreground">{project.name}</span>
-          <Badge variant="outline" className="text-[9px] uppercase tracking-wider text-muted-foreground">
-            {project.origin}
-          </Badge>
-        </div>
-        <p className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground/60">
-          {facts.join("  ·  ")}
-        </p>
-      </div>
-      {needsSources ? (
-        <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.07em] text-muted-foreground/60 group-hover:text-foreground">
-          Wire up
-        </span>
-      ) : null}
-      <CaretRightIcon
-        size={14}
-        aria-hidden
-        className="shrink-0 text-muted-foreground/30 group-hover:text-muted-foreground"
-      />
-    </button>
-  );
-}
-
-function TeamsSection() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["entities", "team"],
-    queryFn: () => api.entities.list({ type: "team", limit: 100 }),
-  });
-  const teams = data?.entities ?? [];
-  if (!isLoading && teams.length === 0) return null;
-  return (
-    <section>
-      <GroupLabel label="Teams" note={`${teams.length} structural`} />
-      {isLoading ? (
-        <Skeleton className="h-12 w-full" />
-      ) : (
-        <div className="flex flex-col gap-1">
-          {teams.map((team) => (
-            <TeamRow key={team.id} team={team} />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function TeamRow({ team }: { team: EntityListItem }) {
-  const ui = useEntityUi();
-  return (
-    <button
-      type="button"
-      onClick={() => ui.openEntity(team.id)}
-      className="group flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left transition-colors hover:bg-muted/40"
-    >
-      <UsersThreeIcon size={16} aria-hidden className="shrink-0 text-muted-foreground/60" />
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
-          <span className="text-[14px] font-medium text-foreground">{team.name}</span>
-          <Badge variant="outline" className="text-[9px] uppercase tracking-wider text-muted-foreground">
-            structural
-          </Badge>
-        </div>
-      </div>
-      <CaretRightIcon
-        size={14}
-        aria-hidden
-        className="shrink-0 text-muted-foreground/30 group-hover:text-muted-foreground"
-      />
-    </button>
-  );
-}
-
-function GroupLabel({ label, note, accent }: { label: string; note: string; accent?: boolean }) {
-  return (
-    <div className="mb-3 mt-9 flex items-baseline justify-between border-b border-border/60 pb-2 first:mt-0">
-      <span
-        className={[
-          "font-mono text-[11px] uppercase tracking-[0.12em]",
-          accent ? "text-[#8B7A00] dark:text-brand-accent" : "text-muted-foreground",
-        ].join(" ")}
-      >
-        {label}
-      </span>
-      <span className="font-mono text-[10px] tracking-[0.04em] text-muted-foreground/70">{note}</span>
+      <AddEntityDialog key={addType} open={addOpen} onOpenChange={setAddOpen} defaultType={addType} />
     </div>
-  );
-}
-
-function EmptyHint({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="rounded-xl border border-dashed border-border py-8 text-center text-[12.5px] text-muted-foreground">
-      {children}
-    </p>
   );
 }
