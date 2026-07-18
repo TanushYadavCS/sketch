@@ -103,7 +103,6 @@ describe("Brief row live task status", () => {
 
     const row = screen.getByRole("button", { name: /Snapshot title/ });
     expect(within(row).getAllByText(formatBriefTaskStatus("in_progress")).length).toBeGreaterThan(0);
-    // The generated todo label ("Todo") must not win over the live overlay.
     expect(within(row).queryByText("Todo")).not.toBeInTheDocument();
   });
 
