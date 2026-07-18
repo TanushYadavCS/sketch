@@ -1008,7 +1008,7 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
         origin_agent_output_id: null,
         rationale: "Ashish reported that this is fixed.",
         delivery_count: 0,
-        expires_at: "2026-07-18T08:00:00.000Z",
+        expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
       })
       .execute();
     await db
