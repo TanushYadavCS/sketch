@@ -964,6 +964,31 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
       return outputsWithItems(rows);
     },
 
+    async listCompletedForScopesSince(
+      agentKey: string,
+      userId: string,
+      sourceKeys: string[],
+      sinceIso: string,
+      options: { limit?: number } = {},
+    ): Promise<AgentOutputWithItems[]> {
+      const scopes = [...new Set(sourceKeys.filter(Boolean))];
+      if (scopes.length === 0) return [];
+      const limit = Math.max(1, Math.min(options.limit ?? 10, 50));
+      const rows = await db
+        .selectFrom("agent_outputs")
+        .selectAll()
+        .where("agent_key", "=", agentKey)
+        .where("user_id", "=", userId)
+        .where("source_key", "in", scopes)
+        .where("status", "=", "completed")
+        .where(sql<boolean>`COALESCE(generated_at, updated_at) > ${sinceIso}`)
+        .orderBy(sql<string>`COALESCE(generated_at, updated_at)`, "desc")
+        .orderBy("id", "desc")
+        .limit(limit)
+        .execute();
+      return outputsWithItems(rows);
+    },
+
     async listCompletedForHumanUsers(
       agentKey: string,
       options: { limit?: number; cursor?: string | null } = {},

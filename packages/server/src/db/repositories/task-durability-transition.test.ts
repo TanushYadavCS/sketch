@@ -194,6 +194,48 @@ describe("createTaskDurabilityTransitionRepository", () => {
     expect(result).toMatchObject({ createdCount: 0, skippedCount: 1, pendingCount: 0, seedState: "reviewed" });
   });
 
+  it("seeds combined routes from recent member-source outputs", async () => {
+    const conversationId = await seedConversation(db, "slack", "C_MEMBER");
+    const messageId = await seedMessage(db, conversationId, {
+      providerMessageId: "member-route-message",
+      threadId: "member-route-thread",
+    });
+    const memberSourceKey = "slack:channel:C_MEMBER";
+    await seedOutput(createAgentOutputRepository(db), db, {
+      sourceKey: memberSourceKey,
+      generatedAt: "2026-07-15T12:00:00.000Z",
+      title: "Member source task",
+      messageIds: [messageId],
+    });
+
+    const result = await createTaskDurabilityTransitionRepository(db).ensureRouteTransition({
+      agentKey: AGENT_KEY,
+      userId: USER_ID,
+      routeId: ROUTE_ID,
+      sourceKey: "route:combined",
+      sourceKeys: [memberSourceKey],
+      allowedConversationIds: [conversationId],
+      now: NOW,
+    });
+
+    expect(result).toMatchObject({ createdCount: 1, skippedCount: 0, pendingCount: 1, seedState: "pending" });
+    const seed = await db
+      .selectFrom("task_seed_candidates")
+      .select(["review_code", "source_key", "title"])
+      .executeTakeFirstOrThrow();
+    expect(seed).toMatchObject({ source_key: "route:combined", title: "Member source task" });
+
+    await expect(
+      createTaskDurabilityTransitionRepository(db).reviewSeedCandidate({
+        userId: USER_ID,
+        code: seed.review_code,
+        decision: "track",
+        surface: "slack",
+        now: NOW,
+      }),
+    ).resolves.toMatchObject({ status: "accepted" });
+  });
+
   it("automatically reviews a successful seed with no valid candidates", async () => {
     const result = await createTaskDurabilityTransitionRepository(db).ensureRouteTransition({
       agentKey: AGENT_KEY,

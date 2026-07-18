@@ -271,6 +271,9 @@ export async function buildConversationSummaryRuntimeContext(
       userId: params.user.id,
       routeId,
       sourceKey,
+      sourceKeys: params.agentConfig.sources.map(
+        (source) => `${source.platform}:${source.targetType}:${source.targetId}`,
+      ),
       allowedConversationIds: conversationIds,
       now: params.now.toISOString(),
     });
