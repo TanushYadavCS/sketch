@@ -24,7 +24,7 @@ function meetingItem(id: string, title: string, startTime: string): DailyBriefIt
   };
 }
 
-function projectItem(id: string, title: string, entityId: string): DailyBriefItem {
+function projectItem(id: string, title: string, entityId: string, actionPrompt: string | null = null): DailyBriefItem {
   return {
     id,
     sectionKey: "active_projects",
@@ -35,7 +35,7 @@ function projectItem(id: string, title: string, entityId: string): DailyBriefIte
     displayRef: null,
     actionType: null,
     actionLabel: null,
-    actionPrompt: null,
+    actionPrompt,
     sourceUrl: null,
     structuredPayload: null,
     knowledgeRefs: { entityIds: [entityId], fileIds: [] },
@@ -107,5 +107,17 @@ describe("DailyBrief Now / Next marker", () => {
     fireEvent.click(screen.getByRole("button", { name: "Atlas rollout" }));
 
     expect(screen.getByTestId("open-stack")).toHaveTextContent("entity-project-1");
+  });
+
+  it("keeps active-project chat actions available alongside entity navigation", () => {
+    const activeProject = projectItem("project-item", "Atlas rollout", "entity-project-1", "Catch me up on Atlas");
+    const onOpenChat = vi.fn();
+    renderWithProviders(<DailyBrief brief={briefWith([], [activeProject])} running={false} onOpenChat={onOpenChat} />);
+
+    const action = screen.getByRole("button", { name: "Catch me up" });
+    expect(action.parentElement).not.toHaveClass("hidden");
+    fireEvent.click(action);
+
+    expect(onOpenChat).toHaveBeenCalledWith("Catch me up on Atlas");
   });
 });
