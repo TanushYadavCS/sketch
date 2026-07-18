@@ -34,7 +34,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
           id: "user-admin",
           name: "Roopak",
           email: "roopak@example.com",
-          role: "admin",
+          auth_role: "admin",
           slack_user_id: "U0TEAM",
         })
         .execute();
@@ -60,7 +60,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
     });
 
     it("skips provisioning until an admin user exists", async () => {
-      await db.updateTable("users").set({ role: "member" }).where("id", "=", "user-admin").execute();
+      await db.updateTable("users").set({ auth_role: "member" }).where("id", "=", "user-admin").execute();
       await ensureSlackConnectorConfig({ db, logger });
       const rows = await db
         .selectFrom("connector_configs")
@@ -69,7 +69,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .execute();
       expect(rows).toHaveLength(0);
 
-      await db.updateTable("users").set({ role: "admin" }).where("id", "=", "user-admin").execute();
+      await db.updateTable("users").set({ auth_role: "admin" }).where("id", "=", "user-admin").execute();
       await ensureSlackConnectorConfig({ db, logger });
       const after = await db
         .selectFrom("connector_configs")

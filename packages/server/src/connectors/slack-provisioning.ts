@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { createConnectorRepository } from "../db/repositories/connectors";
+import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 
 /**
@@ -32,12 +33,7 @@ export async function ensureSlackConnectorConfig(options: {
       .executeTakeFirst();
     if (existing) return;
 
-    const owner = await db
-      .selectFrom("users")
-      .select(["id"])
-      .where("role", "=", "admin")
-      .orderBy("created_at", "asc")
-      .executeTakeFirst();
+    const owner = await createUserRepository(db).findFirstAdmin();
     if (!owner) {
       logger.info("Slack connector config not provisioned yet: no admin user exists");
       return;
