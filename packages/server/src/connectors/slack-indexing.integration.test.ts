@@ -8,7 +8,12 @@ import type { DB } from "../db/schema";
 import type { SlackIndexingFacade } from "../slack/indexing-facade";
 import { createTestDb, createTestPgDb } from "../test-utils";
 import { ensureSlackConnectorConfig } from "./slack-provisioning";
-import { emitSlackSyncedItems, processSlackSalience, reconcileSlackChannelAcls } from "./slack-salience";
+import {
+  archiveAllSlackChannelFiles,
+  emitSlackSyncedItems,
+  processSlackSalience,
+  reconcileSlackChannelAcls,
+} from "./slack-salience";
 
 const logger = pino({ level: "silent" });
 
@@ -404,6 +409,80 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .where("id", "=", slice.row.id)
         .executeTakeFirstOrThrow();
       expect(goneSlice.indexed_file_id).toBeNull();
+    });
+
+    it("archives all channel files on disconnect so stale ACLs stop granting reads", async () => {
+      await ensureSlackConnectorConfig({ db, logger });
+      const config = await db
+        .selectFrom("connector_configs")
+        .select("id")
+        .where("connector_type", "=", "slack")
+        .executeTakeFirstOrThrow();
+      const repo = createConnectorRepository(db);
+      const scopeId = await repo.upsertAccessScope(config.id, {
+        scopeType: "slack_channel",
+        providerScopeId: "C1",
+        label: "#general",
+        memberEmails: ["roopak@example.com"],
+      });
+
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C1",
+      });
+      const slice = await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: 1,
+        lastMessageId: 2,
+        startedAt: "2026-07-01T00:00:00.000Z",
+        endedAt: "2026-07-01T01:00:00.000Z",
+        messageCount: 2,
+        denoisedMessageIds: [1, 2],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+        salienceVerdict: "kept",
+      });
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: "file-live",
+          connector_config_id: config.id,
+          provider_file_id: slice.row.id,
+          file_name: "Slack: #general",
+          file_type: "slack_conversation_slice",
+          content_category: "document",
+          source: "slack",
+          access_scope_id: scopeId,
+          synced_at: "2026-07-01T02:00:00.000Z",
+        })
+        .execute();
+      await db
+        .updateTable("conversation_slices")
+        .set({ indexed_file_id: "file-live" })
+        .where("id", "=", slice.row.id)
+        .execute();
+
+      const archived = await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: config.id });
+      expect(archived).toBe(1);
+
+      const file = await db
+        .selectFrom("indexed_files")
+        .select(["is_archived", "access_scope_id"])
+        .where("id", "=", "file-live")
+        .executeTakeFirstOrThrow();
+      expect(file.is_archived).toBe(1);
+      expect(file.access_scope_id).toBeNull();
+
+      const clearedSlice = await db
+        .selectFrom("conversation_slices")
+        .select("indexed_file_id")
+        .where("id", "=", slice.row.id)
+        .executeTakeFirstOrThrow();
+      expect(clearedSlice.indexed_file_id).toBeNull();
+
+      expect(await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: config.id })).toBe(0);
     });
   });
 }

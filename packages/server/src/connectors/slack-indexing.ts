@@ -2,6 +2,7 @@ import { chunkSlackConversations } from "./slack-chunker";
 import {
   DEFAULT_SLACK_SALIENCE_BATCH_LIMIT,
   SLACK_EMISSION_REFRESH_DAYS,
+  archiveAllSlackChannelFiles,
   emitSlackSyncedItems,
   processSlackSalience,
   reconcileSlackChannelAcls,
@@ -50,6 +51,7 @@ export function createSlackIndexingConnector(): Connector {
       if (!db) throw new Error("Slack indexing connector requires database access");
       if (!connectorConfigId) throw new Error("Slack indexing connector requires its connector config id");
       if (!slackIndexing || !(await slackIndexing.isConfigured())) {
+        await archiveAllSlackChannelFiles({ db, logger, connectorConfigId });
         logger.warn("Slack indexing skipped: no Slack bot token configured");
         return;
       }

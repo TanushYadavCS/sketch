@@ -428,6 +428,28 @@ export async function* emitSlackSyncedItems(options: {
  * teammate's access indefinitely, and a channel the bot was removed from
  * would keep serving its indexed slices forever.
  */
+/**
+ * Disconnect handling: with no bot token the sync cannot verify channel
+ * membership, so previously emitted slices must not stay readable under the
+ * last-known ACLs. Archival is reversible — kept slices keep their salience
+ * verdicts and re-emit on reconnect because archiving clears their
+ * indexed_file_id link.
+ */
+export async function archiveAllSlackChannelFiles(options: {
+  db: Kysely<DB>;
+  logger: Logger;
+  connectorConfigId: string;
+}): Promise<number> {
+  const repo = createConnectorRepository(options.db);
+  const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
+  if (scopes.length === 0) return 0;
+  const filesArchived = await repo.archiveFilesForAccessScopes(scopes.map((scope) => scope.id));
+  if (filesArchived > 0) {
+    options.logger.info({ filesArchived }, "Archived Slack slices: Slack is disconnected");
+  }
+  return filesArchived;
+}
+
 export async function reconcileSlackChannelAcls(options: {
   db: Kysely<DB>;
   logger: Logger;
