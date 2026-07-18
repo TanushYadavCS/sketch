@@ -288,6 +288,77 @@ describe("createTaskDurabilityTransitionRepository", () => {
     await expect(countRows(db, "tasks")).resolves.toBe(1);
   });
 
+  it("keeps a same-title member seed reviewable when its proposed owner differs from an active task", async () => {
+    const conversationId = await seedConversation(db, "slack", "C_MEMBER");
+    const memberSourceKey = "slack:channel:C_MEMBER";
+    const minaMessageId = await seedMessage(db, conversationId, {
+      providerMessageId: "mina-member-route-message",
+      threadId: "shared-member-route-thread",
+    });
+    await seedOutput(createAgentOutputRepository(db), db, {
+      sourceKey: memberSourceKey,
+      generatedAt: "2026-07-14T12:00:00.000Z",
+      title: "Prepare launch notes",
+      messageIds: [minaMessageId],
+      owner: "Mina",
+    });
+    const repo = createTaskDurabilityTransitionRepository(db);
+    await repo.ensureRouteTransition({
+      agentKey: AGENT_KEY,
+      userId: USER_ID,
+      routeId: "member-route",
+      sourceKey: memberSourceKey,
+      allowedConversationIds: [conversationId],
+      now: NOW,
+    });
+    const minaSeed = await db
+      .selectFrom("task_seed_candidates")
+      .select("review_code")
+      .where("route_id", "=", "member-route")
+      .executeTakeFirstOrThrow();
+    await repo.reviewSeedCandidate({
+      userId: USER_ID,
+      code: minaSeed.review_code,
+      decision: "track",
+      surface: "slack",
+      now: NOW,
+    });
+
+    const tanushMessageId = await seedMessage(db, conversationId, {
+      providerMessageId: "tanush-member-route-message",
+      threadId: "shared-member-route-thread",
+    });
+    await seedOutput(createAgentOutputRepository(db), db, {
+      sourceKey: memberSourceKey,
+      generatedAt: "2026-07-15T12:00:00.000Z",
+      title: "Prepare launch notes",
+      messageIds: [tanushMessageId],
+      owner: "Tanush",
+    });
+
+    await expect(
+      repo.ensureRouteTransition({
+        agentKey: AGENT_KEY,
+        userId: USER_ID,
+        routeId: ROUTE_ID,
+        sourceKey: "route:combined",
+        sourceKeys: [memberSourceKey],
+        allowedConversationIds: [conversationId],
+        now: NOW,
+      }),
+    ).resolves.toMatchObject({ createdCount: 1, pendingCount: 1, seedState: "pending" });
+    await expect(
+      db
+        .selectFrom("task_seed_candidates")
+        .select(["proposed_assignee_name", "review_state"])
+        .orderBy("proposed_assignee_name", "asc")
+        .execute(),
+    ).resolves.toEqual([
+      { proposed_assignee_name: "Mina", review_state: "accepted" },
+      { proposed_assignee_name: "Tanush", review_state: "pending" },
+    ]);
+  });
+
   it("automatically reviews a successful seed with no valid candidates", async () => {
     const result = await createTaskDurabilityTransitionRepository(db).ensureRouteTransition({
       agentKey: AGENT_KEY,

@@ -810,17 +810,17 @@ async function persistSeedCandidate(
     .executeTakeFirst();
   if (accepted) return false;
 
-  const activeTask = await db
+  const activeTasks = await db
     .selectFrom("tasks")
-    .select("id")
+    .select(["assignee_name", "proposed_assignee_name"])
     .where("source", "=", "summary")
     .where("created_by_user_id", "=", input.userId)
     .where("normalized_title", "=", normalizeName(resolved.candidate.title))
     .where("source_anchor_key", "=", resolved.anchor.key)
     .where("valid_to", "is", null)
     .where("status", "in", ["open", "in_progress"])
-    .executeTakeFirst();
-  if (activeTask) return false;
+    .execute();
+  if (activeTasks.some((task) => seedOwnerMatchesTask(resolved.proposedAssigneeName, task))) return false;
 
   const existing = await db
     .selectFrom("task_seed_candidates")
@@ -877,6 +877,16 @@ async function persistSeedCandidate(
     }
   }
   throw new Error("Unable to allocate a unique task seed review code.");
+}
+
+function seedOwnerMatchesTask(
+  proposedAssigneeName: string | null,
+  task: { assignee_name: string | null; proposed_assignee_name: string | null },
+): boolean {
+  const taskName = task.proposed_assignee_name ?? task.assignee_name;
+  if (!taskName) return true;
+  if (!proposedAssigneeName) return false;
+  return normalizeName(taskName) === normalizeName(proposedAssigneeName);
 }
 
 async function generateReviewCode(db: Transaction<DB>): Promise<string> {
