@@ -533,8 +533,7 @@ async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
     durabilityEnabled &&
     (taskChangeItems.length !== changes.length ||
       syntheticNew.length !== taskCandidateItems.length ||
-      (orderedChanges.length === 0 &&
-        (taskChangeItems.length > 0 || taskCandidateItems.length > 0 || actionItems.length > 0)) ||
+      (orderedChanges.length === 0 && (taskChangeItems.length > 0 || taskCandidateItems.length > 0)) ||
       (orderedChanges.length > 0 && (allowedMessageIds.length === 0 || allowedConversationIds.length === 0)));
   const taskMemory = Array.isArray(args.runtimeContext.taskMemory)
     ? (args.runtimeContext.taskMemory as TaskMemoryItem[])

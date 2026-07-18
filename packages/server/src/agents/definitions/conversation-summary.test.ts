@@ -984,6 +984,69 @@ describe("conversationSummaryDefinition", () => {
     }
   });
 
+  it("records durability success when visible action items produce an empty task diff", async () => {
+    const db = await createTestDb();
+    try {
+      const user = await seedUser(db);
+      await db
+        .insertInto("task_durability_route_state")
+        .values({
+          agent_key: CONVERSATION_SUMMARY_AGENT_KEY,
+          user_id: user.id,
+          route_id: "visible-only-output-route",
+          source_key: "slack:channel:C_SUMMARY",
+          mode: "hybrid",
+          seed_state: "reviewed",
+          seed_started_at: NOW.toISOString(),
+          seed_reviewed_at: NOW.toISOString(),
+          incremental_success_at: null,
+          last_error: null,
+        })
+        .execute();
+      const logger = createTestLogger();
+      const warn = vi.spyOn(logger, "warn");
+
+      await conversationSummaryDefinition.onOutputSaved?.({
+        db,
+        config: createTestConfig(),
+        logger,
+        userId: user.id,
+        outputId: "visible-only-output",
+        createTasks: true,
+        runtimeContext: {
+          durabilityRouteId: "visible-only-output-route",
+          durabilitySourceKey: "slack:channel:C_SUMMARY",
+          allowedMessageIds: [],
+          allowedConversationIds: [],
+          taskMemory: [],
+        },
+        items: [
+          outputItem({
+            sectionKey: "action_items",
+            title: "Keep an eye on the rollout",
+            summary: "The rollout may need attention, but nobody owns a concrete follow-up.",
+            label: "action_item",
+          }),
+        ],
+      });
+
+      await expect(db.selectFrom("tasks").selectAll().execute()).resolves.toEqual([]);
+      await expect(
+        db
+          .selectFrom("task_durability_route_state")
+          .select(["mode", "incremental_success_at"])
+          .where("route_id", "=", "visible-only-output-route")
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({
+        mode: "durable_only",
+        incremental_success_at: expect.any(String),
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      await db.destroy();
+    }
+  });
+
   it("does not fall back to unanchored legacy promotion for a durability-enabled run", async () => {
     const db = await createTestDb();
     try {
