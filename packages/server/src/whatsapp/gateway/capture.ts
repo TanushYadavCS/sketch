@@ -138,6 +138,8 @@ export class WhatsAppGatewayCapture {
     metadata: WhatsAppCaptureMetadata = { socketGeneration: 0 },
   ): Promise<void> {
     const identity = rawProviderIdentity(message);
+    if (metadata.upsertType === "append" && this.deps.isInitialSyncGeneration()) return;
+    const kind = metadata.upsertType === "append" ? "history_message" : "message";
     const eventKey = createWhatsAppEventKey(
       identity.providerConversationId,
       identity.providerMessageId ?? "",
@@ -147,11 +149,11 @@ export class WhatsAppGatewayCapture {
       if (eventKey && (await this.events.findByEventKey(eventKey))) return;
       const envelope = await this.prepareMessageEnvelope(
         message,
-        "message",
+        kind,
         createWhatsAppConnectionKey(this.deps.leaseGeneration ?? 0, metadata.socketGeneration),
       );
       const result = await this.events.insert({
-        kind: "message",
+        kind,
         origin: "gateway",
         eventKey,
         providerMessageId: identity.providerMessageId,

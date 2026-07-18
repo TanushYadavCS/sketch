@@ -162,6 +162,56 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
     expect(liveRows).toEqual([{ kind: "message", event_key: liveKey }]);
   });
 
+  it("captures append then notify overlap once as promoted reconnect history", async () => {
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => false,
+      wake: async () => undefined,
+      onPersistFailure: () => undefined,
+      leaseGeneration: 4,
+    });
+    const appendFirst = groupMessage("append-first", new Date().toISOString());
+    const notifyFirst = groupMessage("notify-first", new Date().toISOString());
+
+    await capture.captureMessage(appendFirst, { socketGeneration: 2, upsertType: "append" });
+    await capture.captureMessage(appendFirst, { socketGeneration: 2, upsertType: "notify" });
+    await capture.captureMessage(notifyFirst, { socketGeneration: 2, upsertType: "notify" });
+    await capture.captureMessage(notifyFirst, { socketGeneration: 2, upsertType: "append" });
+
+    await expect(
+      db.selectFrom("whatsapp_inbound_events").select(["kind", "provider_message_id"]).orderBy("id", "asc").execute(),
+    ).resolves.toEqual([
+      { kind: "history_message", provider_message_id: "append-first" },
+      { kind: "message", provider_message_id: "notify-first" },
+    ]);
+  });
+
+  it("does not promote offline append traffic during a fresh pairing generation", async () => {
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => true,
+      wake: async () => undefined,
+      onPersistFailure: () => undefined,
+    });
+
+    await capture.captureMessage(groupMessage("initial-append", new Date().toISOString()), {
+      socketGeneration: 1,
+      upsertType: "append",
+    });
+
+    await expect(db.selectFrom("whatsapp_inbound_events").select("id").execute()).resolves.toEqual([]);
+  });
+
   it("emits initial-sync history sets as batch rows without history_message rows", async () => {
     const capture = new WhatsAppGatewayCapture({
       db,

@@ -278,6 +278,9 @@ export class WhatsAppInboundConsumer {
       },
     });
     if (!captureCommitted && !(await this.events.markCaptured(row.id, claimToken))) return;
+    if (envelope.kind === "history_message" && message.kind === "group") {
+      await this.options.backfillWorker?.adoptPassiveHistory([message.target.groupId]);
+    }
     if (envelope.fromMe) {
       if (!(await this.events.markConsumed(row.id, claimToken))) return;
       this.options.logger.warn(
