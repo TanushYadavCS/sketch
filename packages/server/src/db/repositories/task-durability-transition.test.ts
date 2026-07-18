@@ -236,6 +236,58 @@ describe("createTaskDurabilityTransitionRepository", () => {
     ).resolves.toMatchObject({ status: "accepted" });
   });
 
+  it("does not reseed a member-source candidate already accepted on another route", async () => {
+    const conversationId = await seedConversation(db, "slack", "C_MEMBER");
+    const messageId = await seedMessage(db, conversationId, {
+      providerMessageId: "tracked-member-route-message",
+      threadId: "tracked-member-route-thread",
+    });
+    const memberSourceKey = "slack:channel:C_MEMBER";
+    await seedOutput(createAgentOutputRepository(db), db, {
+      sourceKey: memberSourceKey,
+      generatedAt: "2026-07-15T12:00:00.000Z",
+      title: "Already tracked member task",
+      messageIds: [messageId],
+    });
+    const repo = createTaskDurabilityTransitionRepository(db);
+    await repo.ensureRouteTransition({
+      agentKey: AGENT_KEY,
+      userId: USER_ID,
+      routeId: "member-route",
+      sourceKey: memberSourceKey,
+      allowedConversationIds: [conversationId],
+      now: NOW,
+    });
+    const seed = await db
+      .selectFrom("task_seed_candidates")
+      .select("review_code")
+      .where("route_id", "=", "member-route")
+      .executeTakeFirstOrThrow();
+    await expect(
+      repo.reviewSeedCandidate({
+        userId: USER_ID,
+        code: seed.review_code,
+        decision: "track",
+        surface: "slack",
+        now: NOW,
+      }),
+    ).resolves.toMatchObject({ status: "accepted" });
+
+    await expect(
+      repo.ensureRouteTransition({
+        agentKey: AGENT_KEY,
+        userId: USER_ID,
+        routeId: ROUTE_ID,
+        sourceKey: "route:combined",
+        sourceKeys: [memberSourceKey],
+        allowedConversationIds: [conversationId],
+        now: NOW,
+      }),
+    ).resolves.toMatchObject({ createdCount: 0, pendingCount: 0, seedState: "reviewed" });
+    await expect(countRows(db, "task_seed_candidates")).resolves.toBe(1);
+    await expect(countRows(db, "tasks")).resolves.toBe(1);
+  });
+
   it("automatically reviews a successful seed with no valid candidates", async () => {
     const result = await createTaskDurabilityTransitionRepository(db).ensureRouteTransition({
       agentKey: AGENT_KEY,

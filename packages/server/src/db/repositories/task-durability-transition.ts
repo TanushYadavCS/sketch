@@ -800,6 +800,28 @@ async function persistSeedCandidate(
   resolved: ResolvedSeedCandidate,
   now: string,
 ): Promise<boolean> {
+  const accepted = await db
+    .selectFrom("task_seed_candidates")
+    .select("id")
+    .where("agent_key", "=", input.agentKey)
+    .where("user_id", "=", input.userId)
+    .where("evidence_fingerprint", "=", resolved.evidenceFingerprint)
+    .where("review_state", "=", "accepted")
+    .executeTakeFirst();
+  if (accepted) return false;
+
+  const activeTask = await db
+    .selectFrom("tasks")
+    .select("id")
+    .where("source", "=", "summary")
+    .where("created_by_user_id", "=", input.userId)
+    .where("normalized_title", "=", normalizeName(resolved.candidate.title))
+    .where("source_anchor_key", "=", resolved.anchor.key)
+    .where("valid_to", "is", null)
+    .where("status", "in", ["open", "in_progress"])
+    .executeTakeFirst();
+  if (activeTask) return false;
+
   const existing = await db
     .selectFrom("task_seed_candidates")
     .select("id")
