@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 146;
+const EXPECTED_MIGRATION_COUNT = 147;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -181,6 +181,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[143]).toBe("148-whatsapp-pending-slices-index");
     expect(names[144]).toBe("149-whatsapp-backfill-lifecycle-durability");
     expect(names[145]).toBe("150-task-durability-steel-thread");
+    expect(names[146]).toBe("151-agent-output-item-task-links");
   });
 
   it("creates the bounded open-materializable partial index", async () => {
@@ -295,6 +296,109 @@ describe("runMigrations on Postgres — full sequence", () => {
         "idx_task_seed_candidates_route_state",
       ]),
     );
+  });
+
+  it("creates canonical agent output item task links and nulls them when the task is deleted", async () => {
+    const freshDb = await createTestPgDb();
+    try {
+      const columns = await sql<{
+        column_name: string;
+        data_type: string;
+        is_nullable: string;
+      }>`
+        SELECT column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'agent_output_items'
+          AND column_name = 'task_id'
+      `.execute(freshDb);
+      expect(columns.rows).toEqual([{ column_name: "task_id", data_type: "text", is_nullable: "YES" }]);
+
+      const foreignKeys = await sql<{
+        column_name: string;
+        foreign_table_name: string;
+        foreign_column_name: string;
+        delete_rule: string;
+      }>`
+        SELECT
+          kcu.column_name,
+          ccu.table_name AS foreign_table_name,
+          ccu.column_name AS foreign_column_name,
+          rc.delete_rule
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+        JOIN information_schema.constraint_column_usage ccu
+          ON ccu.constraint_name = tc.constraint_name
+         AND ccu.table_schema = tc.table_schema
+        JOIN information_schema.referential_constraints rc
+          ON rc.constraint_name = tc.constraint_name
+         AND rc.constraint_schema = tc.table_schema
+        WHERE tc.table_schema = 'public'
+          AND tc.table_name = 'agent_output_items'
+          AND tc.constraint_type = 'FOREIGN KEY'
+          AND kcu.column_name = 'task_id'
+      `.execute(freshDb);
+      expect(foreignKeys.rows).toEqual([
+        {
+          column_name: "task_id",
+          foreign_table_name: "tasks",
+          foreign_column_name: "id",
+          delete_rule: "SET NULL",
+        },
+      ]);
+
+      const indexes = await sql<{ indexname: string }>`
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND tablename = 'agent_output_items'
+          AND indexname = 'idx_agent_output_items_task_id'
+      `.execute(freshDb);
+      expect(indexes.rows).toEqual([{ indexname: "idx_agent_output_items_task_id" }]);
+
+      await sql`
+        INSERT INTO users (id, name) VALUES ('task-link-user', 'Task Link User')
+      `.execute(freshDb);
+      await sql`
+        INSERT INTO agent_outputs (
+          id, agent_key, user_id, output_date, source_key, timezone, status,
+          trigger_type, agent_version
+        ) VALUES (
+          'task-link-output', 'daily_brief', 'task-link-user', '2026-07-17',
+          '__global__', 'UTC', 'completed', 'manual', 'test'
+        )
+      `.execute(freshDb);
+      await sql`
+        INSERT INTO tasks (
+          id, source, title, normalized_title, status, status_authority,
+          provenance, source_task_id
+        ) VALUES (
+          'task-link-task', 'brief', 'Linked task', 'linked task', 'open',
+          'local', 'brief', 'task-link-source'
+        )
+      `.execute(freshDb);
+      await sql`
+        INSERT INTO agent_output_items (
+          id, agent_output_id, section_key, title, summary, priority,
+          knowledge_refs_json, sort_order, task_id
+        ) VALUES (
+          'task-link-item', 'task-link-output', 'todos', 'Snapshot task',
+          'Snapshot summary', 'medium', '{"entityIds":[],"fileIds":[]}', 0,
+          'task-link-task'
+        )
+      `.execute(freshDb);
+
+      await sql`DELETE FROM tasks WHERE id = 'task-link-task'`.execute(freshDb);
+
+      const item = await sql<{ task_id: string | null }>`
+        SELECT task_id FROM agent_output_items WHERE id = 'task-link-item'
+      `.execute(freshDb);
+      expect(item.rows).toEqual([{ task_id: null }]);
+    } finally {
+      await freshDb.destroy();
+    }
   });
 
   it("creates the sub-entities table and current-row partial unique index", async () => {

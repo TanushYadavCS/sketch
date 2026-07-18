@@ -2,6 +2,7 @@ import type { DailyBriefItem } from "@/lib/api";
 import { cn } from "@sketch/ui/lib/utils";
 import { BriefActionButton } from "./brief-action-button";
 import { actionLabelForItem, labelMeta } from "./item-metadata";
+import { briefTaskExternalStatus, briefTaskStatusTone, formatBriefTaskStatus, getBriefItemTask } from "./task-overlay";
 
 export function BriefItemRow({
   item,
@@ -17,6 +18,10 @@ export function BriefItemRow({
   const meta = labelMeta(item);
   const actionLabel = actionLabelForItem(item);
   const hasLabelColumn = item.sectionKey !== "active_projects";
+  const task = getBriefItemTask(item);
+  const liveLabel = task ? formatBriefTaskStatus(task.status) : null;
+  const tone = task ? briefTaskStatusTone(task.status) : null;
+  const externalStatus = task ? briefTaskExternalStatus(task) : null;
 
   return (
     <article
@@ -47,14 +52,36 @@ export function BriefItemRow({
 
         <span className="min-w-0">
           <span className="block truncate text-[13px] font-medium leading-snug text-foreground">{item.title}</span>
+          {liveLabel ? (
+            <span
+              className={cn(
+                "mt-0.5 flex min-w-0 items-center gap-1.5 font-mono text-[9.5px] uppercase tracking-[0.06em] sm:hidden",
+                tone?.text,
+              )}
+            >
+              <span className={cn("size-1.5 shrink-0 rounded-full", tone?.dot)} aria-hidden />
+              <span className="truncate">
+                {liveLabel}
+                {externalStatus ? <span className="ml-1 normal-case tracking-normal">· {externalStatus}</span> : null}
+              </span>
+            </span>
+          ) : null}
         </span>
 
         {hasLabelColumn ? (
           <span className="hidden w-[112px] min-w-0 items-center gap-1.5 pl-3 font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground/80 sm:flex">
-            {item.sectionKey === "todos" ? (
+            {liveLabel ? (
+              <>
+                <span className={cn("size-1.5 shrink-0 rounded-full", tone?.dot)} aria-hidden />
+                <span className={cn("truncate", tone?.text)}>
+                  {liveLabel}
+                  {externalStatus ? <span className="ml-1 normal-case tracking-normal">· {externalStatus}</span> : null}
+                </span>
+              </>
+            ) : item.sectionKey === "todos" ? (
               <span className={cn("size-1.5 shrink-0 rounded-full", meta.dot)} aria-hidden />
             ) : null}
-            <span className="truncate">{meta.label}</span>
+            {!liveLabel ? <span className="truncate">{meta.label}</span> : null}
           </span>
         ) : null}
       </button>

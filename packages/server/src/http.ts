@@ -38,6 +38,7 @@ import { entityReviewRoutes } from "./entities/review";
 
 import { oauthRoutes } from "./api/oauth";
 import { systemRoutes } from "./api/system";
+import { taskRoutes } from "./api/tasks";
 import { usageRoutes } from "./api/usage";
 import { userRoutes } from "./api/users";
 import { watiWebhookRoutes } from "./api/wati-webhook";
@@ -512,7 +513,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/mcp-servers", mcpServerRoutes(mcpServers, users));
   app.route("/api/workspace/summary", workspaceSummaryRoutes({ db, config, users, mcpServers }));
   if (deps?.agentRunService) {
-    app.route("/api/daily-briefs", dailyBriefRoutes(deps.agentRunService, db));
+    app.route("/api/daily-briefs", dailyBriefRoutes(deps.agentRunService, db, logger));
     app.route("/api/agents", agentRoutes(deps.agentRunService));
   }
   app.route("/api/workspace", createWorkspaceApi({ config }));
@@ -551,6 +552,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     );
   }
   app.route("/api/entities", entityRoutes(db, { logger, config }));
+  app.route("/api/tasks", taskRoutes(db));
   app.route("/api/projects", createProjectRoutes(db));
   app.route("/api/products", productRoutes(db));
   app.route("/api/entity-review", entityReviewRoutes(db, { logger }));

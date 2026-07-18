@@ -15,6 +15,7 @@ import type {
   AgentRoute,
   AgentRouteDestination,
   AgentSourceConfig,
+  PersistedAgentOutputItemRef,
 } from "../../db/repositories/agent-outputs";
 import { requireAgentDefinition } from "../registry";
 import type { AgentDefinition } from "../types";
@@ -30,6 +31,22 @@ import type { ScheduledRunAdmission } from "./queue";
 import { enabledSectionsForScope, maxItemsPerSectionForScope, sourceAsDelivery } from "./routing";
 
 const INTERNAL_OUTPUT_SECTION_ITEM_LIMIT = 25;
+
+export function pairPersistedVisibleItems(
+  items: AgentOutputItemInput[],
+  refs: PersistedAgentOutputItemRef[],
+): Array<{ id: string; item: AgentOutputItemInput }> {
+  if (items.length !== refs.length) {
+    throw new Error(`Agent output persisted item mismatch: expected ${items.length}, received ${refs.length}.`);
+  }
+  return refs.map((ref, index) => {
+    const item = items[index];
+    if (!item || item.sectionKey !== ref.sectionKey || item.sortOrder !== ref.sortOrder) {
+      throw new Error(`Agent output persisted item mismatch at index ${index}.`);
+    }
+    return { id: ref.id, item };
+  });
+}
 
 export function validateAgentOutputLimits(input: {
   items: AgentOutputItemInput[];
@@ -449,12 +466,13 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
         await this.validateItemRefs(def, itemsForHooks);
         const rawPayload = rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext);
         assertAgentOutputPayloadSize(rawPayload);
-        await this.repo.completeOutput({
+        const persistedRefs = await this.repo.completeOutput({
           outputId: params.outputId,
           masthead: payload.masthead,
           rawPayload,
           items: visibleItems,
         });
+        const persistedItems = pairPersistedVisibleItems(visibleItems, persistedRefs);
         if (def.onOutputSaved) {
           await def.onOutputSaved({
             db: this.deps.db,
@@ -463,6 +481,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
             userId: params.userId,
             outputId: params.outputId,
             items: itemsForHooks,
+            persistedItems,
             createTasks: params.createTasks,
             runtimeContext: params.runtimeContext,
           });

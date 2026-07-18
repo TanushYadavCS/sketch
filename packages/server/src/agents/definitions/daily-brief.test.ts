@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type AgentOutputItemInput,
   type AgentRoute,
@@ -9,7 +9,7 @@ import {
 import { createTaskRepository } from "../../db/repositories/tasks";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB, UsersTable } from "../../db/schema";
-import { createTestConfig, createTestDb } from "../../test-utils";
+import { createTestConfig, createTestDb, createTestLogger } from "../../test-utils";
 import {
   DAILY_BRIEF_ENTITY_WINDOW_DAYS,
   DAILY_BRIEF_EVIDENCE_WINDOW_DAYS,
@@ -143,6 +143,244 @@ describe("dailyBriefDefinition.buildInstructions", () => {
     expect(instructions).toContain("active_projects:");
 
     expect(instructions).not.toMatch(/at most \d+ items/);
+  });
+});
+
+describe("dailyBriefDefinition.onOutputSaved task linking", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedUser(db);
+    await db.updateTable("users").set({ email_verified_at: NOW.toISOString() }).where("id", "=", "user-1").execute();
+    await db
+      .insertInto("entities")
+      .values({
+        id: "person-1",
+        name: "Agent User",
+        source_type: "person",
+        subtype: null,
+        aliases: null,
+        metadata: JSON.stringify({ email: "agent@example.com" }),
+        source_ref_id: null,
+        status: "confirmed",
+        hotness: 0,
+        created_at: NOW.toISOString(),
+        updated_at: NOW.toISOString(),
+        ai_brief: null,
+      })
+      .execute();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  async function persistItems(items: AgentOutputItemInput[]) {
+    const repo = createAgentOutputRepository(db);
+    const running = await repo.createRunning({
+      agentKey: "daily_brief",
+      agentVersion: "test",
+      userId: "user-1",
+      outputDate: "2026-07-17",
+      timezone: "UTC",
+      triggerType: "manual",
+    });
+    const refs = await repo.completeOutput({
+      outputId: running.row.id,
+      masthead: { title: "Daily Brief", summary: "Summary" },
+      rawPayload: {},
+      items,
+    });
+    return {
+      outputId: running.row.id,
+      persistedItems: refs.map((ref, index) => ({ id: ref.id, item: items[index] })),
+    };
+  }
+
+  function todo(
+    title: string,
+    options: {
+      projectId?: string;
+      fileIds?: string[];
+      canonicalTaskId?: string;
+      sortOrder?: number;
+    } = {},
+  ): AgentOutputItemInput {
+    return {
+      sectionKey: "todos",
+      title,
+      summary: `${title} snapshot`,
+      priority: "medium",
+      label: "todo",
+      canonicalTaskId: options.canonicalTaskId,
+      structuredPayload: {
+        assigneeEntityId: "person-1",
+        assigneeName: "Agent User",
+      },
+      knowledgeRefs: {
+        entityIds: options.projectId ? [options.projectId] : [],
+        fileIds: options.fileIds ?? ["file-1"],
+      },
+      sortOrder: options.sortOrder ?? 0,
+    };
+  }
+
+  async function runHook(params: {
+    outputId: string;
+    persistedItems: Array<{ id: string; item: AgentOutputItemInput }>;
+    items?: AgentOutputItemInput[];
+    logger?: ReturnType<typeof createTestLogger>;
+  }) {
+    await dailyBriefDefinition.onOutputSaved?.({
+      db,
+      config: createTestConfig(),
+      logger: params.logger ?? createTestLogger(),
+      userId: "user-1",
+      outputId: params.outputId,
+      items: params.items ?? params.persistedItems.map((entry) => entry.item),
+      persistedItems: params.persistedItems,
+      createTasks: true,
+      runtimeContext: {},
+    });
+  }
+
+  it("links an upserted task to the exact persisted item", async () => {
+    await seedEntity(db, { id: "project-a", name: "Project A" });
+    const item = todo("Prepare launch plan", { projectId: "project-a" });
+    const persisted = await persistItems([item]);
+
+    await runHook(persisted);
+
+    const row = await db
+      .selectFrom("agent_output_items")
+      .innerJoin("tasks", "tasks.id", "agent_output_items.task_id")
+      .select(["agent_output_items.id", "tasks.parent_entity_id"])
+      .where("agent_output_items.id", "=", persisted.persistedItems[0].id)
+      .executeTakeFirstOrThrow();
+    expect(row).toEqual({ id: persisted.persistedItems[0].id, parent_entity_id: "project-a" });
+  });
+
+  it("links a collated structural task", async () => {
+    await seedEntity(db, { id: "project-a", name: "Project A" });
+    await db
+      .insertInto("tasks")
+      .values({
+        id: "structural-task",
+        parent_entity_id: "project-a",
+        source: "linear",
+        title: "Prepare launch plan",
+        normalized_title: "prepare launch plan",
+        status: "open",
+        status_authority: "external",
+        provenance: "structural",
+        source_task_id: "LIN-1",
+      })
+      .execute();
+    const persisted = await persistItems([todo("Prepare launch plan", { projectId: "project-a" })]);
+
+    await runHook(persisted);
+
+    await expect(
+      db
+        .selectFrom("agent_output_items")
+        .select("task_id")
+        .where("id", "=", persisted.persistedItems[0].id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ task_id: "structural-task" });
+  });
+
+  it("leaves skipped promotion unlinked", async () => {
+    const persisted = await persistItems([todo("No evidence task", { fileIds: [] })]);
+
+    await runHook(persisted);
+
+    await expect(
+      db
+        .selectFrom("agent_output_items")
+        .select("task_id")
+        .where("id", "=", persisted.persistedItems[0].id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ task_id: null });
+  });
+
+  it("rolls back task creation and leaves the item unlinked when promotion fails", async () => {
+    await seedEntity(db, { id: "project-a", name: "Project A" });
+    const persisted = await persistItems([todo("Fail promotion", { projectId: "project-a" })]);
+    await db.schema.dropTable("task_evidence").execute();
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+
+    await runHook({ ...persisted, logger });
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ outputId: persisted.outputId, userId: "user-1" }),
+      "Daily Brief: task promotion failed",
+    );
+    await expect(db.selectFrom("tasks").select("id").execute()).resolves.toEqual([]);
+    await expect(
+      db
+        .selectFrom("agent_output_items")
+        .select("task_id")
+        .where("id", "=", persisted.persistedItems[0].id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ task_id: null });
+  });
+
+  it("skips promotion for a server-linked durable item", async () => {
+    await db
+      .insertInto("tasks")
+      .values({
+        id: "durable-task",
+        source: "summary",
+        title: "Durable task",
+        normalized_title: "durable task",
+        status: "open",
+        status_authority: "local",
+        provenance: "summary",
+        source_task_id: "durable-task",
+        created_by_user_id: "user-1",
+      })
+      .execute();
+    const persisted = await persistItems([todo("Durable task", { canonicalTaskId: "durable-task" })]);
+    await db.schema.dropTable("task_evidence").execute();
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+
+    await runHook({ ...persisted, logger });
+
+    expect(warn).not.toHaveBeenCalled();
+    await expect(
+      db
+        .selectFrom("agent_output_items")
+        .select("task_id")
+        .where("id", "=", persisted.persistedItems[0].id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ task_id: "durable-task" });
+  });
+
+  it("attaches same-title todos to their exact persisted ids without title matching", async () => {
+    await seedEntity(db, { id: "project-a", name: "Project A" });
+    await seedEntity(db, { id: "project-b", name: "Project B" });
+    const items = [
+      todo("Send revised proposal", { projectId: "project-a", sortOrder: 0 }),
+      todo("Send revised proposal", { projectId: "project-b", sortOrder: 1 }),
+    ];
+    const persisted = await persistItems(items);
+
+    await runHook(persisted);
+
+    const rows = await db
+      .selectFrom("agent_output_items")
+      .innerJoin("tasks", "tasks.id", "agent_output_items.task_id")
+      .select(["agent_output_items.id", "tasks.parent_entity_id"])
+      .where("agent_output_items.agent_output_id", "=", persisted.outputId)
+      .orderBy("agent_output_items.sort_order", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { id: persisted.persistedItems[0].id, parent_entity_id: "project-a" },
+      { id: persisted.persistedItems[1].id, parent_entity_id: "project-b" },
+    ]);
   });
 });
 

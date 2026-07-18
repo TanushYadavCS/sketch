@@ -1,4 +1,4 @@
-import type { DailyBrief as DailyBriefData, DailyBriefItem } from "@/lib/api";
+import type { DailyBrief as DailyBriefData, DailyBriefItem, TaskStatus } from "@/lib/api";
 import { useEntityUiOptional } from "@/lib/entity-ui";
 import { SparkleIcon } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
@@ -64,6 +64,8 @@ export function DailyBrief({
   enabledSections,
   calendarConnected,
   onOpenChat,
+  onUpdateTaskStatus,
+  updatingTaskId,
 }: {
   brief: DailyBriefData;
   running: boolean;
@@ -72,6 +74,10 @@ export function DailyBrief({
   /** Whether the reader has a calendar connected — drives the meetings empty state. */
   calendarConnected?: boolean;
   onOpenChat: (prompt: string) => void;
+  /** Status-update handler owned by Home; passed through to the detail drawer. */
+  onUpdateTaskStatus?: (taskId: string, status: TaskStatus) => void;
+  /** taskId currently being updated, to disable its control; null when idle. */
+  updatingTaskId?: string | null;
 }) {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const entityUi = useEntityUiOptional();
@@ -178,6 +184,8 @@ export function DailyBrief({
         timezone={brief.timezone}
         onClose={() => setSelectedItemId(null)}
         onOpenChat={onOpenChat}
+        onUpdateTaskStatus={onUpdateTaskStatus}
+        updatingTaskId={updatingTaskId}
       />
     </div>
   );

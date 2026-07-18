@@ -1,10 +1,21 @@
-import type { DailyBriefItem, DailyBriefMeetingAttendee } from "@/lib/api";
+import type { DailyBriefItem, DailyBriefMeetingAttendee, DailyBriefTaskState, TaskStatus } from "@/lib/api";
 import { EntityChip, useEntityUiOptional } from "@/lib/entity-ui";
 import { ArrowSquareOutIcon } from "@phosphor-icons/react";
+import { Badge } from "@sketch/ui/components/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
+import { cn } from "@sketch/ui/lib/utils";
 import { BriefActionButton } from "./brief-action-button";
 import { labelMeta, refChips, sourceLinkLabel } from "./item-metadata";
 import { formatMeetingTime } from "./meeting-row";
+import {
+  BRIEF_TASK_STATUS_OPTIONS,
+  briefTaskExternalStatus,
+  briefTaskReadonlyReason,
+  briefTaskStatusTone,
+  formatBriefTaskStatus,
+  getBriefItemTask,
+} from "./task-overlay";
 
 function drawerTitle(item: DailyBriefItem): string {
   if (item.sectionKey === "todos" && item.displayRef) return `${item.displayRef} \u00b7 ${item.title}`;
@@ -30,11 +41,15 @@ export function BriefDetailDrawer({
   timezone,
   onClose,
   onOpenChat,
+  onUpdateTaskStatus,
+  updatingTaskId,
 }: {
   item: DailyBriefItem | null;
   timezone: string;
   onClose: () => void;
   onOpenChat: (prompt: string) => void;
+  onUpdateTaskStatus?: (taskId: string, status: TaskStatus) => void;
+  updatingTaskId?: string | null;
 }) {
   return (
     <Sheet open={item !== null} onOpenChange={(open) => !open && onClose()}>
@@ -45,7 +60,12 @@ export function BriefDetailDrawer({
           item.sectionKey === "meetings" ? (
             <MeetingDrawerBody item={item} timezone={timezone} onOpenChat={onOpenChat} />
           ) : (
-            <DrawerBody item={item} onOpenChat={onOpenChat} />
+            <DrawerBody
+              item={item}
+              onOpenChat={onOpenChat}
+              onUpdateTaskStatus={onUpdateTaskStatus}
+              updatingTaskId={updatingTaskId}
+            />
           )
         ) : null}
       </SheetContent>
@@ -53,10 +73,21 @@ export function BriefDetailDrawer({
   );
 }
 
-function DrawerBody({ item, onOpenChat }: { item: DailyBriefItem; onOpenChat: (prompt: string) => void }) {
+function DrawerBody({
+  item,
+  onOpenChat,
+  onUpdateTaskStatus,
+  updatingTaskId,
+}: {
+  item: DailyBriefItem;
+  onOpenChat: (prompt: string) => void;
+  onUpdateTaskStatus?: (taskId: string, status: TaskStatus) => void;
+  updatingTaskId?: string | null;
+}) {
   const meta = labelMeta(item);
   const chips = refChips(item);
   const actionLabel = item.actionLabel ?? "Ask Sketch";
+  const task = getBriefItemTask(item);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -76,6 +107,15 @@ function DrawerBody({ item, onOpenChat }: { item: DailyBriefItem; onOpenChat: (p
             <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Context</p>
             <p className="text-[13px] leading-relaxed text-muted-foreground">{item.summary}</p>
           </div>
+
+          {task ? (
+            <CurrentTaskSection
+              task={task}
+              snapshotTitle={item.title}
+              onUpdateTaskStatus={onUpdateTaskStatus}
+              updating={updatingTaskId === task.id}
+            />
+          ) : null}
 
           {chips.length > 0 ? (
             <div>
@@ -190,6 +230,114 @@ function MeetingDrawerBody({
       ) : null}
     </div>
   );
+}
+
+function formatCompactRelative(iso: string | null): string | null {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return null;
+  const diff = Date.now() - then;
+  const absDays = Math.floor(Math.abs(diff) / 86_400_000);
+  if (absDays <= 0) return "today";
+  const label = absDays === 1 ? "1d ago" : `${absDays}d ago`;
+  return diff < 0 ? `in ${absDays === 1 ? "1d" : `${absDays}d`}` : label;
+}
+
+function formatCompactDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/**
+ * Compact "Current task" section for non-meeting brief items that carry a live
+ * task overlay. Shows the live status (editable Select when canEditStatus, a
+ * passive pill otherwise), the current task title only when it diverges from
+ * the snapshot title, priority, and useful updated/completed metadata. Snapshot
+ * fields (title/summary) are always preserved above this section.
+ */
+function CurrentTaskSection({
+  task,
+  snapshotTitle,
+  onUpdateTaskStatus,
+  updating,
+}: {
+  task: DailyBriefTaskState;
+  snapshotTitle: string;
+  onUpdateTaskStatus?: (taskId: string, status: TaskStatus) => void;
+  updating: boolean;
+}) {
+  const tone = briefTaskStatusTone(task.status);
+  const showChangedTitle = task.title && task.title !== snapshotTitle;
+  const externalStatus = briefTaskExternalStatus(task);
+  const reason = briefTaskReadonlyReason(task);
+  const updatedRelative = formatCompactRelative(task.updatedAt);
+  const completedDate = task.completedAt ? formatCompactDate(task.completedAt) : null;
+  const canEdit = task.canEditStatus && onUpdateTaskStatus;
+
+  return (
+    <div className="rounded-md border-[0.5px] border-border/70 bg-muted/20 px-3 py-3">
+      <p className="mb-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Current task</p>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+        {canEdit ? (
+          <Select
+            value={task.status}
+            onValueChange={(value) => onUpdateTaskStatus?.(task.id, value as TaskStatus)}
+            disabled={updating}
+          >
+            <SelectTrigger aria-label={`${task.title} status`} className="h-8 w-full text-xs sm:w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {BRIEF_TASK_STATUS_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <Badge variant="outline" className={cn("max-w-full text-[10px]", tone.text)}>
+            <span className={cn("mr-1 inline-block size-1.5 rounded-full", tone.dot)} aria-hidden />
+            {formatBriefTaskStatus(task.status)}
+          </Badge>
+        )}
+        {task.priority ? (
+          <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground/80">
+            {task.priority}
+          </span>
+        ) : null}
+      </div>
+
+      {showChangedTitle ? <p className="mt-2 text-[13px] leading-snug text-foreground">{task.title}</p> : null}
+
+      {externalStatus ? (
+        <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground/70">
+          Source status: {externalStatus}
+        </p>
+      ) : null}
+
+      {reason ? <p className="mt-2 text-[11px] leading-snug text-muted-foreground">{reason}</p> : null}
+
+      {updatedRelative || completedDate ? (
+        <p className="mt-2 font-mono text-[10px] tabular-nums text-muted-foreground/70">
+          {buildTaskMetadataLine(completedDate, updatedRelative)}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function buildTaskMetadataLine(completedDate: string | null, updatedRelative: string | null): string {
+  const parts: string[] = [];
+  if (completedDate) parts.push(`Completed ${completedDate}`);
+  if (updatedRelative) parts.push(updatedDateLabel(updatedRelative, completedDate));
+  return parts.join(" \u00b7 ");
+}
+
+function updatedDateLabel(updatedRelative: string, completedDate: string | null): string {
+  return completedDate ? `updated ${updatedRelative}` : `Updated ${updatedRelative}`;
 }
 
 function AttendeeRow({ attendee }: { attendee: DailyBriefMeetingAttendee }) {

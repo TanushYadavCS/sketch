@@ -40,6 +40,10 @@ export interface AgentOutputSavedArgs {
   userId: string;
   outputId: string;
   items: AgentOutputItemInput[];
+  persistedItems?: Array<{
+    id: string;
+    item: AgentOutputItemInput;
+  }>;
   createTasks: boolean;
   runtimeContext: Record<string, unknown>;
 }
@@ -71,6 +75,7 @@ export interface AgentSourceConfigDef {
 
 export interface AgentApiItem {
   id: string;
+  taskId?: string | null;
   sectionKey: string;
   title: string;
   summary: string;
