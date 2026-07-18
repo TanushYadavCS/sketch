@@ -812,7 +812,7 @@ async function persistSeedCandidate(
 
   const activeTasks = await db
     .selectFrom("tasks")
-    .select(["assignee_name", "proposed_assignee_name"])
+    .select(["assignee_name", "proposed_assignee_name", "parent_entity_id", "parent_source_ref", "parent_name"])
     .where("source", "=", "summary")
     .where("created_by_user_id", "=", input.userId)
     .where("normalized_title", "=", normalizeName(resolved.candidate.title))
@@ -820,7 +820,14 @@ async function persistSeedCandidate(
     .where("valid_to", "is", null)
     .where("status", "in", ["open", "in_progress"])
     .execute();
-  if (activeTasks.some((task) => seedOwnerMatchesTask(resolved.proposedAssigneeName, task))) return false;
+  if (
+    activeTasks.some(
+      (task) =>
+        seedOwnerMatchesTask(resolved.proposedAssigneeName, task) &&
+        seedParentMatchesTask(resolved.candidate.structuredPayload, task),
+    )
+  )
+    return false;
 
   const existing = await db
     .selectFrom("task_seed_candidates")
@@ -887,6 +894,23 @@ function seedOwnerMatchesTask(
   if (!taskName) return true;
   if (!proposedAssigneeName) return false;
   return normalizeName(taskName) === normalizeName(proposedAssigneeName);
+}
+
+function seedParentMatchesTask(
+  payload: Record<string, unknown> | null | undefined,
+  task: { parent_entity_id: string | null; parent_source_ref: string | null; parent_name: string | null },
+): boolean {
+  const parentEntityId = readIdentityString(payload?.parentEntityId);
+  if (parentEntityId) return task.parent_entity_id === parentEntityId;
+  const parentSourceRef = readIdentityString(payload?.parentSourceRef);
+  if (parentSourceRef) return task.parent_source_ref === parentSourceRef;
+  const parentName = readIdentityString(payload?.parentName);
+  if (parentName) return task.parent_name !== null && normalizeName(task.parent_name) === normalizeName(parentName);
+  return task.parent_entity_id === null && task.parent_source_ref === null && task.parent_name === null;
+}
+
+function readIdentityString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 async function generateReviewCode(db: Transaction<DB>): Promise<string> {

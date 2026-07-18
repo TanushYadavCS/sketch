@@ -23,8 +23,9 @@ import * as m119 from "./119-agent-outputs-source-scope";
 import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
+import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 
-const EXPECTED_MIGRATION_COUNT = 147;
+const EXPECTED_MIGRATION_COUNT = 148;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -215,6 +216,80 @@ describe("runMigrations — full sequence", () => {
     expect(names[144]).toBe("149-whatsapp-backfill-lifecycle-durability");
     expect(names[145]).toBe("150-task-durability-steel-thread");
     expect(names[146]).toBe("151-agent-output-item-task-links");
+    expect(names[147]).toBe("152-reseed-combined-durability-routes");
+  });
+
+  it("resets reviewed combined durability routes for member-source reseeding", async () => {
+    await runMigrations(db, { quiet: true });
+    await db.insertInto("users").values({ id: "reseed-user", name: "Reseed User" }).execute();
+    await db
+      .insertInto("task_durability_route_state")
+      .values([
+        {
+          agent_key: "conversation_summary",
+          user_id: "reseed-user",
+          route_id: "combined-reviewed",
+          source_key: "route:combined",
+          mode: "durable_only",
+          seed_state: "reviewed",
+          seed_reviewed_at: "2026-07-01T00:00:00.000Z",
+          incremental_success_at: "2026-07-02T00:00:00.000Z",
+        },
+        {
+          agent_key: "conversation_summary",
+          user_id: "reseed-user",
+          route_id: "direct-reviewed",
+          source_key: "slack:channel:C_DIRECT",
+          mode: "durable_only",
+          seed_state: "reviewed",
+          seed_reviewed_at: "2026-07-01T00:00:00.000Z",
+          incremental_success_at: "2026-07-02T00:00:00.000Z",
+        },
+        {
+          agent_key: "conversation_summary",
+          user_id: "reseed-user",
+          route_id: "combined-pending",
+          source_key: "route:pending",
+          mode: "hybrid",
+          seed_state: "pending",
+          seed_reviewed_at: null,
+          incremental_success_at: null,
+        },
+      ])
+      .execute();
+
+    await combinedDurabilityReseedMigration.up(db as unknown as Kysely<unknown>);
+
+    await expect(
+      db
+        .selectFrom("task_durability_route_state")
+        .select(["route_id", "mode", "seed_state", "seed_reviewed_at", "incremental_success_at"])
+        .where("user_id", "=", "reseed-user")
+        .orderBy("route_id", "asc")
+        .execute(),
+    ).resolves.toEqual([
+      {
+        route_id: "combined-pending",
+        mode: "hybrid",
+        seed_state: "pending",
+        seed_reviewed_at: null,
+        incremental_success_at: null,
+      },
+      {
+        route_id: "combined-reviewed",
+        mode: "hybrid",
+        seed_state: "pending",
+        seed_reviewed_at: null,
+        incremental_success_at: "2026-07-02T00:00:00.000Z",
+      },
+      {
+        route_id: "direct-reviewed",
+        mode: "durable_only",
+        seed_state: "reviewed",
+        seed_reviewed_at: "2026-07-01T00:00:00.000Z",
+        incremental_success_at: "2026-07-02T00:00:00.000Z",
+      },
+    ]);
   });
 
   it("creates the bounded open-materializable partial index", async () => {

@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 147;
+const EXPECTED_MIGRATION_COUNT = 148;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
