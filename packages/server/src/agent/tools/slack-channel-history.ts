@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely } from "kysely";
+import { sql } from "kysely";
 import { z } from "zod/v4";
-import type { StoredConversationMessage } from "../../db/repositories/conversations";
 import type { ConversationSlicesTable, DB } from "../../db/schema";
 import type { Attachment } from "../../files";
 import { type SlackRosterSnapshot, parseSlackRosterSnapshot } from "../../slack/identity-resolution";
@@ -66,9 +66,18 @@ interface DrillAnchor {
 }
 
 interface MessageCursor {
-  receivedAt: string;
+  timestamp: string;
   messageId: number;
 }
+
+/**
+ * Slices are planned on provider timestamps (falling back to received_at), so
+ * raw reads, ordering, and pagination must use the same basis. Filtering on
+ * received_at alone would drop messages whose delivery to us lagged past the
+ * expand window. Both columns are ISO-8601 text in both dialects, so string
+ * comparison through COALESCE is portable.
+ */
+const effectiveTimestamp = sql<string>`coalesce(provider_timestamp, received_at)`;
 
 interface AuthorizedMessageWindow {
   start: string;
@@ -300,18 +309,14 @@ async function loadChannelWindowAuthorization(
  * authorization re-runs on every call, and decode rejects tokens that cross
  * conversation or window bounds.
  */
-function encodePageToken(
-  message: StoredConversationMessage,
-  conversationId: number,
-  window: SlackChannelHistoryWindow,
-): string {
+function encodePageToken(cursor: MessageCursor, conversationId: number, window: SlackChannelHistoryWindow): string {
   return Buffer.from(
     JSON.stringify({
       conversationId,
       windowStart: window.start,
       windowEnd: window.end,
-      receivedAt: message.receivedAt,
-      messageId: message.id,
+      timestamp: cursor.timestamp,
+      messageId: cursor.messageId,
     }),
     "utf8",
   ).toString("base64url");
@@ -330,7 +335,7 @@ function parsePageToken(
       conversationId?: unknown;
       windowStart?: unknown;
       windowEnd?: unknown;
-      receivedAt?: unknown;
+      timestamp?: unknown;
       messageId?: unknown;
     };
     if (
@@ -340,9 +345,9 @@ function parsePageToken(
     ) {
       return null;
     }
-    if (typeof record.receivedAt !== "string" || typeof record.messageId !== "number") return null;
-    if (!parseDate(record.receivedAt) || !Number.isSafeInteger(record.messageId) || record.messageId <= 0) return null;
-    return { receivedAt: record.receivedAt, messageId: record.messageId };
+    if (typeof record.timestamp !== "string" || typeof record.messageId !== "number") return null;
+    if (!parseDate(record.timestamp) || !Number.isSafeInteger(record.messageId) || record.messageId <= 0) return null;
+    return { timestamp: record.timestamp, messageId: record.messageId };
   } catch {
     return null;
   }
@@ -400,8 +405,8 @@ async function listRawMessagesInWindow(
       eb.or(
         messageWindows.map((messageWindow) =>
           eb.and([
-            eb("received_at", ">", afterExclusiveForInclusiveStart(messageWindow.start)),
-            eb("received_at", "<=", messageWindow.end),
+            eb(effectiveTimestamp, ">", afterExclusiveForInclusiveStart(messageWindow.start)),
+            eb(effectiveTimestamp, "<=", messageWindow.end),
           ]),
         ),
       ),
@@ -424,14 +429,14 @@ async function listRawMessagesInWindow(
   if (cursor) {
     query = query.where((eb) =>
       eb.or([
-        eb("received_at", ">", cursor.receivedAt),
-        eb.and([eb("received_at", "=", cursor.receivedAt), eb("id", ">", cursor.messageId)]),
+        eb(effectiveTimestamp, ">", cursor.timestamp),
+        eb.and([eb(effectiveTimestamp, "=", cursor.timestamp), eb("id", ">", cursor.messageId)]),
       ]),
     );
   }
 
   const rows = await query
-    .orderBy("received_at", "asc")
+    .orderBy(effectiveTimestamp, "asc")
     .orderBy("id", "asc")
     .limit(limit + 1)
     .execute();
@@ -475,7 +480,7 @@ async function listRawMessagesInWindow(
     nextPageToken:
       hasMore && last
         ? encodePageToken(
-            { receivedAt: last.received_at, id: last.id } as StoredConversationMessage,
+            { timestamp: last.provider_timestamp ?? last.received_at, messageId: last.id },
             anchor.conversationId,
             window,
           )

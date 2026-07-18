@@ -336,7 +336,7 @@ export async function filterAccessibleFileIds(
 
   const files = await db
     .selectFrom("indexed_files")
-    .select(["id", "access_scope_id", "share_with_everyone"])
+    .select(["id", "access_scope_id", "share_with_everyone", "is_archived"])
     .where("id", "in", fileIds)
     .execute();
 
@@ -401,6 +401,13 @@ export async function filterAccessibleFileIds(
   const emailSet = new Set(userEmails);
   const allowed = new Set<string>();
   for (const file of files) {
+    /**
+     * Archived files are invisible regardless of tier. Archival severs the
+     * scope and per-file grants, which would otherwise flip the file into
+     * the unrestricted no-scope tier below — the opposite of the intent.
+     */
+    if (file.is_archived === 1) continue;
+
     if (file.share_with_everyone === 1) {
       allowed.add(file.id);
       continue;

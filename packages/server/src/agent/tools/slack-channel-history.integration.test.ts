@@ -132,6 +132,29 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(payload.messages[1].sender).toBe("Roopak");
     });
 
+    it("includes messages whose delivery lagged days behind their Slack timestamp", async () => {
+      await createConversationRepository(db).insertMessage({
+        conversationId,
+        providerMessageId: "3000.3",
+        senderJid: "U0EXT",
+        senderName: "Guest",
+        text: "lagged delivery",
+        providerThreadId: rootTs,
+        providerParentMessageId: rootTs,
+        isThreadReply: true,
+        providerTimestamp: "2026-07-17T09:06:00.000Z",
+        receivedAt: "2026-07-19T12:00:00.000Z",
+      });
+
+      const result = await handleSlackChannelHistory({ sliceId }, depsFor(db, ["roopak@example.com"]));
+      const payload = JSON.parse(resultText(result));
+      expect(payload.messages.map((message: { text: string }) => message.text)).toEqual([
+        "root message",
+        "reply mentioning @Roopak",
+        "lagged delivery",
+      ]);
+    });
+
     it("denies a caller whose email is not in the channel scope", async () => {
       const result = await handleSlackChannelHistory({ sliceId }, depsFor(db, ["outsider@example.com"]));
       expect(resultText(result)).toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);

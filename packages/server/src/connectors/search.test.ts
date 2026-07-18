@@ -353,6 +353,15 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
     const accessible = await filterAccessibleFileIds(db, [], ["alice@example.com"]);
     expect(accessible.size).toBe(0);
   });
+
+  it("archived files are excluded even when archival left them scope-less", async () => {
+    await insertFileWithAccess("file-archived");
+    await db.updateTable("indexed_files").set({ is_archived: 1 }).where("id", "=", "file-archived").execute();
+
+    const accessible = await filterAccessibleFileIds(db, ["file-archived", "file-unrestricted"], ["alice@example.com"]);
+    expect(accessible.has("file-archived")).toBe(false);
+    expect(accessible.has("file-unrestricted")).toBe(true);
+  });
 });
 
 describe("search — recency browse applies RBAC before limit", () => {
