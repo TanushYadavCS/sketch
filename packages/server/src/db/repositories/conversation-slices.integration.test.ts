@@ -196,6 +196,31 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       await expect(countRows(db, "whatsapp_backfill_checkpoints")).resolves.toBe(1);
     });
 
+    it("records a live-start boundary only once", async () => {
+      const { groupJid, firstMessageId, lastMessageId } = await seedConversationWindow(db);
+      const repo = createConversationSlicesRepository(db);
+
+      const first = await repo.recordLiveStartOnce({
+        groupJid,
+        effectiveAt: "2026-07-07T09:00:00.000Z",
+        messageId: firstMessageId,
+      });
+      const second = await repo.recordLiveStartOnce({
+        groupJid,
+        effectiveAt: "2026-07-07T09:05:00.000Z",
+        messageId: lastMessageId,
+      });
+
+      expect(first).toMatchObject({
+        live_start_effective_at: "2026-07-07T09:00:00.000Z",
+        live_start_message_id: firstMessageId,
+      });
+      expect(second).toMatchObject({
+        live_start_effective_at: "2026-07-07T09:00:00.000Z",
+        live_start_message_id: firstMessageId,
+      });
+    });
+
     it("keeps complete status and the oldest key when racing checkpoint batches arrive in either order", async () => {
       const repo = createConversationSlicesRepository(db);
       const oldestKey = "v1:1783414700000:oldest";
@@ -272,7 +297,7 @@ async function seedConversationWindow(db: Kysely<DB>) {
     text: "last",
     receivedAt: "2026-07-07T09:05:00.000Z",
   });
-  return { conversationId: conversation.id, firstMessageId: first.row.id, lastMessageId: last.row.id };
+  return { groupJid, conversationId: conversation.id, firstMessageId: first.row.id, lastMessageId: last.row.id };
 }
 
 async function countRows(db: Kysely<DB>, table: "conversation_slices" | "whatsapp_backfill_checkpoints") {

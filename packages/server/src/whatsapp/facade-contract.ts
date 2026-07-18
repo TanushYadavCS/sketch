@@ -3,7 +3,7 @@ import type { WhatsAppSendResult } from "./provider";
 
 export type { WhatsAppSendResult } from "./provider";
 
-export const WHATSAPP_FACADE_CONTRACT_VERSION = "1.0";
+export const WHATSAPP_FACADE_CONTRACT_VERSION = "1.2";
 
 export const whatsAppFacadeTargetSchema = z.string().min(1);
 
@@ -106,10 +106,22 @@ export const whatsAppReactionResponseSchema = z.object({ result: whatsAppReactio
 export const whatsAppMediaDownloadResponseSchema = z.object({ result: stagedMediaRefSchema.nullable() });
 export const whatsAppGroupMetadataResponseSchema = z.object({ result: normalizedGroupMetadataSchema.nullable() });
 export const whatsAppResolveLidResponseSchema = z.object({ phoneJid: z.string().nullable() });
+export const whatsAppHistoryMessageKeySchema = z.object({
+  remoteJid: z.string().min(1),
+  id: z.string().min(1),
+  fromMe: z.boolean(),
+});
+export const whatsAppHistorySyncRequestSchema = z.object({
+  count: z.number().int().min(1).max(50),
+  oldestMessageKey: whatsAppHistoryMessageKeySchema,
+  oldestMessageTimestamp: z.number().finite().positive(),
+});
+export const whatsAppHistorySyncResponseSchema = z.object({ requestSessionId: z.string().min(1) });
 
 export const whatsAppPairingStatusSchema = z.object({
   connected: z.boolean(),
   phoneNumber: z.string().nullable(),
+  lid: z.string().nullable().optional(),
 });
 
 export const whatsAppPairingEventSchema = z.discriminatedUnion("type", [
@@ -123,6 +135,7 @@ export const whatsAppSocketStateSchema = z.enum(["disconnected", "connecting", "
 export const whatsAppSocketStateChangeSchema = z.object({
   ownerToken: z.string().min(1),
   generation: z.number().int().positive(),
+  socketGeneration: z.number().int().positive(),
   socketState: whatsAppSocketStateSchema,
 });
 
@@ -139,6 +152,7 @@ export const whatsAppFacadeHealthSchema = z.object({
 
 export const whatsAppInboundEnvelopeVersionSchema = z.string().regex(/^1\.\d+$/u);
 export const whatsAppIsoUtcTimestampSchema = z.string().datetime({ offset: true });
+export const whatsAppConnectionKeySchema = z.string().regex(/^\d{12}:\d{12}$/u);
 
 export const whatsAppInboundMessageSchema = z.object({
   type: z.enum(["dm", "group"]),
@@ -170,6 +184,7 @@ export const whatsAppMessageEnvelopeSchema = z.object({
   providerConversationId: z.string().min(1),
   providerMessageId: z.string().nullable(),
   eventKey: z.string().nullable(),
+  connectionKey: whatsAppConnectionKeySchema.nullable().optional().default(null),
   fromMe: z.boolean(),
   message: whatsAppInboundMessageSchema,
 });
@@ -181,12 +196,14 @@ export const whatsAppHistoryBatchMetadataSchema = z.object({
   syncType: z.union([z.number(), z.string()]).nullable(),
   progress: z.number().nullable(),
   isLatest: z.boolean().nullable(),
+  peerDataRequestSessionId: z.string().min(1).nullable().optional().default(null),
 });
 
 export const whatsAppHistoryBatchEnvelopeSchema = z.object({
   version: whatsAppInboundEnvelopeVersionSchema,
   kind: z.literal("history_batch"),
   providerTimestamp: whatsAppIsoUtcTimestampSchema,
+  connectionKey: whatsAppConnectionKeySchema.nullable().optional().default(null),
   batch: whatsAppHistoryBatchMetadataSchema,
   messages: z.array(whatsAppMessageEnvelopeSchema),
 });
@@ -208,6 +225,7 @@ export type WhatsAppGroupSyncSummary = z.infer<typeof whatsAppGroupSyncSummarySc
 export type WhatsAppPairingStatus = z.infer<typeof whatsAppPairingStatusSchema>;
 export type WhatsAppPairingEvent = z.infer<typeof whatsAppPairingEventSchema>;
 export type WhatsAppFacadeHealth = z.infer<typeof whatsAppFacadeHealthSchema>;
+export type WhatsAppHistorySyncRequest = z.infer<typeof whatsAppHistorySyncRequestSchema>;
 export type WhatsAppMessageEnvelope = z.infer<typeof whatsAppMessageEnvelopeSchema>;
 export type WhatsAppHistoryBatchEnvelope = z.infer<typeof whatsAppHistoryBatchEnvelopeSchema>;
 export type WhatsAppInboundEnvelope = z.infer<typeof whatsAppInboundEnvelopeSchema>;
@@ -224,6 +242,7 @@ export interface WhatsAppSocketFacade {
   groupMetadata(jid: string, opts: { refresh: boolean }): Promise<NormalizedGroupMetadata | null>;
   syncAllGroups(opts: { force: boolean }): Promise<WhatsAppGroupSyncSummary>;
   resolveLid(jid: string): Promise<string | null>;
+  fetchMessageHistory(request: WhatsAppHistorySyncRequest): Promise<string>;
   pairing: {
     startQr(onEvent: (event: WhatsAppPairingEvent) => Promise<void>): Promise<void>;
     status(): Promise<WhatsAppPairingStatus>;

@@ -137,6 +137,7 @@ async function loadWorksAtCompanies(
 export async function materializePersonFact(
   deps: MaterializeDeps,
   fact: IndexedFileFactRow,
+  options: { linkOnly?: boolean } = {},
 ): Promise<MaterializeResult> {
   if (!fact.subject_name) {
     return { kind: "skipped", reason: "missing_person_subject" };
@@ -219,6 +220,7 @@ export async function materializePersonFact(
           provenanceTier: "inferred",
           precomputedCandidates,
           skipFuzzy,
+          linkOnly: options.linkOnly,
         },
       );
       if (result.kind === "queued") {

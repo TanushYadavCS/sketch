@@ -189,10 +189,11 @@ export class WhatsAppGatewaySupervisor {
    * route. The lease owner and generation fence stale child notifications, while
    * child exit clears the cached health and the periodic poll remains a fallback.
    */
-  handleSocketStateChange(change: WhatsAppSocketStateChange): void {
-    if (!this.client || !this.lease || !this.lastHealth) return;
-    if (this.lease.owner_token !== change.ownerToken || this.lease.generation !== change.generation) return;
+  handleSocketStateChange(change: WhatsAppSocketStateChange): boolean {
+    if (!this.client || !this.lease || !this.lastHealth) return false;
+    if (this.lease.owner_token !== change.ownerToken || this.lease.generation !== change.generation) return false;
     this.lastHealth = { ...this.lastHealth, socketState: change.socketState };
+    return true;
   }
 
   async refreshHealth(): Promise<void> {
@@ -551,6 +552,10 @@ export class InProcessWhatsAppLease {
     this.leases = createWhatsAppSessionLeaseRepository(options.db, {
       ...(options.config.DB_TYPE === "sqlite" ? { sqlitePath: options.config.SQLITE_PATH } : {}),
     });
+  }
+
+  get generation(): number | null {
+    return this.fence?.generation ?? null;
   }
 
   async acquire(): Promise<void> {

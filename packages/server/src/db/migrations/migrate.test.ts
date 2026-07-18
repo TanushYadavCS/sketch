@@ -24,7 +24,7 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 141;
+const EXPECTED_MIGRATION_COUNT = 146;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -208,7 +208,12 @@ describe("runMigrations — full sequence", () => {
     expect(names[137]).toBe("142-verdict-safe-fact-upserts");
     expect(names[138]).toBe("143-indexed-corroboration");
     expect(names[139]).toBe("144-whatsapp-gateway-queue");
-    expect(names[140]).toBe("145-task-durability-steel-thread");
+    expect(names[140]).toBe("145-whatsapp-history-capture-foundation");
+    expect(names[141]).toBe("146-whatsapp-history-top-up");
+    expect(names[142]).toBe("147-whatsapp-backfill-graph-admission");
+    expect(names[143]).toBe("148-whatsapp-pending-slices-index");
+    expect(names[144]).toBe("149-whatsapp-backfill-lifecycle-durability");
+    expect(names[145]).toBe("150-task-durability-steel-thread");
   });
 
   it("creates the bounded open-materializable partial index", async () => {

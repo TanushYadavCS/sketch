@@ -11,6 +11,7 @@ import type { Logger } from "../logger";
 export const WHATSAPP_INBOUND_RETENTION_INTERVAL_MS = 60 * 60_000;
 export const WHATSAPP_INBOUND_RETENTION_INITIAL_DELAY_MS = 10_000;
 export const WHATSAPP_STAGED_MEDIA_RETENTION_MS = 72 * 60 * 60_000;
+export const WHATSAPP_CONNECTION_TRANSITION_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 function inside(root: string, path: string): boolean {
   return path === root || path.startsWith(`${root}${sep}`);
@@ -75,6 +76,19 @@ export async function sweepWhatsAppStagedMedia(params: {
   return removed;
 }
 
+export async function sweepWhatsAppConnectionTransitions(params: {
+  db: Kysely<DB>;
+  now?: () => number;
+}): Promise<number> {
+  const cutoff = new Date((params.now ?? Date.now)() - WHATSAPP_CONNECTION_TRANSITION_RETENTION_MS).toISOString();
+  const result = await params.db
+    .deleteFrom("whatsapp_connection_transitions")
+    .where("reconciled_at", "is not", null)
+    .where("reconciled_at", "<", cutoff)
+    .executeTakeFirst();
+  return Number(result.numDeletedRows);
+}
+
 export interface WhatsAppInboundRetentionJob {
   stop(): void;
 }
@@ -87,10 +101,12 @@ export function startWhatsAppInboundRetention(params: {
   intervalMs?: number;
   sweepEvents?: () => Promise<{ consumed: number; dead: number }>;
   sweepMedia?: () => Promise<number>;
+  sweepTransitions?: () => Promise<number>;
 }): WhatsAppInboundRetentionJob {
   const events = createWhatsAppInboundEventsRepository(params.db);
   const sweepEvents = params.sweepEvents ?? (() => events.sweep());
   const sweepMedia = params.sweepMedia ?? (() => sweepWhatsAppStagedMedia(params));
+  const sweepTransitions = params.sweepTransitions ?? (() => sweepWhatsAppConnectionTransitions(params));
   let running = false;
   let stopped = false;
 
@@ -108,9 +124,13 @@ export function startWhatsAppInboundRetention(params: {
           break;
         }
       }
+      const connectionTransitions = await sweepTransitions();
       const stagedMedia = await sweepMedia();
-      if (consumed > 0 || dead > 0 || stagedMedia > 0) {
-        params.logger.info({ consumed, dead, stagedMedia }, "WhatsApp inbound retention sweep completed");
+      if (consumed > 0 || dead > 0 || connectionTransitions > 0 || stagedMedia > 0) {
+        params.logger.info(
+          { consumed, dead, connectionTransitions, stagedMedia },
+          "WhatsApp inbound retention sweep completed",
+        );
       }
     } catch (error) {
       params.logger.warn({ error }, "WhatsApp inbound retention sweep failed");

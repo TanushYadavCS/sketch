@@ -21,13 +21,10 @@ import {
   type ChatThreadProgressItem,
   type ChatThreadTimelineEntry,
 } from "@/components/sketch/chat-thread";
-import type { ConversationRowProps } from "@/components/sketch/conversation-row";
-import { HomePane } from "@/components/sketch/home-pane";
 import { DEFAULT_TILES, type TileDef } from "@/components/sketch/tile-grid";
 import { useWebChatReconciliation } from "@/hooks/use-web-chat-reconciliation";
 import {
   type AutomationArtifact,
-  type WebChatConversationSummary,
   type WebChatMessagesResponse,
   type WebChatToolProgress,
   type WebChatUploadedAttachment,
@@ -37,20 +34,22 @@ import {
 import {
   createWebChatConversationId,
   hasPendingWebChatSubmission,
-  setPendingWebChatSubmission,
   shouldUseChatViewTransition,
   takePendingWebChatSubmission,
 } from "@/lib/chat-target";
+import { WEB_CHAT_CONVERSATIONS_QUERY_KEY, buildWebChatRecents } from "@/lib/web-chat-conversations";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
 import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
-import { type QueryClient, isCancelledError, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { dashboardRoute, useDashboardAuth } from "./dashboard";
+import { dashboardRoute } from "./dashboard";
+
+export { buildWebChatRecents };
 
 type WebChatDataParts = {
   progress: {
@@ -95,10 +94,7 @@ type ActiveIntegrationConnection = {
 export interface ChatSearch {
   message?: string;
   prefill?: string;
-}
-
-function firstNameOf(name: string): string {
-  return name.trim().split(/\s+/)[0] || "there";
+  new?: boolean;
 }
 
 const NEXT_RUN_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -150,16 +146,6 @@ export function buildSummaryTiles(summary: WorkspaceSummary): TileDef[] {
   ];
 }
 
-export function buildWebChatRecents(conversations: WebChatConversationSummary[]): ConversationRowProps[] {
-  return conversations.slice(0, 5).map((conversation) => ({
-    id: conversation.id,
-    title: conversation.title,
-    channel: conversation.channel,
-    occurredAt: conversation.updatedAt,
-  }));
-}
-
-const WEB_CHAT_CONVERSATIONS_QUERY_KEY = ["web-chat", "conversations"];
 const WEB_CHAT_MESSAGES_STALE_TIME_MS = 15_000;
 
 export const webChatMessagesQueryKey = (conversationId: string) => ["web-chat", "messages", conversationId] as const;
@@ -200,23 +186,14 @@ export function useKnownNewWebChatConversation(conversationId: string, hasNewCon
   return hasNewConversationIntent || knownNewConversationId === conversationId;
 }
 
-function removeWebChatConversationFromCache(
-  data: { conversations: WebChatConversationSummary[] } | undefined,
-  conversationId: string,
-) {
-  return { conversations: (data?.conversations ?? []).filter((conversation) => conversation.id !== conversationId) };
-}
-
-function getDeleteConversationError(error: unknown) {
-  return error instanceof Error && error.message ? error.message : "Failed to delete conversation";
-}
-
 export function validateChatSearch(search: Record<string, unknown>): ChatSearch {
   const message = typeof search.message === "string" ? search.message.trim() : "";
   const prefill = typeof search.prefill === "string" ? search.prefill.trim() : "";
+  const isNew = search.new === true || search.new === "true";
   return {
     ...(message ? { message } : {}),
     ...(prefill ? { prefill } : {}),
+    ...(isNew ? { new: true } : {}),
   };
 }
 
@@ -821,80 +798,20 @@ export const chatRoute = createRoute({
 });
 
 function ChatIndexPage() {
-  const auth = useDashboardAuth();
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const search = useSearch({ from: chatIndexRoute.id }) as ChatSearch;
-  const summaryQuery = useQuery({
-    queryKey: ["workspace", "summary"],
-    queryFn: () => api.workspace.summary(),
-  });
-  const webChatQuery = useQuery({
-    queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY,
-    queryFn: () => api.webChat.conversations(),
-  });
-  const deleteConversationMutation = useMutation({
-    mutationFn: (conversationId: string) => api.webChat.removeConversation(conversationId),
-    onSuccess: (_result, conversationId) => {
-      queryClient.setQueryData<{ conversations: WebChatConversationSummary[] }>(
-        WEB_CHAT_CONVERSATIONS_QUERY_KEY,
-        (data) => removeWebChatConversationFromCache(data, conversationId),
-      );
-      queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
-      toast.success("Conversation deleted");
-    },
-    onError: (error) => {
-      toast.error(getDeleteConversationError(error));
-    },
-  });
-  const handleConversationIntent = useCallback(
-    (conversationId: string) => {
-      void queryClient.prefetchQuery({
-        queryKey: webChatMessagesQueryKey(conversationId),
-        queryFn: ({ signal }) => api.webChat.messages(conversationId, { signal }),
-        staleTime: WEB_CHAT_MESSAGES_STALE_TIME_MS,
-      });
-    },
-    [queryClient],
-  );
 
   useEffect(() => {
-    if (!search.message) return;
     void navigate({
       to: "/chat/$conversationId",
       params: { conversationId: createWebChatConversationId() },
-      search,
+      search: search.message || search.prefill ? search : { new: true },
       replace: true,
       viewTransition: shouldUseChatViewTransition(),
     });
   }, [navigate, search]);
 
-  if (search.message) return null;
-
-  return (
-    <HomePane
-      firstName={firstNameOf(auth.displayName)}
-      tiles={summaryQuery.data ? buildSummaryTiles(summaryQuery.data) : undefined}
-      recents={webChatQuery.data ? buildWebChatRecents(webChatQuery.data.conversations) : []}
-      deletingConversationId={deleteConversationMutation.variables ?? null}
-      onConversationIntent={handleConversationIntent}
-      onDeleteConversation={(conversation) => {
-        deleteConversationMutation.mutate(conversation.id);
-      }}
-      onSubmit={(value, attachments) => {
-        const target = {
-          to: "/chat/$conversationId" as const,
-          params: { conversationId: createWebChatConversationId() },
-          search: { message: value.trim() },
-          viewTransition: shouldUseChatViewTransition(),
-        };
-        if (attachments.length > 0) {
-          setPendingWebChatSubmission(target.params.conversationId, { text: value.trim(), attachments });
-        }
-        void navigate(target);
-      }}
-    />
-  );
+  return null;
 }
 
 export function ChatPage() {
@@ -907,7 +824,7 @@ export function ChatPage() {
   const toolProgressMutationId = useRef(0);
   const queryClient = useQueryClient();
   const hasNewConversationIntent = Boolean(
-    search.message || search.prefill || hasPendingWebChatSubmission(conversationId),
+    search.new || search.message || search.prefill || hasPendingWebChatSubmission(conversationId),
   );
   const knownNewConversation = useKnownNewWebChatConversation(conversationId, hasNewConversationIntent);
   const freshCachedHistory = knownNewConversation ? null : freshCachedWebChatMessages(queryClient, conversationId);
@@ -1225,11 +1142,12 @@ export function ChatPage() {
     sentInitialMessage.current = initialMessageKey;
     queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
     const requestOptions = outgoingRequestOptions(initialAttachments);
-    if (requestOptions) {
-      void chat.sendMessage(outgoingTextMessage(initialText, initialAttachments), requestOptions);
-    } else {
-      void chat.sendMessage(outgoingTextMessage(initialText));
-    }
+    const send = requestOptions
+      ? chat.sendMessage(outgoingTextMessage(initialText, initialAttachments), requestOptions)
+      : chat.sendMessage(outgoingTextMessage(initialText));
+    void Promise.resolve(send).then(() =>
+      queryClient.invalidateQueries({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }),
+    );
     void navigate({
       to: "/chat/$conversationId",
       params: { conversationId },
@@ -1245,8 +1163,8 @@ export function ChatPage() {
   }, [conversationId, navigate, search.prefill]);
 
   return (
-    <TabContentContainer className="mx-auto box-content flex min-h-[calc(100vh-52px)] max-w-4xl flex-col w-[calc(100%-32px)] px-4 sm:w-[calc(100%-80px)] sm:px-10">
-      <ChatHeader title={chatTitle} onBack={() => navigate({ to: "/chat" })} />
+    <TabContentContainer className="mx-auto box-content flex min-h-[calc(100vh-3rem)] max-w-4xl flex-col w-[calc(100%-32px)] px-4 sm:w-[calc(100%-80px)] sm:px-10 md:min-h-screen">
+      <ChatHeader title={chatTitle} onBack={() => navigate({ to: "/home" })} />
 
       <div className="sketch-chat-route-enter relative min-h-0 flex-1">
         <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[28px] bg-gradient-to-b from-background to-transparent" />
@@ -1302,7 +1220,21 @@ export function ChatPage() {
             placeholder="Reply to Sketch..."
             onSubmit={(value, attachments) => {
               queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
-              void chat.sendMessage(outgoingTextMessage(value, attachments), outgoingRequestOptions(attachments));
+              const send = chat.sendMessage(
+                outgoingTextMessage(value, attachments),
+                outgoingRequestOptions(attachments),
+              );
+              void Promise.resolve(send).then(() =>
+                queryClient.invalidateQueries({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }),
+              );
+              if (search.new) {
+                void navigate({
+                  to: "/chat/$conversationId",
+                  params: { conversationId },
+                  search: {},
+                  replace: true,
+                });
+              }
             }}
           />
         </div>

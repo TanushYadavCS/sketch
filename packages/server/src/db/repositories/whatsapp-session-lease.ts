@@ -1,4 +1,5 @@
 import { Kysely, type Selectable, SqliteDialect, type Transaction, sql } from "kysely";
+import { createWhatsAppConnectionKey } from "../../whatsapp/connection-key";
 import { isPg } from "../dialect";
 import type { DB, WhatsAppSessionLeaseTable } from "../schema";
 import { type SqliteRetryOptions, withBoundedSqliteRetry } from "./whatsapp-inbound-events";
@@ -206,6 +207,33 @@ export function createWhatsAppSessionLeaseRepository(
     );
   }
 
+  async function recordConnectedTransition(
+    fence: WhatsAppLeaseFence,
+    socketGeneration: number,
+    connectedAt: string,
+  ): Promise<boolean> {
+    return withLeaseFence(fence, async (executor) => {
+      const lease = await executor
+        .selectFrom("whatsapp_session_lease")
+        .select("disconnected_at")
+        .where("id", "=", WHATSAPP_SESSION_LEASE_ID)
+        .executeTakeFirstOrThrow();
+      const result = await executor
+        .insertInto("whatsapp_connection_transitions")
+        .values({
+          connection_key: createWhatsAppConnectionKey(fence.generation, socketGeneration),
+          lease_generation: fence.generation,
+          socket_generation: socketGeneration,
+          disconnected_at: lease.disconnected_at,
+          connected_at: connectedAt,
+          reconciled_at: null,
+        })
+        .onConflict((oc) => oc.column("connection_key").doNothing())
+        .executeTakeFirst();
+      return Number(result.numInsertedOrUpdatedRows ?? 0) === 1;
+    });
+  }
+
   async function releaseWithHistoryState(fence: WhatsAppLeaseFence, resetHistoryGeneration: boolean): Promise<boolean> {
     return withBoundedSqliteRetry(
       db,
@@ -329,6 +357,7 @@ export function createWhatsAppSessionLeaseRepository(
     heartbeat,
     markDisconnected,
     deriveDisconnectedAt,
+    recordConnectedTransition,
     release,
     releaseAfterLogout,
     resetHistoryGeneration,

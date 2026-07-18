@@ -55,10 +55,10 @@ describe("WhatsApp gateway wake route", () => {
     const response = await app.request("http://127.0.0.1/internal/whatsapp/socket-state", {
       method: "POST",
       headers: { Authorization: "Bearer wake-secret", "Content-Type": "application/json" },
-      body: JSON.stringify({ ownerToken: "owner-1", generation: 3, socketState: "connected" }),
+      body: JSON.stringify({ ownerToken: "owner-1", generation: 3, socketGeneration: 2, socketState: "connected" }),
     });
 
     expect(response.status).toBe(204);
-    expect(changes).toEqual([{ ownerToken: "owner-1", generation: 3, socketState: "connected" }]);
+    expect(changes).toEqual([{ ownerToken: "owner-1", generation: 3, socketGeneration: 2, socketState: "connected" }]);
   });
 });

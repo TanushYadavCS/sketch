@@ -492,7 +492,12 @@ export interface ConversationMessagesTable {
   provider_parent_message_id: string | null;
   is_thread_reply: Generated<number>;
   provider_timestamp: string | null;
+  provider_from_me: Generated<number>;
   received_at: string;
+  source: Generated<string>;
+  effective_at: Generated<string | null>;
+  connection_key: Generated<string | null>;
+  backfill_range_id: Generated<string | null>;
   created_at: Generated<string>;
 }
 
@@ -505,6 +510,8 @@ export interface WhatsAppInboundEventsTable {
   batch_id: string | null;
   chunk_index: number | null;
   chunk_count: number | null;
+  request_session_id: Generated<string | null>;
+  backfill_range_id: Generated<string | null>;
   envelope: string;
   received_at: Generated<string>;
   attempts: Generated<number>;
@@ -533,6 +540,16 @@ export interface WhatsAppSessionLeaseTable {
   acquired_at: Generated<string>;
   last_live_at: string | null;
   disconnected_at: string | null;
+}
+
+export interface WhatsAppConnectionTransitionsTable {
+  connection_key: string;
+  lease_generation: number;
+  socket_generation: number;
+  disconnected_at: string | null;
+  connected_at: string;
+  reconciled_at: string | null;
+  created_at: Generated<string>;
 }
 
 export interface ConversationSlicesTable {
@@ -599,6 +616,43 @@ export interface WhatsAppBackfillCheckpointsTable {
   group_jid: string;
   last_fetched_key: string | null;
   status: string;
+  live_start_effective_at: Generated<string | null>;
+  live_start_message_id: Generated<number | null>;
+  graph_last_served_at: Generated<string | null>;
+  graph_halted_at: Generated<string | null>;
+  graph_halt_reason: Generated<string | null>;
+  updated_at: Generated<string>;
+}
+
+export interface WhatsAppBackfillRangesTable {
+  id: string;
+  group_jid: string;
+  range_key: string;
+  kind: string;
+  connection_key: string;
+  status: string;
+  lower_bound_at: string;
+  upper_bound_at: string;
+  cursor_remote_jid: string | null;
+  cursor_message_id: string | null;
+  cursor_from_me: number | null;
+  cursor_provider_timestamp: string | null;
+  attempts: Generated<number>;
+  next_retry_at: string | null;
+  last_error: string | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  request_session_id: string | null;
+  request_lease_generation: number | null;
+  requested_at: string | null;
+  response_deadline_at: string | null;
+  terminal_status: string | null;
+  last_served_at: string | null;
+  graph_cursor_effective_at: Generated<string | null>;
+  graph_cursor_message_id: Generated<number | null>;
+  graph_completed_at: Generated<string | null>;
+  parent_range_id: Generated<string | null>;
+  created_at: Generated<string>;
   updated_at: Generated<string>;
 }
 
@@ -1254,6 +1308,7 @@ export interface DB {
   whatsapp_keys: WhatsAppKeysTable;
   whatsapp_inbound_events: WhatsAppInboundEventsTable;
   whatsapp_session_lease: WhatsAppSessionLeaseTable;
+  whatsapp_connection_transitions: WhatsAppConnectionTransitionsTable;
   whatsapp_groups: WhatsAppGroupsTable;
   settings: SettingsTable;
   connector_configs: ConnectorConfigsTable;
@@ -1298,6 +1353,7 @@ export interface DB {
   whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
   whatsapp_group_participants: WhatsAppGroupParticipantsTable;
   whatsapp_backfill_checkpoints: WhatsAppBackfillCheckpointsTable;
+  whatsapp_backfill_ranges: WhatsAppBackfillRangesTable;
   whatsapp_window_keepalives: WhatsAppWindowKeepAlivesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;

@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { type NameDedupEntityType, retrieveEntityNameCandidates } from "../connectors/embeddings/trunk-name-embeddings";
 import type { EmbeddingProvider } from "../connectors/embeddings/types";
+import { WHATSAPP_CONNECTOR_TYPE, WHATSAPP_CONVERSATION_SLICE_FILE_TYPE } from "../connectors/types";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -371,24 +372,41 @@ function llmFileCountKey(normalizedName: string, mentionType: MentionType): stri
  * once; the result is order-independent, so streaming yields the same Map the
  * single whole-table load produced.
  */
-async function buildActiveLlmFileCounts(db: Kysely<DB>): Promise<Map<string, number>> {
-  const filesByName = new Map<string, Set<string>>();
+interface ActiveLlmEvidenceProfile {
+  fileIds: Set<string>;
+  whatsappOnly: boolean;
+}
+
+async function buildActiveLlmEvidenceProfiles(db: Kysely<DB>): Promise<Map<string, ActiveLlmEvidenceProfile>> {
+  const evidenceByName = new Map<string, ActiveLlmEvidenceProfile>();
   await forEachFactBatch(
     (cursor, limit) =>
       db
         .selectFrom("indexed_file_facts")
-        .select(["id", "created_at", "indexed_file_id", "subject_name", "raw"])
-        .where("fact_type", "=", "llm_extracted")
-        .where("deleted_at", "is", null)
-        .where("subject_name", "is not", null)
+        .innerJoin("indexed_files", "indexed_files.id", "indexed_file_facts.indexed_file_id")
+        .select([
+          "indexed_file_facts.id",
+          "indexed_file_facts.created_at",
+          "indexed_file_facts.indexed_file_id",
+          "indexed_file_facts.subject_name",
+          "indexed_file_facts.raw",
+          "indexed_files.source as file_source",
+          "indexed_files.file_type as file_type",
+        ])
+        .where("indexed_file_facts.fact_type", "=", "llm_extracted")
+        .where("indexed_file_facts.deleted_at", "is", null)
+        .where("indexed_file_facts.subject_name", "is not", null)
         .where((eb) =>
           eb.or([
-            eb("created_at", ">", cursor.createdAt),
-            eb.and([eb("created_at", "=", cursor.createdAt), eb("id", ">", cursor.id)]),
+            eb("indexed_file_facts.created_at", ">", cursor.createdAt),
+            eb.and([
+              eb("indexed_file_facts.created_at", "=", cursor.createdAt),
+              eb("indexed_file_facts.id", ">", cursor.id),
+            ]),
           ]),
         )
-        .orderBy("created_at", "asc")
-        .orderBy("id", "asc")
+        .orderBy("indexed_file_facts.created_at", "asc")
+        .orderBy("indexed_file_facts.id", "asc")
         .limit(limit)
         .execute(),
     async (rows) => {
@@ -399,13 +417,19 @@ async function buildActiveLlmFileCounts(db: Kysely<DB>): Promise<Map<string, num
         const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
         if (!normalizedName) continue;
         const key = llmFileCountKey(normalizedName, mentionType);
-        const files = filesByName.get(key);
-        if (files) files.add(row.indexed_file_id);
-        else filesByName.set(key, new Set([row.indexed_file_id]));
+        const isWhatsAppSlice =
+          row.file_source === WHATSAPP_CONNECTOR_TYPE && row.file_type === WHATSAPP_CONVERSATION_SLICE_FILE_TYPE;
+        const profile = evidenceByName.get(key);
+        if (profile) {
+          profile.fileIds.add(row.indexed_file_id);
+          profile.whatsappOnly = profile.whatsappOnly && isWhatsAppSlice;
+        } else {
+          evidenceByName.set(key, { fileIds: new Set([row.indexed_file_id]), whatsappOnly: isWhatsAppSlice });
+        }
       }
     },
   );
-  return new Map([...filesByName.entries()].map(([key, files]) => [key, files.size]));
+  return evidenceByName;
 }
 
 export async function refreshResolvedEntityIndex(
@@ -463,7 +487,7 @@ export async function buildMaterializeDeps(
     typeof opts.llmPromotionThreshold === "number" && opts.llmPromotionThreshold >= 1
       ? Math.floor(opts.llmPromotionThreshold)
       : configuredLlmPromotionThreshold;
-  let activeLlmFileCounts: Promise<Map<string, number>> | null = null;
+  let activeLlmEvidenceProfiles: Promise<Map<string, ActiveLlmEvidenceProfile>> | null = null;
   const llmTaskCorroborationThreshold =
     typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1
       ? Math.floor(opts.llmTaskCorroborationThreshold)
@@ -597,9 +621,32 @@ export async function buildMaterializeDeps(
       if (normalizationBackfillComplete) {
         return countActiveLlmFilesIndexed(db, normalizedName, mentionType);
       }
-      activeLlmFileCounts ??= buildActiveLlmFileCounts(db);
-      const counts = await activeLlmFileCounts;
-      return counts.get(llmFileCountKey(normalizedName, mentionType)) ?? 0;
+      activeLlmEvidenceProfiles ??= buildActiveLlmEvidenceProfiles(db);
+      const profiles = await activeLlmEvidenceProfiles;
+      return profiles.get(llmFileCountKey(normalizedName, mentionType))?.fileIds.size ?? 0;
+    },
+    hasOnlyWhatsAppConversationSliceEvidence: async (normalizedName, mentionType) => {
+      if (normalizationBackfillComplete) {
+        const rows = await db
+          .selectFrom("indexed_file_facts as fact")
+          .innerJoin("indexed_files as file", "file.id", "fact.indexed_file_id")
+          .select(["file.source", "file.file_type"])
+          .distinct()
+          .where("fact.fact_type", "=", "llm_extracted")
+          .where("fact.deleted_at", "is", null)
+          .where("fact.raw_mention_type", "=", mentionType)
+          .where("fact.normalized_subject_name", "=", normalizedName)
+          .execute();
+        return (
+          rows.length > 0 &&
+          rows.every(
+            (row) => row.source === WHATSAPP_CONNECTOR_TYPE && row.file_type === WHATSAPP_CONVERSATION_SLICE_FILE_TYPE,
+          )
+        );
+      }
+      activeLlmEvidenceProfiles ??= buildActiveLlmEvidenceProfiles(db);
+      const profiles = await activeLlmEvidenceProfiles;
+      return profiles.get(llmFileCountKey(normalizedName, mentionType))?.whatsappOnly ?? false;
     },
   };
 }

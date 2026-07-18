@@ -65,6 +65,12 @@ export interface WhatsAppBackfillCheckpointSet {
   status: WhatsAppBackfillCheckpointStatus;
 }
 
+export interface WhatsAppLiveStartSet {
+  groupJid: string;
+  effectiveAt: string;
+  messageId: number;
+}
+
 function toSliceInsert(input: ConversationSliceInsert): Insertable<ConversationSlicesTable> {
   return {
     id: input.id ?? randomUUID(),
@@ -298,6 +304,38 @@ export function createConversationSlicesRepository(db: Kysely<DB>) {
         .selectAll()
         .where("group_jid", "=", groupJid)
         .executeTakeFirst();
+    },
+
+    async recordLiveStartOnce(input: WhatsAppLiveStartSet): Promise<WhatsAppBackfillCheckpointRow> {
+      await db
+        .insertInto("whatsapp_backfill_checkpoints")
+        .values({
+          group_jid: input.groupJid,
+          last_fetched_key: null,
+          status: "in_progress",
+          live_start_effective_at: input.effectiveAt,
+          live_start_message_id: input.messageId,
+        })
+        .onConflict((oc) =>
+          oc.column("group_jid").doUpdateSet({
+            live_start_effective_at: sql`CASE
+              WHEN whatsapp_backfill_checkpoints.live_start_message_id IS NULL
+              THEN excluded.live_start_effective_at
+              ELSE whatsapp_backfill_checkpoints.live_start_effective_at
+            END`,
+            live_start_message_id: sql`COALESCE(
+              whatsapp_backfill_checkpoints.live_start_message_id,
+              excluded.live_start_message_id
+            )`,
+          }),
+        )
+        .execute();
+
+      return db
+        .selectFrom("whatsapp_backfill_checkpoints")
+        .selectAll()
+        .where("group_jid", "=", input.groupJid)
+        .executeTakeFirstOrThrow();
     },
 
     /**

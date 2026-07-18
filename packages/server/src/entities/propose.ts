@@ -82,6 +82,11 @@ export interface ProposeInput {
    * an unscoped incoming person proposal queues instead of linking by name.
    */
   strictPersonScopeGate?: boolean;
+  /**
+   * Restricts this proposal to corroborating an entity that can be linked
+   * confidently. New entities and review proposals are suppressed.
+   */
+  linkOnly?: boolean;
 }
 
 export type ProposeResult =
@@ -461,6 +466,7 @@ async function queueProposal(
   ranked: RankedCandidate[],
   reason: CandidateReason,
 ): Promise<ProposeResult> {
+  if (input.linkOnly) return { kind: "suppressed", reason: "link_only_no_confident_match" };
   const isSingle = ranked.length === 1;
   const candidateEntityId = isSingle ? ranked[0].entity.id : null;
   const candidateScore = isSingle ? ranked[0].score : null;
@@ -502,6 +508,7 @@ async function birthGateOrCreate(
   normalized: string,
   branch: "skipFuzzy" | "ranked_empty",
 ): Promise<ProposeResult> {
+  if (input.linkOnly) return { kind: "suppressed", reason: "link_only_no_confident_match" };
   if (deps.birthGateTypes?.has(input.entityType)) {
     const effectiveDryRun = (deps.birthGateDryRun ?? true) && !deps.birthGateLiveTypes?.has(input.entityType);
     if (effectiveDryRun) {
@@ -549,6 +556,7 @@ async function decideScopedPersonCandidates(
 ): Promise<ProposeResult> {
   if (!deps.domainsRepo) {
     if (input.email) {
+      if (input.linkOnly) return { kind: "suppressed", reason: "link_only_no_confident_match" };
       const { entity } = await persistEntity(deps, input);
       return { kind: "created", entity };
     }
@@ -567,6 +575,7 @@ async function decideScopedPersonCandidates(
       return linkNameDedupCandidate(deps, input, ranked[0].entity);
     }
     if (input.email && !input.strictPersonScopeGate && !input.queueInsteadOfCreate) {
+      if (input.linkOnly) return { kind: "suppressed", reason: "link_only_no_confident_match" };
       const { entity } = await persistEntity(deps, input);
       return { kind: "created", entity };
     }
@@ -584,6 +593,7 @@ async function decideScopedPersonCandidates(
       return linkNameDedupCandidate(deps, input, match.candidate.entity);
     }
     if (input.email && !input.queueInsteadOfCreate) {
+      if (input.linkOnly) return { kind: "suppressed", reason: "link_only_no_confident_match" };
       const { entity } = await persistEntity(deps, input);
       return { kind: "created", entity };
     }
@@ -599,6 +609,7 @@ async function decideScopedPersonCandidates(
     if (input.queueInsteadOfCreate) {
       return queueProposal(deps, input, normalized, ranked, ranked[0]?.reason ?? "exact-ambiguous");
     }
+    if (input.linkOnly) return { kind: "suppressed", reason: "link_only_no_confident_match" };
     const { entity } = await persistEntity(deps, input);
     return { kind: "created", entity };
   }

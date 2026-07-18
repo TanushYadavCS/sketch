@@ -391,6 +391,10 @@ export const handlers = [
     return HttpResponse.json({ rows: [], total: 0 });
   }),
 
+  http.get("/api/web-chat/conversations", () => {
+    return HttpResponse.json({ conversations: [] });
+  }),
+
   http.get("/api/auth/session", () => {
     return HttpResponse.json({ authenticated: false });
   }),

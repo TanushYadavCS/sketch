@@ -75,8 +75,8 @@ export function ChannelsPage() {
 
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
-      <h1 className="text-xl font-semibold text-foreground">Channels</h1>
-      <p className="mt-2 text-sm text-muted-foreground">Manage your messaging platform connections.</p>
+      <h1 className="text-[22px] font-medium text-foreground">Channels</h1>
+      <p className="mt-1 text-[13px] text-muted-foreground">Manage your messaging platform connections.</p>
       {!canManageChannels && (
         <p className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
           Channel settings are managed by admins.

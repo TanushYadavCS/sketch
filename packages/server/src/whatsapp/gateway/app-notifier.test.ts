@@ -10,7 +10,12 @@ describe("WhatsAppGatewayAppNotifier", () => {
       fetch,
     });
 
-    notifier.socketStateChanged({ ownerToken: "owner-1", generation: 7, socketState: "connected" });
+    notifier.socketStateChanged({
+      ownerToken: "owner-1",
+      generation: 7,
+      socketGeneration: 3,
+      socketState: "connected",
+    });
 
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
     expect(fetch).toHaveBeenCalledWith(
@@ -21,7 +26,7 @@ describe("WhatsAppGatewayAppNotifier", () => {
           Authorization: "Bearer gateway-secret",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ ownerToken: "owner-1", generation: 7, socketState: "connected" }),
+        body: JSON.stringify({ ownerToken: "owner-1", generation: 7, socketGeneration: 3, socketState: "connected" }),
       }),
     );
   });
@@ -37,7 +42,12 @@ describe("WhatsAppGatewayAppNotifier", () => {
     });
 
     expect(() =>
-      notifier.socketStateChanged({ ownerToken: "owner-1", generation: 7, socketState: "disconnected" }),
+      notifier.socketStateChanged({
+        ownerToken: "owner-1",
+        generation: 7,
+        socketGeneration: 3,
+        socketState: "disconnected",
+      }),
     ).not.toThrow();
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
   });

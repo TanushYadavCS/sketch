@@ -80,6 +80,12 @@ export const configSchema = z.object({
   WHATSAPP_SLICE_MAX_MESSAGES: z.coerce.number().int().min(1).default(50),
   WHATSAPP_SALIENCE_BATCH_LIMIT: z.coerce.number().int().min(1).default(50),
   WHATSAPP_EMISSION_REFRESH_DAYS: z.coerce.number().int().min(1).default(7),
+  WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES: z.coerce.number().int().min(1).default(500),
+  WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS: z.coerce.number().int().min(1).default(20_000),
+  WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES: z.coerce.number().int().min(1).default(1500),
+  WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX: z.coerce.number().int().min(0).default(200),
+  WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX: z.coerce.number().int().min(0).default(500),
+  WHATSAPP_BACKFILL_GRAPH_OPEN_FACTS_MAX: z.coerce.number().int().min(0).default(5000),
   WHATSAPP_WINDOW_KEEPALIVE_ENABLED: z
     .enum(["true", "false", "1", "0"])
     .default("false")

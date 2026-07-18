@@ -62,6 +62,7 @@ import { initTelemetry } from "./telemetry/setup";
 import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
 import { createDbAuthState } from "./whatsapp/auth-store";
+import { WhatsAppBackfillWorker } from "./whatsapp/backfill-worker";
 import { WhatsAppBot } from "./whatsapp/bot";
 import type { WhatsAppSocketFacade } from "./whatsapp/facade-contract";
 import { GatewayClientFacade } from "./whatsapp/gateway-client-facade";
@@ -363,7 +364,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     onMessage() {},
     onHistoryMessages() {},
   };
-  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, whatsappBot ?? gatewayInboundSource, logger);
+  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, whatsappBot ?? gatewayInboundSource, logger, {
+    getLeaseGeneration: () => inProcessWhatsAppLease?.generation ?? null,
+  });
   const watiWhatsApp =
     config.WHATSAPP_DM_PROVIDER === WHATSAPP_WATI_PROVIDER_ID
       ? createWatiWhatsAppProvider({
@@ -660,15 +663,32 @@ export async function createServer(config: Config, options?: CreateServerOptions
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
   });
+  const whatsappInboundConsumerRef: { current: WhatsAppInboundConsumer | null } = { current: null };
+  const whatsappBackfillWorker =
+    whatsapp instanceof GatewayClientFacade
+      ? new WhatsAppBackfillWorker({
+          db,
+          config,
+          logger,
+          facade: whatsapp,
+          handlers: whatsappHandlers,
+          shouldHandleInboundMessage: whatsappRuntime.shouldHandleInboundMessage,
+          onRequestAccepted: () => whatsappInboundConsumerRef.current?.wake(),
+        })
+      : null;
   const whatsappInboundConsumer = new WhatsAppInboundConsumer({
     db,
     logger,
     handlers: whatsappHandlers,
     shouldHandleInboundMessage: whatsappRuntime.shouldHandleInboundMessage,
     stagingDir: join(config.DATA_DIR, "wa-staging"),
+    backfillWindowDays: config.WHATSAPP_HISTORY_LOOKBACK_DAYS,
+    backfillWorker: whatsappBackfillWorker ?? undefined,
   });
+  whatsappInboundConsumerRef.current = whatsappInboundConsumer;
   await createWhatsAppInboundEventsRepository(db).resetDispatched();
   whatsappInboundConsumer.start();
+  whatsappBackfillWorker?.start();
   const whatsappInboundRetention = startWhatsAppInboundRetention({
     db,
     logger,
@@ -718,8 +738,17 @@ export async function createServer(config: Config, options?: CreateServerOptions
       ? {
           whatsappWakeToken: whatsapp.gatewayToken,
           onWhatsAppWake: () => whatsappInboundConsumer.wake(),
-          onWhatsAppSocketStateChange: (change: Parameters<WhatsAppGatewaySupervisor["handleSocketStateChange"]>[0]) =>
-            whatsappSupervisor?.handleSocketStateChange(change),
+          onWhatsAppSocketStateChange: async (
+            change: Parameters<WhatsAppGatewaySupervisor["handleSocketStateChange"]>[0],
+          ) => {
+            const accepted = whatsappSupervisor?.handleSocketStateChange(change) ?? false;
+            if (accepted && change.socketState === "connected") {
+              await whatsappBackfillWorker?.handleConnected({
+                leaseGeneration: change.generation,
+                socketGeneration: change.socketGeneration,
+              });
+            }
+          },
         }
       : {}),
   });
@@ -747,6 +776,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 11. Shutdown handle
   async function shutdown() {
     logger.info("Shutting down...");
+    await whatsappBackfillWorker?.stop();
     await whatsappInboundConsumer.stop();
     whatsappInboundRetention.stop();
     normalizationBackfill.stop();

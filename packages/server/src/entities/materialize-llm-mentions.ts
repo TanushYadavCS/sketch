@@ -29,17 +29,21 @@ export async function materializeLlmExtractedFact(
   if (fileCount < deps.llmPromotionThreshold) {
     return { kind: "deferred_below_threshold", reason: "below_promotion_threshold" };
   }
+  const whatsappOnlyEvidence =
+    (mentionType === "person" || mentionType === "company" || mentionType === "tool") &&
+    (await deps.hasOnlyWhatsAppConversationSliceEvidence(normalized, mentionType));
 
   if (mentionType === "person") {
-    return materializePersonFact(deps, fact);
+    return materializePersonFact(deps, fact, { linkOnly: whatsappOnlyEvidence });
   }
-  return materializeNonPersonLlmEntity(deps, fact, mentionType);
+  return materializeNonPersonLlmEntity(deps, fact, mentionType, { linkOnly: whatsappOnlyEvidence });
 }
 
 export async function materializeNonPersonLlmEntity(
   deps: MaterializeDeps,
   fact: IndexedFileFactRow,
   sourceType: NonPersonMentionType,
+  options: { linkOnly?: boolean } = {},
 ): Promise<MaterializeResult> {
   const raw = readJsonObject(fact.raw);
   const variations = Array.isArray(raw.variations) ? raw.variations.filter(isString) : [];
@@ -78,6 +82,7 @@ export async function materializeNonPersonLlmEntity(
       metadata: { origin: "ai" },
       provenanceTier: "inferred",
       evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
+      linkOnly: options.linkOnly,
     },
   );
 

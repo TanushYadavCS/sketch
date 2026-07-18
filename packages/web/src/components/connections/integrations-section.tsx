@@ -1,5 +1,6 @@
+import { QuietAddButton } from "@/components/quiet-add-button";
 import { api } from "@/lib/api";
-import { GearSixIcon, PlugIcon, PlusIcon, SpinnerGapIcon, TrashIcon } from "@phosphor-icons/react";
+import { GearSixIcon, PlugIcon, SpinnerGapIcon, TrashIcon } from "@phosphor-icons/react";
 import type { IntegrationConnection } from "@sketch/shared";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
@@ -70,10 +71,9 @@ export function IntegrationsSection({
           </div>
           <p className="mt-3 text-sm font-medium">No apps connected yet</p>
           <p className="mt-1.5 text-sm text-muted-foreground">Add an integration to connect your apps.</p>
-          <Button variant="ghost" size="sm" className="mt-4 gap-1.5 hover:bg-brand-accent/8" onClick={onAdd}>
-            <PlusIcon size={14} weight="bold" />
+          <QuietAddButton className="mt-4" onClick={onAdd}>
             Add integration
-          </Button>
+          </QuietAddButton>
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border border-border bg-card">
