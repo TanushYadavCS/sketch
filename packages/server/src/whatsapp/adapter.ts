@@ -28,6 +28,7 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
+import { createWhatsAppEventKey } from "../db/repositories/whatsapp-inbound-events";
 import type { DB } from "../db/schema";
 import { type Attachment, extensionToMime } from "../files";
 import { appendIntegrationConnectionLinks } from "../integrations/connection-links";
@@ -406,19 +407,22 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     botName?: string | null;
     connectionKey?: string | null;
   }) => {
-    const providerMessageId = params.sent?.providerMessageId;
+    const sent = params.sent;
+    const providerMessageId = sent?.providerMessageId;
     if (!providerMessageId) return;
-    const providerTimestamp = validWhatsAppProviderTimestamp(params.sent?.providerTimestamp);
+    const providerTimestamp = validWhatsAppProviderTimestamp(sent.providerTimestamp);
 
     await repos.conversations.insertMessage({
       conversationId: params.conversationId,
       providerMessageId,
+      eventKey: createWhatsAppEventKey(sent.providerConversationId, providerMessageId, true),
       senderJid: "bot",
       senderName: params.botName ?? "Sketch",
       isBot: true,
       addressedToSketch: false,
       text: params.text,
       providerTimestamp: providerTimestamp ?? null,
+      providerFromMe: true,
       source: "live",
       connectionKey: params.connectionKey ?? null,
     });

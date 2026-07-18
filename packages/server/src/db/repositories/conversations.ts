@@ -153,6 +153,17 @@ async function findExistingMessage(db: ConversationDb, data: ConversationMessage
       .executeTakeFirst();
     if (byEventKey) return byEventKey;
   }
+  if (data.source === "history" && data.providerFromMe && !data.isBot) {
+    const legacyOutbound = await db
+      .selectFrom("conversation_messages")
+      .selectAll()
+      .where("conversation_id", "=", data.conversationId)
+      .where("provider_message_id", "=", data.providerMessageId)
+      .where("is_bot", "=", 1)
+      .orderBy("id", "asc")
+      .executeTakeFirst();
+    if (legacyOutbound) return legacyOutbound;
+  }
   return legacyMessageUniqueWhere(db, data).executeTakeFirst();
 }
 
@@ -183,6 +194,20 @@ function whatsappPhoneSenderCandidates(phoneE164?: string | null): string[] {
 }
 
 export function createConversationRepository(db: ConversationDb) {
+  async function reconcileOutboundIdentity(
+    row: ConversationMessageRow,
+    data: ConversationMessageInsert,
+  ): Promise<ConversationMessageRow> {
+    if (!row.is_bot || !data.providerFromMe || !data.eventKey) return row;
+    await db
+      .updateTable("conversation_messages")
+      .set({ event_key: data.eventKey, provider_from_me: 1 })
+      .where("id", "=", row.id)
+      .where("event_key", "is", null)
+      .execute();
+    return db.selectFrom("conversation_messages").selectAll().where("id", "=", row.id).executeTakeFirstOrThrow();
+  }
+
   async function stampBackfillRangeIfUnowned(
     row: ConversationMessageRow,
     backfillRangeId: string | null | undefined,
@@ -202,7 +227,8 @@ export function createConversationRepository(db: ConversationDb) {
   ): Promise<{ row: StoredConversationMessage; inserted: boolean }> {
     const existing = await findExistingMessage(db, data);
     if (existing) {
-      return { row: toStored(await stampBackfillRangeIfUnowned(existing, data.backfillRangeId)), inserted: false };
+      const reconciled = await reconcileOutboundIdentity(existing, data);
+      return { row: toStored(await stampBackfillRangeIfUnowned(reconciled, data.backfillRangeId)), inserted: false };
     }
 
     const receivedAt = data.receivedAt ?? new Date().toISOString();
@@ -234,7 +260,8 @@ export function createConversationRepository(db: ConversationDb) {
     } catch {
       const row = await findExistingMessage(db, data);
       if (row) {
-        return { row: toStored(await stampBackfillRangeIfUnowned(row, data.backfillRangeId)), inserted: false };
+        const reconciled = await reconcileOutboundIdentity(row, data);
+        return { row: toStored(await stampBackfillRangeIfUnowned(reconciled, data.backfillRangeId)), inserted: false };
       }
       throw new Error("Failed to insert conversation message");
     }
