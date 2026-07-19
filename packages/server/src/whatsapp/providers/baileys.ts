@@ -7,6 +7,7 @@ import type { WhatsAppHistoryMessagesHandler, WhatsAppMessage, WhatsAppMessageHa
 import { createWhatsAppConnectionKey } from "../connection-key";
 import type { WhatsAppQuotedRef, WhatsAppSocketFacade } from "../facade-contract";
 import {
+  type WhatsAppHistoryMessagesHandler as ProviderWhatsAppHistoryMessagesHandler,
   WHATSAPP_BAILEYS_PROVIDER_ID,
   type WhatsAppCapabilities,
   type WhatsAppDmProvider,
@@ -62,6 +63,7 @@ export function createBaileysWhatsAppProviders(
   logger: Logger,
   options: { getLeaseGeneration?: () => number | null } = {},
 ): BaileysWhatsAppProviders {
+  let appendHistoryHandler: ProviderWhatsAppHistoryMessagesHandler | null = null;
   const connectionKey = (socketGeneration: number): string | null => {
     const leaseGeneration = options.getLeaseGeneration?.();
     return leaseGeneration === null || leaseGeneration === undefined
@@ -223,7 +225,7 @@ export function createBaileysWhatsAppProviders(
     inboundProvider: {
       id: WHATSAPP_BAILEYS_PROVIDER_ID,
       onMessage(handler) {
-        inboundSource.onMessage((message, metadata) => {
+        inboundSource.onMessage(async (message, metadata) => {
           const normalized = normalizeBaileysInboundMessage(message, connectionKey(metadata.socketGeneration));
           rememberMessage(
             whatsapp,
@@ -231,10 +233,15 @@ export function createBaileysWhatsAppProviders(
             normalized.providerMessageId,
             normalized.rawProviderPayload,
           );
-          return handler(normalized);
+          if (metadata.upsertType === "append") {
+            await appendHistoryHandler?.([normalized]);
+            return;
+          }
+          await handler(normalized);
         });
       },
       onHistoryMessages(handler) {
+        appendHistoryHandler = handler;
         inboundSource.onHistoryMessages((messages, metadata) => {
           const historyConnectionKey = connectionKey(metadata.socketGeneration);
           const normalized = messages.map((message) => normalizeBaileysInboundMessage(message, historyConnectionKey));
