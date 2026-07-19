@@ -191,6 +191,34 @@ describe("WhatsApp gateway Baileys absorption capture", () => {
     ]);
   });
 
+  it("stages media for promoted reconnect append messages", async () => {
+    const capture = new WhatsAppGatewayCapture({
+      db,
+      logger: createTestLogger(),
+      stagingDir: join(directory, "staging"),
+      maxFileBytes: 1024,
+      getSocket: () => null,
+      rememberMessage: () => undefined,
+      isInitialSyncGeneration: () => false,
+      wake: async () => undefined,
+      onPersistFailure: () => undefined,
+    });
+    const media = groupMessage("append-media", new Date().toISOString());
+    media.mediaType = "imageMessage";
+
+    await capture.captureMessage(media, { socketGeneration: 2, upsertType: "append" });
+
+    const row = await db.selectFrom("whatsapp_inbound_events").select(["kind", "envelope"]).executeTakeFirstOrThrow();
+    const envelope = JSON.parse(row.envelope) as {
+      message: { stagedMediaRef: unknown; mediaStagingError: string | null };
+    };
+    expect(row.kind).toBe("history_message");
+    expect(envelope.message).toMatchObject({
+      stagedMediaRef: null,
+      mediaStagingError: "WhatsApp socket unavailable for media staging",
+    });
+  });
+
   it("does not promote offline append traffic during a fresh pairing generation", async () => {
     const capture = new WhatsAppGatewayCapture({
       db,
