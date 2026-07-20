@@ -656,6 +656,34 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(file?.is_archived).toBe(0);
     });
 
+    it("clears scope members instead of archiving when a disabled group's roster has zero teammates", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "disabled zero teammates",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+      });
+      const groups = createWhatsAppGroupRepository(db);
+      await groups.refreshParticipants(seeded.groupJid, [
+        { participantJid: "15559990001@s.whatsapp.net", phoneE164: "+15559990001", adminRole: null },
+      ]);
+      await groups.setIndexEnabled(seeded.groupJid, false);
+
+      const summary = await reconcileWhatsAppGroupAcls({
+        db,
+        logger: createTestLogger(),
+        connectorConfigId: whatsappConfigId,
+      });
+      expect(summary.scopesArchived).toBe(0);
+      expect(summary.scopesRefreshed).toBe(1);
+      expect(await scopeEmails(seeded.scopeId)).toEqual([]);
+      const file = await db
+        .selectFrom("indexed_files")
+        .select("is_archived")
+        .where("id", "=", seeded.fileId)
+        .executeTakeFirst();
+      expect(file?.is_archived).toBe(0);
+    });
+
     it("archives files when the roster resolves to zero teammates", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "external only group",

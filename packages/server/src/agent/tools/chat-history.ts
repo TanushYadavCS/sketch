@@ -124,7 +124,15 @@ export function createSearchChatHistoryTool(deps: SketchMcpDeps) {
         .positive()
         .optional()
         .describe("Search messages with row id less than this. Defaults to the current trigger message id."),
-      limit: z.number().int().positive().max(100).optional().describe("Max matches to return. Default 20, max 100."),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(100)
+        .optional()
+        .describe(
+          "Max matches to return. Default 20, max 100. Results are relevance-ordered; hasMore signals truncation — narrow the query or raise limit rather than paging with row-id bounds.",
+        ),
       includeBotMessages: z.boolean().optional().describe("Include Sketch's persisted visible replies. Default false."),
     },
     async ({ query, scope, platform, afterMessageId, beforeMessageId, limit, includeBotMessages }) => {

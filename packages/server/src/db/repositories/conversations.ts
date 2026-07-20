@@ -103,6 +103,11 @@ interface RankedConversationMessageRow extends ConversationMessageRow {
  * subquery keeps this a single statement per dialect with no unbounded IN
  * parameter list. Rank stays internal: dialect rank scales differ (ts_rank
  * DESC vs bm25 ASC), so the contract is best-first ordering, not a number.
+ *
+ * hasMore is a truncation signal, not a pagination contract: results are
+ * relevance-ordered, and the row-id bounds cannot resume a rank order, so
+ * callers refine the query or raise the limit instead of paging. Matches the
+ * single-conversation searchMessages semantics.
  */
 export interface SearchMessagesAcrossConversationsOptions {
   query: string;

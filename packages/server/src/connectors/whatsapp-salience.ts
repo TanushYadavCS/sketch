@@ -682,9 +682,26 @@ export async function reconcileWhatsAppGroupAcls(options: {
       continue;
     }
 
+    /*
+     * Zero-teammate rosters: enabled groups archive (reversible — archival
+     * clears the slice link and re-emission relinks once a teammate returns).
+     * Disabled groups are excluded from re-emission, so archiving them would
+     * be permanent; clearing scope members instead revokes all access while
+     * keeping the retained files recoverable when membership returns.
+     */
     if (teammateEmails.length === 0) {
-      filesArchived += await connectorRepo.archiveFilesForAccessScopes([scope.id]);
-      scopesArchived += 1;
+      if (config.indexEnabled) {
+        filesArchived += await connectorRepo.archiveFilesForAccessScopes([scope.id]);
+        scopesArchived += 1;
+        continue;
+      }
+      await connectorRepo.upsertAccessScope(options.connectorConfigId, {
+        scopeType: "whatsapp_group",
+        providerScopeId: scope.providerScopeId,
+        label: sanitizeWhatsAppDisplayText(config.name) || "WhatsApp group",
+        memberEmails: [],
+      });
+      scopesRefreshed += 1;
       continue;
     }
 
