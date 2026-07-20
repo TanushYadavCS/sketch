@@ -342,6 +342,13 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         { platform: "slack", kind: "channel", providerConversationId: "C_REAL" },
         "general",
       );
+      await db
+        .insertInto("channels")
+        .values([
+          { id: "ch-mpim", slack_channel_id: "G_LEGACY", name: "mpdm-roopak--himanshu-1", type: "group" },
+          { id: "ch-real", slack_channel_id: "C_REAL", name: "general", type: "public_channel" },
+        ])
+        .execute();
 
       const migration = await import("../db/migrations/151-reclassify-mpim-conversations");
       await migration.up(db as unknown as Kysely<unknown>);
@@ -353,6 +360,12 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .execute();
       expect(kinds.find((row) => row.id === mpim.id)?.kind).toBe("mpim");
       expect(kinds.find((row) => row.id === channel.id)?.kind).toBe("channel");
+
+      const channelRows = await db.selectFrom("channels").select(["id", "type"]).orderBy("id").execute();
+      expect(channelRows).toEqual([
+        { id: "ch-mpim", type: "mpim" },
+        { id: "ch-real", type: "public_channel" },
+      ]);
     });
 
     it("reactivates a disabled singleton so indexing survives owner removal", async () => {
