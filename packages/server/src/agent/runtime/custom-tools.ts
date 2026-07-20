@@ -192,6 +192,7 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     logger: params.logger,
     conversationRepo: params.conversationRepo,
     conversationContext: params.conversationContext,
+    privateAudienceUserId: params.privateAudienceUserId,
     agentInstructions: params.agentInstructions,
     agentAllowedTools: params.agentAllowedTools,
     agentOutputWriter: params.agentOutputWriter,

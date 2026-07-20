@@ -725,6 +725,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           sendDm,
           conversationRepo: repos.conversations,
           conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
+          privateAudienceUserId: user.id,
         });
 
         const finalText = appendIntegrationConnectionLinks(

@@ -363,6 +363,7 @@ export interface RunAgentParams {
     currentMessageId?: number;
     providerThreadId?: string | null;
   };
+  privateAudienceUserId?: string;
   agentRuntime?: AgentRuntimeKind;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
   agentRuntimeProvider?: AgentRuntimeProvider;
@@ -1220,6 +1221,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     logger,
     conversationRepo: params.conversationRepo,
     conversationContext: params.conversationContext,
+    privateAudienceUserId: params.privateAudienceUserId,
     agentInstructions: params.agentInstructions,
     agentAllowedTools: params.agentAllowedTools,
     agentOutputWriter: params.agentOutputWriter,
