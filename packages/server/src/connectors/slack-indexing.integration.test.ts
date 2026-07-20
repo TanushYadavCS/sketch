@@ -22,7 +22,7 @@ function fakeFacade(overrides: Partial<SlackIndexingFacade> = {}): SlackIndexing
     isConfigured: async () => true,
     listMemberChannels: async () => [{ id: "C1", name: "general" }],
     listChannelMembers: async () => ["U0TEAM"],
-    getUserInfo: async () => ({ name: "priya", realName: "Priya", email: "priya@example.com" }),
+    getUserInfo: async () => ({ name: "priya", realName: "Priya", email: "priya@example.com", isBot: false }),
     ...overrides,
   };
 }
@@ -154,8 +154,8 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         listChannelMembers: async () => ["U0TEAM", "U0CRM", "U0EXT"],
         getUserInfo: async (userId: string) =>
           userId === "U0CRM"
-            ? { name: "asha", realName: "Asha M", email: "Asha@Client.com" }
-            : { name: "guest", realName: "Guest Person", email: null },
+            ? { name: "asha", realName: "Asha M", email: "Asha@Client.com", isBot: false }
+            : { name: "guest", realName: "Guest Person", email: null, isBot: false },
       });
 
       const { resolveSlackChannelRoster } = await import("../slack/identity-resolution");
@@ -171,6 +171,39 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         { slackUserId: "U0TEAM", displayName: "Roopak", kind: "teammate", email: "roopak@example.com" },
         { slackUserId: "U0CRM", displayName: "Asha Mehta", kind: "entity", email: "Asha@Client.com" },
         { slackUserId: "U0EXT", displayName: "Guest Person", kind: "external", email: null },
+      ]);
+    });
+
+    it("excludes bot members from the roster, including a bot with a stray users row", async () => {
+      await db
+        .insertInto("users")
+        .values({
+          id: "user-bot",
+          name: "sketchdev",
+          auth_role: "member",
+          slack_user_id: "U0BOT",
+        })
+        .execute();
+
+      const facade = fakeFacade({
+        listChannelMembers: async () => ["U0TEAM", "U0BOT", "U0EXTBOT"],
+        getUserInfo: async (userId: string) =>
+          userId === "U0TEAM"
+            ? { name: "roopak", realName: "Roopak", email: "roopak@example.com", isBot: false }
+            : { name: "botsy", realName: "Botsy", email: null, isBot: true },
+      });
+
+      const { resolveSlackChannelRoster } = await import("../slack/identity-resolution");
+      const roster = await resolveSlackChannelRoster({
+        db,
+        facade,
+        channelId: "C1",
+        channelName: "general",
+        logger,
+      });
+
+      expect(roster.participants).toEqual([
+        { slackUserId: "U0TEAM", displayName: "Roopak", kind: "teammate", email: "roopak@example.com" },
       ]);
     });
 

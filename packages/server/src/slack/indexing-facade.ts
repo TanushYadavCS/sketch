@@ -13,6 +13,7 @@ export interface SlackIndexingUser {
   name: string;
   realName: string;
   email: string | null;
+  isBot: boolean;
 }
 
 /**
@@ -65,6 +66,7 @@ export function createSlackIndexingFacade(options: CreateSlackIndexingFacadeOpti
       name: result.user?.name ?? "unknown",
       realName: result.user?.real_name ?? result.user?.name ?? "unknown",
       email: result.user?.profile?.email ?? null,
+      isBot: result.user?.is_bot === true || userId === "USLACKBOT",
     };
   }
 
@@ -114,9 +116,9 @@ export function createSlackIndexingFacade(options: CreateSlackIndexingFacadeOpti
       if (options.userCache) {
         const cached = await options.userCache.resolve(userId, async (id) => {
           const info = await fetchUserInfo(id);
-          return { name: info.name, realName: info.realName, email: info.email, tz: null };
+          return { name: info.name, realName: info.realName, email: info.email, tz: null, isBot: info.isBot };
         });
-        return { name: cached.name, realName: cached.realName, email: cached.email };
+        return { name: cached.name, realName: cached.realName, email: cached.email, isBot: cached.isBot };
       }
       return fetchUserInfo(userId);
     },

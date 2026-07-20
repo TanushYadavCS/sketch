@@ -575,6 +575,7 @@ export async function buildMaterializeDeps(
     };
   }
 
+  const chatSliceFileCache = new Map<string, boolean>();
   const fileToConnector = new Map<string, string>();
   const connectorOwners = new Map<string, string>();
   const allFiles = await db.selectFrom("indexed_files").select(["id", "connector_config_id"]).execute();
@@ -610,6 +611,18 @@ export async function buildMaterializeDeps(
         .where("id", "=", indexedFileId)
         .executeTakeFirst()
         .then((row) => row ?? null),
+    isChatConversationSliceFile: async (indexedFileId: string) => {
+      const cached = chatSliceFileCache.get(indexedFileId);
+      if (cached !== undefined) return cached;
+      const row = await db
+        .selectFrom("indexed_files")
+        .select(["source", "file_type"])
+        .where("id", "=", indexedFileId)
+        .executeTakeFirst();
+      const isChatSlice = row ? isChatConversationSliceEvidence(row.source, row.file_type) : false;
+      chatSliceFileCache.set(indexedFileId, isChatSlice);
+      return isChatSlice;
+    },
     /**
      * Resolves the owning user for a fact, falling back to the connector's
      * owner. Only ids present in `users` are returned: legacy auth wrote

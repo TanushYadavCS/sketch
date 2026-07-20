@@ -73,6 +73,13 @@ async function findEntityByEmail(db: Kysely<DB>, email: string): Promise<{ name:
  * Slack profile display name. Names are never invented and unresolved
  * members keep their real Slack profile name — there is no phone-style
  * masking regime for Slack.
+ *
+ * Bot members are excluded entirely: the indexing bot is a member of every
+ * indexed channel by construction, and listing bots as participants feeds
+ * their names into salience and downstream entity extraction as if they were
+ * people. The profile lookup runs before the teammate match so a bot with a
+ * stray users row is still filtered; when the lookup fails the member is kept
+ * (fail-open to inclusion, mirroring the pre-existing unknown fallback).
  */
 export async function resolveSlackChannelRoster(options: ResolveSlackRosterOptions): Promise<SlackRosterSnapshot> {
   const { db, facade, channelId, channelName, logger } = options;
@@ -81,6 +88,14 @@ export async function resolveSlackChannelRoster(options: ResolveSlackRosterOptio
 
   const participants: SlackRosterParticipant[] = [];
   for (const slackUserId of memberIds) {
+    let profile: { realName: string; email: string | null; isBot: boolean } | null = null;
+    try {
+      profile = await facade.getUserInfo(slackUserId);
+    } catch (err) {
+      logger.warn({ err, channelId }, "Slack roster user lookup failed");
+    }
+    if (profile?.isBot) continue;
+
     const teammate = teammates.get(slackUserId);
     if (teammate) {
       participants.push({
@@ -92,11 +107,7 @@ export async function resolveSlackChannelRoster(options: ResolveSlackRosterOptio
       continue;
     }
 
-    let profile: { realName: string; email: string | null };
-    try {
-      profile = await facade.getUserInfo(slackUserId);
-    } catch (err) {
-      logger.warn({ err, channelId }, "Slack roster user lookup failed");
+    if (!profile) {
       participants.push({ slackUserId, displayName: "unknown", kind: "external", email: null });
       continue;
     }

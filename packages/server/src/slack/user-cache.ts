@@ -11,6 +11,7 @@ export interface CachedUser {
   realName: string;
   email: string | null;
   tz: string | null;
+  isBot: boolean;
 }
 
 export class UserCache {
