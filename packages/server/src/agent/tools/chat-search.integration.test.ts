@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { reconcileWhatsAppGroupAcls } from "../../connectors/whatsapp-salience";
 import { createConnectorRepository } from "../../db/repositories/connectors";
 import { createConversationSlicesRepository } from "../../db/repositories/conversation-slices";
 import { createConversationRepository } from "../../db/repositories/conversations";
 import { createUserRepository } from "../../db/repositories/users";
+import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-groups";
 import type { DB } from "../../db/schema";
 import { createTestDb, createTestLogger, createTestPgDb } from "../../test-utils";
-import { reconcileWhatsAppGroupAcls } from "../../connectors/whatsapp-salience";
-import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-groups";
 import { stableWhatsAppParticipantJidRef } from "../../whatsapp/identity-resolution";
 import { handleAllChatsSearch } from "./chat-search";
 import type { SketchMcpDeps } from "./types";
@@ -222,10 +222,7 @@ async function seedWhatsAppGroup(
   };
 }
 
-function depsFor(
-  db: Kysely<DB>,
-  overrides: Partial<SketchMcpDeps> = {},
-): SketchMcpDeps {
+function depsFor(db: Kysely<DB>, overrides: Partial<SketchMcpDeps> = {}): SketchMcpDeps {
   return {
     db,
     currentUserId: USER_ID,
@@ -563,9 +560,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(2);
-      const slackHit = outcome.body.messages.find(
-        (m) => (m.conversation as { platform: string }).platform === "slack",
-      );
+      const slackHit = outcome.body.messages.find((m) => (m.conversation as { platform: string }).platform === "slack");
       const whatsappHit = outcome.body.messages.find(
         (m) => (m.conversation as { platform: string }).platform === "whatsapp",
       );
