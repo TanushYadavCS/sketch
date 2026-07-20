@@ -29,6 +29,18 @@ export interface OperationalAlertTransportResult {
   providerMessageId: string | null;
 }
 
+export class OperationalAlertRetryableError extends Error {
+  readonly retryIndefinitely = true;
+
+  constructor(
+    message: string,
+    readonly providerCode: string,
+  ) {
+    super(message);
+    this.name = "OperationalAlertRetryableError";
+  }
+}
+
 export interface OperationalAlertRecipient {
   id: string;
   name: string;

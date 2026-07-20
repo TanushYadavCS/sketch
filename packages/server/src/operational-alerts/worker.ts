@@ -21,6 +21,11 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown delivery error";
 }
 
+function shouldRetryIndefinitely(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("retryIndefinitely" in error)) return false;
+  return (error as { retryIndefinitely?: unknown }).retryIndefinitely === true;
+}
+
 function destinationForAdmin(
   channel: "whatsapp" | "slack",
   admin: { whatsapp_number: string | null; slack_user_id: string | null },
@@ -128,7 +133,7 @@ export class OperationalAlertWorker {
       const delivery = await this.params.alerts.claimNext(nowIso);
       if (!delivery) break;
       const alert = await this.params.alerts.getAlert(delivery.alert_id);
-      if (!alert || alert.state !== "open") {
+      if (!alert || (alert.state !== "open" && !(alert.state === "resolved" && alert.opened_at))) {
         await this.params.alerts.markSkipped(delivery.id, "alert_resolved", "Alert is no longer open", nowIso);
         continue;
       }
@@ -186,6 +191,7 @@ export class OperationalAlertWorker {
           message: errorMessage(error),
           nextAttemptAt: new Date(now.getTime() + delayMs).toISOString(),
           now: nowIso,
+          retryIndefinitely: shouldRetryIndefinitely(error),
         });
         this.params.logger.warn(
           { alertId: alert.id, alertType: alert.type, deliveryId: delivery.id, attempts, error },

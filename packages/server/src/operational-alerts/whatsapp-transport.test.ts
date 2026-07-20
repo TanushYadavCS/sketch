@@ -98,4 +98,26 @@ describe("WhatsApp operational alert transport", () => {
     });
     expect(deps.whatsapp.sendTemplate).toHaveBeenCalledTimes(1);
   });
+
+  it("rejects a null direct-message result as retryable", async () => {
+    const deps = createDeps({ receivedAt: "2026-07-17T09:00:00.000Z", providerTimestamp: null });
+    vi.mocked(deps.whatsapp.sendText).mockResolvedValue(null);
+    const transport = createWhatsAppOperationalAlertTransport(deps);
+
+    await expect(transport.send(sendInput(new Date("2026-07-17T10:00:00.000Z")))).rejects.toMatchObject({
+      providerCode: "transport_unavailable",
+      retryIndefinitely: true,
+    });
+  });
+
+  it("rejects a null template result as retryable", async () => {
+    const deps = createDeps({ receivedAt: "2026-07-15T09:00:00.000Z", providerTimestamp: null });
+    vi.mocked(deps.whatsapp.sendTemplate).mockResolvedValue(null);
+    const transport = createWhatsAppOperationalAlertTransport(deps);
+
+    await expect(transport.send(sendInput(new Date("2026-07-17T10:00:00.000Z")))).rejects.toMatchObject({
+      providerCode: "transport_unavailable",
+      retryIndefinitely: true,
+    });
+  });
 });

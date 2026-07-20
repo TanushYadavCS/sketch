@@ -110,12 +110,28 @@ export function createOperationalAlertsRepository(db: Kysely<DB>) {
           .where("last_observed_at", "<=", resolvedAt)
           .executeTakeFirst();
         if (Number(result.numUpdatedRows) !== 1) return;
-        await trx
-          .updateTable("operational_alert_deliveries")
-          .set({ state: "skipped", last_error_code: "alert_resolved", updated_at: resolvedAt })
-          .where("alert_id", "=", active.id)
-          .where("state", "in", ["pending", "retry"])
-          .execute();
+        if (active.state === "open") {
+          await trx
+            .updateTable("operational_alert_deliveries")
+            .set({
+              state: "retry",
+              attempts: 0,
+              next_attempt_at: resolvedAt,
+              claim_token: null,
+              claimed_at: null,
+              updated_at: resolvedAt,
+            })
+            .where("alert_id", "=", active.id)
+            .where("state", "in", ["pending", "retry", "dead"])
+            .execute();
+        } else {
+          await trx
+            .updateTable("operational_alert_deliveries")
+            .set({ state: "skipped", last_error_code: "alert_resolved", updated_at: resolvedAt })
+            .where("alert_id", "=", active.id)
+            .where("state", "in", ["pending", "retry"])
+            .execute();
+        }
       });
     },
 
@@ -264,8 +280,9 @@ export function createOperationalAlertsRepository(db: Kysely<DB>) {
       message: string;
       nextAttemptAt: string;
       now: string;
+      retryIndefinitely?: boolean;
     }): Promise<void> {
-      const state = params.attempts >= OPERATIONAL_ALERT_MAX_ATTEMPTS ? "dead" : "retry";
+      const state = !params.retryIndefinitely && params.attempts >= OPERATIONAL_ALERT_MAX_ATTEMPTS ? "dead" : "retry";
       await db
         .updateTable("operational_alert_deliveries")
         .set({

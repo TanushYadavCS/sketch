@@ -7,7 +7,7 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { createOperationalAlertDefinitions } from "./definitions";
 import { BAILEYS_DISCONNECT_GRACE_MS, createOperationalAlertService } from "./service";
-import { BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY } from "./types";
+import { BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY, OperationalAlertRetryableError } from "./types";
 import { OperationalAlertWorker } from "./worker";
 
 describe("operational alerts", () => {
@@ -180,6 +180,72 @@ describe("operational alerts", () => {
     const active = await alerts.findActive(BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY);
     await expect(alerts.listDeliveries(active?.id ?? "missing")).resolves.toEqual([
       expect.objectContaining({ state: "retry", attempts: 1, last_error_code: "503" }),
+    ]);
+  });
+
+  it("keeps an opened disconnect alert retryable through a long outage and delivers it after recovery", async () => {
+    let now = new Date("2026-07-17T10:00:00.000Z");
+    const alerts = createOperationalAlertsRepository(db);
+    const users = createUserRepository(db);
+    const settings = createSettingsRepository(db);
+    await settings.ensure();
+    await users.create({
+      id: "admin-1",
+      name: "Admin",
+      email: "admin@example.com",
+      authRole: "admin",
+      whatsappNumber: "+919876543210",
+    });
+    const service = createOperationalAlertService({ alerts, now: () => now });
+    await service.observeBaileysSocketState({
+      ownerToken: "owner",
+      generation: 1,
+      socketGeneration: 1,
+      socketState: "logged-out",
+      occurredAt: now.toISOString(),
+      statusCode: 401,
+    });
+    const transport = {
+      send: vi
+        .fn()
+        .mockRejectedValue(new OperationalAlertRetryableError("socket unavailable", "transport_unavailable")),
+    };
+    const worker = new OperationalAlertWorker({
+      alerts,
+      users,
+      settings,
+      definitions: createOperationalAlertDefinitions({ isBaileysGatewayDisconnected: () => true }),
+      transports: { whatsapp: transport },
+      logger: createTestLogger(),
+      now: () => now,
+    });
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await worker.drain();
+      now = new Date(now.getTime() + 60 * 60_000);
+    }
+
+    const active = await alerts.findActive(BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY);
+    await expect(alerts.listDeliveries(active?.id ?? "missing")).resolves.toEqual([
+      expect.objectContaining({ state: "retry", attempts: 6, last_error_code: "transport_unavailable" }),
+    ]);
+
+    await service.observeBaileysSocketState({
+      ownerToken: "owner",
+      generation: 2,
+      socketGeneration: 1,
+      socketState: "connected",
+      occurredAt: now.toISOString(),
+    });
+    transport.send.mockResolvedValue({ providerMessageId: "recovery-message" });
+    await worker.drain();
+    await worker.stop();
+
+    expect(transport.send).toHaveBeenLastCalledWith(
+      expect.objectContaining({ directMessage: expect.stringContaining(`recovered at ${now.toISOString()}`) }),
+    );
+    await expect(alerts.listDeliveries(active?.id ?? "missing")).resolves.toEqual([
+      expect.objectContaining({ state: "sent", attempts: 0, provider_message_id: "recovery-message" }),
     ]);
   });
 });

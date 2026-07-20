@@ -23,7 +23,9 @@ function renderBaileysAlert(alert: OperationalAlertRow, context: { orgName: stri
     .filter(Boolean)
     .join(", ");
   const diagnosticSuffix = diagnostic ? ` (${diagnostic})` : "";
-  const directMessage = `Operational alert for ${context.orgName}: the Baileys WhatsApp connection ${status} at ${payload.occurredAt}${diagnosticSuffix}. WhatsApp messages may be delayed until an admin reconnects it in Settings > Channels.`;
+  const directMessage = alert.resolved_at
+    ? `Operational alert for ${context.orgName}: the Baileys WhatsApp connection ${status} at ${payload.occurredAt}${diagnosticSuffix} and recovered at ${alert.resolved_at}. This notification was delayed until after the connection recovered.`
+    : `Operational alert for ${context.orgName}: the Baileys WhatsApp connection ${status} at ${payload.occurredAt}${diagnosticSuffix}. WhatsApp messages may be delayed until an admin reconnects it in Settings > Channels.`;
   return {
     directMessage,
     templateSummary: directMessage,
