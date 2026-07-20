@@ -1,4 +1,5 @@
-import type { DailyBrief as DailyBriefData, DailyBriefItem } from "@/lib/api";
+import type { DailyBrief as DailyBriefData, DailyBriefItem, TaskStatus } from "@/lib/api";
+import { useEntityUiOptional } from "@/lib/entity-ui";
 import { SparkleIcon } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import { BriefDetailDrawer } from "./brief-detail-drawer";
@@ -63,6 +64,8 @@ export function DailyBrief({
   enabledSections,
   calendarConnected,
   onOpenChat,
+  onUpdateTaskStatus,
+  updatingTaskId,
 }: {
   brief: DailyBriefData;
   running: boolean;
@@ -71,15 +74,36 @@ export function DailyBrief({
   /** Whether the reader has a calendar connected — drives the meetings empty state. */
   calendarConnected?: boolean;
   onOpenChat: (prompt: string) => void;
+  /** Status-update handler owned by Home; passed through to the detail drawer. */
+  onUpdateTaskStatus?: (taskId: string, status: TaskStatus) => void;
+  /** taskId currently being updated, to disable its control; null when idle. */
+  updatingTaskId?: string | null;
 }) {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const entityUi = useEntityUiOptional();
   const nextMeetingId = useNextMeetingId(brief.sections.meetings ?? []);
+
+  /**
+   * Active-project rows deep-link into project detail — the shared entity
+   * drawer — via the item's first entity reference. This is the daily path
+   * into a project. Every other section opens the brief detail sheet.
+   */
+  const openItem = (item: DailyBriefItem) => {
+    if (item.sectionKey === "active_projects" && entityUi) {
+      const projectEntityId = item.knowledgeRefs.entityIds[0];
+      if (projectEntityId) {
+        entityUi.openEntity(projectEntityId);
+        return;
+      }
+    }
+    setSelectedItemId(item.id);
+  };
   const subtitle =
     brief.masthead?.summary ?? brief.masthead?.title ?? "Today across your to-dos, customers, and projects.";
   const visibleSections = enabledSections
     ? BRIEF_SECTIONS.filter((section) => enabledSections.includes(section.key))
     : BRIEF_SECTIONS;
-  const allItems = visibleSections.flatMap((section) => brief.sections[section.key]);
+  const allItems = visibleSections.flatMap((section) => brief.sections[section.key] ?? []);
   const selectedItem = allItems.find((item) => item.id === selectedItemId) ?? null;
 
   return (
@@ -102,7 +126,7 @@ export function DailyBrief({
 
       <div className="mt-8 flex flex-col gap-8">
         {visibleSections.map((section) => {
-          const items = brief.sections[section.key];
+          const items = brief.sections[section.key] ?? [];
           if (section.key === "meetings") {
             return (
               <BriefSection key={section.key} label={section.label}>
@@ -138,7 +162,7 @@ export function DailyBrief({
                       key={item.id}
                       item={item}
                       isLast={index === items.length - 1}
-                      onOpenDetail={() => setSelectedItemId(item.id)}
+                      onOpenDetail={() => openItem(item)}
                       onOpenChat={onOpenChat}
                     />
                   ))}
@@ -160,6 +184,8 @@ export function DailyBrief({
         timezone={brief.timezone}
         onClose={() => setSelectedItemId(null)}
         onOpenChat={onOpenChat}
+        onUpdateTaskStatus={onUpdateTaskStatus}
+        updatingTaskId={updatingTaskId}
       />
     </div>
   );

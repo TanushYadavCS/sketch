@@ -27,6 +27,7 @@ import {
   createPausedQueueManager,
   createService,
   createWritingService,
+  dmSource,
   emptySummaryPayload,
   perSourceSelfModel,
   runtimeContextFromUserMessage,
@@ -421,6 +422,88 @@ describe("AgentRunService", () => {
       ]),
     ).rejects.toThrow("Slack channel is not available for this user");
     expect(isUserInChannel).toHaveBeenCalledWith("C_PRIVATE", "U_AGENT");
+  });
+
+  it("resolves persisted Slack and WhatsApp DM sources only for the configured user", async () => {
+    const users = createUserRepository(db);
+    const alice = await users.create({
+      name: "Alice",
+      email: "alice@example.com",
+      slackUserId: "U_ALICE",
+      whatsappNumber: "+15551234567",
+    });
+    const bob = await users.create({
+      name: "Bob",
+      email: "bob@example.com",
+      slackUserId: "U_BOB",
+      whatsappNumber: "+15557654321",
+    });
+    const conversations = createConversationRepository(db);
+    const aliceSlack = await conversations.getOrCreate(
+      { platform: "slack", kind: "dm", providerConversationId: "D_ALICE" },
+      "Alice",
+    );
+    const aliceWhatsApp = await conversations.getOrCreate(
+      { platform: "whatsapp", kind: "dm", providerConversationId: "dm:+15551234567" },
+      "+15551234567",
+    );
+    const bobSlack = await conversations.getOrCreate(
+      { platform: "slack", kind: "dm", providerConversationId: "D_BOB" },
+      "Bob",
+    );
+    await conversations.insertMessage({
+      conversationId: aliceSlack.id,
+      providerMessageId: "alice-slack-message",
+      senderJid: "U_ALICE",
+      senderName: "Alice",
+      senderUserId: alice.id,
+      text: "Alice Slack DM",
+      receivedAt: "2026-06-15T07:00:00.000Z",
+    });
+    await conversations.insertMessage({
+      conversationId: aliceWhatsApp.id,
+      providerMessageId: "alice-whatsapp-message",
+      senderJid: "15551234567@s.whatsapp.net",
+      senderName: "Alice",
+      senderUserId: alice.id,
+      text: "Alice WhatsApp DM",
+      receivedAt: "2026-06-15T07:05:00.000Z",
+    });
+    await conversations.insertMessage({
+      conversationId: bobSlack.id,
+      providerMessageId: "bob-slack-message",
+      senderJid: "U_BOB",
+      senderName: "Bob",
+      senderUserId: bob.id,
+      text: "Bob Slack DM",
+      receivedAt: "2026-06-15T07:10:00.000Z",
+    });
+    const service = createService(db, []);
+
+    const updated = await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, alice.id, {
+      sources: [dmSource("slack", aliceSlack.id), dmSource("whatsapp", aliceWhatsApp.id)],
+    });
+
+    expect(updated?.sources).toEqual([
+      {
+        platform: "slack",
+        targetType: "dm",
+        targetId: String(aliceSlack.id),
+        label: "Slack DM with Alice",
+      },
+      {
+        platform: "whatsapp",
+        targetType: "dm",
+        targetId: String(aliceWhatsApp.id),
+        label: "WhatsApp DM with Alice",
+      },
+    ]);
+    expect(updated?.availableSources).toEqual(updated?.sources);
+    expect(JSON.stringify(updated)).not.toContain("15551234567");
+
+    await expect(
+      service.resolveSourceConfigsForUser(CONVERSATION_SUMMARY_AGENT_KEY, alice.id, [dmSource("slack", bobSlack.id)]),
+    ).rejects.toThrow("DM source is not available for this user");
   });
 
   it("normalizes delivery models with defaultRoute and full-key legacy matching", async () => {

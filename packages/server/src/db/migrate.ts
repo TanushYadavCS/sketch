@@ -149,8 +149,11 @@ import * as m146 from "./migrations/146-whatsapp-history-top-up";
 import * as m147 from "./migrations/147-whatsapp-backfill-graph-admission";
 import * as m148 from "./migrations/148-whatsapp-pending-slices-index";
 import * as m149 from "./migrations/149-whatsapp-backfill-lifecycle-durability";
-import * as m150 from "./migrations/150-slack-conversation-indexing";
-import * as m151 from "./migrations/151-reclassify-mpim-conversations";
+import * as m150 from "./migrations/150-task-durability-steel-thread";
+import * as m151 from "./migrations/151-agent-output-item-task-links";
+import * as m152 from "./migrations/152-reseed-combined-durability-routes";
+import * as m153 from "./migrations/153-slack-conversation-indexing";
+import * as m154 from "./migrations/154-reclassify-mpim-conversations";
 import type { DB } from "./schema";
 
 /**
@@ -309,8 +312,11 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "147-whatsapp-backfill-graph-admission": m147,
           "148-whatsapp-pending-slices-index": m148,
           "149-whatsapp-backfill-lifecycle-durability": m149,
-          "150-slack-conversation-indexing": m150,
-          "151-reclassify-mpim-conversations": m151,
+          "150-task-durability-steel-thread": m150,
+          "151-agent-output-item-task-links": m151,
+          "152-reseed-combined-durability-routes": m152,
+          "153-slack-conversation-indexing": m153,
+          "154-reclassify-mpim-conversations": m154,
         };
       },
     },

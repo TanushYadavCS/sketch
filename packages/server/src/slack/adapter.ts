@@ -24,6 +24,10 @@ import {
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
+import {
+  type FollowupReviewCommandHandler,
+  createFollowupReviewCommandHandler,
+} from "../agents/followup-review-command";
 import { appendAutomationBuilderLinks } from "../automation/artifact-links";
 import {
   REASONING_TEXT_OPTIONS,
@@ -153,6 +157,7 @@ export interface SlackAdapterDeps {
     channelId: string;
     messageRef: string;
   }>;
+  followupReviewHandler?: FollowupReviewCommandHandler;
 }
 
 export async function validateSlackTokens(botToken: string, appToken?: string) {
@@ -272,6 +277,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
   } = deps;
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
+  const handleFollowupReviewCommand = deps.followupReviewHandler ?? createFollowupReviewCommandHandler(db);
 
   const mode = config.SLACK_MODE ?? "socket";
   const slackBot = new SlackBot({
@@ -531,6 +537,23 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
       const command = parseSketchCommand(message.text);
       const dmConversation = await repos.conversations.getOrCreate(slackConversationRefForMessage(message), user.name);
+      const followupReview = await handleFollowupReviewCommand({
+        text: message.text,
+        userId: user.id,
+        surface: "slack",
+      });
+      if (followupReview.handled) {
+        await captureSlackMessage({
+          message,
+          senderName: user.name,
+          senderUserId: user.id,
+          addressedToSketch: true,
+          attachments: [],
+          displayName: user.name,
+        });
+        await replyToUser(followupReview.message);
+        return;
+      }
       if (command === "new_session") {
         await archiveRuntimeSessions(db, user.id);
         await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
@@ -785,6 +808,16 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         attachments,
         displayName: channel.name,
       });
+      if (sender.senderUserId) {
+        const followupReview = await handleFollowupReviewCommand({
+          text: message.text,
+          userId: sender.senderUserId,
+          surface: "slack",
+        });
+        if (followupReview.handled) {
+          await slackBot.postThreadReply(message.channelId, message.ts, followupReview.message);
+        }
+      }
     } catch (err) {
       logger.warn({ err, channelId: message.channelId }, "Failed to capture passive Slack channel message");
     }
@@ -813,6 +846,17 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         attachments,
         displayName: channel.name,
       });
+      if (sender.senderUserId) {
+        const followupReview = await handleFollowupReviewCommand({
+          text: message.text,
+          userId: sender.senderUserId,
+          surface: "slack",
+        });
+        if (followupReview.handled) {
+          await slackBot.postThreadReply(message.channelId, message.threadTs, followupReview.message);
+          return;
+        }
+      }
 
       logger.debug(
         { channelId: message.channelId, threadTs: message.threadTs, user: sender.senderName },
@@ -865,6 +909,23 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           slackConversationRefForMessage(message),
           channel.name,
         );
+        const followupReview = await handleFollowupReviewCommand({
+          text: message.text,
+          userId: user.id,
+          surface: "slack",
+        });
+        if (followupReview.handled) {
+          await captureSlackMessage({
+            message,
+            senderName: user.name,
+            senderUserId: user.id,
+            addressedToSketch: true,
+            attachments: [],
+            displayName: channel.name,
+          });
+          await slackBot.postThreadReply(message.channelId, threadTs, followupReview.message);
+          return;
+        }
         if (command === "new_session") {
           await archiveRuntimeSessions(db, channelWorkspaceKey, threadTs);
           await repos.conversations.advanceCursorToCurrentMax({

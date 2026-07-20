@@ -37,6 +37,7 @@ import { collectWhatsAppGroupParticipants, toParticipantInputs } from "./group-p
 import type { WhatsAppGroupMetadata as ProviderWhatsAppGroupMetadata } from "./provider";
 
 const ECHO_TTL_MS = 60_000;
+const INBOUND_DEDUPE_TTL_MS = 60_000;
 const COMPOSING_INTERVAL_MS = 5_000;
 const COMPOSING_TTL_MS = 3 * 60_000;
 const WATCHDOG_INTERVAL_MS = 60_000;
@@ -90,6 +91,7 @@ export type WhatsAppMessage = WhatsAppDmMessage | WhatsAppGroupMessage;
 
 export interface WhatsAppCaptureMetadata {
   socketGeneration: number;
+  upsertType?: "notify" | "append";
 }
 
 export type WhatsAppMessageHandler = (message: WhatsAppMessage, metadata: WhatsAppCaptureMetadata) => Promise<void>;
@@ -157,6 +159,7 @@ export class WhatsAppBot {
   private handler: WhatsAppMessageHandler | null = null;
   private historyHandler: WhatsAppHistoryMessagesHandler | null = null;
   private recentlySent = new Set<string>();
+  private recentlyReceived = new Set<string>();
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private activeSocketGeneration = 0;
@@ -744,7 +747,8 @@ export class WhatsAppBot {
         return;
       }
 
-      if (type !== "notify") return;
+      if (type !== "notify" && type !== "append") return;
+      const metadata: WhatsAppCaptureMetadata = { socketGeneration, upsertType: type };
 
       for (const msg of messages) {
         if (!msg.message) continue;
@@ -767,9 +771,9 @@ export class WhatsAppBot {
         if (!text && !hasMedia) continue;
 
         if (isGroup) {
-          await this.handleGroupMessage(msg, jid, text, messageType, hasMedia, socketGeneration);
+          await this.handleGroupMessage(msg, jid, text, messageType, hasMedia, metadata);
         } else {
-          await this.handleDmMessage(msg, jid, isStandardDm, text, messageType, hasMedia, socketGeneration);
+          await this.handleDmMessage(msg, jid, isStandardDm, text, messageType, hasMedia, metadata);
         }
       }
     });
@@ -782,7 +786,7 @@ export class WhatsAppBot {
     text: string | null,
     messageType: string | undefined,
     hasMedia: boolean,
-    socketGeneration: number,
+    metadata: WhatsAppCaptureMetadata,
   ): Promise<void> {
     let phoneNumber: string | null = null;
 
@@ -798,21 +802,23 @@ export class WhatsAppBot {
 
     if (this.handler) {
       const quotedMessage = extractQuotedMessage(msg.message ? extractContextInfo(msg.message) : undefined);
-      this.lastMessageAt = Date.now();
-      await this.handler(
-        {
-          type: "dm",
-          text: text ?? "",
-          phoneNumber,
-          jid,
-          messageId: msg.key?.id ?? "",
-          pushName: msg.pushName ?? "Unknown",
-          rawMessage: msg,
-          mediaType: hasMedia ? (messageType ?? undefined) : undefined,
-          ...(quotedMessage ? { quotedMessage } : {}),
-        },
-        { socketGeneration },
-      );
+      await this.dispatchInboundOnce(msg, async () => {
+        this.lastMessageAt = Date.now();
+        await this.handler?.(
+          {
+            type: "dm",
+            text: text ?? "",
+            phoneNumber,
+            jid,
+            messageId: msg.key?.id ?? "",
+            pushName: msg.pushName ?? "Unknown",
+            rawMessage: msg,
+            mediaType: hasMedia ? (messageType ?? undefined) : undefined,
+            ...(quotedMessage ? { quotedMessage } : {}),
+          },
+          metadata,
+        );
+      });
     }
   }
 
@@ -822,13 +828,35 @@ export class WhatsAppBot {
     text: string | null,
     messageType: string | undefined,
     hasMedia: boolean,
-    socketGeneration: number,
+    metadata: WhatsAppCaptureMetadata,
   ): Promise<void> {
     const groupMessage = await this.buildGroupMessage(msg, groupJid, text, messageType, hasMedia);
     if (groupMessage && this.handler) {
-      this.lastMessageAt = Date.now();
-      await this.handler(groupMessage, { socketGeneration });
+      await this.dispatchInboundOnce(msg, async () => {
+        this.lastMessageAt = Date.now();
+        await this.handler?.(groupMessage, metadata);
+      });
     }
+  }
+
+  private async dispatchInboundOnce(msg: proto.IWebMessageInfo, dispatch: () => Promise<void>): Promise<void> {
+    const providerMessageId = msg.key?.id;
+    const providerConversationId = msg.key?.remoteJid;
+    if (!providerMessageId || !providerConversationId) {
+      await dispatch();
+      return;
+    }
+    const key = `${providerConversationId}\u001f${providerMessageId}\u001f${String(Boolean(msg.key?.fromMe))}`;
+    if (this.recentlyReceived.has(key)) return;
+    this.recentlyReceived.add(key);
+    try {
+      await dispatch();
+    } catch (error) {
+      this.recentlyReceived.delete(key);
+      throw error;
+    }
+    const expiry = setTimeout(() => this.recentlyReceived.delete(key), INBOUND_DEDUPE_TTL_MS);
+    expiry.unref?.();
   }
 
   /**

@@ -156,6 +156,15 @@ function whatsappSource(jid: string, name: string): AgentSourceConfig {
   return { platform: "whatsapp", targetType: "group", targetId: jid, label: name };
 }
 
+function dmSource(platform: "slack" | "whatsapp", conversationId: number): AgentSourceConfig {
+  return {
+    platform,
+    targetType: "dm",
+    targetId: String(conversationId),
+    label: "Spoofed phone label",
+  } as unknown as AgentSourceConfig;
+}
+
 function perSourceSelfModel(): AgentDeliveryModel {
   return { mode: "per_source", defaultRoute: "self", perSource: {}, combined: null };
 }
@@ -375,6 +384,7 @@ export {
   createPausedQueueManager,
   createService,
   createWritingService,
+  dmSource,
   emptySummaryPayload,
   perSourceSelfModel,
   runtimeContextFromUserMessage,

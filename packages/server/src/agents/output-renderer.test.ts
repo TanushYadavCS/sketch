@@ -10,6 +10,7 @@ const sections: AgentSectionDef[] = [
 function item(overrides: Partial<AgentApiItem> = {}): AgentApiItem {
   return {
     id: "item-1",
+    taskId: null,
     sectionKey: "todos",
     title: "Follow up with Acme",
     summary: "Acme asked for the launch timeline.",

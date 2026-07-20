@@ -7,6 +7,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 import { AgentDetail } from "./agent-detail";
 import { SummariserConfigPage } from "./summariser-config";
+import { ChannelPickerList } from "./summariser-shared";
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
@@ -93,5 +94,35 @@ describe("Summarizer task creation copy", () => {
     expect(
       screen.getByText("Tasks appear on linked projects. Task owners can update status; admins can monitor progress."),
     ).toBeInTheDocument();
+  });
+
+  it("shows persisted Slack and WhatsApp DMs as source options without exposing phone numbers", async () => {
+    const agent = {
+      ...detailResponse.agent,
+      sources: [
+        ...detailResponse.agent.sources,
+        { platform: "whatsapp", targetType: "dm", targetId: "40", label: "Saved WhatsApp DM" },
+      ],
+      availableSources: [
+        { platform: "slack", targetType: "dm", targetId: "41", label: "Slack DM with Tanush Yadav" },
+        { platform: "whatsapp", targetType: "dm", targetId: "42", label: "WhatsApp DM with Tanush Yadav" },
+      ],
+      sourceConfig: {
+        ...detailResponse.agent.sourceConfig,
+        supportsSlackDms: true,
+        supportsWhatsAppDms: true,
+      },
+    } as unknown as AgentDetailResponse["agent"];
+
+    renderWithProviders(
+      <ChannelPickerList agent={agent} selected={new Set()} onToggle={() => {}} showSlackDms showWhatsappDms />,
+    );
+
+    expect(await screen.findByText("Slack direct messages")).toBeInTheDocument();
+    expect(screen.getByText("WhatsApp direct messages")).toBeInTheDocument();
+    expect(screen.getAllByText("Slack DM with Tanush Yadav")).toHaveLength(1);
+    expect(screen.getAllByText("WhatsApp DM with Tanush Yadav")).toHaveLength(1);
+    expect(screen.getByText("Saved WhatsApp DM")).toBeInTheDocument();
+    expect(screen.queryByText(/\+?\d{10,}/)).not.toBeInTheDocument();
   });
 });

@@ -495,6 +495,7 @@ describe("runAgent AI SDK runtime path", () => {
       "mcp__sketch__GetEntityContext",
       "mcp__sketch__GetFileContent",
       "mcp__sketch__GetTeamDirectory",
+      "mcp__sketch__ListFollowups",
       "mcp__sketch__ListTasks",
       "mcp__sketch__ManageScheduledTasks",
       "mcp__sketch__ReadChatHistory",

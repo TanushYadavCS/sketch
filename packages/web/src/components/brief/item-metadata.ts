@@ -14,6 +14,12 @@ export const LABEL_META: Record<
     waiting: { label: "Waiting", dot: "bg-sky-400", eyebrow: "Task" },
     done: { label: "Done", dot: "bg-emerald-500", eyebrow: "Task" },
   },
+  untracked_followups: {
+    untracked: { label: "Untracked", dot: "bg-sky-400", eyebrow: "Follow-up" },
+  },
+  looks_resolved: {
+    looks_resolved: { label: "Review", dot: "bg-amber-400", eyebrow: "Follow-up" },
+  },
   customer_updates: {
     owed_follow_up: { label: "Owed follow-up", dot: "bg-red-500", eyebrow: "Customer update" },
     warm: { label: "Warm", dot: "bg-amber-400", eyebrow: "Customer update" },
@@ -42,6 +48,9 @@ export function labelMeta(item: DailyBriefItem) {
 
 export function actionLabelForItem(item: DailyBriefItem): string {
   if (item.sectionKey === "active_projects") return "Catch me up";
+  if (item.sectionKey === "untracked_followups" || item.sectionKey === "looks_resolved") {
+    return item.actionLabel ?? "Review with Sketch";
+  }
   if (item.sectionKey === "todos") {
     if (item.label === "blocked") return "Unblock with Sketch";
     if (item.label === "done") return "Review with Sketch";

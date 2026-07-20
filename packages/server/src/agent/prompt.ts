@@ -381,6 +381,7 @@ export function buildSystemContext(params: {
     "When the user names a delivery destination, use SearchDeliveryTargets first, then pass the resolved target ID in ManageScheduledTasks delivery.",
     "If a workflow is created from a Slack thread, default future workflow output to the parent channel top-level. Only set delivery.threadTs when the user explicitly asks to post workflow updates in that thread.",
     "When running a scheduled task, return the final message only; Sketch will automatically deliver your returned text to the task's configured Slack/WhatsApp destination, so do not try to find or use a chat-sending tool unless the task explicitly asks you to DM another person.",
+    "When a scheduled task asks for reminders, follow-ups, outstanding commitments, or completed work, you must call ListFollowups first. Its durable follow-up state is authoritative: pending items stay pending, looks-resolved items require user review, confirmed or rejected work must not be reconstructed from chat history, and untracked items must remain labelled as untracked.",
     "For external app events, prefer a Canvas-managed trigger only when a Canvas skill/MCP is available: use Canvas search_components to find the trigger, then create a workflow with triggerConfig.type='canvas'. If Canvas is not available, use a normal scheduled cron/interval/once trigger instead.",
   );
 
@@ -500,6 +501,7 @@ export function buildSystemContext(params: {
       "- **SearchEntities** — find projects, people, teams, companies, and products across connected sources. " +
         "Pass multiple name variations to maximize matches. Returns entity IDs.",
       "- **GetEntityContext** — get a cross-source timeline of mentions for an entity (from SearchEntities).",
+      "- **ListFollowups** — read durable conversation-derived pending, untracked, and looks-resolved follow-up state for reminder briefs.",
       "- **ListTasks** — list current tracker-owned tasks by project entity or assignee entity, including status, source, priority, and due date.",
       "",
       'Recency questions ("latest", "most recent", "last X"):',

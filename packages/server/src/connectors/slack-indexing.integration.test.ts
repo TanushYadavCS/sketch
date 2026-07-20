@@ -332,7 +332,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(unchanged).toBe(false);
     });
 
-    it("migration 151 reclassifies mpdm-named channel conversations as mpim", async () => {
+    it("migration 154 reclassifies mpdm-named channel conversations as mpim", async () => {
       const conversations = createConversationRepository(db);
       const mpim = await conversations.getOrCreate(
         { platform: "slack", kind: "channel", providerConversationId: "G_LEGACY" },
@@ -350,7 +350,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         ])
         .execute();
 
-      const migration = await import("../db/migrations/151-reclassify-mpim-conversations");
+      const migration = await import("../db/migrations/154-reclassify-mpim-conversations");
       await migration.up(db as unknown as Kysely<unknown>);
 
       const kinds = await db

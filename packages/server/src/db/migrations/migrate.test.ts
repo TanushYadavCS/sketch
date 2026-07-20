@@ -23,8 +23,9 @@ import * as m119 from "./119-agent-outputs-source-scope";
 import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
+import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 
-const EXPECTED_MIGRATION_COUNT = 147;
+const EXPECTED_MIGRATION_COUNT = 150;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -213,8 +214,84 @@ describe("runMigrations — full sequence", () => {
     expect(names[142]).toBe("147-whatsapp-backfill-graph-admission");
     expect(names[143]).toBe("148-whatsapp-pending-slices-index");
     expect(names[144]).toBe("149-whatsapp-backfill-lifecycle-durability");
-    expect(names[145]).toBe("150-slack-conversation-indexing");
-    expect(names[146]).toBe("151-reclassify-mpim-conversations");
+    expect(names[145]).toBe("150-task-durability-steel-thread");
+    expect(names[146]).toBe("151-agent-output-item-task-links");
+    expect(names[147]).toBe("152-reseed-combined-durability-routes");
+    expect(names[148]).toBe("153-slack-conversation-indexing");
+    expect(names[149]).toBe("154-reclassify-mpim-conversations");
+  });
+
+  it("resets reviewed combined durability routes for member-source reseeding", async () => {
+    await runMigrations(db, { quiet: true });
+    await db.insertInto("users").values({ id: "reseed-user", name: "Reseed User" }).execute();
+    await db
+      .insertInto("task_durability_route_state")
+      .values([
+        {
+          agent_key: "conversation_summary",
+          user_id: "reseed-user",
+          route_id: "combined-reviewed",
+          source_key: "route:combined",
+          mode: "durable_only",
+          seed_state: "reviewed",
+          seed_reviewed_at: "2026-07-01T00:00:00.000Z",
+          incremental_success_at: "2026-07-02T00:00:00.000Z",
+        },
+        {
+          agent_key: "conversation_summary",
+          user_id: "reseed-user",
+          route_id: "direct-reviewed",
+          source_key: "slack:channel:C_DIRECT",
+          mode: "durable_only",
+          seed_state: "reviewed",
+          seed_reviewed_at: "2026-07-01T00:00:00.000Z",
+          incremental_success_at: "2026-07-02T00:00:00.000Z",
+        },
+        {
+          agent_key: "conversation_summary",
+          user_id: "reseed-user",
+          route_id: "combined-pending",
+          source_key: "route:pending",
+          mode: "hybrid",
+          seed_state: "pending",
+          seed_reviewed_at: null,
+          incremental_success_at: null,
+        },
+      ])
+      .execute();
+
+    await combinedDurabilityReseedMigration.up(db as unknown as Kysely<unknown>);
+
+    await expect(
+      db
+        .selectFrom("task_durability_route_state")
+        .select(["route_id", "mode", "seed_state", "seed_reviewed_at", "incremental_success_at"])
+        .where("user_id", "=", "reseed-user")
+        .orderBy("route_id", "asc")
+        .execute(),
+    ).resolves.toEqual([
+      {
+        route_id: "combined-pending",
+        mode: "hybrid",
+        seed_state: "pending",
+        seed_reviewed_at: null,
+        incremental_success_at: null,
+      },
+      {
+        route_id: "combined-reviewed",
+        mode: "hybrid",
+        seed_state: "pending",
+        seed_reviewed_at: null,
+        incremental_success_at: "2026-07-02T00:00:00.000Z",
+      },
+      {
+        route_id: "direct-reviewed",
+        mode: "durable_only",
+        seed_state: "reviewed",
+        seed_reviewed_at: "2026-07-01T00:00:00.000Z",
+        incremental_success_at: "2026-07-02T00:00:00.000Z",
+      },
+    ]);
   });
 
   it("creates the bounded open-materializable partial index", async () => {
@@ -235,6 +312,188 @@ describe("runMigrations — full sequence", () => {
     expect(indexSql).toContain("deleted_at is null");
     expect(indexSql).toContain("materialized_at is null");
     expect(indexSql).toContain("materialization_attempts < 5");
+  });
+
+  it("creates the durable conversation follow-up schema", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const taskColumns = await sql<{ name: string; type: string; notnull: number }>`PRAGMA table_info(tasks)`.execute(
+      db,
+    );
+    expect(taskColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "source_platform", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "source_conversation_id", type: "INTEGER", notnull: 0 }),
+        expect.objectContaining({ name: "source_provider_thread_id", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "source_anchor_key", type: "TEXT", notnull: 0 }),
+        expect.objectContaining({ name: "origin_agent_output_id", type: "TEXT", notnull: 0 }),
+      ]),
+    );
+
+    for (const table of [
+      "task_message_evidence",
+      "task_completion_recommendations",
+      "task_completion_recommendation_evidence",
+      "task_completion_recommendation_deliveries",
+      "task_durability_route_state",
+      "task_seed_candidates",
+    ]) {
+      const result = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master WHERE type='table' AND name=${sql.lit(table)}
+      `.execute(db);
+      expect(result.rows).toHaveLength(1);
+    }
+
+    const recommendationColumns = await sql<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>`PRAGMA table_info(task_completion_recommendations)`.execute(db);
+    expect(recommendationColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "review_code", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "evidence_fingerprint", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "delivery_count", type: "INTEGER", notnull: 1, dflt_value: "0" }),
+        expect.objectContaining({ name: "expires_at", type: "TEXT", notnull: 1 }),
+      ]),
+    );
+
+    const routeColumns = await sql<{
+      name: string;
+      type: string;
+      notnull: number;
+    }>`PRAGMA table_info(task_durability_route_state)`.execute(db);
+    expect(routeColumns.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "agent_key", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "user_id", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "route_id", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "source_key", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "mode", type: "TEXT", notnull: 1 }),
+        expect.objectContaining({ name: "seed_state", type: "TEXT", notnull: 1 }),
+      ]),
+    );
+
+    const indexes = await sql<{ name: string }>`
+      SELECT name
+      FROM sqlite_master
+      WHERE type='index'
+        AND tbl_name IN (
+          'tasks',
+          'task_message_evidence',
+          'task_completion_recommendations',
+          'task_completion_recommendation_deliveries',
+          'task_durability_route_state',
+          'task_seed_candidates'
+        )
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.name)).toEqual(
+      expect.arrayContaining([
+        "idx_tasks_conversation_anchor_status",
+        "idx_task_message_evidence_anchor",
+        "task_completion_recommendations_review_code_uidx",
+        "task_completion_recommendations_fingerprint_uidx",
+        "idx_task_completion_recommendations_task_state_expiry",
+        "task_completion_recommendations_pending_task_uidx",
+        "task_completion_recommendation_deliveries_uidx",
+        "task_durability_route_state_uidx",
+        "idx_task_durability_route_state_source",
+        "task_seed_candidates_review_code_uidx",
+        "task_seed_candidates_fingerprint_uidx",
+        "idx_task_seed_candidates_route_state",
+      ]),
+    );
+
+    const evidenceForeignKeys = await sql<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>`PRAGMA foreign_key_list(task_message_evidence)`.execute(db);
+    expect(evidenceForeignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: "tasks", from: "task_id", to: "id", on_delete: "CASCADE" }),
+        expect.objectContaining({
+          table: "conversation_messages",
+          from: "conversation_message_id",
+          to: "id",
+          on_delete: "CASCADE",
+        }),
+        expect.objectContaining({
+          table: "conversations",
+          from: "source_conversation_id",
+          to: "id",
+          on_delete: "CASCADE",
+        }),
+      ]),
+    );
+  });
+
+  it("creates canonical agent output item task links and nulls them when the task is deleted", async () => {
+    await sql`PRAGMA foreign_keys = ON`.execute(db);
+    await runMigrations(db, { quiet: true });
+
+    const columns = await sql<{ name: string; type: string; notnull: number }>`
+      PRAGMA table_info(agent_output_items)
+    `.execute(db);
+    expect(columns.rows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "task_id", type: "TEXT", notnull: 0 })]),
+    );
+
+    const foreignKeys = await sql<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>`PRAGMA foreign_key_list(agent_output_items)`.execute(db);
+    expect(foreignKeys.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: "tasks", from: "task_id", to: "id", on_delete: "SET NULL" }),
+      ]),
+    );
+
+    const indexes = await sql<{ name: string }>`PRAGMA index_list(agent_output_items)`.execute(db);
+    expect(indexes.rows.map((row) => row.name)).toContain("idx_agent_output_items_task_id");
+
+    await sql`
+      INSERT INTO users (id, name) VALUES ('task-link-user', 'Task Link User')
+    `.execute(db);
+    await sql`
+      INSERT INTO agent_outputs (
+        id, agent_key, user_id, output_date, source_key, timezone, status,
+        trigger_type, agent_version
+      ) VALUES (
+        'task-link-output', 'daily_brief', 'task-link-user', '2026-07-17',
+        '__global__', 'UTC', 'completed', 'manual', 'test'
+      )
+    `.execute(db);
+    await sql`
+      INSERT INTO tasks (
+        id, source, title, normalized_title, status, status_authority,
+        provenance, source_task_id
+      ) VALUES (
+        'task-link-task', 'brief', 'Linked task', 'linked task', 'open',
+        'local', 'brief', 'task-link-source'
+      )
+    `.execute(db);
+    await sql`
+      INSERT INTO agent_output_items (
+        id, agent_output_id, section_key, title, summary, priority,
+        knowledge_refs_json, sort_order, task_id
+      ) VALUES (
+        'task-link-item', 'task-link-output', 'todos', 'Snapshot task',
+        'Snapshot summary', 'medium', '{"entityIds":[],"fileIds":[]}', 0,
+        'task-link-task'
+      )
+    `.execute(db);
+
+    await sql`DELETE FROM tasks WHERE id = 'task-link-task'`.execute(db);
+
+    const item = await sql<{ task_id: string | null }>`
+      SELECT task_id FROM agent_output_items WHERE id = 'task-link-item'
+    `.execute(db);
+    expect(item.rows).toEqual([{ task_id: null }]);
   });
 
   it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {

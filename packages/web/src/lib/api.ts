@@ -530,7 +530,7 @@ export interface EntityRelationEvidenceResponse {
 
 export type TaskStatus = "open" | "in_progress" | "done" | "dropped";
 
-export interface EntityTask {
+export interface Task {
   id: string;
   parentEntityId: string | null;
   parentSourceRef: string | null;
@@ -557,6 +557,8 @@ export interface EntityTask {
   updatedAt: string;
   canEditStatus: boolean;
 }
+
+export type EntityTask = Task;
 
 export interface EntityTimelineItem {
   fileId: string;
@@ -1057,9 +1059,34 @@ export interface DailyBriefMeetingPayload {
   attendees: DailyBriefMeetingAttendee[];
 }
 
+/**
+ * Live task-state overlay attached to a Daily Brief item.
+ *
+ * Mirrors the authoritative task record (e.g. an EntityTask) but only carries
+ * the fields the Brief surface needs to render status and ownership. All fields
+ * are optional-safe at the type level via `DailyBriefItem.task` being nullable;
+ * this interface itself describes a fully-populated overlay.
+ */
+export interface DailyBriefTaskState {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  /** Raw status string from the source system; supplementary for external authority. */
+  statusRaw: string | null;
+  /** "local" when Sketch owns the status, "external" when a source system does. */
+  statusAuthority: string;
+  priority: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+  /** Whether the viewer is allowed to mutate the status from the Brief. */
+  canEditStatus: boolean;
+  /** Why the status is read-only for the viewer, when it is. */
+  readonlyReason: "not_owner" | "external_authority" | null;
+}
+
 export interface DailyBriefItem {
   id: string;
-  sectionKey: "meetings" | "todos" | "customer_updates" | "active_projects";
+  sectionKey: "meetings" | "todos" | "untracked_followups" | "looks_resolved" | "customer_updates" | "active_projects";
   title: string;
   summary: string;
   priority: "high" | "medium" | "low";
@@ -1072,6 +1099,10 @@ export interface DailyBriefItem {
   structuredPayload: DailyBriefMeetingPayload | null;
   knowledgeRefs: DailyBriefKnowledgeRefs;
   sortOrder: number;
+  /** Links this brief item to a live task; absent on legacy/partial payloads. */
+  taskId?: string | null;
+  /** Live task-state overlay; absent on legacy/partial payloads. */
+  task?: DailyBriefTaskState | null;
 }
 
 export interface DailyBrief {
@@ -1089,6 +1120,8 @@ export interface DailyBrief {
   sections: {
     meetings: DailyBriefItem[];
     todos: DailyBriefItem[];
+    untracked_followups: DailyBriefItem[];
+    looks_resolved: DailyBriefItem[];
     customer_updates: DailyBriefItem[];
     active_projects: DailyBriefItem[];
   };
@@ -1147,7 +1180,7 @@ export interface AgentDeliveryMention {
 
 export interface AgentSourceConfig {
   platform: "slack" | "whatsapp";
-  targetType: "channel" | "group";
+  targetType: "channel" | "dm" | "group";
   targetId: string;
   label: string | null;
 }
@@ -1214,7 +1247,9 @@ export interface AgentRouteMember {
 export interface AgentSourceConfigMeta {
   maxSources: number;
   supportsSlackChannels: boolean;
+  supportsSlackDms?: boolean;
   supportsWhatsAppGroups: boolean;
+  supportsWhatsAppDms?: boolean;
 }
 
 export interface AgentConfig {
@@ -1231,6 +1266,7 @@ export interface AgentConfig {
   focus: string | null;
   delivery: AgentDeliveryConfig | null;
   sourceConfig: AgentSourceConfigMeta | null;
+  availableSources?: AgentSourceConfig[];
   sources: AgentSourceConfig[];
   routes: AgentRoute[];
   sections: AgentSectionConfig[];
@@ -2726,6 +2762,19 @@ export const api = {
           lastRunAt: string | null;
         }[];
       }>(`/api/usage/summary${qs ? `?${qs}` : ""}`);
+    },
+  },
+  tasks: {
+    /** Fetch the live task record for a single task id. GET /api/tasks/:taskId */
+    get(taskId: string) {
+      return request<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}`);
+    },
+    /** Update a task's status. PATCH /api/tasks/:taskId — returns the updated task. */
+    updateStatus(taskId: string, status: TaskStatus) {
+      return request<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
     },
   },
   workspace: {

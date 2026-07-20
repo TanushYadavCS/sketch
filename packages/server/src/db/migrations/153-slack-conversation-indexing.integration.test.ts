@@ -4,7 +4,7 @@ import { createTestDb, createTestPgDb } from "../../test-utils";
 import { createConversationSlicesRepository } from "../repositories/conversation-slices";
 import { createConversationRepository } from "../repositories/conversations";
 import type { DB } from "../schema";
-import * as migration from "./150-slack-conversation-indexing";
+import * as migration from "./153-slack-conversation-indexing";
 
 async function seedConversation(db: Kysely<DB>): Promise<number> {
   const conversations = createConversationRepository(db);

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import type { Kysely } from "kysely";
+import type { Kysely, Selectable } from "kysely";
+import { type TaskAccessContext, resolveTaskAccessContext, toTaskDto } from "../api/task-access";
 import type {
   AgentDeliveryConfig,
   AgentDeliveryMention,
@@ -12,7 +13,9 @@ import type {
   AgentSourceConfig,
   AgentSourceKey,
 } from "../db/repositories/agent-outputs";
-import type { DB } from "../db/schema";
+import { createTaskRepository } from "../db/repositories/tasks";
+import type { DB, TasksTable } from "../db/schema";
+import type { Logger } from "../logger";
 import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
 import { getAgentDefinition } from "./registry";
@@ -23,7 +26,183 @@ import {
   AgentSourceTargetError,
   type AgentViewerRole,
 } from "./service";
-import type { AgentDefinition } from "./types";
+import type { AgentApiItem, AgentDefinition } from "./types";
+
+export const MAX_BRIEF_TASK_LINKS = 100;
+
+export interface DailyBriefTaskState {
+  id: string;
+  title: string;
+  status: "open" | "in_progress" | "done" | "dropped";
+  statusRaw: string | null;
+  statusAuthority: string;
+  priority: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+  canEditStatus: boolean;
+  readonlyReason: "not_owner" | "external_authority" | null;
+}
+
+type HydratedDailyBriefItem = AgentApiItem & {
+  taskId: string | null;
+  task: DailyBriefTaskState | null;
+};
+
+type TaskLinkCandidate = {
+  taskId: string;
+  kind: "canonical" | "legacy";
+  overflow: boolean;
+};
+
+type LegacyRejectionReason =
+  | "owner_mismatch"
+  | "not_server_owned"
+  | "malformed_task_id"
+  | "invalid_section_shape"
+  | "invalid_task_provenance"
+  | "not_visible_or_missing";
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function legacyTaskLinkCandidate(
+  output: AgentOutputApi,
+  item: AgentApiItem,
+  userId: string,
+): { taskId: string } | { reason: LegacyRejectionReason } | null {
+  const payload = item.structuredPayload;
+  if (!payload || (!Object.hasOwn(payload, "taskId") && payload.serverOwnedFollowup !== true)) return null;
+  if (output.userId !== userId) return { reason: "owner_mismatch" };
+  if (payload.serverOwnedFollowup !== true) return { reason: "not_server_owned" };
+  const taskId = nonEmptyString(payload.taskId);
+  if (!taskId) return { reason: "malformed_task_id" };
+  const validTodo = item.sectionKey === "todos" && payload.trackingState === "durable";
+  const validResolved =
+    item.sectionKey === "looks_resolved" &&
+    payload.trackingState === "looks_resolved" &&
+    nonEmptyString(payload.recommendationId) !== null;
+  if (!validTodo && !validResolved) return { reason: "invalid_section_shape" };
+  return { taskId };
+}
+
+function toDailyBriefTaskState(task: Selectable<TasksTable>, access: TaskAccessContext): DailyBriefTaskState {
+  const dto = toTaskDto(task, access);
+  return {
+    id: dto.id,
+    title: dto.title,
+    status: dto.status as DailyBriefTaskState["status"],
+    statusRaw: dto.statusRaw,
+    statusAuthority: dto.statusAuthority,
+    priority: dto.priority,
+    completedAt: dto.completedAt,
+    updatedAt: dto.updatedAt,
+    canEditStatus: dto.canEditStatus,
+    readonlyReason: dto.readonlyReason,
+  };
+}
+
+export async function hydrateDailyBriefTaskState(params: {
+  output: AgentOutputApi;
+  userId: string;
+  access: TaskAccessContext;
+  loadVisibleTasks: (taskIds: string[], access: TaskAccessContext) => Promise<Selectable<TasksTable>[]>;
+  logger: Pick<Logger, "debug">;
+}): Promise<AgentOutputApi & { sections: Record<string, HydratedDailyBriefItem[]> }> {
+  const candidateByItem = new Map<AgentApiItem, TaskLinkCandidate>();
+  const idsToLoad: string[] = [];
+  const acceptedIds = new Set<string>();
+  const rejectedLegacyReasons: Partial<Record<LegacyRejectionReason, number>> = {};
+  let canonicalCandidates = 0;
+  let legacyCandidates = 0;
+  let rejectedLegacyCandidates = 0;
+  let overflowCandidates = 0;
+
+  const rejectLegacy = (reason: LegacyRejectionReason) => {
+    rejectedLegacyCandidates += 1;
+    rejectedLegacyReasons[reason] = (rejectedLegacyReasons[reason] ?? 0) + 1;
+  };
+
+  for (const items of Object.values(params.output.sections)) {
+    for (const item of items) {
+      let candidate: Omit<TaskLinkCandidate, "overflow"> | null = null;
+      if (item.taskId !== null && item.taskId !== undefined) {
+        const taskId = nonEmptyString(item.taskId);
+        if (taskId) {
+          canonicalCandidates += 1;
+          candidate = { taskId, kind: "canonical" };
+        }
+      } else {
+        const legacy = legacyTaskLinkCandidate(params.output, item, params.userId);
+        if (legacy && "reason" in legacy) {
+          rejectLegacy(legacy.reason);
+        } else if (legacy) {
+          legacyCandidates += 1;
+          candidate = { taskId: legacy.taskId, kind: "legacy" };
+        }
+      }
+      if (!candidate) continue;
+
+      let overflow = false;
+      if (!acceptedIds.has(candidate.taskId)) {
+        if (acceptedIds.size >= MAX_BRIEF_TASK_LINKS) {
+          overflow = true;
+          overflowCandidates += 1;
+        } else {
+          acceptedIds.add(candidate.taskId);
+          idsToLoad.push(candidate.taskId);
+        }
+      }
+      candidateByItem.set(item, { ...candidate, overflow });
+    }
+  }
+
+  const visibleTasks = idsToLoad.length === 0 ? [] : await params.loadVisibleTasks(idsToLoad, params.access);
+  const visibleById = new Map(visibleTasks.map((task) => [task.id, task]));
+  let canonicalHydrated = 0;
+  let legacyHydrated = 0;
+  const sections: Record<string, HydratedDailyBriefItem[]> = {};
+
+  for (const [sectionKey, items] of Object.entries(params.output.sections)) {
+    sections[sectionKey] = items.map((item) => {
+      const candidate = candidateByItem.get(item);
+      if (!candidate || candidate.overflow) return { ...item, taskId: null, task: null };
+      const task = visibleById.get(candidate.taskId);
+      if (!task) {
+        if (candidate.kind === "legacy") rejectLegacy("not_visible_or_missing");
+        return { ...item, taskId: null, task: null };
+      }
+      if (candidate.kind === "legacy" && (task.provenance !== "summary" || !task.source_anchor_key)) {
+        rejectLegacy("invalid_task_provenance");
+        return { ...item, taskId: null, task: null };
+      }
+      if (candidate.kind === "canonical") canonicalHydrated += 1;
+      else legacyHydrated += 1;
+      return {
+        ...item,
+        taskId: task.id,
+        task: toDailyBriefTaskState(task, params.access),
+      };
+    });
+  }
+
+  params.logger.debug(
+    {
+      event: "daily_brief_task_hydration",
+      outputId: params.output.id,
+      canonicalCandidates,
+      legacyCandidates,
+      canonicalHydrated,
+      legacyHydrated,
+      rejectedLegacyCandidates,
+      rejectedLegacyReasons,
+      overflowCandidates,
+    },
+    "Daily Brief: hydrated live task links",
+  );
+
+  return { ...params.output, sections };
+}
 
 async function getCurrentUserId(c: { get: (key: "sub" | "email") => string | undefined }, service: AgentRunService) {
   const sub = c.get("sub");
@@ -53,6 +232,8 @@ function toBriefShape(output: AgentOutputApi | null) {
     sections: {
       meetings: output.sections.meetings ?? [],
       todos: output.sections.todos ?? [],
+      untracked_followups: output.sections.untracked_followups ?? [],
+      looks_resolved: output.sections.looks_resolved ?? [],
       customer_updates: output.sections.customer_updates ?? [],
       active_projects: output.sections.active_projects ?? [],
     },
@@ -78,8 +259,20 @@ async function hasCalendarConnector(db: Kysely<DB>, userId: string): Promise<boo
   return Boolean(row);
 }
 
-export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>) {
+export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>, logger: Pick<Logger, "debug">) {
   const routes = new Hono();
+  const taskRepo = createTaskRepository(db);
+
+  const hydrate = async (c: Parameters<typeof resolveTaskAccessContext>[1], output: AgentOutputApi, userId: string) => {
+    const access = await resolveTaskAccessContext(db, c, userId);
+    return hydrateDailyBriefTaskState({
+      output,
+      userId,
+      access,
+      loadVisibleTasks: (taskIds, taskAccess) => taskRepo.listVisibleTasksByIds(taskIds, taskAccess),
+      logger,
+    });
+  };
 
   routes.get("/", async (c) => {
     const userId = await getCurrentUserId(c, service);
@@ -89,8 +282,9 @@ export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>) {
       service.getLatestForUser(DAILY_BRIEF_AGENT_KEY, userId, date),
       hasCalendarConnector(db, userId),
     ]);
+    const output = result.output ? await hydrate(c, result.output, userId) : null;
     return c.json({
-      brief: toBriefShape(result.output),
+      brief: toBriefShape(output),
       running: result.running,
       briefDate: result.outputDate,
       timezone: result.timezone,
@@ -104,7 +298,7 @@ export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>) {
     if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
     const output = await service.getByIdForUser(DAILY_BRIEF_AGENT_KEY, c.req.param("id"), userId);
     if (!output) return c.json({ error: { code: "NOT_FOUND", message: "Daily Brief not found" } }, 404);
-    return c.json({ brief: toBriefShape(output) });
+    return c.json({ brief: toBriefShape(await hydrate(c, output, userId)) });
   });
 
   routes.post("/", async (c) => {
@@ -254,15 +448,15 @@ function parseSourceConfigs(value: unknown): AgentSourceConfig[] | undefined {
     if (platform !== "slack" && platform !== "whatsapp") {
       throw new ConfigPatchError("source.platform must be slack or whatsapp");
     }
-    if (targetType !== "channel" && targetType !== "group") {
-      throw new ConfigPatchError("source.targetType must be channel or group");
+    if (targetType !== "channel" && targetType !== "dm" && targetType !== "group") {
+      throw new ConfigPatchError("source.targetType must be channel, dm, or group");
     }
     if (!targetId) throw new ConfigPatchError("source.targetId is required");
-    if (platform === "slack" && targetType !== "channel") {
-      throw new ConfigPatchError("Slack sources must be channels");
+    if (platform === "slack" && targetType === "group") {
+      throw new ConfigPatchError("Slack sources must be channels or DMs");
     }
-    if (platform === "whatsapp" && targetType !== "group") {
-      throw new ConfigPatchError("WhatsApp sources must be groups");
+    if (platform === "whatsapp" && targetType === "channel") {
+      throw new ConfigPatchError("WhatsApp sources must be groups or DMs");
     }
     const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : null;
     return { platform, targetType, targetId, label };
@@ -280,14 +474,14 @@ function parseRouteSourceKey(value: unknown): AgentSourceKey {
   if ((platform !== "slack" && platform !== "whatsapp") || !targetId) {
     throw new ConfigPatchError("route source must be a valid source key");
   }
-  if (targetType !== "channel" && targetType !== "group") {
+  if (targetType !== "channel" && targetType !== "dm" && targetType !== "group") {
     throw new ConfigPatchError("route source must be a valid source key");
   }
-  if (platform === "slack" && targetType !== "channel") {
-    throw new ConfigPatchError("Slack route sources must be channels");
+  if (platform === "slack" && targetType === "group") {
+    throw new ConfigPatchError("Slack route sources must be channels or DMs");
   }
-  if (platform === "whatsapp" && targetType !== "group") {
-    throw new ConfigPatchError("WhatsApp route sources must be groups");
+  if (platform === "whatsapp" && targetType === "channel") {
+    throw new ConfigPatchError("WhatsApp route sources must be groups or DMs");
   }
   return `${platform}:${targetType}:${targetId}`;
 }

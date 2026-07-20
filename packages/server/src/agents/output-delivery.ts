@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { createAgentOutputDeliveryRepository } from "../db/repositories/agent-output-deliveries";
 import type { AgentDeliveryConfig } from "../db/repositories/agent-outputs";
 import { createConversationRepository } from "../db/repositories/conversations";
+import { createEntityRepository } from "../db/repositories/entities";
 import { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
@@ -23,6 +24,15 @@ import { type RenderableAgentOutput, renderAgentOutputForDelivery } from "./outp
 import type { AgentDefinition } from "./types";
 
 const SLACK_TEXT_LIMIT = 39_000;
+const MAX_DELIVERY_CHUNKS = 10;
+
+function boundedDeliveryChunks(text: string, limit: number): string[] {
+  const chunks = chunkText(text, limit);
+  if (chunks.length > MAX_DELIVERY_CHUNKS) {
+    throw new Error(`Agent output delivery requires more than ${MAX_DELIVERY_CHUNKS} message chunks.`);
+  }
+  return chunks;
+}
 
 export interface AgentOutputDeliveryRequest {
   definition: AgentDefinition;
@@ -45,6 +55,7 @@ export interface AgentOutputDeliveryDeps {
 export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps): AgentOutputDeliveryPublisher {
   const repo = createAgentOutputDeliveryRepository(deps.db);
   const conversations = createConversationRepository(deps.db);
+  const entities = createEntityRepository(deps.db);
   const inboxMessages = createInboxMessagesRepository(deps.db);
   const users = createUserRepository(deps.db);
   const capture = createWorkflowDeliveryCapture({
@@ -53,7 +64,10 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
     logger: deps.logger,
   });
 
-  async function sendSlack(delivery: AgentDeliveryConfig, text: string): Promise<string[]> {
+  async function sendSlack(
+    delivery: AgentDeliveryConfig,
+    text: string,
+  ): Promise<{ messageRefs: string[]; contentDelivered: boolean }> {
     const slack = deps.getSlack();
     if (!slack) throw new Error("Slack bot is not connected.");
 
@@ -66,21 +80,23 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
     }
 
     const refs: string[] = [];
-    for (const chunk of chunkText(text, SLACK_TEXT_LIMIT)) {
+    for (const chunk of boundedDeliveryChunks(text, SLACK_TEXT_LIMIT)) {
       const messageRef = await slack.postMessage(targetId, chunk);
+      if (!messageRef) throw new Error("Slack delivery did not return a message reference.");
       refs.push(messageRef);
       await capture.captureSlack({ deliveryTarget: targetId, threadTs: null, messageRef, text: chunk });
     }
-    return refs;
+    return { messageRefs: refs, contentDelivered: true };
   }
 
   async function sendWhatsApp(
     delivery: AgentDeliveryConfig,
     output: RenderableAgentOutput & { id: string; userId: string; agentKey: string },
     text: string,
-  ): Promise<string[]> {
+  ): Promise<{ messageRefs: string[]; contentDelivered: boolean }> {
     if (!deps.whatsapp.isConnected) throw new Error("WhatsApp is not connected.");
     const target = whatsappTargetFromDeliveryTarget(delivery.targetId);
+    const chunks = boundedDeliveryChunks(text, WHATSAPP_TEXT_LIMIT);
 
     if (target.kind === "dm") {
       const recipientUserId = delivery.recipientUserId ?? output.userId;
@@ -100,10 +116,20 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
           inboxMetadata: { source: "agent_output", outputId: output.id, agentKey: output.agentKey },
         });
         if (result.mode === "text") {
-          return captureWhatsAppDmTextSends(result.deliveryTarget, result.textSends);
+          const messageRefs = await captureWhatsAppDmTextSends(result.deliveryTarget, result.textSends);
+          if (messageRefs.length !== result.textSends.length) {
+            throw new Error("WhatsApp delivery did not return a message reference for every content chunk.");
+          }
+          return {
+            messageRefs,
+            contentDelivered: true,
+          };
         }
         const messageRef = result.sent?.providerMessageId;
-        return [messageRef ?? result.inboxMessageId].filter((ref): ref is string => Boolean(ref));
+        return {
+          messageRefs: [messageRef ?? result.inboxMessageId].filter((ref): ref is string => Boolean(ref)),
+          contentDelivered: false,
+        };
       } catch (err) {
         if (err instanceof ProactiveDeliveryTextSendError) {
           await captureWhatsAppDmTextSends(err.deliveryTarget, err.textSends);
@@ -114,10 +140,10 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
     }
 
     const refs: string[] = [];
-    for (const chunk of chunkText(text, WHATSAPP_TEXT_LIMIT)) {
+    for (const chunk of chunks) {
       const sent = await deps.whatsapp.sendText(target, chunk);
       const messageRef = sent?.providerMessageId;
-      if (!messageRef) continue;
+      if (!messageRef) throw new Error("WhatsApp delivery did not return a message reference.");
       refs.push(messageRef);
       await capture.captureWhatsApp({
         deliveryTarget: delivery.targetId,
@@ -126,7 +152,7 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
         text: chunk,
       });
     }
-    return refs;
+    return { messageRefs: refs, contentDelivered: true };
   }
 
   async function captureWhatsAppDmTextSends(
@@ -165,11 +191,82 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
           platform: params.delivery.platform,
           mentions: params.delivery.mentions,
         });
-        const messageRefs =
+        const result =
           params.delivery.platform === "slack"
             ? await sendSlack(params.delivery, text)
             : await sendWhatsApp(params.delivery, params.output, text);
-        await repo.markSent(attempt.id, messageRefs);
+        const recommendationIds = result.contentDelivered
+          ? [
+              ...new Set(
+                Object.values(params.output.sections)
+                  .flat()
+                  .flatMap((item) => {
+                    const id = item.structuredPayload?.recommendationId;
+                    return item.sectionKey === "looks_resolved" &&
+                      item.structuredPayload?.serverOwnedFollowup === true &&
+                      typeof id === "string" &&
+                      id
+                      ? [id]
+                      : [];
+                  }),
+              ),
+            ]
+          : [];
+        let assigneeEntityIds: string[] = [];
+        if (recommendationIds.length > 0) {
+          try {
+            const verifiedEmails = await users.getVerifiedEmailsForUser(params.output.userId);
+            const peopleByEmail = await entities.getPersonEntitiesByEmails(verifiedEmails);
+            assigneeEntityIds = [...new Set([...peopleByEmail.values()].flat().map((person) => person.id))];
+          } catch (err) {
+            deps.logger.warn(
+              { err, outputId: params.output.id, userId: params.output.userId },
+              "Agent output delivery: recommendation assignee validation failed",
+            );
+          }
+        }
+        await deps.db.transaction().execute(async (trx) => {
+          await createAgentOutputDeliveryRepository(trx).markSent(attempt.id, result.messageRefs);
+          const validRecommendations =
+            recommendationIds.length > 0
+              ? await trx
+                  .selectFrom("task_completion_recommendations")
+                  .innerJoin("tasks", "tasks.id", "task_completion_recommendations.task_id")
+                  .select("task_completion_recommendations.id")
+                  .where("task_completion_recommendations.id", "in", recommendationIds)
+                  .where("task_completion_recommendations.review_state", "=", "pending")
+                  .where((eb) =>
+                    eb.or([
+                      eb("tasks.created_by_user_id", "=", params.output.userId),
+                      ...(assigneeEntityIds.length > 0
+                        ? [eb("tasks.assignee_entity_id", "in", assigneeEntityIds)]
+                        : []),
+                    ]),
+                  )
+                  .execute()
+              : [];
+          for (const recommendation of validRecommendations) {
+            const inserted = await trx
+              .insertInto("task_completion_recommendation_deliveries")
+              .values({
+                recommendation_id: recommendation.id,
+                agent_output_delivery_id: attempt.id,
+              })
+              .onConflict((oc) => oc.columns(["recommendation_id", "agent_output_delivery_id"]).doNothing())
+              .executeTakeFirst();
+            if (Number(inserted.numInsertedOrUpdatedRows ?? 0) > 0) {
+              await trx
+                .updateTable("task_completion_recommendations")
+                .set((eb) => ({
+                  delivery_count: eb("delivery_count", "+", 1),
+                  updated_at: new Date().toISOString(),
+                }))
+                .where("id", "=", recommendation.id)
+                .where("review_state", "=", "pending")
+                .execute();
+            }
+          }
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         await repo.markFailed(attempt.id, message);

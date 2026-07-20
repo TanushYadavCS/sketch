@@ -35,6 +35,11 @@ interface PreparedHistoryMessage {
   oversized: boolean;
 }
 
+interface PrepareMessageEnvelopeOptions {
+  timestamp?: string;
+  stageMedia?: boolean;
+}
+
 export interface WhatsAppGatewayCaptureDeps {
   db: Kysely<DB>;
   logger: Logger;
@@ -138,6 +143,8 @@ export class WhatsAppGatewayCapture {
     metadata: WhatsAppCaptureMetadata = { socketGeneration: 0 },
   ): Promise<void> {
     const identity = rawProviderIdentity(message);
+    if (metadata.upsertType === "append" && this.deps.isInitialSyncGeneration()) return;
+    const kind = metadata.upsertType === "append" ? "history_message" : "message";
     const eventKey = createWhatsAppEventKey(
       identity.providerConversationId,
       identity.providerMessageId ?? "",
@@ -147,11 +154,12 @@ export class WhatsAppGatewayCapture {
       if (eventKey && (await this.events.findByEventKey(eventKey))) return;
       const envelope = await this.prepareMessageEnvelope(
         message,
-        "message",
+        kind,
         createWhatsAppConnectionKey(this.deps.leaseGeneration ?? 0, metadata.socketGeneration),
+        { stageMedia: kind === "message" || metadata.upsertType === "append" },
       );
       const result = await this.events.insert({
-        kind: "message",
+        kind,
         origin: "gateway",
         eventKey,
         providerMessageId: identity.providerMessageId,
@@ -251,7 +259,7 @@ export class WhatsAppGatewayCapture {
     connectionKey: string,
     timestamp: string,
   ): Promise<PreparedHistoryMessage> {
-    let envelope = await this.prepareMessageEnvelope(message, "history_message", connectionKey, timestamp);
+    let envelope = await this.prepareMessageEnvelope(message, "history_message", connectionKey, { timestamp });
     let oversized = byteLength(envelope) > WHATSAPP_HISTORY_CHUNK_MAX_BYTES - HISTORY_CHUNK_SIZE_RESERVE_BYTES;
     if (oversized) {
       envelope = whatsAppMessageEnvelopeSchema.parse({
@@ -267,8 +275,9 @@ export class WhatsAppGatewayCapture {
     message: WhatsAppMessage,
     kind: "message" | "history_message",
     connectionKey: string,
-    timestamp = providerTimestamp(message, this.now),
+    options: PrepareMessageEnvelopeOptions = {},
   ): Promise<WhatsAppMessageEnvelope> {
+    const timestamp = options.timestamp ?? providerTimestamp(message, this.now);
     const identity = rawProviderIdentity(message);
     const eventKey = createWhatsAppEventKey(
       identity.providerConversationId,
@@ -283,7 +292,8 @@ export class WhatsAppGatewayCapture {
         ...(eventKey ? { eventKey } : {}),
       });
     }
-    const staged = kind === "message" ? await this.stageMedia(message) : { ref: null, error: null };
+    const staged =
+      (options.stageMedia ?? kind === "message") ? await this.stageMedia(message) : { ref: null, error: null };
     return whatsAppMessageEnvelopeSchema.parse({
       version: "1.0",
       kind,
