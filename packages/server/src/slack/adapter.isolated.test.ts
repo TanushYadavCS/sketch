@@ -229,6 +229,7 @@ function freshMockBot() {
   return {
     onMessage: vi.fn(),
     onChannelMessage: vi.fn(),
+    onChannelRenamed: vi.fn(),
     onThreadMessage: vi.fn(),
     onChannelMention: vi.fn(),
     onAppHomeOpened: vi.fn(),
@@ -328,6 +329,31 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.onChannelMessage).toHaveBeenCalledOnce();
       expect(mockBotInstance.onThreadMessage).toHaveBeenCalledOnce();
       expect(mockBotInstance.onChannelMention).toHaveBeenCalledOnce();
+    });
+
+    it("refreshes channel and conversation names when a channel is renamed", async () => {
+      const deps = makeDeps({
+        repos: {
+          ...makeDeps().repos,
+          channels: {
+            findBySlackChannelId: vi.fn().mockResolvedValue(makeChannel({ id: "ch-1", name: "old-name" })),
+            findById: vi.fn().mockResolvedValue(undefined),
+            create: vi.fn(),
+            update: vi.fn().mockImplementation(async (id, data) => makeChannel({ id, ...data })),
+          } as unknown as SlackAdapterDeps["repos"]["channels"],
+        },
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      mockBotInstance.getChannelInfo.mockResolvedValue({ name: "new-name", type: "channel" });
+
+      const rename = mockBotInstance.onChannelRenamed.mock.calls[0]?.[0] as (channelId: string) => Promise<void>;
+      await rename("C1");
+
+      expect(deps.repos.channels.update).toHaveBeenCalledWith("ch-1", { name: "new-name" });
+      expect(deps.repos.conversations.getOrCreate).toHaveBeenCalledWith(
+        { platform: "slack", kind: "channel", providerConversationId: "C1" },
+        "new-name",
+      );
     });
   });
 

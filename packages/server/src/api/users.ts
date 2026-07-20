@@ -17,6 +17,7 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { countRecentTokens, createVerificationToken } from "../auth/email-verify";
 import type { Config } from "../config";
+import { ensureSlackConnectorConfig } from "../connectors/slack-provisioning";
 import type { createChannelRepository } from "../db/repositories/channels";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import type { createSettingsRepository } from "../db/repositories/settings";
@@ -828,6 +829,16 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     }
 
     await users.remove(id);
+
+    /**
+     * The org-wide Slack indexing singleton may have been owned by the removed
+     * user, and archiveConnectorsForOwner just disabled it. Re-ensure after the
+     * row is gone so the connector is reassigned to a remaining admin now,
+     * not at the next restart or token rotation.
+     */
+    if (result.archived > 0) {
+      await ensureSlackConnectorConfig({ db: deps.db, encryptionKey: deps.config.ENCRYPTION_KEY, logger: deps.logger });
+    }
     return c.json({ success: true });
   });
 

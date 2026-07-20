@@ -350,6 +350,43 @@ describe("Users API — agent fields", () => {
     fetchMock.mockRestore();
   });
 
+  it("reassigns the org Slack connector when its owning admin is deleted", async () => {
+    const users = createUserRepository(db);
+    const owner = await users.create({
+      name: "second-admin",
+      email: "second.admin@test.com",
+      emailVerified: true,
+      passwordHash: await hashPassword(PASSWORD),
+      authRole: "admin",
+    });
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "slack-singleton",
+        connector_type: "slack",
+        auth_type: "system",
+        credentials: JSON.stringify({ type: "system" }),
+        sync_status: "pending",
+        created_by: owner.id,
+      })
+      .execute();
+
+    const res = await app.request(`/api/users/${owner.id}`, {
+      method: "DELETE",
+      headers: { Cookie: cookie },
+    });
+    expect(res.status).toBe(200);
+
+    const connector = await db
+      .selectFrom("connector_configs")
+      .select(["sync_status", "created_by"])
+      .where("id", "=", "slack-singleton")
+      .executeTakeFirstOrThrow();
+    expect(connector.sync_status).toBe("pending");
+    const admin = await users.findByEmail(ADMIN_EMAIL);
+    expect(connector.created_by).toBe(admin?.id);
+  });
+
   it("keeps local human users when managed tenant member removal fails", async () => {
     const managedApp = createApp(
       db,

@@ -124,6 +124,7 @@ export class SlackBot {
   private channelMessageHandler: SlackMessageHandler | null = null;
   private mentionHandler: SlackMessageHandler | null = null;
   private threadMessageHandler: SlackMessageHandler | null = null;
+  private channelRenamedHandler: ((channelId: string) => Promise<void>) | null = null;
   private appHomeOpenedHandler: AppHomeOpenedHandler | null = null;
   private homeActionHandler: HomeActionHandler | null = null;
   private botUserId: string | null = null;
@@ -187,6 +188,10 @@ export class SlackBot {
     this.threadMessageHandler = handler;
   }
 
+  onChannelRenamed(handler: (channelId: string) => Promise<void>): void {
+    this.channelRenamedHandler = handler;
+  }
+
   onAppHomeOpened(handler: AppHomeOpenedHandler): void {
     this.appHomeOpenedHandler = handler;
   }
@@ -238,8 +243,21 @@ export class SlackBot {
 
       if (mentionsBot) return;
 
-      if ("subtype" in message && typeof message.subtype === "string" && SYSTEM_MESSAGE_SUBTYPES.has(message.subtype))
+      if ("subtype" in message && typeof message.subtype === "string" && SYSTEM_MESSAGE_SUBTYPES.has(message.subtype)) {
+        /**
+         * Renames are excluded from capture but must still refresh stored
+         * channel metadata, or slice filenames and rosters keep advertising
+         * the old name forever.
+         */
+        if (message.subtype === "channel_name" && this.channelRenamedHandler) {
+          try {
+            await this.channelRenamedHandler(message.channel);
+          } catch (err) {
+            this.logger.warn({ err, channelId: message.channel }, "Channel rename refresh failed");
+          }
+        }
         return;
+      }
 
       if (threadTs && this.threadMessageHandler) {
         const hasText = text.length > 0;

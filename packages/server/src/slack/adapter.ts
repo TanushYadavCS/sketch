@@ -737,6 +737,25 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     });
   });
 
+  /**
+   * Channel renames arrive as excluded system messages, so this is the only
+   * signal that refreshes stored metadata: the channels row feeds agent
+   * context and the conversations display name feeds Slack slice rendering
+   * and indexed file names.
+   */
+  slackBot.onChannelRenamed(async (channelId) => {
+    const channelInfo = await slackBot.getChannelInfo(channelId);
+    const channel = await repos.channels.findBySlackChannelId(channelId);
+    if (channel && channel.name !== channelInfo.name) {
+      await repos.channels.update(channel.id, { name: channelInfo.name });
+    }
+    await repos.conversations.getOrCreate(
+      { platform: "slack", kind: "channel", providerConversationId: channelId },
+      channelInfo.name,
+    );
+    logger.info({ channelId, name: channelInfo.name }, "Refreshed channel metadata after rename");
+  });
+
   // Passive top-level channel message handler
   slackBot.onChannelMessage(async (message) => {
     try {
