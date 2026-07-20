@@ -941,13 +941,15 @@ describe("WhatsAppBot handleGroupMessage LID resolution", () => {
     (bot as unknown as { registerMessageHandler: () => void }).registerMessageHandler();
 
     const captured: unknown[] = [];
-    bot.onMessage(async (msg) => {
+    const capturedMetadata: unknown[] = [];
+    bot.onMessage(async (msg, metadata) => {
       captured.push(msg);
+      capturedMetadata.push(metadata);
     });
 
     const fire = (payload: unknown) => handlers.get("messages.upsert")?.(payload);
 
-    return { bot, fire, captured };
+    return { bot, fire, captured, capturedMetadata };
   }
 
   function makeGroupMsg(participantJid: string): proto.IWebMessageInfo {
@@ -1005,6 +1007,22 @@ describe("WhatsAppBot handleGroupMessage LID resolution", () => {
     const msg = captured[0] as { type: string; senderPhone: string | null };
     expect(msg.type).toBe("group");
     expect(msg.senderPhone).toBeNull();
+  });
+
+  it("forwards an offline append once when a normal notify overlaps", async () => {
+    const { fire, captured, capturedMetadata } = createBotWithMockSocket(async () => "+15550001111");
+
+    await fire({
+      type: "append",
+      messages: [makeGroupMsg("86702773280883@lid")],
+    });
+    await fire({
+      type: "notify",
+      messages: [makeGroupMsg("86702773280883@lid")],
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(capturedMetadata).toEqual([{ socketGeneration: 0, upsertType: "append" }]);
   });
 });
 

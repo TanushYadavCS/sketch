@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
+import { createWhatsAppEventKey } from "../db/repositories/whatsapp-inbound-events";
 import { type Attachment, downloadWhatsAppMedia } from "../files";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
@@ -1264,6 +1265,15 @@ describe("whatsapp/adapter", () => {
       expect(mock.startComposing).toHaveBeenCalledWith("1234567890@s.whatsapp.net");
       expect(mock.sendText).toHaveBeenCalledWith("1234567890@s.whatsapp.net", "hello back");
       expect(mock.stopComposing).toHaveBeenCalledWith("1234567890@s.whatsapp.net");
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerMessageId: "sent-1",
+          eventKey: createWhatsAppEventKey("1234567890@s.whatsapp.net", "sent-1", true),
+          isBot: true,
+          providerFromMe: true,
+          source: "live",
+        }),
+      );
     });
 
     it("does not send DM tool progress by default", async () => {

@@ -177,6 +177,54 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       await expect(repo.findMessageByEventKey(eventKey)).resolves.toMatchObject({ id: pn.row.id, eventKey });
     });
 
+    it("reconciles a legacy bot reply when fresh history replays it as from-me", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "whatsapp",
+        kind: "group",
+        providerConversationId: "group@g.us",
+      });
+      const botReply = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "OUTBOUND-1",
+        senderJid: "bot",
+        senderName: "Sketch",
+        text: "reply",
+        isBot: true,
+        source: "live",
+      });
+
+      const replay = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "OUTBOUND-1",
+        eventKey: "outbound-event-key",
+        senderJid: "",
+        senderName: "Unknown",
+        text: "reply",
+        providerFromMe: true,
+        source: "history",
+        backfillRangeId: "initial-range",
+      });
+
+      expect(replay.inserted).toBe(false);
+      expect(replay.row).toMatchObject({
+        id: botReply.row.id,
+        eventKey: "outbound-event-key",
+        isBot: true,
+        providerFromMe: true,
+        source: "live",
+        backfillRangeId: "initial-range",
+      });
+      await expect(
+        db
+          .selectFrom("conversation_messages")
+          .select(({ fn }) => fn.countAll<number>().as("count"))
+          .where("conversation_id", "=", conversation.id)
+          .where("provider_message_id", "=", "OUTBOUND-1")
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ count: 1 });
+    });
+
     it("finds the latest message by provider message id within a conversation", async () => {
       const repo = createConversationRepository(db);
       const conversation = await repo.getOrCreate({

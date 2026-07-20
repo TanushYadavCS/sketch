@@ -437,6 +437,7 @@ describe("WhatsAppInboundConsumer", () => {
       ["boundary-live-first", "2026-07-15T08:27:00.000Z"],
       ["boundary-live-second", "2026-07-15T08:28:00.000Z"],
     ]);
+    const adoptPassiveHistory = vi.fn(async () => undefined);
     const consumer = new WhatsAppInboundConsumer({
       db,
       logger: createTestLogger(),
@@ -470,6 +471,11 @@ describe("WhatsAppInboundConsumer", () => {
           return true;
         },
       }),
+      backfillWorker: {
+        correlateOnDemandSession: async () => false,
+        handleOnDemandResponse: async () => false,
+        adoptPassiveHistory,
+      },
     });
 
     consumer.start();
@@ -507,6 +513,8 @@ describe("WhatsAppInboundConsumer", () => {
       kind: "initial",
       upper_bound_at: "2026-07-15T08:27:00.000Z",
     });
+    expect(adoptPassiveHistory).toHaveBeenCalledTimes(1);
+    expect(adoptPassiveHistory).toHaveBeenCalledWith(["120363000000001@g.us"]);
   });
 
   it("terminally consumes a Baileys DM when the configured DM provider is Wati", async () => {
