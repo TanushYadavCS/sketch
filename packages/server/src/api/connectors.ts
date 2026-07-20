@@ -2238,7 +2238,7 @@ export function connectorRoutes(
     }
 
     const requestedScope = await db.transaction().execute(async (trx) => {
-      const txConnectorRepo = createConnectorRepository(trx);
+      const txConnectorRepo = createConnectorRepository(trx, appConfig?.ENCRYPTION_KEY);
       const scope =
         config.connector_type === "whatsapp"
           ? await applyWhatsAppGroupScope({ db: trx, scopeConfig: parsed.data.scopeConfig })
