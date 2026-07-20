@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTaskRepository } from "../db/repositories/tasks";
 import type { DB } from "../db/schema";
@@ -19,7 +19,10 @@ describe("follow-up review routes", () => {
     db = await createTestDb();
     await db
       .insertInto("users")
-      .values({ id: "user-1", name: "User", email: "user@example.com", auth_role: "member" })
+      .values([
+        { id: "user-1", name: "User", email: "user@example.com", auth_role: "member" },
+        { id: "user-2", name: "Other", email: "other@example.com", auth_role: "member" },
+      ])
       .execute();
     const created = await createTaskRepository(db).upsertTask({
       parentEntityId: null,
@@ -59,6 +62,31 @@ describe("follow-up review routes", () => {
       .execute();
 
     const app = reviewApp(db, "user-1");
+    const invalid = await app.request("/api/task-completion-recommendations/recommendation-1", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision: "dismiss" }),
+    });
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toMatchObject({ error: { code: "INVALID_DECISION" } });
+
+    const unauthorized = await reviewApp(db, "user-2").request(
+      "/api/task-completion-recommendations/recommendation-1",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: "confirm_done" }),
+      },
+    );
+    const missing = await app.request("/api/task-completion-recommendations/missing", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision: "confirm_done" }),
+    });
+    expect(unauthorized.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(await unauthorized.json()).toEqual(await missing.json());
+
     const request = (decision: "confirm_done" | "keep_open") =>
       app.request("/api/task-completion-recommendations/recommendation-1", {
         method: "PATCH",
@@ -83,6 +111,128 @@ describe("follow-up review routes", () => {
     const conflict = await request("keep_open");
     expect(conflict.status).toBe(409);
     await expect(conflict.json()).resolves.toMatchObject({ error: { code: "REVIEW_ALREADY_DECIDED" } });
+  });
+
+  it("returns REVIEW_STALE when a completion review has expired", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("users")
+      .values({ id: "user-1", name: "User", email: "user@example.com", auth_role: "member" })
+      .execute();
+    const created = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Expired completion review",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "expired-summary-task",
+      createdByUserId: "user-1",
+    });
+    await db
+      .insertInto("task_completion_recommendations")
+      .values({
+        id: "expired-recommendation",
+        task_id: created.taskId,
+        proposed_status: "done",
+        review_code: "EXPIRED1",
+        evidence_fingerprint: "expired-fingerprint",
+        origin_agent_output_id: null,
+        rationale: "This recommendation is too old.",
+        expires_at: "2026-07-19T00:00:00.000Z",
+        reviewed_at: null,
+        reviewed_by_user_id: null,
+        review_surface: null,
+      })
+      .execute();
+
+    const response = await reviewApp(db, "user-1").request(
+      "/api/task-completion-recommendations/expired-recommendation",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: "confirm_done" }),
+      },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "REVIEW_STALE" } });
+  });
+
+  it("revalidates completion authority inside the transaction without disclosing the review", async () => {
+    db = await createTestDb();
+    await db
+      .insertInto("users")
+      .values([
+        { id: "user-1", name: "User", email: "user@example.com", auth_role: "member" },
+        { id: "user-2", name: "Other", email: "other@example.com", auth_role: "member" },
+      ])
+      .execute();
+    const created = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Authority changes during review",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "authority-change-task",
+      createdByUserId: "user-1",
+    });
+    await db
+      .insertInto("task_completion_recommendations")
+      .values({
+        id: "authority-change-review",
+        task_id: created.taskId,
+        proposed_status: "done",
+        review_code: "AUTH1234",
+        evidence_fingerprint: "authority-change",
+        origin_agent_output_id: null,
+        rationale: "Authority will change before completion.",
+        expires_at: "2099-01-01T00:00:00.000Z",
+        reviewed_at: null,
+        reviewed_by_user_id: null,
+        review_surface: null,
+      })
+      .execute();
+    await sql`
+      CREATE TRIGGER change_task_owner_during_review
+      AFTER UPDATE OF review_state ON task_completion_recommendations
+      WHEN NEW.id = 'authority-change-review' AND NEW.review_state = 'accepted'
+      BEGIN
+        UPDATE tasks SET created_by_user_id = 'user-2' WHERE id = NEW.task_id;
+      END
+    `.execute(db);
+
+    const app = reviewApp(db, "user-1");
+    const response = await app.request("/api/task-completion-recommendations/authority-change-review", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision: "confirm_done" }),
+    });
+    const missing = await app.request("/api/task-completion-recommendations/missing", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision: "confirm_done" }),
+    });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual(await missing.json());
   });
 
   it("keeps seed review owner-scoped and makes dismiss retries idempotent", async () => {
