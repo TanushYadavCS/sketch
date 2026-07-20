@@ -154,30 +154,34 @@ function DrawerBody({
       </div>
 
       {item.review || item.actionPrompt || item.sourceUrl ? (
-        <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-6 py-4">
+        <div className="flex flex-col items-start gap-2 border-t border-border/60 px-6 py-4">
+          {item.actionPrompt || item.sourceUrl ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {item.actionPrompt ? (
+                <BriefActionButton
+                  label={actionLabel}
+                  stopPropagation={false}
+                  onClick={() => onOpenChat(item.actionPrompt as string)}
+                />
+              ) : null}
+              {item.sourceUrl ? (
+                <a
+                  href={item.sourceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-full border-[0.5px] border-border bg-transparent px-3 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:border-foreground/25 hover:bg-muted/50 hover:text-foreground"
+                >
+                  <ArrowSquareOutIcon size={13} weight="bold" aria-hidden />
+                  {sourceLinkLabel(item.sourceUrl)}
+                </a>
+              ) : null}
+            </div>
+          ) : null}
           <BriefFollowupReviewActions
             review={item.review}
             updating={updatingReviewId === item.review?.id}
             onReview={onReviewFollowup}
           />
-          {item.actionPrompt ? (
-            <BriefActionButton
-              label={actionLabel}
-              stopPropagation={false}
-              onClick={() => onOpenChat(item.actionPrompt as string)}
-            />
-          ) : null}
-          {item.sourceUrl ? (
-            <a
-              href={item.sourceUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-full border-[0.5px] border-border bg-transparent px-3 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:border-foreground/25 hover:bg-muted/50 hover:text-foreground"
-            >
-              <ArrowSquareOutIcon size={13} weight="bold" aria-hidden />
-              {sourceLinkLabel(item.sourceUrl)}
-            </a>
-          ) : null}
         </div>
       ) : null}
     </div>

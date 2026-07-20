@@ -132,7 +132,7 @@ describe("Brief row live task status", () => {
 });
 
 describe("Inline follow-up review actions", () => {
-  it("renders completion controls beside the chat action and reports the selected decision", async () => {
+  it("renders the chat action above one grouped completion decision and reports the selected choice", async () => {
     const user = userEvent.setup();
     const onReviewFollowup = vi.fn();
     const reviewItem = {
@@ -158,8 +158,20 @@ describe("Inline follow-up review actions", () => {
       <DailyBrief brief={brief} running={false} onOpenChat={() => {}} onReviewFollowup={onReviewFollowup} />,
     );
 
-    expect(screen.getByRole("button", { name: "Review with Sketch" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Mark done" }));
+    const row = screen.getByRole("button", { name: /Confirm launch is done/ }).closest("article");
+    expect(row).not.toBeNull();
+    const chatAction = within(row as HTMLElement).getByRole("button", { name: "Review with Sketch" });
+    const decisionGroup = within(row as HTMLElement).getByRole("group", {
+      name: "Completion review decision",
+    });
+    const markDone = within(decisionGroup).getByRole("button", { name: "Mark as done" });
+    expect(decisionGroup).not.toContainElement(chatAction);
+    const rowButtons = Array.from((row as HTMLElement).querySelectorAll("button"));
+    expect(rowButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
+      rowButtons.indexOf(markDone as HTMLButtonElement),
+    );
+
+    await user.click(markDone);
     expect(onReviewFollowup).toHaveBeenCalledWith("completion", "recommendation-1", "confirm_done");
   });
 
@@ -187,6 +199,93 @@ describe("Inline follow-up review actions", () => {
 
     expect(screen.getByText("Dismissed")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Track" })).not.toBeInTheDocument();
+  });
+
+  it("groups seed decisions below the chat action and reports the selected choice", async () => {
+    const user = userEvent.setup();
+    const onReviewFollowup = vi.fn();
+    const reviewItem = {
+      ...todoItem("seed-1", "Follow up with Acme"),
+      sectionKey: "untracked_followups" as const,
+      actionLabel: "Discuss with Sketch",
+      review: {
+        kind: "seed" as const,
+        id: "candidate-1",
+        state: "pending" as const,
+        canReview: true,
+        acceptedTaskId: null,
+      },
+    };
+    const brief = {
+      ...briefWithTodos([]),
+      sections: {
+        ...briefWithTodos([]).sections,
+        untracked_followups: [reviewItem],
+      },
+    };
+
+    renderWithProviders(
+      <DailyBrief brief={brief} running={false} onOpenChat={() => {}} onReviewFollowup={onReviewFollowup} />,
+    );
+
+    const row = screen.getByRole("button", { name: /Follow up with Acme/ }).closest("article");
+    expect(row).not.toBeNull();
+    const chatAction = within(row as HTMLElement).getByRole("button", { name: "Discuss with Sketch" });
+    const decisionGroup = within(row as HTMLElement).getByRole("group", {
+      name: "Follow-up tracking decision",
+    });
+    const dismiss = within(decisionGroup).getByRole("button", { name: "Dismiss" });
+    expect(decisionGroup).not.toContainElement(chatAction);
+    const rowButtons = Array.from((row as HTMLElement).querySelectorAll("button"));
+    expect(rowButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
+      rowButtons.indexOf(dismiss as HTMLButtonElement),
+    );
+
+    await user.click(dismiss);
+    expect(onReviewFollowup).toHaveBeenCalledWith("seed", "candidate-1", "dismiss");
+  });
+
+  it("keeps the chat action above the grouped review decision in the detail drawer", async () => {
+    const user = userEvent.setup();
+    const onReviewFollowup = vi.fn();
+    const reviewItem = {
+      ...todoItem("review-drawer-1", "Confirm drawer launch is done"),
+      sectionKey: "looks_resolved" as const,
+      actionLabel: "Review with Sketch",
+      review: {
+        kind: "completion" as const,
+        id: "recommendation-drawer-1",
+        state: "pending" as const,
+        canReview: true,
+      },
+    };
+    const brief = {
+      ...briefWithTodos([]),
+      sections: {
+        ...briefWithTodos([]).sections,
+        looks_resolved: [reviewItem],
+      },
+    };
+
+    renderWithProviders(
+      <DailyBrief brief={brief} running={false} onOpenChat={() => {}} onReviewFollowup={onReviewFollowup} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Confirm drawer launch is done/ }));
+    const drawer = await screen.findByRole("dialog");
+    const chatAction = within(drawer).getByRole("button", { name: "Review with Sketch" });
+    const decisionGroup = within(drawer).getByRole("group", {
+      name: "Completion review decision",
+    });
+    const keepOpen = within(decisionGroup).getByRole("button", { name: "Keep open" });
+    const drawerButtons = Array.from(drawer.querySelectorAll("button"));
+    expect(decisionGroup).not.toContainElement(chatAction);
+    expect(drawerButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
+      drawerButtons.indexOf(keepOpen as HTMLButtonElement),
+    );
+
+    await user.click(keepOpen);
+    expect(onReviewFollowup).toHaveBeenCalledWith("completion", "recommendation-drawer-1", "keep_open");
   });
 });
 

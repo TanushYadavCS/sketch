@@ -13,7 +13,8 @@
     "test:unit": "vitest run --project unit --project unit-isolated --passWithNoTests",
     "test:integration": "vitest run --project integration --passWithNoTests",
     "test:changed": "vitest run --changed --project unit --project unit-isolated --passWithNoTests",
-    "test:watch": "vitest --project unit --project unit-isolated"
+    "test:watch": "vitest --project unit --project unit-isolated",
+    "fixture:inline-followup-review": "bash ../../scripts/with-node-version.sh tsx src/scripts/inline-followup-review-fixture.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^5.0.10",

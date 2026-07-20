@@ -12,6 +12,7 @@
     "test:unit": "pnpm -r test:unit",
     "test:integration": "pnpm -r --workspace-concurrency=1 test:integration",
     "test:changed": "pnpm -r test:changed",
+    "fixture:inline-followup-review": "bash scripts/with-node-version.sh tsx packages/server/src/scripts/inline-followup-review-fixture.ts",
     "otter:check": "tsx scripts/otter-check.ts",
     "recompute:entity-hotness": "tsx scripts/recompute-entity-hotness.ts",
     "worktree:create": "tsx scripts/worktree.ts create",

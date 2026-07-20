@@ -91,15 +91,15 @@ export function BriefItemRow({
         ) : null}
       </button>
 
-      <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-1.5 py-2.5">
+      <div className="flex min-w-0 shrink-0 flex-col items-end justify-center gap-1.5 py-2.5">
+        {item.actionPrompt ? (
+          <BriefActionButton label={actionLabel} onClick={() => onOpenChat(item.actionPrompt as string)} />
+        ) : null}
         <BriefFollowupReviewActions
           review={item.review}
           updating={updatingReviewId === item.review?.id}
           onReview={onReviewFollowup}
         />
-        {item.actionPrompt ? (
-          <BriefActionButton label={actionLabel} onClick={() => onOpenChat(item.actionPrompt as string)} />
-        ) : null}
       </div>
     </article>
   );
