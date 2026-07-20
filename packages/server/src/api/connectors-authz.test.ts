@@ -234,6 +234,35 @@ describe("Connectors API — authorization", () => {
       expect(res.status).toBe(200);
     });
 
+    it("owner can save scope for an encrypted managed Google Calendar connector", async () => {
+      const encryptionKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      const encryptedApp = createApp(db, createTestConfig({ ENCRYPTION_KEY: encryptionKey }), { logger });
+      const encryptedCookie = await login(encryptedApp, MEMBER_EMAIL);
+      const cfg = await createConnectorRepository(db, encryptionKey).createConfig({
+        connectorType: "google_calendar",
+        authType: "oauth",
+        credentials: JSON.stringify({ type: "oauth", access_token: "stub" }),
+        credentialSource: "canvas",
+        createdBy: memberId,
+      });
+
+      const res = await encryptedApp.request(`/api/connectors/${cfg.id}/scope`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: encryptedCookie },
+        body: JSON.stringify({ scopeConfig: { calendarIds: ["primary"] } }),
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        connector: {
+          id: cfg.id,
+          connectorType: "google_calendar",
+          scopeConfig: { calendarIds: ["primary"] },
+          syncStatus: "pending",
+        },
+      });
+    });
+
     it("admin → 200 on PATCH /:id/scope org-wide connector", async () => {
       const cfg = await insertConfig(db, { connectorType: "notion", createdBy: memberId });
       const res = await app.request(`/api/connectors/${cfg.id}/scope`, {
