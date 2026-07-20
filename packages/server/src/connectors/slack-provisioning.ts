@@ -28,10 +28,10 @@ export async function ensureSlackConnectorConfig(options: {
     const { db, encryptionKey, logger } = options;
     const existing = await db
       .selectFrom("connector_configs")
-      .select("id")
+      .select(["id", "sync_status"])
       .where("connector_type", "=", "slack")
       .executeTakeFirst();
-    if (existing) return;
+    if (existing && existing.sync_status !== "disabled") return;
 
     const owner = await createUserRepository(db).findFirstAdmin();
     if (!owner) {
@@ -40,6 +40,27 @@ export async function ensureSlackConnectorConfig(options: {
     }
 
     const repo = createConnectorRepository(db, encryptionKey);
+    if (existing) {
+      /**
+       * The singleton is system-managed and its only disable path is owner
+       * removal (archiveConnectorsForOwner scrubs credentials and flips it to
+       * disabled). Ensure therefore reactivates a disabled row under the
+       * current first admin instead of leaving Slack indexing dead after the
+       * original owner leaves the workspace.
+       */
+      await repo.updateConfig(existing.id, {
+        credentials: JSON.stringify({ type: "system" }),
+        syncStatus: "pending",
+        errorMessage: null,
+      });
+      await db.updateTable("connector_configs").set({ created_by: owner.id }).where("id", "=", existing.id).execute();
+      logger.info(
+        { connectorConfigId: existing.id, ownerId: owner.id },
+        "Reactivated disabled Slack indexing connector config",
+      );
+      return;
+    }
+
     const created = await repo.createConfig({
       connectorType: "slack",
       authType: "system",

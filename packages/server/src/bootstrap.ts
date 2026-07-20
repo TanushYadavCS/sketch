@@ -18,6 +18,7 @@ import { AgentRunService } from "./agents/service";
 import type { Config } from "./config";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
 import { ensureSlackConnectorConfig } from "./connectors/slack-provisioning";
+import { archiveAllSlackChannelFiles } from "./connectors/slack-salience";
 import { startSyncScheduler } from "./connectors/sync";
 import { createPricingService } from "./cost/cost-pricing";
 import { OpenRouterPriceMap } from "./cost/openrouter-price-map";
@@ -732,6 +733,25 @@ export async function createServer(config: Config, options?: CreateServerOptions
         slack = null;
       }
       await settingsRepo.update({ slackBotToken: null, slackAppToken: null });
+      /**
+       * Revoke indexed-channel access in the same gesture instead of waiting
+       * for the next scheduled sync: until archival runs, previously emitted
+       * slices stay searchable under their last-known ACLs. The unconfigured
+       * sync path repeats this archival as a backstop, so a failure here only
+       * delays revocation rather than losing it.
+       */
+      try {
+        const slackConnector = await db
+          .selectFrom("connector_configs")
+          .select("id")
+          .where("connector_type", "=", "slack")
+          .executeTakeFirst();
+        if (slackConnector) {
+          await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: slackConnector.id });
+        }
+      } catch (err) {
+        logger.warn({ err }, "Failed to archive Slack files on disconnect; next sync will archive");
+      }
       logger.info("Slack disconnected and tokens cleared");
     },
     onLlmSettingsUpdated: async () => {

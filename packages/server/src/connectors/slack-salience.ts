@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { type ConversationSliceRow, createConversationSlicesRepository } from "../db/repositories/conversation-slices";
@@ -104,6 +104,23 @@ async function listSliceContexts(
     where === "pending"
       ? query.where("conversation_slices.salience_verdict", "is", null)
       : query.where("conversation_slices.salience_verdict", "=", "kept");
+  if (where === "pending") {
+    /**
+     * A claim left behind by a failed attempt is retry backoff: rows inside
+     * the stale window are excluded so they don't occupy batch slots, and
+     * never-attempted rows (empty coalesce sorts first) are judged before
+     * retries so persistent failures cannot starve fresh slices.
+     */
+    const staleBefore = new Date(Date.now() - SALIENCE_CLAIM_STALE_MS).toISOString();
+    query = query
+      .where((eb) =>
+        eb.or([
+          eb("conversation_slices.salience_claimed_at", "is", null),
+          eb("conversation_slices.salience_claimed_at", "<", staleBefore),
+        ]),
+      )
+      .orderBy(sql`coalesce(conversation_slices.salience_claimed_at, '')`, "asc");
+  }
   if (where === "kept" && refreshedAfter) {
     query = query.where((eb) =>
       eb.or([
@@ -229,6 +246,16 @@ function serializedSignals(verdict: WhatsAppSalienceVerdict): string {
   });
 }
 
+/**
+ * Slack Web API errors carry the platform code in `data.error`. These codes
+ * mean the bot can no longer see the channel (left, kicked, or the channel was
+ * archived), so every retry would fail identically.
+ */
+function isChannelInaccessibleError(err: unknown): boolean {
+  const code = (err as { data?: { error?: string } } | null)?.data?.error;
+  return code === "channel_not_found" || code === "not_in_channel" || code === "is_archived";
+}
+
 async function processPendingSlice(
   options: SlackSalienceOptions,
   context: SlackSliceContext,
@@ -261,7 +288,28 @@ async function processPendingSlice(
     if (!updated) return "lost";
     return verdict.salient ? "kept" : "dropped";
   } catch (err) {
-    await createConversationSlicesRepository(options.db).clearSalienceClaim(context.slice.id, claimToken);
+    /**
+     * Membership is the opt-in: a slice whose channel the bot can no longer
+     * see must not be indexed, so it is dead-lettered as dropped instead of
+     * retrying forever. Any other failure keeps the claim in place — the
+     * stale-claim window doubles as retry backoff, and the pending listing
+     * skips backed-off rows so persistent failures cannot monopolize the
+     * batch.
+     */
+    if (isChannelInaccessibleError(err)) {
+      options.logger.warn(
+        { err, sliceId: context.slice.id, channelId: context.channelId },
+        "Slack salience dead-lettered slice: channel no longer accessible",
+      );
+      const updated = await repo.updateSalienceVerdictIfClaimed(context.slice.id, claimToken, {
+        verdict: "dropped",
+        signals: JSON.stringify({
+          promptVersion: SLACK_SALIENCE_PROMPT_VERSION,
+          droppedReason: "channel_inaccessible",
+        }),
+      });
+      return updated ? "dropped" : "lost";
+    }
     throw err;
   }
 }

@@ -119,11 +119,159 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
 
       const slice = await db
         .selectFrom("conversation_slices")
-        .select(["salience_verdict", "salience_claim_token"])
+        .select(["salience_verdict", "salience_claim_token", "salience_claimed_at"])
         .where("conversation_id", "=", conversation.id)
         .executeTakeFirstOrThrow();
       expect(slice.salience_verdict).toBeNull();
-      expect(slice.salience_claim_token).toBeNull();
+      expect(slice.salience_claim_token).not.toBeNull();
+      expect(slice.salience_claimed_at).not.toBeNull();
+    });
+
+    it("dead-letters slices from channels the bot can no longer access", async () => {
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C_GONE",
+      });
+      await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: 1,
+        lastMessageId: 2,
+        startedAt: "2026-07-17T00:00:00.000Z",
+        endedAt: "2026-07-17T01:00:00.000Z",
+        messageCount: 2,
+        denoisedMessageIds: [1, 2],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+      });
+
+      const facade = fakeFacade({
+        listChannelMembers: async () => {
+          throw Object.assign(new Error("An API error occurred: channel_not_found"), {
+            data: { error: "channel_not_found" },
+          });
+        },
+      });
+      const generator = {
+        generateJSON: async () => {
+          throw new Error("generator must not be called for an inaccessible channel");
+        },
+      } as unknown as Parameters<typeof processSlackSalience>[0]["generator"];
+
+      const summary = await processSlackSalience({ db, logger, facade, generator });
+      expect(summary.dropped).toBe(1);
+      expect(summary.failures).toBe(0);
+
+      const slice = await db
+        .selectFrom("conversation_slices")
+        .select(["salience_verdict", "salience_signals"])
+        .where("conversation_id", "=", conversation.id)
+        .executeTakeFirstOrThrow();
+      expect(slice.salience_verdict).toBe("dropped");
+      expect(slice.salience_signals).toContain("channel_inaccessible");
+    });
+
+    it("failed slices back off and stop monopolizing the salience batch", async () => {
+      const conversations = createConversationRepository(db);
+      const failing = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C_FAILING",
+      });
+      const healthy = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C_HEALTHY",
+      });
+      const slices = createConversationSlicesRepository(db);
+      await slices.insertIfAbsent({
+        conversationId: failing.id,
+        firstMessageId: 1,
+        lastMessageId: 2,
+        startedAt: "2026-07-17T00:00:00.000Z",
+        endedAt: "2026-07-17T01:00:00.000Z",
+        messageCount: 2,
+        denoisedMessageIds: [1, 2],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+      });
+      await slices.insertIfAbsent({
+        conversationId: healthy.id,
+        firstMessageId: 3,
+        lastMessageId: 4,
+        startedAt: "2026-07-17T02:00:00.000Z",
+        endedAt: "2026-07-17T03:00:00.000Z",
+        messageCount: 2,
+        denoisedMessageIds: [3, 4],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+      });
+      await db
+        .insertInto("conversation_messages")
+        .values(
+          [3, 4].map((id) => ({
+            id,
+            conversation_id: healthy.id,
+            provider_message_id: `msg-${id}`,
+            sender_jid: "U0TEAM",
+            sender_name: "Roopak",
+            is_bot: 0,
+            addressed_to_sketch: 0,
+            text: `message ${id}`,
+            received_at: "2026-07-17T02:30:00.000Z",
+            provider_timestamp: "2026-07-17T02:30:00.000Z",
+          })),
+        )
+        .execute();
+
+      const facade = fakeFacade({
+        listChannelMembers: async (channelId: string) => {
+          if (channelId === "C_FAILING") throw new Error("transient Slack outage");
+          return ["U0TEAM"];
+        },
+      });
+      const generator = {
+        generateJSON: async () => ({ salient: true, signals: ["decision"], entities: [] }),
+      } as unknown as Parameters<typeof processSlackSalience>[0]["generator"];
+
+      const first = await processSlackSalience({ db, logger, facade, generator, batchLimit: 1 });
+      expect(first.failures).toBe(1);
+      expect(first.judged).toBe(0);
+
+      const second = await processSlackSalience({ db, logger, facade, generator, batchLimit: 1 });
+      expect(second.judged).toBe(1);
+      expect(second.kept).toBe(1);
+
+      const verdicts = await db
+        .selectFrom("conversation_slices")
+        .select(["conversation_id", "salience_verdict"])
+        .orderBy("conversation_id")
+        .execute();
+      expect(verdicts.find((v) => v.conversation_id === failing.id)?.salience_verdict).toBeNull();
+      expect(verdicts.find((v) => v.conversation_id === healthy.id)?.salience_verdict).toBe("kept");
+    });
+
+    it("reactivates a disabled singleton so indexing survives owner removal", async () => {
+      await ensureSlackConnectorConfig({ db, logger });
+      const created = await db
+        .selectFrom("connector_configs")
+        .select(["id"])
+        .where("connector_type", "=", "slack")
+        .executeTakeFirstOrThrow();
+      await createConnectorRepository(db).archiveConnectorsForOwner("user-admin");
+
+      await ensureSlackConnectorConfig({ db, logger });
+
+      const row = await db
+        .selectFrom("connector_configs")
+        .select(["id", "sync_status", "created_by", "error_message"])
+        .where("connector_type", "=", "slack")
+        .executeTakeFirstOrThrow();
+      expect(row.id).toBe(created.id);
+      expect(row.sync_status).toBe("pending");
+      expect(row.created_by).toBe("user-admin");
+      expect(row.error_message).toBeNull();
     });
 
     it("resolves the identity ladder: teammate, then CRM entity by email, then display name", async () => {
