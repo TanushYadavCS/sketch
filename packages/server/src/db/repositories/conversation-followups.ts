@@ -424,6 +424,67 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
       }
     },
 
+    async reviewRecommendationById(input: {
+      id: string;
+      action: "confirm_done" | "keep_open";
+      userId: string;
+      assigneeEntityIds: string[];
+      surface: string;
+      now: string;
+      canEditAllLocalTasks?: boolean;
+    }) {
+      const load = () =>
+        db
+          .selectFrom("task_completion_recommendations")
+          .innerJoin("tasks", "tasks.id", "task_completion_recommendations.task_id")
+          .select([
+            "task_completion_recommendations.review_code",
+            "task_completion_recommendations.review_state",
+            "task_completion_recommendations.task_id",
+            "tasks.created_by_user_id",
+            "tasks.assignee_entity_id",
+          ])
+          .where("task_completion_recommendations.id", "=", input.id)
+          .executeTakeFirst();
+      const current = await load();
+      if (!current) return { status: "not_found" as const };
+      const authorized =
+        input.canEditAllLocalTasks === true ||
+        current.created_by_user_id === input.userId ||
+        Boolean(current.assignee_entity_id && input.assigneeEntityIds.includes(current.assignee_entity_id));
+      if (!authorized) return { status: "unauthorized" as const };
+      if (current.review_state !== "pending") {
+        if (current.review_state !== "accepted" && current.review_state !== "rejected") {
+          return { status: "stale" as const };
+        }
+        return {
+          status: "already_reviewed" as const,
+          decision: current.review_state === "accepted" ? ("confirm_done" as const) : ("keep_open" as const),
+          taskId: current.task_id,
+        };
+      }
+
+      const result = await createConversationFollowupsRepository(db).reviewRecommendation({
+        code: current.review_code,
+        action: input.action,
+        userId: input.userId,
+        assigneeEntityIds: input.assigneeEntityIds,
+        surface: input.surface,
+        now: input.now,
+        canEditAllLocalTasks: input.canEditAllLocalTasks,
+      });
+      if (result.status !== "stale") return result;
+      const raced = await load();
+      if (raced?.review_state === "accepted" || raced?.review_state === "rejected") {
+        return {
+          status: "already_reviewed" as const,
+          decision: raced.review_state === "accepted" ? ("confirm_done" as const) : ("keep_open" as const),
+          taskId: raced.task_id,
+        };
+      }
+      return result;
+    },
+
     async reviewRecommendation(input: {
       code: string;
       action: "confirm_done" | "keep_open";

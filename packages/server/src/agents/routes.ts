@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Kysely, Selectable } from "kysely";
-import { type TaskAccessContext, resolveTaskAccessContext, toTaskDto } from "../api/task-access";
+import { type TaskAccessContext, canEditTaskStatus, resolveTaskAccessContext, toTaskDto } from "../api/task-access";
 import type {
   AgentDeliveryConfig,
   AgentDeliveryMention,
@@ -13,6 +13,8 @@ import type {
   AgentSourceConfig,
   AgentSourceKey,
 } from "../db/repositories/agent-outputs";
+import { createConversationFollowupsRepository } from "../db/repositories/conversation-followups";
+import { createTaskDurabilityTransitionRepository } from "../db/repositories/task-durability-transition";
 import { createTaskRepository } from "../db/repositories/tasks";
 import type { DB, TasksTable } from "../db/schema";
 import type { Logger } from "../logger";
@@ -29,6 +31,7 @@ import {
 import type { AgentApiItem, AgentDefinition } from "./types";
 
 export const MAX_BRIEF_TASK_LINKS = 100;
+export const MAX_BRIEF_REVIEW_LINKS = 100;
 
 export interface DailyBriefTaskState {
   id: string;
@@ -46,7 +49,23 @@ export interface DailyBriefTaskState {
 type HydratedDailyBriefItem = AgentApiItem & {
   taskId: string | null;
   task: DailyBriefTaskState | null;
+  review?: DailyBriefReviewState | null;
 };
+
+export type DailyBriefReviewState =
+  | {
+      kind: "completion";
+      id: string;
+      state: "pending" | "accepted" | "rejected" | "expired";
+      canReview: boolean;
+    }
+  | {
+      kind: "seed";
+      id: string;
+      state: "pending" | "accepted" | "dismissed";
+      canReview: boolean;
+      acceptedTaskId: string | null;
+    };
 
 type TaskLinkCandidate = {
   taskId: string;
@@ -108,7 +127,7 @@ export async function hydrateDailyBriefTaskState(params: {
   access: TaskAccessContext;
   loadVisibleTasks: (taskIds: string[], access: TaskAccessContext) => Promise<Selectable<TasksTable>[]>;
   logger: Pick<Logger, "debug">;
-}): Promise<AgentOutputApi & { sections: Record<string, HydratedDailyBriefItem[]> }> {
+}): Promise<Omit<AgentOutputApi, "sections"> & { sections: Record<string, HydratedDailyBriefItem[]> }> {
   const candidateByItem = new Map<AgentApiItem, TaskLinkCandidate>();
   const idsToLoad: string[] = [];
   const acceptedIds = new Set<string>();
@@ -204,6 +223,192 @@ export async function hydrateDailyBriefTaskState(params: {
   return { ...params.output, sections };
 }
 
+type ReviewReference =
+  | { kind: "completion"; id: string | null; code: string | null; overflow: boolean }
+  | { kind: "seed"; id: string | null; code: string | null; overflow: boolean };
+
+export async function hydrateDailyBriefState(params: {
+  db: Kysely<DB>;
+  output: AgentOutputApi;
+  userId: string;
+  access: TaskAccessContext;
+  loadVisibleTasks: (taskIds: string[], access: TaskAccessContext) => Promise<Selectable<TasksTable>[]>;
+  logger: Pick<Logger, "debug">;
+  now?: string;
+}): Promise<Omit<AgentOutputApi, "sections"> & { sections: Record<string, HydratedDailyBriefItem[]> }> {
+  const references = new Map<AgentApiItem, ReviewReference>();
+  const selectedReferenceKeys = new Set<string>();
+  const completionIds: string[] = [];
+  const completionCodes: string[] = [];
+  const seedIds: string[] = [];
+  const seedCodes: string[] = [];
+
+  if (params.output.userId === params.userId) {
+    for (const items of Object.values(params.output.sections)) {
+      for (const item of items) {
+        const payload = item.structuredPayload;
+        if (!payload || payload.serverOwnedFollowup !== true) continue;
+        let reference: Omit<ReviewReference, "overflow"> | null = null;
+        if (item.sectionKey === "looks_resolved" && payload.trackingState === "looks_resolved") {
+          const id = nonEmptyString(payload.recommendationId);
+          const code = nonEmptyString(payload.reviewCode);
+          if (id || code) reference = { kind: "completion", id, code };
+        } else if (item.sectionKey === "untracked_followups" && payload.trackingState === "untracked") {
+          const candidateId = nonEmptyString(payload.candidateId);
+          const reviewCode = nonEmptyString(payload.reviewCode);
+          const id = candidateId && candidateId !== reviewCode ? candidateId : null;
+          if (id || reviewCode) reference = { kind: "seed", id, code: reviewCode };
+        }
+        if (!reference) continue;
+        const key = `${reference.kind}:${reference.id ? `id:${reference.id}` : `code:${reference.code}`}`;
+        const overflow = !selectedReferenceKeys.has(key) && selectedReferenceKeys.size >= MAX_BRIEF_REVIEW_LINKS;
+        if (!overflow && !selectedReferenceKeys.has(key)) {
+          selectedReferenceKeys.add(key);
+          if (reference.kind === "completion") {
+            if (reference.id) completionIds.push(reference.id);
+            else if (reference.code) completionCodes.push(reference.code);
+          } else if (reference.id) seedIds.push(reference.id);
+          else if (reference.code) seedCodes.push(reference.code);
+        }
+        references.set(item, { ...reference, overflow });
+      }
+    }
+  }
+
+  const completionRows =
+    completionIds.length + completionCodes.length === 0
+      ? []
+      : await params.db
+          .selectFrom("task_completion_recommendations")
+          .innerJoin("tasks", "tasks.id", "task_completion_recommendations.task_id")
+          .selectAll("tasks")
+          .select([
+            "task_completion_recommendations.id as recommendation_id",
+            "task_completion_recommendations.review_code as recommendation_review_code",
+            "task_completion_recommendations.review_state as recommendation_review_state",
+            "task_completion_recommendations.expires_at as recommendation_expires_at",
+            "task_completion_recommendations.delivery_count as recommendation_delivery_count",
+          ])
+          .where((eb) =>
+            eb.or([
+              ...(completionIds.length > 0 ? [eb("task_completion_recommendations.id", "in", completionIds)] : []),
+              ...(completionCodes.length > 0
+                ? [eb("task_completion_recommendations.review_code", "in", completionCodes)]
+                : []),
+            ]),
+          )
+          .limit(completionIds.length + completionCodes.length)
+          .execute();
+  const completionById = new Map(completionRows.map((row) => [row.recommendation_id, row]));
+  const completionByCode = new Map(completionRows.map((row) => [row.recommendation_review_code, row]));
+
+  const seedRows =
+    seedIds.length + seedCodes.length === 0
+      ? []
+      : await params.db
+          .selectFrom("task_seed_candidates")
+          .select(["id", "review_code", "review_state", "accepted_task_id"])
+          .where("user_id", "=", params.userId)
+          .where((eb) =>
+            eb.or([
+              ...(seedIds.length > 0 ? [eb("id", "in", seedIds)] : []),
+              ...(seedCodes.length > 0 ? [eb("review_code", "in", seedCodes)] : []),
+            ]),
+          )
+          .limit(seedIds.length + seedCodes.length)
+          .execute();
+  const seedById = new Map(seedRows.map((row) => [row.id, row]));
+  const seedByCode = new Map(seedRows.map((row) => [row.review_code, row]));
+
+  const reviewByItem = new Map<AgentApiItem, DailyBriefReviewState>();
+  const now = params.now ?? new Date().toISOString();
+  const outputWithAcceptedTasks: AgentOutputApi = {
+    ...params.output,
+    sections: Object.fromEntries(
+      Object.entries(params.output.sections).map(([section, items]) => [
+        section,
+        items.map((item) => {
+          const reference = references.get(item);
+          if (!reference || reference.overflow) return item;
+          if (reference.kind === "completion") {
+            const row =
+              (reference.id ? completionById.get(reference.id) : undefined) ??
+              (reference.code ? completionByCode.get(reference.code) : undefined);
+            if (!row || !canEditTaskStatus(row, params.access)) return item;
+            const actionable =
+              row.valid_to === null &&
+              (row.status === "open" || row.status === "in_progress") &&
+              row.status_authority === "local" &&
+              (row.provenance === "summary" || row.provenance === "brief") &&
+              row.recommendation_expires_at > now &&
+              row.recommendation_delivery_count <= 3;
+            const state =
+              row.recommendation_review_state === "pending" && !actionable
+                ? "expired"
+                : row.recommendation_review_state;
+            if (state !== "pending" && state !== "accepted" && state !== "rejected" && state !== "expired") return item;
+            reviewByItem.set(item, {
+              kind: "completion",
+              id: row.recommendation_id,
+              state,
+              canReview: state === "pending",
+            });
+            return item;
+          }
+          const row =
+            (reference.id ? seedById.get(reference.id) : undefined) ??
+            (reference.code ? seedByCode.get(reference.code) : undefined);
+          if (
+            !row ||
+            (row.review_state !== "pending" && row.review_state !== "accepted" && row.review_state !== "dismissed")
+          ) {
+            return item;
+          }
+          reviewByItem.set(item, {
+            kind: "seed",
+            id: row.id,
+            state: row.review_state,
+            canReview: row.review_state === "pending",
+            acceptedTaskId: null,
+          });
+          return row.review_state === "accepted" && row.accepted_task_id
+            ? { ...item, taskId: row.accepted_task_id }
+            : item;
+        }),
+      ]),
+    ),
+  };
+
+  const hydrated = await hydrateDailyBriefTaskState({
+    output: outputWithAcceptedTasks,
+    userId: params.userId,
+    access: params.access,
+    loadVisibleTasks: params.loadVisibleTasks,
+    logger: params.logger,
+  });
+  const sections: Record<string, HydratedDailyBriefItem[]> = Object.fromEntries(
+    Object.entries(hydrated.sections).map(([section, items]) => [
+      section,
+      items.map((item, index) => {
+        const original = params.output.sections[section]?.[index];
+        const review = original ? reviewByItem.get(original) : undefined;
+        if (!review) return { ...item, review: null };
+        if (review.kind === "seed") {
+          return {
+            ...item,
+            review: {
+              ...review,
+              acceptedTaskId: review.state === "accepted" && item.task ? item.task.id : null,
+            },
+          };
+        }
+        return { ...item, review };
+      }),
+    ]),
+  );
+  return { ...hydrated, sections };
+}
+
 async function getCurrentUserId(c: { get: (key: "sub" | "email") => string | undefined }, service: AgentRunService) {
   const sub = c.get("sub");
   if (!sub) return null;
@@ -265,7 +470,8 @@ export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>, logge
 
   const hydrate = async (c: Parameters<typeof resolveTaskAccessContext>[1], output: AgentOutputApi, userId: string) => {
     const access = await resolveTaskAccessContext(db, c, userId);
-    return hydrateDailyBriefTaskState({
+    return hydrateDailyBriefState({
+      db,
       output,
       userId,
       access,
@@ -314,6 +520,92 @@ export function dailyBriefRoutes(service: AgentRunService, db: Kysely<DB>, logge
     });
     const row = rows[0] ?? null;
     return c.json({ generation: row ? { id: row.id, status: row.status, briefDate: row.output_date } : null }, 202);
+  });
+
+  return routes;
+}
+
+export function followupReviewRoutes(service: AgentRunService, db: Kysely<DB>) {
+  const routes = new Hono();
+  const followups = createConversationFollowupsRepository(db);
+  const transition = createTaskDurabilityTransitionRepository(db);
+  const tasks = createTaskRepository(db);
+
+  const taskState = async (taskId: string | undefined, access: TaskAccessContext) => {
+    if (!taskId) return null;
+    const task = (await tasks.listVisibleTasksByIds([taskId], access))[0];
+    return task ? toDailyBriefTaskState(task, access) : null;
+  };
+
+  routes.patch("/task-completion-recommendations/:recommendationId", async (c) => {
+    const userId = await getCurrentUserId(c, service);
+    if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
+    const body = (await c.req.json().catch(() => null)) as { decision?: unknown } | null;
+    if (body?.decision !== "confirm_done" && body?.decision !== "keep_open") {
+      return c.json({ error: { code: "INVALID_DECISION", message: "Invalid completion review decision" } }, 400);
+    }
+    const access = await resolveTaskAccessContext(db, c, userId);
+    const result = await followups.reviewRecommendationById({
+      id: c.req.param("recommendationId"),
+      action: body.decision,
+      userId,
+      assigneeEntityIds: access.assigneeEntityIds,
+      canEditAllLocalTasks: access.canEditAllLocalTasks,
+      surface: "web",
+      now: new Date().toISOString(),
+    });
+    if (result.status === "not_found" || result.status === "unauthorized") {
+      return c.json({ error: { code: "NOT_FOUND", message: "Review not found" } }, 404);
+    }
+    if (result.status === "stale") {
+      return c.json({ error: { code: "REVIEW_STALE", message: "Review is no longer actionable" } }, 409);
+    }
+    if (result.status === "already_reviewed" && result.decision !== body.decision) {
+      return c.json({ error: { code: "REVIEW_ALREADY_DECIDED", message: "Review already has another decision" } }, 409);
+    }
+    return c.json({
+      review: {
+        kind: "completion" as const,
+        id: c.req.param("recommendationId"),
+        state: body.decision === "confirm_done" ? ("accepted" as const) : ("rejected" as const),
+        canReview: false,
+      },
+      task: await taskState("taskId" in result ? result.taskId : undefined, access),
+    });
+  });
+
+  routes.patch("/task-seed-candidates/:candidateId", async (c) => {
+    const userId = await getCurrentUserId(c, service);
+    if (!userId) return c.json({ error: { code: "UNAUTHORIZED", message: "User not found" } }, 401);
+    const body = (await c.req.json().catch(() => null)) as { decision?: unknown } | null;
+    if (body?.decision !== "track" && body?.decision !== "dismiss") {
+      return c.json({ error: { code: "INVALID_DECISION", message: "Invalid seed review decision" } }, 400);
+    }
+    const access = await resolveTaskAccessContext(db, c, userId);
+    const result = await transition.reviewSeedCandidateById({
+      id: c.req.param("candidateId"),
+      userId,
+      decision: body.decision,
+      surface: "web",
+      now: new Date().toISOString(),
+    });
+    if (result.status === "not_found") {
+      return c.json({ error: { code: "NOT_FOUND", message: "Review not found" } }, 404);
+    }
+    if (result.status === "already_reviewed" && result.decision !== body.decision) {
+      return c.json({ error: { code: "REVIEW_ALREADY_DECIDED", message: "Review already has another decision" } }, 409);
+    }
+    const task = await taskState("taskId" in result ? result.taskId : undefined, access);
+    return c.json({
+      review: {
+        kind: "seed" as const,
+        id: c.req.param("candidateId"),
+        state: body.decision === "track" ? ("accepted" as const) : ("dismissed" as const),
+        canReview: false,
+        acceptedTaskId: task?.id ?? null,
+      },
+      task,
+    });
   });
 
   return routes;

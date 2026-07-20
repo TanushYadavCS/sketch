@@ -2188,7 +2188,7 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
       mode: "hybrid",
       untracked: [
         {
-          candidateId: "SEED1234",
+          candidateId: "pending-seed",
           title: "Follow up with Acme",
           reviewCode: "SEED1234",
           sourceKey,
