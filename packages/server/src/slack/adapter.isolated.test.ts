@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
+import { refreshSlackChannelName } from "../connectors/slack-salience";
 import { downloadSlackFile } from "../files";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
@@ -229,6 +230,7 @@ function freshMockBot() {
   return {
     onMessage: vi.fn(),
     onChannelMessage: vi.fn(),
+    onChannelRenamed: vi.fn(),
     onThreadMessage: vi.fn(),
     onChannelMention: vi.fn(),
     onAppHomeOpened: vi.fn(),
@@ -302,6 +304,10 @@ vi.mock("./api", () => ({
   slackApiCall: vi.fn().mockResolvedValue({}),
 }));
 
+vi.mock("../connectors/slack-salience", () => ({
+  refreshSlackChannelName: vi.fn().mockResolvedValue(true),
+}));
+
 function getHandlers() {
   return {
     dm: mockBotInstance.onMessage.mock.calls[0]?.[0] as (msg: unknown) => Promise<void>,
@@ -328,6 +334,50 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.onChannelMessage).toHaveBeenCalledOnce();
       expect(mockBotInstance.onThreadMessage).toHaveBeenCalledOnce();
       expect(mockBotInstance.onChannelMention).toHaveBeenCalledOnce();
+    });
+
+    it("refreshes channel and conversation names when a channel is renamed", async () => {
+      const deps = makeDeps({
+        repos: {
+          ...makeDeps().repos,
+          channels: {
+            findBySlackChannelId: vi.fn().mockResolvedValue(makeChannel({ id: "ch-1", name: "old-name" })),
+            findById: vi.fn().mockResolvedValue(undefined),
+            create: vi.fn(),
+            update: vi.fn().mockImplementation(async (id, data) => makeChannel({ id, ...data })),
+          } as unknown as SlackAdapterDeps["repos"]["channels"],
+        },
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      mockBotInstance.getChannelInfo.mockResolvedValue({ name: "new-name", type: "channel" });
+
+      const rename = mockBotInstance.onChannelRenamed.mock.calls[0]?.[0] as (channelId: string) => Promise<void>;
+      await rename("C1");
+
+      expect(deps.repos.channels.update).toHaveBeenCalledWith("ch-1", { name: "new-name" });
+      expect(vi.mocked(refreshSlackChannelName)).toHaveBeenCalledWith(
+        expect.objectContaining({ channelId: "C1", channelName: "new-name" }),
+      );
+    });
+
+    it("records group DM (mpim) captures under their own conversation kind", async () => {
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+
+      await channel({
+        type: "channel_message",
+        channelType: "mpim",
+        text: "group dm chatter",
+        userId: "U1",
+        channelId: "G_MPIM",
+        ts: "1111.2222",
+      });
+
+      expect(deps.repos.conversations.getOrCreate).toHaveBeenCalledWith(
+        { platform: "slack", kind: "mpim", providerConversationId: "G_MPIM" },
+        expect.anything(),
+      );
     });
   });
 

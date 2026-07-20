@@ -1,5 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { SlackBot, clipForSlackLoading } from "./bot";
+import { SYSTEM_MESSAGE_SUBTYPES, SlackBot, clipForSlackLoading } from "./bot";
+
+describe("SYSTEM_MESSAGE_SUBTYPES", () => {
+  it("blocks channel-membership system messages that carry a user field", () => {
+    for (const subtype of [
+      "channel_join",
+      "channel_leave",
+      "channel_topic",
+      "channel_purpose",
+      "channel_name",
+      "channel_archive",
+      "channel_unarchive",
+      "channel_posting_permissions",
+    ]) {
+      expect(SYSTEM_MESSAGE_SUBTYPES.has(subtype)).toBe(true);
+    }
+  });
+
+  it("lets user-content subtypes through", () => {
+    expect(SYSTEM_MESSAGE_SUBTYPES.has("file_share")).toBe(false);
+    expect(SYSTEM_MESSAGE_SUBTYPES.has("thread_broadcast")).toBe(false);
+  });
+});
 
 describe("clipForSlackLoading", () => {
   it("returns text unchanged when within the 50-code-point limit", () => {

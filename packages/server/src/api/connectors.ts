@@ -62,6 +62,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
+import { createSettingsBackedSlackIndexingFacade } from "../slack/indexing-facade";
 import {
   type ConnectorPermissions,
   connectorPermissions,
@@ -157,7 +158,9 @@ function syncInBackground(
     >
   >,
 ) {
-  runConnectorSync(db, connectorId, logger, config).catch((err) => {
+  runConnectorSync(db, connectorId, logger, config, {
+    slackIndexingFacade: createSettingsBackedSlackIndexingFacade({ db, encryptionKey: config?.ENCRYPTION_KEY }),
+  }).catch((err) => {
     logger.error({ err, connectorId }, "Background sync failed");
   });
 }
@@ -332,6 +335,7 @@ function defaultAuthTypeForConnector(connectorType: ConnectorType): AuthType {
     case "otter":
       return "api_key";
     case "whatsapp":
+    case "slack":
       return "system";
   }
 }
@@ -830,6 +834,23 @@ export function connectorRoutes(
 
     const connectorType = parsed.data.connectorType as ConnectorType;
     const connectorMeta = getConnector(connectorType);
+
+    /**
+     * The Slack indexing connector is a bootstrap-provisioned singleton:
+     * connecting the Slack bot creates it, and a second config would run
+     * duplicate syncs over the same channels.
+     */
+    if (connectorType === "slack") {
+      return c.json(
+        {
+          error: {
+            code: "SYSTEM_PROVISIONED",
+            message: "The Slack connector is provisioned automatically when the Slack bot is connected.",
+          },
+        },
+        400,
+      );
+    }
 
     if (isLocalConnectorBlockedInCanvasMode(appConfig, connectorType)) {
       return localConnectorBlockedResponse(c, connectorType);

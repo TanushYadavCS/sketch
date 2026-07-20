@@ -216,8 +216,8 @@ describe("searchFiles — FTS5 query sanitization", () => {
 });
 
 describe("KIND_TO_RULES", () => {
-  it("maps message kind to local conversation and WhatsApp slice sources", () => {
-    expect(KIND_TO_RULES.message).toEqual([{ sources: ["conversation", "whatsapp"] }]);
+  it("maps message kind to local conversation, WhatsApp, and Slack slice sources", () => {
+    expect(KIND_TO_RULES.message).toEqual([{ sources: ["conversation", "whatsapp", "slack"] }]);
   });
 });
 
@@ -352,6 +352,15 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
   it("empty fileIds returns empty set", async () => {
     const accessible = await filterAccessibleFileIds(db, [], ["alice@example.com"]);
     expect(accessible.size).toBe(0);
+  });
+
+  it("archived files are excluded even when archival left them scope-less", async () => {
+    await insertFileWithAccess("file-archived");
+    await db.updateTable("indexed_files").set({ is_archived: 1 }).where("id", "=", "file-archived").execute();
+
+    const accessible = await filterAccessibleFileIds(db, ["file-archived", "file-unrestricted"], ["alice@example.com"]);
+    expect(accessible.has("file-archived")).toBe(false);
+    expect(accessible.has("file-unrestricted")).toBe(true);
   });
 });
 
@@ -756,6 +765,17 @@ describe("getFileContent — RBAC", () => {
   it("returns null for missing file id", async () => {
     const file = await getFileContent(db, "does-not-exist", ["member@example.com"]);
     expect(file).toBeNull();
+  });
+
+  it("denies archived files on the RBAC path even when archival cleared the scope", async () => {
+    await db
+      .updateTable("indexed_files")
+      .set({ is_archived: 1, access_scope_id: null })
+      .where("id", "=", "file-restricted")
+      .execute();
+
+    expect(await getFileContent(db, "file-restricted", ["member@example.com"])).toBeNull();
+    expect((await getFileContent(db, "file-restricted"))?.content).toBe("top secret content");
   });
 
   it("manual share grants content access; revoking removes it immediately", async () => {

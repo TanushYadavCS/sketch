@@ -72,6 +72,8 @@ export interface SlackMessage {
   type: "dm" | "channel_message" | "channel_mention" | "thread_message";
   threadTs?: string;
   files?: SlackFile[];
+  /** Slack event channel_type ("channel" | "group" | "mpim" | "im"); lets capture distinguish group DMs from channels. */
+  channelType?: string;
 }
 
 export type SlackMessageHandler = (message: SlackMessage) => Promise<void>;
@@ -98,6 +100,23 @@ export interface SlackBotConfig {
   signingSecret?: string; // Required for http mode
 }
 
+/**
+ * Channel-membership system messages that Slack delivers with a `user` field,
+ * so they pass the human-sender gate and would otherwise be captured as
+ * conversation content. Exact blocklist rather than "any subtype": user
+ * content subtypes like `file_share` and `thread_broadcast` must keep flowing.
+ */
+export const SYSTEM_MESSAGE_SUBTYPES = new Set([
+  "channel_join",
+  "channel_leave",
+  "channel_topic",
+  "channel_purpose",
+  "channel_name",
+  "channel_archive",
+  "channel_unarchive",
+  "channel_posting_permissions",
+]);
+
 export class SlackBot {
   private app: App;
   private logger: Logger;
@@ -107,6 +126,7 @@ export class SlackBot {
   private channelMessageHandler: SlackMessageHandler | null = null;
   private mentionHandler: SlackMessageHandler | null = null;
   private threadMessageHandler: SlackMessageHandler | null = null;
+  private channelRenamedHandler: ((channelId: string) => Promise<void>) | null = null;
   private appHomeOpenedHandler: AppHomeOpenedHandler | null = null;
   private homeActionHandler: HomeActionHandler | null = null;
   private botUserId: string | null = null;
@@ -170,6 +190,10 @@ export class SlackBot {
     this.threadMessageHandler = handler;
   }
 
+  onChannelRenamed(handler: (channelId: string) => Promise<void>): void {
+    this.channelRenamedHandler = handler;
+  }
+
   onAppHomeOpened(handler: AppHomeOpenedHandler): void {
     this.appHomeOpenedHandler = handler;
   }
@@ -188,6 +212,8 @@ export class SlackBot {
       if (message.user === this.botUserId) return;
 
       const isIm = "channel_type" in message && message.channel_type === "im";
+      const channelType =
+        "channel_type" in message && typeof message.channel_type === "string" ? message.channel_type : undefined;
       const threadTs = "thread_ts" in message ? (message.thread_ts as string) : undefined;
       const text = "text" in message && typeof message.text === "string" ? message.text : "";
       const mentionsBot = this.botUserId ? text.includes(`<@${this.botUserId}>`) : false;
@@ -221,6 +247,22 @@ export class SlackBot {
 
       if (mentionsBot) return;
 
+      if ("subtype" in message && typeof message.subtype === "string" && SYSTEM_MESSAGE_SUBTYPES.has(message.subtype)) {
+        /**
+         * Renames are excluded from capture but must still refresh stored
+         * channel metadata, or slice filenames and rosters keep advertising
+         * the old name forever.
+         */
+        if (message.subtype === "channel_name" && this.channelRenamedHandler) {
+          try {
+            await this.channelRenamedHandler(message.channel);
+          } catch (err) {
+            this.logger.warn({ err, channelId: message.channel }, "Channel rename refresh failed");
+          }
+        }
+        return;
+      }
+
       if (threadTs && this.threadMessageHandler) {
         const hasText = text.length > 0;
         const rawFiles = "files" in message && Array.isArray(message.files) ? message.files : [];
@@ -241,6 +283,7 @@ export class SlackBot {
           channelId: message.channel,
           ts: message.ts,
           threadTs,
+          ...(channelType ? { channelType } : {}),
           ...(files.length > 0 && { files }),
         });
         return;
@@ -261,6 +304,7 @@ export class SlackBot {
 
         await this.channelMessageHandler({
           type: "channel_message",
+          ...(channelType ? { channelType } : {}),
           text,
           userId: message.user,
           channelId: message.channel,
@@ -458,13 +502,14 @@ export class SlackBot {
 
   async getUserInfo(
     userId: string,
-  ): Promise<{ name: string; realName: string; email: string | null; tz: string | null }> {
+  ): Promise<{ name: string; realName: string; email: string | null; tz: string | null; isBot: boolean }> {
     const result = await this.app.client.users.info({ user: userId });
     return {
       name: result.user?.name ?? "unknown",
       realName: result.user?.real_name ?? result.user?.name ?? "unknown",
       email: result.user?.profile?.email ?? null,
       tz: result.user?.tz ?? null,
+      isBot: result.user?.is_bot === true || userId === "USLACKBOT",
     };
   }
 
@@ -472,7 +517,8 @@ export class SlackBot {
     const result = await this.app.client.conversations.info({ channel: channelId });
     const channel = result.channel;
     let type = "public_channel";
-    if (channel?.is_group) type = "group";
+    if (channel?.is_mpim) type = "mpim";
+    else if (channel?.is_group) type = "group";
     else if (channel?.is_private) type = "private_channel";
     return {
       name: channel?.name ?? "unknown",

@@ -46,10 +46,12 @@ export async function materializeLlmRelationFact(
   const triggeredByUserId = deps.resolveOwner(fact);
   if (!triggeredByUserId) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
 
-  const sourceResult = await materializeRelationEndpoint(deps, fact, source, triggeredByUserId, "source");
+  const linkOnly = fact.indexed_file_id ? await deps.isChatConversationSliceFile(fact.indexed_file_id) : false;
+
+  const sourceResult = await materializeRelationEndpoint(deps, fact, source, triggeredByUserId, "source", { linkOnly });
   if (sourceResult.kind === "suppressed_endpoint") return { kind: "skipped", reason: "relation_endpoint_suppressed" };
   if (sourceResult.kind === "queued_held") return sourceResult;
-  const targetResult = await materializeRelationEndpoint(deps, fact, target, triggeredByUserId, "target");
+  const targetResult = await materializeRelationEndpoint(deps, fact, target, triggeredByUserId, "target", { linkOnly });
   if (targetResult.kind === "suppressed_endpoint") return { kind: "skipped", reason: "relation_endpoint_suppressed" };
   if (targetResult.kind === "queued_held") return targetResult;
   if (sourceResult.entity.id === targetResult.entity.id) return { kind: "skipped", reason: "self_relation" };
@@ -236,6 +238,7 @@ async function materializeRelationEndpoint(
   endpoint: EntityGraphRelationEndpoint,
   triggeredByUserId: string,
   role: "source" | "target",
+  options: { linkOnly?: boolean } = {},
 ): Promise<
   | { kind: "resolved"; entity: IndexEntityRow; created: boolean }
   | { kind: "queued_held"; reviewId: string; reason: "relation_endpoint" }
@@ -273,6 +276,7 @@ async function materializeRelationEndpoint(
       metadata: { origin: "ai", relationEndpoint: true },
       provenanceTier: "inferred",
       evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
+      linkOnly: options.linkOnly,
       queueInsteadOfCreate:
         endpoint.type === "project" || (endpoint.type === "product" && deps.birthGateTypes.has("product")),
     },

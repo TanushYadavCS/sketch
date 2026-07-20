@@ -97,7 +97,14 @@ export interface MaterializeDeps {
   birthGateDryRun: boolean;
   embeddingProvider: EmbeddingProvider | null;
   countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
-  hasOnlyWhatsAppConversationSliceEvidence: (normalizedName: string, mentionType: MentionType) => Promise<boolean>;
+  hasOnlyChatConversationSliceEvidence: (normalizedName: string, mentionType: MentionType) => Promise<boolean>;
+  /**
+   * True when the fact's file is a WhatsApp/Slack conversation slice. Relation
+   * endpoints from chat slices are link-only: chat can corroborate entities
+   * born from stronger sources but must never mint them (the mention path
+   * enforces the same rule via hasOnlyChatConversationSliceEvidence).
+   */
+  isChatConversationSliceFile: (indexedFileId: string) => Promise<boolean>;
   /**
    * True once the Fix 2b normalization backfill has populated projection columns
    * for every pre-existing row. Feature corroboration and LLM count/third-party
