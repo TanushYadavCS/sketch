@@ -1,3 +1,4 @@
+import { QuietAddButton } from "@/components/quiet-add-button";
 /**
  * The agent detail lets users review generated output history and tune one
  * code-owned prebuilt agent through schedule, sources, focus, volume, delivery,
@@ -19,7 +20,6 @@ import {
   CheckCircleIcon,
   HashIcon,
   PencilSimpleIcon,
-  PlusIcon,
   SlackLogoIcon,
   UserIcon,
   UsersThreeIcon,
@@ -357,14 +357,7 @@ function SummariserIndex({
             <span className="font-mono text-[11px] uppercase tracking-[0.07em] text-muted-foreground">Summarisers</span>
             <span className="font-mono text-[10px] text-muted-foreground/60">{agent.routes.length}</span>
           </div>
-          <button
-            type="button"
-            onClick={() => setModalOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-md border-[0.5px] border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent dark:bg-[#111110] dark:hover:bg-[#1C1C1A]"
-          >
-            <PlusIcon size={12} weight="bold" aria-hidden />
-            New summariser
-          </button>
+          <QuietAddButton onClick={() => setModalOpen(true)}>New summariser</QuietAddButton>
         </div>
 
         {agent.routes.length === 0 ? (

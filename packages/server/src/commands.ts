@@ -1,6 +1,12 @@
 export type ToolProgressCommand = "off" | "friendly" | "technical";
 export type ReasoningTextCommand = "on" | "off";
 
+export type FollowupReviewCommand =
+  | { action: "confirm_done"; code: string }
+  | { action: "keep_open"; code: string }
+  | { action: "track"; code: string }
+  | { action: "dismiss"; code: string };
+
 export type SketchCommand =
   | "new_session"
   | "tool_progress_off"
@@ -36,6 +42,31 @@ export const REASONING_TEXT_LABELS: Record<ReasoningTextCommand, string> = {
 export interface ProgressSettingsSummary {
   toolProgress: ToolProgressCommand;
   reasoningText: boolean;
+}
+
+export function parseFollowupReviewCommand(text: string | null | undefined): FollowupReviewCommand | null {
+  const normalized = text?.trim();
+  if (!normalized) return null;
+
+  const match = normalized.match(/^(confirm[ \t]+done|keep[ \t]+open|track|dismiss)[ \t]+([a-z0-9]{4,12})$/i);
+  if (!match) return null;
+
+  const rawAction = match[1]?.toLowerCase().replace(/[ \t]+/g, " ");
+  const code = match[2]?.toUpperCase();
+  if (!code) return null;
+
+  switch (rawAction) {
+    case "confirm done":
+      return { action: "confirm_done", code };
+    case "keep open":
+      return { action: "keep_open", code };
+    case "track":
+      return { action: "track", code };
+    case "dismiss":
+      return { action: "dismiss", code };
+    default:
+      return null;
+  }
 }
 
 export function parseSketchCommand(text: string | null | undefined): SketchCommand | null {

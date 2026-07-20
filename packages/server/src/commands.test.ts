@@ -7,8 +7,81 @@ import {
   getToolProgressConfirmation,
   getToolProgressCurrent,
   getToolProgressSuggestion,
+  parseFollowupReviewCommand,
   parseSketchCommand,
 } from "./commands";
+
+describe("parseFollowupReviewCommand", () => {
+  it.each([
+    ["Confirm done A1B2", { action: "confirm_done", code: "A1B2" }],
+    ["Keep open ZX90", { action: "keep_open", code: "ZX90" }],
+    ["Track TASK123", { action: "track", code: "TASK123" }],
+    ["Dismiss ABCD5678EFGH", { action: "dismiss", code: "ABCD5678EFGH" }],
+  ] as const)("parses %s", (input, expected) => {
+    expect(parseFollowupReviewCommand(input)).toEqual(expected);
+  });
+
+  it("is case-insensitive and normalizes codes to uppercase", () => {
+    expect(parseFollowupReviewCommand("confirm DONE ab12")).toEqual({
+      action: "confirm_done",
+      code: "AB12",
+    });
+    expect(parseFollowupReviewCommand("KEEP open z9y8")).toEqual({
+      action: "keep_open",
+      code: "Z9Y8",
+    });
+  });
+
+  it("ignores surrounding whitespace", () => {
+    expect(parseFollowupReviewCommand(" \t Track a1b2c3 \t ")).toEqual({
+      action: "track",
+      code: "A1B2C3",
+    });
+  });
+
+  it("accepts only 4-12 character alphanumeric codes", () => {
+    expect(parseFollowupReviewCommand("Track ABC1")).toEqual({ action: "track", code: "ABC1" });
+    expect(parseFollowupReviewCommand("Track ABCD5678EFGH")).toEqual({
+      action: "track",
+      code: "ABCD5678EFGH",
+    });
+
+    expect(parseFollowupReviewCommand("Track ABC")).toBeNull();
+    expect(parseFollowupReviewCommand("Track ABCD5678EFGHI")).toBeNull();
+    expect(parseFollowupReviewCommand("Track AB-12")).toBeNull();
+    expect(parseFollowupReviewCommand("Track AB_12")).toBeNull();
+  });
+
+  it.each([
+    "",
+    "Confirm done",
+    "Keep open",
+    "Track",
+    "Dismiss",
+    "Confirm ABCD",
+    "Done ABCD",
+    "Keep ABCD",
+    "Open ABCD",
+    "Track ABCD please",
+    "please Dismiss ABCD",
+    "Confirm done ABCD Keep open EFGH",
+    "Confirm\ndone ABCD",
+  ])("rejects missing, ambiguous, or free text: %j", (input) => {
+    expect(parseFollowupReviewCommand(input)).toBeNull();
+  });
+
+  it("returns null for nullish input", () => {
+    expect(parseFollowupReviewCommand(null)).toBeNull();
+    expect(parseFollowupReviewCommand(undefined)).toBeNull();
+  });
+
+  it("does not change sketch slash-command parsing", () => {
+    expect(parseSketchCommand("Confirm done A1B2")).toBeNull();
+    expect(parseSketchCommand("Keep open A1B2")).toBeNull();
+    expect(parseSketchCommand("Track A1B2")).toBeNull();
+    expect(parseSketchCommand("Dismiss A1B2")).toBeNull();
+  });
+});
 
 describe("parseSketchCommand", () => {
   it("detects /new exactly", () => {

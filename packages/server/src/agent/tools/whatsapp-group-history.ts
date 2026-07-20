@@ -468,7 +468,12 @@ function toStoredConversationMessage(row: {
   provider_parent_message_id: string | null;
   is_thread_reply: number;
   provider_timestamp: string | null;
+  provider_from_me: number;
   received_at: string;
+  source: string;
+  effective_at: string | null;
+  connection_key: string | null;
+  backfill_range_id: string | null;
   created_at: string;
 }): StoredConversationMessage {
   return {
@@ -486,7 +491,12 @@ function toStoredConversationMessage(row: {
     providerParentMessageId: row.provider_parent_message_id,
     isThreadReply: row.is_thread_reply === 1,
     providerTimestamp: row.provider_timestamp,
+    providerFromMe: row.provider_from_me === 1,
     receivedAt: row.received_at,
+    source: row.source === "history" ? "history" : "live",
+    effectiveAt: row.effective_at ?? row.received_at,
+    connectionKey: row.connection_key,
+    backfillRangeId: row.backfill_range_id,
     createdAt: row.created_at,
   };
 }

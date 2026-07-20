@@ -126,6 +126,7 @@ export class WhatsAppGatewaySupervisor {
   private respawnScheduled = false;
   private lastHealth: WhatsAppFacadeHealth | null = null;
   private lastPublishedSocketState: WhatsAppSocketStateChange["socketState"] | null = null;
+  private lastSocketGeneration: number | null = null;
   private lastSocketStateChangeAt: string | null = null;
   private socketStatePublication: Promise<void> = Promise.resolve();
   private pairingSpawn: Promise<GatewayClientFacade> | null = null;
@@ -193,11 +194,12 @@ export class WhatsAppGatewaySupervisor {
    * route. The lease owner and generation fence stale child notifications, while
    * child exit clears the cached health and the periodic poll remains a fallback.
    */
-  async handleSocketStateChange(change: WhatsAppSocketStateChange): Promise<void> {
-    if (!this.client || !this.lease || !this.lastHealth) return;
-    if (this.lease.owner_token !== change.ownerToken || this.lease.generation !== change.generation) return;
+  async handleSocketStateChange(change: WhatsAppSocketStateChange): Promise<boolean> {
+    if (!this.client || !this.lease || !this.lastHealth) return false;
+    if (this.lease.owner_token !== change.ownerToken || this.lease.generation !== change.generation) return false;
     this.lastHealth = { ...this.lastHealth, socketState: change.socketState };
     await this.publishSocketStateChange(change);
+    return true;
   }
 
   async refreshHealth(): Promise<void> {
@@ -454,8 +456,17 @@ export class WhatsAppGatewaySupervisor {
     this.scheduleRespawn("unexpected gateway exit", { code, signal });
   }
 
-  private async publishSocketStateChange(change: WhatsAppSocketStateChange): Promise<void> {
-    const normalized = { ...change, occurredAt: change.occurredAt ?? new Date(this.now()).toISOString() };
+  private async publishSocketStateChange(
+    change: Omit<WhatsAppSocketStateChange, "socketGeneration"> & { socketGeneration?: number },
+  ): Promise<void> {
+    const socketGeneration = change.socketGeneration ?? this.lastSocketGeneration ?? 1;
+    const occurredAt = change.occurredAt ?? new Date(this.now()).toISOString();
+    const normalized: WhatsAppSocketStateChange & { occurredAt: string } = {
+      ...change,
+      socketGeneration,
+      occurredAt,
+    };
+    this.lastSocketGeneration = socketGeneration;
     const publication = this.socketStatePublication.then(async () => {
       if (this.lastSocketStateChangeAt && normalized.occurredAt < this.lastSocketStateChangeAt) return;
       this.lastSocketStateChangeAt = normalized.occurredAt;
@@ -603,6 +614,10 @@ export class InProcessWhatsAppLease {
     this.leases = createWhatsAppSessionLeaseRepository(options.db, {
       ...(options.config.DB_TYPE === "sqlite" ? { sqlitePath: options.config.SQLITE_PATH } : {}),
     });
+  }
+
+  get generation(): number | null {
+    return this.fence?.generation ?? null;
   }
 
   async acquire(): Promise<void> {

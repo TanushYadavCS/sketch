@@ -7,6 +7,7 @@ export const WHATSAPP_INBOUND_MAX_ATTEMPTS = 5;
 export const WHATSAPP_INBOUND_CLAIM_BATCH_SIZE = 25;
 export const WHATSAPP_INBOUND_ENVELOPE_MAX_BYTES = 256 * 1024;
 export const WHATSAPP_INBOUND_SWEEP_BATCH_SIZE = 500;
+export const WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS = 10 * 60_000;
 
 export type WhatsAppInboundEventKind = "message" | "history_message" | "history_batch";
 export type WhatsAppInboundEventOrigin = "gateway" | "inprocess";
@@ -23,6 +24,8 @@ export interface WhatsAppInboundEventInsert {
   batchId?: string | null;
   chunkIndex?: number | null;
   chunkCount?: number | null;
+  requestSessionId?: string | null;
+  backfillRangeId?: string | null;
   status?: "pending" | "dead";
   lastError?: string | null;
 }
@@ -144,6 +147,8 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
       batch_id: data.batchId ?? null,
       chunk_index: data.chunkIndex ?? null,
       chunk_count: data.chunkCount ?? null,
+      request_session_id: data.requestSessionId ?? null,
+      backfill_range_id: data.backfillRangeId ?? null,
       last_error: oversized ? "serialized envelope exceeds 256KB" : truncateError(data.lastError),
     };
 
@@ -414,6 +419,50 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
     );
   }
 
+  async function deferCorrelation(
+    id: number,
+    claimToken: string,
+    error: string,
+  ): Promise<"deferred" | "dead" | "lost"> {
+    return withBoundedSqliteRetry(
+      db,
+      async () => {
+        const expired = isPg(db)
+          ? sql<boolean>`received_at::timestamptz <= CURRENT_TIMESTAMP - ${
+              WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS / 1_000
+            } * INTERVAL '1 second'`
+          : sql<boolean>`datetime(received_at) <= datetime(CURRENT_TIMESTAMP, ${`-${
+              WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS / 1_000
+            } seconds`})`;
+        const nextAttemptAt = isPg(db)
+          ? sql<string>`(CURRENT_TIMESTAMP + INTERVAL '1 second')::text`
+          : sql<string>`datetime(CURRENT_TIMESTAMP, '+1 second')`;
+        const terminalAt = isPg(db) ? sql<string>`CURRENT_TIMESTAMP::text` : sql<string>`CURRENT_TIMESTAMP`;
+        const result = await db
+          .updateTable("whatsapp_inbound_events")
+          .set({
+            status: sql<string>`CASE WHEN ${expired} THEN 'dead' ELSE 'captured' END`,
+            attempts: sql<number>`CASE
+              WHEN ${expired} THEN attempts
+              WHEN attempts > 0 THEN attempts - 1
+              ELSE 0
+            END`,
+            next_attempt_at: sql<string>`CASE WHEN ${expired} THEN ${terminalAt} ELSE ${nextAttemptAt} END`,
+            consumed_at: null,
+            last_error: truncateError(error),
+          })
+          .where("id", "=", id)
+          .where("claim_token", "=", claimToken)
+          .where("status", "=", "processing")
+          .returning("status")
+          .executeTakeFirst();
+        if (result?.status === "dead") return "dead";
+        return result?.status === "captured" ? "deferred" : "lost";
+      },
+      retryOptions,
+    );
+  }
+
   async function markDead(id: number, claimToken: string, error: string): Promise<boolean> {
     return withBoundedSqliteRetry(
       db,
@@ -485,6 +534,7 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
           .selectFrom("whatsapp_inbound_events")
           .select("id")
           .where("status", "=", "consumed")
+          .where("backfill_range_id", "is", null)
           .where(consumedCutoff)
           .orderBy("id")
           .limit(WHATSAPP_INBOUND_SWEEP_BATCH_SIZE)
@@ -535,6 +585,7 @@ export function createWhatsAppInboundEventsRepository(db: WhatsAppInboundDb, ret
     consumeDispatched,
     resetDispatched,
     revertToCaptured,
+    deferCorrelation,
     markDead,
     isBatchComplete,
     isBatchCompleteExcluding,

@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestLogger } from "../../test-utils";
 import type { WhatsAppSocketFacade } from "../facade-contract";
 import { createWhatsAppGatewayHttpApp } from "./http-server";
 
-function facade(): WhatsAppSocketFacade {
+function facade(overrides: Partial<WhatsAppSocketFacade> = {}): WhatsAppSocketFacade {
   return {
     send: async () => null,
     sendComposing: async () => undefined,
@@ -12,6 +12,7 @@ function facade(): WhatsAppSocketFacade {
     groupMetadata: async () => null,
     syncAllGroups: async () => ({ synced: 0 }),
     resolveLid: async () => null,
+    fetchMessageHistory: async () => "request-session-1",
     pairing: {
       startQr: async (onEvent) => onEvent({ type: "qr", qr: "qr-data" }),
       status: async () => ({ connected: false, phoneNumber: null }),
@@ -27,6 +28,7 @@ function facade(): WhatsAppSocketFacade {
       scriptHash: "abc",
       contractVersion: "1.0",
     }),
+    ...overrides,
   };
 }
 
@@ -61,5 +63,40 @@ describe("WhatsApp gateway HTTP facade", () => {
     await expect(health.json()).resolves.toMatchObject({ queueDepth: 2, scriptHash: "abc" });
     const pairing = await app.request("/pairing-sessions/current", { headers });
     await expect(pairing.json()).resolves.toEqual({ connected: false, phoneNumber: null });
+  });
+
+  it("round-trips authenticated history requests and rejects counts above the Baileys cap", async () => {
+    const fetchMessageHistory = vi.fn(async () => "request-session-7");
+    const app = createWhatsAppGatewayHttpApp({
+      token: "secret",
+      facade: facade({ fetchMessageHistory }),
+      logger: createTestLogger(),
+    });
+    const input = {
+      count: 50,
+      oldestMessageKey: { remoteJid: "120363000000001@g.us", id: "oldest-1", fromMe: false },
+      oldestMessageTimestamp: 1_768_464_420,
+    };
+    const response = await app.request("/history-sync-requests", {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ requestSessionId: "request-session-7" });
+    expect(fetchMessageHistory).toHaveBeenCalledWith(input);
+
+    const overCap = await app.request("/history-sync-requests", {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ ...input, count: 51 }),
+    });
+    expect(overCap.status).toBe(400);
+    const unauthorized = await app.request("/history-sync-requests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    expect(unauthorized.status).toBe(401);
   });
 });

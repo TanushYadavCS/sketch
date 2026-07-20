@@ -324,7 +324,9 @@ function normalizeRouteSources(value: unknown): AgentSourceKey[] {
     const source = parseSourceKey(entry as AgentSourceKey);
     if (
       (source.platform !== "slack" && source.platform !== "whatsapp") ||
-      (source.targetType !== "channel" && source.targetType !== "group") ||
+      (source.targetType !== "channel" && source.targetType !== "dm" && source.targetType !== "group") ||
+      (source.platform === "slack" && source.targetType === "group") ||
+      (source.platform === "whatsapp" && source.targetType === "channel") ||
       !source.targetId
     ) {
       continue;

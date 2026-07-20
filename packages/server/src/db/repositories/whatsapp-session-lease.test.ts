@@ -121,6 +121,33 @@ describe("WhatsApp session lease repository on SQLite", () => {
     await expect(repo.deriveDisconnectedAt(fence)).resolves.toBe(false);
   });
 
+  it("persists each fenced connected transition before notification delivery", async () => {
+    const repo = createWhatsAppSessionLeaseRepository(db, { sqlitePath });
+    const acquired = await repo.acquire(owner("owner-connected"));
+    const fence = { ownerToken: "owner-connected", generation: acquired.lease?.generation ?? 0 };
+    await db
+      .updateTable("whatsapp_session_lease")
+      .set({ disconnected_at: "2026-07-17T10:00:00.000Z" })
+      .where("id", "=", "default")
+      .execute();
+
+    await expect(repo.recordConnectedTransition(fence, 3, "2026-07-17T10:15:00.000Z")).resolves.toBe(true);
+    await expect(repo.recordConnectedTransition(fence, 3, "2026-07-17T10:16:00.000Z")).resolves.toBe(false);
+    await expect(
+      db.selectFrom("whatsapp_connection_transitions").selectAll().executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({
+      connection_key: "000000000001:000000000003",
+      lease_generation: 1,
+      socket_generation: 3,
+      disconnected_at: "2026-07-17T10:00:00.000Z",
+      connected_at: "2026-07-17T10:15:00.000Z",
+      reconciled_at: null,
+    });
+    await expect(
+      repo.recordConnectedTransition({ ownerToken: "stale-owner", generation: 1 }, 4, "2026-07-17T10:30:00.000Z"),
+    ).rejects.toBeInstanceOf(WhatsAppLeaseFenceError);
+  });
+
   it("leaves disconnected_at null when no live heartbeat exists", async () => {
     const repo = createWhatsAppSessionLeaseRepository(db, { sqlitePath });
     const acquired = await repo.acquire(owner("owner-a"));

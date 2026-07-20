@@ -1,4 +1,5 @@
-import { BrainIcon, FolderOpenIcon, MagnifyingGlassIcon, PlusIcon } from "@phosphor-icons/react";
+import { QuietAddButton } from "@/components/quiet-add-button";
+import { BrainIcon, FolderOpenIcon, MagnifyingGlassIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 
 interface SkillsEmptyStateProps {
@@ -27,10 +28,9 @@ export function SkillsEmptyState({
           <p className="mt-1 max-w-xs text-xs text-muted-foreground">
             Skills let you define custom behaviors, connect integrations, and automate workflows with Sketch.
           </p>
-          <Button onClick={onCreateClick} size="sm" className="mt-4 gap-1.5">
-            <PlusIcon size={14} weight="bold" />
+          <QuietAddButton onClick={onCreateClick} className="mt-4">
             Create Your First Skill
-          </Button>
+          </QuietAddButton>
         </>
       )}
 
@@ -49,10 +49,7 @@ export function SkillsEmptyState({
                 Clear Search
               </Button>
             )}
-            <Button onClick={onCreateClick} size="sm" className="gap-1.5">
-              <PlusIcon size={14} weight="bold" />
-              Create Skill
-            </Button>
+            <QuietAddButton onClick={onCreateClick}>Create Skill</QuietAddButton>
           </div>
         </>
       )}
@@ -66,10 +63,9 @@ export function SkillsEmptyState({
           <p className="mt-1 max-w-xs text-xs text-muted-foreground">
             {`Create your first ${category?.toLowerCase()} skill to get started.`}
           </p>
-          <Button onClick={onCreateClick} size="sm" className="mt-4 gap-1.5">
-            <PlusIcon size={14} weight="bold" />
+          <QuietAddButton onClick={onCreateClick} className="mt-4">
             Create Skill
-          </Button>
+          </QuietAddButton>
         </>
       )}
     </div>

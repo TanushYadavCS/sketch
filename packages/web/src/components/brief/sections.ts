@@ -20,6 +20,16 @@ export const BRIEF_SECTIONS: BriefSectionMeta[] = [
     promise: "Your most pressing tasks, pulled from your tools and ranked for today.",
   },
   {
+    key: "untracked_followups",
+    label: "Untracked follow-ups",
+    promise: "Recent follow-ups reconstructed from summaries for you to track or dismiss.",
+  },
+  {
+    key: "looks_resolved",
+    label: "Looks resolved",
+    promise: "Follow-ups that may be complete and are waiting for your confirmation.",
+  },
+  {
     key: "customer_updates",
     label: "Customer Updates",
     promise: "Movement on the accounts and deals that matter, summarized for you.",

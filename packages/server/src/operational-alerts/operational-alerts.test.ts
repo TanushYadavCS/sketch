@@ -54,6 +54,7 @@ describe("operational alerts", () => {
     await service.observeBaileysSocketState({
       ownerToken: "owner",
       generation: 7,
+      socketGeneration: 1,
       socketState: "disconnected",
       occurredAt: new Date(now.getTime() - BAILEYS_DISCONNECT_GRACE_MS).toISOString(),
       statusCode: 408,
@@ -61,6 +62,7 @@ describe("operational alerts", () => {
     await service.observeBaileysSocketState({
       ownerToken: "owner",
       generation: 7,
+      socketGeneration: 1,
       socketState: "disconnected",
       occurredAt: new Date(now.getTime() - 60_000).toISOString(),
       statusCode: 413,
@@ -105,6 +107,7 @@ describe("operational alerts", () => {
     await service.observeBaileysSocketState({
       ownerToken: "owner",
       generation: 7,
+      socketGeneration: 2,
       socketState: "connected",
       occurredAt: new Date(now.getTime() + 1_000).toISOString(),
     });
@@ -130,6 +133,7 @@ describe("operational alerts", () => {
     await service.observeBaileysSocketState({
       ownerToken: "owner",
       generation: 1,
+      socketGeneration: 1,
       socketState: "disconnected",
       occurredAt: now.toISOString(),
     });
@@ -154,6 +158,7 @@ describe("operational alerts", () => {
     await service.observeBaileysSocketState({
       ownerToken: "owner",
       generation: 2,
+      socketGeneration: 1,
       socketState: "logged-out",
       occurredAt: now.toISOString(),
       statusCode: 401,

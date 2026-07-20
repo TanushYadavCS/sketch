@@ -2,13 +2,19 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, rename, stat } from "node:fs/promises";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { type Kysely, sql } from "kysely";
+import { createConversationSlicesRepository } from "../db/repositories/conversation-slices";
 import { createConversationRepository } from "../db/repositories/conversations";
-import { createWhatsAppInboundEventsRepository } from "../db/repositories/whatsapp-inbound-events";
+import { createWhatsAppBackfillRangeRepository } from "../db/repositories/whatsapp-backfill-ranges";
+import {
+  WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS,
+  createWhatsAppInboundEventsRepository,
+} from "../db/repositories/whatsapp-inbound-events";
 import type { WhatsAppInboundEventRow } from "../db/repositories/whatsapp-inbound-events";
 import type { DB } from "../db/schema";
 import type { Attachment } from "../files";
 import type { Logger } from "../logger";
 import type { WhatsAppAdapterHandlers } from "./adapter";
+import { isOnDemandWhatsAppHistory } from "./backfill-worker";
 import type { WhatsAppMessage } from "./bot";
 import {
   type StagedMediaRef,
@@ -28,6 +34,12 @@ export interface WhatsAppInboundConsumerOptions {
   shouldHandleInboundMessage: (message: WhatsAppInboundMessage) => boolean;
   stagingDir: string;
   pollIntervalMs?: number;
+  backfillWindowDays?: number;
+  backfillWorker?: {
+    correlateOnDemandSession(requestSessionId: string): Promise<boolean>;
+    handleOnDemandResponse(requestSessionId: string): Promise<boolean>;
+    adoptPassiveHistory(groupJids: string[]): Promise<void>;
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -191,6 +203,7 @@ export class WhatsAppInboundConsumer {
       ...envelope.message,
       rawMessage: envelope.message.rawProviderPayload,
     } as WhatsAppMessage);
+    message.connectionKey = envelope.connectionKey;
     if (!this.options.shouldHandleInboundMessage(message)) {
       await this.consumeFiltered(row, claimToken, message.kind);
       return;
@@ -198,6 +211,9 @@ export class WhatsAppInboundConsumer {
     let captureCommitted = false;
     const capture = await this.options.handlers.captureQueuedMessage(message, {
       eventKey: envelope.eventKey,
+      source: envelope.kind === "message" ? "live" : "history",
+      connectionKey: envelope.connectionKey,
+      fromMe: envelope.fromMe,
       attachmentsForWorkspace: async (workspaceDir) => {
         if (envelope.message.mediaStagingError) {
           this.options.logger.warn(
@@ -219,6 +235,32 @@ export class WhatsAppInboundConsumer {
       commitCapture: async (captureMessage) => {
         const captured = await this.options.db.transaction().execute(async (trx) => {
           const captured = await captureMessage(createConversationRepository(trx));
+          if (envelope.kind === "message" && message.kind === "group" && captured) {
+            const checkpoint = await createConversationSlicesRepository(trx).recordLiveStartOnce({
+              groupJid: message.target.groupId,
+              effectiveAt: captured.captured.effectiveAt,
+              messageId: captured.captured.id,
+            });
+            if (checkpoint.live_start_effective_at && checkpoint.live_start_message_id != null) {
+              const now = new Date();
+              const range = await createWhatsAppBackfillRangeRepository(trx).ensureInitialRange({
+                groupJid: message.target.groupId,
+                connectionKey: envelope.connectionKey,
+                liveStartEffectiveAt: checkpoint.live_start_effective_at,
+                liveStartMessageId: checkpoint.live_start_message_id,
+                lowerBoundAt: new Date(
+                  now.getTime() - (this.options.backfillWindowDays ?? 30) * 24 * 60 * 60_000,
+                ).toISOString(),
+                now: now.toISOString(),
+              });
+              if (range.created || range.adopted > 0) {
+                this.options.logger.info(
+                  { rangeId: range.row.id, rowsAdopted: range.adopted },
+                  "WhatsApp initial backfill range created",
+                );
+              }
+            }
+          }
           const transition = await trx
             .updateTable("whatsapp_inbound_events")
             .set({ status: "captured", next_attempt_at: sql`CURRENT_TIMESTAMP`, consumed_at: null })
@@ -236,6 +278,9 @@ export class WhatsAppInboundConsumer {
       },
     });
     if (!captureCommitted && !(await this.events.markCaptured(row.id, claimToken))) return;
+    if (envelope.kind === "history_message" && message.kind === "group") {
+      await this.options.backfillWorker?.adoptPassiveHistory([message.target.groupId]);
+    }
     if (envelope.fromMe) {
       if (!(await this.events.markConsumed(row.id, claimToken))) return;
       this.options.logger.warn(
@@ -281,6 +326,10 @@ export class WhatsAppInboundConsumer {
     claimToken: string,
     envelope: WhatsAppHistoryBatchEnvelope,
   ): Promise<void> {
+    if (isOnDemandWhatsAppHistory(envelope.batch.syncType)) {
+      await this.processOnDemandHistory(row, claimToken, envelope);
+      return;
+    }
     const envelopeByMessage = new WeakMap<WhatsAppInboundMessage, WhatsAppMessageEnvelope>();
     const messages = envelope.messages
       .map((item) => {
@@ -288,6 +337,7 @@ export class WhatsAppInboundConsumer {
           ...item.message,
           rawMessage: item.message.rawProviderPayload,
         } as WhatsAppMessage);
+        message.connectionKey = item.connectionKey ?? envelope.connectionKey;
         envelopeByMessage.set(message, item);
         return message;
       })
@@ -307,28 +357,17 @@ export class WhatsAppInboundConsumer {
         syncType: envelope.batch.syncType as never,
         progress,
         isLatest: envelope.batch.isLatest ?? undefined,
+        peerDataRequestSessionId: envelope.batch.peerDataRequestSessionId,
       },
       {
         checkpoint: isTerminalChunk,
-        attachmentsForMessage: async (message, workspaceDir) => {
+        captureMetadataForMessage: (message) => {
           const item = envelopeByMessage.get(message);
-          if (!item) return [];
-          if (item.message.mediaStagingError) {
-            this.options.logger.warn(
-              { inboundEventId: row.id, mediaStagingError: item.message.mediaStagingError },
-              "Stored WhatsApp media staging failed; continuing without attachment",
-            );
-            return [];
-          }
-          if (!item.message.stagedMediaRef) return [];
-          return [
-            await moveWhatsAppStagedMedia({
-              ref: item.message.stagedMediaRef,
-              eventKey: item.eventKey,
-              workspaceDir,
-              stagingDir: this.options.stagingDir,
-            }),
-          ];
+          return {
+            eventKey: item?.eventKey ?? null,
+            connectionKey: item?.connectionKey ?? envelope.connectionKey,
+            fromMe: item?.fromMe ?? false,
+          };
         },
       },
     );
@@ -340,6 +379,45 @@ export class WhatsAppInboundConsumer {
         "WhatsApp history batch completion barrier reached",
       );
     }
+    await this.options.backfillWorker?.adoptPassiveHistory(
+      messages.filter((message) => message.kind === "group").map((message) => message.target.groupId),
+    );
+  }
+
+  private async processOnDemandHistory(
+    row: WhatsAppInboundEventRow,
+    claimToken: string,
+    envelope: WhatsAppHistoryBatchEnvelope,
+  ): Promise<void> {
+    const requestSessionId = envelope.batch.peerDataRequestSessionId;
+    if (!requestSessionId) throw new Error("ON_DEMAND WhatsApp history response lacked request session correlation");
+    const correlated = await this.options.backfillWorker?.correlateOnDemandSession(requestSessionId);
+    if (!correlated) {
+      const result = await this.events.deferCorrelation(
+        row.id,
+        claimToken,
+        "awaiting WhatsApp history request correlation",
+      );
+      if (result === "dead") {
+        this.options.logger.warn(
+          {
+            inboundEventId: row.id,
+            requestSessionId,
+            correlationWindowMs: WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS,
+          },
+          "Uncorrelated WhatsApp on-demand history response dead-lettered",
+        );
+      }
+      return;
+    }
+    if (!(await this.events.markCaptured(row.id, claimToken))) return;
+    const completion = await this.events.markConsumedAndCheckBatch(row.id, claimToken);
+    if (!completion.batchComplete) return;
+    await this.options.backfillWorker?.handleOnDemandResponse(requestSessionId);
+    this.options.logger.info(
+      { batchId: envelope.batch.batchId, requestSessionId },
+      "WhatsApp on-demand history batch staged",
+    );
   }
 
   /**

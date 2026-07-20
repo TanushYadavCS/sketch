@@ -143,6 +143,12 @@ export async function runConnectorSync(
       | "WHATSAPP_SLICE_MAX_MESSAGES"
       | "WHATSAPP_SALIENCE_BATCH_LIMIT"
       | "WHATSAPP_EMISSION_REFRESH_DAYS"
+      | "WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES"
+      | "WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS"
+      | "WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES"
+      | "WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX"
+      | "WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX"
+      | "WHATSAPP_BACKFILL_GRAPH_OPEN_FACTS_MAX"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"
@@ -197,6 +203,19 @@ export async function runConnectorSync(
               sliceMaxMessages: storedScopeConfig.sliceMaxMessages ?? appConfig?.WHATSAPP_SLICE_MAX_MESSAGES,
               salienceBatchLimit: storedScopeConfig.salienceBatchLimit ?? appConfig?.WHATSAPP_SALIENCE_BATCH_LIMIT,
               emissionRefreshDays: storedScopeConfig.emissionRefreshDays ?? appConfig?.WHATSAPP_EMISSION_REFRESH_DAYS,
+              backfillGraphPageMessages:
+                storedScopeConfig.backfillGraphPageMessages ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES,
+              backfillGraphPageTokens:
+                storedScopeConfig.backfillGraphPageTokens ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS,
+              backfillGraphCycleMessages:
+                storedScopeConfig.backfillGraphCycleMessages ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES,
+              backfillGraphPendingSlicesMax:
+                storedScopeConfig.backfillGraphPendingSlicesMax ??
+                appConfig?.WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX,
+              backfillGraphPendingFilesMax:
+                storedScopeConfig.backfillGraphPendingFilesMax ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX,
+              backfillGraphOpenFactsMax:
+                storedScopeConfig.backfillGraphOpenFactsMax ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_OPEN_FACTS_MAX,
             }
           : storedScopeConfig;
   const owner = await userRepo.findById(config.created_by);

@@ -140,15 +140,31 @@ export function useSourceOptions(agent: AgentConfig) {
       label: group.name,
     }),
   );
+  const dmOptions = new Map<string, AgentSourceConfig>();
+  for (const source of [...agent.sources, ...(agent.availableSources ?? [])]) {
+    if (source.targetType === "dm") dmOptions.set(sourceKey(source), source);
+  }
+  const slackDmOptions = [...dmOptions.values()].filter((source) => source.platform === "slack");
+  const whatsappDmOptions = [...dmOptions.values()].filter((source) => source.platform === "whatsapp");
 
   const lookup = new Map<string, AgentSourceConfig>();
-  for (const source of [...agent.sources, ...slackOptions, ...whatsappOptions]) lookup.set(sourceKey(source), source);
+  for (const source of [
+    ...agent.sources,
+    ...slackOptions,
+    ...slackDmOptions,
+    ...whatsappOptions,
+    ...whatsappDmOptions,
+  ]) {
+    lookup.set(sourceKey(source), source);
+  }
 
   return {
     slackLoading: slackChannels.isLoading,
     whatsappLoading: whatsappGroups.isLoading,
     slackOptions,
+    slackDmOptions,
     whatsappOptions,
+    whatsappDmOptions,
     lookup,
   };
 }
@@ -312,7 +328,9 @@ export function SourcesField({ agent, controller }: { agent: AgentConfig; contro
         selected={selected}
         onToggle={controller.toggleSource}
         showSlack={agent.sourceConfig?.supportsSlackChannels ?? false}
+        showSlackDms={agent.sourceConfig?.supportsSlackDms ?? false}
         showWhatsapp={agent.sourceConfig?.supportsWhatsAppGroups ?? false}
+        showWhatsappDms={agent.sourceConfig?.supportsWhatsAppDms ?? false}
         isDisabled={atMax ? () => true : undefined}
       />
       <p className={LABEL}>
@@ -433,17 +451,22 @@ export function ChannelPickerList({
   selected,
   onToggle,
   showSlack = true,
+  showSlackDms = false,
   showWhatsapp = true,
+  showWhatsappDms = false,
   isDisabled,
 }: {
   agent: AgentConfig;
   selected: Set<string>;
   onToggle: (option: AgentSourceConfig) => void;
   showSlack?: boolean;
+  showSlackDms?: boolean;
   showWhatsapp?: boolean;
+  showWhatsappDms?: boolean;
   isDisabled?: (option: AgentSourceConfig) => boolean;
 }) {
-  const { slackLoading, whatsappLoading, slackOptions, whatsappOptions } = useSourceOptions(agent);
+  const { slackLoading, whatsappLoading, slackOptions, slackDmOptions, whatsappOptions, whatsappDmOptions } =
+    useSourceOptions(agent);
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
   const match = (o: AgentSourceConfig) => !q || (o.label ?? o.targetId).toLowerCase().includes(q);
@@ -460,7 +483,7 @@ export function ChannelPickerList({
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search channels & groups…"
+          placeholder="Search conversations…"
           className="w-full rounded-md border-[0.5px] border-border bg-background py-1.5 pl-7 pr-2 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-foreground/30 focus:outline-none"
         />
       </div>
@@ -478,6 +501,18 @@ export function ChannelPickerList({
             empty="The bot isn't in any Slack channels yet."
           />
         ) : null}
+        {showSlackDms ? (
+          <ChannelSection
+            title="Slack direct messages"
+            loading={false}
+            total={slackDmOptions.length}
+            options={slackDmOptions.filter(match)}
+            selected={selected}
+            onToggle={onToggle}
+            isDisabled={isDisabled}
+            empty="No persisted Slack direct message is available yet."
+          />
+        ) : null}
         {showWhatsapp ? (
           <ChannelSection
             title="WhatsApp groups"
@@ -488,6 +523,18 @@ export function ChannelPickerList({
             onToggle={onToggle}
             isDisabled={isDisabled}
             empty="The bot isn't in any WhatsApp groups yet — add it to a group and reload."
+          />
+        ) : null}
+        {showWhatsappDms ? (
+          <ChannelSection
+            title="WhatsApp direct messages"
+            loading={false}
+            total={whatsappDmOptions.length}
+            options={whatsappDmOptions.filter(match)}
+            selected={selected}
+            onToggle={onToggle}
+            isDisabled={isDisabled}
+            empty="No persisted WhatsApp direct message is available yet."
           />
         ) : null}
       </div>

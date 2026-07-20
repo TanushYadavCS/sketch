@@ -1,3 +1,4 @@
+import { QuietAddButton } from "@/components/quiet-add-button";
 import { api } from "@/lib/api";
 import type { SlackChannelInfo, User, WhatsAppGroupInfo } from "@/lib/api";
 import {
@@ -6,7 +7,6 @@ import {
   EyeSlashIcon,
   LockIcon,
   PencilSimpleIcon,
-  PlusIcon,
   ShareNetworkIcon,
   SpinnerGapIcon,
   TrashIcon,
@@ -63,10 +63,7 @@ export function EnvironmentVariablesSection({
     <div>
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm font-medium text-muted-foreground">Environment variables</p>
-        <Button variant="ghost" size="sm" className="gap-1.5 hover:bg-brand-accent/8" onClick={onAdd}>
-          <PlusIcon size={14} weight="bold" />
-          New variable
-        </Button>
+        <QuietAddButton onClick={onAdd}>New variable</QuietAddButton>
       </div>
 
       {variables.length === 0 ? (
@@ -78,10 +75,9 @@ export function EnvironmentVariablesSection({
           <p className="mt-1.5 max-w-sm text-sm text-muted-foreground">
             Add credentials and config for Bash commands run by Sketch.
           </p>
-          <Button variant="ghost" size="sm" className="mt-4 gap-1.5 hover:bg-brand-accent/8" onClick={onAdd}>
-            <PlusIcon size={14} weight="bold" />
+          <QuietAddButton className="mt-4" onClick={onAdd}>
             New variable
-          </Button>
+          </QuietAddButton>
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border border-border bg-card">

@@ -417,6 +417,12 @@ export class AgentRunTargetLayer extends AgentRunConfigLayer {
     if (!user) throw new AgentSourceTargetError("User not found");
 
     if (source.platform === "slack") {
+      if (source.targetType === "dm") {
+        if (!config.supportsSlackDms) throw new AgentSourceTargetError("Slack DM sources are not supported");
+        const resolved = await this.repo.findDmSourceForUser(userId, "slack", source.targetId);
+        if (!resolved) throw new AgentSourceTargetError("DM source is not available for this user");
+        return resolved;
+      }
       if (!config.supportsSlackChannels || source.targetType !== "channel") {
         throw new AgentSourceTargetError("Slack sources must be channels");
       }
@@ -436,6 +442,12 @@ export class AgentRunTargetLayer extends AgentRunConfigLayer {
       };
     }
 
+    if (source.targetType === "dm") {
+      if (!config.supportsWhatsAppDms) throw new AgentSourceTargetError("WhatsApp DM sources are not supported");
+      const resolved = await this.repo.findDmSourceForUser(userId, "whatsapp", source.targetId);
+      if (!resolved) throw new AgentSourceTargetError("DM source is not available for this user");
+      return resolved;
+    }
     if (!config.supportsWhatsAppGroups || source.targetType !== "group") {
       throw new AgentSourceTargetError("WhatsApp sources must be groups");
     }
@@ -452,6 +464,16 @@ export class AgentRunTargetLayer extends AgentRunConfigLayer {
       targetId: group.jid,
       label: group.name,
     };
+  }
+
+  protected async listAvailableSourcesForUser(def: AgentDefinition, userId: string): Promise<AgentSourceConfig[]> {
+    if (!def.sourceConfig || (!def.sourceConfig.supportsSlackDms && !def.sourceConfig.supportsWhatsAppDms)) return [];
+    const sources = await this.repo.listDmSourceOptionsForUser(userId);
+    return sources.filter(
+      (source) =>
+        (source.platform === "slack" && def.sourceConfig?.supportsSlackDms) ||
+        (source.platform === "whatsapp" && def.sourceConfig?.supportsWhatsAppDms),
+    );
   }
 
   private async resolveSourcesForRun(

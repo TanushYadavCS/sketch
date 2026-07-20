@@ -91,7 +91,7 @@ describe("WhatsApp gateway supervision decisions", () => {
     host_id: "host",
     boot_id: "boot",
     script_hash: "hash",
-    contract_version: "1.0",
+    contract_version: "1.2",
   } as Parameters<typeof classifyWhatsAppGatewayLease>[0]["lease"];
 
   it("adopts only a fresh same-host lease with matching health", () => {
@@ -100,7 +100,7 @@ describe("WhatsApp gateway supervision decisions", () => {
         lease,
         hostId: "host",
         bootId: "boot",
-        health: { scriptHash: "hash", contractVersion: "1.0" },
+        health: { scriptHash: "hash", contractVersion: "1.2" },
         expectedHash: "hash",
         heartbeatFresh: true,
       }),
@@ -110,7 +110,7 @@ describe("WhatsApp gateway supervision decisions", () => {
         lease,
         hostId: "other-host",
         bootId: "boot",
-        health: { scriptHash: "hash", contractVersion: "1.0" },
+        health: { scriptHash: "hash", contractVersion: "1.2" },
         expectedHash: "hash",
         heartbeatFresh: true,
       }),
@@ -123,7 +123,7 @@ describe("WhatsApp gateway supervision decisions", () => {
         lease,
         hostId: "host",
         bootId: "boot",
-        health: { scriptHash: "old", contractVersion: "1.0" },
+        health: { scriptHash: "old", contractVersion: "1.2" },
         expectedHash: "new",
         heartbeatFresh: true,
       }),
@@ -133,7 +133,7 @@ describe("WhatsApp gateway supervision decisions", () => {
         lease,
         hostId: "host",
         bootId: "boot",
-        health: { scriptHash: "hash", contractVersion: "1.0" },
+        health: { scriptHash: "hash", contractVersion: "1.2" },
         expectedHash: "hash",
         heartbeatFresh: false,
       }),
@@ -161,9 +161,9 @@ describe("WhatsApp gateway supervision decisions", () => {
   });
 
   it("restarts for script or contract skew", () => {
-    expect(whatsappGatewayHealthDecision({ scriptHash: "old", contractVersion: "1.0" }, "new")).toBe("restart");
-    expect(whatsappGatewayHealthDecision({ scriptHash: "new", contractVersion: "2.0" }, "new")).toBe("restart");
-    expect(whatsappGatewayHealthDecision({ scriptHash: "new", contractVersion: "1.0" }, "new")).toBe("healthy");
+    expect(whatsappGatewayHealthDecision({ scriptHash: "old", contractVersion: "1.2" }, "new")).toBe("restart");
+    expect(whatsappGatewayHealthDecision({ scriptHash: "new", contractVersion: "1.1" }, "new")).toBe("restart");
+    expect(whatsappGatewayHealthDecision({ scriptHash: "new", contractVersion: "1.2" }, "new")).toBe("healthy");
   });
 });
 
@@ -463,6 +463,7 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
     await supervisor.handleSocketStateChange({
       ownerToken: "current-owner",
       generation: 4,
+      socketGeneration: 2,
       socketState: "connected",
       occurredAt: "2026-07-17T10:00:00.000Z",
     });
@@ -471,6 +472,7 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
     await supervisor.handleSocketStateChange({
       ownerToken: "current-owner",
       generation: 4,
+      socketGeneration: 2,
       socketState: "disconnected",
       occurredAt: "2026-07-17T10:01:00.000Z",
       statusCode: 413,
@@ -505,7 +507,12 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
       contractVersion: "1.0",
     };
 
-    await supervisor.handleSocketStateChange({ ownerToken: "old-owner", generation: 4, socketState: "connected" });
+    await supervisor.handleSocketStateChange({
+      ownerToken: "old-owner",
+      generation: 4,
+      socketGeneration: 2,
+      socketState: "connected",
+    });
 
     expect(supervisor.isConnected).toBe(false);
     expect(internals.lastHealth.socketState).toBe("disconnected");
@@ -536,12 +543,22 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
       scriptHash: "hash",
       contractVersion: "1.0",
     };
-    await supervisor.handleSocketStateChange({ ownerToken: "current-owner", generation: 6, socketState: "connected" });
+    await supervisor.handleSocketStateChange({
+      ownerToken: "current-owner",
+      generation: 6,
+      socketGeneration: 2,
+      socketState: "connected",
+    });
     expect(supervisor.isConnected).toBe(true);
 
     internals.stopping = true;
     await internals.onChildExit(child, 1, null);
-    await supervisor.handleSocketStateChange({ ownerToken: "current-owner", generation: 6, socketState: "connected" });
+    await supervisor.handleSocketStateChange({
+      ownerToken: "current-owner",
+      generation: 6,
+      socketGeneration: 2,
+      socketState: "connected",
+    });
 
     expect(supervisor.isConnected).toBe(false);
     expect(internals.lastHealth).toBeNull();

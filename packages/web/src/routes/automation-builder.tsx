@@ -340,7 +340,7 @@ export function AutomationBuilderPage() {
 
   if (automationQuery.isLoading || !draft || !automationQuery.data) {
     return (
-      <div className="flex min-h-[calc(100vh-52px)] items-center justify-center text-sm text-muted-foreground">
+      <div className="flex min-h-[calc(100vh-3rem)] items-center justify-center text-sm text-muted-foreground md:min-h-screen">
         Loading builder...
       </div>
     );
@@ -358,7 +358,7 @@ export function AutomationBuilderPage() {
   const selectedOutput = selectedStep ? selectedRun?.stepOutputs[selectedStep.id] : undefined;
   const builderTitle = draft.title?.trim() || draft.prompt;
   return (
-    <div className="relative flex h-[calc(100vh-52px)] min-h-0 overflow-hidden bg-background">
+    <div className="relative flex h-[calc(100vh-3rem)] min-h-0 overflow-hidden bg-background md:h-screen">
       <BuilderChatSidecar
         conversationId={builderConversationId}
         taskId={taskId}

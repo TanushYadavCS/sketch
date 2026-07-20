@@ -193,7 +193,7 @@ describe("AgentRunService", () => {
     expect(contexts.map((context) => context.createTasks)).toEqual([false, true]);
   });
 
-  it("promotes Summarizer internal task candidates without persisting them as visible output items", async () => {
+  it("keeps legacy Summarizer task candidates out of durable memory during the hybrid transition", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
     const user = await users.create({ name: "Agent User", email: "user@example.com", slackUserId: "U_AGENT" });
@@ -282,19 +282,15 @@ describe("AgentRunService", () => {
       .where("created_by_user_id", "=", user.id)
       .execute();
     const evidence = await db.selectFrom("task_evidence").select(["kind", "ref_id"]).orderBy("ref_id", "asc").execute();
+    const transition = await db
+      .selectFrom("task_durability_route_state")
+      .select(["mode", "incremental_success_at"])
+      .executeTakeFirstOrThrow();
 
     expect(visibleItems).toEqual([{ section_key: "highlights", title: "Launch thread moved forward" }]);
-    expect(summaryTasks).toEqual([
-      {
-        title: "Mina: send the launch checklist",
-        provenance: "summary",
-        source: "summary",
-      },
-    ]);
-    expect(evidence).toEqual([
-      { kind: "conversation_message", ref_id: "701" },
-      { kind: "conversation_message", ref_id: "702" },
-    ]);
+    expect(summaryTasks).toEqual([]);
+    expect(evidence).toEqual([]);
+    expect(transition).toEqual({ mode: "hybrid", incremental_success_at: null });
   });
 
   it("persists delivery config with the other agent preferences", async () => {

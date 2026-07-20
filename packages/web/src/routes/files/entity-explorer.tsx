@@ -15,6 +15,7 @@ import { AddEntityDialog } from "@/components/entity-review/add-entity-dialog";
 import { humanSourceType } from "@/components/entity-review/entity-format";
 import { GhostReviewRow, ReviewDetailSheet } from "@/components/entity-review/review-band";
 import { GraphRebuildDialog, type GraphRebuildDialogPrefill } from "@/components/graph-rebuild-dialog";
+import { QuietAddButton } from "@/components/quiet-add-button";
 import { RebuildBanner } from "@/components/rebuild-banner";
 import { countKey, listKey } from "@/components/review-actions";
 import { useRebuildJob } from "@/hooks/use-rebuild-job";
@@ -30,7 +31,6 @@ import {
   CubeIcon,
   DotsThreeIcon,
   MagnifyingGlassIcon,
-  PlusIcon,
   UserIcon,
   XIcon,
 } from "@phosphor-icons/react";
@@ -83,6 +83,9 @@ function entityContext(entity: EntityListItem): string | null {
   if (m.parentPage) return m.parentPage as string;
   if (entity.sourceType === "person" && entity.subtype) {
     return entity.subtype === "internal" ? "Internal" : "External";
+  }
+  if (entity.sourceType === "company" && entity.subtype) {
+    return entity.subtype.charAt(0).toUpperCase() + entity.subtype.slice(1);
   }
   return null;
 }
@@ -237,10 +240,7 @@ export function EntityExplorer() {
           {showSystem ? "Hide system entities" : "Show system entities"}
         </Button>
 
-        <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => setShowAddDialog(true)}>
-          <PlusIcon size={12} />
-          Add Entity
-        </Button>
+        <QuietAddButton onClick={() => setShowAddDialog(true)}>Add Entity</QuietAddButton>
 
         {isAdmin && (
           <DropdownMenu>
@@ -374,7 +374,29 @@ export function EntityExplorer() {
   );
 }
 
-function EntityRow({ entity, onSelect }: { entity: EntityListItem; onSelect: (id: string) => void }) {
+/**
+ * The bordered entity table (shared column header + rows). Lifted out so the
+ * Your Org tabs can mount the Entity Explorer table per-type without the
+ * explorer's own toolbar, filters, or review lane.
+ */
+export function EntityTable({ entities, onSelect }: { entities: EntityListItem[]; onSelect: (id: string) => void }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-border" data-testid="entities-table">
+      <div className="flex items-center gap-3 border-b border-border bg-muted/30 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        <span className="min-w-0 flex-1">Name</span>
+        <span className="w-32 text-center">Type</span>
+        <span className="w-16 text-center">Mentions</span>
+        <span className="w-20 text-center">Status</span>
+        <span className="w-24 text-right">Last Active</span>
+      </div>
+      {entities.map((entity) => (
+        <EntityRow key={entity.id} entity={entity} onSelect={onSelect} />
+      ))}
+    </div>
+  );
+}
+
+export function EntityRow({ entity, onSelect }: { entity: EntityListItem; onSelect: (id: string) => void }) {
   const isPerson = entity.sourceType === "person";
   const source = sourceFromType(entity.sourceType);
   const context = entityContext(entity);

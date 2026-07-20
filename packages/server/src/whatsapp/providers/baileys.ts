@@ -4,8 +4,10 @@ import type { WAMessage } from "@whiskeysockets/baileys";
 import type { Attachment } from "../../files";
 import type { Logger } from "../../logger";
 import type { WhatsAppHistoryMessagesHandler, WhatsAppMessage, WhatsAppMessageHandler } from "../bot";
+import { createWhatsAppConnectionKey } from "../connection-key";
 import type { WhatsAppQuotedRef, WhatsAppSocketFacade } from "../facade-contract";
 import {
+  type WhatsAppHistoryMessagesHandler as ProviderWhatsAppHistoryMessagesHandler,
   WHATSAPP_BAILEYS_PROVIDER_ID,
   type WhatsAppCapabilities,
   type WhatsAppDmProvider,
@@ -59,7 +61,15 @@ export function createBaileysWhatsAppProviders(
   whatsapp: WhatsAppSocketFacade,
   inboundSource: BaileysWhatsAppInboundSource,
   logger: Logger,
+  options: { getLeaseGeneration?: () => number | null } = {},
 ): BaileysWhatsAppProviders {
+  let appendHistoryHandler: ProviderWhatsAppHistoryMessagesHandler | null = null;
+  const connectionKey = (socketGeneration: number): string | null => {
+    const leaseGeneration = options.getLeaseGeneration?.();
+    return leaseGeneration === null || leaseGeneration === undefined
+      ? null
+      : createWhatsAppConnectionKey(leaseGeneration, socketGeneration);
+  };
   const toProviderConversationId = (target: WhatsAppTarget): string => {
     if (target.kind === "group") return target.groupId;
     return target.providerConversationId ?? phoneE164ToWhatsAppJid(target.phoneE164);
@@ -215,20 +225,26 @@ export function createBaileysWhatsAppProviders(
     inboundProvider: {
       id: WHATSAPP_BAILEYS_PROVIDER_ID,
       onMessage(handler) {
-        inboundSource.onMessage((message) => {
-          const normalized = normalizeBaileysInboundMessage(message);
+        inboundSource.onMessage(async (message, metadata) => {
+          const normalized = normalizeBaileysInboundMessage(message, connectionKey(metadata.socketGeneration));
           rememberMessage(
             whatsapp,
             normalized.providerConversationId,
             normalized.providerMessageId,
             normalized.rawProviderPayload,
           );
-          return handler(normalized);
+          if (metadata.upsertType === "append") {
+            await appendHistoryHandler?.([normalized]);
+            return;
+          }
+          await handler(normalized);
         });
       },
       onHistoryMessages(handler) {
+        appendHistoryHandler = handler;
         inboundSource.onHistoryMessages((messages, metadata) => {
-          const normalized = messages.map(normalizeBaileysInboundMessage);
+          const historyConnectionKey = connectionKey(metadata.socketGeneration);
+          const normalized = messages.map((message) => normalizeBaileysInboundMessage(message, historyConnectionKey));
           for (const message of normalized) {
             rememberMessage(
               whatsapp,
@@ -248,7 +264,10 @@ export function baileysTargetFromPhone(phoneE164: string): Extract<WhatsAppTarge
   return { kind: "dm", phoneE164, providerConversationId: phoneE164ToWhatsAppJid(phoneE164) };
 }
 
-export function normalizeBaileysInboundMessage(message: WhatsAppMessage): WhatsAppInboundMessage {
+export function normalizeBaileysInboundMessage(
+  message: WhatsAppMessage,
+  connectionKey: string | null = null,
+): WhatsAppInboundMessage {
   if (message.type === "dm") {
     const providerConversationId = phoneE164ToWhatsAppJid(message.phoneNumber);
     return {
@@ -264,6 +283,7 @@ export function normalizeBaileysInboundMessage(message: WhatsAppMessage): WhatsA
       target: { kind: "dm", phoneE164: message.phoneNumber, providerConversationId },
       text: message.text,
       rawProviderPayload: message.rawMessage,
+      connectionKey,
       ...(message.mediaType ? { mediaType: message.mediaType } : {}),
       ...(message.quotedMessage ? { quotedMessage: message.quotedMessage } : {}),
     };
@@ -283,6 +303,7 @@ export function normalizeBaileysInboundMessage(message: WhatsAppMessage): WhatsA
     text: message.text,
     isMentioned: message.isMentioned,
     rawProviderPayload: message.rawMessage,
+    connectionKey,
     ...(message.mediaType ? { mediaType: message.mediaType } : {}),
     ...(message.quotedMessage ? { quotedMessage: message.quotedMessage } : {}),
   };

@@ -5,12 +5,18 @@ import { phoneE164ToWhatsAppJid } from "../provider";
 import { createBaileysWhatsAppProviders } from "./baileys";
 
 function createMockBot() {
-  let messageHandler: ((message: unknown) => Promise<void>) | null = null;
+  let messageHandler:
+    | ((message: unknown, metadata: { socketGeneration: number; upsertType?: "notify" | "append" }) => Promise<void>)
+    | null = null;
+  let historyHandler: ((messages: unknown[], metadata: { socketGeneration: number }) => Promise<unknown>) | null = null;
   const bot = {
     isConnected: true,
     socket: null,
     onMessage: vi.fn((handler) => {
       messageHandler = handler;
+    }),
+    onHistoryMessages: vi.fn((handler) => {
+      historyHandler = handler;
     }),
     sendText: vi.fn(async (jid: string) => ({
       key: { id: `sent-${jid}`, remoteJid: jid, fromMe: true },
@@ -28,8 +34,11 @@ function createMockBot() {
   return {
     bot,
     facade: new InProcessSocketFacade(bot as never, createTestLogger()),
-    emit: async (message: unknown) => {
-      await messageHandler?.(message);
+    emit: async (message: unknown, socketGeneration = 1, upsertType: "notify" | "append" = "notify") => {
+      await messageHandler?.(message, { socketGeneration, upsertType });
+    },
+    emitHistory: async (messages: unknown[], socketGeneration = 1) => {
+      await historyHandler?.(messages, { socketGeneration });
     },
   };
 }
@@ -191,5 +200,82 @@ describe("createBaileysWhatsAppProviders", () => {
         text: "hello",
       }),
     );
+  });
+
+  it("stamps in-process live and history messages with the composite connection key", async () => {
+    const { bot, facade, emit, emitHistory } = createMockBot();
+    const providers = createBaileysWhatsAppProviders(facade, bot as never, createTestLogger(), {
+      getLeaseGeneration: () => 7,
+    });
+    const liveHandler = vi.fn();
+    const historyHandler = vi.fn(async () => ({ persisted: 0, skippedOld: 0, skippedDup: 0 }));
+    providers.inboundProvider.onMessage(liveHandler);
+    providers.inboundProvider.onHistoryMessages?.(historyHandler);
+    const groupMessage = {
+      type: "group",
+      text: "hello",
+      jid: "group@g.us",
+      messageId: "m1",
+      pushName: "Alice",
+      rawMessage: {
+        key: { id: "m1", remoteJid: "group@g.us", participant: "15551234567@s.whatsapp.net", fromMe: false },
+        messageTimestamp: 1_700_000_000,
+      },
+      isMentioned: false,
+      senderJid: "15551234567@s.whatsapp.net",
+      senderPhone: "+15551234567",
+    };
+
+    await emit(groupMessage, 19);
+    await emitHistory([groupMessage], 20);
+
+    expect(liveHandler).toHaveBeenCalledWith(expect.objectContaining({ connectionKey: "000000000007:000000000019" }));
+    expect(historyHandler).toHaveBeenCalledWith(
+      [expect.objectContaining({ connectionKey: "000000000007:000000000020" })],
+      expect.objectContaining({ socketGeneration: 20 }),
+    );
+  });
+
+  it("routes in-process append messages through history handling instead of the live adapter", async () => {
+    const { bot, facade, emit } = createMockBot();
+    const providers = createBaileysWhatsAppProviders(facade, bot as never, createTestLogger(), {
+      getLeaseGeneration: () => 7,
+    });
+    const liveHandler = vi.fn();
+    const historyHandler = vi.fn(async () => ({ persisted: 1, skippedOld: 0, skippedDup: 0 }));
+    providers.inboundProvider.onMessage(liveHandler);
+    providers.inboundProvider.onHistoryMessages?.(historyHandler);
+
+    await emit(
+      {
+        type: "group",
+        text: "missed message",
+        jid: "group@g.us",
+        messageId: "append-1",
+        pushName: "Alice",
+        rawMessage: {
+          key: {
+            id: "append-1",
+            remoteJid: "group@g.us",
+            participant: "15551234567@s.whatsapp.net",
+            fromMe: false,
+          },
+          messageTimestamp: 1_700_000_000,
+        },
+        isMentioned: true,
+        senderJid: "15551234567@s.whatsapp.net",
+        senderPhone: "+15551234567",
+      },
+      20,
+      "append",
+    );
+
+    expect(liveHandler).not.toHaveBeenCalled();
+    expect(historyHandler).toHaveBeenCalledWith([
+      expect.objectContaining({
+        providerMessageId: "append-1",
+        connectionKey: "000000000007:000000000020",
+      }),
+    ]);
   });
 });

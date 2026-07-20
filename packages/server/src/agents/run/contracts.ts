@@ -108,6 +108,7 @@ export interface AgentConfigView {
   delivery: AgentDeliveryConfig | null;
   deliveryModel: AgentDeliveryModel;
   sourceConfig: AgentSourceConfigDef | null;
+  availableSources: AgentSourceConfig[];
   sources: AgentSourceConfig[];
   routes: AgentConfigRouteView[];
   sections: AgentSectionView[];

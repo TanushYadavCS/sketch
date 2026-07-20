@@ -1,3 +1,4 @@
+import { QuietAddButton } from "@/components/quiet-add-button";
 /**
  * The agents landing — the curated catalog of prebuilt agents. Most are a single
  * code-owned, opt-in job rendered as one row with an on/off switch. A
@@ -6,7 +7,7 @@
  * summariser" action that opens the first-time-setup modal.
  */
 import { type AgentRoute, type AgentSourceConfig, type AgentSummary, api } from "@/lib/api";
-import { CaretRightIcon, PlusIcon } from "@phosphor-icons/react";
+import { CaretRightIcon } from "@phosphor-icons/react";
 import { Switch } from "@sketch/ui/components/switch";
 import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -140,14 +141,7 @@ function SummariserGroup({ agent }: { agent: AgentSummary }) {
           <span className="text-[14px] font-medium text-foreground">{agent.title}</span>
           <p className="mt-0.5 text-[12.5px] text-muted-foreground">{agent.tagline}</p>
         </Link>
-        <button
-          type="button"
-          onClick={() => setModalOpen(true)}
-          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-        >
-          <PlusIcon size={12} weight="bold" aria-hidden />
-          New
-        </button>
+        <QuietAddButton onClick={() => setModalOpen(true)}>New</QuietAddButton>
       </div>
 
       <div className="ml-4 flex flex-col">

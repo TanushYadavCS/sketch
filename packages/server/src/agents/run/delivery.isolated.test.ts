@@ -27,6 +27,7 @@ import {
   createPausedQueueManager,
   createService,
   createWritingService,
+  dmSource,
   emptySummaryPayload,
   perSourceSelfModel,
   runtimeContextFromUserMessage,
@@ -413,5 +414,81 @@ describe("AgentRunService", () => {
     expect(tasks).toHaveLength(0);
     expect(runAgent).not.toHaveBeenCalled();
     expect(isUserInChannel).toHaveBeenCalledWith("C_PRIVATE", "U_AGENT");
+  });
+
+  it("delivers self-routed DM summaries back to the configured user identity", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const users = createUserRepository(db);
+    const user = await users.create({
+      name: "Alice",
+      email: "alice@example.com",
+      slackUserId: "U_ALICE",
+      whatsappNumber: "+15551234567",
+    });
+    const conversations = createConversationRepository(db);
+    const slackDm = await conversations.getOrCreate(
+      { platform: "slack", kind: "dm", providerConversationId: "D_ALICE" },
+      "Alice",
+    );
+    const whatsappDm = await conversations.getOrCreate(
+      { platform: "whatsapp", kind: "dm", providerConversationId: "dm:+15551234567" },
+      "Alice",
+    );
+    for (const [conversationId, providerMessageId] of [
+      [slackDm.id, "slack-dm-message"],
+      [whatsappDm.id, "whatsapp-dm-message"],
+    ] as const) {
+      await conversations.insertMessage({
+        conversationId,
+        providerMessageId,
+        senderJid: providerMessageId,
+        senderName: "Alice",
+        senderUserId: user.id,
+        text: providerMessageId,
+        receivedAt: "2026-06-15T07:00:00.000Z",
+      });
+    }
+    const outputDelivery = { deliver: vi.fn(async () => {}) } satisfies AgentOutputDeliveryPublisher;
+    const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Summarizer", summary: "Summary" },
+        rawPayload: emptySummaryPayload(),
+        items: [],
+      });
+      return successfulRunResult();
+    });
+    const service = createService(db, tasks, {
+      runAgent: runAgent as unknown as AgentRunServiceDeps["runAgent"],
+      outputDelivery,
+      ...allowSlackDelivery([]),
+    });
+    const sources = [dmSource("slack", slackDm.id), dmSource("whatsapp", whatsappDm.id)];
+    await service.updateConfigForUser(CONVERSATION_SUMMARY_AGENT_KEY, user.id, {
+      enabled: true,
+      sources,
+      routes: sources.map((source) => sourceRoute(source)),
+    });
+
+    await service.requestGenerationForUser({
+      agentKey: CONVERSATION_SUMMARY_AGENT_KEY,
+      userId: user.id,
+      outputDate: OUTPUT_DATE,
+      triggerType: "manual",
+    });
+    for (const task of tasks) await task();
+
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: expect.objectContaining({ platform: "slack", targetType: "dm", targetId: "U_ALICE" }),
+      }),
+    );
+    expect(outputDelivery.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: expect.objectContaining({ platform: "whatsapp", targetType: "dm", targetId: "+15551234567" }),
+      }),
+    );
   });
 });

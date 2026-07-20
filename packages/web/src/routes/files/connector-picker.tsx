@@ -10,6 +10,7 @@ import {
   isOwnedOrPersonalAppConnection,
 } from "@/components/connections/connection-status";
 import { ConnectorLogo } from "@/components/connector-logos";
+import { QuietAddButton } from "@/components/quiet-add-button";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
 import { INTEGRATIONS, type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
@@ -778,10 +779,9 @@ function ConnectorRow({
               </Button>
             )}
             {onlyOtherPerUserConnectors && (
-              <Button variant="outline" size="sm" className="h-7 gap-1.5 whitespace-nowrap text-xs" onClick={onConnect}>
-                <PlusIcon size={12} />
+              <QuietAddButton className="whitespace-nowrap" onClick={onConnect}>
                 Connect mine
-              </Button>
+              </QuietAddButton>
             )}
             {needsScopeSetup && canManage && (
               <Button size="sm" className="h-7 whitespace-nowrap text-xs" onClick={() => onManage(connector)}>
@@ -809,10 +809,9 @@ function ConnectorRow({
           </div>
         ) : canConnect ? (
           <div className="flex items-center justify-end gap-2 self-end sm:self-auto sm:shrink-0">
-            <Button variant="outline" size="sm" className="h-7 whitespace-nowrap text-xs" onClick={onConnect}>
-              <PlusIcon size={12} />
+            <QuietAddButton className="whitespace-nowrap" onClick={onConnect}>
               Connect
-            </Button>
+            </QuietAddButton>
           </div>
         ) : (
           <span className="self-end whitespace-nowrap text-xs text-muted-foreground sm:self-auto sm:shrink-0">

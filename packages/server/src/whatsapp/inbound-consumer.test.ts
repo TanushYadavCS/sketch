@@ -3,9 +3,14 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createWhatsAppInboundEventsRepository } from "../db/repositories/whatsapp-inbound-events";
+import { createConversationRepository } from "../db/repositories/conversations";
+import {
+  WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS,
+  createWhatsAppInboundEventsRepository,
+} from "../db/repositories/whatsapp-inbound-events";
 import { createTestDb, createTestLogger } from "../test-utils";
 import type { WhatsAppAdapterHandlers } from "./adapter";
+import { WhatsAppBackfillWorker } from "./backfill-worker";
 import { whatsAppHistoryBatchEnvelopeSchema, whatsAppMessageEnvelopeSchema } from "./facade-contract";
 import { WhatsAppInboundConsumer, moveWhatsAppStagedMedia } from "./inbound-consumer";
 import { createWhatsAppRuntime } from "./runtime";
@@ -400,6 +405,118 @@ describe("WhatsAppInboundConsumer", () => {
     );
   });
 
+  it("records the first live group boundary once and ignores promoted history for the boundary", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const history = groupEnvelope("boundary-history");
+    history.kind = "history_message";
+    const firstLive = groupEnvelope("boundary-live-first");
+    const secondLive = groupEnvelope("boundary-live-second");
+    await repo.insert({
+      kind: "history_message",
+      origin: "gateway",
+      eventKey: history.eventKey,
+      providerMessageId: history.providerMessageId,
+      envelope: JSON.stringify(history),
+    });
+    await repo.insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: firstLive.eventKey,
+      providerMessageId: firstLive.providerMessageId,
+      envelope: JSON.stringify(firstLive),
+    });
+    await repo.insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: secondLive.eventKey,
+      providerMessageId: secondLive.providerMessageId,
+      envelope: JSON.stringify(secondLive),
+    });
+    const effectiveById = new Map([
+      ["boundary-history", "2026-07-15T08:20:00.000Z"],
+      ["boundary-live-first", "2026-07-15T08:27:00.000Z"],
+      ["boundary-live-second", "2026-07-15T08:28:00.000Z"],
+    ]);
+    const adoptPassiveHistory = vi.fn(async () => undefined);
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger: createTestLogger(),
+      stagingDir,
+      shouldHandleInboundMessage: () => true,
+      handlers: handlers({
+        captureQueuedMessage: async (message, params) => {
+          if (!params.commitCapture) throw new Error("expected transactional capture");
+          return params.commitCapture(async (conversationRepository) => {
+            const conversation = await conversationRepository.getOrCreate({
+              platform: "whatsapp",
+              kind: "group",
+              providerConversationId: "120363000000001@g.us",
+            });
+            const captured = await conversationRepository.captureOrGet({
+              conversationId: conversation.id,
+              providerMessageId: message.providerMessageId,
+              eventKey: params.eventKey,
+              senderJid: message.senderProviderId,
+              senderName: message.senderName,
+              text: message.text,
+              receivedAt: effectiveById.get(message.providerMessageId),
+              source: params.source,
+              connectionKey: params.connectionKey,
+            });
+            return { conversation, captured, attachments: [], inserted: true, omitted: false };
+          });
+        },
+        dispatchCapturedMessage: async (_message, _capture, hooks) => {
+          await hooks.onRunStart();
+          return true;
+        },
+      }),
+      backfillWorker: {
+        correlateOnDemandSession: async () => false,
+        handleOnDemandResponse: async () => false,
+        adoptPassiveHistory,
+      },
+    });
+
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    const messages = await createConversationRepository(db).listMessages(
+      (
+        await db
+          .selectFrom("conversations")
+          .select("id")
+          .where("provider_conversation_id", "=", "120363000000001@g.us")
+          .executeTakeFirstOrThrow()
+      ).id,
+      { includeBotMessages: true },
+    );
+    const firstLiveRow = messages.messages.find((message) => message.providerMessageId === "boundary-live-first");
+    const checkpoint = await db
+      .selectFrom("whatsapp_backfill_checkpoints")
+      .selectAll()
+      .where("group_jid", "=", "120363000000001@g.us")
+      .executeTakeFirstOrThrow();
+    const initialRange = await db
+      .selectFrom("whatsapp_backfill_ranges")
+      .select(["kind", "status", "upper_bound_at"])
+      .where("group_jid", "=", "120363000000001@g.us")
+      .where("range_key", "=", "initial")
+      .executeTakeFirstOrThrow();
+    expect(messages.messages.map((message) => message.source)).toEqual(["history", "live", "live"]);
+    expect(checkpoint).toMatchObject({
+      live_start_effective_at: "2026-07-15T08:27:00.000Z",
+      live_start_message_id: firstLiveRow?.id,
+    });
+    expect(initialRange).toMatchObject({
+      kind: "initial",
+      upper_bound_at: "2026-07-15T08:27:00.000Z",
+    });
+    expect(adoptPassiveHistory).toHaveBeenCalledTimes(1);
+    expect(adoptPassiveHistory).toHaveBeenCalledWith(["120363000000001@g.us"]);
+  });
+
   it("terminally consumes a Baileys DM when the configured DM provider is Wati", async () => {
     const repo = createWhatsAppInboundEventsRepository(db);
     const envelope = messageEnvelope("filtered-dm", "event-filtered-dm");
@@ -685,7 +802,7 @@ describe("WhatsAppInboundConsumer", () => {
       chunkIndex: 0,
       chunkCount: 1,
     });
-    let historyAttachments: unknown;
+    let historyCaptureMetadata: unknown;
     const consumer = new WhatsAppInboundConsumer({
       db,
       logger: createTestLogger(),
@@ -694,10 +811,7 @@ describe("WhatsAppInboundConsumer", () => {
       handlers: handlers({
         handleHistoryMessages: async (messages, _metadata, options) => {
           expect(messages.map((message) => message.text)).toEqual(["hello"]);
-          historyAttachments = await options?.attachmentsForMessage?.(
-            messages[0],
-            join(stagingDir, "history-workspace"),
-          );
+          historyCaptureMetadata = options?.captureMetadataForMessage?.(messages[0]);
           return { persisted: 1, skippedOld: 0, skippedDup: 0 };
         },
       }),
@@ -706,7 +820,11 @@ describe("WhatsAppInboundConsumer", () => {
     await consumer.wake();
     await consumer.stop();
 
-    expect(historyAttachments).toEqual([]);
+    expect(historyCaptureMetadata).toEqual({
+      eventKey: "event-history-staging-error",
+      connectionKey: null,
+      fromMe: false,
+    });
     await expect(
       db
         .selectFrom("whatsapp_inbound_events")
@@ -755,6 +873,345 @@ describe("WhatsAppInboundConsumer", () => {
     await consumer.stop();
     expect(progress).toEqual([99, 100]);
     expect(checkpoints).toEqual([false, true]);
+  });
+
+  it("dead-letters an uncorrelated on-demand response after its bounded deferral window", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const history = whatsAppHistoryBatchEnvelopeSchema.parse({
+      version: "1.1",
+      kind: "history_batch",
+      providerTimestamp: "2026-07-15T08:20:00.000Z",
+      connectionKey: "000000000001:000000000002",
+      batch: {
+        batchId: "batch-orphaned-on-demand",
+        chunkIndex: 0,
+        chunkCount: 1,
+        syncType: 6,
+        progress: null,
+        isLatest: null,
+        peerDataRequestSessionId: "request-orphaned-on-demand",
+      },
+      messages: [],
+    });
+    const inserted = await repo.insert({
+      kind: "history_batch",
+      origin: "gateway",
+      envelope: JSON.stringify(history),
+      batchId: "batch-orphaned-on-demand",
+      chunkIndex: 0,
+      chunkCount: 1,
+      requestSessionId: "request-orphaned-on-demand",
+    });
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const backfillWorker = {
+      correlateOnDemandSession: vi.fn(async () => false),
+      handleOnDemandResponse: vi.fn(async () => true),
+      adoptPassiveHistory: vi.fn(async () => undefined),
+    };
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger,
+      stagingDir,
+      shouldHandleInboundMessage: () => true,
+      handlers: handlers(),
+      backfillWorker,
+    });
+
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["status", "attempts"])
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ status: "captured", attempts: 0 });
+
+    await db
+      .updateTable("whatsapp_inbound_events")
+      .set({ received_at: "2000-01-01T00:00:00.000Z", next_attempt_at: "2000-01-01T00:00:00.000Z" })
+      .where("id", "=", inserted.row.id)
+      .execute();
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["status", "attempts", "last_error"])
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      status: "dead",
+      attempts: 1,
+      last_error: "awaiting WhatsApp history request correlation",
+    });
+    expect(backfillWorker.correlateOnDemandSession).toHaveBeenCalledTimes(2);
+    expect(backfillWorker.handleOnDemandResponse).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      {
+        inboundEventId: inserted.row.id,
+        requestSessionId: "request-orphaned-on-demand",
+        correlationWindowMs: WHATSAPP_ON_DEMAND_CORRELATION_MAX_AGE_MS,
+      },
+      "Uncorrelated WhatsApp on-demand history response dead-lettered",
+    );
+  });
+
+  it("stages a correlated on-demand response without blocking the following live dispatch", async () => {
+    const repo = createWhatsAppInboundEventsRepository(db);
+    const history = whatsAppHistoryBatchEnvelopeSchema.parse({
+      version: "1.1",
+      kind: "history_batch",
+      providerTimestamp: "2026-07-15T08:20:00.000Z",
+      connectionKey: "000000000001:000000000002",
+      batch: {
+        batchId: "batch-on-demand",
+        chunkIndex: 0,
+        chunkCount: 1,
+        syncType: 6,
+        progress: null,
+        isLatest: null,
+        peerDataRequestSessionId: "request-on-demand",
+      },
+      messages: [],
+    });
+    const staged = await repo.insert({
+      kind: "history_batch",
+      origin: "gateway",
+      envelope: JSON.stringify(history),
+      batchId: "batch-on-demand",
+      chunkIndex: 0,
+      chunkCount: 1,
+      requestSessionId: "request-on-demand",
+    });
+    const live = messageEnvelope("live-after-fetch", "event-live-after-fetch");
+    const liveRow = await repo.insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: live.eventKey,
+      providerMessageId: live.providerMessageId,
+      envelope: JSON.stringify(live),
+    });
+    const dispatchCapturedMessage = vi.fn(async (_message, _capture, hooks) => {
+      await hooks.onRunStart();
+      return true;
+    });
+    const handleHistoryMessages = vi.fn(async () => ({ persisted: 0, skippedOld: 0, skippedDup: 0 }));
+    const backfillWorker = {
+      correlateOnDemandSession: vi.fn(async () => true),
+      handleOnDemandResponse: vi.fn(async () => true),
+      adoptPassiveHistory: vi.fn(async () => undefined),
+    };
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger: createTestLogger(),
+      stagingDir,
+      shouldHandleInboundMessage: () => true,
+      handlers: handlers({ dispatchCapturedMessage, handleHistoryMessages }),
+      backfillWorker,
+    });
+
+    consumer.start();
+    await consumer.wake();
+    await consumer.stop();
+
+    expect(handleHistoryMessages).not.toHaveBeenCalled();
+    expect(backfillWorker.correlateOnDemandSession).toHaveBeenCalledWith("request-on-demand");
+    expect(backfillWorker.handleOnDemandResponse).toHaveBeenCalledWith("request-on-demand");
+    expect(dispatchCapturedMessage).toHaveBeenCalledTimes(1);
+    await expect(
+      db
+        .selectFrom("whatsapp_inbound_events")
+        .select(["id", "status"])
+        .where("id", "in", [staged.row.id, liveRow.row.id])
+        .orderBy("id")
+        .execute(),
+    ).resolves.toEqual([
+      { id: staged.row.id, status: "consumed" },
+      { id: liveRow.row.id, status: "consumed" },
+    ]);
+  });
+
+  it("dispatches live traffic before a real multi-batch materialization loop completes", async () => {
+    const conversation = await createConversationRepository(db).getOrCreate(
+      { platform: "whatsapp", kind: "group", providerConversationId: "120363000000001@g.us" },
+      "Backfill Group",
+    );
+    await db
+      .insertInto("whatsapp_groups")
+      .values({ jid: "120363000000001@g.us", name: "Backfill Group", description: null })
+      .execute();
+    await db
+      .insertInto("whatsapp_backfill_ranges")
+      .values({
+        id: "range-live-fairness",
+        group_jid: "120363000000001@g.us",
+        range_key: "gap:live-fairness",
+        kind: "gap",
+        connection_key: "000000000001:000000000002",
+        status: "materializing",
+        terminal_status: "complete",
+        lower_bound_at: "2026-07-15T08:00:00.000Z",
+        upper_bound_at: "2026-07-15T09:00:00.000Z",
+      })
+      .execute();
+    const historyMessages = Array.from({ length: 401 }, (_, index) =>
+      whatsAppMessageEnvelopeSchema.parse({
+        ...groupEnvelope(`history-${index}`, `event-history-${index}`),
+        kind: "history_message",
+        connectionKey: "000000000001:000000000002",
+      }),
+    );
+    const history = whatsAppHistoryBatchEnvelopeSchema.parse({
+      version: "1.1",
+      kind: "history_batch",
+      providerTimestamp: "2026-07-15T08:27:00.000Z",
+      connectionKey: "000000000001:000000000002",
+      batch: {
+        batchId: "batch-live-fairness",
+        chunkIndex: 0,
+        chunkCount: 1,
+        syncType: 6,
+        progress: null,
+        isLatest: null,
+        peerDataRequestSessionId: "request-live-fairness",
+      },
+      messages: historyMessages,
+    });
+    await db
+      .insertInto("whatsapp_inbound_events")
+      .values({
+        kind: "history_batch",
+        origin: "gateway",
+        envelope: JSON.stringify(history),
+        batch_id: "batch-live-fairness",
+        request_session_id: "request-live-fairness",
+        backfill_range_id: "range-live-fairness",
+        status: "consumed",
+        consumed_at: "2026-07-15T08:30:00.000Z",
+      })
+      .execute();
+
+    let releaseYield!: () => void;
+    let observedYield!: () => void;
+    const yieldObserved = new Promise<void>((resolve) => {
+      observedYield = resolve;
+    });
+    const yieldRelease = new Promise<void>((resolve) => {
+      releaseYield = resolve;
+    });
+    const batchSizes: number[] = [];
+    const dispatchBeforeCompletion: boolean[] = [];
+    let materializationComplete = false;
+    const testHandlers = handlers({
+      handleHistoryMessages: async (messages, _metadata, options) => {
+        batchSizes.push(messages.length);
+        for (const message of messages) {
+          const metadata = options?.captureMetadataForMessage?.(message);
+          await createConversationRepository(db).insertMessage({
+            conversationId: conversation.id,
+            providerMessageId: message.providerMessageId,
+            eventKey: metadata?.eventKey,
+            senderJid: message.senderProviderId,
+            senderName: message.senderName,
+            text: message.text,
+            providerTimestamp: message.providerTimestamp,
+            providerFromMe: metadata?.fromMe,
+            source: "history",
+            connectionKey: metadata?.connectionKey,
+            backfillRangeId: options?.range?.id,
+          });
+        }
+        return { persisted: messages.length, skippedOld: 0, skippedDup: 0 };
+      },
+      dispatchCapturedMessage: async (_message, _capture, hooks) => {
+        dispatchBeforeCompletion.push(!materializationComplete);
+        await hooks.onRunStart();
+        return true;
+      },
+    });
+    let yielded = false;
+    const backfillWorker = new WhatsAppBackfillWorker({
+      db,
+      config: { WHATSAPP_HISTORY_LOOKBACK_DAYS: 30 },
+      logger: createTestLogger(),
+      facade: {
+        send: async () => null,
+        sendComposing: async () => undefined,
+        react: async () => ({ ok: true }),
+        downloadMedia: async () => null,
+        groupMetadata: async () => null,
+        syncAllGroups: async () => ({ synced: 0 }),
+        resolveLid: async () => null,
+        fetchMessageHistory: async () => "unused",
+        pairing: {
+          startQr: async () => undefined,
+          status: async () => ({ connected: true, phoneNumber: "+15551234567" }),
+          cancel: async () => undefined,
+          logout: async () => undefined,
+        },
+        shutdown: async () => undefined,
+        health: async () => ({
+          socketState: "connected",
+          queueDepth: 0,
+          insertFailures: 0,
+          uptime: 1,
+          scriptHash: "test",
+          contractVersion: "1.1",
+        }),
+      },
+      handlers: testHandlers,
+      shouldHandleInboundMessage: () => true,
+      now: () => Date.parse("2026-07-15T08:30:00.000Z"),
+      sleep: async () => undefined,
+      onMaterializationBatchYield: async () => {
+        if (!yielded) {
+          yielded = true;
+          observedYield();
+          await yieldRelease;
+        }
+      },
+    });
+    const materialization = backfillWorker.runOnce().then(() => {
+      materializationComplete = true;
+    });
+    await yieldObserved;
+
+    const live = messageEnvelope("live-during-materialization", "event-live-during-materialization");
+    await createWhatsAppInboundEventsRepository(db).insert({
+      kind: "message",
+      origin: "gateway",
+      eventKey: live.eventKey,
+      providerMessageId: live.providerMessageId,
+      envelope: JSON.stringify(live),
+    });
+    const consumer = new WhatsAppInboundConsumer({
+      db,
+      logger: createTestLogger(),
+      stagingDir,
+      shouldHandleInboundMessage: () => true,
+      handlers: testHandlers,
+    });
+    consumer.start();
+    await consumer.wake();
+
+    expect(dispatchBeforeCompletion).toEqual([true]);
+    expect(batchSizes).toEqual([200]);
+    releaseYield();
+    await materialization;
+    await consumer.stop();
+    expect(batchSizes).toEqual([200, 200, 1]);
+    await expect(
+      db
+        .selectFrom("whatsapp_backfill_ranges")
+        .select("status")
+        .where("id", "=", "range-live-fairness")
+        .executeTakeFirst(),
+    ).resolves.toEqual({ status: "complete" });
   });
 });
 

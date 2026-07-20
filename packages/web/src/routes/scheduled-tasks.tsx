@@ -513,8 +513,8 @@ export function ScheduledTasksPage() {
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <div>
-        <h1 className="text-xl font-semibold text-foreground">Scheduled tasks</h1>
-        <p className="mt-2 text-sm text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>
+        <h1 className="text-[22px] font-medium text-foreground">Automations</h1>
+        <p className="mt-1 text-[13px] text-muted-foreground">{getSubtitle(auth.role ?? "member")}</p>
       </div>
 
       <div className="mt-6">

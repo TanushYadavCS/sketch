@@ -2,7 +2,11 @@ import { join } from "node:path";
 import { AgentRunAdmissionCancelledError } from "../../agent/concurrency-limiter";
 import { buildSketchContext } from "../../agent/prompt";
 import type { RunAgentParams, RunAgentResult } from "../../agent/runner";
-import type { AgentOutputWriter, WriteAgentOutputPayload } from "../../agent/tools/agent-output";
+import {
+  type AgentOutputWriter,
+  type WriteAgentOutputPayload,
+  assertAgentOutputPayloadSize,
+} from "../../agent/tools/agent-output";
 import { ensureWorkspace } from "../../agent/workspace";
 import type {
   AgentDeliveryConfig,
@@ -11,6 +15,7 @@ import type {
   AgentRoute,
   AgentRouteDestination,
   AgentSourceConfig,
+  PersistedAgentOutputItemRef,
 } from "../../db/repositories/agent-outputs";
 import { requireAgentDefinition } from "../registry";
 import type { AgentDefinition } from "../types";
@@ -24,6 +29,53 @@ import {
 import { AgentRunOutputLayer } from "./outputs";
 import type { ScheduledRunAdmission } from "./queue";
 import { enabledSectionsForScope, maxItemsPerSectionForScope, sourceAsDelivery } from "./routing";
+
+const INTERNAL_OUTPUT_SECTION_ITEM_LIMIT = 25;
+
+export function pairPersistedVisibleItems(
+  items: AgentOutputItemInput[],
+  refs: PersistedAgentOutputItemRef[],
+): Array<{ id: string; item: AgentOutputItemInput }> {
+  if (items.length !== refs.length) {
+    throw new Error(`Agent output persisted item mismatch: expected ${items.length}, received ${refs.length}.`);
+  }
+  return refs.map((ref, index) => {
+    const item = items[index];
+    if (!item || item.sectionKey !== ref.sectionKey || item.sortOrder !== ref.sortOrder) {
+      throw new Error(`Agent output persisted item mismatch at index ${index}.`);
+    }
+    return { id: ref.id, item };
+  });
+}
+
+export function validateAgentOutputLimits(input: {
+  items: AgentOutputItemInput[];
+  visibleSectionKeys: Set<string>;
+  internalSectionKeys: Set<string>;
+  maxItemsPerSection: number;
+}): void {
+  const counts = new Map<string, number>();
+  let internalItemCount = 0;
+  for (const item of input.items) {
+    if (!input.visibleSectionKeys.has(item.sectionKey) && !input.internalSectionKeys.has(item.sectionKey)) continue;
+    if (input.internalSectionKeys.has(item.sectionKey)) {
+      internalItemCount += 1;
+      continue;
+    }
+    counts.set(item.sectionKey, (counts.get(item.sectionKey) ?? 0) + 1);
+  }
+  if (internalItemCount > INTERNAL_OUTPUT_SECTION_ITEM_LIMIT) {
+    throw new Error(
+      `Agent output internal task sections (${[...input.internalSectionKeys].join(", ")}) exceed their shared 25-item limit.`,
+    );
+  }
+  for (const [sectionKey, count] of counts) {
+    const limit = input.maxItemsPerSection;
+    if (count > limit) {
+      throw new Error(`Agent output section ${sectionKey} exceeds its ${limit}-item limit.`);
+    }
+  }
+}
 
 export class AgentRunGenerationLayer extends AgentRunOutputLayer {
   protected async generateExistingOutput(
@@ -78,6 +130,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
                 delivery: config.delivery,
                 sources: scope.sources,
                 sourceKey: scope.sourceKey,
+                routeId: scope.route?.id ?? scope.sourceKey,
                 firstRunLookbackHours,
                 floorWindowToPeriod: output.trigger_type === "manual",
                 deliveryPlatform: deliveryPlatformForRoute(scope.route, scope.sources),
@@ -119,6 +172,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
         outputId,
         userId: user.id,
         enabledSections: new Set(enabledSections),
+        maxItemsPerSection: routeMaxItemsPerSection,
         expectedOutputDate: output.output_date,
         expectedTimezone: output.timezone,
         runtimeContext,
@@ -241,7 +295,33 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
     if (resolvedSources.length !== 1) {
       throw new AgentDeliveryTargetError("Combined routes cannot use self destination");
     }
-    return this.resolveDeliveryConfigForUser(userId, sourceAsDelivery(resolvedSources[0]));
+    const [source] = resolvedSources;
+    if (source.targetType !== "dm") {
+      return this.resolveDeliveryConfigForUser(userId, sourceAsDelivery(source));
+    }
+    const user = await this.deps.users.findById(userId);
+    if (!user) throw new AgentDeliveryTargetError("User not found");
+    if (source.platform === "slack") {
+      if (!user.slack_user_id) throw new AgentDeliveryTargetError("Slack delivery is not available for this user");
+      return this.resolveDeliveryConfigForUser(userId, {
+        enabled: true,
+        platform: "slack",
+        targetType: "dm",
+        targetId: user.slack_user_id,
+        label: user.name,
+      });
+    }
+    if (!user.whatsapp_number) {
+      throw new AgentDeliveryTargetError("WhatsApp delivery is not available for this user");
+    }
+    return {
+      enabled: true,
+      platform: "whatsapp",
+      targetType: "dm",
+      targetId: user.whatsapp_number,
+      label: user.name,
+      recipientUserId: user.id,
+    };
   }
 
   private async resolveMemberRouteDelivery(
@@ -335,6 +415,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
       outputId: string;
       userId: string;
       enabledSections: Set<string>;
+      maxItemsPerSection: number;
       expectedOutputDate: string;
       expectedTimezone: string;
       runtimeContext: Record<string, unknown>;
@@ -363,20 +444,35 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
             (visibleSectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey)) ||
             internalSectionKeys.has(item.sectionKey),
         );
+        validateAgentOutputLimits({
+          items: filtered,
+          visibleSectionKeys,
+          internalSectionKeys,
+          maxItemsPerSection: params.maxItemsPerSection,
+        });
         const reconciled = def.reconcileItems
           ? await def.reconcileItems({ db: this.deps.db, items: filtered, runtimeContext: params.runtimeContext })
           : filtered;
         const itemsForHooks = await def.enrichItems(this.deps.db, reconciled);
+        validateAgentOutputLimits({
+          items: itemsForHooks,
+          visibleSectionKeys,
+          internalSectionKeys,
+          maxItemsPerSection: params.maxItemsPerSection,
+        });
         const visibleItems = itemsForHooks.filter(
           (item) => visibleSectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey),
         );
         await this.validateItemRefs(def, itemsForHooks);
-        await this.repo.completeOutput({
+        const rawPayload = rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext);
+        assertAgentOutputPayloadSize(rawPayload);
+        const persistedRefs = await this.repo.completeOutput({
           outputId: params.outputId,
           masthead: payload.masthead,
-          rawPayload: rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext),
+          rawPayload,
           items: visibleItems,
         });
+        const persistedItems = pairPersistedVisibleItems(visibleItems, persistedRefs);
         if (def.onOutputSaved) {
           await def.onOutputSaved({
             db: this.deps.db,
@@ -385,7 +481,9 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
             userId: params.userId,
             outputId: params.outputId,
             items: itemsForHooks,
+            persistedItems,
             createTasks: params.createTasks,
+            runtimeContext: params.runtimeContext,
           });
         }
         params.onSaved();
@@ -396,7 +494,14 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
   private async validateItemRefs(def: AgentDefinition, items: AgentOutputItemInput[]): Promise<void> {
     const errors: string[] = [];
     for (const item of items) {
-      if (def.requiresKnowledgeRefs && item.knowledgeRefs.entityIds.length + item.knowledgeRefs.fileIds.length === 0) {
+      const serverOwnedFollowup =
+        item.structuredPayload?.serverOwnedFollowup === true &&
+        (item.sectionKey === "looks_resolved" || item.sectionKey === "untracked_followups");
+      if (
+        def.requiresKnowledgeRefs &&
+        !serverOwnedFollowup &&
+        item.knowledgeRefs.entityIds.length + item.knowledgeRefs.fileIds.length === 0
+      ) {
         errors.push(`${item.sectionKey}:${item.title} has no entityIds or fileIds`);
       }
       const entityCount = await this.repo.countKnownEntities(item.knowledgeRefs.entityIds);
