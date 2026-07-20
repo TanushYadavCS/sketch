@@ -628,8 +628,20 @@ export async function* emitWhatsAppSyncedItems(options: {
  * older than the emission refresh window would retain a departed teammate's
  * access indefinitely, because scope members are otherwise rewritten only when
  * a slice is (re-)emitted. Rosters come from the synced participant tables,
- * so this reflects the last observed group state; a roster that resolves to
- * zero teammates archives the group's files, mirroring the Slack behavior.
+ * so this reflects the last observed group state.
+ *
+ * Disabled groups deliberately keep their previously indexed files (the
+ * shipped disable semantic retains history), so membership is reconciled for
+ * every scoped group: a departed member must lose access to retained slices
+ * too.
+ *
+ * Zero-teammate rosters diverge by enablement. Enabled groups archive,
+ * matching the emission-time fail-closed behavior — reversible, because
+ * archival clears the slice link and re-emission relinks once a teammate
+ * returns. Disabled groups are excluded from re-emission, so archiving them
+ * would be permanent; their scope members are cleared instead, which revokes
+ * all access while keeping the retained files recoverable when membership
+ * returns.
  */
 export async function reconcileWhatsAppGroupAcls(options: {
   db: Kysely<DB>;
@@ -646,13 +658,6 @@ export async function reconcileWhatsAppGroupAcls(options: {
   let filesArchived = 0;
 
   for (const scope of scopes) {
-    /*
-     * Disabled groups deliberately keep their previously indexed files (the
-     * shipped disable semantic retains history), so membership is reconciled
-     * for every scoped group: a departed member must lose access to retained
-     * slices too. Only a roster with zero resolved teammates archives files,
-     * matching the emission-time fail-closed behavior.
-     */
     const config = await groupRepo.getIndexingConfig(scope.providerScopeId);
     if (!config) {
       options.logger.warn({ groupJid: scope.providerScopeId }, "WhatsApp ACL reconciliation found no group row");
@@ -682,13 +687,6 @@ export async function reconcileWhatsAppGroupAcls(options: {
       continue;
     }
 
-    /*
-     * Zero-teammate rosters: enabled groups archive (reversible — archival
-     * clears the slice link and re-emission relinks once a teammate returns).
-     * Disabled groups are excluded from re-emission, so archiving them would
-     * be permanent; clearing scope members instead revokes all access while
-     * keeping the retained files recoverable when membership returns.
-     */
     if (teammateEmails.length === 0) {
       if (config.indexEnabled) {
         filesArchived += await connectorRepo.archiveFilesForAccessScopes([scope.id]);
