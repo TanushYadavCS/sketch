@@ -182,6 +182,22 @@ export function createConversationSlicesRepository(db: Kysely<DB>) {
       return db.selectFrom("conversation_slices").selectAll().where("id", "=", sliceId).executeTakeFirstOrThrow();
     },
 
+    /**
+     * Clears indexed-file links on kept slices so the next emission pass
+     * re-renders and re-upserts them (verdicts persist, no LLM re-judging).
+     * Used when rendered content is stale, e.g. after a channel rename.
+     */
+    async unlinkKeptSliceFiles(conversationId: number): Promise<number> {
+      const result = await db
+        .updateTable("conversation_slices")
+        .set({ indexed_file_id: null })
+        .where("conversation_id", "=", conversationId)
+        .where("salience_verdict", "=", "kept")
+        .where("indexed_file_id", "is not", null)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0);
+    },
+
     async clearSalienceClaim(sliceId: string, claimToken: string): Promise<boolean> {
       const result = await db
         .updateTable("conversation_slices")

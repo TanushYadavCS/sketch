@@ -833,10 +833,18 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     /**
      * The org-wide Slack indexing singleton may have been owned by the removed
      * user, and archiveConnectorsForOwner just disabled it. Re-ensure after the
-     * row is gone so the connector is reassigned to a remaining admin now,
-     * not at the next restart or token rotation.
+     * row is gone so the connector is reassigned to a remaining admin now, not
+     * at the next restart or token rotation. Gated on a disabled slack row so
+     * removing a user who owned only per-user connectors never provisions a
+     * phantom Slack connector in an installation without Slack.
      */
-    if (result.archived > 0) {
+    const disabledSlackConfig = await deps.db
+      .selectFrom("connector_configs")
+      .select("id")
+      .where("connector_type", "=", "slack")
+      .where("sync_status", "=", "disabled")
+      .executeTakeFirst();
+    if (disabledSlackConfig) {
       await ensureSlackConnectorConfig({ db: deps.db, encryptionKey: deps.config.ENCRYPTION_KEY, logger: deps.logger });
     }
     return c.json({ success: true });

@@ -498,6 +498,43 @@ export async function archiveAllSlackChannelFiles(options: {
   return filesArchived;
 }
 
+/**
+ * Propagates a channel rename into stored state: updates the conversation
+ * display name (source for slice rendering and file names) and unlinks kept
+ * slices' indexed files so the next emission re-renders them under the new
+ * name. Emission upserts by provider_file_id, so the existing file rows are
+ * updated in place — verdicts persist and no salience re-runs. Called from the
+ * live channel_name event handler and from ACL reconciliation, which covers
+ * renames that happen while the bot is offline.
+ */
+export async function refreshSlackChannelName(options: {
+  db: Kysely<DB>;
+  logger: Logger;
+  channelId: string;
+  channelName: string;
+}): Promise<boolean> {
+  const conversation = await options.db
+    .selectFrom("conversations")
+    .select(["id", "display_name"])
+    .where("platform", "=", "slack")
+    .where("kind", "=", "channel")
+    .where("provider_conversation_id", "=", options.channelId)
+    .executeTakeFirst();
+  if (!conversation || conversation.display_name === options.channelName) return false;
+
+  await options.db
+    .updateTable("conversations")
+    .set({ display_name: options.channelName, updated_at: new Date().toISOString() })
+    .where("id", "=", conversation.id)
+    .execute();
+  const unlinked = await createConversationSlicesRepository(options.db).unlinkKeptSliceFiles(conversation.id);
+  options.logger.info(
+    { channelId: options.channelId, channelName: options.channelName, slicesUnlinked: unlinked },
+    "Refreshed Slack channel name; kept slices queued for re-emission",
+  );
+  return true;
+}
+
 export async function reconcileSlackChannelAcls(options: {
   db: Kysely<DB>;
   logger: Logger;
@@ -553,6 +590,13 @@ export async function reconcileSlackChannelAcls(options: {
       memberEmails: teammateEmails,
     });
     scopesRefreshed += 1;
+
+    await refreshSlackChannelName({
+      db: options.db,
+      logger: options.logger,
+      channelId: scope.providerScopeId,
+      channelName,
+    });
   }
 
   const summary = { scopesRefreshed, scopesArchived, filesArchived };

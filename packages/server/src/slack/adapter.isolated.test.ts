@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
+import { refreshSlackChannelName } from "../connectors/slack-salience";
 import { downloadSlackFile } from "../files";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
@@ -303,6 +304,10 @@ vi.mock("./api", () => ({
   slackApiCall: vi.fn().mockResolvedValue({}),
 }));
 
+vi.mock("../connectors/slack-salience", () => ({
+  refreshSlackChannelName: vi.fn().mockResolvedValue(true),
+}));
+
 function getHandlers() {
   return {
     dm: mockBotInstance.onMessage.mock.calls[0]?.[0] as (msg: unknown) => Promise<void>,
@@ -350,9 +355,28 @@ describe("slack/adapter", () => {
       await rename("C1");
 
       expect(deps.repos.channels.update).toHaveBeenCalledWith("ch-1", { name: "new-name" });
+      expect(vi.mocked(refreshSlackChannelName)).toHaveBeenCalledWith(
+        expect.objectContaining({ channelId: "C1", channelName: "new-name" }),
+      );
+    });
+
+    it("records group DM (mpim) captures under their own conversation kind", async () => {
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+
+      await channel({
+        type: "channel_message",
+        channelType: "mpim",
+        text: "group dm chatter",
+        userId: "U1",
+        channelId: "G_MPIM",
+        ts: "1111.2222",
+      });
+
       expect(deps.repos.conversations.getOrCreate).toHaveBeenCalledWith(
-        { platform: "slack", kind: "channel", providerConversationId: "C1" },
-        "new-name",
+        { platform: "slack", kind: "mpim", providerConversationId: "G_MPIM" },
+        expect.anything(),
       );
     });
   });

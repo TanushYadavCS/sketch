@@ -387,6 +387,41 @@ describe("Users API — agent fields", () => {
     expect(connector.created_by).toBe(admin?.id);
   });
 
+  it("does not provision a phantom Slack connector when the deleted user owned only per-user connectors", async () => {
+    const users = createUserRepository(db);
+    const owner = await users.create({
+      name: "drive-owner",
+      email: "drive.owner@test.com",
+      emailVerified: true,
+      passwordHash: await hashPassword(PASSWORD),
+      authRole: "member",
+    });
+    await db
+      .insertInto("connector_configs")
+      .values({
+        id: "drive-connector",
+        connector_type: "google_drive",
+        auth_type: "oauth",
+        credentials: "{}",
+        sync_status: "pending",
+        created_by: owner.id,
+      })
+      .execute();
+
+    const res = await app.request(`/api/users/${owner.id}`, {
+      method: "DELETE",
+      headers: { Cookie: cookie },
+    });
+    expect(res.status).toBe(200);
+
+    const slackRows = await db
+      .selectFrom("connector_configs")
+      .select("id")
+      .where("connector_type", "=", "slack")
+      .execute();
+    expect(slackRows).toHaveLength(0);
+  });
+
   it("keeps local human users when managed tenant member removal fails", async () => {
     const managedApp = createApp(
       db,

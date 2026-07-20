@@ -150,6 +150,7 @@ import * as m147 from "./migrations/147-whatsapp-backfill-graph-admission";
 import * as m148 from "./migrations/148-whatsapp-pending-slices-index";
 import * as m149 from "./migrations/149-whatsapp-backfill-lifecycle-durability";
 import * as m150 from "./migrations/150-slack-conversation-indexing";
+import * as m151 from "./migrations/151-reclassify-mpim-conversations";
 import type { DB } from "./schema";
 
 /**
@@ -309,6 +310,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "148-whatsapp-pending-slices-index": m148,
           "149-whatsapp-backfill-lifecycle-durability": m149,
           "150-slack-conversation-indexing": m150,
+          "151-reclassify-mpim-conversations": m151,
         };
       },
     },

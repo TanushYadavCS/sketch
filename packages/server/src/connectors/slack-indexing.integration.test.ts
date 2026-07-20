@@ -252,6 +252,109 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(verdicts.find((v) => v.conversation_id === healthy.id)?.salience_verdict).toBe("kept");
     });
 
+    it("rename refresh unlinks kept slices so they re-emit under the new channel name", async () => {
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "C_RENAMED" },
+        "old-name",
+      );
+      const slices = createConversationSlicesRepository(db);
+      const inserted = await slices.insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: 1,
+        lastMessageId: 2,
+        startedAt: "2026-07-01T00:00:00.000Z",
+        endedAt: "2026-07-01T01:00:00.000Z",
+        messageCount: 2,
+        denoisedMessageIds: [1, 2],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+      });
+      await db
+        .insertInto("connector_configs")
+        .values({
+          id: "slack-config-rename",
+          connector_type: "slack",
+          auth_type: "system",
+          credentials: "{}",
+          created_by: "user-admin",
+        })
+        .execute();
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: "file-old-name",
+          connector_config_id: "slack-config-rename",
+          provider_file_id: "slack://slice/rename-test",
+          file_name: "Slack: #old-name",
+          file_type: "slack_conversation_slice",
+          content_category: "document",
+          source: "slack",
+          content_hash: "hash-rename",
+          is_archived: 0,
+          synced_at: new Date().toISOString(),
+        })
+        .execute();
+      await db
+        .updateTable("conversation_slices")
+        .set({ salience_verdict: "kept", indexed_file_id: "file-old-name" })
+        .where("id", "=", inserted.row.id)
+        .execute();
+
+      const { refreshSlackChannelName } = await import("./slack-salience");
+      const refreshed = await refreshSlackChannelName({
+        db,
+        logger,
+        channelId: "C_RENAMED",
+        channelName: "new-name",
+      });
+      expect(refreshed).toBe(true);
+
+      const row = await db
+        .selectFrom("conversations")
+        .select("display_name")
+        .where("id", "=", conversation.id)
+        .executeTakeFirstOrThrow();
+      expect(row.display_name).toBe("new-name");
+      const slice = await db
+        .selectFrom("conversation_slices")
+        .select("indexed_file_id")
+        .where("id", "=", inserted.row.id)
+        .executeTakeFirstOrThrow();
+      expect(slice.indexed_file_id).toBeNull();
+
+      const unchanged = await refreshSlackChannelName({
+        db,
+        logger,
+        channelId: "C_RENAMED",
+        channelName: "new-name",
+      });
+      expect(unchanged).toBe(false);
+    });
+
+    it("migration 151 reclassifies mpdm-named channel conversations as mpim", async () => {
+      const conversations = createConversationRepository(db);
+      const mpim = await conversations.getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "G_LEGACY" },
+        "mpdm-roopak--himanshu-1",
+      );
+      const channel = await conversations.getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "C_REAL" },
+        "general",
+      );
+
+      const migration = await import("../db/migrations/151-reclassify-mpim-conversations");
+      await migration.up(db as unknown as Kysely<unknown>);
+
+      const kinds = await db
+        .selectFrom("conversations")
+        .select(["id", "kind"])
+        .where("id", "in", [mpim.id, channel.id])
+        .execute();
+      expect(kinds.find((row) => row.id === mpim.id)?.kind).toBe("mpim");
+      expect(kinds.find((row) => row.id === channel.id)?.kind).toBe("channel");
+    });
+
     it("reactivates a disabled singleton so indexing survives owner removal", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const created = await db

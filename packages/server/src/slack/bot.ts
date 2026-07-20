@@ -72,6 +72,8 @@ export interface SlackMessage {
   type: "dm" | "channel_message" | "channel_mention" | "thread_message";
   threadTs?: string;
   files?: SlackFile[];
+  /** Slack event channel_type ("channel" | "group" | "mpim" | "im"); lets capture distinguish group DMs from channels. */
+  channelType?: string;
 }
 
 export type SlackMessageHandler = (message: SlackMessage) => Promise<void>;
@@ -210,6 +212,8 @@ export class SlackBot {
       if (message.user === this.botUserId) return;
 
       const isIm = "channel_type" in message && message.channel_type === "im";
+      const channelType =
+        "channel_type" in message && typeof message.channel_type === "string" ? message.channel_type : undefined;
       const threadTs = "thread_ts" in message ? (message.thread_ts as string) : undefined;
       const text = "text" in message && typeof message.text === "string" ? message.text : "";
       const mentionsBot = this.botUserId ? text.includes(`<@${this.botUserId}>`) : false;
@@ -279,6 +283,7 @@ export class SlackBot {
           channelId: message.channel,
           ts: message.ts,
           threadTs,
+          ...(channelType ? { channelType } : {}),
           ...(files.length > 0 && { files }),
         });
         return;
@@ -299,6 +304,7 @@ export class SlackBot {
 
         await this.channelMessageHandler({
           type: "channel_message",
+          ...(channelType ? { channelType } : {}),
           text,
           userId: message.user,
           channelId: message.channel,
@@ -511,7 +517,8 @@ export class SlackBot {
     const result = await this.app.client.conversations.info({ channel: channelId });
     const channel = result.channel;
     let type = "public_channel";
-    if (channel?.is_group) type = "group";
+    if (channel?.is_mpim) type = "mpim";
+    else if (channel?.is_group) type = "group";
     else if (channel?.is_private) type = "private_channel";
     return {
       name: channel?.name ?? "unknown",
