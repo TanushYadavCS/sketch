@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { writeAgentOutputSchema } from "./agent-output";
+import { describe, expect, it, vi } from "vitest";
+import { z } from "zod/v4";
+import { createWriteAgentOutputTool, recordRejectedWriteAgentOutputCall, writeAgentOutputSchema } from "./agent-output";
 
 describe("writeAgentOutputSchema", () => {
   it("strips model-provided canonical task link fields", () => {
@@ -42,5 +43,25 @@ describe("writeAgentOutputSchema", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+
+  it("records malformed calls observed before SDK schema validation", async () => {
+    const recordRejectedAttempt = vi.fn();
+    const write = vi.fn();
+    const writer = { recordRejectedAttempt, write };
+    const writeTool = createWriteAgentOutputTool(writer);
+    const malformedInput = {
+      outputDate: "2026-07-16",
+      timezone: "UTC",
+      masthead: { title: "", summary: "Summary" },
+      items: [],
+    };
+
+    expect(z.object(writeTool.inputSchema).safeParse(malformedInput).success).toBe(false);
+    recordRejectedWriteAgentOutputCall(writer, "mcp__sketch__WriteAgentOutput", malformedInput);
+    expect(recordRejectedAttempt).toHaveBeenCalledOnce();
+    await expect(writeTool.handler(malformedInput, {})).rejects.toThrow();
+    expect(recordRejectedAttempt).toHaveBeenCalledTimes(2);
+    expect(write).not.toHaveBeenCalled();
   });
 });
