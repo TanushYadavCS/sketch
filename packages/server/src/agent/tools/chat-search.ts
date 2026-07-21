@@ -2,6 +2,7 @@ import type { Expression, Kysely } from "kysely";
 import { type CrossConversationSearchMessage, createConversationRepository } from "../../db/repositories/conversations";
 import type { DB } from "../../db/schema";
 import { parseSlackRosterSnapshot } from "../../slack/identity-resolution";
+import { sanitizeWhatsAppDisplayText } from "../../whatsapp/privacy";
 import { renderSlackChannelHistoryMessages } from "./slack-channel-history";
 import type { SketchMcpDeps } from "./types";
 import { parseWhatsAppGroupRosterSnapshot, renderWhatsAppGroupHistoryMessages } from "./whatsapp-group-history";
@@ -101,6 +102,23 @@ interface ConversationRenderGroup {
   messages: CrossConversationSearchMessage[];
 }
 
+/**
+ * conversations.display_name for a WhatsApp group can hold the raw group JID
+ * until the first metadata refresh, so group names are resolved from
+ * whatsapp_groups (the sync-refreshed source reconciliation also labels scopes
+ * from) and sanitized, with a generic fallback. The stored display_name is
+ * never rendered for groups.
+ */
+async function loadWhatsAppGroupName(db: Kysely<DB>, conversationId: number): Promise<string | null> {
+  const row = await db
+    .selectFrom("conversations")
+    .innerJoin("whatsapp_groups", "whatsapp_groups.jid", "conversations.provider_conversation_id")
+    .select("whatsapp_groups.name")
+    .where("conversations.id", "=", conversationId)
+    .executeTakeFirst();
+  return row?.name ?? null;
+}
+
 async function loadLatestRosterSnapshot(db: Kysely<DB>, conversationId: number): Promise<string | null> {
   const row = await db
     .selectFrom("conversation_slices")
@@ -171,12 +189,17 @@ export async function renderAllChatsSearchResults(
       name: group.kind === "dm" ? "Direct chat with Sketch" : (group.displayName ?? "Unknown"),
     };
     if (group.platform === "whatsapp" && group.kind !== "dm") {
+      const groupName = await loadWhatsAppGroupName(db, conversationId);
+      const groupConversation = {
+        ...conversation,
+        name: sanitizeWhatsAppDisplayText(groupName ?? "") || "WhatsApp group",
+      };
       const roster = parseWhatsAppGroupRosterSnapshot(
         (await loadLatestRosterSnapshot(db, conversationId)) ?? EMPTY_WHATSAPP_ROSTER,
       );
       const core = renderWhatsAppGroupHistoryMessages(roster, group.messages);
       group.messages.forEach((message, index) => {
-        renderedById.set(message.id, { ...core[index], conversation });
+        renderedById.set(message.id, { ...core[index], conversation: groupConversation });
       });
       continue;
     }

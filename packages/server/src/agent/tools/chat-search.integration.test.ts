@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { type Kysely, sql } from "kysely";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { reconcileWhatsAppGroupAcls } from "../../connectors/whatsapp-salience";
 import { createConnectorRepository } from "../../db/repositories/connectors";
 import { createConversationSlicesRepository } from "../../db/repositories/conversation-slices";
@@ -8,7 +8,7 @@ import { createConversationRepository } from "../../db/repositories/conversation
 import { createUserRepository } from "../../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-groups";
 import type { DB } from "../../db/schema";
-import { createTestDb, createTestLogger, createTestPgDb } from "../../test-utils";
+import { createTestDb, createTestLogger, createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { stableWhatsAppParticipantJidRef } from "../../whatsapp/identity-resolution";
 import { handleAllChatsSearch } from "./chat-search";
 import type { SketchMcpDeps } from "./types";
@@ -231,21 +231,35 @@ function depsFor(db: Kysely<DB>, overrides: Partial<SketchMcpDeps> = {}): Sketch
   } as unknown as SketchMcpDeps;
 }
 
-function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
+function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { shared?: boolean } = {}) {
   describe(label, () => {
     let db!: Kysely<DB>;
     let slackConfigId!: string;
     let whatsappConfigId!: string;
 
+    if (opts.shared) {
+      beforeAll(async () => {
+        db = await getDb();
+      }, 30000);
+    }
+
     beforeEach(async () => {
-      db = await createDb();
+      if (opts.shared) {
+        await sql`BEGIN`.execute(db);
+      } else {
+        db = await getDb();
+      }
       await seedUser(db);
       slackConfigId = await seedConnectorConfig(db, "slack");
       whatsappConfigId = await seedConnectorConfig(db, "whatsapp");
     }, 30000);
 
     afterEach(async () => {
-      await db.destroy();
+      if (opts.shared) {
+        await sql`ROLLBACK`.execute(db);
+      } else {
+        await db.destroy();
+      }
     });
 
     it("finds messages across authorized Slack channels and WhatsApp groups with conversation identity", async () => {
@@ -551,6 +565,8 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(platforms).toContain("slack");
       expect(platforms).toContain("whatsapp");
       expect(outcome.body.messages.some((message) => message.id === groupMessage.row.id)).toBe(true);
+      const groupHit = outcome.body.messages.find((message) => message.id === groupMessage.row.id);
+      expect((groupHit?.conversation as { name: string }).name).toBe("WhatsApp group");
     });
 
     it("handles punctuation-only queries safely", async () => {
@@ -605,9 +621,36 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(slackHit?.text).toBe("mention check @Tara please");
       expect(String(whatsappHit?.sender)).toMatch(/^External \(/);
     });
+
+    it("renders WhatsApp group names from whatsapp_groups when the conversation display name is a raw JID", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "jid name guard message",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        displayName: "Deal Room",
+      });
+      await db
+        .updateTable("conversations")
+        .set({ display_name: seeded.groupJid })
+        .where("id", "=", seeded.conversationId)
+        .execute();
+
+      const outcome = await handleAllChatsSearch({ query: "jid name guard" }, depsFor(db));
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(1);
+      expect((outcome.body.messages[0]?.conversation as { name: string }).name).toBe("Deal Room");
+      expect(JSON.stringify(outcome.body.messages)).not.toContain(seeded.groupJid);
+    });
   });
 }
 
+/**
+ * Runs on a fresh database per test (createTestPgDb on Postgres, not the
+ * shared BEGIN/ROLLBACK database): these tests call refreshParticipants,
+ * which opens its own Kysely transaction and would collide with an outer
+ * per-test transaction scope.
+ */
 function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
   describe(`${label} reconcileWhatsAppGroupAcls`, () => {
     let db!: Kysely<DB>;
@@ -743,6 +786,6 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
 }
 
 runSuite("chat-search sqlite", createTestDb);
-runSuite("chat-search postgres", createTestPgDb);
+runSuite("chat-search postgres", getSharedPgDb, { shared: true });
 runReconcileSuite("sqlite", createTestDb);
 runReconcileSuite("postgres", createTestPgDb);
