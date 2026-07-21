@@ -101,6 +101,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
 
     let writeAttempted = false;
     let lastWriteError: string | null = null;
+    let lastWriteErrorAfterPersistence = false;
     let saved = false;
     const config = await this.resolveConfig(def, user.id);
     const scope = await this.resolveScopeForOutput(def, user, config, output);
@@ -191,8 +192,10 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
         onAttempt: () => {
           writeAttempted = true;
         },
-        onRejected: (error) => {
+        onRejected: (error, afterPersistence) => {
+          if (lastWriteErrorAfterPersistence && !afterPersistence) return;
           lastWriteError = sanitizeAgentOutputWriterError(error);
+          lastWriteErrorAfterPersistence = afterPersistence;
         },
         onSaved: () => {
           saved = true;
@@ -447,11 +450,15 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
       runtimeContext: Record<string, unknown>;
       createTasks: boolean;
       onAttempt: () => void;
-      onRejected: (error: unknown) => void;
+      onRejected: (error: unknown, afterPersistence: boolean) => void;
       onSaved: () => void;
     },
   ): AgentOutputWriter {
     return {
+      recordRejectedAttempt: (error) => {
+        params.onAttempt();
+        params.onRejected(error, false);
+      },
       write: async (payload: {
         outputDate: string;
         timezone: string;
@@ -460,6 +467,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
         items: AgentOutputItemInput[];
       }) => {
         params.onAttempt();
+        let outputPersisted = false;
         try {
           if (payload.outputDate !== params.expectedOutputDate) {
             throw new Error(`Output date mismatch: expected ${params.expectedOutputDate}, got ${payload.outputDate}`);
@@ -502,6 +510,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
             rawPayload,
             items: visibleItems,
           });
+          outputPersisted = true;
           const persistedItems = pairPersistedVisibleItems(visibleItems, persistedRefs);
           if (def.onOutputSaved) {
             await def.onOutputSaved({
@@ -518,7 +527,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
           }
           params.onSaved();
         } catch (error) {
-          params.onRejected(error);
+          params.onRejected(error, outputPersisted);
           throw error;
         }
       },

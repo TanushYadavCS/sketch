@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunAgentParams, RunAgentResult } from "../agent/runner";
+import { createWriteAgentOutputTool } from "../agent/tools/agent-output";
 import { type AgentOutputItemInput, createAgentOutputRepository } from "../db/repositories/agent-outputs";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createTaskRepository } from "../db/repositories/tasks";
@@ -222,6 +223,29 @@ describe("Agent output writer failures", () => {
     });
   });
 
+  it("persists schema validation failures before the writer receives a payload", async () => {
+    const output = await runOutputWriterScenario(db, async (params) => {
+      const writeTool = createWriteAgentOutputTool(params.agentOutputWriter);
+      try {
+        await writeTool.handler(
+          {
+            outputDate: OUTPUT_DATE,
+            timezone: "UTC",
+            masthead: { title: "", summary: "Summary" },
+            items: [],
+          },
+          {},
+        );
+      } catch {}
+      return runResult();
+    });
+    expect(output).toMatchObject({
+      status: "failed",
+      error_message: expect.stringContaining("masthead"),
+    });
+    expect(output?.error_message).not.toBe("Agent did not call WriteAgentOutput.");
+  });
+
   it("persists the final rejection when WriteAgentOutput fails repeatedly", async () => {
     const output = await runOutputWriterScenario(db, async (params) => {
       if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
@@ -300,6 +324,37 @@ describe("Agent output writer failures", () => {
       expect(output).toMatchObject({
         status: "failed",
         error_message: "Post-save hook failed with details",
+      });
+    } finally {
+      dailyBriefDefinition.onOutputSaved = originalOnOutputSaved;
+    }
+  });
+
+  it("preserves a post-save hook rejection when the model retries the writer", async () => {
+    const originalOnOutputSaved = dailyBriefDefinition.onOutputSaved;
+    dailyBriefDefinition.onOutputSaved = async () => {
+      throw new Error("Post-save hook failed before retry");
+    };
+
+    try {
+      const output = await runOutputWriterScenario(db, async (params) => {
+        if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            await params.agentOutputWriter.write({
+              outputDate: OUTPUT_DATE,
+              timezone: "UTC",
+              masthead: { title: "Daily Brief", summary: "Summary" },
+              rawPayload: dailyBriefRawPayload(),
+              items: [],
+            });
+          } catch {}
+        }
+        return runResult();
+      });
+      expect(output).toMatchObject({
+        status: "failed",
+        error_message: "Post-save hook failed before retry",
       });
     } finally {
       dailyBriefDefinition.onOutputSaved = originalOnOutputSaved;
