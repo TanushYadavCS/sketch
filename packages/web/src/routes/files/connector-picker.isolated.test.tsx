@@ -217,6 +217,91 @@ describe("ConnectorPicker connector capabilities", () => {
     expect(screen.queryByText(/Canvas/)).not.toBeInTheDocument();
   });
 
+  it("detects a newly connected native Canvas account for the org-level Linear connector", async () => {
+    const user = userEvent.setup();
+    const importedBodies: unknown[] = [];
+    let linearConnected = false;
+    setupStatus();
+    vi.spyOn(window, "open").mockReturnValue({ closed: false } as Window);
+    server.use(
+      http.get("/api/mcp-servers", () =>
+        HttpResponse.json({
+          servers: [
+            {
+              id: "provider-1",
+              type: "canvas",
+              slug: "canvas",
+              displayName: "Canvas",
+              url: "http://canvas.test",
+              apiUrl: null,
+              credentials: "configured",
+              mode: "skill",
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:00Z",
+            },
+          ],
+        }),
+      ),
+      http.get("/api/mcp-servers/provider-1/connections", () =>
+        HttpResponse.json({
+          connections: linearConnected
+            ? [
+                {
+                  id: "secrets:admin-1:linear:linear",
+                  providerId: "provider-1",
+                  source: "canvas_user_secrets",
+                  appId: "linear",
+                  appName: "Linear",
+                  status: "active",
+                  accessLevel: "personal",
+                  isOwnedByViewer: true,
+                  createdAt: "2026-01-01T00:00:00Z",
+                },
+              ]
+            : [],
+        }),
+      ),
+      http.get("/api/connectors/credential-source", () =>
+        HttpResponse.json({
+          mode: "canvas",
+          canvasConfigured: true,
+          canvasCredentialImportConfigured: true,
+          publicKeyId: "key-1",
+        }),
+      ),
+      http.post("/api/connectors/canvas/connect", () =>
+        HttpResponse.json({ redirectUrl: "https://canvas.example.com/connect/secrets?token=test" }),
+      ),
+      http.post("/api/connectors/canvas/import", async ({ request }) => {
+        importedBodies.push(await request.json());
+        return HttpResponse.json({
+          connector: {
+            id: "linear-connector",
+            connectorType: "linear",
+            syncStatus: "pending",
+            alreadyConnected: false,
+          },
+        });
+      }),
+    );
+    renderPicker([]);
+
+    await user.click(await screen.findByRole("button", { name: /Browse all/i }));
+    await user.click(
+      within(connectorRowByDescription("Issues, projects, and roadmaps")).getByRole("button", { name: "Connect" }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Connect account" }));
+
+    expect(await screen.findByText("Waiting for sign-in to finish...")).toBeInTheDocument();
+    linearConnected = true;
+
+    await waitFor(
+      () => expect(importedBodies).toEqual([{ connectorType: "linear", accountId: "secrets:admin-1:linear:linear" }]),
+      { timeout: 3500 },
+    );
+    expect(screen.queryByText("Waiting for sign-in to finish...")).not.toBeInTheDocument();
+  }, 10000);
+
   it("surfaces unfinished Google Calendar setup instead of looking connected", async () => {
     const user = userEvent.setup();
     setupStatus();
