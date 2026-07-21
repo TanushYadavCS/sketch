@@ -214,6 +214,7 @@ export async function getFileContent(
       "enrichment_status",
       "access_scope_id",
       "share_with_everyone",
+      "is_archived",
     ])
     .where("id", "=", fileId)
     .executeTakeFirst();
@@ -223,6 +224,13 @@ export async function getFileContent(
   // userEmails === undefined → trusted bypass; userEmails === [] → fail closed.
   if (userEmails !== undefined) {
     if (userEmails.length === 0) return null;
+
+    /**
+     * Archived files are denied on the RBAC path: archival severs the scope
+     * and per-file grants, which would otherwise flip the file into the
+     * unrestricted no-scope tier below. Mirrors filterAccessibleFileIds.
+     */
+    if (file.is_archived === 1) return null;
 
     if (file.share_with_everyone !== 1) {
       const hasScope = file.access_scope_id != null;
@@ -336,7 +344,7 @@ export async function filterAccessibleFileIds(
 
   const files = await db
     .selectFrom("indexed_files")
-    .select(["id", "access_scope_id", "share_with_everyone"])
+    .select(["id", "access_scope_id", "share_with_everyone", "is_archived"])
     .where("id", "in", fileIds)
     .execute();
 
@@ -401,6 +409,13 @@ export async function filterAccessibleFileIds(
   const emailSet = new Set(userEmails);
   const allowed = new Set<string>();
   for (const file of files) {
+    /**
+     * Archived files are invisible regardless of tier. Archival severs the
+     * scope and per-file grants, which would otherwise flip the file into
+     * the unrestricted no-scope tier below — the opposite of the intent.
+     */
+    if (file.is_archived === 1) continue;
+
     if (file.share_with_everyone === 1) {
       allowed.add(file.id);
       continue;
@@ -577,7 +592,7 @@ export const KIND_TO_RULES: Record<string, KindRule[]> = {
     { sources: ["clickup"], fileTypes: ["task", "subtask"] },
     { sources: ["linear"], fileTypes: ["issue"] },
   ],
-  message: [{ sources: ["conversation", "whatsapp"] }],
+  message: [{ sources: ["conversation", "whatsapp", "slack"] }],
 };
 
 /** Compile kind rules to a raw SQL fragment for the FTS / hybrid pipelines. */

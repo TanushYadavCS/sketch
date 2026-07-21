@@ -21,6 +21,7 @@ import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
 import { heapStats, heapUsedMb } from "../lib/heap";
+import type { SlackIndexingFacade } from "../slack/indexing-facade";
 import { resolveConnectorCredentials } from "./credential-providers";
 import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
@@ -109,6 +110,7 @@ export { getConnector } from "./registry";
 export interface RunConnectorSyncOptions {
   postSyncMode?: "inline" | "deferred";
   postSyncInputCollector?: PostSyncGraphInputCollector;
+  slackIndexingFacade?: SlackIndexingFacade | null;
 }
 
 /**
@@ -319,6 +321,7 @@ export async function runConnectorSync(
       ownerEmail,
       resolveNameToEmail,
       salienceGenerator,
+      slackIndexing: options.slackIndexingFacade ?? null,
       onEntitySeed: async (seed) => {
         await factRepo.upsertFact({
           ...factContext,
@@ -381,8 +384,8 @@ export async function runConnectorSync(
           continue;
         }
 
-        if (connectorType === "whatsapp") {
-          await linkWhatsAppSliceIndexedFile(db, item.providerFileId, itemResult.indexedFileId, syncLogger);
+        if (connectorType === "whatsapp" || connectorType === "slack") {
+          await linkConversationSliceIndexedFile(db, item.providerFileId, itemResult.indexedFileId, syncLogger);
         }
 
         affectedIndexedFileIds.add(itemResult.indexedFileId);
@@ -577,7 +580,7 @@ async function refreshCrmRollupsForSync(params: {
   }
 }
 
-async function linkWhatsAppSliceIndexedFile(
+async function linkConversationSliceIndexedFile(
   db: Kysely<DB>,
   sliceId: string,
   indexedFileId: string,
@@ -589,13 +592,15 @@ async function linkWhatsAppSliceIndexedFile(
     .where("id", "=", sliceId)
     .executeTakeFirst();
   if (Number(result.numUpdatedRows ?? 0) === 0) {
-    logger.warn({ sliceId, indexedFileId }, "WhatsApp synced item did not match a conversation slice");
+    logger.warn({ sliceId, indexedFileId }, "Conversation-slice synced item did not match a conversation slice");
   }
 }
 
 export interface SyncSchedulerDeps {
   /** Download image from Google Drive for embedding. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
+  /** Slack API facade for the slack-indexing connector; built in bootstrap. */
+  slackIndexingFacade?: SlackIndexingFacade | null;
   appConfig?: Partial<
     Pick<
       Config,
@@ -699,6 +704,7 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
       await runConnectorSync(db, config.id, logger, deps?.appConfig, {
         postSyncMode: "deferred",
         postSyncInputCollector: postSyncInputs,
+        slackIndexingFacade: deps?.slackIndexingFacade ?? null,
       });
     } catch (err) {
       logger.error({ err, connectorId: config.id }, "Scheduled sync failed for connector");

@@ -2,7 +2,12 @@ import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { type NameDedupEntityType, retrieveEntityNameCandidates } from "../connectors/embeddings/trunk-name-embeddings";
 import type { EmbeddingProvider } from "../connectors/embeddings/types";
-import { WHATSAPP_CONNECTOR_TYPE, WHATSAPP_CONVERSATION_SLICE_FILE_TYPE } from "../connectors/types";
+import {
+  SLACK_CONNECTOR_TYPE,
+  SLACK_CONVERSATION_SLICE_FILE_TYPE,
+  WHATSAPP_CONNECTOR_TYPE,
+  WHATSAPP_CONVERSATION_SLICE_FILE_TYPE,
+} from "../connectors/types";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -362,6 +367,13 @@ function unregisterEntity(index: LookupIndex, entityId: string): void {
   index.personScopeKeysByEntityId.delete(entityId);
 }
 
+function isChatConversationSliceEvidence(source: string | null, fileType: string | null): boolean {
+  return (
+    (source === WHATSAPP_CONNECTOR_TYPE && fileType === WHATSAPP_CONVERSATION_SLICE_FILE_TYPE) ||
+    (source === SLACK_CONNECTOR_TYPE && fileType === SLACK_CONVERSATION_SLICE_FILE_TYPE)
+  );
+}
+
 function llmFileCountKey(normalizedName: string, mentionType: MentionType): string {
   return `${mentionType}\u0000${normalizedName}`;
 }
@@ -374,7 +386,7 @@ function llmFileCountKey(normalizedName: string, mentionType: MentionType): stri
  */
 interface ActiveLlmEvidenceProfile {
   fileIds: Set<string>;
-  whatsappOnly: boolean;
+  chatSliceOnly: boolean;
 }
 
 async function buildActiveLlmEvidenceProfiles(db: Kysely<DB>): Promise<Map<string, ActiveLlmEvidenceProfile>> {
@@ -417,14 +429,13 @@ async function buildActiveLlmEvidenceProfiles(db: Kysely<DB>): Promise<Map<strin
         const normalizedName = normalizeEntityMatchName(mentionType, row.subject_name);
         if (!normalizedName) continue;
         const key = llmFileCountKey(normalizedName, mentionType);
-        const isWhatsAppSlice =
-          row.file_source === WHATSAPP_CONNECTOR_TYPE && row.file_type === WHATSAPP_CONVERSATION_SLICE_FILE_TYPE;
+        const isChatSlice = isChatConversationSliceEvidence(row.file_source, row.file_type);
         const profile = evidenceByName.get(key);
         if (profile) {
           profile.fileIds.add(row.indexed_file_id);
-          profile.whatsappOnly = profile.whatsappOnly && isWhatsAppSlice;
+          profile.chatSliceOnly = profile.chatSliceOnly && isChatSlice;
         } else {
-          evidenceByName.set(key, { fileIds: new Set([row.indexed_file_id]), whatsappOnly: isWhatsAppSlice });
+          evidenceByName.set(key, { fileIds: new Set([row.indexed_file_id]), chatSliceOnly: isChatSlice });
         }
       }
     },
@@ -564,6 +575,7 @@ export async function buildMaterializeDeps(
     };
   }
 
+  const chatSliceFileCache = new Map<string, boolean>();
   const fileToConnector = new Map<string, string>();
   const connectorOwners = new Map<string, string>();
   const allFiles = await db.selectFrom("indexed_files").select(["id", "connector_config_id"]).execute();
@@ -599,6 +611,18 @@ export async function buildMaterializeDeps(
         .where("id", "=", indexedFileId)
         .executeTakeFirst()
         .then((row) => row ?? null),
+    isChatConversationSliceFile: async (indexedFileId: string) => {
+      const cached = chatSliceFileCache.get(indexedFileId);
+      if (cached !== undefined) return cached;
+      const row = await db
+        .selectFrom("indexed_files")
+        .select(["source", "file_type"])
+        .where("id", "=", indexedFileId)
+        .executeTakeFirst();
+      const isChatSlice = row ? isChatConversationSliceEvidence(row.source, row.file_type) : false;
+      chatSliceFileCache.set(indexedFileId, isChatSlice);
+      return isChatSlice;
+    },
     /**
      * Resolves the owning user for a fact, falling back to the connector's
      * owner. Only ids present in `users` are returned: legacy auth wrote
@@ -625,7 +649,7 @@ export async function buildMaterializeDeps(
       const profiles = await activeLlmEvidenceProfiles;
       return profiles.get(llmFileCountKey(normalizedName, mentionType))?.fileIds.size ?? 0;
     },
-    hasOnlyWhatsAppConversationSliceEvidence: async (normalizedName, mentionType) => {
+    hasOnlyChatConversationSliceEvidence: async (normalizedName, mentionType) => {
       if (normalizationBackfillComplete) {
         const rows = await db
           .selectFrom("indexed_file_facts as fact")
@@ -637,16 +661,11 @@ export async function buildMaterializeDeps(
           .where("fact.raw_mention_type", "=", mentionType)
           .where("fact.normalized_subject_name", "=", normalizedName)
           .execute();
-        return (
-          rows.length > 0 &&
-          rows.every(
-            (row) => row.source === WHATSAPP_CONNECTOR_TYPE && row.file_type === WHATSAPP_CONVERSATION_SLICE_FILE_TYPE,
-          )
-        );
+        return rows.length > 0 && rows.every((row) => isChatConversationSliceEvidence(row.source, row.file_type));
       }
       activeLlmEvidenceProfiles ??= buildActiveLlmEvidenceProfiles(db);
       const profiles = await activeLlmEvidenceProfiles;
-      return profiles.get(llmFileCountKey(normalizedName, mentionType))?.whatsappOnly ?? false;
+      return profiles.get(llmFileCountKey(normalizedName, mentionType))?.chatSliceOnly ?? false;
     },
   };
 }

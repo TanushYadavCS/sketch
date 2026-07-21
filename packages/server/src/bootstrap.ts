@@ -17,6 +17,8 @@ import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
 import type { Config } from "./config";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
+import { ensureSlackConnectorConfig } from "./connectors/slack-provisioning";
+import { archiveAllSlackChannelFiles } from "./connectors/slack-salience";
 import { startSyncScheduler } from "./connectors/sync";
 import { createPricingService } from "./cost/cost-pricing";
 import { OpenRouterPriceMap } from "./cost/openrouter-price-map";
@@ -60,6 +62,7 @@ import { TaskScheduler } from "./scheduler/service";
 import { syncFeaturedSkills } from "./skills/sync";
 import { createConfiguredSlackBot, validateSlackTokens } from "./slack/adapter";
 import type { SlackBot } from "./slack/bot";
+import { createSettingsBackedSlackIndexingFacade } from "./slack/indexing-facade";
 import { createSlackStartupManager } from "./slack/startup";
 import { UserCache } from "./slack/user-cache";
 import { type ProviderContext, createWorkflowStepRecorder, instrumentAgentRun } from "./telemetry/agent-run-telemetry";
@@ -607,7 +610,15 @@ export async function createServer(config: Config, options?: CreateServerOptions
   await scheduler.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
-  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
+  const slackIndexingFacade = createSettingsBackedSlackIndexingFacade({
+    db,
+    encryptionKey: config.ENCRYPTION_KEY,
+    userCache,
+  });
+  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config, slackIndexingFacade });
+  if ((await settingsRepo.get())?.slack_bot_token) {
+    await ensureSlackConnectorConfig({ db, encryptionKey: config.ENCRYPTION_KEY, logger });
+  }
 
   // 8.7. Fix 2b normalization backfill — populates indexed corroboration columns
   // for pre-migration rows in the background; readers stay on the legacy path
@@ -745,6 +756,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     queueManager,
     onSlackTokensUpdated: async (tokens) => {
       await startSlackBotIfConfigured(tokens);
+      if (tokens?.botToken) {
+        await ensureSlackConnectorConfig({ db, encryptionKey: config.ENCRYPTION_KEY, logger });
+      }
     },
     onSlackDisconnect: async () => {
       if (slack) {
@@ -752,6 +766,25 @@ export async function createServer(config: Config, options?: CreateServerOptions
         slack = null;
       }
       await settingsRepo.update({ slackBotToken: null, slackAppToken: null });
+      /**
+       * Revoke indexed-channel access in the same gesture instead of waiting
+       * for the next scheduled sync: until archival runs, previously emitted
+       * slices stay searchable under their last-known ACLs. The unconfigured
+       * sync path repeats this archival as a backstop, so a failure here only
+       * delays revocation rather than losing it.
+       */
+      try {
+        const slackConnector = await db
+          .selectFrom("connector_configs")
+          .select("id")
+          .where("connector_type", "=", "slack")
+          .executeTakeFirst();
+        if (slackConnector) {
+          await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: slackConnector.id });
+        }
+      } catch (err) {
+        logger.warn({ err }, "Failed to archive Slack files on disconnect; next sync will archive");
+      }
       logger.info("Slack disconnected and tokens cleared");
     },
     onLlmSettingsUpdated: async () => {
