@@ -194,8 +194,9 @@ async function renderSlackSlice(
     }));
 
   const displayNames = new Map(roster.participants.map((p) => [p.slackUserId, p.displayName]));
+  const channelLine = `Channel: #${context.channelName}`;
   const rosterBlock = [
-    `Channel: #${context.channelName}`,
+    channelLine,
     "Participants:",
     ...roster.participants.map((participant) => {
       const kindLabel =
@@ -212,10 +213,17 @@ async function renderSlackSlice(
   });
   const transcript = [...(rootLine ? [rootLine, ""] : []), ...transcriptLines].join("\n");
 
+  /**
+   * Stored content is transcript-only (plus the channel header), matching the
+   * email/Fireflies convention: participant rosters stay out of the body so
+   * they never pollute embeddings or the entity extractor. The full roster
+   * block still feeds the salience prompt, and ACLs come from the roster
+   * snapshot, so nothing downstream loses identity context.
+   */
   return {
     rosterBlock,
     transcript,
-    content: `${rosterBlock}\n\n${transcript}`,
+    content: `${channelLine}\n\n${transcript}`,
     roster,
     serializedRoster: JSON.stringify(roster),
     teammateEmails: teammateEmailsFromRoster(roster),

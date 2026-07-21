@@ -382,7 +382,14 @@ async function renderSlice(db: Kysely<DB>, context: SliceContext, logger: Logger
   const messages = await listSliceMessages(db, context.slice);
   const rosterBlock = renderWhatsAppRosterBlock(roster.snapshot);
   const transcript = renderWhatsAppTranscript(roster.snapshot, messages);
-  const content = `${rosterBlock}\n\nTranscript:\n${transcript}`;
+  /**
+   * Stored content is transcript-only (plus the group header), matching the
+   * email/Fireflies convention: participant rosters stay out of the body so
+   * they never pollute embeddings or the entity extractor. The roster block
+   * still feeds the salience prompt, and ACLs come from the roster snapshot.
+   */
+  const titleGroup = sanitizeWhatsAppDisplayText(context.groupName) || "WhatsApp group";
+  const content = `Group: ${titleGroup}\n\nTranscript:\n${transcript}`;
   assertNoRawWhatsAppIdentifiers(content);
   return {
     rosterSnapshot: roster.snapshot,

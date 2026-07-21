@@ -289,7 +289,8 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
           memberEmails: [seeded.teammateEmail],
         },
       });
-      expect(firstItems[0]?.content).toContain("WhatsApp roster:");
+      expect(firstItems[0]?.content).toContain("Group: ");
+      expect(firstItems[0]?.content).not.toContain("WhatsApp roster:");
       expect(firstItems[0]?.content).toContain("Tara Teammate:");
       expect(firstItems[0]?.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
       expect(firstItems[0]?.entitySeeds).toBeUndefined();
@@ -454,7 +455,8 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       expect(items.map((item) => item.providerFileId)).toEqual([kept.sliceId]);
       expect(unscopedItems.map((item) => item.providerFileId)).not.toContain(unscoped.sliceId);
       expect(items[0]?.accessScope?.memberEmails).toEqual([kept.teammateEmail]);
-      expect(items[0]?.content).toContain("WhatsApp roster:");
+      expect(items[0]?.content).toContain("Group: ");
+      expect(items[0]?.content).not.toContain("WhatsApp roster:");
       expect(items[0]?.content).toContain("Tara Teammate:");
       expect(items[0]?.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
       await expect(db.selectFrom("tasks").selectAll().execute()).resolves.toEqual([]);

@@ -531,6 +531,47 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(prompts[0]).not.toContain("<@U0TEAM>");
     });
 
+    it("emitted content is transcript-only: channel header without the participant roster", async () => {
+      await ensureSlackConnectorConfig({ db, logger });
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "C1" },
+        "general",
+      );
+      const message = await conversations.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1900.1",
+        senderJid: "U0TEAM",
+        senderName: "Roopak",
+        text: "Decision: we ship the pricing change on Monday",
+        providerTimestamp: "2026-07-17T11:00:00.000Z",
+        receivedAt: "2026-07-17T11:00:00.000Z",
+      });
+      await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: message.row.id,
+        lastMessageId: message.row.id,
+        startedAt: "2026-07-17T11:00:00.000Z",
+        endedAt: "2026-07-17T11:00:00.000Z",
+        messageCount: 1,
+        denoisedMessageIds: [message.row.id],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+        salienceVerdict: "kept",
+      });
+
+      const items = [];
+      for await (const item of emitSlackSyncedItems({ db, logger, facade: fakeFacade() })) {
+        items.push(item);
+      }
+
+      expect(items).toHaveLength(1);
+      expect(items[0]?.content).toContain("Channel: #general");
+      expect(items[0]?.content).toContain("Roopak: Decision: we ship the pricing change on Monday");
+      expect(items[0]?.content).not.toContain("Participants:");
+      expect(items[0]?.content).not.toContain("(teammate)");
+    });
+
     it("emission with no teammate member archives the linked file and emits nothing", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const config = await db
