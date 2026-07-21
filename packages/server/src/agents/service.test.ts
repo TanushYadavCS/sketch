@@ -9,8 +9,8 @@ import type { DB } from "../db/schema";
 import type { QueueManager } from "../queue";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 import { CONVERSATION_SUMMARY_AGENT_KEY, CONVERSATION_SUMMARY_AGENT_VERSION } from "./definitions/conversation-summary";
-import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION } from "./definitions/daily-brief";
-import { AgentRunService } from "./service";
+import { DAILY_BRIEF_AGENT_KEY, DAILY_BRIEF_AGENT_VERSION, dailyBriefDefinition } from "./definitions/daily-brief";
+import { AgentRunService, type AgentRunServiceDeps } from "./service";
 
 const OUTPUT_DATE = "2026-06-15";
 const PREVIOUS_DATE = "2026-06-14";
@@ -182,6 +182,224 @@ describe("Daily Brief durable-task hooks", () => {
     expect(afterEnabled).toBe(1);
   });
 });
+
+describe("Agent output writer failures", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("persists the writer rejection when WriteAgentOutput was called but rejected", async () => {
+    const output = await runOutputWriterScenario(db, async (params) => {
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      try {
+        await params.agentOutputWriter.write({
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Daily Brief", summary: "Summary" },
+          rawPayload: dailyBriefRawPayload(),
+          items: [briefItem({ knowledgeRefs: { entityIds: ["unknown-entity"], fileIds: [] } })],
+        });
+      } catch {}
+      return runResult();
+    });
+    expect(output).toMatchObject({
+      status: "failed",
+      error_message: "Agent output validation failed: todos:Brief todo references unknown entityIds",
+    });
+  });
+
+  it("keeps the generic failure when WriteAgentOutput was never called", async () => {
+    const output = await runOutputWriterScenario(db, async () => runResult());
+    expect(output).toMatchObject({
+      status: "failed",
+      error_message: "Agent did not call WriteAgentOutput.",
+    });
+  });
+
+  it("persists the final rejection when WriteAgentOutput fails repeatedly", async () => {
+    const output = await runOutputWriterScenario(db, async (params) => {
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      try {
+        await params.agentOutputWriter.write({
+          outputDate: PREVIOUS_DATE,
+          timezone: "UTC",
+          masthead: { title: "Daily Brief", summary: "Summary" },
+          rawPayload: dailyBriefRawPayload(PREVIOUS_DATE),
+          items: [],
+        });
+      } catch {}
+      try {
+        await params.agentOutputWriter.write({
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Daily Brief", summary: "Summary" },
+          rawPayload: dailyBriefRawPayload(),
+          items: [
+            briefItem({
+              title: "Final rejected item",
+              knowledgeRefs: { entityIds: ["unknown-entity"], fileIds: [] },
+            }),
+          ],
+        });
+      } catch {}
+      return runResult();
+    });
+    expect(output).toMatchObject({
+      status: "failed",
+      error_message: expect.stringContaining("todos:Final rejected item references unknown entityIds"),
+    });
+    expect(output?.error_message).not.toContain("Output date mismatch");
+  });
+
+  it("preserves the writer rejection when the agent run later throws", async () => {
+    const output = await runOutputWriterScenario(db, async (params) => {
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      try {
+        await params.agentOutputWriter.write({
+          outputDate: OUTPUT_DATE,
+          timezone: "UTC",
+          masthead: { title: "Daily Brief", summary: "Summary" },
+          rawPayload: dailyBriefRawPayload(),
+          items: [briefItem({ knowledgeRefs: { entityIds: ["unknown-entity"], fileIds: [] } })],
+        });
+      } catch {}
+      throw new Error("Agent runtime failed after writer rejection");
+    });
+    expect(output).toMatchObject({
+      status: "failed",
+      error_message: "Agent output validation failed: todos:Brief todo references unknown entityIds",
+    });
+  });
+
+  it("persists a writer rejection after output persistence has completed", async () => {
+    const originalOnOutputSaved = dailyBriefDefinition.onOutputSaved;
+    dailyBriefDefinition.onOutputSaved = async () => {
+      throw new Error("Post-save hook failed\nwith details");
+    };
+
+    try {
+      const output = await runOutputWriterScenario(db, async (params) => {
+        if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+        try {
+          await params.agentOutputWriter.write({
+            outputDate: OUTPUT_DATE,
+            timezone: "UTC",
+            masthead: { title: "Daily Brief", summary: "Summary" },
+            rawPayload: dailyBriefRawPayload(),
+            items: [],
+          });
+        } catch {}
+        return runResult();
+      });
+      expect(output).toMatchObject({
+        status: "failed",
+        error_message: "Post-save hook failed with details",
+      });
+    } finally {
+      dailyBriefDefinition.onOutputSaved = originalOnOutputSaved;
+    }
+  });
+
+  it("completes the output when a rejected write is followed by a successful retry", async () => {
+    const output = await runOutputWriterScenario(db, async (params) => {
+      if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+      try {
+        await params.agentOutputWriter.write({
+          outputDate: PREVIOUS_DATE,
+          timezone: "UTC",
+          masthead: { title: "Daily Brief", summary: "Summary" },
+          rawPayload: dailyBriefRawPayload(PREVIOUS_DATE),
+          items: [],
+        });
+      } catch {}
+      await params.agentOutputWriter.write({
+        outputDate: OUTPUT_DATE,
+        timezone: "UTC",
+        masthead: { title: "Daily Brief", summary: "Summary" },
+        rawPayload: dailyBriefRawPayload(),
+        items: [],
+      });
+      return runResult();
+    });
+    expect(output).toMatchObject({
+      status: "completed",
+      error_message: null,
+    });
+  });
+
+  it("caps sanitized writer errors at five hundred characters", async () => {
+    const originalOnOutputSaved = dailyBriefDefinition.onOutputSaved;
+    dailyBriefDefinition.onOutputSaved = async () => {
+      throw new Error("x".repeat(600));
+    };
+
+    try {
+      const output = await runOutputWriterScenario(db, async (params) => {
+        if (!params.agentOutputWriter) throw new Error("agentOutputWriter missing");
+        try {
+          await params.agentOutputWriter.write({
+            outputDate: OUTPUT_DATE,
+            timezone: "UTC",
+            masthead: { title: "Daily Brief", summary: "Summary" },
+            rawPayload: dailyBriefRawPayload(),
+            items: [],
+          });
+        } catch {}
+        return runResult();
+      });
+      expect(output?.error_message).toHaveLength(500);
+      expect(output?.error_message).toMatch(/…$/);
+    } finally {
+      dailyBriefDefinition.onOutputSaved = originalOnOutputSaved;
+    }
+  });
+});
+
+async function runOutputWriterScenario(db: Kysely<DB>, runAgent: AgentRunServiceDeps["runAgent"]) {
+  const users = createUserRepository(db);
+  const user = await users.create({
+    name: "Daily Brief User",
+    email: "brief-owner@example.com",
+    emailVerified: true,
+  });
+  const queued: Array<() => Promise<void>> = [];
+  const service = new AgentRunService({
+    db,
+    config: createTestConfig(),
+    logger: createTestLogger(),
+    users,
+    settings: createSettingsRepository(db),
+    runAgent,
+    runScheduledAgent: async () => {
+      throw new Error("runScheduledAgent should not be called");
+    },
+    queueManager: createPausedQueueManager(queued),
+  });
+  const [row] = await service.requestGenerationForUser({
+    agentKey: DAILY_BRIEF_AGENT_KEY,
+    userId: user.id,
+    outputDate: OUTPUT_DATE,
+    triggerType: "manual",
+  });
+  if (!row) throw new Error("Expected a running output");
+  await queued[0]?.();
+  return createAgentOutputRepository(db).findById(DAILY_BRIEF_AGENT_KEY, row.id);
+}
+
+function dailyBriefRawPayload(outputDate = OUTPUT_DATE) {
+  return {
+    outputDate,
+    timezone: "UTC",
+    masthead: { title: "Daily Brief", summary: "Summary" },
+    items: [],
+  };
+}
 
 async function runAndCapture(
   db: Kysely<DB>,

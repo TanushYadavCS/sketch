@@ -1165,6 +1165,15 @@ export function createAgentOutputRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    async markWriteFailed(outputId: string, message: string): Promise<void> {
+      await db
+        .updateTable("agent_outputs")
+        .set({ status: "failed", error_message: message, updated_at: new Date().toISOString() })
+        .where("id", "=", outputId)
+        .where("status", "in", ["running", "completed"])
+        .execute();
+    },
+
     async markDeliveryFailed(outputId: string, message: string): Promise<void> {
       await db
         .updateTable("agent_outputs")
