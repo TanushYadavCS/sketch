@@ -203,12 +203,19 @@ export async function renderAllChatsSearchResults(
 }
 
 /**
- * Availability contract: privateAudienceUserId is set server-side only for
- * runs whose entire visible output goes to the requesting user (their DM with
- * Sketch or their interactive web chat). Everything else — group/channel runs,
- * scheduled tasks, automations, API-triggered runs — is denied here so
- * private cross-chat results can never land in a shared or third-party
- * destination.
+ * Availability contract: all_chats is authorized purely by the requesting
+ * user's membership (currentUserId → verified emails → access scopes), and is
+ * allowed from any run context including shared channels and groups. Product
+ * decision 2026-07-21: results may surface in shared destinations; the caller's
+ * membership is the sole boundary, matching how the user could quote the same
+ * content by hand. Runs without an authenticated requesting user (no
+ * currentUserId) are denied.
+ *
+ * The current conversation is additionally always searchable regardless of the
+ * scope join: whoever triggered the run can already read it via
+ * conversation-scope search, so including it (DM, channel, or group, even an
+ * index-disabled WhatsApp group) discloses nothing new. The platform filter
+ * still applies to it.
  */
 export async function handleAllChatsSearch(
   args: AllChatsSearchArgs,
@@ -217,12 +224,8 @@ export async function handleAllChatsSearch(
   if (!deps.db) {
     return { ok: false, message: "Cross-chat search is not available in this run." };
   }
-  if (!deps.privateAudienceUserId || deps.privateAudienceUserId !== deps.currentUserId) {
-    return {
-      ok: false,
-      message:
-        "Cross-chat search is only available in a direct chat with Sketch (DM or web chat). Ask the user to message Sketch directly for cross-channel or cross-group lookups.",
-    };
+  if (!deps.currentUserId) {
+    return { ok: false, message: "Cross-chat search requires an authenticated requesting user." };
   }
   const userEmails = await resolveVerifiedUserEmails(deps);
   if (userEmails.length === 0) {
@@ -237,7 +240,7 @@ export async function handleAllChatsSearch(
       .select(["id", "platform", "kind"])
       .where("id", "=", contextConversationId)
       .executeTakeFirst();
-    if (current?.kind === "dm" && (!args.platform || current.platform === args.platform)) {
+    if (current && (!args.platform || current.platform === args.platform)) {
       currentConversationId = current.id;
     }
   }

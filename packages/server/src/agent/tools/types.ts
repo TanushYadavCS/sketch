@@ -138,14 +138,6 @@ export interface SketchMcpDeps {
     currentMessageId?: number;
     providerThreadId?: string | null;
   };
-  /**
-   * Server-derived audience contract for cross-conversation chat search: set
-   * only when the run's entire visible output goes to exactly this user (their
-   * own DM with Sketch, or their interactive web chat). Never inferred from
-   * run shape — scheduled, automation, API-triggered, and delivery runs must
-   * leave it unset so all_chats search stays unavailable there.
-   */
-  privateAudienceUserId?: string;
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;
   agentOutputWriter?: AgentOutputWriter;

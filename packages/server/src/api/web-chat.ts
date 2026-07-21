@@ -1732,7 +1732,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               inboxMessagesRepo: deps.inboxMessagesRepo,
               userRepo: deps.users,
               currentUserId: currentUser.id,
-              privateAudienceUserId: currentUser.id,
               sendDm: deps.sendDm,
               ...(attachments.length > 0 ? { attachments } : {}),
               ...(taskContext ? { taskContext } : {}),

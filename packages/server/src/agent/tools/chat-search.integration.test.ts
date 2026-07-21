@@ -226,7 +226,6 @@ function depsFor(db: Kysely<DB>, overrides: Partial<SketchMcpDeps> = {}): Sketch
   return {
     db,
     currentUserId: USER_ID,
-    privateAudienceUserId: USER_ID,
     userRepo: createUserRepository(db),
     ...overrides,
   } as unknown as SketchMcpDeps;
@@ -490,7 +489,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(outcome.body.messages).toHaveLength(0);
     });
 
-    it("denies without a private audience, with a mismatched audience, and without a verified email", async () => {
+    it("denies without an authenticated requesting user and without a verified email", async () => {
       await seedSlackChannel(db, {
         channelId: "C8",
         text: "gated content",
@@ -498,21 +497,60 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         connectorConfigId: slackConfigId,
       });
 
-      const noAudience = await handleAllChatsSearch(
+      const anonymous = await handleAllChatsSearch(
         { query: "gated content" },
-        depsFor(db, { privateAudienceUserId: undefined }),
+        depsFor(db, { currentUserId: undefined }),
       );
-      expect(noAudience.ok).toBe(false);
-
-      const mismatched = await handleAllChatsSearch(
-        { query: "gated content" },
-        depsFor(db, { privateAudienceUserId: "someone-else" }),
-      );
-      expect(mismatched.ok).toBe(false);
+      expect(anonymous.ok).toBe(false);
 
       await db.updateTable("users").set({ email_verified_at: null }).where("id", "=", USER_ID).execute();
       const unverified = await handleAllChatsSearch({ query: "gated content" }, depsFor(db));
       expect(unverified.ok).toBe(false);
+    });
+
+    it("works from a shared group context and includes the current conversation without an access scope", async () => {
+      await seedSlackChannel(db, {
+        channelId: "C10",
+        text: "shared context marker in slack",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const conversations = createConversationRepository(db);
+      const currentGroup = await conversations.getOrCreate({
+        platform: "whatsapp",
+        kind: "group",
+        providerConversationId: "888800001111222233@g.us",
+      });
+      const groupMessage = await conversations.insertMessage({
+        conversationId: currentGroup.id,
+        providerMessageId: "grp-current-1",
+        senderJid: "15550001111@s.whatsapp.net",
+        senderName: "Tara",
+        text: "shared context marker in this group",
+        receivedAt: "2026-07-17T09:00:00.000Z",
+      });
+      const trigger = await conversations.insertMessage({
+        conversationId: currentGroup.id,
+        providerMessageId: "grp-current-2",
+        senderJid: "15550001234@s.whatsapp.net",
+        senderName: "Roopak",
+        text: "search my chats",
+        receivedAt: "2026-07-17T09:01:00.000Z",
+      });
+
+      const outcome = await handleAllChatsSearch(
+        { query: "shared context marker" },
+        depsFor(db, {
+          conversationContext: { conversationId: currentGroup.id, currentMessageId: trigger.row.id },
+        }),
+      );
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(2);
+      const platforms = outcome.body.messages.map((message) => (message.conversation as { platform: string }).platform);
+      expect(platforms).toContain("slack");
+      expect(platforms).toContain("whatsapp");
+      expect(outcome.body.messages.some((message) => message.id === groupMessage.row.id)).toBe(true);
     });
 
     it("handles punctuation-only queries safely", async () => {

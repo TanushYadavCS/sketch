@@ -104,14 +104,14 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
 export function createSearchChatHistoryTool(deps: SketchMcpDeps) {
   return tool(
     SEARCH_CHAT_HISTORY_TOOL_NAME,
-    "Search persisted messages in the current chat conversation by keyword, topic, name, decision, project, phrase, or older chat reference. Use this as the first tool for targeted chat-history discovery, even when only some missed messages were inlined. Use scope 'all_chats' (direct chats with Sketch only) to search across every Slack channel and WhatsApp group the user is a member of. Use ReadChatHistory only for chronological paging or reading around a known message id.",
+    "Search persisted messages in the current chat conversation by keyword, topic, name, decision, project, phrase, or older chat reference. Use this as the first tool for targeted chat-history discovery, even when only some missed messages were inlined. Use scope 'all_chats' to search across every Slack channel and WhatsApp group the requesting user is a member of. Use ReadChatHistory only for chronological paging or reading around a known message id.",
     {
       query: z.string().min(1).describe("Keyword, topic, name, project, decision, or phrase to find in chat history."),
       scope: z
         .enum(["conversation", "current_thread", "all_chats"])
         .optional()
         .describe(
-          "Search the whole current conversation, only the active Slack thread, or (all_chats) every Slack channel and WhatsApp group the user is a member of plus this direct chat. all_chats works only in direct chats with Sketch. Defaults to current_thread when a Slack thread is active, otherwise conversation.",
+          "Search the whole current conversation, only the active Slack thread, or (all_chats) every Slack channel and WhatsApp group the requesting user is a member of plus this conversation. Defaults to current_thread when a Slack thread is active, otherwise conversation.",
         ),
       platform: z
         .enum(["slack", "whatsapp"])

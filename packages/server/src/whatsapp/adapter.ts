@@ -954,7 +954,6 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             agentAllowedTools,
             conversationRepo: repos.conversations,
             conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
-            privateAudienceUserId: user.id,
           });
 
           const finalText = appendIntegrationConnectionLinks(
