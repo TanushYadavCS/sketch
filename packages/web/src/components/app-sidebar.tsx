@@ -7,6 +7,8 @@ import {
   BrainIcon,
   CalendarDotsIcon,
   CaretDownIcon,
+  CaretLeftIcon,
+  CaretRightIcon,
   CaretUpDownIcon,
   ChartBarIcon,
   DesktopIcon,
@@ -50,7 +52,6 @@ import {
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarTrigger,
   useSidebar,
 } from "@sketch/ui/components/sidebar";
 import { useTheme } from "@sketch/ui/hooks/use-theme";
@@ -97,6 +98,51 @@ const MORE_NAV: NavItem[] = [
   { label: "Settings", href: "/settings", icon: GearIcon },
 ];
 
+/**
+ * Neutral row styling that overrides the SidebarMenuButton primitive's default
+ * active/hover states (which map to the olive `--sidebar-accent-foreground`
+ * token). Matches the Variant-F prototype: muted by default, near-foreground
+ * text on a faint gray wash when active or hovered.
+ */
+const NAV_ROW =
+  "text-muted-foreground hover:bg-foreground/[0.04]! hover:text-foreground! active:bg-foreground/[0.07]! active:text-foreground! data-[active=true]:bg-foreground/[0.07]! data-[active=true]:text-foreground!";
+
+/**
+ * Rail collapse/expand toggle — a slim vertical pull-handle pinned to the right
+ * edge at the viewport midpoint, matching the Variant-F prototype's ExpandToggle
+ * (replaces the primitive's top-right PanelLeft button). The caret flips: points
+ * left to collapse when expanded, right to expand when collapsed. Rendered as a
+ * direct child of <Sidebar> so it anchors to the full-height fixed container.
+ */
+function RailToggle() {
+  const { state, toggleSidebar, isMobile } = useSidebar();
+  if (isMobile) return null;
+  const collapsed = state === "collapsed";
+  const Caret = collapsed ? CaretRightIcon : CaretLeftIcon;
+  return (
+    <button
+      type="button"
+      onClick={toggleSidebar}
+      aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+      title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+      className={cn(
+        "group/rail-toggle absolute top-1/2 right-[-5px] z-30 hidden h-[56px] w-[10px] -translate-y-1/2 items-center justify-center md:flex",
+        "rounded-full border border-sidebar-border bg-background shadow-sm",
+        "cursor-pointer transition-all duration-200 ease-out",
+        "hover:w-[16px] hover:bg-muted hover:shadow",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+      )}
+    >
+      <Caret
+        size={10}
+        weight="bold"
+        aria-hidden
+        className="text-muted-foreground/70 transition-colors group-hover/rail-toggle:text-foreground"
+      />
+    </button>
+  );
+}
+
 function formatRole(role?: "admin" | "member"): string | null {
   if (role === "admin") return "Admin";
   if (role === "member") return "Member";
@@ -122,10 +168,10 @@ function InternalNavItem({
   const Icon = item.icon;
   return (
     <SidebarMenuItem>
-      <SidebarMenuButton asChild isActive={active} tooltip={item.label}>
+      <SidebarMenuButton asChild isActive={active} tooltip={item.label} className={NAV_ROW}>
         <Link to={item.href} onClick={onSelect}>
-          <Icon size={17} aria-hidden />
-          <span className="group-data-[collapsible=icon]:hidden">{item.label}</span>
+          <Icon size={16} aria-hidden />
+          <span className="flex-1 truncate text-[13px] group-data-[collapsible=icon]:hidden">{item.label}</span>
         </Link>
       </SidebarMenuButton>
       {badge && badge > 0 ? <SidebarMenuBadge>{badge}</SidebarMenuBadge> : null}
@@ -159,8 +205,13 @@ function MoreNavigation({
           <SidebarMenuItem>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <SidebarMenuButton isActive={hasActiveChild} tooltip="More" aria-label="More destinations">
-                  <CaretDownIcon size={17} aria-hidden />
+                <SidebarMenuButton
+                  isActive={hasActiveChild}
+                  tooltip="More"
+                  aria-label="More destinations"
+                  className={NAV_ROW}
+                >
+                  <CaretDownIcon size={16} aria-hidden />
                   <span className="group-data-[collapsible=icon]:hidden">More</span>
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
@@ -203,14 +254,14 @@ function MoreNavigation({
         aria-expanded={isOpen}
         aria-label={isOpen ? "Hide more destinations" : "Show more destinations"}
         onClick={() => setOpen((current) => !current)}
-        className="group flex w-full items-center gap-2 py-1.5 outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+        className="group flex w-full items-center gap-2 py-[5px] outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
       >
-        <span className="h-px flex-1 bg-sidebar-border transition-colors group-hover:bg-sidebar-foreground/25" />
-        <span className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground group-hover:text-foreground">
+        <span className="h-px flex-1 bg-border transition-colors group-hover:bg-foreground/25" aria-hidden />
+        <span className="flex items-center gap-[3px] font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground/70 transition-colors group-hover:text-foreground">
           More
           <CaretDownIcon size={11} aria-hidden className={cn("transition-transform", !isOpen && "-rotate-90")} />
         </span>
-        <span className="h-px flex-1 bg-sidebar-border transition-colors group-hover:bg-sidebar-foreground/25" />
+        <span className="h-px flex-1 bg-border transition-colors group-hover:bg-foreground/25" aria-hidden />
       </button>
       {isOpen ? (
         <SidebarGroupContent className="mt-1">
@@ -225,10 +276,10 @@ function MoreNavigation({
             ))}
             {managedUrl ? (
               <SidebarMenuItem>
-                <SidebarMenuButton asChild tooltip="Account">
+                <SidebarMenuButton asChild tooltip="Account" className={NAV_ROW}>
                   <a href={managedUrl} target="_blank" rel="noopener noreferrer">
-                    <ArrowSquareOutIcon size={17} aria-hidden />
-                    <span>Account</span>
+                    <ArrowSquareOutIcon size={16} aria-hidden />
+                    <span className="flex-1 truncate text-[13px]">Account</span>
                   </a>
                 </SidebarMenuButton>
               </SidebarMenuItem>
@@ -253,7 +304,7 @@ function RecentsNavigation({ pathname, onSelect }: { pathname: string; onSelect:
 
   return (
     <SidebarGroup className="min-h-0 flex-1 py-1">
-      <SidebarGroupLabel className="h-7 font-mono text-[10px] uppercase tracking-[0.1em]">Recents</SidebarGroupLabel>
+      <SidebarGroupLabel className="font-mono text-[11px] uppercase tracking-[0.08em]">Recents</SidebarGroupLabel>
       <SidebarGroupContent className="min-h-0 overflow-y-auto">
         {conversations.isLoading ? (
           <p className="px-2 py-1.5 text-xs text-muted-foreground">Loading conversations…</p>
@@ -410,20 +461,19 @@ export function AppSidebar({
 
   return (
     <Sidebar collapsible="icon">
-      <SidebarHeader className="relative gap-2 px-2 pt-3 pb-1">
-        <SidebarTrigger className="absolute top-5 -right-3 z-30 hidden size-6 rounded-full border bg-background shadow-sm md:inline-flex" />
-        <div className="flex h-10 items-center gap-2 px-2 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
+      <RailToggle />
+      <SidebarHeader className="gap-2 px-2 pt-3 pb-1">
+        <div className="flex h-10 items-center gap-2.5 px-2 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
           <img src={logoSrc} alt="Sketch" className="size-7 shrink-0" />
-          <div className="min-w-0 group-data-[collapsible=icon]:hidden">
-            <p className="truncate text-sm font-semibold">Sketch</p>
-            <p className="truncate text-[11px] text-muted-foreground">{orgLabel}</p>
-          </div>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium tracking-tight group-data-[collapsible=icon]:hidden">
+            {orgLabel}
+          </span>
         </div>
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton
               tooltip="New chat"
-              className="border border-brand-accent/70 bg-brand-accent/[0.06] hover:bg-brand-accent/15"
+              className={NAV_ROW}
               onClick={() => {
                 closeMobile();
                 navigate({
@@ -434,15 +484,15 @@ export function AppSidebar({
                 });
               }}
             >
-              <NotePencilIcon size={17} aria-hidden />
-              <span className="group-data-[collapsible=icon]:hidden">New chat</span>
+              <NotePencilIcon size={16} aria-hidden />
+              <span className="text-[13px] group-data-[collapsible=icon]:hidden">New chat</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
-            <SidebarMenuButton asChild tooltip="Add integration">
+            <SidebarMenuButton asChild tooltip="Add integration" className={NAV_ROW}>
               <Link to="/integrations" onClick={closeMobile}>
-                <PlusIcon size={17} aria-hidden />
-                <span className="group-data-[collapsible=icon]:hidden">Add integration</span>
+                <PlusIcon size={16} aria-hidden />
+                <span className="text-[13px] group-data-[collapsible=icon]:hidden">Add integration</span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
