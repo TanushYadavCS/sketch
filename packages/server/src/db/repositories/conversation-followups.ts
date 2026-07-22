@@ -3,6 +3,7 @@ import { type Kysely, type Selectable, type Transaction, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import type { DB, TasksTable } from "../schema";
 import type { AgentOutputItemInput } from "./agent-outputs";
+import { type TaskActivitySurface, createTaskActivityRepository } from "./task-activity";
 import { type ConversationTaskSourceAnchor, type TaskStatus, createTaskRepository } from "./tasks";
 
 const RECOMMENDATION_EXPIRY_MS = 48 * 60 * 60 * 1000;
@@ -42,6 +43,7 @@ interface TaskMatchMetadata {
   assigneeEntityId?: string | null;
   assigneeName?: string | null;
   proposedAssigneeName?: string | null;
+  dueAt?: string | null;
 }
 
 export type SummarizerTaskChange =
@@ -622,6 +624,16 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
                 .execute();
               return { status: "stale" as const };
             }
+            await appendReviewDecisionActivity(trx, {
+              recommendationId: recommendation.recommendation_id,
+              taskId: recommendation.task_id,
+              decisionState: state,
+              userId: input.userId,
+              surface: input.surface,
+              previousTaskStatus: recommendation.status,
+              nextTaskStatus: "done",
+              now: input.now,
+            });
             return { status: "confirmed" as const, taskId: recommendation.task_id };
           }
           const taskStillActionable = await touchActionableTaskForReview(trx, recommendation.task_id, {
@@ -646,6 +658,16 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
               .execute();
             return { status: "stale" as const };
           }
+          await appendReviewDecisionActivity(trx, {
+            recommendationId: recommendation.recommendation_id,
+            taskId: recommendation.task_id,
+            decisionState: state,
+            userId: input.userId,
+            surface: input.surface,
+            previousTaskStatus: recommendation.status,
+            nextTaskStatus: null,
+            now: input.now,
+          });
           return { status: "kept_open" as const, taskId: recommendation.task_id };
         });
       } catch (error) {
@@ -687,6 +709,59 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
       });
     },
   };
+}
+
+async function appendReviewDecisionActivity(
+  db: Transaction<DB>,
+  input: {
+    recommendationId: string;
+    taskId: string;
+    decisionState: "accepted" | "rejected";
+    userId: string;
+    surface: string;
+    previousTaskStatus: string;
+    nextTaskStatus: string | null;
+    now: string;
+  },
+): Promise<void> {
+  const activity = createTaskActivityRepository(db);
+  const surface = toTaskActivitySurface(input.surface);
+  await activity.append({
+    taskId: input.taskId,
+    eventKind: "completion_review_decided",
+    actorType: "user",
+    actorUserId: input.userId,
+    surface,
+    changes: { reviewState: { before: "pending", after: input.decisionState } },
+    identityParts: [input.recommendationId, input.decisionState],
+    occurredAt: input.now,
+  });
+  if (input.nextTaskStatus && input.previousTaskStatus !== input.nextTaskStatus) {
+    await activity.append({
+      taskId: input.taskId,
+      eventKind: "task_status_changed",
+      actorType: "user",
+      actorUserId: input.userId,
+      surface,
+      changes: { status: { before: input.previousTaskStatus, after: input.nextTaskStatus } },
+      identityParts: [input.recommendationId, input.previousTaskStatus, input.nextTaskStatus],
+      occurredAt: input.now,
+    });
+  }
+}
+
+function toTaskActivitySurface(surface: string): TaskActivitySurface {
+  if (
+    surface === "daily_brief" ||
+    surface === "summarizer" ||
+    surface === "web" ||
+    surface === "slack" ||
+    surface === "whatsapp" ||
+    surface === "system"
+  ) {
+    return surface;
+  }
+  return "system";
 }
 
 function legacyIdentity(candidate: LegacyFollowupCandidate): string {
@@ -814,9 +889,40 @@ async function applyTaskChange(
       item: change.item,
       sourceAnchor: evidence.anchor,
       originOutputId: input.outputId ?? null,
+      dueAt: await sourceSupportedDueDate(
+        db,
+        evidence.messageIds,
+        readStructuredPayloadString(change.item.structuredPayload, "dueAt"),
+      ),
     });
     const taskId = promoted.taskId;
-    await insertMessageEvidence(db, taskId, evidence.anchor, evidence.messageIds);
+    const insertedMessageIds = await insertMessageEvidence(db, taskId, evidence.anchor, evidence.messageIds);
+    const activity = createTaskActivityRepository(db);
+    if (promoted.status === "upserted" && promoted.created) {
+      await activity.append({
+        taskId,
+        eventKind: "task_created",
+        actorType: "agent",
+        actorKey: "conversation_summary",
+        surface: "summarizer",
+        sourceAgentOutputId: input.outputId ?? null,
+        identityParts: [taskId],
+        occurredAt: input.now,
+      });
+    }
+    if (insertedMessageIds.length > 0) {
+      await activity.append({
+        taskId,
+        eventKind: "material_evidence_added",
+        actorType: "agent",
+        actorKey: "conversation_summary",
+        surface: "summarizer",
+        sourceAgentOutputId: input.outputId ?? null,
+        evidence: { messageIds: insertedMessageIds },
+        identityParts: [taskId, ...insertedMessageIds],
+        occurredAt: input.now,
+      });
+    }
     return { status: "applied", kind: "new", taskId };
   }
 
@@ -850,19 +956,48 @@ async function applyTaskChange(
     return { status: "rejected", kind: change.kind, reason: "task_not_editable" };
   }
 
-  await insertMessageEvidence(db, task.id, evidence.anchor, evidence.messageIds);
+  const insertedMessageIds = await insertMessageEvidence(db, task.id, evidence.anchor, evidence.messageIds);
+  const activity = createTaskActivityRepository(db);
+  if (insertedMessageIds.length > 0) {
+    await activity.append({
+      taskId: task.id,
+      eventKind: "material_evidence_added",
+      actorType: "agent",
+      actorKey: "conversation_summary",
+      surface: "summarizer",
+      sourceAgentOutputId: input.outputId ?? null,
+      evidence: { messageIds: insertedMessageIds },
+      identityParts: [task.id, ...insertedMessageIds],
+      occurredAt: input.now,
+    });
+  }
   if (change.kind === "changed") {
     const metadata = change.metadata;
+    const dueAt =
+      Object.hasOwn(metadata, "dueAt") && metadata.dueAt
+        ? await sourceSupportedDueDate(db, evidence.messageIds, metadata.dueAt)
+        : null;
+    const next = {
+      title: metadata.title?.trim() || task.title,
+      priority: metadata.priority ?? task.priority,
+      dueAt: dueAt ?? task.due_at,
+      parentEntityId: metadata.parentEntityId ?? task.parent_entity_id,
+      assigneeEntityId: metadata.assigneeEntityId ?? task.assignee_entity_id,
+      assigneeName: metadata.assigneeName ?? task.assignee_name,
+      proposedAssigneeName: metadata.proposedAssigneeName ?? task.proposed_assignee_name,
+    };
+    const changes = taskFieldChanges(task, next);
     const updated = await db
       .updateTable("tasks")
       .set({
-        title: metadata.title?.trim() || task.title,
-        normalized_title: metadata.title?.trim() ? normalizeName(metadata.title) : task.normalized_title,
-        priority: metadata.priority ?? task.priority,
-        parent_entity_id: metadata.parentEntityId ?? task.parent_entity_id,
-        assignee_entity_id: metadata.assigneeEntityId ?? task.assignee_entity_id,
-        assignee_name: metadata.assigneeName ?? task.assignee_name,
-        proposed_assignee_name: metadata.proposedAssigneeName ?? task.proposed_assignee_name,
+        title: next.title,
+        normalized_title: next.title !== task.title ? normalizeName(next.title) : task.normalized_title,
+        priority: next.priority,
+        due_at: next.dueAt,
+        parent_entity_id: next.parentEntityId,
+        assignee_entity_id: next.assigneeEntityId,
+        assignee_name: next.assigneeName,
+        proposed_assignee_name: next.proposedAssigneeName,
         updated_at: input.now,
       })
       .where("id", "=", task.id)
@@ -880,6 +1015,19 @@ async function applyTaskChange(
       )
       .executeTakeFirst();
     if (Number(updated.numUpdatedRows ?? 0) === 0) throw new TaskBecameUneditableError();
+    if (Object.keys(changes).length > 0) {
+      await activity.append({
+        taskId: task.id,
+        eventKind: "task_fields_changed",
+        actorType: "agent",
+        actorKey: "conversation_summary",
+        surface: "summarizer",
+        sourceAgentOutputId: input.outputId ?? null,
+        changes,
+        identityParts: [task.id, input.outputId ?? null, JSON.stringify(changes)],
+        occurredAt: input.now,
+      });
+    }
     return { status: "applied", kind: "changed", taskId: task.id };
   }
 
@@ -898,12 +1046,71 @@ async function applyTaskChange(
     input.outputId ?? null,
     input.now,
   );
+  if (recommendation.created) {
+    await activity.append({
+      taskId: task.id,
+      eventKind: "completion_review_opened",
+      actorType: "agent",
+      actorKey: "conversation_summary",
+      surface: "summarizer",
+      sourceAgentOutputId: input.outputId ?? null,
+      identityParts: [recommendation.id],
+      occurredAt: input.now,
+    });
+  }
   return {
     status: "applied",
     kind: "resolved",
     taskId: task.id,
     recommendation,
   };
+}
+
+function readStructuredPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
+  const value = payload?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function sourceSupportedDueDate(
+  db: Kysely<DB> | Transaction<DB>,
+  messageIds: number[],
+  candidate: string | null,
+): Promise<string | null> {
+  if (!candidate || !/^\d{4}-\d{2}-\d{2}$/.test(candidate)) return null;
+  const date = new Date(`${candidate}T00:00:00.000Z`);
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== candidate) return null;
+  const supported = await db
+    .selectFrom("conversation_messages")
+    .select("id")
+    .where("id", "in", messageIds)
+    .where("text", "like", `%${candidate}%`)
+    .executeTakeFirst();
+  return supported ? candidate : null;
+}
+
+function taskFieldChanges(
+  task: Selectable<TasksTable>,
+  next: {
+    title: string;
+    priority: string | null;
+    dueAt: string | null;
+    parentEntityId: string | null;
+    assigneeEntityId: string | null;
+    assigneeName: string | null;
+    proposedAssigneeName: string | null;
+  },
+) {
+  return Object.fromEntries(
+    [
+      ["title", task.title, next.title],
+      ["priority", task.priority, next.priority],
+      ["dueAt", task.due_at, next.dueAt],
+      ["parentEntityId", task.parent_entity_id, next.parentEntityId],
+      ["assigneeEntityId", task.assignee_entity_id, next.assigneeEntityId],
+      ["assigneeName", task.assignee_name, next.assigneeName],
+      ["proposedAssigneeName", task.proposed_assignee_name, next.proposedAssigneeName],
+    ].flatMap(([field, before, after]) => (before === after ? [] : [[field, { before, after }]])),
+  );
 }
 
 async function matchWithinScope(
@@ -979,9 +1186,10 @@ async function insertMessageEvidence(
   taskId: string,
   anchor: ConversationTaskSourceAnchor,
   messageIds: number[],
-): Promise<void> {
+): Promise<number[]> {
+  const insertedMessageIds: number[] = [];
   for (const messageId of messageIds) {
-    await db
+    const result = await db
       .insertInto("task_message_evidence")
       .values({
         task_id: taskId,
@@ -992,8 +1200,10 @@ async function insertMessageEvidence(
         source_anchor_key: anchor.key,
       })
       .onConflict((oc) => oc.columns(["task_id", "conversation_message_id"]).doNothing())
-      .execute();
+      .executeTakeFirst();
+    if (Number(result.numInsertedOrUpdatedRows ?? 0) > 0) insertedMessageIds.push(messageId);
   }
+  return insertedMessageIds;
 }
 
 async function createCompletionRecommendation(

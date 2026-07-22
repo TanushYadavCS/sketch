@@ -71,6 +71,7 @@ export function createTaskRoutes(db: Kysely<DB>) {
       assigneeEntityIds: access.assigneeEntityIds,
       canEditAllLocalTasks: access.canEditAllLocalTasks,
       status: body.status as TaskStatus,
+      surface: "web",
     });
     if (!updated) return c.json({ error: { code: "FORBIDDEN", message: "Task status is read-only" } }, 403);
     const creators = await loadTaskCreators(db, [updated]);

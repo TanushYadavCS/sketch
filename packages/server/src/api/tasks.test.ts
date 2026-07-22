@@ -89,6 +89,11 @@ describe("GET/PATCH /api/tasks/:taskId", () => {
       headers: { Cookie: memberCookie, "Content-Type": "application/json" },
       body: JSON.stringify({ status: "done" }),
     });
+    const retry = await app.request(`/api/tasks/${task.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "done" }),
+    });
 
     expect(get.status).toBe(200);
     await expect(get.json()).resolves.toMatchObject({
@@ -102,9 +107,26 @@ describe("GET/PATCH /api/tasks/:taskId", () => {
       },
     });
     expect(patch.status).toBe(200);
+    expect(retry.status).toBe(200);
     await expect(patch.json()).resolves.toMatchObject({
       task: { id: task.taskId, status: "done", statusRaw: "done", canEditStatus: true },
     });
+    await expect(
+      db
+        .selectFrom("task_activity_events")
+        .select(["task_id", "event_kind", "actor_type", "actor_user_id", "surface", "changes_json"])
+        .where("task_id", "=", task.taskId)
+        .execute(),
+    ).resolves.toEqual([
+      {
+        task_id: task.taskId,
+        event_kind: "task_status_changed",
+        actor_type: "user",
+        actor_user_id: memberId,
+        surface: "web",
+        changes_json: JSON.stringify({ status: { before: "open", after: "done" } }),
+      },
+    ]);
   });
 
   it("lets an assignee and admin update local tasks while hiding them from unrelated members", async () => {

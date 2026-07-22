@@ -966,6 +966,20 @@ describe("GET/PATCH /api/entities/:id/tasks", () => {
       readonlyReason: null,
       canEditStatus: true,
     });
+    await expect(
+      db
+        .selectFrom("task_activity_events")
+        .select(["event_kind", "actor_user_id", "surface", "changes_json"])
+        .where("task_id", "=", local.taskId)
+        .execute(),
+    ).resolves.toEqual([
+      {
+        event_kind: "task_status_changed",
+        actor_user_id: adminId,
+        surface: "web",
+        changes_json: JSON.stringify({ status: { before: "open", after: "done" } }),
+      },
+    ]);
   });
 
   it("lets admins read and patch project-local summary tasks from other users", async () => {

@@ -7,6 +7,7 @@ import type { AgentKnowledgeRefs, AgentOutputItemInput } from "./agent-outputs";
 import type { FileViewer } from "./connectors";
 import { fileVisibilityPredicate } from "./connectors";
 import { normalizeContactPointValue, whereLiveEntity } from "./entities";
+import { type TaskActivityChanges, type TaskActivitySurface, createTaskActivityRepository } from "./task-activity";
 
 export const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 const BRIEF_TASK_ID_SEPARATOR = "\u001f";
@@ -60,14 +61,21 @@ export interface PromoteBriefTaskInput {
 export type PromoteBriefTaskResult =
   | { status: "skipped"; reason: "missing_file_id" }
   | { status: "skipped"; reason: "ineligible_assignee" }
-  | { status: "collated"; taskId: string }
-  | { status: "upserted"; taskId: string; created: boolean };
+  | { status: "collated"; taskId: string; evidenceFileIds: string[] }
+  | {
+      status: "upserted";
+      taskId: string;
+      created: boolean;
+      changes: TaskActivityChanges;
+      evidenceFileIds: string[];
+    };
 
 export interface PromoteSummaryTaskInput {
   userId: string;
   item: AgentOutputItemInput;
   sourceAnchor?: ConversationTaskSourceAnchor | null;
   originOutputId?: string | null;
+  dueAt?: string | null;
 }
 
 export interface ConversationTaskSourceAnchor {
@@ -87,6 +95,7 @@ export interface UpdateLocalTaskStatusInput {
   assigneeEntityIds?: string[];
   canEditAllLocalTasks?: boolean;
   status: TaskStatus;
+  surface?: TaskActivitySurface;
 }
 
 export interface ReanchorNullParentTasksResult {
@@ -99,6 +108,7 @@ export interface ReanchorNullParentTasksResult {
 export interface LoadOpenDurableTasksForBriefOptions {
   userId: string;
   userEmails: string[];
+  assigneeEntityIds?: string[];
   activeSummarySourceKeys?: string[];
   activeSummaryConversationIds?: number[];
   limit?: number;
@@ -209,8 +219,8 @@ export function createTaskRepository(db: Kysely<DB>) {
         }),
       });
       if (existing) {
-        await promoteBriefTaskEvidence(db, existing.id, input.knowledgeRefs);
-        return { status: "collated", taskId: existing.id };
+        const evidenceFileIds = await promoteBriefTaskEvidence(db, existing.id, input.knowledgeRefs);
+        return { status: "collated", taskId: existing.id, evidenceFileIds };
       }
 
       if (input.knowledgeRefs.fileIds.length === 0) return { status: "skipped", reason: "missing_file_id" };
@@ -226,8 +236,8 @@ export function createTaskRepository(db: Kysely<DB>) {
         todo: input.todo,
         normalizedTitle,
       });
-      await promoteBriefTaskEvidence(db, result.taskId, input.knowledgeRefs);
-      return { status: "upserted", ...result };
+      const evidenceFileIds = await promoteBriefTaskEvidence(db, result.taskId, input.knowledgeRefs);
+      return { status: "upserted", ...result, evidenceFileIds };
     },
 
     async promoteSummaryTask(input: PromoteSummaryTaskInput): Promise<PromoteSummaryTaskResult> {
@@ -266,6 +276,7 @@ export function createTaskRepository(db: Kysely<DB>) {
         normalizedTitle,
         sourceAnchor: input.sourceAnchor ?? null,
         originOutputId: input.originOutputId ?? null,
+        dueAt: input.dueAt ?? null,
       });
       await promoteSummaryTaskEvidence(db, result.taskId, input.item);
       return { status: "upserted", ...result };
@@ -400,49 +411,22 @@ export function createTaskRepository(db: Kysely<DB>) {
               AND task_evidence.kind = 'file'
               AND ${fileAccessFilterSql(opts.userEmails)}
           )`;
-      const activeSummarySourceKeys = [...new Set(opts.activeSummarySourceKeys ?? [])].filter(Boolean);
-      const activeSummaryConversationIds = [...new Set(opts.activeSummaryConversationIds ?? [])];
-      const hasActiveSummaryScope =
-        opts.activeSummarySourceKeys !== undefined || opts.activeSummaryConversationIds !== undefined;
+      const assigneeEntityIds = [...new Set(opts.assigneeEntityIds ?? [])].filter(Boolean);
       return db
         .selectFrom("tasks")
-        .leftJoin("agent_outputs as summary_origin", "summary_origin.id", "tasks.origin_agent_output_id")
         .selectAll("tasks")
         .where("tasks.valid_to", "is", null)
         .where("tasks.status", "in", ["open", "in_progress"])
         .where((eb) =>
           eb.or([
             eb.and([eb("tasks.provenance", "=", "structural"), visibleFileEvidence]),
-            ...(hasActiveSummaryScope
-              ? [
-                  eb.and([
-                    eb("tasks.created_by_user_id", "=", opts.userId),
-                    eb("tasks.provenance", "=", "brief"),
-                    eb("tasks.assignee_entity_id", "is not", null),
-                  ]),
-                  eb.and([
-                    eb("tasks.created_by_user_id", "=", opts.userId),
-                    eb("tasks.provenance", "=", "summary"),
-                    eb("tasks.assignee_entity_id", "is not", null),
-                    activeSummarySourceKeys.length > 0 || activeSummaryConversationIds.length > 0
-                      ? eb.or([
-                          ...(activeSummarySourceKeys.length > 0
-                            ? [eb("summary_origin.source_key", "in", activeSummarySourceKeys)]
-                            : []),
-                          ...(activeSummaryConversationIds.length > 0
-                            ? [eb("tasks.source_conversation_id", "in", activeSummaryConversationIds)]
-                            : []),
-                        ])
-                      : sql<boolean>`false`,
-                  ]),
-                ]
-              : [
-                  eb.and([
-                    eb("tasks.created_by_user_id", "=", opts.userId),
-                    eb("tasks.provenance", "in", ["brief", "summary"]),
-                    eb("tasks.assignee_entity_id", "is not", null),
-                  ]),
-                ]),
+            eb.and([
+              eb("tasks.provenance", "in", ["brief", "summary"]),
+              eb.or([
+                eb("tasks.created_by_user_id", "=", opts.userId),
+                ...(assigneeEntityIds.length > 0 ? [eb("tasks.assignee_entity_id", "in", assigneeEntityIds)] : []),
+              ]),
+            ]),
           ]),
         )
         .orderBy("tasks.updated_at", "desc")
@@ -493,42 +477,77 @@ export function createTaskRepository(db: Kysely<DB>) {
     },
 
     async updateLocalTaskStatus(input: UpdateLocalTaskStatusInput): Promise<Selectable<TasksTable> | null> {
-      const existing = await db
-        .selectFrom("tasks")
-        .selectAll()
-        .where("id", "=", input.taskId)
-        .where("valid_to", "is", null)
-        .executeTakeFirst();
-      if (
-        !existing ||
-        !canEditLocalTask(existing, input.userId, input.assigneeEntityIds ?? [], input.canEditAllLocalTasks === true) ||
-        existing.status_authority !== "local" ||
-        (existing.provenance !== "brief" && existing.provenance !== "summary")
-      ) {
+      const mutationId = randomUUID();
+      return db.transaction().execute(async (trx) => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const existing = await trx
+            .selectFrom("tasks")
+            .selectAll()
+            .where("id", "=", input.taskId)
+            .where("valid_to", "is", null)
+            .executeTakeFirst();
+          if (
+            !existing ||
+            !canEditLocalTask(
+              existing,
+              input.userId,
+              input.assigneeEntityIds ?? [],
+              input.canEditAllLocalTasks === true,
+            ) ||
+            existing.status_authority !== "local" ||
+            (existing.provenance !== "brief" && existing.provenance !== "summary")
+          ) {
+            return null;
+          }
+          if (existing.status === input.status) return existing;
+
+          const previousStatusChangedAt = Date.parse(existing.status_changed_at ?? "");
+          const now = new Date(
+            Number.isFinite(previousStatusChangedAt) ? Math.max(Date.now(), previousStatusChangedAt + 1) : Date.now(),
+          ).toISOString();
+          let update = trx
+            .updateTable("tasks")
+            .set({
+              status: input.status,
+              status_raw: input.status,
+              status_authority: "local",
+              status_changed_at: now,
+              completed_at: input.status === "done" ? now : null,
+              updated_at: now,
+            })
+            .where("id", "=", input.taskId)
+            .where("valid_to", "is", null)
+            .where("status", "=", existing.status)
+            .where("status_authority", "=", "local")
+            .where("provenance", "in", ["brief", "summary"]);
+          if (input.canEditAllLocalTasks !== true) {
+            update = update.where((eb) =>
+              eb.or([
+                eb("created_by_user_id", "=", input.userId),
+                ...((input.assigneeEntityIds?.length ?? 0) > 0
+                  ? [eb("assignee_entity_id", "in", input.assigneeEntityIds ?? [])]
+                  : []),
+              ]),
+            );
+          }
+          const result = await update.executeTakeFirst();
+          if (Number(result.numUpdatedRows ?? 0) === 0) continue;
+
+          await createTaskActivityRepository(trx).append({
+            taskId: existing.id,
+            eventKind: "task_status_changed",
+            actorType: "user",
+            actorUserId: input.userId,
+            surface: input.surface ?? "web",
+            changes: { status: { before: existing.status, after: input.status } },
+            identityParts: [existing.id, mutationId],
+            occurredAt: now,
+          });
+          return trx.selectFrom("tasks").selectAll().where("id", "=", input.taskId).executeTakeFirstOrThrow();
+        }
+
         return null;
-      }
-
-      const now = new Date().toISOString();
-      const completedAt =
-        input.status === "done"
-          ? existing.status === "done" && existing.completed_at
-            ? existing.completed_at
-            : now
-          : null;
-      await db
-        .updateTable("tasks")
-        .set({
-          status: input.status,
-          status_raw: input.status,
-          status_authority: "local",
-          status_changed_at: existing.status === input.status ? existing.status_changed_at : now,
-          completed_at: completedAt,
-          updated_at: now,
-        })
-        .where("id", "=", input.taskId)
-        .execute();
-
-      return db.selectFrom("tasks").selectAll().where("id", "=", input.taskId).executeTakeFirstOrThrow();
+      });
     },
   };
 }
@@ -636,7 +655,7 @@ async function upsertBriefTask(
     todo: AgentOutputItemInput;
     normalizedTitle: string;
   },
-): Promise<{ taskId: string; created: boolean }> {
+): Promise<{ taskId: string; created: boolean; changes: TaskActivityChanges }> {
   const owner = summaryTaskOwnerIdentity({
     assigneeEntityId: input.assigneeEntityId,
     assigneeName: input.assigneeName,
@@ -694,6 +713,17 @@ async function upsertBriefTask(
     valid_to: null,
     updated_at: now,
   };
+  const changes: TaskActivityChanges = existing
+    ? Object.fromEntries(
+        [
+          ["title", existing.title, values.title],
+          ["priority", existing.priority, values.priority],
+          ["parentEntityId", existing.parent_entity_id, values.parent_entity_id],
+          ["assigneeEntityId", existing.assignee_entity_id, values.assignee_entity_id],
+          ["assigneeName", existing.assignee_name, values.assignee_name],
+        ].flatMap(([field, before, after]) => (before === after ? [] : [[field, { before, after }]])),
+      )
+    : {};
 
   await db
     .insertInto("tasks")
@@ -714,7 +744,7 @@ async function upsertBriefTask(
     .where("source", "=", "brief")
     .where("source_task_id", "=", sourceTaskId)
     .executeTakeFirstOrThrow();
-  return { taskId: row.id, created: !existing };
+  return { taskId: row.id, created: !existing, changes };
 }
 
 async function upsertSummaryTask(
@@ -732,6 +762,7 @@ async function upsertSummaryTask(
     normalizedTitle: string;
     sourceAnchor: ConversationTaskSourceAnchor | null;
     originOutputId: string | null;
+    dueAt: string | null;
   },
 ): Promise<{ taskId: string; created: boolean }> {
   const owner = summaryTaskOwnerIdentity(input);
@@ -788,7 +819,7 @@ async function upsertSummaryTask(
     assignee_name: hasAssigneeSignal ? input.assigneeName : (existing?.assignee_name ?? null),
     proposed_assignee_name: hasAssigneeSignal ? input.proposedAssigneeName : (existing?.proposed_assignee_name ?? null),
     priority: input.item.priority,
-    due_at: null,
+    due_at: input.dueAt ?? existing?.due_at ?? null,
     provenance: "summary",
     source_task_id: sourceTaskId,
     created_by_user_id: input.userId,
@@ -1022,20 +1053,24 @@ async function resolveBriefTaskParent(db: Kysely<DB>, entityIds: string[]) {
   return id ? { id } : null;
 }
 
-async function promoteBriefTaskEvidence(db: Kysely<DB>, taskId: string, refs: AgentKnowledgeRefs): Promise<void> {
+async function promoteBriefTaskEvidence(db: Kysely<DB>, taskId: string, refs: AgentKnowledgeRefs): Promise<string[]> {
   const edges = [
     ...refs.fileIds.map((refId) => ({ kind: "file", refId })),
     ...refs.entityIds.map((refId) => ({ kind: "entity", refId })),
     ...(refs.factIds ?? []).map((refId) => ({ kind: "fact", refId })),
     ...(refs.mentionIds ?? []).map((refId) => ({ kind: "mention", refId })),
   ];
+  const insertedFileIds: string[] = [];
   for (const edge of edges) {
-    await db
+    const inserted = await db
       .insertInto("task_evidence")
       .values({ task_id: taskId, kind: edge.kind, ref_id: edge.refId })
       .onConflict((oc) => oc.columns(["task_id", "kind", "ref_id"]).doNothing())
-      .execute();
+      .returning("ref_id")
+      .executeTakeFirst();
+    if (inserted && edge.kind === "file") insertedFileIds.push(inserted.ref_id);
   }
+  return insertedFileIds;
 }
 
 type SummaryTaskParent = { id: string | null; parentSourceRef: string | null; parentName: string | null };

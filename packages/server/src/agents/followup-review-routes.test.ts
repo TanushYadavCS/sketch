@@ -111,6 +111,29 @@ describe("follow-up review routes", () => {
     const conflict = await request("keep_open");
     expect(conflict.status).toBe(409);
     await expect(conflict.json()).resolves.toMatchObject({ error: { code: "REVIEW_ALREADY_DECIDED" } });
+    await expect(
+      db
+        .selectFrom("task_activity_events")
+        .select(["event_kind", "actor_type", "actor_user_id", "surface", "changes_json"])
+        .where("task_id", "=", created.taskId)
+        .orderBy("event_kind")
+        .execute(),
+    ).resolves.toEqual([
+      {
+        event_kind: "completion_review_decided",
+        actor_type: "user",
+        actor_user_id: "user-1",
+        surface: "web",
+        changes_json: JSON.stringify({ reviewState: { before: "pending", after: "accepted" } }),
+      },
+      {
+        event_kind: "task_status_changed",
+        actor_type: "user",
+        actor_user_id: "user-1",
+        surface: "web",
+        changes_json: JSON.stringify({ status: { before: "open", after: "done" } }),
+      },
+    ]);
   });
 
   it("returns REVIEW_STALE when a completion review has expired", async () => {
@@ -233,6 +256,7 @@ describe("follow-up review routes", () => {
 
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual(await missing.json());
+    await expect(db.selectFrom("task_activity_events").select("id").execute()).resolves.toEqual([]);
   });
 
   it("keeps seed review owner-scoped and makes dismiss retries idempotent", async () => {

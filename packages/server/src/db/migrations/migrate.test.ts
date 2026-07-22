@@ -25,7 +25,7 @@ import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 
-const EXPECTED_MIGRATION_COUNT = 148;
+const EXPECTED_MIGRATION_COUNT = 149;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -217,6 +217,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[145]).toBe("150-task-durability-steel-thread");
     expect(names[146]).toBe("151-agent-output-item-task-links");
     expect(names[147]).toBe("152-reseed-combined-durability-routes");
+    expect(names[148]).toBe("153-task-activity-events");
   });
 
   it("resets reviewed combined durability routes for member-source reseeding", async () => {
@@ -492,6 +493,47 @@ describe("runMigrations — full sequence", () => {
       SELECT task_id FROM agent_output_items WHERE id = 'task-link-item'
     `.execute(db);
     expect(item.rows).toEqual([{ task_id: null }]);
+  });
+
+  it("creates the append-only task activity schema and indexes", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const columns = await sql<{ name: string }>`
+      SELECT name
+      FROM pragma_table_info('task_activity_events')
+      ORDER BY cid ASC
+    `.execute(db);
+    expect(columns.rows.map((row) => row.name)).toEqual([
+      "id",
+      "task_id",
+      "event_kind",
+      "actor_type",
+      "actor_user_id",
+      "actor_key",
+      "surface",
+      "source_agent_output_id",
+      "changes_json",
+      "evidence_json",
+      "dedupe_key",
+      "occurred_at",
+      "created_at",
+    ]);
+
+    const indexes = await sql<{ name: string; unique: number }>`
+      SELECT name, "unique"
+      FROM pragma_index_list('task_activity_events')
+      WHERE name IN (
+        'idx_task_activity_events_task_time',
+        'idx_task_activity_events_kind_time',
+        'idx_task_activity_events_dedupe_key'
+      )
+      ORDER BY name ASC
+    `.execute(db);
+    expect(indexes.rows).toEqual([
+      { name: "idx_task_activity_events_dedupe_key", unique: 1 },
+      { name: "idx_task_activity_events_kind_time", unique: 0 },
+      { name: "idx_task_activity_events_task_time", unique: 0 },
+    ]);
   });
 
   it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {

@@ -14,6 +14,7 @@ import {
 } from "../../db/repositories/agent-outputs";
 import { createConversationFollowupsRepository } from "../../db/repositories/conversation-followups";
 import { createEntityRepository, whereLiveEntity } from "../../db/repositories/entities";
+import { createTaskActivityRepository } from "../../db/repositories/task-activity";
 import {
   type ActiveTaskDurabilityRoute,
   createTaskDurabilityTransitionRepository,
@@ -21,8 +22,10 @@ import {
 import { createTaskRepository } from "../../db/repositories/tasks";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
+import { createLogger } from "../../logger";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
 import { parseTimestampMs } from "../../timestamps";
+import { resolveDailyBriefTaskAttention } from "../daily-brief-task-attention";
 import { type FollowupReminderView, reconcileFollowupReminderItems } from "../followup-reminder";
 import type {
   AgentApiItem,
@@ -710,8 +713,13 @@ const DAILY_BRIEF_INSTRUCTIONS = [
 
 const DURABLE_TASKS_INSTRUCTION = [
   "- The runtime context includes followupReminder when conversation-derived follow-up tracking is available. Treat its pending, untracked, and looksResolved lists as authoritative; the server reconciles those sections after generation.",
-  "- Never place a looksResolved task in todos. Preserve exact taskId, sourceKey, and sourceAnchorKey identities from runtime context in structuredPayload when rendering related todos.",
-  "- The runtime context may include openDurableTasks and summaryTasks: tasks that already exist with the shown status. Render those as-is and only create todos for genuinely new work; do not duplicate an existing task.",
+  "- Never place a looksResolved task or a task with the taskAttention reason pending_completion_review in todos. Preserve exact taskId, sourceKey, sourceAnchorKey, parentEntityId, and assigneeEntityId identities from runtime context in structuredPayload when rendering related items.",
+  "- Treat openDurableTasks as broad Known Task Memory for duplicate prevention. A task's presence there does not mean it belongs in today's Brief.",
+  "- The runtime context includes taskAttention.items: the server-ranked existing tasks that may merit presentation today, plus authoritative attentionReasons explaining why. Use this list for existing-task todos instead of promoting quiet Known Task Memory.",
+  "- Do not claim that a task changed unless taskAttention supplies new_since_last_brief, meaningfully_changed, or status_changed. Use changedFields and due/priority/continuity reasons as the factual basis for concise explanations.",
+  "- Preserve taskAttention ordering: do not move a low-signal carried_from_previous_brief task ahead of overdue, pending-review, new/changed, due-soon, or high-priority work without fresh evidence.",
+  "- When no existing task merits attention, produce fewer todos rather than filling the section with quiet backlog items.",
+  "- The runtime context may also include summaryTasks. Render taskAttention identities as-is and only create todos for genuinely new work; do not duplicate an existing task.",
   "- Some summary tasks may also appear in openDurableTasks. Treat matching ids, titles, or parents as one existing task, not as separate pieces of work.",
   "- Use recentSummaries to understand what Summarizer already extracted from chat. Treat those action items as already-derived context, not as raw source material to derive again.",
   "- Do not create a new todo if it matches an existing durable task or summary task. Create todos only for genuinely new work from non-Summarizer-covered sources or newly discovered evidence.",
@@ -852,6 +860,93 @@ function reconcileMeetingItems(items: AgentOutputItemInput[], meetings: TodaysMe
   });
 
   return [...reconciled, ...others];
+}
+
+type TaskAttentionIdentity = {
+  taskId: string;
+  parentEntityId: string | null;
+  assigneeEntityId: string | null;
+  sourcePlatform: string | null;
+  sourceAnchorKey: string | null;
+  attentionReasons: string[];
+  evidenceFileIds: string[];
+};
+
+function parseTaskAttentionIdentities(value: unknown): Map<string, TaskAttentionIdentity> {
+  const context = asRecord(value);
+  const items = Array.isArray(context?.items) ? context.items : [];
+  const identities = new Map<string, TaskAttentionIdentity>();
+  for (const value of items) {
+    const item = asRecord(value);
+    const taskId = readString(item?.taskId);
+    if (!item || !taskId) continue;
+    const evidence = asRecord(item.evidence);
+    identities.set(taskId, {
+      taskId,
+      parentEntityId: readString(item.parentEntityId),
+      assigneeEntityId: readString(item.assigneeEntityId),
+      sourcePlatform: readString(item.sourcePlatform),
+      sourceAnchorKey: readString(item.sourceAnchorKey),
+      attentionReasons: readStringArray(item.attentionReasons),
+      evidenceFileIds: readStringArray(evidence?.fileIds),
+    });
+  }
+  return identities;
+}
+
+function parseKnownTaskIds(value: unknown): Set<string> {
+  if (!Array.isArray(value)) return new Set();
+  return new Set(
+    value.flatMap((entry) => {
+      const taskId = readString(asRecord(entry)?.id);
+      return taskId ? [taskId] : [];
+    }),
+  );
+}
+
+function reconcileTaskAttentionItems(
+  items: AgentOutputItemInput[],
+  taskAttention: unknown,
+  openDurableTasks: unknown,
+): AgentOutputItemInput[] {
+  const attentionById = parseTaskAttentionIdentities(taskAttention);
+  const knownTaskIds = parseKnownTaskIds(openDurableTasks);
+  return items.flatMap((item): AgentOutputItemInput[] => {
+    if (item.sectionKey !== "todos") return [item];
+    const payload = item.structuredPayload ?? {};
+    const taskId = readString(payload.taskId);
+    if (!taskId) return [item];
+    const attention = attentionById.get(taskId);
+    if (!attention) {
+      if (knownTaskIds.has(taskId)) return [];
+      const { taskId: _ignored, ...safePayload } = payload;
+      return [{ ...item, structuredPayload: safePayload }];
+    }
+    if (attention.attentionReasons.includes("pending_completion_review")) return [];
+    const entityIds = [...item.knowledgeRefs.entityIds, attention.parentEntityId, attention.assigneeEntityId].filter(
+      (value): value is string => Boolean(value),
+    );
+    return [
+      {
+        ...item,
+        canonicalTaskId: taskId,
+        structuredPayload: {
+          ...payload,
+          taskId,
+          parentEntityId: attention.parentEntityId,
+          assigneeEntityId: attention.assigneeEntityId,
+          sourcePlatform: attention.sourcePlatform,
+          sourceAnchorKey: attention.sourceAnchorKey,
+          attentionReasons: attention.attentionReasons,
+        },
+        knowledgeRefs: {
+          ...item.knowledgeRefs,
+          entityIds: [...new Set(entityIds)],
+          fileIds: [...new Set([...item.knowledgeRefs.fileIds, ...attention.evidenceFileIds])],
+        },
+      },
+    ];
+  });
 }
 
 async function enrichItems(db: Kysely<DB>, items: AgentOutputItemInput[]): Promise<AgentOutputItemInput[]> {
@@ -1395,12 +1490,24 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
         activeSummaryConversationIds,
       }
     : {};
-  const [openDurableTasks, recentSummaries, summaryTasks, transitionResult, peopleResult] = await Promise.all([
+  const maxItemsPerSection =
+    typeof args.baseContext.maxItemsPerSection === "number"
+      ? args.baseContext.maxItemsPerSection
+      : args.maxItemsPerSection;
+  const peopleResult = await entities
+    .getPersonEntitiesByEmails(verifiedEmails)
+    .then((value) => ({ status: "ok" as const, value }))
+    .catch(() => ({ status: "error" as const }));
+  const assigneeEntityIds =
+    peopleResult.status === "ok"
+      ? [...new Set([...peopleResult.value.values()].flat().map((person) => person.id))]
+      : [];
+  const [openDurableTasks, recentSummaries, summaryTasks, transitionResult] = await Promise.all([
     taskRepo.loadOpenDurableTasksForBrief({
       userId: args.userId,
       userEmails,
-      ...activeSummaryTaskScope,
-      limit: args.maxItemsPerSection * 4,
+      assigneeEntityIds,
+      limit: maxItemsPerSection * 4,
     }),
     loadRecentSummariesForBrief(outputRepo, args.userId, summarySince, durabilityEnabled, activeRoutes),
     taskRepo.loadSummaryTasksForBrief({
@@ -1432,15 +1539,19 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
             suppressedLegacy: [],
           },
         }),
-    entities
-      .getPersonEntitiesByEmails(verifiedEmails)
-      .then((value) => ({ status: "ok" as const, value }))
-      .catch(() => ({ status: "error" as const })),
   ]);
-  const assigneeEntityIds =
-    peopleResult.status === "ok"
-      ? [...new Set([...peopleResult.value.values()].flat().map((person) => person.id))]
-      : [];
+  const taskAttention = await resolveDailyBriefTaskAttention({
+    db: args.db,
+    userId: args.userId,
+    userEmails,
+    assigneeEntityIds,
+    outputDate: readString(args.baseContext.outputDate) ?? new Date().toISOString().slice(0, 10),
+    timezone: readString(args.baseContext.timezone) ?? "UTC",
+    generatedAt: readString(args.baseContext.generationStartedAt) ?? new Date().toISOString(),
+    maxItemsPerSection,
+    initialPartial: peopleResult.status === "error",
+    logger: createLogger(args.config),
+  });
   const scopedOpenDurableTasks = openDurableTasks;
   const scopedRecentSummaries = durabilityEnabled
     ? recentSummaries.filter((summary) => activeRouteOutputSourceKeys.has(summary.output.source_key))
@@ -1568,6 +1679,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
       parentEntityId: task.parent_entity_id,
       updatedAt: task.updated_at,
     })),
+    taskAttention,
     ...(followupReminder ? { followupReminder } : {}),
     sameDayPreviousOutput: dropCompletedTodos(args.baseContext.sameDayPreviousOutput as FormattedPriorOutput | null),
     previousDayOutput: dropCompletedTodos(args.baseContext.previousDayOutput as FormattedPriorOutput | null),
@@ -1653,14 +1765,52 @@ function buildFollowupReminderView(
 async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
   if (!args.createTasks) return;
   if (!args.persistedItems) {
-    const taskRepo = createTaskRepository(args.db);
     for (const item of args.items) {
       if (item.sectionKey !== "todos" || item.canonicalTaskId) continue;
       try {
-        await taskRepo.promoteBriefTask({
-          userId: args.userId,
-          todo: item,
-          knowledgeRefs: item.knowledgeRefs,
+        await args.db.transaction().execute(async (trx) => {
+          const result = await createTaskRepository(trx).promoteBriefTask({
+            userId: args.userId,
+            todo: item,
+            knowledgeRefs: item.knowledgeRefs,
+          });
+          if (result.status === "upserted" && result.created) {
+            await createTaskActivityRepository(trx).append({
+              taskId: result.taskId,
+              eventKind: "task_created",
+              actorType: "agent",
+              actorKey: DAILY_BRIEF_AGENT_KEY,
+              surface: "daily_brief",
+              sourceAgentOutputId: args.outputId,
+              identityParts: [result.taskId],
+              occurredAt: new Date().toISOString(),
+            });
+          } else if (result.status === "upserted" && Object.keys(result.changes).length > 0) {
+            await createTaskActivityRepository(trx).append({
+              taskId: result.taskId,
+              eventKind: "task_fields_changed",
+              actorType: "agent",
+              actorKey: DAILY_BRIEF_AGENT_KEY,
+              surface: "daily_brief",
+              sourceAgentOutputId: args.outputId,
+              changes: result.changes,
+              identityParts: [result.taskId, args.outputId, JSON.stringify(result.changes)],
+              occurredAt: new Date().toISOString(),
+            });
+          }
+          if (result.status !== "skipped" && result.evidenceFileIds.length > 0) {
+            await createTaskActivityRepository(trx).append({
+              taskId: result.taskId,
+              eventKind: "material_evidence_added",
+              actorType: "agent",
+              actorKey: DAILY_BRIEF_AGENT_KEY,
+              surface: "daily_brief",
+              sourceAgentOutputId: args.outputId,
+              evidence: { fileIds: result.evidenceFileIds },
+              identityParts: [result.taskId, ...result.evidenceFileIds],
+              occurredAt: new Date().toISOString(),
+            });
+          }
         });
       } catch (err) {
         args.logger.warn({ err, outputId: args.outputId, userId: args.userId }, "Daily Brief: task promotion failed");
@@ -1680,6 +1830,43 @@ async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
           knowledgeRefs: item.knowledgeRefs,
         });
         if (result.status === "skipped") return;
+        if (result.status === "upserted" && result.created) {
+          await createTaskActivityRepository(trx).append({
+            taskId: result.taskId,
+            eventKind: "task_created",
+            actorType: "agent",
+            actorKey: DAILY_BRIEF_AGENT_KEY,
+            surface: "daily_brief",
+            sourceAgentOutputId: args.outputId,
+            identityParts: [result.taskId],
+            occurredAt: new Date().toISOString(),
+          });
+        } else if (result.status === "upserted" && Object.keys(result.changes).length > 0) {
+          await createTaskActivityRepository(trx).append({
+            taskId: result.taskId,
+            eventKind: "task_fields_changed",
+            actorType: "agent",
+            actorKey: DAILY_BRIEF_AGENT_KEY,
+            surface: "daily_brief",
+            sourceAgentOutputId: args.outputId,
+            changes: result.changes,
+            identityParts: [result.taskId, args.outputId, JSON.stringify(result.changes)],
+            occurredAt: new Date().toISOString(),
+          });
+        }
+        if (result.evidenceFileIds.length > 0) {
+          await createTaskActivityRepository(trx).append({
+            taskId: result.taskId,
+            eventKind: "material_evidence_added",
+            actorType: "agent",
+            actorKey: DAILY_BRIEF_AGENT_KEY,
+            surface: "daily_brief",
+            sourceAgentOutputId: args.outputId,
+            evidence: { fileIds: result.evidenceFileIds },
+            identityParts: [result.taskId, ...result.evidenceFileIds],
+            occurredAt: new Date().toISOString(),
+          });
+        }
         const linked = await createAgentOutputRepository(trx).linkItemToTask({
           outputId: args.outputId,
           itemId: persisted.id,
@@ -1754,16 +1941,21 @@ export const dailyBriefDefinition: AgentDefinition = {
       buildDailyBriefCandidateContext(params),
       buildTodaysMeetings(params),
     ]);
-    return { dailyBriefCandidateContext, todaysMeetings };
+    return { dailyBriefCandidateContext, todaysMeetings, generationStartedAt: params.now.toISOString() };
   },
   reconcileItems: async ({ items, runtimeContext }) => {
     const sections = Array.isArray(runtimeContext.sections) ? (runtimeContext.sections as string[]) : [];
     const withMeetings = sections.includes(DAILY_BRIEF_MEETINGS_SECTION_KEY)
       ? reconcileMeetingItems(items, parseTodaysMeetings(runtimeContext.todaysMeetings))
       : items;
+    const withTaskAttention = reconcileTaskAttentionItems(
+      withMeetings,
+      runtimeContext.taskAttention,
+      runtimeContext.openDurableTasks,
+    );
     const followupReminder = runtimeContext.followupReminder;
     if (!followupReminder || typeof followupReminder !== "object") {
-      return withMeetings.filter(
+      return withTaskAttention.filter(
         (item) => item.sectionKey !== "looks_resolved" && item.sectionKey !== "untracked_followups",
       );
     }
@@ -1772,7 +1964,7 @@ export const dailyBriefDefinition: AgentDefinition = {
       typeof runtimeContext.maxItemsPerSection === "number"
         ? runtimeContext.maxItemsPerSection
         : Number.POSITIVE_INFINITY;
-    return reconcileFollowupReminderItems(withMeetings, reminder, maxItemsPerSection);
+    return reconcileFollowupReminderItems(withTaskAttention, reminder, maxItemsPerSection);
   },
   enrichItems,
   toApiItem,

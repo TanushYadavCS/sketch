@@ -608,7 +608,7 @@ describe("conversationSummaryDefinition", () => {
       for (const [id, text] of [
         ["initial-change", "Mina will prepare the launch plan."],
         ["initial-resolve", "Tanush will close the vendor review."],
-        ["changed-evidence", "Mina will prepare the revised launch plan."],
+        ["changed-evidence", "Mina will prepare the revised launch plan by 2026-07-08."],
         ["resolved-evidence", "Tanush finished the vendor review."],
         ["new-evidence", "Mina will send the rollout note."],
       ]) {
@@ -688,6 +688,7 @@ describe("conversationSummaryDefinition", () => {
               matchedTaskId: taskId.get("Prepare the launch plan"),
               messageIds: [messageId.get("changed-evidence")],
               assigneeName: "Mina",
+              dueAt: "2026-07-08",
             },
           }),
           outputItem({
@@ -718,13 +719,14 @@ describe("conversationSummaryDefinition", () => {
         ],
       });
 
-      const tasks = await db.selectFrom("tasks").select(["id", "title"]).orderBy("title").execute();
+      const tasks = await db.selectFrom("tasks").select(["id", "title", "due_at"]).orderBy("title").execute();
       expect(tasks).toHaveLength(3);
       expect(tasks.map((task) => task.title)).toEqual([
         "Close the vendor review",
         "Prepare the revised launch plan",
         "Send the rollout note",
       ]);
+      expect(tasks.find((task) => task.title === "Prepare the revised launch plan")?.due_at).toBe("2026-07-08");
       await expect(db.selectFrom("task_message_evidence").selectAll().execute()).resolves.toHaveLength(5);
       await expect(db.selectFrom("task_completion_recommendations").selectAll().execute()).resolves.toHaveLength(1);
     } finally {

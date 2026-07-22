@@ -1207,6 +1207,22 @@ export interface TaskCompletionRecommendationDeliveriesTable {
   created_at: Generated<string>;
 }
 
+export interface TaskActivityEventsTable {
+  id: string;
+  task_id: string;
+  event_kind: string;
+  actor_type: string;
+  actor_user_id: string | null;
+  actor_key: string | null;
+  surface: string;
+  source_agent_output_id: string | null;
+  changes_json: string | null;
+  evidence_json: string | null;
+  dedupe_key: string;
+  occurred_at: string;
+  created_at: Generated<string>;
+}
+
 export interface TaskDurabilityRouteStateTable {
   agent_key: string;
   user_id: string;
@@ -1387,6 +1403,7 @@ export interface DB {
   task_completion_recommendations: TaskCompletionRecommendationsTable;
   task_completion_recommendation_evidence: TaskCompletionRecommendationEvidenceTable;
   task_completion_recommendation_deliveries: TaskCompletionRecommendationDeliveriesTable;
+  task_activity_events: TaskActivityEventsTable;
   task_durability_route_state: TaskDurabilityRouteStateTable;
   task_seed_candidates: TaskSeedCandidatesTable;
   work_cycles: WorkCyclesTable;

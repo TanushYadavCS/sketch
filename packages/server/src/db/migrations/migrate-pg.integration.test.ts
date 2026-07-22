@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 148;
+const EXPECTED_MIGRATION_COUNT = 149;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -182,6 +182,8 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[144]).toBe("149-whatsapp-backfill-lifecycle-durability");
     expect(names[145]).toBe("150-task-durability-steel-thread");
     expect(names[146]).toBe("151-agent-output-item-task-links");
+    expect(names[147]).toBe("152-reseed-combined-durability-routes");
+    expect(names[148]).toBe("153-task-activity-events");
   });
 
   it("creates the bounded open-materializable partial index", async () => {
@@ -295,6 +297,56 @@ describe("runMigrations on Postgres — full sequence", () => {
         "task_seed_candidates_fingerprint_uidx",
         "idx_task_seed_candidates_route_state",
       ]),
+    );
+  });
+
+  it("creates the append-only task activity schema and indexes", async () => {
+    const columns = await sql<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }>`
+      SELECT column_name, data_type, is_nullable
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'task_activity_events'
+      ORDER BY ordinal_position ASC
+    `.execute(db);
+    expect(columns.rows.map((row) => row.column_name)).toEqual([
+      "id",
+      "task_id",
+      "event_kind",
+      "actor_type",
+      "actor_user_id",
+      "actor_key",
+      "surface",
+      "source_agent_output_id",
+      "changes_json",
+      "evidence_json",
+      "dedupe_key",
+      "occurred_at",
+      "created_at",
+    ]);
+
+    const indexes = await sql<{ indexname: string; indexdef: string }>`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'task_activity_events'
+        AND indexname IN (
+          'idx_task_activity_events_task_time',
+          'idx_task_activity_events_kind_time',
+          'idx_task_activity_events_dedupe_key'
+        )
+      ORDER BY indexname ASC
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.indexname)).toEqual([
+      "idx_task_activity_events_dedupe_key",
+      "idx_task_activity_events_kind_time",
+      "idx_task_activity_events_task_time",
+    ]);
+    expect(indexes.rows.find((row) => row.indexname === "idx_task_activity_events_dedupe_key")?.indexdef).toContain(
+      "UNIQUE",
     );
   });
 

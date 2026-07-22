@@ -152,6 +152,7 @@ import * as m149 from "./migrations/149-whatsapp-backfill-lifecycle-durability";
 import * as m150 from "./migrations/150-task-durability-steel-thread";
 import * as m151 from "./migrations/151-agent-output-item-task-links";
 import * as m152 from "./migrations/152-reseed-combined-durability-routes";
+import * as m153 from "./migrations/153-task-activity-events";
 import type { DB } from "./schema";
 
 /**
@@ -313,6 +314,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "150-task-durability-steel-thread": m150,
           "151-agent-output-item-task-links": m151,
           "152-reseed-combined-durability-routes": m152,
+          "153-task-activity-events": m153,
         };
       },
     },
