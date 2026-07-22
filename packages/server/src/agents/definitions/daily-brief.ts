@@ -869,6 +869,7 @@ type TaskAttentionIdentity = {
   sourcePlatform: string | null;
   sourceAnchorKey: string | null;
   attentionReasons: string[];
+  changedFields: string[];
   evidenceFileIds: string[];
 };
 
@@ -888,6 +889,7 @@ function parseTaskAttentionIdentities(value: unknown): Map<string, TaskAttention
       sourcePlatform: readString(item.sourcePlatform),
       sourceAnchorKey: readString(item.sourceAnchorKey),
       attentionReasons: readStringArray(item.attentionReasons),
+      changedFields: readStringArray(item.changedFields),
       evidenceFileIds: readStringArray(evidence?.fileIds),
     });
   }
@@ -938,6 +940,7 @@ function reconcileTaskAttentionItems(
           sourcePlatform: attention.sourcePlatform,
           sourceAnchorKey: attention.sourceAnchorKey,
           attentionReasons: attention.attentionReasons,
+          changedFields: attention.changedFields,
         },
         knowledgeRefs: {
           ...item.knowledgeRefs,

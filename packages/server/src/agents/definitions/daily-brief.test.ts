@@ -1071,6 +1071,7 @@ describe("dailyBriefDefinition.reconcileItems", () => {
                 sourcePlatform: "slack",
                 sourceAnchorKey: "slack:42:root",
                 attentionReasons: ["meaningfully_changed"],
+                changedFields: ["priority", "status"],
               },
               {
                 taskId: "task-pending",
@@ -1094,6 +1095,8 @@ describe("dailyBriefDefinition.reconcileItems", () => {
         assigneeEntityId: "person-1",
         sourcePlatform: "slack",
         sourceAnchorKey: "slack:42:root",
+        attentionReasons: ["meaningfully_changed"],
+        changedFields: ["priority", "status"],
       },
     });
   });

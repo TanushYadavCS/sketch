@@ -7,7 +7,7 @@ import type {
   TaskStatus,
 } from "@/lib/api";
 import { EntityChip, useEntityUiOptional } from "@/lib/entity-ui";
-import { ArrowSquareOutIcon } from "@phosphor-icons/react";
+import { ArrowSquareOutIcon, ClockIcon } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@sketch/ui/components/select";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
@@ -24,6 +24,191 @@ import {
   formatBriefTaskStatus,
   getBriefItemTask,
 } from "./task-overlay";
+
+type TaskAttentionReason =
+  | "new_since_last_brief"
+  | "meaningfully_changed"
+  | "status_changed"
+  | "due_soon"
+  | "overdue"
+  | "high_priority"
+  | "pending_completion_review"
+  | "carried_from_previous_brief";
+
+interface TaskAttentionContext {
+  reasons: TaskAttentionReason[];
+  changedFields: string[];
+}
+
+const taskAttentionReasonCopy: Record<
+  Exclude<TaskAttentionReason, "meaningfully_changed">,
+  { title: string; description: string }
+> = {
+  new_since_last_brief: {
+    title: "New since your last brief",
+    description: "This task was added after your previous brief.",
+  },
+  status_changed: {
+    title: "Status changed",
+    description: "Its status changed since your previous brief.",
+  },
+  due_soon: {
+    title: "Due soon",
+    description: "This task is due within the next seven days.",
+  },
+  overdue: {
+    title: "Overdue",
+    description: "The due date has passed and this task is still open.",
+  },
+  high_priority: {
+    title: "High priority",
+    description: "This task is marked as high priority.",
+  },
+  pending_completion_review: {
+    title: "Needs your review",
+    description: "Sketch found signs that this task may be complete.",
+  },
+  carried_from_previous_brief: {
+    title: "Still on your radar",
+    description: "This task appeared in your previous brief and is still open.",
+  },
+};
+
+function readTaskAttentionContext(item: DailyBriefItem): TaskAttentionContext | null {
+  if (item.sectionKey !== "todos" || !item.structuredPayload) return null;
+  const payload = item.structuredPayload as unknown as Record<string, unknown>;
+  if (!Array.isArray(payload.attentionReasons)) return null;
+
+  const knownReasons = new Set<TaskAttentionReason>([
+    "new_since_last_brief",
+    "meaningfully_changed",
+    "status_changed",
+    "due_soon",
+    "overdue",
+    "high_priority",
+    "pending_completion_review",
+    "carried_from_previous_brief",
+  ]);
+  const reasons = [
+    ...new Set(
+      payload.attentionReasons.filter(
+        (reason): reason is TaskAttentionReason =>
+          typeof reason === "string" && knownReasons.has(reason as TaskAttentionReason),
+      ),
+    ),
+  ];
+  const changedFields = Array.isArray(payload.changedFields)
+    ? [
+        ...new Set(
+          payload.changedFields.flatMap((field) => (typeof field === "string" && field.trim() ? [field.trim()] : [])),
+        ),
+      ]
+    : [];
+  return { reasons, changedFields };
+}
+
+function formatChangedField(field: string): string | null {
+  const labels: Record<string, string> = {
+    assignee_entity_id: "assignee",
+    assignee_name: "assignee",
+    due_at: "due date",
+    parent_entity_id: "project",
+    priority: "priority",
+    proposed_assignee_name: "suggested assignee",
+    status: "status",
+    title: "title",
+  };
+  return labels[field] ?? null;
+}
+
+function formatNaturalList(values: string[]): string {
+  if (values.length === 1) return values[0] as string;
+  if (values.length === 2) return `${values[0]} and ${values[1]}`;
+  return `${values.slice(0, -1).join(", ")}, and ${values.at(-1)}`;
+}
+
+function meaningfulChangeCopy(changedFields: string[]): { title: string; description: string } {
+  const readableFields = [
+    ...new Set(
+      changedFields.flatMap((field) => {
+        const label = formatChangedField(field);
+        return label ? [label] : [];
+      }),
+    ),
+  ];
+  if (readableFields.length === 0) {
+    return {
+      title: "Recently updated",
+      description: "Something important about this task changed since your previous brief.",
+    };
+  }
+  const fields = formatNaturalList(readableFields);
+  return {
+    title: "Recently updated",
+    description: `The ${fields} changed since your previous brief.`,
+  };
+}
+
+function readableTaskAttentionReasons(context: TaskAttentionContext) {
+  return context.reasons
+    .filter((reason) => {
+      if (reason === "meaningfully_changed" && context.reasons.includes("new_since_last_brief")) return false;
+      if (
+        reason === "status_changed" &&
+        context.reasons.includes("meaningfully_changed") &&
+        context.changedFields.includes("status")
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .map((reason) =>
+      reason === "meaningfully_changed" ? meaningfulChangeCopy(context.changedFields) : taskAttentionReasonCopy[reason],
+    );
+}
+
+function BriefContextBlock({ item }: { item: DailyBriefItem }) {
+  const taskAttention = readTaskAttentionContext(item);
+  if (!taskAttention && !item.summary) return null;
+  const knownReasons = taskAttention ? readableTaskAttentionReasons(taskAttention) : [];
+  const readableReasons = taskAttention
+    ? knownReasons.length > 0
+      ? knownReasons
+      : [{ title: "Recent activity", description: "Sketch noticed recent activity on this task." }]
+    : [];
+  const label = taskAttention ? "Why it’s in your brief" : "Briefing note";
+
+  return (
+    <section aria-label={label} className="space-y-2">
+      <div className="flex items-center gap-1.5">
+        <span
+          className={cn("inline-block size-1 rounded-full", taskAttention ? "bg-amber-400" : "bg-muted-foreground/50")}
+          aria-hidden
+        />
+        <p
+          className={cn(
+            "font-mono text-[10px] uppercase tracking-[0.12em]",
+            taskAttention ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground",
+          )}
+        >
+          {label}
+        </p>
+      </div>
+      {readableReasons.length > 0 ? (
+        <ul className="border-l border-amber-400/40 pl-3">
+          {readableReasons.map((reason, index) => (
+            <li key={reason.title} className={cn("py-2", index > 0 && "border-t border-border/50")}>
+              <p className="text-[13px] font-medium leading-snug text-foreground">{reason.title}</p>
+              <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">{reason.description}</p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-[13px] leading-relaxed text-foreground/80">{item.summary}</p>
+      )}
+    </section>
+  );
+}
 
 function drawerTitle(item: DailyBriefItem): string {
   if (item.sectionKey === "todos" && item.displayRef) return `${item.displayRef} \u00b7 ${item.title}`;
@@ -117,15 +302,18 @@ function DrawerBody({
           </p>
           <h2 className="mt-2 text-[18px] font-semibold leading-snug text-foreground">{drawerTitle(item)}</h2>
           <p className="mt-1 text-[12px] text-muted-foreground">
-            {drawerSubtitle(item)} {"\u00b7"} {priorityLabel(item.priority)}
+            {drawerSubtitle(item)}
+            {!task ? (
+              <>
+                {" "}
+                {"\u00b7"} {priorityLabel(item.priority)}
+              </>
+            ) : null}
           </p>
         </header>
 
         <div className="mt-5 space-y-5">
-          <div>
-            <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Context</p>
-            <p className="text-[13px] leading-relaxed text-muted-foreground">{item.summary}</p>
-          </div>
+          <BriefContextBlock item={item} />
 
           {task ? (
             <CurrentTaskSection
@@ -239,12 +427,7 @@ function MeetingDrawerBody({
             </div>
           ) : null}
 
-          {item.summary ? (
-            <div>
-              <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Context</p>
-              <p className="text-[13px] leading-relaxed text-muted-foreground">{item.summary}</p>
-            </div>
-          ) : null}
+          <BriefContextBlock item={item} />
 
           <MeetingTimelines attendees={attendees} />
         </div>
@@ -294,6 +477,15 @@ function formatCompactDate(iso: string | null): string | null {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function formatTaskPriority(priority: string | null): string | null {
+  if (!priority?.trim()) return null;
+  const normalized = priority.trim().toLowerCase();
+  if (normalized.endsWith(" priority")) {
+    return `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`;
+  }
+  return `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)} priority`;
+}
+
 /**
  * Compact "Current task" section for non-meeting brief items that carry a live
  * task overlay. Shows the live status (editable Select when canEditStatus, a
@@ -319,57 +511,72 @@ function CurrentTaskSection({
   const updatedRelative = formatCompactRelative(task.updatedAt);
   const completedDate = task.completedAt ? formatCompactDate(task.completedAt) : null;
   const canEdit = task.canEditStatus && onUpdateTaskStatus;
+  const priority = formatTaskPriority(task.priority);
+  const metadata = updatedRelative || completedDate ? buildTaskMetadataLine(completedDate, updatedRelative) : null;
+  const headingId = `brief-current-task-${task.id}`;
 
   return (
-    <div className="rounded-md border-[0.5px] border-border/70 bg-muted/20 px-3 py-3">
-      <p className="mb-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Current task</p>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
-        {canEdit ? (
-          <Select
-            value={task.status}
-            onValueChange={(value) => onUpdateTaskStatus?.(task.id, value as TaskStatus)}
-            disabled={updating}
-          >
-            <SelectTrigger aria-label={`${task.title} status`} className="h-8 w-full text-xs sm:w-44">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {BRIEF_TASK_STATUS_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        ) : (
-          <Badge variant="outline" className={cn("max-w-full text-[10px]", tone.text)}>
-            <span className={cn("mr-1 inline-block size-1.5 rounded-full", tone.dot)} aria-hidden />
-            {formatBriefTaskStatus(task.status)}
-          </Badge>
-        )}
-        {task.priority ? (
-          <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground/80">
-            {task.priority}
+    <section
+      aria-labelledby={headingId}
+      className="overflow-hidden rounded-lg border-[0.5px] border-border/70 bg-background/40"
+    >
+      <div className="flex items-center justify-between gap-3 border-b border-border/50 bg-muted/20 px-4 py-3">
+        <h3 id={headingId} className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+          Current task
+        </h3>
+        {priority ? (
+          <span className="rounded-full border-[0.5px] border-border/70 bg-background/60 px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+            {priority}
           </span>
         ) : null}
       </div>
 
-      {showChangedTitle ? <p className="mt-2 text-[13px] leading-snug text-foreground">{task.title}</p> : null}
+      <div className="px-4 py-3">
+        {showChangedTitle ? (
+          <p className="mb-3 text-[13px] font-medium leading-snug text-foreground">{task.title}</p>
+        ) : null}
 
-      {externalStatus ? (
-        <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground/70">
-          Source status: {externalStatus}
-        </p>
+        <div className="grid grid-cols-[52px_minmax(0,1fr)] items-center gap-3">
+          <p className="text-[11px] font-medium text-muted-foreground">Status</p>
+          {canEdit ? (
+            <Select
+              value={task.status}
+              onValueChange={(value) => onUpdateTaskStatus?.(task.id, value as TaskStatus)}
+              disabled={updating}
+            >
+              <SelectTrigger aria-label={`${task.title} status`} className="h-9 w-full text-[13px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {BRIEF_TASK_STATUS_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <Badge variant="outline" className={cn("max-w-full px-2.5 py-1.5 text-[11px]", tone.text)}>
+              <span className={cn("mr-1 inline-block size-1.5 rounded-full", tone.dot)} aria-hidden />
+              {formatBriefTaskStatus(task.status)}
+            </Badge>
+          )}
+        </div>
+
+        {externalStatus ? (
+          <p className="mt-2 pl-[64px] text-[11px] text-muted-foreground">Source status: {externalStatus}</p>
+        ) : null}
+
+        {reason ? <p className="mt-2 pl-[64px] text-[11px] leading-relaxed text-muted-foreground">{reason}</p> : null}
+      </div>
+
+      {metadata ? (
+        <div className="flex items-center gap-1.5 border-t border-border/50 bg-muted/10 px-4 py-2.5 text-[11px] text-muted-foreground">
+          <ClockIcon size={13} weight="regular" aria-hidden />
+          <span className="tabular-nums">{metadata}</span>
+        </div>
       ) : null}
-
-      {reason ? <p className="mt-2 text-[11px] leading-snug text-muted-foreground">{reason}</p> : null}
-
-      {updatedRelative || completedDate ? (
-        <p className="mt-2 font-mono text-[10px] tabular-nums text-muted-foreground/70">
-          {buildTaskMetadataLine(completedDate, updatedRelative)}
-        </p>
-      ) : null}
-    </div>
+    </section>
   );
 }
 
