@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "bash scripts/with-node-version.sh pnpm exec concurrently -n server,web -c blue,magenta \"DOTENV_CONFIG_PATH=$PWD/.env pnpm --filter @sketch/server dev\" \"pnpm --filter @sketch/web dev\"",
     "dev:branch": "bash scripts/dev-branch-db.sh",
+    "dev:followup-review-qa": "DOTENV_CONFIG_PATH=$PWD/.env bash scripts/with-node-version.sh tsx packages/server/src/scripts/followup-review-qa-server.ts",
     "build": "pnpm -r build && cp -r packages/web/dist packages/server/dist/public",
     "lint": "biome check .",
     "format": "biome format . --write",
@@ -12,6 +13,7 @@
     "test:unit": "pnpm -r test:unit",
     "test:integration": "pnpm -r --workspace-concurrency=1 test:integration",
     "test:changed": "pnpm -r test:changed",
+    "fixture:followup-review": "bash scripts/with-node-version.sh tsx packages/server/src/scripts/inline-followup-review-fixture.ts",
     "fixture:inline-followup-review": "bash scripts/with-node-version.sh tsx packages/server/src/scripts/inline-followup-review-fixture.ts",
     "otter:check": "tsx scripts/otter-check.ts",
     "recompute:entity-hotness": "tsx scripts/recompute-entity-hotness.ts",

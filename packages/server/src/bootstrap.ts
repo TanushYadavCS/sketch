@@ -90,16 +90,20 @@ export interface ServerHandle {
 }
 
 /**
- * Options for createServer. When `connect` is false (default true), the stack
- * is built without starting WhatsApp or Slack, which lets tests instantiate the
- * full server without live platform connections.
+ * Options for createServer. `connect: false` avoids Slack and WhatsApp startup.
+ * `externalStartup: false` also skips startup work that can contact remote services.
+ * `backgroundWork: false` keeps schedulers, backfills, and inbound consumers stopped.
  */
 export interface CreateServerOptions {
   connect?: boolean;
+  externalStartup?: boolean;
+  backgroundWork?: boolean;
 }
 
 export async function createServer(config: Config, options?: CreateServerOptions): Promise<ServerHandle> {
   const connect = options?.connect !== false;
+  const externalStartup = options?.externalStartup !== false;
+  const backgroundWork = options?.backgroundWork !== false;
 
   // 1. Logger
   const logger = createLogger(config);
@@ -142,7 +146,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   }
 
   // 2.5. Sync featured skills
-  await syncFeaturedSkills(config, logger);
+  if (externalStartup) await syncFeaturedSkills(config, logger);
 
   // 3. Repositories
   const users = createUserRepository(db);
@@ -151,7 +155,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const agentEnvironmentVariables = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   await backfillFilesConnectorCredentialEncryption(db, config.ENCRYPTION_KEY, logger);
   await runManagedSeed(config, settingsRepo, users);
-  await migrateManagedConnectorCredentialsToCanvas({ db, appConfig: config, logger });
+  if (externalStartup) await migrateManagedConnectorCredentialsToCanvas({ db, appConfig: config, logger });
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
   const conversationsRepo = createConversationRepository(db);
@@ -571,23 +575,24 @@ export async function createServer(config: Config, options?: CreateServerOptions
     limitAgentExecution,
     limitScheduledAgentExecution,
   });
-  await scheduler.start();
+  if (backgroundWork) await scheduler.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
-  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
+  const syncScheduler = backgroundWork ? startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config }) : null;
 
   // 8.7. Fix 2b normalization backfill — populates indexed corroboration columns
   // for pre-migration rows in the background; readers stay on the legacy path
   // until it completes, so this must not block startup readiness.
-  const normalizationBackfill = startNormalizationBackfill(db, logger);
-  const whatsappWindowKeepAliveJob = config.WHATSAPP_WINDOW_KEEPALIVE_ENABLED
-    ? startWhatsAppWindowKeepAliveJob({
-        db,
-        logger,
-        whatsapp: whatsappRuntime,
-        settingsRepo,
-      })
-    : null;
+  const normalizationBackfill = backgroundWork ? startNormalizationBackfill(db, logger) : null;
+  const whatsappWindowKeepAliveJob =
+    backgroundWork && config.WHATSAPP_WINDOW_KEEPALIVE_ENABLED
+      ? startWhatsAppWindowKeepAliveJob({
+          db,
+          logger,
+          whatsapp: whatsappRuntime,
+          settingsRepo,
+        })
+      : null;
   const agentOutputDelivery = createAgentOutputDeliveryService({
     db,
     logger,
@@ -611,7 +616,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     getWhatsApp: () => whatsapp,
   });
   const agentScheduler = new AgentScheduler({ service: agentRunService, logger });
-  agentScheduler.start();
+  if (backgroundWork) agentScheduler.start();
 
   const slackAdapterDeps = {
     db,
@@ -686,14 +691,18 @@ export async function createServer(config: Config, options?: CreateServerOptions
     backfillWorker: whatsappBackfillWorker ?? undefined,
   });
   whatsappInboundConsumerRef.current = whatsappInboundConsumer;
-  await createWhatsAppInboundEventsRepository(db).resetDispatched();
-  whatsappInboundConsumer.start();
-  whatsappBackfillWorker?.start();
-  const whatsappInboundRetention = startWhatsAppInboundRetention({
-    db,
-    logger,
-    stagingDir: join(config.DATA_DIR, "wa-staging"),
-  });
+  if (backgroundWork) {
+    await createWhatsAppInboundEventsRepository(db).resetDispatched();
+    whatsappInboundConsumer.start();
+    whatsappBackfillWorker?.start();
+  }
+  const whatsappInboundRetention = backgroundWork
+    ? startWhatsAppInboundRetention({
+        db,
+        logger,
+        stagingDir: join(config.DATA_DIR, "wa-staging"),
+      })
+    : null;
 
   // 9. HTTP server
   const app = createApp(db, config, {
@@ -776,15 +785,19 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 11. Shutdown handle
   async function shutdown() {
     logger.info("Shutting down...");
-    await whatsappBackfillWorker?.stop();
-    await whatsappInboundConsumer.stop();
-    whatsappInboundRetention.stop();
-    normalizationBackfill.stop();
+    if (backgroundWork) {
+      await whatsappBackfillWorker?.stop();
+      await whatsappInboundConsumer.stop();
+    }
+    whatsappInboundRetention?.stop();
+    normalizationBackfill?.stop();
     await telemetry.shutdown();
-    await syncScheduler.stop();
+    await syncScheduler?.stop();
     whatsappWindowKeepAliveJob?.stop();
-    agentScheduler.stop();
-    scheduler.stop();
+    if (backgroundWork) {
+      agentScheduler.stop();
+      scheduler.stop();
+    }
     if (slack) await slack.stop();
     if (whatsappSupervisor) {
       await whatsappSupervisor.shutdown();

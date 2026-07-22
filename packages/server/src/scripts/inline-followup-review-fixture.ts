@@ -11,6 +11,7 @@ import { localDateInTimezone } from "../agents/run/output-utils";
 import { createTaskDurabilityTransitionRepository } from "../db/repositories/task-durability-transition";
 import { createTaskRepository } from "../db/repositories/tasks";
 import type { DB } from "../db/schema";
+import { assertFollowupReviewQaDatabasePath } from "./followup-review-qa-config";
 
 const FIXTURE_LABEL = "Inline follow-up review QA fixture";
 const COMPLETION_TITLES = {
@@ -26,6 +27,21 @@ const SEED_TITLES = {
 export interface InlineFollowupReviewFixtureOptions {
   userId: string;
   now?: Date | string;
+  isolateRuntime?: boolean;
+}
+
+export interface FollowupReviewQaIsolationResult {
+  settingsDisconnected: number;
+  usersDisconnected: number;
+  connectorsDisabled: number;
+  scheduledTasksPaused: number;
+  agentConfigsDisabled: number;
+  dailyBriefConfigsDisabled: number;
+  agentEnvironmentVariablesRemoved: number;
+  agentEnvironmentVariableSharesRemoved: number;
+  mcpServersRemoved: number;
+  whatsappCredentialsRemoved: number;
+  whatsappKeysRemoved: number;
 }
 
 export interface InlineFollowupReviewFixtureResult {
@@ -33,6 +49,23 @@ export interface InlineFollowupReviewFixtureResult {
   outputDate: string;
   briefOutputId: string;
   sourceOutputId: string;
+  reviewCodes: {
+    confirmDone: string;
+    keepOpen: string;
+    expired: string;
+    track: string;
+    dismiss: string;
+    missing: string;
+  };
+  commands: {
+    confirmDone: string;
+    keepOpen: string;
+    expired: string;
+    track: string;
+    dismiss: string;
+    missing: string;
+  };
+  runtimeIsolation?: FollowupReviewQaIsolationResult;
   completionRecommendationIds: {
     confirmDone: string;
     keepOpen: string;
@@ -118,6 +151,96 @@ function fixtureItem(input: {
   };
 }
 
+/** Disables copied background work and live channel/tool credentials in a QA-only database. */
+export async function isolateFollowupReviewQaDatabase(
+  db: Kysely<DB>,
+  now = new Date().toISOString(),
+): Promise<FollowupReviewQaIsolationResult> {
+  return db.transaction().execute(async (trx) => {
+    const settings = await trx
+      .updateTable("settings")
+      .set({
+        slack_bot_token: null,
+        slack_app_token: null,
+        smtp_host: null,
+        smtp_port: null,
+        smtp_user: null,
+        smtp_password: null,
+        smtp_from: null,
+        google_oauth_client_id: null,
+        google_oauth_client_secret: null,
+        microsoft_oauth_client_id: null,
+        microsoft_oauth_client_secret: null,
+        microsoft_oauth_tenant: null,
+        llm_provider: null,
+        anthropic_api_key: null,
+        aws_access_key_id: null,
+        aws_secret_access_key: null,
+        aws_region: null,
+        model_id: null,
+        gemini_api_key: null,
+        embedding_provider: null,
+        sketch_api_key: null,
+        whatsapp_fallback_agent_id: null,
+        updated_at: now,
+      })
+      .executeTakeFirst();
+    const disconnectedUsers = await trx
+      .updateTable("users")
+      .set({ slack_user_id: null, whatsapp_number: null })
+      .executeTakeFirst();
+    const connectors = await trx
+      .updateTable("connector_configs")
+      .set({ sync_status: "disabled", updated_at: now })
+      .executeTakeFirst();
+    const scheduledTasks = await trx
+      .updateTable("scheduled_tasks")
+      .set({ status: "paused", next_run_at: null, updated_at: now })
+      .executeTakeFirst();
+    const agentConfigs = await trx
+      .updateTable("agent_user_configs")
+      .set({ enabled: 0, updated_at: now })
+      .executeTakeFirst();
+    const users = await trx.selectFrom("users").select("id").execute();
+    for (const user of users) {
+      await trx
+        .insertInto("agent_user_configs")
+        .values({
+          agent_key: DAILY_BRIEF_AGENT_KEY,
+          user_id: user.id,
+          enabled: 0,
+          updated_at: now,
+        })
+        .onConflict((oc) =>
+          oc.columns(["agent_key", "user_id"]).doUpdateSet({
+            enabled: 0,
+            updated_at: now,
+          }),
+        )
+        .execute();
+    }
+    const agentEnvironmentVariableShares = await trx.deleteFrom("agent_environment_variable_shares").executeTakeFirst();
+    const agentEnvironmentVariables = await trx.deleteFrom("agent_environment_variables").executeTakeFirst();
+    const mcpServers = await trx.deleteFrom("mcp_servers").executeTakeFirst();
+    const whatsappCredentials = await trx.deleteFrom("whatsapp_creds").executeTakeFirst();
+    const whatsappKeys = await trx.deleteFrom("whatsapp_keys").executeTakeFirst();
+
+    return {
+      settingsDisconnected: Number(settings.numUpdatedRows ?? 0),
+      usersDisconnected: Number(disconnectedUsers.numUpdatedRows ?? 0),
+      connectorsDisabled: Number(connectors.numUpdatedRows ?? 0),
+      scheduledTasksPaused: Number(scheduledTasks.numUpdatedRows ?? 0),
+      agentConfigsDisabled: Number(agentConfigs.numUpdatedRows ?? 0),
+      dailyBriefConfigsDisabled: users.length,
+      agentEnvironmentVariablesRemoved: Number(agentEnvironmentVariables.numDeletedRows ?? 0),
+      agentEnvironmentVariableSharesRemoved: Number(agentEnvironmentVariableShares.numDeletedRows ?? 0),
+      mcpServersRemoved: Number(mcpServers.numDeletedRows ?? 0),
+      whatsappCredentialsRemoved: Number(whatsappCredentials.numDeletedRows ?? 0),
+      whatsappKeysRemoved: Number(whatsappKeys.numDeletedRows ?? 0),
+    };
+  });
+}
+
 /** Removes only records created by the inline follow-up review QA fixture for one user. */
 export async function clearInlineFollowupReviewFixture(db: Kysely<DB>, userId: string): Promise<void> {
   const ids = fixtureIds(userId);
@@ -187,6 +310,7 @@ export async function seedInlineFollowupReviewFixture(
     .executeTakeFirst();
   if (!user) throw new Error(`User ${options.userId} does not exist.`);
 
+  const runtimeIsolation = options.isolateRuntime ? await isolateFollowupReviewQaDatabase(db, now) : undefined;
   await clearInlineFollowupReviewFixture(db, options.userId);
 
   const timezone = user.timezone ?? "UTC";
@@ -315,6 +439,22 @@ export async function seedInlineFollowupReviewFixture(
   const trackSeed = seedByTitle.get(SEED_TITLES.track);
   const dismissSeed = seedByTitle.get(SEED_TITLES.dismiss);
   if (!trackSeed || !dismissSeed) throw new Error("Fixture seed candidates were not created.");
+  const reviewCodes = {
+    confirmDone: reviewCode(`${ids.prefix}-confirmDone`),
+    keepOpen: reviewCode(`${ids.prefix}-keepOpen`),
+    expired: reviewCode(`${ids.prefix}-expired`),
+    track: trackSeed.review_code,
+    dismiss: dismissSeed.review_code,
+    missing: "QANOTFOUND",
+  };
+  const commands = {
+    confirmDone: `Confirm done ${reviewCodes.confirmDone}`,
+    keepOpen: `Keep open ${reviewCodes.keepOpen}`,
+    expired: `Confirm done ${reviewCodes.expired}`,
+    track: `Track ${reviewCodes.track}`,
+    dismiss: `Dismiss ${reviewCodes.dismiss}`,
+    missing: `Dismiss ${reviewCodes.missing}`,
+  };
 
   const tasks = createTaskRepository(db);
   const completionTaskEntries = await Promise.all(
@@ -349,7 +489,7 @@ export async function seedInlineFollowupReviewFixture(
         task_id: completionTaskIds[key],
         proposed_status: "done",
         review_state: "pending",
-        review_code: reviewCode(`${ids.prefix}-${key}`),
+        review_code: reviewCodes[key],
         evidence_fingerprint: `${ids.prefix}-evidence-${key}`,
         origin_agent_output_id: ids.sourceOutputId,
         rationale:
@@ -405,12 +545,12 @@ export async function seedInlineFollowupReviewFixture(
         summary: "Use Mark as done to verify the task becomes done and the terminal label persists.",
         label: "looks_resolved",
         actionLabel: "Review with Sketch",
-        actionPrompt: `Confirm done ${reviewCode(`${ids.prefix}-confirmDone`)}`,
+        actionPrompt: commands.confirmDone,
         structuredPayload: {
           serverOwnedFollowup: true,
           trackingState: "looks_resolved",
           recommendationId: ids.completionRecommendationIds.confirmDone,
-          reviewCode: reviewCode(`${ids.prefix}-confirmDone`),
+          reviewCode: reviewCodes.confirmDone,
           taskId: completionTaskIds.confirmDone,
         },
         sortOrder: 0,
@@ -425,12 +565,12 @@ export async function seedInlineFollowupReviewFixture(
         summary: "Use Keep open to verify rejection leaves the durable task actionable.",
         label: "looks_resolved",
         actionLabel: "Review with Sketch",
-        actionPrompt: `Keep open ${reviewCode(`${ids.prefix}-keepOpen`)}`,
+        actionPrompt: commands.keepOpen,
         structuredPayload: {
           serverOwnedFollowup: true,
           trackingState: "looks_resolved",
           recommendationId: ids.completionRecommendationIds.keepOpen,
-          reviewCode: reviewCode(`${ids.prefix}-keepOpen`),
+          reviewCode: reviewCodes.keepOpen,
           taskId: completionTaskIds.keepOpen,
         },
         sortOrder: 1,
@@ -445,12 +585,12 @@ export async function seedInlineFollowupReviewFixture(
         summary: "This item should render Review expired without mutation controls.",
         label: "looks_resolved",
         actionLabel: "Review with Sketch",
-        actionPrompt: `Confirm done ${reviewCode(`${ids.prefix}-expired`)}`,
+        actionPrompt: commands.expired,
         structuredPayload: {
           serverOwnedFollowup: true,
           trackingState: "looks_resolved",
           recommendationId: ids.completionRecommendationIds.expired,
-          reviewCode: reviewCode(`${ids.prefix}-expired`),
+          reviewCode: reviewCodes.expired,
           taskId: completionTaskIds.expired,
         },
         sortOrder: 2,
@@ -465,7 +605,7 @@ export async function seedInlineFollowupReviewFixture(
         summary: "Use Track to create and hydrate the canonical durable task.",
         label: "untracked",
         actionLabel: "Discuss with Sketch",
-        actionPrompt: `Track ${trackSeed.review_code}`,
+        actionPrompt: commands.track,
         structuredPayload: {
           serverOwnedFollowup: true,
           trackingState: "untracked",
@@ -483,7 +623,7 @@ export async function seedInlineFollowupReviewFixture(
         summary: "Use Dismiss to verify the terminal outcome replaces mutation controls.",
         label: "untracked",
         actionLabel: "Discuss with Sketch",
-        actionPrompt: `Dismiss ${dismissSeed.review_code}`,
+        actionPrompt: commands.dismiss,
         structuredPayload: {
           serverOwnedFollowup: true,
           trackingState: "untracked",
@@ -514,6 +654,9 @@ export async function seedInlineFollowupReviewFixture(
     outputDate,
     briefOutputId: ids.briefOutputId,
     sourceOutputId: ids.sourceOutputId,
+    reviewCodes,
+    commands,
+    ...(runtimeIsolation ? { runtimeIsolation } : {}),
     completionRecommendationIds: ids.completionRecommendationIds,
     seedCandidateIds: {
       track: trackSeed.id,
@@ -565,12 +708,14 @@ async function runCli(): Promise<void> {
       db: { type: "string" },
       "user-id": { type: "string" },
       "user-email": { type: "string" },
+      "isolate-runtime": { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
   if (parsed.values.help) {
     console.log(
-      "Usage: pnpm fixture:inline-followup-review -- <seed|clear> --db /absolute/path/sketch.db (--user-id ID | --user-email EMAIL)",
+      "Usage: pnpm fixture:followup-review -- <seed|clear> --db /absolute/path/sketch.db " +
+        "(--user-id ID | --user-email EMAIL) [--isolate-runtime]",
     );
     return;
   }
@@ -578,6 +723,7 @@ async function runCli(): Promise<void> {
   if (command !== "seed" && command !== "clear") throw new Error("Command must be seed or clear.");
   const dbPath = parsed.values.db;
   if (!dbPath || !isAbsolute(dbPath)) throw new Error("Pass an absolute SQLite path with --db.");
+  assertFollowupReviewQaDatabasePath(dbPath);
   await access(dbPath);
   const backupPath = await backupDatabase(dbPath);
   const sqlite = new Database(dbPath);
@@ -591,7 +737,10 @@ async function runCli(): Promise<void> {
       console.log(JSON.stringify({ command, userId, backupPath }, null, 2));
       return;
     }
-    const result = await seedInlineFollowupReviewFixture(db, { userId });
+    const result = await seedInlineFollowupReviewFixture(db, {
+      userId,
+      isolateRuntime: parsed.values["isolate-runtime"],
+    });
     console.log(JSON.stringify({ command, backupPath, ...result }, null, 2));
   } finally {
     await db.destroy();
