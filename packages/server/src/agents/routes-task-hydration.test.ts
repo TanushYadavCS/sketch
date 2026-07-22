@@ -393,7 +393,7 @@ describe("Daily Brief task hydration routes", () => {
           evidence_fingerprint: "fingerprint-1",
           origin_agent_output_id: null,
           rationale: "The task appears complete.",
-          expires_at: "2026-07-22T00:00:00.000Z",
+          expires_at: "2099-01-01T00:00:00.000Z",
           reviewed_at: null,
           reviewed_by_user_id: null,
           review_surface: null,

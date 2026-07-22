@@ -1,7 +1,7 @@
 import type { DailyBriefItem, DailyBriefReviewDecision, DailyBriefReviewState } from "@/lib/api";
 import { cn } from "@sketch/ui/lib/utils";
 import { BriefActionButton } from "./brief-action-button";
-import { BriefFollowupReviewActions } from "./brief-followup-review-actions";
+import { BriefFollowupActionRail } from "./brief-followup-action-rail";
 import { actionLabelForItem, labelMeta } from "./item-metadata";
 import { briefTaskExternalStatus, briefTaskStatusTone, formatBriefTaskStatus, getBriefItemTask } from "./task-overlay";
 
@@ -27,11 +27,13 @@ export function BriefItemRow({
   const liveLabel = task ? formatBriefTaskStatus(task.status) : null;
   const tone = task ? briefTaskStatusTone(task.status) : null;
   const externalStatus = task ? briefTaskExternalStatus(task) : null;
+  const isFollowupSection = item.sectionKey === "untracked_followups" || item.sectionKey === "looks_resolved";
 
   return (
     <article
       className={cn(
-        "grid grid-cols-[minmax(0,1fr)] items-center gap-x-3 sm:grid-cols-[minmax(0,1fr)_168px]",
+        "grid grid-cols-[minmax(0,1fr)] items-center gap-x-3",
+        isFollowupSection ? "sm:grid-cols-[minmax(0,1fr)_auto]" : "sm:grid-cols-[minmax(0,1fr)_168px]",
         !isLast && "border-b border-border/50",
       )}
     >
@@ -91,16 +93,23 @@ export function BriefItemRow({
         ) : null}
       </button>
 
-      <div className="flex min-w-0 shrink-0 flex-col items-end justify-center gap-1.5 py-2.5">
-        {item.actionPrompt ? (
-          <BriefActionButton label={actionLabel} onClick={() => onOpenChat(item.actionPrompt as string)} />
-        ) : null}
-        <BriefFollowupReviewActions
-          review={item.review}
-          updating={updatingReviewId === item.review?.id}
-          onReview={onReviewFollowup}
-        />
-      </div>
+      {isFollowupSection ? (
+        <div className="flex min-w-0 shrink-0 items-center justify-start pb-2.5 sm:justify-end sm:py-2.5">
+          <BriefFollowupActionRail
+            review={item.review}
+            updating={updatingReviewId === item.review?.id}
+            onReview={onReviewFollowup}
+            chatLabel={actionLabel}
+            onOpenChat={item.actionPrompt ? () => onOpenChat(item.actionPrompt as string) : undefined}
+          />
+        </div>
+      ) : (
+        <div className="flex min-w-0 shrink-0 items-center justify-end py-2.5">
+          {item.actionPrompt ? (
+            <BriefActionButton label={actionLabel} onClick={() => onOpenChat(item.actionPrompt as string)} />
+          ) : null}
+        </div>
+      )}
     </article>
   );
 }

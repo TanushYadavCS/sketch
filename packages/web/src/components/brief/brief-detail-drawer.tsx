@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
 import { cn } from "@sketch/ui/lib/utils";
 import { BriefActionButton } from "./brief-action-button";
-import { BriefFollowupReviewActions } from "./brief-followup-review-actions";
+import { BriefFollowupActionRail } from "./brief-followup-action-rail";
 import { labelMeta, refChips, sourceLinkLabel } from "./item-metadata";
 import { formatMeetingTime } from "./meeting-row";
 import {
@@ -106,6 +106,7 @@ function DrawerBody({
   const chips = refChips(item);
   const actionLabel = item.actionLabel ?? "Ask Sketch";
   const task = getBriefItemTask(item);
+  const isFollowupSection = item.sectionKey === "untracked_followups" || item.sectionKey === "looks_resolved";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -153,7 +154,28 @@ function DrawerBody({
         </div>
       </div>
 
-      {item.review || item.actionPrompt || item.sourceUrl ? (
+      {isFollowupSection && (item.review || item.actionPrompt || item.sourceUrl) ? (
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border/60 px-6 py-4">
+          {item.sourceUrl ? (
+            <a
+              href={item.sourceUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mr-auto inline-flex items-center gap-1.5 rounded-full border-[0.5px] border-border bg-transparent px-3 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:border-foreground/25 hover:bg-muted/50 hover:text-foreground"
+            >
+              <ArrowSquareOutIcon size={13} weight="bold" aria-hidden />
+              {sourceLinkLabel(item.sourceUrl)}
+            </a>
+          ) : null}
+          <BriefFollowupActionRail
+            review={item.review}
+            updating={updatingReviewId === item.review?.id}
+            onReview={onReviewFollowup}
+            chatLabel={actionLabel}
+            onOpenChat={item.actionPrompt ? () => onOpenChat(item.actionPrompt as string) : undefined}
+          />
+        </div>
+      ) : item.review || item.actionPrompt || item.sourceUrl ? (
         <div className="flex flex-col items-start gap-2 border-t border-border/60 px-6 py-4">
           {item.actionPrompt || item.sourceUrl ? (
             <div className="flex flex-wrap items-center gap-2">
@@ -177,11 +199,6 @@ function DrawerBody({
               ) : null}
             </div>
           ) : null}
-          <BriefFollowupReviewActions
-            review={item.review}
-            updating={updatingReviewId === item.review?.id}
-            onReview={onReviewFollowup}
-          />
         </div>
       ) : null}
     </div>

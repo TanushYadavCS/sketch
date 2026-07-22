@@ -1,9 +1,9 @@
 import type { DailyBriefReviewDecision, DailyBriefReviewState } from "@/lib/api";
-import { CheckIcon, XIcon } from "@phosphor-icons/react";
+import { CheckIcon, PlusIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { cn } from "@sketch/ui/lib/utils";
 
-function terminalLabel(review: DailyBriefReviewState): string | null {
+export function briefFollowupTerminalLabel(review: DailyBriefReviewState): string | null {
   if (review.kind === "completion") {
     if (review.state === "accepted") return "Marked done";
     if (review.state === "rejected") return "Kept open";
@@ -25,7 +25,7 @@ export function BriefFollowupReviewActions({
   onReview?: (kind: DailyBriefReviewState["kind"], id: string, decision: DailyBriefReviewDecision) => void;
 }) {
   if (!review) return null;
-  const terminal = terminalLabel(review);
+  const terminal = briefFollowupTerminalLabel(review);
   if (terminal) {
     return <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">{terminal}</span>;
   }
@@ -34,21 +34,21 @@ export function BriefFollowupReviewActions({
   const actions: Array<{
     label: string;
     decision: DailyBriefReviewDecision;
-    Icon: typeof CheckIcon;
-    tone: "accept" | "reject";
+    Icon: typeof CheckIcon | null;
+    tone: "primary" | "secondary";
   }> =
     review.kind === "completion"
       ? [
-          { label: "Mark as done", decision: "confirm_done", Icon: CheckIcon, tone: "accept" },
-          { label: "Keep open", decision: "keep_open", Icon: XIcon, tone: "reject" },
+          { label: "Mark as done", decision: "confirm_done", Icon: CheckIcon, tone: "primary" },
+          { label: "Keep open", decision: "keep_open", Icon: null, tone: "secondary" },
         ]
       : [
-          { label: "Track", decision: "track", Icon: CheckIcon, tone: "accept" },
-          { label: "Dismiss", decision: "dismiss", Icon: XIcon, tone: "reject" },
+          { label: "Track", decision: "track", Icon: PlusIcon, tone: "primary" },
+          { label: "Dismiss", decision: "dismiss", Icon: null, tone: "secondary" },
         ];
   return (
     <fieldset aria-label={groupLabel} aria-busy={updating} className="flex w-max max-w-full flex-col items-end gap-1">
-      <div className="inline-flex flex-nowrap items-center justify-end gap-1.5">
+      <div className="inline-flex flex-nowrap items-center justify-end gap-1">
         {actions.map((action) => (
           <Button
             key={action.decision}
@@ -61,13 +61,13 @@ export function BriefFollowupReviewActions({
               onReview(review.kind, review.id, action.decision);
             }}
             className={cn(
-              "h-7 min-w-0 rounded-full border-[0.5px] px-3 text-[11px] shadow-none focus-visible:ring-inset",
-              action.tone === "accept"
-                ? "border-emerald-500/15 bg-emerald-500/8 text-emerald-700/80 hover:bg-emerald-500/12 hover:text-emerald-800 dark:border-emerald-400/15 dark:bg-emerald-400/8 dark:text-emerald-400/75 dark:hover:bg-emerald-400/12 dark:hover:text-emerald-300"
-                : "border-red-500/15 bg-red-500/8 text-red-700/80 hover:bg-red-500/12 hover:text-red-800 dark:border-red-400/15 dark:bg-red-400/8 dark:text-red-400/75 dark:hover:bg-red-400/12 dark:hover:text-red-300",
+              "h-7 min-w-0 rounded-md px-2 text-[11px] shadow-none focus-visible:ring-inset",
+              action.tone === "primary"
+                ? "border border-accent-foreground/25 bg-accent px-2.5 text-accent-foreground hover:bg-accent-foreground/15 hover:text-accent-foreground"
+                : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
             )}
           >
-            <action.Icon size={12} weight="bold" aria-hidden />
+            {action.Icon ? <action.Icon size={12} weight="bold" aria-hidden /> : null}
             {action.label}
           </Button>
         ))}

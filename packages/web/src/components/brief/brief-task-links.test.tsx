@@ -132,7 +132,7 @@ describe("Brief row live task status", () => {
 });
 
 describe("Inline follow-up review actions", () => {
-  it("renders the chat action above one grouped completion decision and reports the selected choice", async () => {
+  it("renders the grouped completion decision before the full chat action and reports the selected choice", async () => {
     const user = userEvent.setup();
     const onReviewFollowup = vi.fn();
     const reviewItem = {
@@ -167,8 +167,8 @@ describe("Inline follow-up review actions", () => {
     const markDone = within(decisionGroup).getByRole("button", { name: "Mark as done" });
     expect(decisionGroup).not.toContainElement(chatAction);
     const rowButtons = Array.from((row as HTMLElement).querySelectorAll("button"));
-    expect(rowButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
-      rowButtons.indexOf(markDone as HTMLButtonElement),
+    expect(rowButtons.indexOf(markDone as HTMLButtonElement)).toBeLessThan(
+      rowButtons.indexOf(chatAction as HTMLButtonElement),
     );
 
     await user.click(markDone);
@@ -201,7 +201,7 @@ describe("Inline follow-up review actions", () => {
     expect(screen.queryByRole("button", { name: "Track" })).not.toBeInTheDocument();
   });
 
-  it("groups seed decisions below the chat action and reports the selected choice", async () => {
+  it("renders seed decisions before the full chat action and reports the selected choice", async () => {
     const user = userEvent.setup();
     const onReviewFollowup = vi.fn();
     const reviewItem = {
@@ -237,15 +237,15 @@ describe("Inline follow-up review actions", () => {
     const dismiss = within(decisionGroup).getByRole("button", { name: "Dismiss" });
     expect(decisionGroup).not.toContainElement(chatAction);
     const rowButtons = Array.from((row as HTMLElement).querySelectorAll("button"));
-    expect(rowButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
-      rowButtons.indexOf(dismiss as HTMLButtonElement),
+    expect(rowButtons.indexOf(dismiss as HTMLButtonElement)).toBeLessThan(
+      rowButtons.indexOf(chatAction as HTMLButtonElement),
     );
 
     await user.click(dismiss);
     expect(onReviewFollowup).toHaveBeenCalledWith("seed", "candidate-1", "dismiss");
   });
 
-  it("keeps the chat action above the grouped review decision in the detail drawer", async () => {
+  it("keeps the grouped review decision before the full chat action in the detail drawer", async () => {
     const user = userEvent.setup();
     const onReviewFollowup = vi.fn();
     const reviewItem = {
@@ -280,8 +280,8 @@ describe("Inline follow-up review actions", () => {
     const keepOpen = within(decisionGroup).getByRole("button", { name: "Keep open" });
     const drawerButtons = Array.from(drawer.querySelectorAll("button"));
     expect(decisionGroup).not.toContainElement(chatAction);
-    expect(drawerButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
-      drawerButtons.indexOf(keepOpen as HTMLButtonElement),
+    expect(drawerButtons.indexOf(keepOpen as HTMLButtonElement)).toBeLessThan(
+      drawerButtons.indexOf(chatAction as HTMLButtonElement),
     );
 
     await user.click(keepOpen);
