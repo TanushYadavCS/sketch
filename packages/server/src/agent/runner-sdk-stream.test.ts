@@ -1,6 +1,11 @@
 import { readFile } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
-import { extractAssistantText, extractAssistantTextDelta, replaySdkStreamMessages } from "./runner";
+import { describe, expect, it, vi } from "vitest";
+import {
+  extractAssistantText,
+  extractAssistantTextDelta,
+  recordSdkAgentOutputToolStarts,
+  replaySdkStreamMessages,
+} from "./runner";
 
 interface SdkStreamFixture {
   source: string;
@@ -245,5 +250,39 @@ describe("Claude Agent SDK stream fixture mapping", () => {
       },
     ]);
     expect(replay.toolCalls).toEqual([{ toolName: "Skill", skillName: "canvas", startedAt: 2, endedAt: 3 }]);
+  });
+
+  it("records malformed WriteAgentOutput calls before MCP schema validation", () => {
+    const replay = replaySdkStreamMessages([
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "<TOOL_USE_ID_1>",
+              name: "mcp__sketch__WriteAgentOutput",
+              input: {
+                outputDate: "2026-07-21",
+                timezone: "UTC",
+                masthead: { title: "", summary: "Summary" },
+                items: [],
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    const recordRejectedAttempt = vi.fn();
+
+    recordSdkAgentOutputToolStarts(
+      { recordRejectedAttempt, write: vi.fn() },
+      replay.toolStarts.map(({ toolName, input }) => ({ toolName, input })),
+    );
+
+    expect(recordRejectedAttempt).toHaveBeenCalledOnce();
+    expect(recordRejectedAttempt.mock.calls[0]?.[0]).toMatchObject({
+      issues: [expect.objectContaining({ path: ["masthead", "title"] })],
+    });
   });
 });
