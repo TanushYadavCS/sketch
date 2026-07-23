@@ -368,6 +368,76 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       ]);
     });
 
+    it("migration 155 requeues kept linked slices for re-emission and leaves the rest alone", async () => {
+      await ensureSlackConnectorConfig({ db, logger });
+      const config = await db
+        .selectFrom("connector_configs")
+        .select("id")
+        .where("connector_type", "=", "slack")
+        .executeTakeFirstOrThrow();
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "C1" },
+        "general",
+      );
+      const fileValues = ["file-kept", "file-dropped"].map((id) => ({
+        id,
+        connector_config_id: config.id,
+        provider_file_id: id,
+        file_name: id,
+        file_type: "slack_conversation_slice",
+        content_category: "document",
+        source: "slack",
+        synced_at: "2026-06-01T00:00:00.000Z",
+      }));
+      await db.insertInto("indexed_files").values(fileValues).execute();
+
+      const slices = createConversationSlicesRepository(db);
+      const seedSlice = async (n: number, verdict: "kept" | "dropped", fileId: string | null) => {
+        const message = await conversations.insertMessage({
+          conversationId: conversation.id,
+          providerMessageId: `100.${n}`,
+          senderJid: "U0TEAM",
+          senderName: "Roopak",
+          text: `message ${n}`,
+          providerTimestamp: "2026-06-01T00:00:00.000Z",
+          receivedAt: "2026-06-01T00:00:00.000Z",
+        });
+        const slice = await slices.insertIfAbsent({
+          conversationId: conversation.id,
+          firstMessageId: message.row.id,
+          lastMessageId: message.row.id,
+          startedAt: "2026-06-01T00:00:00.000Z",
+          endedAt: "2026-06-01T00:00:00.000Z",
+          messageCount: 1,
+          denoisedMessageIds: [message.row.id],
+          flushReason: "gap",
+          rosterSnapshot: "[]",
+          salienceVerdict: verdict,
+        });
+        if (fileId) {
+          await db
+            .updateTable("conversation_slices")
+            .set({ indexed_file_id: fileId })
+            .where("id", "=", slice.row.id)
+            .execute();
+        }
+        return slice.row.id;
+      };
+      const keptLinked = await seedSlice(1, "kept", "file-kept");
+      const droppedLinked = await seedSlice(2, "dropped", "file-dropped");
+      const keptUnlinked = await seedSlice(3, "kept", null);
+
+      const migration = await import("../db/migrations/155-requeue-kept-slice-reemission");
+      await migration.up(db as unknown as Kysely<unknown>);
+
+      const rows = await db.selectFrom("conversation_slices").select(["id", "indexed_file_id"]).execute();
+      const byId = new Map(rows.map((row) => [row.id, row.indexed_file_id]));
+      expect(byId.get(keptLinked)).toBeNull();
+      expect(byId.get(droppedLinked)).toBe("file-dropped");
+      expect(byId.get(keptUnlinked)).toBeNull();
+    });
+
     it("reactivates a disabled singleton so indexing survives owner removal", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const created = await db
