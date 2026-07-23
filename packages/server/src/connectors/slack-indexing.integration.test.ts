@@ -726,6 +726,78 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(unlinked.indexed_file_id).toBeNull();
     });
 
+    it("emission with no teammate archives the file of a requeued unlinked slice", async () => {
+      await ensureSlackConnectorConfig({ db, logger });
+      const config = await db
+        .selectFrom("connector_configs")
+        .select("id")
+        .where("connector_type", "=", "slack")
+        .executeTakeFirstOrThrow();
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "C1" },
+        "general",
+      );
+      const message = await conversations.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1800.9",
+        senderJid: "U0EXT",
+        senderName: "Guest",
+        text: "external-only chatter",
+        providerTimestamp: "2026-07-17T10:00:00.000Z",
+        receivedAt: "2026-07-17T10:00:00.000Z",
+      });
+      const slice = await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: message.row.id,
+        lastMessageId: message.row.id,
+        startedAt: "2026-07-17T10:00:00.000Z",
+        endedAt: "2026-07-17T10:00:00.000Z",
+        messageCount: 1,
+        denoisedMessageIds: [message.row.id],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+        salienceVerdict: "kept",
+      });
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: "file-requeued",
+          connector_config_id: config.id,
+          provider_file_id: slice.row.id,
+          file_name: "Slack: #general",
+          file_type: "slack_conversation_slice",
+          content_category: "document",
+          source: "slack",
+          synced_at: "2026-07-17T10:05:00.000Z",
+        })
+        .execute();
+
+      const facade = fakeFacade({ listChannelMembers: async () => ["U0EXT"] });
+      let skipped = 0;
+      const items = [];
+      for await (const item of emitSlackSyncedItems({
+        db,
+        logger,
+        facade,
+        onSkippedNoScope: () => {
+          skipped += 1;
+        },
+      })) {
+        items.push(item);
+      }
+
+      expect(items).toHaveLength(0);
+      expect(skipped).toBe(1);
+      const file = await db
+        .selectFrom("indexed_files")
+        .select(["is_archived", "access_scope_id"])
+        .where("id", "=", "file-requeued")
+        .executeTakeFirstOrThrow();
+      expect(file.is_archived).toBe(1);
+      expect(file.access_scope_id).toBeNull();
+    });
+
     it("reconciles ACLs: refreshes visible-channel membership, archives invisible channels", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const config = await db
