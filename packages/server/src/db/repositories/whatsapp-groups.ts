@@ -185,17 +185,22 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       if (overrides.sliceGapMinutes !== undefined) values.slice_gap_minutes = overrides.sliceGapMinutes;
       if (overrides.sliceMaxAgeMinutes !== undefined) values.slice_max_age_minutes = overrides.sliceMaxAgeMinutes;
       if (overrides.sliceMaxMessages !== undefined) values.slice_max_messages = overrides.sliceMaxMessages;
-      await db.transaction().execute(async (trx) => {
-        const before = await trx
-          .selectFrom("whatsapp_groups")
-          .select("index_enabled")
-          .where("jid", "=", jid)
-          .executeTakeFirst();
-        await trx.updateTable("whatsapp_groups").set(values).where("jid", "=", jid).execute();
-        if (enabled && before?.index_enabled === 0) {
-          await requeueKeptSlicesForJids(trx, [jid]);
-        }
-      });
+      /**
+       * Deliberately not wrapped in an explicit transaction: repository
+       * methods run inside shared-PGlite test transactions where an inner
+       * COMMIT would terminate the outer per-test transaction, and the
+       * worst-case partial failure here (enabled without requeue) is benign —
+       * the next enable transition or migration replays it.
+       */
+      const before = await db
+        .selectFrom("whatsapp_groups")
+        .select("index_enabled")
+        .where("jid", "=", jid)
+        .executeTakeFirst();
+      await db.updateTable("whatsapp_groups").set(values).where("jid", "=", jid).execute();
+      if (enabled && before?.index_enabled === 0) {
+        await requeueKeptSlicesForJids(db, [jid]);
+      }
       const row = await db.selectFrom("whatsapp_groups").selectAll().where("jid", "=", jid).executeTakeFirst();
       return row ? toIndexingConfig(row) : undefined;
     },
