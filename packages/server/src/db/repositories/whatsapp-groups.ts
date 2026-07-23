@@ -69,6 +69,35 @@ function toIndexingConfig(row: WhatsAppGroupRow): WhatsAppGroupIndexingConfig {
  * upserts the same file rows by provider_file_id.
  */
 async function requeueKeptSlicesForJids(db: Kysely<DB>, jids: string[]): Promise<void> {
+  await requeueKeptSlicesCore(db, jids);
+}
+
+/**
+ * Replaces the index-enabled selection and requeues newly enabled groups on
+ * the given executor WITHOUT opening a transaction. Callers already inside a
+ * transaction (the connector scope route) must use this directly — a nested
+ * db.transaction() fails on SQLite and COMMITs the outer per-test
+ * transaction on shared PGlite.
+ */
+export async function applyIndexEnabledSelection(db: Kysely<DB>, jids: string[]): Promise<void> {
+  const selected = [...new Set(jids)];
+  const previouslyEnabled = await db
+    .selectFrom("whatsapp_groups")
+    .select("jid")
+    .where("index_enabled", "=", 1)
+    .execute();
+  const previous = new Set(previouslyEnabled.map((row) => row.jid));
+  const newlyEnabled = selected.filter((jid) => !previous.has(jid));
+  if (newlyEnabled.length > 0) {
+    await requeueKeptSlicesCore(db, newlyEnabled);
+  }
+  await db.updateTable("whatsapp_groups").set({ index_enabled: 0 }).execute();
+  if (selected.length > 0) {
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", selected).execute();
+  }
+}
+
+async function requeueKeptSlicesCore(db: Kysely<DB>, jids: string[]): Promise<void> {
   if (jids.length === 0) return;
   const conversations = await db
     .selectFrom("conversations")
@@ -117,22 +146,8 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
     },
 
     async replaceIndexEnabledJids(jids: string[]): Promise<WhatsAppGroupIndexingConfig[]> {
-      const selected = [...new Set(jids)];
       await db.transaction().execute(async (trx) => {
-        const previouslyEnabled = await trx
-          .selectFrom("whatsapp_groups")
-          .select("jid")
-          .where("index_enabled", "=", 1)
-          .execute();
-        const previous = new Set(previouslyEnabled.map((row) => row.jid));
-        await trx.updateTable("whatsapp_groups").set({ index_enabled: 0 }).execute();
-        if (selected.length > 0) {
-          await trx.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", selected).execute();
-        }
-        const newlyEnabled = selected.filter((jid) => !previous.has(jid));
-        if (newlyEnabled.length > 0) {
-          await requeueKeptSlicesForJids(trx, newlyEnabled);
-        }
+        await applyIndexEnabledSelection(trx, jids);
       });
       const rows = await db
         .selectFrom("whatsapp_groups")

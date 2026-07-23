@@ -59,7 +59,7 @@ import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createFileSharesRepository } from "../db/repositories/file-shares";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
-import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
+import { applyIndexEnabledSelection, createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { createSettingsBackedSlackIndexingFacade } from "../slack/indexing-facade";
@@ -229,10 +229,15 @@ export async function applyWhatsAppGroupScope(params: {
   const knownGroups = await repo.list();
   const knownJids = new Set(knownGroups.map((group) => group.jid));
   const selectedJids = [...new Set(stringArray(params.scopeConfig.groupJids))].filter((jid) => knownJids.has(jid));
-  await params.db.updateTable("whatsapp_groups").set({ index_enabled: 0 }).execute();
-  if (selectedJids.length > 0) {
-    await params.db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", selectedJids).execute();
-  }
+  /**
+   * Routed through applyIndexEnabledSelection instead of updating
+   * index_enabled directly so newly enabled groups get their kept slices
+   * requeued for re-emission — a direct flag flip would leave stale linked
+   * files that emission never refreshes (linked slices outside the 7-day
+   * window are skipped). The non-transactional variant is required: this
+   * runs inside the scope route's transaction.
+   */
+  await applyIndexEnabledSelection(params.db, selectedJids);
   return { ...params.scopeConfig, groupJids: selectedJids };
 }
 
