@@ -194,8 +194,9 @@ async function renderSlackSlice(
     }));
 
   const displayNames = new Map(roster.participants.map((p) => [p.slackUserId, p.displayName]));
+  const channelLine = `Channel: #${context.channelName}`;
   const rosterBlock = [
-    `Channel: #${context.channelName}`,
+    channelLine,
     "Participants:",
     ...roster.participants.map((participant) => {
       const kindLabel =
@@ -212,10 +213,17 @@ async function renderSlackSlice(
   });
   const transcript = [...(rootLine ? [rootLine, ""] : []), ...transcriptLines].join("\n");
 
+  /**
+   * Stored content is transcript-only (plus the channel header), matching the
+   * email/Fireflies convention: participant rosters stay out of the body so
+   * they never pollute embeddings or the entity extractor. The full roster
+   * block still feeds the salience prompt, and ACLs come from the roster
+   * snapshot, so nothing downstream loses identity context.
+   */
   return {
     rosterBlock,
     transcript,
-    content: `${rosterBlock}\n\n${transcript}`,
+    content: `${channelLine}\n\n${transcript}`,
     roster,
     serializedRoster: JSON.stringify(roster),
     teammateEmails: teammateEmailsFromRoster(roster),
@@ -364,8 +372,25 @@ function sourcePathForSlice(context: SlackSliceContext): string {
   return `slack://slice/${context.slice.id}?${params.toString()}`;
 }
 
+/**
+ * Requeued slices (migration 155 cleared their indexed_file_id) still own a
+ * live file row keyed by provider_file_id = slice id. Without the fallback
+ * lookup, a slice whose channel no longer resolves any teammate would leave
+ * that old file active under stale ACLs forever.
+ */
+async function findSliceFileId(db: Kysely<DB>, sliceId: string): Promise<string | null> {
+  const row = await db
+    .selectFrom("indexed_files")
+    .select("id")
+    .where("provider_file_id", "=", sliceId)
+    .where("file_type", "=", SLACK_CONVERSATION_SLICE_FILE_TYPE)
+    .where("is_archived", "=", 0)
+    .executeTakeFirst();
+  return row?.id ?? null;
+}
+
 async function archiveLinkedSliceFileIfPresent(db: Kysely<DB>, context: SlackSliceContext): Promise<void> {
-  const indexedFileId = context.slice.indexed_file_id;
+  const indexedFileId = context.slice.indexed_file_id ?? (await findSliceFileId(db, context.slice.id));
   if (!indexedFileId) return;
   await db.transaction().execute(async (trx) => {
     await trx.deleteFrom("file_access").where("indexed_file_id", "=", indexedFileId).execute();

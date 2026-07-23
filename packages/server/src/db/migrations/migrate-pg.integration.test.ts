@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 150;
+const EXPECTED_MIGRATION_COUNT = 151;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -185,6 +185,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[147]).toBe("152-reseed-combined-durability-routes");
     expect(names[148]).toBe("153-slack-conversation-indexing");
     expect(names[149]).toBe("154-reclassify-mpim-conversations");
+    expect(names[150]).toBe("155-requeue-kept-slice-reemission");
   });
 
   it("creates the bounded open-materializable partial index", async () => {

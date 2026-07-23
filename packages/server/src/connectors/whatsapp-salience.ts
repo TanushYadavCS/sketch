@@ -383,7 +383,14 @@ async function renderSlice(db: Kysely<DB>, context: SliceContext, logger: Logger
   const messages = await listSliceMessages(db, context.slice);
   const rosterBlock = renderWhatsAppRosterBlock(roster.snapshot);
   const transcript = renderWhatsAppTranscript(roster.snapshot, messages);
-  const content = `${rosterBlock}\n\nTranscript:\n${transcript}`;
+  /**
+   * Stored content is transcript-only (plus the group header), matching the
+   * email/Fireflies convention: participant rosters stay out of the body so
+   * they never pollute embeddings or the entity extractor. The roster block
+   * still feeds the salience prompt, and ACLs come from the roster snapshot.
+   */
+  const titleGroup = sanitizeWhatsAppDisplayText(context.groupName) || "WhatsApp group";
+  const content = `Group: ${titleGroup}\n\nTranscript:\n${transcript}`;
   assertNoRawWhatsAppIdentifiers(content);
   return {
     rosterSnapshot: roster.snapshot,
@@ -548,8 +555,25 @@ async function syncedItemForKeptSlice(
   };
 }
 
+/**
+ * Requeued slices (migration 155 cleared their indexed_file_id) still own a
+ * live file row keyed by provider_file_id = slice id. Without the fallback
+ * lookup, a slice whose group no longer resolves any teammate would leave
+ * that old file active under stale ACLs forever.
+ */
+async function findSliceFileId(db: Kysely<DB>, sliceId: string): Promise<string | null> {
+  const row = await db
+    .selectFrom("indexed_files")
+    .select("id")
+    .where("provider_file_id", "=", sliceId)
+    .where("file_type", "=", WHATSAPP_CONVERSATION_SLICE_FILE_TYPE)
+    .where("is_archived", "=", 0)
+    .executeTakeFirst();
+  return row?.id ?? null;
+}
+
 async function archiveLinkedSliceFileIfPresent(db: Kysely<DB>, context: SliceContext): Promise<void> {
-  const indexedFileId = context.slice.indexed_file_id;
+  const indexedFileId = context.slice.indexed_file_id ?? (await findSliceFileId(db, context.slice.id));
   if (!indexedFileId) return;
   await db.transaction().execute(async (trx) => {
     await trx.deleteFrom("file_access").where("indexed_file_id", "=", indexedFileId).execute();

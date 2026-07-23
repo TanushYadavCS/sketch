@@ -130,6 +130,65 @@ describe("WhatsApp connector scope API", () => {
     });
   });
 
+  it("requeues kept slices for groups newly enabled via the scope endpoint", async () => {
+    await seedGroup(db, "delta@g.us", "Delta");
+    const connector = await createConnectorRepository(db).createConfig({
+      connectorType: "whatsapp",
+      authType: "system",
+      credentials: JSON.stringify({ type: "system" }),
+      scopeConfig: JSON.stringify({ groupJids: [] }),
+      createdBy: adminId,
+    });
+    const conversation = await db
+      .insertInto("conversations")
+      .values({ platform: "whatsapp", kind: "group", provider_conversation_id: "delta@g.us", display_name: "Delta" })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "file-delta",
+        connector_config_id: connector.id,
+        provider_file_id: "slice-delta",
+        file_name: "WhatsApp: Delta",
+        file_type: "whatsapp_conversation_slice",
+        content_category: "document",
+        source: "whatsapp",
+        synced_at: "2026-07-01T00:00:00.000Z",
+      })
+      .execute();
+    await db
+      .insertInto("conversation_slices")
+      .values({
+        id: "slice-delta",
+        conversation_id: conversation.id,
+        first_message_id: 1,
+        last_message_id: 1,
+        started_at: "2026-07-01T00:00:00.000Z",
+        ended_at: "2026-07-01T00:00:00.000Z",
+        message_count: 1,
+        flush_reason: "gap",
+        roster_snapshot: "[]",
+        salience_verdict: "kept",
+        indexed_file_id: "file-delta",
+      })
+      .execute();
+
+    const res = await app.request(`/api/connectors/${connector.id}/scope`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ scopeConfig: { groupJids: ["delta@g.us"] } }),
+    });
+    expect(res.status).toBe(200);
+
+    const slice = await db
+      .selectFrom("conversation_slices")
+      .select("indexed_file_id")
+      .where("id", "=", "slice-delta")
+      .executeTakeFirstOrThrow();
+    expect(slice.indexed_file_id).toBeNull();
+  });
+
   it("gates generic WhatsApp browse to admins and derives system credentials server-side", async () => {
     await seedGroup(db, "alpha@g.us", "Alpha");
     const hash = await hashPassword(PASSWORD);
