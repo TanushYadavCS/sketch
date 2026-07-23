@@ -188,19 +188,22 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       /**
        * Deliberately not wrapped in an explicit transaction: repository
        * methods run inside shared-PGlite test transactions where an inner
-       * COMMIT would terminate the outer per-test transaction, and the
-       * worst-case partial failure here (enabled without requeue) is benign —
-       * the next enable transition or migration replays it.
+       * COMMIT would terminate the outer per-test transaction. Instead the
+       * requeue runs BEFORE the enable flip so every partial failure is
+       * retryable: if the enable never commits, the group still reads as
+       * disabled and a retry replays the (idempotent) requeue; the reverse
+       * order would strand roster-stale content forever, because a retry
+       * would see index_enabled=1 and skip the transition.
        */
       const before = await db
         .selectFrom("whatsapp_groups")
         .select("index_enabled")
         .where("jid", "=", jid)
         .executeTakeFirst();
-      await db.updateTable("whatsapp_groups").set(values).where("jid", "=", jid).execute();
       if (enabled && before?.index_enabled === 0) {
         await requeueKeptSlicesForJids(db, [jid]);
       }
+      await db.updateTable("whatsapp_groups").set(values).where("jid", "=", jid).execute();
       const row = await db.selectFrom("whatsapp_groups").selectAll().where("jid", "=", jid).executeTakeFirst();
       return row ? toIndexingConfig(row) : undefined;
     },
