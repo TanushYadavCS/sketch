@@ -115,6 +115,98 @@ describe("createWhatsAppGroupRepository", () => {
     await expect(repo.listIndexEnabled()).resolves.toEqual([]);
   });
 
+  it("requeues kept linked slices when a group flips from disabled to enabled", async () => {
+    const seedGroupWithLinkedSlice = async (jid: string, suffix: string) => {
+      await repo.upsert({
+        jid,
+        name: `Group ${suffix}`,
+        description: null,
+        tool_progress: null,
+        reasoning_text: null,
+        updated_at: "2026-03-13T10:00:00.000Z",
+      });
+      const conversation = await db
+        .insertInto("conversations")
+        .values({
+          platform: "whatsapp",
+          kind: "group",
+          provider_conversation_id: jid,
+          display_name: `Group ${suffix}`,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("connector_configs")
+        .values({
+          id: "conn-wa",
+          connector_type: "whatsapp",
+          auth_type: "system",
+          credentials: "{}",
+          created_by: "admin",
+        })
+        .onConflict((oc) => oc.doNothing())
+        .execute();
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: `file-${suffix}`,
+          connector_config_id: "conn-wa",
+          provider_file_id: `slice-${suffix}`,
+          file_name: `WhatsApp: Group ${suffix}`,
+          file_type: "whatsapp_conversation_slice",
+          content_category: "document",
+          source: "whatsapp",
+          synced_at: "2026-03-13T10:00:00.000Z",
+        })
+        .execute();
+      await db
+        .insertInto("conversation_slices")
+        .values({
+          id: `slice-${suffix}`,
+          conversation_id: conversation.id,
+          first_message_id: 1,
+          last_message_id: 1,
+          started_at: "2026-03-13T09:00:00.000Z",
+          ended_at: "2026-03-13T09:05:00.000Z",
+          message_count: 1,
+          flush_reason: "gap",
+          roster_snapshot: "[]",
+          salience_verdict: "kept",
+          indexed_file_id: `file-${suffix}`,
+        })
+        .execute();
+      return `slice-${suffix}`;
+    };
+
+    const enabledSlice = await seedGroupWithLinkedSlice("on@g.us", "on");
+    const untouchedSlice = await seedGroupWithLinkedSlice("off@g.us", "off");
+
+    await repo.setIndexEnabled("on@g.us", true);
+    const afterEnable = await db.selectFrom("conversation_slices").select(["id", "indexed_file_id"]).execute();
+    const linkById = new Map(afterEnable.map((row) => [row.id, row.indexed_file_id]));
+    expect(linkById.get(enabledSlice)).toBeNull();
+    expect(linkById.get(untouchedSlice)).toBe("file-off");
+
+    await db
+      .updateTable("conversation_slices")
+      .set({ indexed_file_id: "file-on" })
+      .where("id", "=", enabledSlice)
+      .execute();
+    await repo.setIndexEnabled("on@g.us", true);
+    const afterRepeat = await db
+      .selectFrom("conversation_slices")
+      .select("indexed_file_id")
+      .where("id", "=", enabledSlice)
+      .executeTakeFirstOrThrow();
+    expect(afterRepeat.indexed_file_id).toBe("file-on");
+
+    await repo.replaceIndexEnabledJids(["on@g.us", "off@g.us"]);
+    const afterReplace = await db.selectFrom("conversation_slices").select(["id", "indexed_file_id"]).execute();
+    const replaceById = new Map(afterReplace.map((row) => [row.id, row.indexed_file_id]));
+    expect(replaceById.get(untouchedSlice)).toBeNull();
+    expect(replaceById.get(enabledSlice)).toBe("file-on");
+  });
+
   it("creates, updates, lists, and deletes manual member labels", async () => {
     await db.insertInto("users").values({ id: "labeler", name: "Labeler", email: "labeler@example.com" }).execute();
 

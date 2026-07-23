@@ -428,6 +428,55 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       const droppedLinked = await seedSlice(2, "dropped", "file-dropped");
       const keptUnlinked = await seedSlice(3, "kept", null);
 
+      const seedWhatsAppSlice = async (jid: string, suffix: string, indexEnabled: 0 | 1) => {
+        await db
+          .insertInto("whatsapp_groups")
+          .values({ jid, name: `Group ${suffix}`, index_enabled: indexEnabled, updated_at: "2026-06-01T00:00:00.000Z" })
+          .execute();
+        const wa = await db
+          .insertInto("conversations")
+          .values({
+            platform: "whatsapp",
+            kind: "group",
+            provider_conversation_id: jid,
+            display_name: `Group ${suffix}`,
+          })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+        await db
+          .insertInto("indexed_files")
+          .values({
+            id: `file-wa-${suffix}`,
+            connector_config_id: config.id,
+            provider_file_id: `slice-wa-${suffix}`,
+            file_name: `WhatsApp: Group ${suffix}`,
+            file_type: "whatsapp_conversation_slice",
+            content_category: "document",
+            source: "whatsapp",
+            synced_at: "2026-06-01T00:00:00.000Z",
+          })
+          .execute();
+        await db
+          .insertInto("conversation_slices")
+          .values({
+            id: `slice-wa-${suffix}`,
+            conversation_id: wa.id,
+            first_message_id: 1,
+            last_message_id: 1,
+            started_at: "2026-06-01T00:00:00.000Z",
+            ended_at: "2026-06-01T00:00:00.000Z",
+            message_count: 1,
+            flush_reason: "gap",
+            roster_snapshot: "[]",
+            salience_verdict: "kept",
+            indexed_file_id: `file-wa-${suffix}`,
+          })
+          .execute();
+        return `slice-wa-${suffix}`;
+      };
+      const waEnabled = await seedWhatsAppSlice("on@g.us", "on", 1);
+      const waDisabled = await seedWhatsAppSlice("off@g.us", "off", 0);
+
       const migration = await import("../db/migrations/155-requeue-kept-slice-reemission");
       await migration.up(db as unknown as Kysely<unknown>);
 
@@ -436,6 +485,8 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(byId.get(keptLinked)).toBeNull();
       expect(byId.get(droppedLinked)).toBe("file-dropped");
       expect(byId.get(keptUnlinked)).toBeNull();
+      expect(byId.get(waEnabled)).toBeNull();
+      expect(byId.get(waDisabled)).toBe("file-wa-off");
     });
 
     it("reactivates a disabled singleton so indexing survives owner removal", async () => {

@@ -60,6 +60,37 @@ function toIndexingConfig(row: WhatsAppGroupRow): WhatsAppGroupIndexingConfig {
   };
 }
 
+/**
+ * A group whose indexing was off keeps its kept slices linked to retained
+ * files, and emission never selects disabled groups — so nothing would ever
+ * refresh that content, even after re-enabling (linked slices outside the
+ * 7-day refresh window are skipped). Clearing kept-slice links on the
+ * disabled-to-enabled transition requeues them; the emitter re-renders and
+ * upserts the same file rows by provider_file_id.
+ */
+async function requeueKeptSlicesForJids(db: Kysely<DB>, jids: string[]): Promise<void> {
+  if (jids.length === 0) return;
+  const conversations = await db
+    .selectFrom("conversations")
+    .select("id")
+    .where("platform", "=", "whatsapp")
+    .where("kind", "=", "group")
+    .where("provider_conversation_id", "in", jids)
+    .execute();
+  if (conversations.length === 0) return;
+  await db
+    .updateTable("conversation_slices")
+    .set({ indexed_file_id: null })
+    .where("salience_verdict", "=", "kept")
+    .where("indexed_file_id", "is not", null)
+    .where(
+      "conversation_id",
+      "in",
+      conversations.map((row) => row.id),
+    )
+    .execute();
+}
+
 export function createWhatsAppGroupRepository(db: Kysely<DB>) {
   return {
     async getByJid(jid: string): Promise<WhatsAppGroupRow | undefined> {
@@ -88,9 +119,19 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
     async replaceIndexEnabledJids(jids: string[]): Promise<WhatsAppGroupIndexingConfig[]> {
       const selected = [...new Set(jids)];
       await db.transaction().execute(async (trx) => {
+        const previouslyEnabled = await trx
+          .selectFrom("whatsapp_groups")
+          .select("jid")
+          .where("index_enabled", "=", 1)
+          .execute();
+        const previous = new Set(previouslyEnabled.map((row) => row.jid));
         await trx.updateTable("whatsapp_groups").set({ index_enabled: 0 }).execute();
         if (selected.length > 0) {
           await trx.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", selected).execute();
+        }
+        const newlyEnabled = selected.filter((jid) => !previous.has(jid));
+        if (newlyEnabled.length > 0) {
+          await requeueKeptSlicesForJids(trx, newlyEnabled);
         }
       });
       const rows = await db
@@ -144,7 +185,17 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       if (overrides.sliceGapMinutes !== undefined) values.slice_gap_minutes = overrides.sliceGapMinutes;
       if (overrides.sliceMaxAgeMinutes !== undefined) values.slice_max_age_minutes = overrides.sliceMaxAgeMinutes;
       if (overrides.sliceMaxMessages !== undefined) values.slice_max_messages = overrides.sliceMaxMessages;
-      await db.updateTable("whatsapp_groups").set(values).where("jid", "=", jid).execute();
+      await db.transaction().execute(async (trx) => {
+        const before = await trx
+          .selectFrom("whatsapp_groups")
+          .select("index_enabled")
+          .where("jid", "=", jid)
+          .executeTakeFirst();
+        await trx.updateTable("whatsapp_groups").set(values).where("jid", "=", jid).execute();
+        if (enabled && before?.index_enabled === 0) {
+          await requeueKeptSlicesForJids(trx, [jid]);
+        }
+      });
       const row = await db.selectFrom("whatsapp_groups").selectAll().where("jid", "=", jid).executeTakeFirst();
       return row ? toIndexingConfig(row) : undefined;
     },
