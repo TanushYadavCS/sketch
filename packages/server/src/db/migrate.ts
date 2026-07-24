@@ -154,7 +154,8 @@ import * as m151 from "./migrations/151-agent-output-item-task-links";
 import * as m152 from "./migrations/152-reseed-combined-durability-routes";
 import * as m153 from "./migrations/153-slack-conversation-indexing";
 import * as m154 from "./migrations/154-reclassify-mpim-conversations";
-import * as m155 from "./migrations/155-operational-alerts";
+import * as m155 from "./migrations/155-requeue-kept-slice-reemission";
+import * as m156 from "./migrations/156-operational-alerts";
 import type { DB } from "./schema";
 
 /**
@@ -318,7 +319,8 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "152-reseed-combined-durability-routes": m152,
           "153-slack-conversation-indexing": m153,
           "154-reclassify-mpim-conversations": m154,
-          "155-operational-alerts": m155,
+          "155-requeue-kept-slice-reemission": m155,
+          "156-operational-alerts": m156,
         };
       },
     },

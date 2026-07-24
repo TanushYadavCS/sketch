@@ -368,6 +368,127 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       ]);
     });
 
+    it("migration 155 requeues kept linked slices for re-emission and leaves the rest alone", async () => {
+      await ensureSlackConnectorConfig({ db, logger });
+      const config = await db
+        .selectFrom("connector_configs")
+        .select("id")
+        .where("connector_type", "=", "slack")
+        .executeTakeFirstOrThrow();
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "C1" },
+        "general",
+      );
+      const fileValues = ["file-kept", "file-dropped"].map((id) => ({
+        id,
+        connector_config_id: config.id,
+        provider_file_id: id,
+        file_name: id,
+        file_type: "slack_conversation_slice",
+        content_category: "document",
+        source: "slack",
+        synced_at: "2026-06-01T00:00:00.000Z",
+      }));
+      await db.insertInto("indexed_files").values(fileValues).execute();
+
+      const slices = createConversationSlicesRepository(db);
+      const seedSlice = async (n: number, verdict: "kept" | "dropped", fileId: string | null) => {
+        const message = await conversations.insertMessage({
+          conversationId: conversation.id,
+          providerMessageId: `100.${n}`,
+          senderJid: "U0TEAM",
+          senderName: "Roopak",
+          text: `message ${n}`,
+          providerTimestamp: "2026-06-01T00:00:00.000Z",
+          receivedAt: "2026-06-01T00:00:00.000Z",
+        });
+        const slice = await slices.insertIfAbsent({
+          conversationId: conversation.id,
+          firstMessageId: message.row.id,
+          lastMessageId: message.row.id,
+          startedAt: "2026-06-01T00:00:00.000Z",
+          endedAt: "2026-06-01T00:00:00.000Z",
+          messageCount: 1,
+          denoisedMessageIds: [message.row.id],
+          flushReason: "gap",
+          rosterSnapshot: "[]",
+          salienceVerdict: verdict,
+        });
+        if (fileId) {
+          await db
+            .updateTable("conversation_slices")
+            .set({ indexed_file_id: fileId })
+            .where("id", "=", slice.row.id)
+            .execute();
+        }
+        return slice.row.id;
+      };
+      const keptLinked = await seedSlice(1, "kept", "file-kept");
+      const droppedLinked = await seedSlice(2, "dropped", "file-dropped");
+      const keptUnlinked = await seedSlice(3, "kept", null);
+
+      const seedWhatsAppSlice = async (jid: string, suffix: string, indexEnabled: 0 | 1) => {
+        await db
+          .insertInto("whatsapp_groups")
+          .values({ jid, name: `Group ${suffix}`, index_enabled: indexEnabled, updated_at: "2026-06-01T00:00:00.000Z" })
+          .execute();
+        const wa = await db
+          .insertInto("conversations")
+          .values({
+            platform: "whatsapp",
+            kind: "group",
+            provider_conversation_id: jid,
+            display_name: `Group ${suffix}`,
+          })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+        await db
+          .insertInto("indexed_files")
+          .values({
+            id: `file-wa-${suffix}`,
+            connector_config_id: config.id,
+            provider_file_id: `slice-wa-${suffix}`,
+            file_name: `WhatsApp: Group ${suffix}`,
+            file_type: "whatsapp_conversation_slice",
+            content_category: "document",
+            source: "whatsapp",
+            synced_at: "2026-06-01T00:00:00.000Z",
+          })
+          .execute();
+        await db
+          .insertInto("conversation_slices")
+          .values({
+            id: `slice-wa-${suffix}`,
+            conversation_id: wa.id,
+            first_message_id: 1,
+            last_message_id: 1,
+            started_at: "2026-06-01T00:00:00.000Z",
+            ended_at: "2026-06-01T00:00:00.000Z",
+            message_count: 1,
+            flush_reason: "gap",
+            roster_snapshot: "[]",
+            salience_verdict: "kept",
+            indexed_file_id: `file-wa-${suffix}`,
+          })
+          .execute();
+        return `slice-wa-${suffix}`;
+      };
+      const waEnabled = await seedWhatsAppSlice("on@g.us", "on", 1);
+      const waDisabled = await seedWhatsAppSlice("off@g.us", "off", 0);
+
+      const migration = await import("../db/migrations/155-requeue-kept-slice-reemission");
+      await migration.up(db as unknown as Kysely<unknown>);
+
+      const rows = await db.selectFrom("conversation_slices").select(["id", "indexed_file_id"]).execute();
+      const byId = new Map(rows.map((row) => [row.id, row.indexed_file_id]));
+      expect(byId.get(keptLinked)).toBeNull();
+      expect(byId.get(droppedLinked)).toBe("file-dropped");
+      expect(byId.get(keptUnlinked)).toBeNull();
+      expect(byId.get(waEnabled)).toBeNull();
+      expect(byId.get(waDisabled)).toBe("file-wa-off");
+    });
+
     it("reactivates a disabled singleton so indexing survives owner removal", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const created = await db
@@ -531,6 +652,47 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(prompts[0]).not.toContain("<@U0TEAM>");
     });
 
+    it("emitted content is transcript-only: channel header without the participant roster", async () => {
+      await ensureSlackConnectorConfig({ db, logger });
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "C1" },
+        "general",
+      );
+      const message = await conversations.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1900.1",
+        senderJid: "U0TEAM",
+        senderName: "Roopak",
+        text: "Decision: we ship the pricing change on Monday",
+        providerTimestamp: "2026-07-17T11:00:00.000Z",
+        receivedAt: "2026-07-17T11:00:00.000Z",
+      });
+      await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: message.row.id,
+        lastMessageId: message.row.id,
+        startedAt: "2026-07-17T11:00:00.000Z",
+        endedAt: "2026-07-17T11:00:00.000Z",
+        messageCount: 1,
+        denoisedMessageIds: [message.row.id],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+        salienceVerdict: "kept",
+      });
+
+      const items = [];
+      for await (const item of emitSlackSyncedItems({ db, logger, facade: fakeFacade() })) {
+        items.push(item);
+      }
+
+      expect(items).toHaveLength(1);
+      expect(items[0]?.content).toContain("Channel: #general");
+      expect(items[0]?.content).toContain("Roopak: Decision: we ship the pricing change on Monday");
+      expect(items[0]?.content).not.toContain("Participants:");
+      expect(items[0]?.content).not.toContain("(teammate)");
+    });
+
     it("emission with no teammate member archives the linked file and emits nothing", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const config = await db
@@ -613,6 +775,78 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .where("id", "=", slice.row.id)
         .executeTakeFirstOrThrow();
       expect(unlinked.indexed_file_id).toBeNull();
+    });
+
+    it("emission with no teammate archives the file of a requeued unlinked slice", async () => {
+      await ensureSlackConnectorConfig({ db, logger });
+      const config = await db
+        .selectFrom("connector_configs")
+        .select("id")
+        .where("connector_type", "=", "slack")
+        .executeTakeFirstOrThrow();
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "C1" },
+        "general",
+      );
+      const message = await conversations.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1800.9",
+        senderJid: "U0EXT",
+        senderName: "Guest",
+        text: "external-only chatter",
+        providerTimestamp: "2026-07-17T10:00:00.000Z",
+        receivedAt: "2026-07-17T10:00:00.000Z",
+      });
+      const slice = await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: message.row.id,
+        lastMessageId: message.row.id,
+        startedAt: "2026-07-17T10:00:00.000Z",
+        endedAt: "2026-07-17T10:00:00.000Z",
+        messageCount: 1,
+        denoisedMessageIds: [message.row.id],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+        salienceVerdict: "kept",
+      });
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: "file-requeued",
+          connector_config_id: config.id,
+          provider_file_id: slice.row.id,
+          file_name: "Slack: #general",
+          file_type: "slack_conversation_slice",
+          content_category: "document",
+          source: "slack",
+          synced_at: "2026-07-17T10:05:00.000Z",
+        })
+        .execute();
+
+      const facade = fakeFacade({ listChannelMembers: async () => ["U0EXT"] });
+      let skipped = 0;
+      const items = [];
+      for await (const item of emitSlackSyncedItems({
+        db,
+        logger,
+        facade,
+        onSkippedNoScope: () => {
+          skipped += 1;
+        },
+      })) {
+        items.push(item);
+      }
+
+      expect(items).toHaveLength(0);
+      expect(skipped).toBe(1);
+      const file = await db
+        .selectFrom("indexed_files")
+        .select(["is_archived", "access_scope_id"])
+        .where("id", "=", "file-requeued")
+        .executeTakeFirstOrThrow();
+      expect(file.is_archived).toBe(1);
+      expect(file.access_scope_id).toBeNull();
     });
 
     it("reconciles ACLs: refreshes visible-channel membership, archives invisible channels", async () => {

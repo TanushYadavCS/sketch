@@ -9,13 +9,12 @@
 <h3 align="center">One AI assistant for your entire team.<br/>Deploy once. Show up everywhere.</h3>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=for-the-badge" alt="Apache 2.0 License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Elastic%202.0-blue?style=for-the-badge" alt="Elastic License 2.0" /></a>
   <img src="https://img.shields.io/github/v/tag/canvasxai/sketch?style=for-the-badge&label=version&color=green" alt="version" />
   <img src="https://img.shields.io/badge/node-24%2B-brightgreen?style=for-the-badge" alt="Node 24+" />
   <a href="https://github.com/canvasxai/sketch/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/canvasxai/sketch/ci.yml?style=for-the-badge&label=CI" alt="CI" /></a>
   <a href="https://github.com/canvasxai/sketch/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge" alt="PRs Welcome" /></a>
   <a href="https://getsketch.ai/discord"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord" /></a>
-  <a href="https://platform.claude.com/docs/en/agent-sdk/overview"><img src="https://img.shields.io/badge/built%20with-Claude%20Agent%20SDK-D97757?style=for-the-badge" alt="Built with Claude Agent SDK" /></a>
 </p>
 
 ---
@@ -32,7 +31,7 @@ It felt broken.
 
 ## What Sketch actually is
 
-Sketch is an open-source, self-hostable AI assistant built for teams. One deployment, every team member, any channel they already use.
+Sketch is a source-available, self-hostable AI assistant built for teams. One deployment, every team member, any channel they already use.
 
 Think of it as giving your entire org a shared AI teammate — one that remembers, learns, and works across Slack and WhatsApp — while still keeping everyone's private stuff private.
 
@@ -71,9 +70,7 @@ Open `http://localhost:3000` — the onboarding wizard walks you through Slack/W
         |
     Message Queue (per-channel, sequential)
         |
-    Agent Runner
-        |
-    Claude Agent SDK
+    Agent Runner (Claude)
         |
     Workspace (scoped files, tools, memory)
 ```
@@ -104,7 +101,7 @@ See the full [Self-Hosting Guide](SELF_HOSTING.md) for production deployment wit
 | What           | How                            |
 |----------------|--------------------------------|
 | Runtime        | Node.js 24, TypeScript         |
-| Agent brain    | Claude Agent SDK               |
+| Agent brain    | Claude                         |
 | Database       | SQLite (Kysely query builder)  |
 | HTTP           | Hono                           |
 | Frontend       | React, Vite                    |
@@ -120,7 +117,7 @@ sketch/
     server/src/
       slack/          -> Bolt adapter (Socket Mode, DMs, channels, threads)
       whatsapp/       -> Baileys adapter (QR pairing, media, groups)
-      agent/          -> Claude Agent SDK runner, workspace isolation, prompts
+      agent/          -> Agent runner, workspace isolation, prompts
       db/             -> Kysely + SQLite, migrations, repositories
       http.ts         -> Hono app with API routes
       queue.ts        -> Per-channel sequential message queue
@@ -139,4 +136,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, code style, and PR guideli
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Elastic License 2.0 (ELv2) — see [LICENSE](LICENSE).
+
+Sketch is source available: you can freely use, copy, modify, and self-host it. You may not provide it to third parties as a hosted or managed service, circumvent license-key functionality, or remove licensing/copyright notices.

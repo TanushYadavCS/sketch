@@ -2,7 +2,7 @@
   "name": "@sketch/server",
   "version": "1.1.0",
   "private": true,
-  "license": "Apache-2.0",
+  "license": "Elastic-2.0",
   "type": "module",
   "scripts": {
     "dev": "bash ../../scripts/with-node-version.sh tsx --watch src/index.ts",

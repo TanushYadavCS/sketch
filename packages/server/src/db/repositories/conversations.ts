@@ -1,4 +1,4 @@
-import { type Insertable, type Kysely, type Selectable, type Transaction, sql } from "kysely";
+import { type Expression, type Insertable, type Kysely, type Selectable, type Transaction, sql } from "kysely";
 import type { Attachment } from "../../files";
 import { effectiveWhatsAppMessageTimestamp } from "../../whatsapp/provider-timestamp";
 import { isPg } from "../dialect";
@@ -96,6 +96,41 @@ interface RankedConversationMessageRow extends ConversationMessageRow {
   rank: number;
 }
 
+/**
+ * Cross-conversation search takes authorization as an opaque conversation-id
+ * subquery built by the caller (the tool layer owns the membership predicate,
+ * mirroring how the history tools colocate their authz joins). Embedding the
+ * subquery keeps this a single statement per dialect with no unbounded IN
+ * parameter list. Rank stays internal: dialect rank scales differ (ts_rank
+ * DESC vs bm25 ASC), so the contract is best-first ordering, not a number.
+ *
+ * hasMore is a truncation signal, not a pagination contract: results are
+ * relevance-ordered, and the row-id bounds cannot resume a rank order, so
+ * callers refine the query or raise the limit instead of paging. Matches the
+ * single-conversation searchMessages semantics.
+ */
+export interface SearchMessagesAcrossConversationsOptions {
+  query: string;
+  authorizedConversationIds: Expression<unknown>;
+  currentConversationId?: number;
+  afterMessageId?: number;
+  beforeMessageId?: number;
+  limit?: number;
+  includeBotMessages?: boolean;
+}
+
+export interface CrossConversationSearchMessage extends StoredConversationMessage {
+  conversationPlatform: string;
+  conversationKind: string;
+  conversationDisplayName: string | null;
+}
+
+interface CrossConversationRankedRow extends RankedConversationMessageRow {
+  conversation_platform: string;
+  conversation_kind: string;
+  conversation_display_name: string | null;
+}
+
 function parseAttachments(value: string | null): Attachment[] {
   if (!value) return [];
 
@@ -178,6 +213,15 @@ function sanitizeSqliteFtsQuery(input: string): string {
 
 function rankedToStored(row: RankedConversationMessageRow): SearchConversationMessageResult {
   return { ...toStored(row), rank: Number(row.rank) };
+}
+
+function crossConversationRowToStored(row: CrossConversationRankedRow): CrossConversationSearchMessage {
+  return {
+    ...toStored(row),
+    conversationPlatform: row.conversation_platform,
+    conversationKind: row.conversation_kind,
+    conversationDisplayName: row.conversation_display_name,
+  };
 }
 
 function mergeSeenMessageId(left: number | null, right: number | null): number | null {
@@ -733,6 +777,121 @@ export function createConversationRepository(db: ConversationDb) {
       const visibleRows = rows.rows.slice(0, limit);
       return {
         messages: visibleRows.map(rankedToStored),
+        hasMore: rows.rows.length > limit,
+      };
+    },
+
+    async searchMessagesAcrossConversations(
+      options: SearchMessagesAcrossConversationsOptions,
+    ): Promise<{ messages: CrossConversationSearchMessage[]; hasMore: boolean }> {
+      const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
+      const afterFilter = options.afterMessageId === undefined ? sql`` : sql`AND m.id > ${options.afterMessageId}`;
+      const beforeFilter = options.beforeMessageId === undefined ? sql`` : sql`AND m.id < ${options.beforeMessageId}`;
+      const botFilter = options.includeBotMessages ? sql`` : sql`AND m.is_bot = 0`;
+      const currentConversationFilter =
+        options.currentConversationId === undefined
+          ? sql``
+          : sql`OR m.conversation_id = ${options.currentConversationId}`;
+      const scopeFilter = sql`AND (m.conversation_id IN (${options.authorizedConversationIds}) ${currentConversationFilter})`;
+
+      if (isPg(db)) {
+        const pgQuery = sanitizePostgresWebsearchQuery(options.query);
+        if (!pgQuery) return { messages: [], hasMore: false };
+
+        const rows = await sql<CrossConversationRankedRow>`
+          WITH q AS (
+            SELECT websearch_to_tsquery('simple', ${pgQuery}) AS query
+          )
+          SELECT
+            m.id,
+            m.conversation_id,
+            m.provider_message_id,
+            m.sender_jid,
+            m.sender_name,
+            m.sender_user_id,
+            m.is_bot,
+            m.addressed_to_sketch,
+            m.text,
+            m.attachments,
+            m.provider_thread_id,
+            m.provider_parent_message_id,
+            m.is_thread_reply,
+            m.provider_timestamp,
+            m.provider_from_me,
+            m.received_at,
+            m.source,
+            m.effective_at,
+            m.connection_key,
+            m.backfill_range_id,
+            m.created_at,
+            c.platform AS conversation_platform,
+            c.kind AS conversation_kind,
+            c.display_name AS conversation_display_name,
+            ts_rank(m.search_vector, q.query) AS rank
+          FROM conversation_messages m
+          CROSS JOIN q
+          INNER JOIN conversations c ON c.id = m.conversation_id
+          WHERE m.search_vector @@ q.query
+            ${scopeFilter}
+            ${botFilter}
+            ${afterFilter}
+            ${beforeFilter}
+          ORDER BY rank DESC, m.id DESC
+          LIMIT ${limit + 1}
+        `.execute(db);
+
+        const visibleRows = rows.rows.slice(0, limit);
+        return {
+          messages: visibleRows.map(crossConversationRowToStored),
+          hasMore: rows.rows.length > limit,
+        };
+      }
+
+      const ftsQuery = sanitizeSqliteFtsQuery(options.query);
+      if (!ftsQuery) return { messages: [], hasMore: false };
+
+      const rows = await sql<CrossConversationRankedRow>`
+        SELECT
+          m.id,
+          m.conversation_id,
+          m.provider_message_id,
+          m.sender_jid,
+          m.sender_name,
+          m.sender_user_id,
+          m.is_bot,
+          m.addressed_to_sketch,
+          m.text,
+          m.attachments,
+          m.provider_thread_id,
+          m.provider_parent_message_id,
+          m.is_thread_reply,
+          m.provider_timestamp,
+          m.provider_from_me,
+          m.received_at,
+          m.source,
+          m.effective_at,
+          m.connection_key,
+          m.backfill_range_id,
+          m.created_at,
+          c.platform AS conversation_platform,
+          c.kind AS conversation_kind,
+          c.display_name AS conversation_display_name,
+          bm25(conversation_messages_fts, 5.0, 1.0) AS rank
+        FROM conversation_messages_fts
+        INNER JOIN conversation_messages m ON m.id = conversation_messages_fts.rowid
+        INNER JOIN conversations c ON c.id = m.conversation_id
+        WHERE conversation_messages_fts MATCH ${ftsQuery}
+          ${scopeFilter}
+          ${botFilter}
+          ${afterFilter}
+          ${beforeFilter}
+        ORDER BY rank, m.id DESC
+        LIMIT ${limit + 1}
+      `.execute(db);
+
+      const visibleRows = rows.rows.slice(0, limit);
+      return {
+        messages: visibleRows.map(crossConversationRowToStored),
         hasMore: rows.rows.length > limit,
       };
     },

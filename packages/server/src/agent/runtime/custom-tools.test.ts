@@ -10,7 +10,13 @@ import { createAgentRuntimeCustomToolEffects, createDefaultAgentRuntimeCustomToo
 
 interface SmokeTool {
   inputSchema?: {
-    safeParse(value: unknown): { success: boolean };
+    safeParse?(value: unknown): { success: boolean };
+    validate?(value: unknown):
+      | PromiseLike<{ success: boolean; value?: Record<string, unknown> }>
+      | {
+          success: boolean;
+          value?: Record<string, unknown>;
+        };
   };
   execute?: (input: Record<string, unknown>, options: never) => Promise<unknown>;
   toModelOutput?: (options: { toolCallId: string; input: unknown; output: unknown }) => unknown;
@@ -72,6 +78,32 @@ describe("AI SDK custom Sketch tool provider", () => {
 
     expect(tools.mcp__sketch__TranscribeAudio).toBeDefined();
     expect(tools.mcp__sketch__VisualAnalysis).toBeDefined();
+  });
+
+  it("passes malformed agent output calls to the handler for rejection tracking", async () => {
+    const effects = createAgentRuntimeCustomToolEffects();
+    const provider = createDefaultAgentRuntimeCustomToolProvider({
+      effects,
+      transcriptionEnabled: false,
+      visionAnalysisEnabled: false,
+      visionConfig: null,
+    });
+    const recordRejectedAttempt = vi.fn();
+    const write = vi.fn();
+    const tools = await provider.createTools(params({ agentOutputWriter: { recordRejectedAttempt, write } }));
+    const writeTool = tools.mcp__sketch__WriteAgentOutput as SmokeTool;
+    const malformedInput = {
+      outputDate: "2026-07-04",
+      timezone: "UTC",
+      masthead: { title: "", summary: "Summary" },
+      items: [],
+    };
+
+    const validation = await writeTool.inputSchema?.validate?.(malformedInput);
+    expect(validation).toEqual({ success: true, value: malformedInput });
+    await expect(writeTool.execute?.(validation?.value ?? malformedInput, {} as never)).rejects.toThrow();
+    expect(recordRejectedAttempt).toHaveBeenCalledOnce();
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("invokes the wrapped SDK handler and preserves upload side effects", async () => {
@@ -174,7 +206,10 @@ describe("AI SDK custom Sketch tool provider", () => {
     for (const [toolName, input] of Object.entries(smokeInputs)) {
       const toolDefinition = tools[toolName] as SmokeTool | undefined;
       expect(toolDefinition?.inputSchema, toolName).toBeDefined();
-      expect(toolDefinition?.inputSchema?.safeParse(input).success, toolName).toBe(true);
+      const validation = toolDefinition?.inputSchema?.safeParse
+        ? toolDefinition.inputSchema.safeParse(input)
+        : await toolDefinition?.inputSchema?.validate?.(input);
+      expect(validation?.success, toolName).toBe(true);
       const output = await toolDefinition?.execute?.(input, {} as never);
       await expect(
         Promise.resolve(toolDefinition?.toModelOutput?.({ toolCallId: `${toolName}-call`, input, output })),

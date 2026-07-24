@@ -60,6 +60,66 @@ function toIndexingConfig(row: WhatsAppGroupRow): WhatsAppGroupIndexingConfig {
   };
 }
 
+/**
+ * A group whose indexing was off keeps its kept slices linked to retained
+ * files, and emission never selects disabled groups — so nothing would ever
+ * refresh that content, even after re-enabling (linked slices outside the
+ * 7-day refresh window are skipped). Clearing kept-slice links on the
+ * disabled-to-enabled transition requeues them; the emitter re-renders and
+ * upserts the same file rows by provider_file_id.
+ */
+async function requeueKeptSlicesForJids(db: Kysely<DB>, jids: string[]): Promise<void> {
+  await requeueKeptSlicesCore(db, jids);
+}
+
+/**
+ * Replaces the index-enabled selection and requeues newly enabled groups on
+ * the given executor WITHOUT opening a transaction. Callers already inside a
+ * transaction (the connector scope route) must use this directly — a nested
+ * db.transaction() fails on SQLite and COMMITs the outer per-test
+ * transaction on shared PGlite.
+ */
+export async function applyIndexEnabledSelection(db: Kysely<DB>, jids: string[]): Promise<void> {
+  const selected = [...new Set(jids)];
+  const previouslyEnabled = await db
+    .selectFrom("whatsapp_groups")
+    .select("jid")
+    .where("index_enabled", "=", 1)
+    .execute();
+  const previous = new Set(previouslyEnabled.map((row) => row.jid));
+  const newlyEnabled = selected.filter((jid) => !previous.has(jid));
+  if (newlyEnabled.length > 0) {
+    await requeueKeptSlicesCore(db, newlyEnabled);
+  }
+  await db.updateTable("whatsapp_groups").set({ index_enabled: 0 }).execute();
+  if (selected.length > 0) {
+    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", selected).execute();
+  }
+}
+
+async function requeueKeptSlicesCore(db: Kysely<DB>, jids: string[]): Promise<void> {
+  if (jids.length === 0) return;
+  const conversations = await db
+    .selectFrom("conversations")
+    .select("id")
+    .where("platform", "=", "whatsapp")
+    .where("kind", "=", "group")
+    .where("provider_conversation_id", "in", jids)
+    .execute();
+  if (conversations.length === 0) return;
+  await db
+    .updateTable("conversation_slices")
+    .set({ indexed_file_id: null })
+    .where("salience_verdict", "=", "kept")
+    .where("indexed_file_id", "is not", null)
+    .where(
+      "conversation_id",
+      "in",
+      conversations.map((row) => row.id),
+    )
+    .execute();
+}
+
 export function createWhatsAppGroupRepository(db: Kysely<DB>) {
   return {
     async getByJid(jid: string): Promise<WhatsAppGroupRow | undefined> {
@@ -86,12 +146,8 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
     },
 
     async replaceIndexEnabledJids(jids: string[]): Promise<WhatsAppGroupIndexingConfig[]> {
-      const selected = [...new Set(jids)];
       await db.transaction().execute(async (trx) => {
-        await trx.updateTable("whatsapp_groups").set({ index_enabled: 0 }).execute();
-        if (selected.length > 0) {
-          await trx.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", selected).execute();
-        }
+        await applyIndexEnabledSelection(trx, jids);
       });
       const rows = await db
         .selectFrom("whatsapp_groups")
@@ -144,6 +200,24 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       if (overrides.sliceGapMinutes !== undefined) values.slice_gap_minutes = overrides.sliceGapMinutes;
       if (overrides.sliceMaxAgeMinutes !== undefined) values.slice_max_age_minutes = overrides.sliceMaxAgeMinutes;
       if (overrides.sliceMaxMessages !== undefined) values.slice_max_messages = overrides.sliceMaxMessages;
+      /**
+       * Deliberately not wrapped in an explicit transaction: repository
+       * methods run inside shared-PGlite test transactions where an inner
+       * COMMIT would terminate the outer per-test transaction. Instead the
+       * requeue runs BEFORE the enable flip so every partial failure is
+       * retryable: if the enable never commits, the group still reads as
+       * disabled and a retry replays the (idempotent) requeue; the reverse
+       * order would strand roster-stale content forever, because a retry
+       * would see index_enabled=1 and skip the transition.
+       */
+      const before = await db
+        .selectFrom("whatsapp_groups")
+        .select("index_enabled")
+        .where("jid", "=", jid)
+        .executeTakeFirst();
+      if (enabled && before?.index_enabled === 0) {
+        await requeueKeptSlicesForJids(db, [jid]);
+      }
       await db.updateTable("whatsapp_groups").set(values).where("jid", "=", jid).execute();
       const row = await db.selectFrom("whatsapp_groups").selectAll().where("jid", "=", jid).executeTakeFirst();
       return row ? toIndexingConfig(row) : undefined;

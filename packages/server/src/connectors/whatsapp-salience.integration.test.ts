@@ -289,7 +289,8 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
           memberEmails: [seeded.teammateEmail],
         },
       });
-      expect(firstItems[0]?.content).toContain("WhatsApp roster:");
+      expect(firstItems[0]?.content).toContain("Group: ");
+      expect(firstItems[0]?.content).not.toContain("WhatsApp roster:");
       expect(firstItems[0]?.content).toContain("Tara Teammate:");
       expect(firstItems[0]?.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
       expect(firstItems[0]?.entitySeeds).toBeUndefined();
@@ -454,7 +455,8 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       expect(items.map((item) => item.providerFileId)).toEqual([kept.sliceId]);
       expect(unscopedItems.map((item) => item.providerFileId)).not.toContain(unscoped.sliceId);
       expect(items[0]?.accessScope?.memberEmails).toEqual([kept.teammateEmail]);
-      expect(items[0]?.content).toContain("WhatsApp roster:");
+      expect(items[0]?.content).toContain("Group: ");
+      expect(items[0]?.content).not.toContain("WhatsApp roster:");
       expect(items[0]?.content).toContain("Tara Teammate:");
       expect(items[0]?.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
       await expect(db.selectFrom("tasks").selectAll().execute()).resolves.toEqual([]);
@@ -562,6 +564,47 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
 
       expect(result.itemsProcessed).toBe(0);
       expect(after.indexed_file_id).toBeNull();
+      expect(archivedFile.is_archived).toBe(1);
+      expect(archivedFile.access_scope_id).toBeNull();
+    });
+
+    it("archives the file of a requeued unlinked slice when scope resolves to zero teammates", async () => {
+      const seeded = await seedSlice(db, {
+        verdict: "kept",
+        salienceSignals: JSON.stringify({ signals: ["decision"], entities: [] }),
+      });
+      const config = await seedConnectorConfig(db);
+      await runConnectorSync(db, config.id, createTestLogger());
+      if (!seeded.teammateUserId) throw new Error("expected teammate user");
+      const before = await db
+        .selectFrom("conversation_slices")
+        .selectAll()
+        .where("id", "=", seeded.sliceId)
+        .executeTakeFirstOrThrow();
+      if (!before.indexed_file_id) throw new Error("expected linked file");
+
+      await db
+        .updateTable("conversation_slices")
+        .set({ indexed_file_id: null })
+        .where("id", "=", seeded.sliceId)
+        .execute();
+      const recentEnd = new Date();
+      await setSliceWindow(
+        db,
+        seeded.sliceId,
+        new Date(recentEnd.getTime() - 60_000).toISOString(),
+        recentEnd.toISOString(),
+      );
+      await db.updateTable("users").set({ whatsapp_number: null }).where("id", "=", seeded.teammateUserId).execute();
+
+      const result = await runConnectorSync(db, config.id, createTestLogger());
+      const archivedFile = await db
+        .selectFrom("indexed_files")
+        .selectAll()
+        .where("id", "=", before.indexed_file_id)
+        .executeTakeFirstOrThrow();
+
+      expect(result.itemsProcessed).toBe(0);
       expect(archivedFile.is_archived).toBe(1);
       expect(archivedFile.access_scope_id).toBeNull();
     });
