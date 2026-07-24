@@ -70,31 +70,261 @@ function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
-function magicLinkConfirmationPage(token: string, confirmation: string, returnTo: string | null): string {
+function magicLinkConfirmationPage(
+  token: string,
+  confirmation: string,
+  returnTo: string | null,
+  styleNonce: string,
+): string {
   const returnToInput = returnTo ? `<input type="hidden" name="return_to" value="${escapeHtml(returnTo)}">` : "";
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>Confirm sign in</title>
+  <style nonce="${escapeHtml(styleNonce)}">
+    :root {
+      color-scheme: dark;
+      font-family:
+        Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+      font-synthesis: none;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      min-width: 320px;
+      min-height: 100vh;
+      margin: 0;
+      color: #f5f5f6;
+      background: #000000;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .shell {
+      display: grid;
+      min-height: 100vh;
+      place-items: center;
+      padding: 48px 20px;
+    }
+
+    .auth {
+      width: min(100%, 400px);
+      transform: translateY(-3vh);
+    }
+
+    .brand {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      margin-bottom: 34px;
+      color: #fafafa;
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.025em;
+    }
+
+    .brand-mark {
+      display: block;
+      width: 28px;
+      height: 28px;
+      object-fit: contain;
+    }
+
+    .card {
+      padding: 26px 36px 28px;
+      overflow: hidden;
+      border: 1px solid #292927;
+      border-radius: 14px;
+      background: #1b1b1a;
+      box-shadow: inset 0 1px rgba(255, 255, 255, 0.025);
+      text-align: center;
+    }
+
+    .status {
+      display: grid;
+      width: 48px;
+      height: 48px;
+      margin: 0 auto 18px;
+      place-items: center;
+      border-radius: 999px;
+      color: #eeeeec;
+      background: #383836;
+    }
+
+    .status svg {
+      width: 22px;
+      height: 22px;
+    }
+
+    h1 {
+      margin: 0;
+      color: #fafafa;
+      font-size: 21px;
+      font-weight: 600;
+      line-height: 1.3;
+      letter-spacing: -0.025em;
+    }
+
+    .description {
+      max-width: 310px;
+      margin: 9px auto 24px;
+      color: #8d8d89;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    form {
+      margin: 0;
+    }
+
+    button {
+      display: flex;
+      width: 100%;
+      min-height: 44px;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 18px;
+      border: 1px solid #f2f2f0;
+      border-radius: 8px;
+      color: #111113;
+      background: #f2f2f0;
+      box-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.3),
+        inset 0 -1px rgba(0, 0, 0, 0.08);
+      font: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition:
+        background-color 140ms ease,
+        transform 140ms ease,
+        box-shadow 140ms ease;
+    }
+
+    button:hover {
+      background: #ffffff;
+    }
+
+    button:active {
+      transform: translateY(1px);
+      box-shadow: inset 0 1px rgba(0, 0, 0, 0.12);
+    }
+
+    button:focus-visible {
+      outline: 2px solid #09090b;
+      outline-offset: 2px;
+      box-shadow: 0 0 0 4px #a1a1aa;
+    }
+
+    .arrow {
+      font-size: 17px;
+      line-height: 1;
+      transition: transform 140ms ease;
+    }
+
+    button:hover .arrow {
+      transform: translateX(2px);
+    }
+
+    .security-note {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      margin: 17px 0 0;
+      color: #858581;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .lock {
+      position: relative;
+      width: 9px;
+      height: 7px;
+      border-radius: 2px;
+      background: #71717a;
+    }
+
+    .lock::before {
+      position: absolute;
+      top: -5px;
+      left: 2px;
+      width: 5px;
+      height: 6px;
+      border: 1.5px solid #71717a;
+      border-bottom: 0;
+      border-radius: 5px 5px 0 0;
+      content: "";
+    }
+
+    @media (max-width: 480px) {
+      .shell {
+        align-items: start;
+        padding: 56px 16px 24px;
+      }
+
+      .auth {
+        transform: none;
+      }
+
+      .brand {
+        margin-bottom: 28px;
+      }
+
+      .card {
+        padding: 26px 24px 28px;
+        border-radius: 14px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      button,
+      .arrow {
+        transition: none;
+      }
+    }
+  </style>
 </head>
 <body>
-  <main>
-    <h1>Confirm sign in</h1>
-    <p>Continue to securely sign in to Sketch.</p>
-    <form method="post" action="/api/auth/magic-link/confirmation" autocomplete="off">
-      <input type="hidden" name="token" value="${escapeHtml(token)}">
-      <input type="hidden" name="confirmation" value="${escapeHtml(confirmation)}">
-      ${returnToInput}
-      <button type="submit">Sign in</button>
-    </form>
+  <main class="shell">
+    <div class="auth">
+      <div class="brand">
+        <img class="brand-mark" src="/logos/sketch-icon-dark.png" alt="">
+        <span>Sketch</span>
+      </div>
+      <section class="card" aria-labelledby="confirmation-title">
+        <div class="status" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3 19 6v5c0 4.5-2.7 8.3-7 10-4.3-1.7-7-5.5-7-10V6l7-3Z"/>
+            <path d="m9 12 2 2 4-4"/>
+          </svg>
+        </div>
+        <h1 id="confirmation-title">Confirm sign in</h1>
+        <p class="description">Continue to securely sign in to your Sketch workspace.</p>
+        <form method="post" action="/api/auth/magic-link/confirmation" autocomplete="off">
+          <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="confirmation" value="${escapeHtml(confirmation)}">
+          ${returnToInput}
+          <button type="submit">Sign in <span class="arrow" aria-hidden="true">→</span></button>
+        </form>
+        <p class="security-note"><span class="lock" aria-hidden="true"></span>This secure link can only be used once.</p>
+      </section>
+    </div>
   </main>
 </body>
 </html>`;
 }
 
-function setMagicLinkConfirmationHeaders(c: Context): void {
+function setMagicLinkConfirmationHeaders(c: Context, styleNonce: string): void {
   c.header("Cache-Control", "no-store");
   c.header("Pragma", "no-cache");
   c.header("Referrer-Policy", "no-referrer");
@@ -102,7 +332,7 @@ function setMagicLinkConfirmationHeaders(c: Context): void {
   c.header("X-Frame-Options", "DENY");
   c.header(
     "Content-Security-Policy",
-    "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    `default-src 'none'; style-src 'nonce-${styleNonce}'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
   );
 }
 
@@ -310,6 +540,7 @@ export function authRoutes(
     }
 
     const confirmation = randomBytes(32).toString("hex");
+    const styleNonce = randomBytes(16).toString("base64");
     setCookie(c, MAGIC_LINK_CONFIRMATION_COOKIE, confirmation, {
       httpOnly: true,
       secure: isSecure(c),
@@ -317,8 +548,8 @@ export function authRoutes(
       path: "/api/auth/magic-link/confirmation",
       maxAge: MAGIC_LINK_CONFIRMATION_MAX_AGE,
     });
-    setMagicLinkConfirmationHeaders(c);
-    return c.html(magicLinkConfirmationPage(token, confirmation, returnTo));
+    setMagicLinkConfirmationHeaders(c, styleNonce);
+    return c.html(magicLinkConfirmationPage(token, confirmation, returnTo, styleNonce));
   });
 
   routes.post("/magic-link/confirmation", async (c) => {

@@ -306,6 +306,14 @@ describe("magic link confirmation", () => {
     expect(prefetchedRes.status).toBe(200);
     expect(prefetchedRes.headers.get("cache-control")).toBe("no-store");
     expect(prefetchedRes.headers.get("referrer-policy")).toBe("no-referrer");
+    const html = await prefetchedRes.text();
+    const styleNonce = html.match(/<style nonce="([^"]+)">/)?.[1];
+    expect(styleNonce).toBeDefined();
+    expect(prefetchedRes.headers.get("content-security-policy")).toContain(`style-src 'nonce-${styleNonce}'`);
+    expect(prefetchedRes.headers.get("content-security-policy")).toContain("img-src 'self'");
+    expect(html).toContain('src="/logos/sketch-icon-dark.png"');
+    expect(html).toContain('class="card"');
+    expect(html).toContain("This secure link can only be used once.");
 
     const humanRes = await app.request(`${url.pathname}${url.search}`);
     expect(humanRes.status).toBe(200);
