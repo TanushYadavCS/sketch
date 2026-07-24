@@ -54,6 +54,14 @@ export interface ReviewSeedCandidateInput {
   now: ClockValue;
 }
 
+export interface ReviewSeedCandidateByIdInput {
+  userId: string;
+  id: string;
+  decision: SeedReviewDecision;
+  surface: SeedReviewSurface;
+  now: ClockValue;
+}
+
 export type SeedReviewResult =
   | { status: "not_found" }
   | {
@@ -102,6 +110,7 @@ export interface UserTaskDurabilityRoute {
 }
 
 export interface UserTaskDurabilityUntrackedItem {
+  id: string;
   code: string;
   title: string;
   label: string;
@@ -330,6 +339,23 @@ export function createTaskDurabilityTransitionRepository(db: Kysely<DB>) {
           lastError,
         };
       }
+    },
+
+    async reviewSeedCandidateById(input: ReviewSeedCandidateByIdInput): Promise<SeedReviewResult> {
+      const seed = await db
+        .selectFrom("task_seed_candidates")
+        .select("review_code")
+        .where("id", "=", input.id)
+        .where("user_id", "=", input.userId)
+        .executeTakeFirst();
+      if (!seed) return { status: "not_found" };
+      return createTaskDurabilityTransitionRepository(db).reviewSeedCandidate({
+        userId: input.userId,
+        code: seed.review_code,
+        decision: input.decision,
+        surface: input.surface,
+        now: input.now,
+      });
     },
 
     async reviewSeedCandidate(input: ReviewSeedCandidateInput): Promise<SeedReviewResult> {
@@ -645,6 +671,7 @@ export function createTaskDurabilityTransitionRepository(db: Kysely<DB>) {
           lastError: route.last_error,
         })),
         untracked: candidates.map((candidate) => ({
+          id: candidate.id,
           code: candidate.review_code,
           title: candidate.title,
           label: UNTRACKED_LABEL,

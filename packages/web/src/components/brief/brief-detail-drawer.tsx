@@ -1,4 +1,11 @@
-import type { DailyBriefItem, DailyBriefMeetingAttendee, DailyBriefTaskState, TaskStatus } from "@/lib/api";
+import type {
+  DailyBriefItem,
+  DailyBriefMeetingAttendee,
+  DailyBriefReviewDecision,
+  DailyBriefReviewState,
+  DailyBriefTaskState,
+  TaskStatus,
+} from "@/lib/api";
 import { EntityChip, useEntityUiOptional } from "@/lib/entity-ui";
 import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
@@ -6,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@sketch/ui/components/sheet";
 import { cn } from "@sketch/ui/lib/utils";
 import { BriefActionButton } from "./brief-action-button";
+import { BriefFollowupReviewActions } from "./brief-followup-review-actions";
 import { labelMeta, refChips, sourceLinkLabel } from "./item-metadata";
 import { formatMeetingTime } from "./meeting-row";
 import {
@@ -43,6 +51,8 @@ export function BriefDetailDrawer({
   onOpenChat,
   onUpdateTaskStatus,
   updatingTaskId,
+  onReviewFollowup,
+  updatingReviewId,
 }: {
   item: DailyBriefItem | null;
   timezone: string;
@@ -50,6 +60,8 @@ export function BriefDetailDrawer({
   onOpenChat: (prompt: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: TaskStatus) => void;
   updatingTaskId?: string | null;
+  onReviewFollowup?: (kind: DailyBriefReviewState["kind"], id: string, decision: DailyBriefReviewDecision) => void;
+  updatingReviewId?: string | null;
 }) {
   return (
     <Sheet open={item !== null} onOpenChange={(open) => !open && onClose()}>
@@ -65,6 +77,8 @@ export function BriefDetailDrawer({
               onOpenChat={onOpenChat}
               onUpdateTaskStatus={onUpdateTaskStatus}
               updatingTaskId={updatingTaskId}
+              onReviewFollowup={onReviewFollowup}
+              updatingReviewId={updatingReviewId}
             />
           )
         ) : null}
@@ -78,11 +92,15 @@ function DrawerBody({
   onOpenChat,
   onUpdateTaskStatus,
   updatingTaskId,
+  onReviewFollowup,
+  updatingReviewId,
 }: {
   item: DailyBriefItem;
   onOpenChat: (prompt: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: TaskStatus) => void;
   updatingTaskId?: string | null;
+  onReviewFollowup?: (kind: DailyBriefReviewState["kind"], id: string, decision: DailyBriefReviewDecision) => void;
+  updatingReviewId?: string | null;
 }) {
   const meta = labelMeta(item);
   const chips = refChips(item);
@@ -135,26 +153,35 @@ function DrawerBody({
         </div>
       </div>
 
-      {item.actionPrompt || item.sourceUrl ? (
-        <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-6 py-4">
-          {item.actionPrompt ? (
-            <BriefActionButton
-              label={actionLabel}
-              stopPropagation={false}
-              onClick={() => onOpenChat(item.actionPrompt as string)}
-            />
+      {item.review || item.actionPrompt || item.sourceUrl ? (
+        <div className="flex flex-col items-start gap-2 border-t border-border/60 px-6 py-4">
+          {item.actionPrompt || item.sourceUrl ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {item.actionPrompt ? (
+                <BriefActionButton
+                  label={actionLabel}
+                  stopPropagation={false}
+                  onClick={() => onOpenChat(item.actionPrompt as string)}
+                />
+              ) : null}
+              {item.sourceUrl ? (
+                <a
+                  href={item.sourceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-full border-[0.5px] border-border bg-transparent px-3 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:border-foreground/25 hover:bg-muted/50 hover:text-foreground"
+                >
+                  <ArrowSquareOutIcon size={13} weight="bold" aria-hidden />
+                  {sourceLinkLabel(item.sourceUrl)}
+                </a>
+              ) : null}
+            </div>
           ) : null}
-          {item.sourceUrl ? (
-            <a
-              href={item.sourceUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-full border-[0.5px] border-border bg-transparent px-3 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:border-foreground/25 hover:bg-muted/50 hover:text-foreground"
-            >
-              <ArrowSquareOutIcon size={13} weight="bold" aria-hidden />
-              {sourceLinkLabel(item.sourceUrl)}
-            </a>
-          ) : null}
+          <BriefFollowupReviewActions
+            review={item.review}
+            updating={updatingReviewId === item.review?.id}
+            onReview={onReviewFollowup}
+          />
         </div>
       ) : null}
     </div>

@@ -1,4 +1,10 @@
-import type { DailyBrief as DailyBriefData, DailyBriefItem, TaskStatus } from "@/lib/api";
+import type {
+  DailyBrief as DailyBriefData,
+  DailyBriefItem,
+  DailyBriefReviewDecision,
+  DailyBriefReviewState,
+  TaskStatus,
+} from "@/lib/api";
 import { useEntityUiOptional } from "@/lib/entity-ui";
 import { SparkleIcon } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
@@ -66,6 +72,8 @@ export function DailyBrief({
   onOpenChat,
   onUpdateTaskStatus,
   updatingTaskId,
+  onReviewFollowup,
+  updatingReviewId,
 }: {
   brief: DailyBriefData;
   running: boolean;
@@ -78,6 +86,8 @@ export function DailyBrief({
   onUpdateTaskStatus?: (taskId: string, status: TaskStatus) => void;
   /** taskId currently being updated, to disable its control; null when idle. */
   updatingTaskId?: string | null;
+  onReviewFollowup?: (kind: DailyBriefReviewState["kind"], id: string, decision: DailyBriefReviewDecision) => void;
+  updatingReviewId?: string | null;
 }) {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const entityUi = useEntityUiOptional();
@@ -164,6 +174,8 @@ export function DailyBrief({
                       isLast={index === items.length - 1}
                       onOpenDetail={() => openItem(item)}
                       onOpenChat={onOpenChat}
+                      onReviewFollowup={onReviewFollowup}
+                      updatingReviewId={updatingReviewId}
                     />
                   ))}
                 </div>
@@ -186,6 +198,8 @@ export function DailyBrief({
         onOpenChat={onOpenChat}
         onUpdateTaskStatus={onUpdateTaskStatus}
         updatingTaskId={updatingTaskId}
+        onReviewFollowup={onReviewFollowup}
+        updatingReviewId={updatingReviewId}
       />
     </div>
   );

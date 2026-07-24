@@ -5,7 +5,14 @@
  * logic (and the status formatting it shares with the row + drawer) can be
  * unit-tested without rendering Home or wiring a router.
  */
-import type { DailyBrief, DailyBriefItem, DailyBriefResponse, DailyBriefTaskState, TaskStatus } from "@/lib/api";
+import type {
+  DailyBrief,
+  DailyBriefItem,
+  DailyBriefResponse,
+  DailyBriefReviewMutationResponse,
+  DailyBriefTaskState,
+  TaskStatus,
+} from "@/lib/api";
 
 export const BRIEF_TASK_STATUS_OPTIONS: Array<{ value: TaskStatus; label: string }> = [
   { value: "open", label: "Open" },
@@ -90,4 +97,28 @@ export function applyTaskOverlayToBrief(brief: DailyBrief, task: DailyBriefTaskS
     sections[key] = nextItems;
   }
   return changed ? { ...brief, sections } : brief;
+}
+
+export function applyReviewOverlayToBriefResponse(
+  response: DailyBriefResponse,
+  result: DailyBriefReviewMutationResponse,
+): DailyBriefResponse {
+  if (!response.brief) return response;
+  let changed = false;
+  const sections = { ...response.brief.sections } as DailyBrief["sections"];
+  for (const key of BRIEF_SECTION_KEYS) {
+    const items = sections[key];
+    if (!items?.length) continue;
+    sections[key] = items.map((item) => {
+      if (item.review?.id !== result.review.id) return item;
+      changed = true;
+      return {
+        ...item,
+        review: result.review,
+        taskId: result.task?.id ?? null,
+        task: result.task,
+      };
+    });
+  }
+  return changed ? { ...response, brief: { ...response.brief, sections } } : response;
 }

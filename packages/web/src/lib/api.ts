@@ -1084,6 +1084,28 @@ export interface DailyBriefTaskState {
   readonlyReason: "not_owner" | "external_authority" | null;
 }
 
+export type DailyBriefReviewState =
+  | {
+      kind: "completion";
+      id: string;
+      state: "pending" | "accepted" | "rejected" | "expired";
+      canReview: boolean;
+    }
+  | {
+      kind: "seed";
+      id: string;
+      state: "pending" | "accepted" | "dismissed";
+      canReview: boolean;
+      acceptedTaskId: string | null;
+    };
+
+export type DailyBriefReviewDecision = "confirm_done" | "keep_open" | "track" | "dismiss";
+
+export interface DailyBriefReviewMutationResponse {
+  review: DailyBriefReviewState;
+  task: DailyBriefTaskState | null;
+}
+
 export interface DailyBriefItem {
   id: string;
   sectionKey: "meetings" | "todos" | "untracked_followups" | "looks_resolved" | "customer_updates" | "active_projects";
@@ -1103,6 +1125,8 @@ export interface DailyBriefItem {
   taskId?: string | null;
   /** Live task-state overlay; absent on legacy/partial payloads. */
   task?: DailyBriefTaskState | null;
+  /** Current durable follow-up review state; absent on legacy/partial payloads. */
+  review?: DailyBriefReviewState | null;
 }
 
 export interface DailyBrief {
@@ -1424,6 +1448,21 @@ export const api = {
     },
     get(id: string) {
       return request<{ brief: DailyBrief }>(`/api/daily-briefs/${id}`);
+    },
+    reviewCompletion(id: string, decision: "confirm_done" | "keep_open") {
+      return request<DailyBriefReviewMutationResponse>(
+        `/api/task-completion-recommendations/${encodeURIComponent(id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ decision }),
+        },
+      );
+    },
+    reviewSeed(id: string, decision: "track" | "dismiss") {
+      return request<DailyBriefReviewMutationResponse>(`/api/task-seed-candidates/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ decision }),
+      });
     },
     create(body?: { briefDate?: string }) {
       return request<{ generation: { id: string; status: string; briefDate: string } | null }>("/api/daily-briefs", {

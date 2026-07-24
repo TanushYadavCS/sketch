@@ -383,7 +383,103 @@ describe("Daily Brief task hydration routes", () => {
         sourceTaskId: "route-task",
         createdByUserId: "user-1",
       });
-      const brief = output({ todos: [item("route-item", "todos", { taskId: created.taskId })] });
+      await db
+        .insertInto("task_completion_recommendations")
+        .values({
+          id: "recommendation-1",
+          task_id: created.taskId,
+          proposed_status: "done",
+          review_code: "DONE1234",
+          evidence_fingerprint: "fingerprint-1",
+          origin_agent_output_id: null,
+          rationale: "The task appears complete.",
+          expires_at: "2026-07-22T00:00:00.000Z",
+          reviewed_at: null,
+          reviewed_by_user_id: null,
+          review_surface: null,
+          created_at: "2026-07-17T08:00:00.000Z",
+          updated_at: "2026-07-17T08:00:00.000Z",
+        })
+        .execute();
+      const acceptedTask = await createTaskRepository(db).upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: "Accepted reconstructed follow-up",
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: "accepted-seed-task",
+        createdByUserId: "user-1",
+      });
+      const conversation = await db
+        .insertInto("conversations")
+        .values({
+          platform: "slack",
+          kind: "channel",
+          provider_conversation_id: "C_SEED",
+          display_name: "Seed",
+          last_seen_message_id: null,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("task_seed_candidates")
+        .values({
+          id: "candidate-1",
+          agent_key: "conversation-summary",
+          user_id: "user-1",
+          route_id: "route-1",
+          source_key: "slack:channel:C_SEED",
+          origin_agent_output_id: null,
+          origin_agent_output_item_id: null,
+          title: "Accepted reconstructed follow-up",
+          normalized_title: "accepted reconstructed follow-up",
+          proposed_assignee_name: null,
+          source_platform: "slack",
+          source_conversation_id: conversation.id,
+          source_provider_thread_id: null,
+          source_anchor_key: `slack:${conversation.id}:root`,
+          evidence_fingerprint: "seed-fingerprint",
+          review_code: "SEED1234",
+          review_state: "accepted",
+          accepted_task_id: acceptedTask.taskId,
+          reviewed_at: "2026-07-17T09:00:00.000Z",
+          reviewed_by_user_id: "user-1",
+        })
+        .execute();
+      const brief = output({
+        todos: [item("route-item", "todos", { taskId: created.taskId })],
+        untracked_followups: [
+          item("seed-item", "untracked_followups", {
+            structuredPayload: {
+              serverOwnedFollowup: true,
+              trackingState: "untracked",
+              candidateId: "candidate-1",
+              reviewCode: "SEED1234",
+            },
+          }),
+        ],
+        looks_resolved: [
+          item("review-item", "looks_resolved", {
+            taskId: created.taskId,
+            structuredPayload: {
+              serverOwnedFollowup: true,
+              trackingState: "looks_resolved",
+              recommendationId: "recommendation-1",
+              reviewCode: "DONE1234",
+              taskId: created.taskId,
+            },
+          }),
+        ],
+      });
       const service = {
         resolveUserId: vi.fn(async () => "user-1"),
         getLatestForUser: vi.fn(async () => ({
@@ -408,19 +504,59 @@ describe("Daily Brief task hydration routes", () => {
       const latest = await app.request("/api/daily-briefs");
       expect(latest.status).toBe(200);
       await expect(latest.json()).resolves.toMatchObject({
-        brief: { sections: { todos: [{ taskId: created.taskId, task: { status: "open" } }] } },
+        brief: {
+          sections: {
+            todos: [{ taskId: created.taskId, task: { status: "open" } }],
+            looks_resolved: [
+              {
+                review: {
+                  kind: "completion",
+                  id: "recommendation-1",
+                  state: "pending",
+                  canReview: true,
+                },
+              },
+            ],
+            untracked_followups: [
+              {
+                taskId: acceptedTask.taskId,
+                task: { id: acceptedTask.taskId, status: "open" },
+                review: {
+                  kind: "seed",
+                  id: "candidate-1",
+                  state: "accepted",
+                  canReview: false,
+                  acceptedTaskId: acceptedTask.taskId,
+                },
+              },
+            ],
+          },
+        },
       });
 
-      await db
-        .updateTable("tasks")
-        .set({
-          status: "done",
-          status_raw: "done",
-          completed_at: "2026-07-17T10:00:00.000Z",
-          updated_at: "2026-07-17T10:00:00.000Z",
-        })
-        .where("id", "=", created.taskId)
-        .execute();
+      await db.transaction().execute(async (trx) => {
+        await trx
+          .updateTable("tasks")
+          .set({
+            status: "done",
+            status_raw: "done",
+            completed_at: "2026-07-17T10:00:00.000Z",
+            updated_at: "2026-07-17T10:00:00.000Z",
+          })
+          .where("id", "=", created.taskId)
+          .execute();
+        await trx
+          .updateTable("task_completion_recommendations")
+          .set({
+            review_state: "accepted",
+            reviewed_at: "2026-07-17T10:00:00.000Z",
+            reviewed_by_user_id: "user-1",
+            review_surface: "web",
+            updated_at: "2026-07-17T10:00:00.000Z",
+          })
+          .where("id", "=", "recommendation-1")
+          .execute();
+      });
 
       const byId = await app.request("/api/daily-briefs/brief-1");
       expect(byId.status).toBe(200);
@@ -434,9 +570,270 @@ describe("Daily Brief task hydration routes", () => {
                 task: { title: "Current task title", status: "done", completedAt: "2026-07-17T10:00:00.000Z" },
               },
             ],
+            looks_resolved: [
+              {
+                review: {
+                  kind: "completion",
+                  id: "recommendation-1",
+                  state: "accepted",
+                  canReview: false,
+                },
+              },
+            ],
+            untracked_followups: [
+              {
+                taskId: acceptedTask.taskId,
+                task: { id: acceptedTask.taskId, status: "open" },
+                review: {
+                  kind: "seed",
+                  id: "candidate-1",
+                  state: "accepted",
+                  canReview: false,
+                  acceptedTaskId: acceptedTask.taskId,
+                },
+              },
+            ],
           },
         },
       });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("does not disclose an unauthorized completion review or an inaccessible accepted task", async () => {
+    const db = await createTestDb();
+    try {
+      await db
+        .insertInto("users")
+        .values([
+          { id: "user-1", name: "Reader", email: "reader@example.com", auth_role: "member" },
+          { id: "user-2", name: "Owner", email: "owner@example.com", auth_role: "member" },
+        ])
+        .execute();
+      const hiddenTask = await createTaskRepository(db).upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: "Hidden task",
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: "hidden-task",
+        createdByUserId: "user-2",
+      });
+      await db
+        .insertInto("task_completion_recommendations")
+        .values({
+          id: "hidden-recommendation",
+          task_id: hiddenTask.taskId,
+          proposed_status: "done",
+          review_code: "HIDDEN12",
+          evidence_fingerprint: "hidden-completion",
+          origin_agent_output_id: null,
+          rationale: "Private rationale.",
+          expires_at: "2099-01-01T00:00:00.000Z",
+          reviewed_at: null,
+          reviewed_by_user_id: null,
+          review_surface: null,
+        })
+        .execute();
+      const conversation = await db
+        .insertInto("conversations")
+        .values({
+          platform: "slack",
+          kind: "channel",
+          provider_conversation_id: "C_HIDDEN",
+          display_name: "Hidden",
+          last_seen_message_id: null,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("task_seed_candidates")
+        .values({
+          id: "accepted-hidden-candidate",
+          agent_key: "conversation-summary",
+          user_id: "user-1",
+          route_id: "route-hidden",
+          source_key: "slack:channel:C_HIDDEN",
+          origin_agent_output_id: null,
+          origin_agent_output_item_id: null,
+          title: "Accepted hidden task",
+          normalized_title: "accepted hidden task",
+          proposed_assignee_name: null,
+          source_platform: "slack",
+          source_conversation_id: conversation.id,
+          source_provider_thread_id: null,
+          source_anchor_key: `slack:${conversation.id}:root`,
+          evidence_fingerprint: "hidden-seed",
+          review_code: "HIDSEED1",
+          review_state: "accepted",
+          accepted_task_id: hiddenTask.taskId,
+          reviewed_at: "2026-07-20T00:00:00.000Z",
+          reviewed_by_user_id: "user-1",
+        })
+        .execute();
+      const brief = output({
+        looks_resolved: [
+          item("hidden-completion", "looks_resolved", {
+            taskId: hiddenTask.taskId,
+            structuredPayload: {
+              serverOwnedFollowup: true,
+              trackingState: "looks_resolved",
+              recommendationId: "hidden-recommendation",
+              reviewCode: "HIDDEN12",
+              taskId: hiddenTask.taskId,
+            },
+          }),
+        ],
+        untracked_followups: [
+          item("hidden-seed", "untracked_followups", {
+            structuredPayload: {
+              serverOwnedFollowup: true,
+              trackingState: "untracked",
+              candidateId: "accepted-hidden-candidate",
+              reviewCode: "HIDSEED1",
+            },
+          }),
+        ],
+      });
+      const service = {
+        resolveUserId: vi.fn(async () => "user-1"),
+        getLatestForUser: vi.fn(async () => ({
+          output: brief,
+          running: false,
+          outputDate: "2026-07-20",
+          timezone: "UTC",
+          enabledSections: ["looks_resolved", "untracked_followups"],
+        })),
+      } as unknown as AgentRunService;
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        c.set("sub", "auth-user");
+        c.set("email", "reader@example.com");
+        c.set("role", "member");
+        c.set("adminCanReadAllFiles", false);
+        await next();
+      });
+      app.route("/api/daily-briefs", dailyBriefRoutes(service, db, createTestLogger()));
+
+      const response = await app.request("/api/daily-briefs");
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        brief: {
+          sections: {
+            looks_resolved: [{ taskId: null, task: null, review: null }],
+            untracked_followups: [
+              {
+                taskId: null,
+                task: null,
+                review: {
+                  kind: "seed",
+                  id: "accepted-hidden-candidate",
+                  state: "accepted",
+                  acceptedTaskId: null,
+                },
+              },
+            ],
+          },
+        },
+      });
+    } finally {
+      await db.destroy();
+    }
+  });
+
+  it("hydrates at most one hundred review references and leaves overflow chat-only", async () => {
+    const db = await createTestDb();
+    try {
+      await db
+        .insertInto("users")
+        .values({ id: "user-1", name: "Reader", email: "reader@example.com", auth_role: "member" })
+        .execute();
+      const conversation = await db
+        .insertInto("conversations")
+        .values({
+          platform: "slack",
+          kind: "channel",
+          provider_conversation_id: "C_OVERFLOW",
+          display_name: "Overflow",
+          last_seen_message_id: null,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("task_seed_candidates")
+        .values(
+          Array.from({ length: 101 }, (_, index) => ({
+            id: `candidate-${index}`,
+            agent_key: "conversation-summary",
+            user_id: "user-1",
+            route_id: "route-overflow",
+            source_key: "slack:channel:C_OVERFLOW",
+            origin_agent_output_id: null,
+            origin_agent_output_item_id: null,
+            title: `Candidate ${index}`,
+            normalized_title: `candidate ${index}`,
+            proposed_assignee_name: null,
+            source_platform: "slack",
+            source_conversation_id: conversation.id,
+            source_provider_thread_id: null,
+            source_anchor_key: `slack:${conversation.id}:${index}`,
+            evidence_fingerprint: `overflow-${index}`,
+            review_code: `OVR${String(index).padStart(5, "0")}`,
+            accepted_task_id: null,
+            reviewed_at: null,
+            reviewed_by_user_id: null,
+          })),
+        )
+        .execute();
+      const brief = output({
+        untracked_followups: Array.from({ length: 101 }, (_, index) =>
+          item(`overflow-${index}`, "untracked_followups", {
+            structuredPayload: {
+              serverOwnedFollowup: true,
+              trackingState: "untracked",
+              candidateId: `candidate-${index}`,
+              reviewCode: `OVR${String(index).padStart(5, "0")}`,
+            },
+          }),
+        ),
+      });
+      const service = {
+        resolveUserId: vi.fn(async () => "user-1"),
+        getLatestForUser: vi.fn(async () => ({
+          output: brief,
+          running: false,
+          outputDate: "2026-07-20",
+          timezone: "UTC",
+          enabledSections: ["untracked_followups"],
+        })),
+      } as unknown as AgentRunService;
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        c.set("sub", "auth-user");
+        c.set("email", "reader@example.com");
+        c.set("role", "member");
+        c.set("adminCanReadAllFiles", false);
+        await next();
+      });
+      app.route("/api/daily-briefs", dailyBriefRoutes(service, db, createTestLogger()));
+
+      const response = await app.request("/api/daily-briefs");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        brief: { sections: { untracked_followups: Array<{ review: unknown }> } };
+      };
+      expect(body.brief.sections.untracked_followups.slice(0, 100).every((entry) => entry.review !== null)).toBe(true);
+      expect(body.brief.sections.untracked_followups[100]?.review).toBeNull();
     } finally {
       await db.destroy();
     }

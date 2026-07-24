@@ -1,6 +1,7 @@
-import type { DailyBriefItem } from "@/lib/api";
+import type { DailyBriefItem, DailyBriefReviewDecision, DailyBriefReviewState } from "@/lib/api";
 import { cn } from "@sketch/ui/lib/utils";
 import { BriefActionButton } from "./brief-action-button";
+import { BriefFollowupReviewActions } from "./brief-followup-review-actions";
 import { actionLabelForItem, labelMeta } from "./item-metadata";
 import { briefTaskExternalStatus, briefTaskStatusTone, formatBriefTaskStatus, getBriefItemTask } from "./task-overlay";
 
@@ -9,11 +10,15 @@ export function BriefItemRow({
   isLast,
   onOpenDetail,
   onOpenChat,
+  onReviewFollowup,
+  updatingReviewId,
 }: {
   item: DailyBriefItem;
   isLast: boolean;
   onOpenDetail: () => void;
   onOpenChat: (prompt: string) => void;
+  onReviewFollowup?: (kind: DailyBriefReviewState["kind"], id: string, decision: DailyBriefReviewDecision) => void;
+  updatingReviewId?: string | null;
 }) {
   const meta = labelMeta(item);
   const actionLabel = actionLabelForItem(item);
@@ -86,10 +91,15 @@ export function BriefItemRow({
         ) : null}
       </button>
 
-      <div className="flex min-w-0 shrink-0 items-center justify-end py-2.5">
+      <div className="flex min-w-0 shrink-0 flex-col items-end justify-center gap-1.5 py-2.5">
         {item.actionPrompt ? (
           <BriefActionButton label={actionLabel} onClick={() => onOpenChat(item.actionPrompt as string)} />
         ) : null}
+        <BriefFollowupReviewActions
+          review={item.review}
+          updating={updatingReviewId === item.review?.id}
+          onReview={onReviewFollowup}
+        />
       </div>
     </article>
   );

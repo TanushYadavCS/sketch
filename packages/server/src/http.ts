@@ -63,7 +63,7 @@ import { createSettingsRepository } from "./db/repositories/settings";
 import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
 
 import type { McpServerConfig, RunAgentParams, RunAgentResult } from "./agent/runner";
-import { agentRoutes, dailyBriefRoutes } from "./agents/routes";
+import { agentRoutes, dailyBriefRoutes, followupReviewRoutes } from "./agents/routes";
 import type { AgentRunService } from "./agents/service";
 import { getSmtpConfig } from "./api/shared";
 import type { createAutomationRunsRepository } from "./db/repositories/automation-runs";
@@ -514,6 +514,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route("/api/workspace/summary", workspaceSummaryRoutes({ db, config, users, mcpServers }));
   if (deps?.agentRunService) {
     app.route("/api/daily-briefs", dailyBriefRoutes(deps.agentRunService, db, logger));
+    app.route("/api", followupReviewRoutes(deps.agentRunService, db));
     app.route("/api/agents", agentRoutes(deps.agentRunService));
   }
   app.route("/api/workspace", createWorkspaceApi({ config }));

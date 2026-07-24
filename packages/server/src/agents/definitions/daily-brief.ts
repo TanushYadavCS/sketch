@@ -1598,7 +1598,7 @@ function buildFollowupReminderView(
     }
   }
   const transitionItems = transition.untracked.map((item) => ({
-    candidateId: item.code,
+    candidateId: item.id,
     title: item.title,
     summary: item.label,
     reviewCode: item.code,

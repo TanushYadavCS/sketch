@@ -22,7 +22,11 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DailyBrief } from "./daily-brief";
-import { applyTaskOverlayToBriefResponse, formatBriefTaskStatus } from "./task-overlay";
+import {
+  applyReviewOverlayToBriefResponse,
+  applyTaskOverlayToBriefResponse,
+  formatBriefTaskStatus,
+} from "./task-overlay";
 
 function baseTask(overrides: Partial<DailyBriefTaskState> = {}): DailyBriefTaskState {
   return {
@@ -124,6 +128,164 @@ describe("Brief row live task status", () => {
 
     const row = screen.getByRole("button", { name: /Snapshot title/ });
     expect(within(row).queryByRole("combobox")).not.toBeInTheDocument();
+  });
+});
+
+describe("Inline follow-up review actions", () => {
+  it("renders the chat action above one grouped completion decision and reports the selected choice", async () => {
+    const user = userEvent.setup();
+    const onReviewFollowup = vi.fn();
+    const reviewItem = {
+      ...todoItem("review-1", "Confirm launch is done"),
+      sectionKey: "looks_resolved" as const,
+      actionLabel: "Review with Sketch",
+      review: {
+        kind: "completion" as const,
+        id: "recommendation-1",
+        state: "pending" as const,
+        canReview: true,
+      },
+    };
+    const brief = {
+      ...briefWithTodos([]),
+      sections: {
+        ...briefWithTodos([]).sections,
+        looks_resolved: [reviewItem],
+      },
+    };
+
+    renderWithProviders(
+      <DailyBrief brief={brief} running={false} onOpenChat={() => {}} onReviewFollowup={onReviewFollowup} />,
+    );
+
+    const row = screen.getByRole("button", { name: /Confirm launch is done/ }).closest("article");
+    expect(row).not.toBeNull();
+    const chatAction = within(row as HTMLElement).getByRole("button", { name: "Review with Sketch" });
+    const decisionGroup = within(row as HTMLElement).getByRole("group", {
+      name: "Completion review decision",
+    });
+    const markDone = within(decisionGroup).getByRole("button", { name: "Mark as done" });
+    expect(decisionGroup).not.toContainElement(chatAction);
+    const rowButtons = Array.from((row as HTMLElement).querySelectorAll("button"));
+    expect(rowButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
+      rowButtons.indexOf(markDone as HTMLButtonElement),
+    );
+
+    await user.click(markDone);
+    expect(onReviewFollowup).toHaveBeenCalledWith("completion", "recommendation-1", "confirm_done");
+  });
+
+  it("renders terminal review outcomes without mutation controls", () => {
+    const reviewItem = {
+      ...todoItem("seed-1", "Follow up with Acme"),
+      sectionKey: "untracked_followups" as const,
+      review: {
+        kind: "seed" as const,
+        id: "candidate-1",
+        state: "dismissed" as const,
+        canReview: false,
+        acceptedTaskId: null,
+      },
+    };
+    const brief = {
+      ...briefWithTodos([]),
+      sections: {
+        ...briefWithTodos([]).sections,
+        untracked_followups: [reviewItem],
+      },
+    };
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    expect(screen.getByText("Dismissed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Track" })).not.toBeInTheDocument();
+  });
+
+  it("groups seed decisions below the chat action and reports the selected choice", async () => {
+    const user = userEvent.setup();
+    const onReviewFollowup = vi.fn();
+    const reviewItem = {
+      ...todoItem("seed-1", "Follow up with Acme"),
+      sectionKey: "untracked_followups" as const,
+      actionLabel: "Discuss with Sketch",
+      review: {
+        kind: "seed" as const,
+        id: "candidate-1",
+        state: "pending" as const,
+        canReview: true,
+        acceptedTaskId: null,
+      },
+    };
+    const brief = {
+      ...briefWithTodos([]),
+      sections: {
+        ...briefWithTodos([]).sections,
+        untracked_followups: [reviewItem],
+      },
+    };
+
+    renderWithProviders(
+      <DailyBrief brief={brief} running={false} onOpenChat={() => {}} onReviewFollowup={onReviewFollowup} />,
+    );
+
+    const row = screen.getByRole("button", { name: /Follow up with Acme/ }).closest("article");
+    expect(row).not.toBeNull();
+    const chatAction = within(row as HTMLElement).getByRole("button", { name: "Discuss with Sketch" });
+    const decisionGroup = within(row as HTMLElement).getByRole("group", {
+      name: "Follow-up tracking decision",
+    });
+    const dismiss = within(decisionGroup).getByRole("button", { name: "Dismiss" });
+    expect(decisionGroup).not.toContainElement(chatAction);
+    const rowButtons = Array.from((row as HTMLElement).querySelectorAll("button"));
+    expect(rowButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
+      rowButtons.indexOf(dismiss as HTMLButtonElement),
+    );
+
+    await user.click(dismiss);
+    expect(onReviewFollowup).toHaveBeenCalledWith("seed", "candidate-1", "dismiss");
+  });
+
+  it("keeps the chat action above the grouped review decision in the detail drawer", async () => {
+    const user = userEvent.setup();
+    const onReviewFollowup = vi.fn();
+    const reviewItem = {
+      ...todoItem("review-drawer-1", "Confirm drawer launch is done"),
+      sectionKey: "looks_resolved" as const,
+      actionLabel: "Review with Sketch",
+      review: {
+        kind: "completion" as const,
+        id: "recommendation-drawer-1",
+        state: "pending" as const,
+        canReview: true,
+      },
+    };
+    const brief = {
+      ...briefWithTodos([]),
+      sections: {
+        ...briefWithTodos([]).sections,
+        looks_resolved: [reviewItem],
+      },
+    };
+
+    renderWithProviders(
+      <DailyBrief brief={brief} running={false} onOpenChat={() => {}} onReviewFollowup={onReviewFollowup} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Confirm drawer launch is done/ }));
+    const drawer = await screen.findByRole("dialog");
+    const chatAction = within(drawer).getByRole("button", { name: "Review with Sketch" });
+    const decisionGroup = within(drawer).getByRole("group", {
+      name: "Completion review decision",
+    });
+    const keepOpen = within(decisionGroup).getByRole("button", { name: "Keep open" });
+    const drawerButtons = Array.from(drawer.querySelectorAll("button"));
+    expect(decisionGroup).not.toContainElement(chatAction);
+    expect(drawerButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
+      drawerButtons.indexOf(keepOpen as HTMLButtonElement),
+    );
+
+    await user.click(keepOpen);
+    expect(onReviewFollowup).toHaveBeenCalledWith("completion", "recommendation-drawer-1", "keep_open");
   });
 });
 
@@ -330,5 +492,77 @@ describe("applyTaskOverlayToBriefResponse (cache overlay updater)", () => {
     const response: DailyBriefResponse = { brief: null, running: false, briefDate: "2026-07-17", timezone: "UTC" };
     const updated = applyTaskOverlayToBriefResponse(response, baseTask({ status: "done" }));
     expect(updated).toBe(response);
+  });
+});
+
+describe("applyReviewOverlayToBriefResponse", () => {
+  it("updates only live review and task overlays while preserving snapshot fields", () => {
+    const reviewItem = {
+      ...todoItem("seed-1", "Snapshot seed title"),
+      sectionKey: "untracked_followups" as const,
+      review: {
+        kind: "seed" as const,
+        id: "candidate-1",
+        state: "pending" as const,
+        canReview: true,
+        acceptedTaskId: null,
+      },
+    };
+    const brief = {
+      ...briefWithTodos([]),
+      sections: { ...briefWithTodos([]).sections, untracked_followups: [reviewItem] },
+    };
+    const task = baseTask({ id: "accepted-task", status: "open" });
+
+    const updated = applyReviewOverlayToBriefResponse(emptyResponse(brief), {
+      review: {
+        kind: "seed",
+        id: "candidate-1",
+        state: "accepted",
+        canReview: false,
+        acceptedTaskId: "accepted-task",
+      },
+      task,
+    });
+
+    const item = updated.brief?.sections.untracked_followups[0];
+    expect(item?.title).toBe("Snapshot seed title");
+    expect(item?.review).toMatchObject({ state: "accepted", acceptedTaskId: "accepted-task" });
+    expect(item?.taskId).toBe("accepted-task");
+    expect(item?.task).toEqual(task);
+  });
+
+  it("clears stale task identity when the reviewed task is no longer visible", () => {
+    const task = baseTask({ id: "hidden-task" });
+    const reviewItem = {
+      ...todoItem("seed-1", "Snapshot seed title", task),
+      sectionKey: "untracked_followups" as const,
+      review: {
+        kind: "seed" as const,
+        id: "candidate-1",
+        state: "pending" as const,
+        canReview: true,
+        acceptedTaskId: null,
+      },
+    };
+    const brief = {
+      ...briefWithTodos([]),
+      sections: { ...briefWithTodos([]).sections, untracked_followups: [reviewItem] },
+    };
+
+    const updated = applyReviewOverlayToBriefResponse(emptyResponse(brief), {
+      review: {
+        kind: "seed",
+        id: "candidate-1",
+        state: "accepted",
+        canReview: false,
+        acceptedTaskId: null,
+      },
+      task: null,
+    });
+
+    const item = updated.brief?.sections.untracked_followups[0];
+    expect(item?.taskId).toBeNull();
+    expect(item?.task).toBeNull();
   });
 });
