@@ -355,8 +355,9 @@ async function loadCandidateTasks(
     else t.created_at
   end`;
   const latestMeaningfulActivity = sql<string>`coalesce(${latestActivity}, ${fallbackMeaningfulActivity})`;
+  const dueDate = sql<string | null>`substr(t.due_at, 1, 10)`;
   const rankExpressions = {
-    overdue: sql<number>`case when t.due_at is not null and t.due_at < ${input.outputDate} then 1 else 0 end`,
+    overdue: sql<number>`case when t.due_at is not null and ${dueDate} < ${input.outputDate} then 1 else 0 end`,
     pending_completion_review: sql<number>`case when exists (
       select 1
       from task_completion_recommendations tcr
@@ -367,8 +368,8 @@ async function loadCandidateTasks(
     ) then 1 else 0 end`,
     recent_change: changedRank,
     due_soon: sql<number>`case when t.due_at is not null
-      and t.due_at >= ${input.outputDate}
-      and t.due_at <= ${addCalendarDays(input.outputDate, 7)}
+      and ${dueDate} >= ${input.outputDate}
+      and ${dueDate} <= ${addCalendarDays(input.outputDate, 7)}
       then 1 else 0 end`,
     high_priority: sql<number>`case when lower(trim(t.priority)) in (${sql.join(HIGH_PRIORITY_VALUES)}) then 1 else 0 end`,
     carried_from_previous_brief: carriedRank,
@@ -448,13 +449,14 @@ function attentionReasons(input: {
   carried: boolean;
 }): DailyBriefTaskAttentionReason[] {
   const reasons: DailyBriefTaskAttentionReason[] = [];
+  const dueDate = input.task.due_at?.slice(0, 10) ?? null;
   if (input.inWindow.some((event) => event.event_kind === "created")) {
     reasons.push("new_since_last_brief");
   }
   if (input.inWindow.length > 0) reasons.push("meaningfully_changed");
   if (input.inWindow.some((event) => event.event_kind === "status_changed")) reasons.push("status_changed");
-  if (input.task.due_at && input.task.due_at < input.outputDate) reasons.push("overdue");
-  else if (input.task.due_at && input.task.due_at <= addCalendarDays(input.outputDate, 7)) reasons.push("due_soon");
+  if (dueDate && dueDate < input.outputDate) reasons.push("overdue");
+  else if (dueDate && dueDate <= addCalendarDays(input.outputDate, 7)) reasons.push("due_soon");
   if (isHighPriority(input.task.priority)) reasons.push("high_priority");
   if (input.pending) reasons.push("pending_completion_review");
   if (input.carried) reasons.push("carried_from_previous_brief");

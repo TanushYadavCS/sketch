@@ -1481,6 +1481,84 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
     });
   });
 
+  it("normalizes timestamp due dates before ranking the inclusive due-soon boundary", async () => {
+    await seedUser(db);
+    const repo = createTaskRepository(db);
+    const dueSoon = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Older boundary due-soon task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: "2026-07-02T00:00:00.000Z",
+      provenance: "summary",
+      sourceTaskId: "older-boundary-due-soon",
+      createdByUserId: "user-1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({ updated_at: "2026-01-01T00:00:00.000Z" })
+      .where("id", "=", dueSoon.taskId)
+      .execute();
+    for (let index = 0; index < 101; index += 1) {
+      const quiet = await repo.upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: `Boundary newer quiet task ${index}`,
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: `boundary-newer-quiet-${index}`,
+        createdByUserId: "user-1",
+      });
+      await db
+        .updateTable("tasks")
+        .set({ updated_at: `2026-06-24T${String(index % 24).padStart(2, "0")}:00:00.000Z` })
+        .where("id", "=", quiet.taskId)
+        .execute();
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.taskAttention).toMatchObject({
+      partial: true,
+      items: [
+        {
+          taskId: dueSoon.taskId,
+          dueAt: "2026-07-02T00:00:00.000Z",
+          attentionReasons: ["due_soon"],
+        },
+      ],
+    });
+  });
+
   it("reports a status change when a later in-window event is more recent", async () => {
     await seedUser(db);
     const repo = createTaskRepository(db);

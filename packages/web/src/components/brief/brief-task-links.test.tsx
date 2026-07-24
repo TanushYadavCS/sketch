@@ -195,10 +195,11 @@ describe("Brief row live task status", () => {
     const seamGroups = rows.flatMap((row) =>
       within(row)
         .getAllByLabelText("Task status and attention")
-        .filter((group) => group.className.includes("88px_1px")),
+        .filter((group) => !group.className.includes("sm:hidden")),
     );
     expect(seamGroups).toHaveLength(2);
     for (const group of seamGroups) {
+      expect(group.className).toMatch(/grid-cols-\[\d+px_1px_minmax\(0,1fr\)\]/);
       const separator = group.querySelector(".bg-border");
       expect(separator).not.toBeNull();
       expect(separator?.className).toContain("w-px");
