@@ -1,4 +1,4 @@
-import type { createOperationalAlertsRepository } from "../db/repositories/operational-alerts";
+import type { OperationalAlertRow, createOperationalAlertsRepository } from "../db/repositories/operational-alerts";
 import { operationalAlertDestinationFingerprint } from "../db/repositories/operational-alerts";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { UserRepository } from "../db/repositories/users";
@@ -108,10 +108,21 @@ export class OperationalAlertWorker {
       await this.params.alerts.promote(alert.id, nowIso);
     }
 
-    const admins = await this.params.users.listAdmins();
+    const openAlerts: Array<{
+      alert: OperationalAlertRow;
+      definition: OperationalAlertDefinition;
+    }> = [];
     for (const alert of await this.params.alerts.listOpen()) {
       const definition = this.params.definitions.get(alert.type);
-      if (!definition) continue;
+      if (!definition || !(await definition.isStillActive(alert))) {
+        await this.params.alerts.resolve(alert.type, alert.resource_key, nowIso);
+        continue;
+      }
+      openAlerts.push({ alert, definition });
+    }
+
+    const admins = await this.params.users.listAdmins();
+    for (const { alert, definition } of openAlerts) {
       for (const channel of definition.channels) {
         const seenDestinations = new Set<string>();
         for (const admin of admins) {

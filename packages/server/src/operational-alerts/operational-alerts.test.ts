@@ -183,6 +183,52 @@ describe("operational alerts", () => {
     ]);
   });
 
+  it("reconciles a persisted open alert before fan-out after startup recovery", async () => {
+    const now = new Date("2026-07-17T10:00:00.000Z");
+    const alerts = createOperationalAlertsRepository(db);
+    const users = createUserRepository(db);
+    const settings = createSettingsRepository(db);
+    await settings.ensure();
+    await users.create({
+      id: "admin-1",
+      name: "Admin",
+      email: "admin@example.com",
+      authRole: "admin",
+      whatsappNumber: "+919876543210",
+    });
+    const service = createOperationalAlertService({ alerts, now: () => now });
+    await service.observeBaileysSocketState({
+      ownerToken: "owner",
+      generation: 1,
+      socketGeneration: 1,
+      socketState: "logged-out",
+      occurredAt: now.toISOString(),
+      statusCode: 401,
+    });
+    const active = await alerts.findActive(BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY);
+    expect(active).toBeDefined();
+    await alerts.promote(active?.id ?? "missing", now.toISOString());
+
+    const send = vi.fn().mockResolvedValue({ providerMessageId: "stale-alert" });
+    const worker = new OperationalAlertWorker({
+      alerts,
+      users,
+      settings,
+      definitions: createOperationalAlertDefinitions({ isBaileysGatewayDisconnected: () => false }),
+      transports: { whatsapp: { send } },
+      logger: createTestLogger(),
+      now: () => new Date(now.getTime() + 1_000),
+    });
+    await worker.drain();
+    await worker.stop();
+
+    expect(send).not.toHaveBeenCalled();
+    await expect(
+      alerts.findActive(BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY),
+    ).resolves.toBeUndefined();
+    await expect(alerts.listDeliveries(active?.id ?? "missing")).resolves.toEqual([]);
+  });
+
   it("keeps an opened disconnect alert retryable through a long outage and delivers it after recovery", async () => {
     let now = new Date("2026-07-17T10:00:00.000Z");
     const alerts = createOperationalAlertsRepository(db);
