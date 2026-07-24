@@ -103,18 +103,20 @@ export interface SettingsRepositoryOptions {
 type SettingsRow = Selectable<SettingsTable>;
 
 interface SettingsCacheBucket {
+  cacheTtlMs: number;
+  now: () => number;
   entry: { value: SettingsRow | null; expiresAt: number } | null;
   inflight: Promise<SettingsRow | null> | null;
 }
 
 /**
  * Per-db cache root. `generation` is shared so any write invalidates every
- * encryption-key bucket. Entries/inflight are keyed by encryption key so a
- * decrypted warm from one key cannot be served to a different key (or no key).
+ * bucket. Entries/inflight are partitioned by encryption key and cache policy
+ * so decrypted values and incompatible clock domains cannot cross repositories.
  */
 interface SettingsDbCacheRoot {
   generation: number;
-  buckets: Map<string, SettingsCacheBucket>;
+  buckets: Map<string, SettingsCacheBucket[]>;
 }
 
 /**
@@ -134,14 +136,34 @@ function cacheRootFor(db: Kysely<DB>): SettingsDbCacheRoot {
   return root;
 }
 
-function cacheBucketFor(root: SettingsDbCacheRoot, encryptionKey: string | undefined): SettingsCacheBucket {
+function cacheBucketFor(
+  root: SettingsDbCacheRoot,
+  encryptionKey: string | undefined,
+  cacheTtlMs: number,
+  now: () => number,
+): SettingsCacheBucket {
   const key = encryptionKey ?? "";
-  let bucket = root.buckets.get(key);
+  let buckets = root.buckets.get(key);
+  if (!buckets) {
+    buckets = [];
+    root.buckets.set(key, buckets);
+  }
+  let bucket = buckets.find((candidate) => candidate.cacheTtlMs === cacheTtlMs && candidate.now === now);
   if (!bucket) {
-    bucket = { entry: null, inflight: null };
-    root.buckets.set(key, bucket);
+    bucket = { cacheTtlMs, now, entry: null, inflight: null };
+    buckets.push(bucket);
   }
   return bucket;
+}
+
+function clearSettingsCacheRoot(root: SettingsDbCacheRoot): void {
+  root.generation += 1;
+  for (const buckets of root.buckets.values()) {
+    for (const bucket of buckets) {
+      bucket.entry = null;
+      bucket.inflight = null;
+    }
+  }
 }
 
 /**
@@ -154,11 +176,7 @@ function cacheBucketFor(root: SettingsDbCacheRoot, encryptionKey: string | undef
 export function invalidateSettingsCache(db: object): void {
   const root = cacheByDb.get(db);
   if (!root) return;
-  root.generation += 1;
-  for (const bucket of root.buckets.values()) {
-    bucket.entry = null;
-    bucket.inflight = null;
-  }
+  clearSettingsCacheRoot(root);
 }
 
 /**
@@ -177,14 +195,10 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
   const cacheTtlMs = options?.cacheTtlMs ?? DEFAULT_SETTINGS_CACHE_TTL_MS;
   const now = options?.now ?? Date.now;
   const root = cacheRootFor(db);
-  const bucket = cacheBucketFor(root, encryptionKey);
+  const bucket = cacheBucketFor(root, encryptionKey, cacheTtlMs, now);
 
   function invalidateCache(): void {
-    root.generation += 1;
-    for (const b of root.buckets.values()) {
-      b.entry = null;
-      b.inflight = null;
-    }
+    clearSettingsCacheRoot(root);
   }
 
   function cloneRow(row: SettingsRow): SettingsRow {
@@ -193,7 +207,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
 
   function readCache(): SettingsRow | null | undefined {
     if (!bucket.entry) return undefined;
-    if (cacheTtlMs > 0 && now() >= bucket.entry.expiresAt) {
+    if (bucket.cacheTtlMs > 0 && bucket.now() >= bucket.entry.expiresAt) {
       bucket.entry = null;
       return undefined;
     }
@@ -204,7 +218,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
     if (generationAtLoad !== root.generation) return;
     bucket.entry = {
       value: value === null ? null : cloneRow(value),
-      expiresAt: cacheTtlMs > 0 ? now() + cacheTtlMs : Number.POSITIVE_INFINITY,
+      expiresAt: bucket.cacheTtlMs > 0 ? bucket.now() + bucket.cacheTtlMs : Number.POSITIVE_INFINITY,
     };
   }
 
@@ -267,6 +281,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
         .onConflict((oc) => oc.column("id").doNothing())
         .execute();
 
+      invalidateCache();
       const apiKey = generateApiKey();
       await db
         .updateTable("settings")

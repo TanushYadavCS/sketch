@@ -1,5 +1,5 @@
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { createSettingsRepository } from "./settings";
@@ -15,6 +15,7 @@ describe("Settings repository", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await db.destroy();
   });
 
@@ -167,6 +168,16 @@ describe("Settings repository", () => {
       expect(row?.admin_email).toBe("a@b.com");
     });
 
+    it("coalesces concurrent cache misses into one settings read", async () => {
+      await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      const selectSpy = vi.spyOn(db, "selectFrom");
+
+      const rows = await Promise.all([settings.get(), settings.get(), settings.get()]);
+
+      expect(rows.map((row) => row?.admin_email)).toEqual(["a@b.com", "a@b.com", "a@b.com"]);
+      expect(selectSpy.mock.calls.filter(([table]) => table === "settings")).toHaveLength(1);
+    });
+
     it("returns defensive copies so callers cannot poison the cache", async () => {
       await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
       const first = await settings.get();
@@ -194,6 +205,22 @@ describe("Settings repository", () => {
       expect((await settings.get())?.org_name).toBe("AfterTtl");
     });
 
+    it("does not share entries across different cache policies", async () => {
+      let nowMs = 1_000;
+      const now = () => nowMs;
+      const noExpiry = createSettingsRepository(db, undefined, { cacheTtlMs: 0, now });
+      const expiring = createSettingsRepository(db, undefined, { cacheTtlMs: 100, now });
+
+      await noExpiry.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      expect((await noExpiry.get())?.org_name).toBeNull();
+
+      await db.updateTable("settings").set({ org_name: "AfterTtl" }).where("id", "=", "default").execute();
+      nowMs += 100;
+
+      expect((await expiring.get())?.org_name).toBe("AfterTtl");
+      expect((await noExpiry.get())?.org_name).toBeNull();
+    });
+
     it("update() with empty data does not invalidate", async () => {
       await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
       expect((await settings.get())?.org_name).toBeNull();
@@ -209,6 +236,18 @@ describe("Settings repository", () => {
 
       await db.updateTable("settings").set({ org_name: "Bypass" }).where("id", "=", "default").execute();
       expect((await settings.get())?.org_name).toBeNull();
+    });
+
+    it("invalidates a cached null when API key generation fails after insert", async () => {
+      expect(await settings.get()).toBeNull();
+
+      await expect(
+        settings.ensureSketchApiKey(() => {
+          throw new Error("generation failed");
+        }),
+      ).rejects.toThrow("generation failed");
+
+      expect((await settings.get())?.id).toBe("default");
     });
 
     it("shares cache invalidation across repository instances for the same db and key", async () => {
@@ -228,7 +267,10 @@ describe("Settings repository", () => {
       expect((await keyed.get())?.slack_bot_token).toBe("xoxb-secret");
 
       const unkeyed = createSettingsRepository(db);
+      const selectSpy = vi.spyOn(db, "selectFrom");
       await expect(unkeyed.get()).rejects.toThrow(/ENCRYPTION_KEY is not set/);
+      await expect(unkeyed.get()).rejects.toThrow(/ENCRYPTION_KEY is not set/);
+      expect(selectSpy.mock.calls.filter(([table]) => table === "settings")).toHaveLength(2);
     });
 
     it("ensure() does not write a stale row after a concurrent update", async () => {
@@ -253,6 +295,37 @@ describe("Settings repository", () => {
 
       await users.remove(agent.id);
       expect((await settings.get())?.whatsapp_fallback_agent_id).toBeNull();
+    });
+
+    it("invalidates cached whatsapp_fallback_agent_id after a transactional remove commits", async () => {
+      const users = createUserRepository(db);
+      await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      const agent = await users.create({ name: "Fallback Agent", type: "agent" });
+      await settings.update({ whatsappFallbackAgentId: agent.id });
+      expect((await settings.get())?.whatsapp_fallback_agent_id).toBe(agent.id);
+
+      await users.transaction((transactionUsers) => transactionUsers.remove(agent.id));
+
+      expect((await settings.get())?.whatsapp_fallback_agent_id).toBeNull();
+    });
+
+    it("keeps the settings cache valid when a transactional remove rolls back", async () => {
+      const users = createUserRepository(db);
+      await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
+      const agent = await users.create({ name: "Fallback Agent", type: "agent" });
+      await settings.update({ whatsappFallbackAgentId: agent.id });
+      expect((await settings.get())?.whatsapp_fallback_agent_id).toBe(agent.id);
+      const selectSpy = vi.spyOn(db, "selectFrom");
+
+      await expect(
+        users.transaction(async (transactionUsers) => {
+          await transactionUsers.remove(agent.id);
+          throw new Error("rollback");
+        }),
+      ).rejects.toThrow("rollback");
+
+      expect((await settings.get())?.whatsapp_fallback_agent_id).toBe(agent.id);
+      expect(selectSpy.mock.calls.filter(([table]) => table === "settings")).toHaveLength(0);
     });
   });
 });

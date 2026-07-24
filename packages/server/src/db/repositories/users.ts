@@ -58,6 +58,11 @@ export interface UserRepository {
   transaction<T>(callback: (repo: UserRepository) => Promise<T>): Promise<T>;
 }
 
+interface SettingsCacheInvalidationContext {
+  cacheDb: object;
+  deferred?: { pending: boolean };
+}
+
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
@@ -74,7 +79,22 @@ function excludeUserIdSql(excludeUserId?: string) {
   return excludeUserId ? sql`AND id != ${excludeUserId}` : sql``;
 }
 
+function recordSettingsWrite(context: SettingsCacheInvalidationContext): void {
+  if (context.deferred) {
+    context.deferred.pending = true;
+    return;
+  }
+  invalidateSettingsCache(context.cacheDb);
+}
+
 export function createUserRepository(db: UserDb): UserRepository {
+  return createUserRepositoryWithContext(db, { cacheDb: db });
+}
+
+function createUserRepositoryWithContext(
+  db: UserDb,
+  settingsCacheInvalidation: SettingsCacheInvalidationContext,
+): UserRepository {
   return {
     async list() {
       return db.selectFrom("users").selectAll().where("type", "!=", "external").orderBy("created_at", "desc").execute();
@@ -331,13 +351,31 @@ export function createUserRepository(db: UserDb): UserRepository {
         .set({ whatsapp_fallback_agent_id: null })
         .where("whatsapp_fallback_agent_id", "=", id)
         .execute();
-      invalidateSettingsCache(db);
+      recordSettingsWrite(settingsCacheInvalidation);
       await db.updateTable("tasks").set({ created_by_user_id: null }).where("created_by_user_id", "=", id).execute();
       return db.deleteFrom("users").where("id", "=", id).execute();
     },
 
-    async transaction<T>(callback: (repo: ReturnType<typeof createUserRepository>) => Promise<T>) {
-      return db.transaction().execute(async (trx) => callback(createUserRepository(trx)));
+    async transaction<T>(callback: (repo: UserRepository) => Promise<T>) {
+      if (settingsCacheInvalidation.deferred) {
+        return db
+          .transaction()
+          .execute(async (trx) => callback(createUserRepositoryWithContext(trx, settingsCacheInvalidation)));
+      }
+
+      const deferred = { pending: false };
+      const result = await db.transaction().execute(async (trx) =>
+        callback(
+          createUserRepositoryWithContext(trx, {
+            cacheDb: settingsCacheInvalidation.cacheDb,
+            deferred,
+          }),
+        ),
+      );
+      if (deferred.pending) {
+        invalidateSettingsCache(settingsCacheInvalidation.cacheDb);
+      }
+      return result;
     },
   };
 }
