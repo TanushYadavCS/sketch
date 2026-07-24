@@ -86,6 +86,21 @@ describe("WhatsApp operational alert transport", () => {
     );
   });
 
+  it("sends text outside the customer service window when the provider does not support templates", async () => {
+    const deps = createDeps({ receivedAt: "2026-07-15T09:00:00.000Z", providerTimestamp: null });
+    vi.mocked(deps.whatsapp.getCapabilities).mockReturnValue({ ...capabilities, templates: false });
+    const transport = createWhatsAppOperationalAlertTransport(deps);
+
+    await expect(transport.send(sendInput(new Date("2026-07-17T10:00:00.000Z")))).resolves.toEqual({
+      providerMessageId: "message-1",
+    });
+    expect(deps.whatsapp.sendText).toHaveBeenCalledWith(
+      { kind: "dm", phoneE164: "+919876543210" },
+      "Baileys disconnected",
+    );
+    expect(deps.whatsapp.sendTemplate).not.toHaveBeenCalled();
+  });
+
   it("falls back to a template when the provider rejects an apparently in-window direct message", async () => {
     const deps = createDeps({ receivedAt: "2026-07-17T09:00:00.000Z", providerTimestamp: null });
     vi.mocked(deps.whatsapp.sendText).mockRejectedValue(

@@ -1,18 +1,25 @@
-import type { Kysely } from "kysely";
-import { afterEach, describe, expect, it } from "vitest";
-import { createTestPgDb } from "../../test-utils";
+import { type Kysely, sql } from "kysely";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { getSharedPgDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { createOperationalAlertsRepository } from "./operational-alerts";
 
 describe("operational alerts repository on Postgres", () => {
-  let db: Kysely<DB> | undefined;
+  let db!: Kysely<DB>;
+
+  beforeAll(async () => {
+    db = await getSharedPgDb();
+  }, 30_000);
+
+  beforeEach(async () => {
+    await sql`BEGIN`.execute(db);
+  });
 
   afterEach(async () => {
-    await db?.destroy();
+    await sql`ROLLBACK`.execute(db);
   });
 
   it("enforces one active alert and one delivery per destination", async () => {
-    db = await createTestPgDb();
     await db
       .insertInto("users")
       .values({ id: "admin-1", name: "Admin", email: "admin@example.com", auth_role: "admin" })

@@ -35,6 +35,11 @@ export function createWhatsAppOperationalAlertTransport(params: {
     async send(input) {
       const target = { kind: "dm" as const, phoneE164: input.recipient.destination };
       const capabilities = params.whatsapp.getCapabilities(target);
+      if (!capabilities.templates) {
+        const sent = requireSent(await params.whatsapp.sendText(target, input.directMessage));
+        return { providerMessageId: sent.providerMessageId };
+      }
+
       const lastInbound = await params.conversations.findLatestInboundWhatsAppDmFromRecipient({
         recipientUserId: input.recipient.id,
         phoneE164: input.recipient.destination,
@@ -47,13 +52,10 @@ export function createWhatsAppOperationalAlertTransport(params: {
           return { providerMessageId: sent.providerMessageId };
         } catch (error) {
           const code = providerCodeFromError(error);
-          if (!capabilities.templates || !code || !TEMPLATE_FALLBACK_PROVIDER_CODES.has(code)) throw error;
+          if (!code || !TEMPLATE_FALLBACK_PROVIDER_CODES.has(code)) throw error;
         }
       }
 
-      if (!capabilities.templates) {
-        throw new Error("WhatsApp templates are unavailable outside the customer service window");
-      }
       const sent = requireSent(
         await params.whatsapp.sendTemplate(
           target,
