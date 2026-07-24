@@ -21,15 +21,18 @@ import type { WhatsAppRuntime } from "./runtime";
 
 interface HistoryHarness {
   emitHistory: (messages: WhatsAppInboundMessage[], metadata?: WhatsAppHistoryBatchMetadata) => Promise<unknown>;
+  handleHistoryMessages: ReturnType<typeof wireWhatsAppHandlers>["handleHistoryMessages"];
+  runAgent: ReturnType<typeof vi.fn>;
 }
 
-function createMockRuntime(): WhatsAppRuntime & HistoryHarness {
+function createMockRuntime(): WhatsAppRuntime & Pick<HistoryHarness, "emitHistory"> {
   let historyHandler:
     | ((messages: WhatsAppInboundMessage[], metadata?: WhatsAppHistoryBatchMetadata) => Promise<unknown>)
     | null = null;
 
   return {
     isConnected: true,
+    shouldHandleInboundMessage: () => true,
     onMessage: vi.fn(),
     onHistoryMessages: vi.fn((handler) => {
       historyHandler = handler as typeof historyHandler;
@@ -70,6 +73,8 @@ function groupMessage(input: {
   providerTimestamp: string;
   text?: string;
   senderPhoneE164?: string;
+  fromMe?: boolean;
+  connectionKey?: string | null;
 }): WhatsAppInboundMessage {
   const senderPhoneE164 = input.senderPhoneE164 ?? "+15550001000";
   const senderJid = `${senderPhoneE164.replace(/\D/gu, "")}@s.whatsapp.net`;
@@ -87,9 +92,15 @@ function groupMessage(input: {
     text: input.text ?? input.providerMessageId,
     isMentioned: false,
     rawProviderPayload: {
-      key: { remoteJid: input.groupJid, id: input.providerMessageId, fromMe: false, participant: senderJid },
+      key: {
+        remoteJid: input.groupJid,
+        id: input.providerMessageId,
+        fromMe: input.fromMe ?? false,
+        participant: senderJid,
+      },
       messageTimestamp: Math.floor(Date.parse(input.providerTimestamp) / 1000),
     },
+    connectionKey: input.connectionKey ?? null,
   };
 }
 
@@ -99,7 +110,8 @@ async function createHarness(
   overrides: Partial<WhatsAppAdapterDeps["repos"]> = {},
 ): Promise<HistoryHarness> {
   const runtime = createMockRuntime();
-  wireWhatsAppHandlers(runtime, {
+  const runAgent = vi.fn(async () => ({}) as never);
+  const handlers = wireWhatsAppHandlers(runtime, {
     db,
     config: createTestConfig({
       DATA_DIR: dataDir,
@@ -115,12 +127,12 @@ async function createHarness(
       ...overrides,
     },
     queue: new QueueManager(),
-    runAgent: vi.fn(async () => ({}) as never),
+    runAgent,
     buildMcpServers: vi.fn(async () => ({})),
     loadIntegrationProvider: vi.fn(async () => null),
     sendDm: vi.fn(async () => ({ channelId: "dm:+15550001000", messageRef: "sent-1" })),
   });
-  return runtime;
+  return Object.assign(runtime, { handleHistoryMessages: handlers.handleHistoryMessages, runAgent });
 }
 
 async function listStoredMessages(db: Kysely<DB>, groupJid: string) {
@@ -131,6 +143,11 @@ async function listStoredMessages(db: Kysely<DB>, groupJid: string) {
       "conversation_messages.provider_message_id",
       "conversation_messages.received_at",
       "conversation_messages.provider_timestamp",
+      "conversation_messages.event_key",
+      "conversation_messages.source",
+      "conversation_messages.effective_at",
+      "conversation_messages.connection_key",
+      "conversation_messages.attachments",
     ])
     .where("conversations.platform", "=", "whatsapp")
     .where("conversations.kind", "=", "group")
@@ -243,7 +260,7 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
       await expect(listStoredMessages(db, groupJid)).resolves.toHaveLength(3);
     });
 
-    it("feeds backfilled conversation rows into the next enabled-group chunker sync", async () => {
+    it("keeps backfilled conversation rows out of the live chunker", async () => {
       const groupJid = `${randomUUID()}@g.us`;
       const group = await seedEnabledGroup(db, groupJid);
       const harness = await createHarness(db, dataDir);
@@ -274,10 +291,90 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
       });
       const slices = await db.selectFrom("conversation_slices").selectAll().orderBy("started_at", "asc").execute();
 
-      expect(summary.slicesCreated).toBe(2);
-      expect(slices).toHaveLength(2);
-      expect(slices.map((slice) => slice.started_at)).toEqual(["2026-07-07T09:00:00.000Z", "2026-07-07T09:10:00.000Z"]);
-      expect(slices.map((slice) => slice.message_count)).toEqual([1, 1]);
+      expect(summary.slicesCreated).toBe(0);
+      expect(summary.messagesProcessed).toBe(0);
+      expect(slices).toHaveLength(0);
+    });
+
+    it("persists valid history with event identity, provenance, connection key, and idempotent redelivery", async () => {
+      const groupJid = `${randomUUID()}@g.us`;
+      const harness = await createHarness(db, dataDir);
+      const first = groupMessage({
+        groupJid,
+        providerMessageId: "history-event-key",
+        providerTimestamp: "2026-07-17T09:00:00.000Z",
+        connectionKey: "000000000007:000000000019",
+      });
+      const redelivery = groupMessage({
+        groupJid,
+        providerMessageId: "history-event-key",
+        providerTimestamp: "2026-07-17T09:00:00.000Z",
+        senderPhoneE164: "+15550002000",
+        connectionKey: "000000000007:000000000019",
+      });
+      const captureMetadataForMessage = () => ({
+        eventKey: "event-history-event-key",
+        connectionKey: "000000000007:000000000019",
+      });
+
+      await expect(
+        harness.handleHistoryMessages([first], { progress: 100 }, { captureMetadataForMessage }),
+      ).resolves.toMatchObject({ persisted: 1, skippedDup: 0 });
+      await expect(
+        harness.handleHistoryMessages([redelivery], { progress: 100 }, { captureMetadataForMessage }),
+      ).resolves.toMatchObject({ persisted: 0, skippedDup: 1 });
+
+      const rows = await listStoredMessages(db, groupJid);
+      expect(rows).toEqual([
+        expect.objectContaining({
+          provider_message_id: "history-event-key",
+          event_key: "event-history-event-key",
+          source: "history",
+          effective_at: "2026-07-17T09:00:00.000Z",
+          connection_key: "000000000007:000000000019",
+          attachments: null,
+        }),
+      ]);
+    });
+
+    it("skips history without a provider id or genuine provider timestamp without advancing coverage", async () => {
+      const groupJid = `${randomUUID()}@g.us`;
+      const harness = await createHarness(db, dataDir);
+      const missingId = groupMessage({
+        groupJid,
+        providerMessageId: "",
+        providerTimestamp: "2026-07-17T09:00:00.000Z",
+      });
+      const missingTimestamp = groupMessage({
+        groupJid,
+        providerMessageId: "missing-timestamp",
+        providerTimestamp: "invalid",
+      });
+
+      await expect(harness.emitHistory([missingId, missingTimestamp], { progress: 100 })).resolves.toEqual({
+        persisted: 0,
+        skippedOld: 0,
+        skippedDup: 0,
+      });
+      await expect(listStoredMessages(db, groupJid)).resolves.toEqual([]);
+      await expect(createConversationSlicesRepository(db).getBackfillCheckpoint(groupJid)).resolves.toBeUndefined();
+    });
+
+    it("stores fromMe group history without dispatching it", async () => {
+      const groupJid = `${randomUUID()}@g.us`;
+      const harness = await createHarness(db, dataDir);
+      const fromMe = groupMessage({
+        groupJid,
+        providerMessageId: "history-from-me",
+        providerTimestamp: "2026-07-17T09:00:00.000Z",
+        fromMe: true,
+      });
+
+      await expect(harness.emitHistory([fromMe], { progress: 100 })).resolves.toMatchObject({ persisted: 1 });
+      await expect(listStoredMessages(db, groupJid)).resolves.toEqual([
+        expect.objectContaining({ provider_message_id: "history-from-me", source: "history" }),
+      ]);
+      expect(harness.runAgent).not.toHaveBeenCalled();
     });
   });
 }

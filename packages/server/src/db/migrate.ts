@@ -141,6 +141,20 @@ import * as m138 from "./migrations/138-whatsapp-identity-candidates";
 import * as m139 from "./migrations/139-tasks-proposed-assignee";
 import * as m140 from "./migrations/140-retire-unassigned-agent-tasks";
 import * as m141 from "./migrations/141-fact-materialization-quarantine";
+import * as m142 from "./migrations/142-verdict-safe-fact-upserts";
+import * as m143 from "./migrations/143-indexed-corroboration";
+import * as m144 from "./migrations/144-whatsapp-gateway-queue";
+import * as m145 from "./migrations/145-whatsapp-history-capture-foundation";
+import * as m146 from "./migrations/146-whatsapp-history-top-up";
+import * as m147 from "./migrations/147-whatsapp-backfill-graph-admission";
+import * as m148 from "./migrations/148-whatsapp-pending-slices-index";
+import * as m149 from "./migrations/149-whatsapp-backfill-lifecycle-durability";
+import * as m150 from "./migrations/150-task-durability-steel-thread";
+import * as m151 from "./migrations/151-agent-output-item-task-links";
+import * as m152 from "./migrations/152-reseed-combined-durability-routes";
+import * as m153 from "./migrations/153-slack-conversation-indexing";
+import * as m154 from "./migrations/154-reclassify-mpim-conversations";
+import * as m155 from "./migrations/155-requeue-kept-slice-reemission";
 import type { DB } from "./schema";
 
 /**
@@ -291,6 +305,20 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "139-tasks-proposed-assignee": m139,
           "140-retire-unassigned-agent-tasks": m140,
           "141-fact-materialization-quarantine": m141,
+          "142-verdict-safe-fact-upserts": m142,
+          "143-indexed-corroboration": m143,
+          "144-whatsapp-gateway-queue": m144,
+          "145-whatsapp-history-capture-foundation": m145,
+          "146-whatsapp-history-top-up": m146,
+          "147-whatsapp-backfill-graph-admission": m147,
+          "148-whatsapp-pending-slices-index": m148,
+          "149-whatsapp-backfill-lifecycle-durability": m149,
+          "150-task-durability-steel-thread": m150,
+          "151-agent-output-item-task-links": m151,
+          "152-reseed-combined-durability-routes": m152,
+          "153-slack-conversation-indexing": m153,
+          "154-reclassify-mpim-conversations": m154,
+          "155-requeue-kept-slice-reemission": m155,
         };
       },
     },

@@ -7,7 +7,7 @@ import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-
 import type { createWhatsAppTemplateMappingRepository } from "../db/repositories/whatsapp-template-mappings";
 import { createEmailTransport, verifyEmailTransport } from "../email";
 import type { SlackBot } from "../slack/bot";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 import type { WatiWhatsAppProvider } from "../whatsapp/providers/wati";
 import { denyIfNotAdmin } from "./auth-helpers";
 
@@ -16,7 +16,7 @@ type WhatsAppGroupsRepo = ReturnType<typeof createWhatsAppGroupRepository>;
 type WhatsAppTemplateMappingsRepo = ReturnType<typeof createWhatsAppTemplateMappingRepository>;
 
 interface ChannelDeps {
-  whatsapp?: WhatsAppBot;
+  whatsapp?: WhatsAppSocketFacade;
   watiProvider?: Pick<WatiWhatsAppProvider, "listTemplates">;
   whatsappTemplateMappings?: WhatsAppTemplateMappingsRepo;
   getSlack?: () => SlackBot | null;
@@ -86,6 +86,7 @@ export function channelRoutes(deps: ChannelDeps) {
   routes.get("/status", async (c) => {
     const slackBot = deps.getSlack?.() ?? null;
     const slackConfigured = !!slackBot;
+    const whatsappStatus = await deps.whatsapp?.pairing.status();
 
     const settingsRow = await deps.settings.get();
     const emailConfigured = !!(settingsRow?.smtp_host && settingsRow?.smtp_from);
@@ -100,9 +101,9 @@ export function channelRoutes(deps: ChannelDeps) {
       },
       {
         platform: "whatsapp" as const,
-        configured: deps.whatsapp?.isConnected ?? false,
-        connected: deps.whatsapp?.isConnected ? true : null,
-        phoneNumber: deps.whatsapp?.phoneNumber ?? null,
+        configured: whatsappStatus?.connected ?? false,
+        connected: whatsappStatus?.connected ? true : null,
+        phoneNumber: whatsappStatus?.phoneNumber ?? null,
         fromAddress: null,
       },
       {

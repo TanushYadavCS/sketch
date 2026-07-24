@@ -21,6 +21,7 @@ import { sweepCoMentionContributesTo } from "../entities/co-mention-sweep";
 import { runFeatureArchiveSweep } from "../entities/feature-archive-sweep";
 import { isRecreateActive } from "../entities/recreate-state";
 import { heapStats, heapUsedMb } from "../lib/heap";
+import type { SlackIndexingFacade } from "../slack/indexing-facade";
 import { resolveConnectorCredentials } from "./credential-providers";
 import { reconcileDanglingCrmRollups, refreshCrmActivityRollups } from "./crm-rollup";
 import { isEmailSyncedItem, persistEnvelopeMetadata, recordSuppressedEmailRecord } from "./email";
@@ -37,7 +38,12 @@ import {
 } from "./enrichment-providers";
 import { createGeminiGenerator } from "./gemini-generate";
 import { applyMicrosoftOAuthConfig, resolveMicrosoftOAuthConfig } from "./microsoft-graph";
-import { runPostSyncGraphPipeline } from "./post-sync";
+import {
+  type PostSyncGraphInputCollector,
+  createPostSyncGraphInputCollector,
+  runPostSyncGraphPipeline,
+} from "./post-sync";
+import { getPostSyncCoordinator } from "./post-sync-coordinator";
 import { getConnector } from "./registry";
 import { emitFactsForSyncedItem } from "./sync-facts";
 import { getSyncIdentityForItem, syncIdentityKey } from "./sync-identity";
@@ -101,6 +107,12 @@ export async function seedTeamDirectoryEntities(db: Kysely<DB>, logger: Logger):
 
 export { getConnector } from "./registry";
 
+export interface RunConnectorSyncOptions {
+  postSyncMode?: "inline" | "deferred";
+  postSyncInputCollector?: PostSyncGraphInputCollector;
+  slackIndexingFacade?: SlackIndexingFacade | null;
+}
+
 /**
  * Run a sync for a single connector config.
  */
@@ -133,12 +145,19 @@ export async function runConnectorSync(
       | "WHATSAPP_SLICE_MAX_MESSAGES"
       | "WHATSAPP_SALIENCE_BATCH_LIMIT"
       | "WHATSAPP_EMISSION_REFRESH_DAYS"
+      | "WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES"
+      | "WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS"
+      | "WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES"
+      | "WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX"
+      | "WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX"
+      | "WHATSAPP_BACKFILL_GRAPH_OPEN_FACTS_MAX"
       | "MICROSOFT_CLIENT_ID"
       | "MICROSOFT_CLIENT_SECRET"
       | "MICROSOFT_TENANT"
       | "OPENROUTER_API_KEY"
     >
   >,
+  options: RunConnectorSyncOptions = {},
 ): Promise<SyncResult> {
   if (isRecreateActive()) {
     logger.info({ connectorId: connectorConfigId }, "Skipping connector sync during entity recreate");
@@ -186,6 +205,19 @@ export async function runConnectorSync(
               sliceMaxMessages: storedScopeConfig.sliceMaxMessages ?? appConfig?.WHATSAPP_SLICE_MAX_MESSAGES,
               salienceBatchLimit: storedScopeConfig.salienceBatchLimit ?? appConfig?.WHATSAPP_SALIENCE_BATCH_LIMIT,
               emissionRefreshDays: storedScopeConfig.emissionRefreshDays ?? appConfig?.WHATSAPP_EMISSION_REFRESH_DAYS,
+              backfillGraphPageMessages:
+                storedScopeConfig.backfillGraphPageMessages ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES,
+              backfillGraphPageTokens:
+                storedScopeConfig.backfillGraphPageTokens ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_PAGE_TOKENS,
+              backfillGraphCycleMessages:
+                storedScopeConfig.backfillGraphCycleMessages ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_CYCLE_MESSAGES,
+              backfillGraphPendingSlicesMax:
+                storedScopeConfig.backfillGraphPendingSlicesMax ??
+                appConfig?.WHATSAPP_BACKFILL_GRAPH_PENDING_SLICES_MAX,
+              backfillGraphPendingFilesMax:
+                storedScopeConfig.backfillGraphPendingFilesMax ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_PENDING_FILES_MAX,
+              backfillGraphOpenFactsMax:
+                storedScopeConfig.backfillGraphOpenFactsMax ?? appConfig?.WHATSAPP_BACKFILL_GRAPH_OPEN_FACTS_MAX,
             }
           : storedScopeConfig;
   const owner = await userRepo.findById(config.created_by);
@@ -207,6 +239,10 @@ export async function runConnectorSync(
     startedAt: new Date().toISOString(),
   };
   activeSyncs.set(config.id, progress);
+
+  const affectedIndexedFileIds = new Set<string>();
+  let syncReconciled = false;
+  const syncRunId = randomUUID();
 
   try {
     const resolvedCredentials = await resolveConnectorCredentials({
@@ -244,13 +280,10 @@ export async function runConnectorSync(
     };
 
     const seenSyncIdentityKeys = new Set<string>();
-    const affectedIndexedFileIds = new Set<string>();
     const dirtyCrmRollupGroupIds = new Set<string>();
-    let syncReconciled = false;
 
     const existingHashes = await loadExistingContentHashes(db, connectorType, config.id);
     const resolveNameToEmail = await buildSyncNameResolver(db);
-    const syncRunId = randomUUID();
     const factContext = {
       connectorConfigId: config.id,
       createdByUserId: config.created_by,
@@ -288,6 +321,7 @@ export async function runConnectorSync(
       ownerEmail,
       resolveNameToEmail,
       salienceGenerator,
+      slackIndexing: options.slackIndexingFacade ?? null,
       onEntitySeed: async (seed) => {
         await factRepo.upsertFact({
           ...factContext,
@@ -350,8 +384,8 @@ export async function runConnectorSync(
           continue;
         }
 
-        if (connectorType === "whatsapp") {
-          await linkWhatsAppSliceIndexedFile(db, item.providerFileId, itemResult.indexedFileId, syncLogger);
+        if (connectorType === "whatsapp" || connectorType === "slack") {
+          await linkConversationSliceIndexedFile(db, item.providerFileId, itemResult.indexedFileId, syncLogger);
         }
 
         affectedIndexedFileIds.add(itemResult.indexedFileId);
@@ -423,17 +457,17 @@ export async function runConnectorSync(
       for (const indexedFileId of reconcileResult.affectedIndexedFileIds) affectedIndexedFileIds.add(indexedFileId);
     }
 
-    await runPostSyncGraphPipeline({
-      db,
-      syncLogger,
-      affectedIndexedFileIds: [...affectedIndexedFileIds],
-      coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
-      floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
-      source: connectorType,
-      syncRunId,
-      connectorConfigId: config.id,
-      runCycleReconcile: syncReconciled,
-    });
+    if (options.postSyncMode !== "deferred") {
+      await runPostSyncGraphPipeline({
+        db,
+        syncLogger,
+        affectedIndexedFileIds: [...affectedIndexedFileIds],
+        sources: [connectorType],
+        workCycleReconciles: syncReconciled ? [{ connectorConfigId: config.id, syncRunId }] : [],
+        coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+        floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
+      });
+    }
 
     if (connectorType === "zoho_crm") {
       await refreshCrmRollupsForSync({
@@ -487,6 +521,14 @@ export async function runConnectorSync(
     });
 
     throw err;
+  } finally {
+    if (options.postSyncMode === "deferred") {
+      options.postSyncInputCollector?.add({
+        affectedIndexedFileIds: [...affectedIndexedFileIds],
+        sources: [connectorType],
+        workCycleReconciles: syncReconciled ? [{ connectorConfigId: config.id, syncRunId }] : [],
+      });
+    }
   }
 }
 
@@ -538,7 +580,7 @@ async function refreshCrmRollupsForSync(params: {
   }
 }
 
-async function linkWhatsAppSliceIndexedFile(
+async function linkConversationSliceIndexedFile(
   db: Kysely<DB>,
   sliceId: string,
   indexedFileId: string,
@@ -550,13 +592,15 @@ async function linkWhatsAppSliceIndexedFile(
     .where("id", "=", sliceId)
     .executeTakeFirst();
   if (Number(result.numUpdatedRows ?? 0) === 0) {
-    logger.warn({ sliceId, indexedFileId }, "WhatsApp synced item did not match a conversation slice");
+    logger.warn({ sliceId, indexedFileId }, "Conversation-slice synced item did not match a conversation slice");
   }
 }
 
 export interface SyncSchedulerDeps {
   /** Download image from Google Drive for embedding. */
   downloadImage?: (providerFileId: string, connectorConfigId: string) => Promise<{ buffer: Buffer; mimeType: string }>;
+  /** Slack API facade for the slack-indexing connector; built in bootstrap. */
+  slackIndexingFacade?: SlackIndexingFacade | null;
   appConfig?: Partial<
     Pick<
       Config,
@@ -652,13 +696,37 @@ export async function runAllSyncs(db: Kysely<DB>, logger: Logger, deps?: SyncSch
 
   await seedTeamDirectoryEntities(db, logger);
 
+  const postSyncInputs = createPostSyncGraphInputCollector();
+
   await runWithConcurrency(configs, SYNC_CONCURRENCY, async (config) => {
+    postSyncInputs.add({ affectedIndexedFileIds: [], sources: [config.connector_type], workCycleReconciles: [] });
     try {
-      await runConnectorSync(db, config.id, logger, deps?.appConfig);
+      await runConnectorSync(db, config.id, logger, deps?.appConfig, {
+        postSyncMode: "deferred",
+        postSyncInputCollector: postSyncInputs,
+        slackIndexingFacade: deps?.slackIndexingFacade ?? null,
+      });
     } catch (err) {
       logger.error({ err, connectorId: config.id }, "Scheduled sync failed for connector");
     }
   });
+
+  const postSyncCoordinator = getPostSyncCoordinator(db);
+  const postSyncContext = {
+    db,
+    logger,
+    coMentionContributesToThreshold: deps?.appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+    floorRetryMaxFilesPerDomain: deps?.appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
+  };
+  try {
+    if (postSyncInputs.hasInputs()) {
+      await postSyncCoordinator.enqueue(postSyncInputs.take(), postSyncContext);
+    } else {
+      await postSyncCoordinator.drain(postSyncContext);
+    }
+  } catch (err) {
+    logger.error({ err }, "Scheduled post-sync graph pipeline failed");
+  }
 
   try {
     const entityRepo = createEntityRepository(db);

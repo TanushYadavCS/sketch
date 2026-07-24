@@ -20,7 +20,7 @@ interface ChunkOptions {
 }
 
 /** Rough token estimate: 1 token ≈ 4 characters. */
-function estimateTokens(text: string): number {
+export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 

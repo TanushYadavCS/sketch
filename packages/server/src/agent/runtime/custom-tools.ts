@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { type JSONValue, type Tool, type ToolSet, tool } from "ai";
+import { type JSONValue, type Tool, type ToolSet, jsonSchema, tool } from "ai";
 import { z } from "zod/v4";
 import {
   type IntegrationProgressEventLike,
@@ -14,6 +14,7 @@ import {
   UploadCollector,
   createSketchMcpToolDefinitions,
 } from "../sketch-tools";
+import { WRITE_AGENT_OUTPUT_TOOL_NAME } from "../tools/agent-output";
 import type { SketchMcpDeps } from "../tools/types";
 import type { AgentRuntimeCustomToolProvider, AgentRuntimeToolEnd, AgentRuntimeToolStart } from "./contracts";
 
@@ -65,6 +66,15 @@ function toInputSchema(inputSchema: RuntimeSdkMcpToolDefinition["inputSchema"]) 
   return z.object(inputSchema);
 }
 
+function toRuntimeInputSchema(sdkTool: RuntimeSdkMcpToolDefinition) {
+  const inputSchema = toInputSchema(sdkTool.inputSchema);
+  if (sdkTool.name !== WRITE_AGENT_OUTPUT_TOOL_NAME) return inputSchema;
+  const advertisedSchema = z.toJSONSchema(inputSchema) as Parameters<typeof jsonSchema<Record<string, unknown>>>[0];
+  return jsonSchema<Record<string, unknown>>(advertisedSchema, {
+    validate: (value) => ({ success: true, value: value as Record<string, unknown> }),
+  });
+}
+
 function mcpToModelOutput({ output }: Parameters<ToolToModelOutput>[0]): ReturnType<ToolToModelOutput> {
   const result = output as { content?: unknown };
 
@@ -92,7 +102,7 @@ function mcpToModelOutput({ output }: Parameters<ToolToModelOutput>[0]): ReturnT
 function toAiSdkTool(sdkTool: RuntimeSdkMcpToolDefinition) {
   return tool({
     description: sdkTool.description,
-    inputSchema: toInputSchema(sdkTool.inputSchema),
+    inputSchema: toRuntimeInputSchema(sdkTool),
     execute: async (input) => sdkTool.handler(input, {}),
     toModelOutput: mcpToModelOutput,
   });

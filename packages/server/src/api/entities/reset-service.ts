@@ -246,6 +246,12 @@ export async function performReset(db: Kysely<DB>, opts: ResetExecutionOptions):
     await db.deleteFrom("entities").where("id", "in", idsForDeletion).execute();
   }
 
+  /**
+   * An operator reset explicitly owns the verdict transition, so it leaves the
+   * input fingerprint intact while clearing the completed marker and retry cap.
+   * A later same-input upsert therefore preserves the forced-open state; it
+   * cannot resurrect the verdict that the operator invalidated.
+   */
   let factsMarkedUnmaterialized = 0;
   if (opts.factTypes.length > 0) {
     const result = await db

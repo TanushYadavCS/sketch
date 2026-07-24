@@ -480,6 +480,7 @@ export interface ConversationMessagesTable {
   id: Generated<number>;
   conversation_id: number;
   provider_message_id: string;
+  event_key: string | null;
   sender_jid: Generated<string>;
   sender_name: string;
   sender_user_id: string | null;
@@ -491,7 +492,63 @@ export interface ConversationMessagesTable {
   provider_parent_message_id: string | null;
   is_thread_reply: Generated<number>;
   provider_timestamp: string | null;
+  provider_from_me: Generated<number>;
   received_at: string;
+  source: Generated<string>;
+  effective_at: Generated<string | null>;
+  connection_key: Generated<string | null>;
+  backfill_range_id: Generated<string | null>;
+  created_at: Generated<string>;
+}
+
+export interface WhatsAppInboundEventsTable {
+  id: Generated<number>;
+  kind: string;
+  origin: string;
+  event_key: string | null;
+  provider_message_id: string | null;
+  batch_id: string | null;
+  chunk_index: number | null;
+  chunk_count: number | null;
+  request_session_id: Generated<string | null>;
+  backfill_range_id: Generated<string | null>;
+  envelope: string;
+  received_at: Generated<string>;
+  attempts: Generated<number>;
+  status: Generated<string>;
+  claim_token: string | null;
+  claimed_at: string | null;
+  next_attempt_at: Generated<string>;
+  consumed_at: string | null;
+  last_error: string | null;
+  created_at: Generated<string>;
+}
+
+export interface WhatsAppSessionLeaseTable {
+  id: string;
+  owner_kind: string;
+  owner_token: string;
+  generation: number;
+  gateway_http_token: string | null;
+  host_id: string;
+  boot_id: string;
+  pid: number;
+  pid_start_time: string;
+  script_hash: string;
+  contract_version: string;
+  heartbeat_at: Generated<string>;
+  acquired_at: Generated<string>;
+  last_live_at: string | null;
+  disconnected_at: string | null;
+}
+
+export interface WhatsAppConnectionTransitionsTable {
+  connection_key: string;
+  lease_generation: number;
+  socket_generation: number;
+  disconnected_at: string | null;
+  connected_at: string;
+  reconciled_at: string | null;
   created_at: Generated<string>;
 }
 
@@ -511,12 +568,23 @@ export interface ConversationSlicesTable {
   salience_claim_token: string | null;
   salience_claimed_at: string | null;
   indexed_file_id: string | null;
+  provider_thread_id: string | null;
   created_at: Generated<string>;
 }
 
 export interface ConversationSliceCursorsTable {
   conversation_id: number;
   last_effective_at: string | null;
+  last_message_id: number | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface ConversationSliceStreamCursorsTable {
+  conversation_id: number;
+  stream_key: string;
   last_message_id: number | null;
   claim_token: string | null;
   claimed_at: string | null;
@@ -559,6 +627,43 @@ export interface WhatsAppBackfillCheckpointsTable {
   group_jid: string;
   last_fetched_key: string | null;
   status: string;
+  live_start_effective_at: Generated<string | null>;
+  live_start_message_id: Generated<number | null>;
+  graph_last_served_at: Generated<string | null>;
+  graph_halted_at: Generated<string | null>;
+  graph_halt_reason: Generated<string | null>;
+  updated_at: Generated<string>;
+}
+
+export interface WhatsAppBackfillRangesTable {
+  id: string;
+  group_jid: string;
+  range_key: string;
+  kind: string;
+  connection_key: string;
+  status: string;
+  lower_bound_at: string;
+  upper_bound_at: string;
+  cursor_remote_jid: string | null;
+  cursor_message_id: string | null;
+  cursor_from_me: number | null;
+  cursor_provider_timestamp: string | null;
+  attempts: Generated<number>;
+  next_retry_at: string | null;
+  last_error: string | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  request_session_id: string | null;
+  request_lease_generation: number | null;
+  requested_at: string | null;
+  response_deadline_at: string | null;
+  terminal_status: string | null;
+  last_served_at: string | null;
+  graph_cursor_effective_at: Generated<string | null>;
+  graph_cursor_message_id: Generated<number | null>;
+  graph_completed_at: Generated<string | null>;
+  parent_range_id: Generated<string | null>;
+  created_at: Generated<string>;
   updated_at: Generated<string>;
 }
 
@@ -646,6 +751,7 @@ export interface AgentOutputsTable {
 export interface AgentOutputItemsTable {
   id: string;
   agent_output_id: string;
+  task_id: string | null;
   section_key: string;
   title: string;
   summary: string;
@@ -1011,9 +1117,24 @@ export interface IndexedFileFactsTable {
   last_seen_sync_run_id: string | null;
   deleted_at: string | null;
   content_hash: string | null;
+  materialization_input_hash: string | null;
+  normalized_subject_name: string | null;
+  normalized_mention_name: string | null;
+  raw_mention_type: string | null;
+  mention_type: string | null;
+  feature_corroboration_key: string | null;
+  normalization_projected_at: string | null;
   materialized_at: string | null;
   materialization_attempts: Generated<number>;
   created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface NormalizationBackfillStateTable {
+  id: string;
+  status: string;
+  cursor_created_at: string | null;
+  cursor_id: string | null;
   updated_at: Generated<string>;
 }
 
@@ -1042,6 +1163,11 @@ export interface TasksTable {
   valid_from: string | null;
   valid_to: string | null;
   milestone_series_key: string | null;
+  source_platform: string | null;
+  source_conversation_id: number | null;
+  source_provider_thread_id: string | null;
+  source_anchor_key: string | null;
+  origin_agent_output_id: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
@@ -1050,6 +1176,86 @@ export interface TaskEvidenceTable {
   task_id: string;
   kind: string;
   ref_id: string;
+}
+
+export interface TaskMessageEvidenceTable {
+  task_id: string;
+  conversation_message_id: number;
+  source_platform: string;
+  source_conversation_id: number;
+  source_provider_thread_id: string | null;
+  source_anchor_key: string;
+  created_at: Generated<string>;
+}
+
+export interface TaskCompletionRecommendationsTable {
+  id: string;
+  task_id: string;
+  proposed_status: string;
+  review_state: Generated<string>;
+  review_code: string;
+  evidence_fingerprint: string;
+  origin_agent_output_id: string | null;
+  rationale: string;
+  delivery_count: Generated<number>;
+  expires_at: string;
+  reviewed_at: string | null;
+  reviewed_by_user_id: string | null;
+  review_surface: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface TaskCompletionRecommendationEvidenceTable {
+  recommendation_id: string;
+  conversation_message_id: number;
+  created_at: Generated<string>;
+}
+
+export interface TaskCompletionRecommendationDeliveriesTable {
+  recommendation_id: string;
+  agent_output_delivery_id: string;
+  created_at: Generated<string>;
+}
+
+export interface TaskDurabilityRouteStateTable {
+  agent_key: string;
+  user_id: string;
+  route_id: string;
+  source_key: string;
+  mode: Generated<string>;
+  seed_state: Generated<string>;
+  seed_started_at: string | null;
+  seed_reviewed_at: string | null;
+  incremental_success_at: string | null;
+  last_error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface TaskSeedCandidatesTable {
+  id: string;
+  agent_key: string;
+  user_id: string;
+  route_id: string;
+  source_key: string;
+  origin_agent_output_id: string | null;
+  origin_agent_output_item_id: string | null;
+  title: string;
+  normalized_title: string;
+  proposed_assignee_name: string | null;
+  source_platform: string;
+  source_conversation_id: number;
+  source_provider_thread_id: string | null;
+  source_anchor_key: string;
+  evidence_fingerprint: string;
+  review_code: string;
+  review_state: Generated<string>;
+  accepted_task_id: string | null;
+  reviewed_at: string | null;
+  reviewed_by_user_id: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
 }
 
 export interface WorkCyclesTable {
@@ -1112,6 +1318,9 @@ export interface DB {
   channels: ChannelsTable;
   whatsapp_creds: WhatsAppCredsTable;
   whatsapp_keys: WhatsAppKeysTable;
+  whatsapp_inbound_events: WhatsAppInboundEventsTable;
+  whatsapp_session_lease: WhatsAppSessionLeaseTable;
+  whatsapp_connection_transitions: WhatsAppConnectionTransitionsTable;
   whatsapp_groups: WhatsAppGroupsTable;
   settings: SettingsTable;
   connector_configs: ConnectorConfigsTable;
@@ -1152,10 +1361,12 @@ export interface DB {
   conversation_messages: ConversationMessagesTable;
   conversation_slices: ConversationSlicesTable;
   conversation_slice_cursors: ConversationSliceCursorsTable;
+  conversation_slice_stream_cursors: ConversationSliceStreamCursorsTable;
   whatsapp_identity_candidates: WhatsAppIdentityCandidatesTable;
   whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
   whatsapp_group_participants: WhatsAppGroupParticipantsTable;
   whatsapp_backfill_checkpoints: WhatsAppBackfillCheckpointsTable;
+  whatsapp_backfill_ranges: WhatsAppBackfillRangesTable;
   whatsapp_window_keepalives: WhatsAppWindowKeepAlivesTable;
   scheduled_tasks: ScheduledTasksTable;
   automation_runs: AutomationRunsTable;
@@ -1181,8 +1392,15 @@ export interface DB {
   entity_review_domain_candidates: EntityReviewDomainCandidatesTable;
   entity_alias_rejections: EntityAliasRejectionsTable;
   indexed_file_facts: IndexedFileFactsTable;
+  normalization_backfill_state: NormalizationBackfillStateTable;
   tasks: TasksTable;
   task_evidence: TaskEvidenceTable;
+  task_message_evidence: TaskMessageEvidenceTable;
+  task_completion_recommendations: TaskCompletionRecommendationsTable;
+  task_completion_recommendation_evidence: TaskCompletionRecommendationEvidenceTable;
+  task_completion_recommendation_deliveries: TaskCompletionRecommendationDeliveriesTable;
+  task_durability_route_state: TaskDurabilityRouteStateTable;
+  task_seed_candidates: TaskSeedCandidatesTable;
   work_cycles: WorkCyclesTable;
   task_cycle_memberships: TaskCycleMembershipsTable;
   sub_entities: SubEntitiesTable;

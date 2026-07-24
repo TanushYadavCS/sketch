@@ -11,7 +11,7 @@ import {
 import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
-import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 import { proposeEntity } from "./propose";
 
 interface CrmRelationEndpoint {
@@ -46,10 +46,12 @@ export async function materializeLlmRelationFact(
   const triggeredByUserId = deps.resolveOwner(fact);
   if (!triggeredByUserId) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
 
-  const sourceResult = await materializeRelationEndpoint(deps, fact, source, triggeredByUserId, "source");
+  const linkOnly = fact.indexed_file_id ? await deps.isChatConversationSliceFile(fact.indexed_file_id) : false;
+
+  const sourceResult = await materializeRelationEndpoint(deps, fact, source, triggeredByUserId, "source", { linkOnly });
   if (sourceResult.kind === "suppressed_endpoint") return { kind: "skipped", reason: "relation_endpoint_suppressed" };
   if (sourceResult.kind === "queued_held") return sourceResult;
-  const targetResult = await materializeRelationEndpoint(deps, fact, target, triggeredByUserId, "target");
+  const targetResult = await materializeRelationEndpoint(deps, fact, target, triggeredByUserId, "target", { linkOnly });
   if (targetResult.kind === "suppressed_endpoint") return { kind: "skipped", reason: "relation_endpoint_suppressed" };
   if (targetResult.kind === "queued_held") return targetResult;
   if (sourceResult.entity.id === targetResult.entity.id) return { kind: "skipped", reason: "self_relation" };
@@ -215,13 +217,16 @@ function readCoercedRelationEndpoint(
   return { name: record.name, type, variations };
 }
 
-async function resolveCrmEndpoint(deps: MaterializeDeps, endpoint: CrmRelationEndpoint): Promise<EntityRow | null> {
+async function resolveCrmEndpoint(
+  deps: MaterializeDeps,
+  endpoint: CrmRelationEndpoint,
+): Promise<IndexEntityRow | null> {
   const refKey = `${endpoint.source}:${endpoint.sourceId}`;
   const cached = deps.index.bySourceRef.get(refKey);
   if (cached) return cached;
   const found = await deps.entityRepo.getEntityBySourceRef(endpoint.source, endpoint.sourceId);
   if (!found) return null;
-  const entity = found as unknown as EntityRow;
+  const entity = found;
   deps.index.bySourceRef.set(refKey, entity);
   registerEntity(deps.index, entity);
   return entity;
@@ -233,8 +238,9 @@ async function materializeRelationEndpoint(
   endpoint: EntityGraphRelationEndpoint,
   triggeredByUserId: string,
   role: "source" | "target",
+  options: { linkOnly?: boolean } = {},
 ): Promise<
-  | { kind: "resolved"; entity: EntityRow; created: boolean }
+  | { kind: "resolved"; entity: IndexEntityRow; created: boolean }
   | { kind: "queued_held"; reviewId: string; reason: "relation_endpoint" }
   | { kind: "suppressed_endpoint" }
 > {
@@ -270,6 +276,7 @@ async function materializeRelationEndpoint(
       metadata: { origin: "ai", relationEndpoint: true },
       provenanceTier: "inferred",
       evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
+      linkOnly: options.linkOnly,
       queueInsteadOfCreate:
         endpoint.type === "project" || (endpoint.type === "product" && deps.birthGateTypes.has("product")),
     },
@@ -278,7 +285,7 @@ async function materializeRelationEndpoint(
     return { kind: "queued_held", reviewId: result.reviewId, reason: "relation_endpoint" };
   }
   if (result.kind === "suppressed") return { kind: "suppressed_endpoint" };
-  const entity = result.entity as unknown as EntityRow;
+  const entity = result.entity;
   registerEntity(deps.index, entity);
   return { kind: "resolved", entity, created: result.kind === "created" };
 }

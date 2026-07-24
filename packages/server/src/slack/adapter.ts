@@ -24,6 +24,10 @@ import {
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
+import {
+  type FollowupReviewCommandHandler,
+  createFollowupReviewCommandHandler,
+} from "../agents/followup-review-command";
 import { appendAutomationBuilderLinks } from "../automation/artifact-links";
 import {
   REASONING_TEXT_OPTIONS,
@@ -38,6 +42,7 @@ import {
   parseSketchCommand,
 } from "../commands";
 import type { Config } from "../config";
+import { refreshSlackChannelName } from "../connectors/slack-salience";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createChannelRepository } from "../db/repositories/channels";
@@ -106,9 +111,18 @@ function isConversationControlMessage(text: string): boolean {
   return isToolProgressCommand(text) || isReasoningTextCommand(text);
 }
 
-function slackConversationRefForMessage(message: { type: string; channelId: string }) {
+/**
+ * Group DMs (channel_type "mpim") are recorded under their own kind so the
+ * indexing pipeline, which operates on kind "channel" only, never chunks or
+ * indexes them — the feature's scope excludes DMs of every arity. Capture
+ * still runs so mention context keeps working inside group DMs.
+ */
+function slackConversationRefForMessage(message: { type: string; channelId: string; channelType?: string }) {
   if (message.type === "dm") {
     return { platform: "slack", kind: "dm", providerConversationId: message.channelId };
+  }
+  if (message.channelType === "mpim") {
+    return { platform: "slack", kind: "mpim", providerConversationId: message.channelId };
   }
   return { platform: "slack", kind: "channel", providerConversationId: message.channelId };
 }
@@ -143,6 +157,7 @@ export interface SlackAdapterDeps {
     channelId: string;
     messageRef: string;
   }>;
+  followupReviewHandler?: FollowupReviewCommandHandler;
 }
 
 export async function validateSlackTokens(botToken: string, appToken?: string) {
@@ -262,6 +277,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
   } = deps;
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
+  const handleFollowupReviewCommand = deps.followupReviewHandler ?? createFollowupReviewCommandHandler(db);
 
   const mode = config.SLACK_MODE ?? "socket";
   const slackBot = new SlackBot({
@@ -521,6 +537,23 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
       const command = parseSketchCommand(message.text);
       const dmConversation = await repos.conversations.getOrCreate(slackConversationRefForMessage(message), user.name);
+      const followupReview = await handleFollowupReviewCommand({
+        text: message.text,
+        userId: user.id,
+        surface: "slack",
+      });
+      if (followupReview.handled) {
+        await captureSlackMessage({
+          message,
+          senderName: user.name,
+          senderUserId: user.id,
+          addressedToSketch: true,
+          attachments: [],
+          displayName: user.name,
+        });
+        await replyToUser(followupReview.message);
+        return;
+      }
       if (command === "new_session") {
         await archiveRuntimeSessions(db, user.id);
         await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
@@ -737,6 +770,22 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     });
   });
 
+  /**
+   * Channel renames arrive as excluded system messages, so this is the only
+   * signal that refreshes stored metadata: the channels row feeds agent
+   * context and the conversations display name feeds Slack slice rendering
+   * and indexed file names.
+   */
+  slackBot.onChannelRenamed(async (channelId) => {
+    const channelInfo = await slackBot.getChannelInfo(channelId);
+    const channel = await repos.channels.findBySlackChannelId(channelId);
+    if (channel && channel.name !== channelInfo.name) {
+      await repos.channels.update(channel.id, { name: channelInfo.name });
+    }
+    await refreshSlackChannelName({ db, logger, channelId, channelName: channelInfo.name });
+    logger.info({ channelId, name: channelInfo.name }, "Refreshed channel metadata after rename");
+  });
+
   // Passive top-level channel message handler
   slackBot.onChannelMessage(async (message) => {
     try {
@@ -759,6 +808,16 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         attachments,
         displayName: channel.name,
       });
+      if (sender.senderUserId) {
+        const followupReview = await handleFollowupReviewCommand({
+          text: message.text,
+          userId: sender.senderUserId,
+          surface: "slack",
+        });
+        if (followupReview.handled) {
+          await slackBot.postThreadReply(message.channelId, message.ts, followupReview.message);
+        }
+      }
     } catch (err) {
       logger.warn({ err, channelId: message.channelId }, "Failed to capture passive Slack channel message");
     }
@@ -787,6 +846,17 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         attachments,
         displayName: channel.name,
       });
+      if (sender.senderUserId) {
+        const followupReview = await handleFollowupReviewCommand({
+          text: message.text,
+          userId: sender.senderUserId,
+          surface: "slack",
+        });
+        if (followupReview.handled) {
+          await slackBot.postThreadReply(message.channelId, message.threadTs, followupReview.message);
+          return;
+        }
+      }
 
       logger.debug(
         { channelId: message.channelId, threadTs: message.threadTs, user: sender.senderName },
@@ -839,6 +909,23 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           slackConversationRefForMessage(message),
           channel.name,
         );
+        const followupReview = await handleFollowupReviewCommand({
+          text: message.text,
+          userId: user.id,
+          surface: "slack",
+        });
+        if (followupReview.handled) {
+          await captureSlackMessage({
+            message,
+            senderName: user.name,
+            senderUserId: user.id,
+            addressedToSketch: true,
+            attachments: [],
+            displayName: channel.name,
+          });
+          await slackBot.postThreadReply(message.channelId, threadTs, followupReview.message);
+          return;
+        }
         if (command === "new_session") {
           await archiveRuntimeSessions(db, channelWorkspaceKey, threadTs);
           await repos.conversations.advanceCursorToCurrentMax({
@@ -910,7 +997,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           onUsage: (call) => eagerAuxCalls.push(call),
         });
         const capture = await captureSlackMessage({
-          message,
+          message: channel.type === "mpim" ? { ...message, channelType: "mpim" } : message,
           senderName: user.name,
           senderUserId: user.id,
           addressedToSketch: true,

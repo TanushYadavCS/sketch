@@ -30,12 +30,43 @@ export interface MaterializeFactsSummary extends ReplayFactsSummary {
 export type EntityRow = Selectable<EntitiesTable>;
 export type IndexedFileFactRow = Selectable<IndexedFileFactsTable>;
 
+/**
+ * Entity columns hydrated into the in-memory lookup index. Restricted to the
+ * fields matching and materialization actually read: `id`/`source_type`/
+ * `provenance_tier` gate match targets, `name`/`aliases` drive normalized name
+ * and dedup lookup, `metadata` yields person email/scope, and
+ * `status`/`hotness`/`created_at` break ties among confirmed candidates. Wide
+ * or unused columns (notably `ai_brief`) are deliberately omitted so the single
+ * shared row per entity stays small.
+ */
+export const ENTITY_INDEX_COLUMNS = [
+  "id",
+  "name",
+  "source_type",
+  "provenance_tier",
+  "aliases",
+  "metadata",
+  "status",
+  "hotness",
+  "created_at",
+] as const satisfies readonly (keyof EntityRow)[];
+
+/**
+ * Projection of {@link EntityRow} restricted to {@link ENTITY_INDEX_COLUMNS}.
+ * This is the declared type of every index-origin row (lookup buckets,
+ * `EntityLookup` results, and `MaterializeResult.entity`), so a consumer that
+ * reaches for an omitted column fails to compile instead of reading `undefined`
+ * at runtime. Signatures that receive full rows from their own DB query keep
+ * `EntityRow`; only index-origin surfaces narrow to this type.
+ */
+export type IndexEntityRow = Pick<EntityRow, (typeof ENTITY_INDEX_COLUMNS)[number]>;
+
 export interface LookupIndex {
-  entitiesByType: Map<ProposeEntityType, EntityRow[]>;
-  byNormalizedName: Map<string, EntityRow[]>;
-  byNormalizedAlias: Map<string, EntityRow[]>;
+  entitiesByType: Map<ProposeEntityType, IndexEntityRow[]>;
+  byNormalizedName: Map<string, IndexEntityRow[]>;
+  byNormalizedAlias: Map<string, IndexEntityRow[]>;
   dedupPoolsByType: Map<ProposeEntityType, CandidatePool>;
-  bySourceRef: Map<string, EntityRow>;
+  bySourceRef: Map<string, IndexEntityRow>;
   companyIdsByDomain: Map<string, string[]>;
   personScopeKeysByEntityId: Map<string, string[]>;
 }
@@ -49,8 +80,8 @@ export interface MaterializeDeps {
   domainsRepo: EntityDomainsRepository;
   lookup: EntityLookup;
   index: LookupIndex;
-  readEmail: (entity: Entity) => string | null;
-  onEntityResolved: (entity: Entity) => void | Promise<void>;
+  readEmail: (entity: IndexEntityRow) => string | null;
+  onEntityResolved: (entity: IndexEntityRow) => void | Promise<void>;
   resolveOwner: (fact: IndexedFileFactRow) => string | null;
   getIndexedFileSourceTime: (indexedFileId: string) => Promise<{
     source_created_at: string | null;
@@ -66,11 +97,25 @@ export interface MaterializeDeps {
   birthGateDryRun: boolean;
   embeddingProvider: EmbeddingProvider | null;
   countActiveLlmFilesForName: (normalizedName: string, mentionType: MentionType) => Promise<number>;
+  hasOnlyChatConversationSliceEvidence: (normalizedName: string, mentionType: MentionType) => Promise<boolean>;
+  /**
+   * True when the fact's file is a WhatsApp/Slack conversation slice. Relation
+   * endpoints from chat slices are link-only: chat can corroborate entities
+   * born from stronger sources but must never mint them (the mention path
+   * enforces the same rule via hasOnlyChatConversationSliceEvidence).
+   */
+  isChatConversationSliceFile: (indexedFileId: string) => Promise<boolean>;
+  /**
+   * True once the Fix 2b normalization backfill has populated projection columns
+   * for every pre-existing row. Feature corroboration and LLM count/third-party
+   * reads switch from legacy `raw`-parsing scans to indexed SQL only when set.
+   */
+  normalizationBackfillComplete: boolean;
 }
 
 export type MaterializeResult =
-  | { kind: "entity_created"; entity: EntityRow; mentionWritten: boolean; countEntity?: boolean }
-  | { kind: "entity_linked"; entity: EntityRow; mentionWritten: boolean; countEntity?: boolean }
+  | { kind: "entity_created"; entity: IndexEntityRow; mentionWritten: boolean; countEntity?: boolean }
+  | { kind: "entity_linked"; entity: IndexEntityRow; mentionWritten: boolean; countEntity?: boolean }
   | { kind: "queued"; reviewId: string }
   | { kind: "queued_held"; reviewId: string; reason: "llm_ambiguous" | "non_person_collision" | "relation_endpoint" }
   | {
@@ -85,7 +130,7 @@ export type MaterializeResult =
   | { kind: "feature_materialized" }
   | { kind: "decision_materialized" }
   | { kind: "milestone_materialized" }
-  | { kind: "structural"; entity: EntityRow }
+  | { kind: "structural"; entity: IndexEntityRow }
   | { kind: "skipped_missing_owner"; reason: string }
   | { kind: "deferred_below_threshold"; reason: string }
   | { kind: "skipped"; reason: string };

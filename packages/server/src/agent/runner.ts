@@ -85,7 +85,7 @@ import {
   UploadCollector,
   createSketchMcpServer,
 } from "./sketch-tools";
-import type { AgentOutputWriter } from "./tools/agent-output";
+import { type AgentOutputWriter, recordRejectedWriteAgentOutputCall } from "./tools/agent-output";
 
 /**
  * A single tool invocation with timing. `startedAt`/`endedAt` are epoch ms:
@@ -110,6 +110,15 @@ export interface ToolUseProgressEvent {
   kind: "tool_use";
   toolName: string;
   input: Record<string, unknown>;
+}
+
+export function recordSdkAgentOutputToolStarts(
+  writer: AgentOutputWriter | undefined,
+  toolStarts: Array<{ toolName: string; input: Record<string, unknown> }>,
+): void {
+  for (const toolStart of toolStarts) {
+    recordRejectedWriteAgentOutputCall(writer, toolStart.toolName, toolStart.input);
+  }
 }
 
 export interface IntermediateTextProgressEvent {
@@ -1319,6 +1328,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
 
     for await (const message of run) {
       const effects = applySdkStreamMessageMapping(sdkStreamState, message, Date.now());
+      recordSdkAgentOutputToolStarts(params.agentOutputWriter, effects.toolStarts);
 
       for (const nextSessionId of effects.sessionIds) {
         sessionId = nextSessionId;

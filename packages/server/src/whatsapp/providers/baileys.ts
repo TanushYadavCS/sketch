@@ -1,10 +1,13 @@
+import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import type { Attachment } from "../../files";
-import { downloadWhatsAppMedia } from "../../files";
 import type { Logger } from "../../logger";
-import type { WhatsAppBot, WhatsAppMessage } from "../bot";
+import type { WhatsAppHistoryMessagesHandler, WhatsAppMessage, WhatsAppMessageHandler } from "../bot";
+import { createWhatsAppConnectionKey } from "../connection-key";
+import type { WhatsAppQuotedRef, WhatsAppSocketFacade } from "../facade-contract";
 import {
+  type WhatsAppHistoryMessagesHandler as ProviderWhatsAppHistoryMessagesHandler,
   WHATSAPP_BAILEYS_PROVIDER_ID,
   type WhatsAppCapabilities,
   type WhatsAppDmProvider,
@@ -18,6 +21,7 @@ import {
   canonicalDmConversationId,
   canonicalGroupConversationId,
   phoneE164ToWhatsAppJid,
+  whatsappJidToPhoneE164,
 } from "../provider";
 
 const BAILEYS_TEXT_CAPABILITIES: Omit<WhatsAppCapabilities, "groups"> = {
@@ -39,15 +43,52 @@ export interface BaileysWhatsAppProviders {
   inboundProvider: WhatsAppInboundProvider;
 }
 
-export function createBaileysWhatsAppProviders(whatsapp: WhatsAppBot, logger: Logger): BaileysWhatsAppProviders {
+export interface BaileysWhatsAppInboundSource {
+  readonly isConnected: boolean;
+  onMessage(handler: WhatsAppMessageHandler): void;
+  onHistoryMessages(handler: WhatsAppHistoryMessagesHandler): void;
+}
+
+interface MessageReferenceStore {
+  rememberMessage(params: {
+    providerConversationId: string;
+    providerMessageId: string;
+    rawProviderPayload: unknown;
+  }): void;
+}
+
+export function createBaileysWhatsAppProviders(
+  whatsapp: WhatsAppSocketFacade,
+  inboundSource: BaileysWhatsAppInboundSource,
+  logger: Logger,
+  options: { getLeaseGeneration?: () => number | null } = {},
+): BaileysWhatsAppProviders {
+  let appendHistoryHandler: ProviderWhatsAppHistoryMessagesHandler | null = null;
+  const connectionKey = (socketGeneration: number): string | null => {
+    const leaseGeneration = options.getLeaseGeneration?.();
+    return leaseGeneration === null || leaseGeneration === undefined
+      ? null
+      : createWhatsAppConnectionKey(leaseGeneration, socketGeneration);
+  };
   const toProviderConversationId = (target: WhatsAppTarget): string => {
     if (target.kind === "group") return target.groupId;
     return target.providerConversationId ?? phoneE164ToWhatsAppJid(target.phoneE164);
   };
 
-  const toQuotedOptions = (options?: WhatsAppSendOptions) => {
+  const toQuotedRef = (
+    providerConversationId: string,
+    options?: WhatsAppSendOptions,
+  ): WhatsAppQuotedRef | undefined => {
     const quoted = options?.quotedMessage?.rawProviderPayload;
-    return quoted && isBaileysMessage(quoted) ? { quoted } : undefined;
+    if (!quoted || !isBaileysMessage(quoted)) return undefined;
+    const quotedMessageId = options.quotedMessage?.providerMessageId;
+    if (!quotedMessageId) return undefined;
+    rememberMessage(whatsapp, providerConversationId, quotedMessageId, quoted);
+    return {
+      kind: "providerMessageId",
+      providerConversationId,
+      value: quotedMessageId,
+    };
   };
 
   const sendText = async (
@@ -56,32 +97,61 @@ export function createBaileysWhatsAppProviders(whatsapp: WhatsAppBot, logger: Lo
     options?: WhatsAppSendOptions,
   ): Promise<WhatsAppSendResult | null> => {
     const providerConversationId = toProviderConversationId(target);
-    const sent = await whatsapp.sendText(providerConversationId, text, toQuotedOptions(options));
-    return toSendResult(providerConversationId, sent);
+    return whatsapp.send(
+      providerConversationId,
+      { kind: "text", text },
+      {
+        quotedRef: toQuotedRef(providerConversationId, options),
+        idempotencyKey: randomUUID(),
+      },
+    );
   };
 
   const sendFile = async (target: WhatsAppTarget, filePath: string, mimeType: string, fileName: string) => {
-    await whatsapp.sendFile(toProviderConversationId(target), filePath, mimeType, fileName);
+    await whatsapp.send(
+      toProviderConversationId(target),
+      { kind: "file", filePath, mimeType, fileName },
+      { idempotencyKey: randomUUID() },
+    );
   };
 
   const startComposing = (target: WhatsAppTarget) => {
-    whatsapp.startComposing(toProviderConversationId(target));
+    void whatsapp.sendComposing(toProviderConversationId(target), true);
   };
 
   const stopComposing = (target: WhatsAppTarget) => {
-    whatsapp.stopComposing(toProviderConversationId(target));
+    void whatsapp.sendComposing(toProviderConversationId(target), false);
   };
 
   const addReaction = async (message: WhatsAppInboundMessage, emoji: string) => {
     const rawMessage = baileysRawMessage(message);
     if (!rawMessage?.key) return;
-    await whatsapp.addReaction(reactionJidForMessage(message, rawMessage), rawMessage.key, emoji);
+    if (!message.providerMessageId) {
+      logger.warn("Skipped WhatsApp reaction for message without provider id");
+      return;
+    }
+    rememberMessage(whatsapp, message.providerConversationId, message.providerMessageId, rawMessage);
+    const result = await whatsapp.react(reactionJidForMessage(message, rawMessage), providerMessageRef(message), emoji);
+    if ("error" in result) {
+      logger.warn({ providerMessageId: message.providerMessageId }, "Skipped WhatsApp reaction for unknown message");
+    }
   };
 
   const removeReaction = async (message: WhatsAppInboundMessage) => {
     const rawMessage = baileysRawMessage(message);
     if (!rawMessage?.key) return;
-    await whatsapp.removeReaction(reactionJidForMessage(message, rawMessage), rawMessage.key);
+    if (!message.providerMessageId) {
+      logger.warn("Skipped WhatsApp reaction removal for message without provider id");
+      return;
+    }
+    rememberMessage(whatsapp, message.providerConversationId, message.providerMessageId, rawMessage);
+    const result = await whatsapp.react(reactionJidForMessage(message, rawMessage), providerMessageRef(message), "");
+    if ("error" in result) {
+      logger.warn(
+        { providerMessageId: message.providerMessageId },
+        "Skipped WhatsApp reaction removal for unknown message",
+      );
+    }
   };
 
   const downloadMedia = async (
@@ -90,17 +160,25 @@ export function createBaileysWhatsAppProviders(whatsapp: WhatsAppBot, logger: Lo
     params: { maxFileBytes: number },
   ): Promise<Attachment[]> => {
     const rawMessage = baileysRawMessage(message);
-    if (!message.mediaType || !rawMessage || !whatsapp.socket) return [];
+    if (!message.mediaType || !rawMessage) return [];
+    rememberMessage(whatsapp, message.providerConversationId, message.providerMessageId, rawMessage);
 
     try {
-      const attachment = await downloadWhatsAppMedia(
-        rawMessage,
-        whatsapp.socket,
-        join(workspaceDir, "attachments"),
-        params.maxFileBytes,
-        logger,
-      );
-      return [attachment];
+      const media = await whatsapp.downloadMedia({
+        messageRef: providerMessageRef(message),
+        destinationDir: join(workspaceDir, "attachments"),
+        maxFileBytes: params.maxFileBytes,
+      });
+      return media
+        ? [
+            {
+              originalName: media.originalName ?? basename(media.stagedPath),
+              mimeType: media.mime,
+              localPath: media.stagedPath,
+              sizeBytes: media.size,
+            },
+          ]
+        : [];
     } catch (err) {
       logger.warn({ err, mediaType: message.mediaType }, "Failed to download WhatsApp media");
       return [];
@@ -108,7 +186,7 @@ export function createBaileysWhatsAppProviders(whatsapp: WhatsAppBot, logger: Lo
   };
 
   const getGroupMetadata = async (groupId: string): Promise<WhatsAppGroupMetadata | undefined> => {
-    return whatsapp.getProviderGroupMetadata(groupId);
+    return (await whatsapp.groupMetadata(groupId, { refresh: false })) ?? undefined;
   };
 
   const shared = {
@@ -121,7 +199,10 @@ export function createBaileysWhatsAppProviders(whatsapp: WhatsAppBot, logger: Lo
     removeReaction,
     downloadMedia,
     getGroupMetadata,
-    resolveProviderContactToPhone: (providerContactId: string) => whatsapp.resolveJidToPhone(providerContactId),
+    resolveProviderContactToPhone: async (providerContactId: string) => {
+      const phoneJid = await whatsapp.resolveLid(providerContactId);
+      return phoneJid ? whatsappJidToPhoneE164(phoneJid) : null;
+    },
   };
 
   return {
@@ -129,7 +210,7 @@ export function createBaileysWhatsAppProviders(whatsapp: WhatsAppBot, logger: Lo
       ...shared,
       role: "dm",
       get isConnected() {
-        return whatsapp.isConnected;
+        return inboundSource.isConnected;
       },
       capabilities: { ...BAILEYS_TEXT_CAPABILITIES, groups: false },
     },
@@ -137,19 +218,43 @@ export function createBaileysWhatsAppProviders(whatsapp: WhatsAppBot, logger: Lo
       ...shared,
       role: "group",
       get isConnected() {
-        return whatsapp.isConnected;
+        return inboundSource.isConnected;
       },
       capabilities: { ...BAILEYS_TEXT_CAPABILITIES, groups: true },
     },
     inboundProvider: {
       id: WHATSAPP_BAILEYS_PROVIDER_ID,
       onMessage(handler) {
-        whatsapp.onMessage((message) => handler(normalizeBaileysInboundMessage(message)));
+        inboundSource.onMessage(async (message, metadata) => {
+          const normalized = normalizeBaileysInboundMessage(message, connectionKey(metadata.socketGeneration));
+          rememberMessage(
+            whatsapp,
+            normalized.providerConversationId,
+            normalized.providerMessageId,
+            normalized.rawProviderPayload,
+          );
+          if (metadata.upsertType === "append") {
+            await appendHistoryHandler?.([normalized]);
+            return;
+          }
+          await handler(normalized);
+        });
       },
       onHistoryMessages(handler) {
-        whatsapp.onHistoryMessages((messages, metadata) =>
-          handler(messages.map(normalizeBaileysInboundMessage), metadata),
-        );
+        appendHistoryHandler = handler;
+        inboundSource.onHistoryMessages((messages, metadata) => {
+          const historyConnectionKey = connectionKey(metadata.socketGeneration);
+          const normalized = messages.map((message) => normalizeBaileysInboundMessage(message, historyConnectionKey));
+          for (const message of normalized) {
+            rememberMessage(
+              whatsapp,
+              message.providerConversationId,
+              message.providerMessageId,
+              message.rawProviderPayload,
+            );
+          }
+          return handler(normalized, metadata);
+        });
       },
     },
   };
@@ -159,7 +264,10 @@ export function baileysTargetFromPhone(phoneE164: string): Extract<WhatsAppTarge
   return { kind: "dm", phoneE164, providerConversationId: phoneE164ToWhatsAppJid(phoneE164) };
 }
 
-function normalizeBaileysInboundMessage(message: WhatsAppMessage): WhatsAppInboundMessage {
+export function normalizeBaileysInboundMessage(
+  message: WhatsAppMessage,
+  connectionKey: string | null = null,
+): WhatsAppInboundMessage {
   if (message.type === "dm") {
     const providerConversationId = phoneE164ToWhatsAppJid(message.phoneNumber);
     return {
@@ -175,6 +283,7 @@ function normalizeBaileysInboundMessage(message: WhatsAppMessage): WhatsAppInbou
       target: { kind: "dm", phoneE164: message.phoneNumber, providerConversationId },
       text: message.text,
       rawProviderPayload: message.rawMessage,
+      connectionKey,
       ...(message.mediaType ? { mediaType: message.mediaType } : {}),
       ...(message.quotedMessage ? { quotedMessage: message.quotedMessage } : {}),
     };
@@ -194,18 +303,9 @@ function normalizeBaileysInboundMessage(message: WhatsAppMessage): WhatsAppInbou
     text: message.text,
     isMentioned: message.isMentioned,
     rawProviderPayload: message.rawMessage,
+    connectionKey,
     ...(message.mediaType ? { mediaType: message.mediaType } : {}),
     ...(message.quotedMessage ? { quotedMessage: message.quotedMessage } : {}),
-  };
-}
-
-function toSendResult(providerConversationId: string, sent: WAMessage | null): WhatsAppSendResult | null {
-  if (!sent) return null;
-  return {
-    providerMessageId: sent.key?.id ?? null,
-    providerConversationId,
-    providerTimestamp: providerTimestamp(sent),
-    rawProviderPayload: sent,
   };
 }
 
@@ -215,6 +315,28 @@ function providerTimestamp(message: WAMessage | undefined): string | null {
   const seconds = Number(timestamp);
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
   return new Date(seconds * 1000).toISOString();
+}
+
+function providerMessageRef(message: WhatsAppInboundMessage): WhatsAppQuotedRef {
+  return {
+    kind: "providerMessageId",
+    providerConversationId: message.providerConversationId,
+    value: message.providerMessageId,
+  };
+}
+
+function rememberMessage(
+  facade: WhatsAppSocketFacade,
+  providerConversationId: string,
+  providerMessageId: string,
+  rawProviderPayload: unknown,
+): void {
+  if (!providerMessageId || !("rememberMessage" in facade)) return;
+  (facade as WhatsAppSocketFacade & MessageReferenceStore).rememberMessage({
+    providerConversationId,
+    providerMessageId,
+    rawProviderPayload,
+  });
 }
 
 function baileysRawMessage(message: WhatsAppInboundMessage): WAMessage | null {

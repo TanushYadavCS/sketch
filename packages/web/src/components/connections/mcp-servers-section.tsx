@@ -1,4 +1,5 @@
-import { DotsThreeIcon, GearIcon, PencilSimpleIcon, PlugIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
+import { QuietAddButton } from "@/components/quiet-add-button";
+import { DotsThreeIcon, GearIcon, PencilSimpleIcon, PlugIcon, TrashIcon } from "@phosphor-icons/react";
 import type { McpServerRecord } from "@sketch/shared";
 /**
  * MCP Servers section: admin CRUD for workspace-level MCP servers.
@@ -30,10 +31,7 @@ export function McpServersSection({
     <div>
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm font-medium text-muted-foreground">MCP Servers</p>
-        <Button variant="ghost" size="sm" className="gap-1.5 hover:bg-brand-accent/8" onClick={onAdd}>
-          <PlusIcon size={14} weight="bold" />
-          New server
-        </Button>
+        <QuietAddButton onClick={onAdd}>New server</QuietAddButton>
       </div>
 
       {servers.length === 0 ? (
@@ -45,10 +43,9 @@ export function McpServersSection({
           <p className="mt-1.5 max-w-xs text-sm text-muted-foreground">
             Connect a custom MCP server to give the agent access to your internal tools.
           </p>
-          <Button variant="ghost" size="sm" className="mt-4 gap-1.5 hover:bg-brand-accent/8" onClick={onAdd}>
-            <PlusIcon size={14} weight="bold" />
+          <QuietAddButton className="mt-4" onClick={onAdd}>
             New server
-          </Button>
+          </QuietAddButton>
         </div>
       ) : (
         <div className="rounded-lg border border-border bg-card">

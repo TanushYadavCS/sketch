@@ -83,6 +83,24 @@ async function seedFiles(db: Kysely<DB>, count: number): Promise<string[]> {
   return ids;
 }
 
+async function seedChatSliceFile(db: Kysely<DB>, id: string, source: string, fileType: string): Promise<void> {
+  await db
+    .insertInto("indexed_files")
+    .values({
+      id,
+      connector_config_id: CONNECTOR_ID,
+      provider_file_id: id,
+      file_name: id,
+      file_type: fileType,
+      content_category: "document",
+      source,
+      content_hash: `hash-${id}`,
+      is_archived: 0,
+      synced_at: new Date().toISOString(),
+    })
+    .execute();
+}
+
 async function upsertLlmFact(
   db: Kysely<DB>,
   fileId: string,
@@ -784,6 +802,80 @@ describe("materializeFromFact — llm_relation typed edges", () => {
 
   afterEach(async () => {
     await db.destroy();
+  });
+
+  it("never mints relation endpoints from a chat conversation slice", async () => {
+    await seedFiles(db, 1);
+    await seedChatSliceFile(db, "slice-slack", "slack", "slack_conversation_slice");
+    await upsertLlmRelationFact(db, {
+      fileId: "slice-slack",
+      relationType: "leads",
+      source: { name: "K Saurabh", type: "person" },
+      target: { name: "Acme Corp", type: "company" },
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(summary.entitiesCreated).toBe(0);
+    expect(summary.relationshipsWritten).toBe(0);
+    const entities = await db.selectFrom("entities").select("name").execute();
+    expect(entities).toEqual([]);
+  });
+
+  it("never mints relation endpoints from a WhatsApp conversation slice", async () => {
+    await seedFiles(db, 1);
+    await seedChatSliceFile(db, "slice-wa", "whatsapp", "whatsapp_conversation_slice");
+    await upsertLlmRelationFact(db, {
+      fileId: "slice-wa",
+      relationType: "works_at",
+      source: { name: "Priya Rao", type: "person" },
+      target: { name: "Globex", type: "company" },
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(summary.entitiesCreated).toBe(0);
+    expect(summary.relationshipsWritten).toBe(0);
+  });
+
+  it("links chat-slice relations to existing entities and writes the relationship without minting", async () => {
+    await seedFiles(db, 1);
+    await seedChatSliceFile(db, "slice-slack", "slack", "slack_conversation_slice");
+    const repo = createEntityRepository(db);
+    await repo.upsertEntityFromTool({
+      name: "Acme Corp",
+      sourceType: "company",
+      source: "crm",
+      sourceId: "company:acme",
+    });
+    await repo.upsertEntityFromTool({
+      name: "Globex",
+      sourceType: "company",
+      source: "crm",
+      sourceId: "company:globex",
+    });
+    await upsertLlmRelationFact(db, {
+      fileId: "slice-slack",
+      relationType: "partner_of",
+      source: { name: "Acme Corp", type: "company" },
+      target: { name: "Globex", type: "company" },
+    });
+
+    const summary = await materializeUnmaterializedFacts(db, createTestLogger(), { llmPromotionThreshold: 1 });
+
+    expect(summary.entitiesCreated).toBe(0);
+    expect(summary.relationshipsWritten).toBe(2);
+    const relationships = await db
+      .selectFrom("entity_relationships")
+      .innerJoin("entities as source", "source.id", "entity_relationships.source_entity_id")
+      .innerJoin("entities as target", "target.id", "entity_relationships.target_entity_id")
+      .select(["source.name as source_name", "target.name as target_name"])
+      .orderBy("source.name")
+      .execute();
+    expect(relationships).toEqual([
+      { source_name: "Acme Corp", target_name: "Globex" },
+      { source_name: "Globex", target_name: "Acme Corp" },
+    ]);
   });
 
   it("materializes relation endpoints immediately and writes extracted relationship evidence", async () => {

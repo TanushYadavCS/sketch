@@ -8,6 +8,7 @@ import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import { buildMaterializeDeps } from "./materialize-deps";
+import type { IndexEntityRow } from "./materialize-types";
 import { type Entity, type EntityLookup, proposeEntity } from "./propose";
 
 async function fetchPersonEntities(db: Kysely<DB>): Promise<Entity[]> {
@@ -40,7 +41,7 @@ function makeLookup(getList: () => Entity[]): EntityLookup {
   };
 }
 
-function readEmail(e: Entity): string | null {
+function readEmail(e: IndexEntityRow): string | null {
   if (!e.metadata) return null;
   try {
     const m = JSON.parse(e.metadata);

@@ -3,7 +3,7 @@ import { normalizeEntityMatchName, registerEntity } from "./materialize-deps";
 import { isString, readJsonObject } from "./materialize-json";
 import { createMentionFromFact } from "./materialize-mentions";
 import { materializePersonFact } from "./materialize-person";
-import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 import { proposeEntity } from "./propose";
 
 export async function materializeLlmExtractedFact(
@@ -29,17 +29,21 @@ export async function materializeLlmExtractedFact(
   if (fileCount < deps.llmPromotionThreshold) {
     return { kind: "deferred_below_threshold", reason: "below_promotion_threshold" };
   }
+  const chatSliceOnlyEvidence =
+    (mentionType === "person" || mentionType === "company" || mentionType === "tool") &&
+    (await deps.hasOnlyChatConversationSliceEvidence(normalized, mentionType));
 
   if (mentionType === "person") {
-    return materializePersonFact(deps, fact);
+    return materializePersonFact(deps, fact, { linkOnly: chatSliceOnlyEvidence });
   }
-  return materializeNonPersonLlmEntity(deps, fact, mentionType);
+  return materializeNonPersonLlmEntity(deps, fact, mentionType, { linkOnly: chatSliceOnlyEvidence });
 }
 
 export async function materializeNonPersonLlmEntity(
   deps: MaterializeDeps,
   fact: IndexedFileFactRow,
   sourceType: NonPersonMentionType,
+  options: { linkOnly?: boolean } = {},
 ): Promise<MaterializeResult> {
   const raw = readJsonObject(fact.raw);
   const variations = Array.isArray(raw.variations) ? raw.variations.filter(isString) : [];
@@ -78,6 +82,7 @@ export async function materializeNonPersonLlmEntity(
       metadata: { origin: "ai" },
       provenanceTier: "inferred",
       evidenceDomain: typeof raw.evidenceDomain === "string" ? raw.evidenceDomain : null,
+      linkOnly: options.linkOnly,
     },
   );
 
@@ -88,7 +93,7 @@ export async function materializeNonPersonLlmEntity(
     return { kind: "skipped", reason: result.reason };
   }
 
-  const entity = result.entity as unknown as EntityRow;
+  const entity = result.entity;
   const created = result.kind === "created";
   registerEntity(deps.index, entity);
 

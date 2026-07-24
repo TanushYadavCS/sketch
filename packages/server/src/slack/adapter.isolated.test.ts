@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
+import { refreshSlackChannelName } from "../connectors/slack-salience";
 import { downloadSlackFile } from "../files";
 import { QueueManager } from "../queue";
 import { createTestConfig, flush } from "../test-utils";
@@ -229,6 +230,7 @@ function freshMockBot() {
   return {
     onMessage: vi.fn(),
     onChannelMessage: vi.fn(),
+    onChannelRenamed: vi.fn(),
     onThreadMessage: vi.fn(),
     onChannelMention: vi.fn(),
     onAppHomeOpened: vi.fn(),
@@ -302,6 +304,10 @@ vi.mock("./api", () => ({
   slackApiCall: vi.fn().mockResolvedValue({}),
 }));
 
+vi.mock("../connectors/slack-salience", () => ({
+  refreshSlackChannelName: vi.fn().mockResolvedValue(true),
+}));
+
 function getHandlers() {
   return {
     dm: mockBotInstance.onMessage.mock.calls[0]?.[0] as (msg: unknown) => Promise<void>,
@@ -329,9 +335,70 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.onThreadMessage).toHaveBeenCalledOnce();
       expect(mockBotInstance.onChannelMention).toHaveBeenCalledOnce();
     });
+
+    it("refreshes channel and conversation names when a channel is renamed", async () => {
+      const deps = makeDeps({
+        repos: {
+          ...makeDeps().repos,
+          channels: {
+            findBySlackChannelId: vi.fn().mockResolvedValue(makeChannel({ id: "ch-1", name: "old-name" })),
+            findById: vi.fn().mockResolvedValue(undefined),
+            create: vi.fn(),
+            update: vi.fn().mockImplementation(async (id, data) => makeChannel({ id, ...data })),
+          } as unknown as SlackAdapterDeps["repos"]["channels"],
+        },
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      mockBotInstance.getChannelInfo.mockResolvedValue({ name: "new-name", type: "channel" });
+
+      const rename = mockBotInstance.onChannelRenamed.mock.calls[0]?.[0] as (channelId: string) => Promise<void>;
+      await rename("C1");
+
+      expect(deps.repos.channels.update).toHaveBeenCalledWith("ch-1", { name: "new-name" });
+      expect(vi.mocked(refreshSlackChannelName)).toHaveBeenCalledWith(
+        expect.objectContaining({ channelId: "C1", channelName: "new-name" }),
+      );
+    });
+
+    it("records group DM (mpim) captures under their own conversation kind", async () => {
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+
+      await channel({
+        type: "channel_message",
+        channelType: "mpim",
+        text: "group dm chatter",
+        userId: "U1",
+        channelId: "G_MPIM",
+        ts: "1111.2222",
+      });
+
+      expect(deps.repos.conversations.getOrCreate).toHaveBeenCalledWith(
+        { platform: "slack", kind: "mpim", providerConversationId: "G_MPIM" },
+        expect.anything(),
+      );
+    });
   });
 
   describe("DM handler", () => {
+    it.each([
+      ["  confirm   done a1b2  ", "Marked the follow-up done."],
+      ["dismiss c3d4", "Dismissed that reconstructed follow-up."],
+    ])("handles follow-up review command %s without running the agent", async (text, reply) => {
+      const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: reply });
+      const deps = makeDeps({ followupReviewHandler });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text, userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(followupReviewHandler).toHaveBeenCalledWith({ text, userId: "u1", surface: "slack" });
+      expect(mockBotInstance.postMessage).toHaveBeenCalledWith("D1", reply);
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
     it("resolves user, runs agent, and posts response", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
@@ -832,6 +899,29 @@ describe("slack/adapter", () => {
   });
 
   describe("passive channel handler", () => {
+    it("handles a top-level follow-up command without running the agent", async () => {
+      const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: "Marked the follow-up done." });
+      const deps = makeDeps({ followupReviewHandler });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+
+      await channel({
+        text: "confirm done a1b2",
+        userId: "S1",
+        channelId: "C1",
+        ts: "2",
+        type: "channel_message",
+      });
+
+      expect(followupReviewHandler).toHaveBeenCalledWith({
+        text: "confirm done a1b2",
+        userId: "u1",
+        surface: "slack",
+      });
+      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "2", "Marked the follow-up done.");
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
     it("captures passive top-level channel messages without running the agent", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
@@ -854,6 +944,35 @@ describe("slack/adapter", () => {
   });
 
   describe("thread handler", () => {
+    it("handles a passive thread track command, captures it, and does not run the agent", async () => {
+      const followupReviewHandler = vi
+        .fn()
+        .mockResolvedValue({ handled: true, message: "Now tracking that follow-up." });
+      const deps = makeDeps({ followupReviewHandler });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { thread } = getHandlers();
+
+      await thread({
+        text: "track ab12",
+        userId: "S1",
+        channelId: "C1",
+        ts: "2",
+        threadTs: "1",
+        type: "thread_message",
+      });
+
+      expect(followupReviewHandler).toHaveBeenCalledWith({
+        text: "track ab12",
+        userId: "u1",
+        surface: "slack",
+      });
+      expect(deps.repos.conversations.insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "track ab12", addressedToSketch: false }),
+      );
+      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "1", "Now tracking that follow-up.");
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
     it("captures passive thread messages without running the agent", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
@@ -907,6 +1026,31 @@ describe("slack/adapter", () => {
   });
 
   describe("channel mention handler", () => {
+    it("handles an addressed threaded keep-open command without running the agent", async () => {
+      const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: "Kept the follow-up open." });
+      const deps = makeDeps({ followupReviewHandler });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({
+        text: "KEEP OPEN z9y8",
+        userId: "S1",
+        channelId: "C1",
+        ts: "2",
+        threadTs: "1",
+        type: "channel_mention",
+      });
+      await flush();
+
+      expect(followupReviewHandler).toHaveBeenCalledWith({
+        text: "KEEP OPEN z9y8",
+        userId: "u1",
+        surface: "slack",
+      });
+      expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "1", "Kept the follow-up open.");
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
     it("creates channel if not found and injects channel metadata into shared context", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);

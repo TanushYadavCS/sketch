@@ -5,7 +5,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
-import type { WhatsAppBot } from "../whatsapp/bot";
+import type { NormalizedGroupMetadata } from "../whatsapp/facade-contract";
 import { CONVERSATION_SUMMARY_AGENT_KEY } from "./definitions/conversation-summary";
 import { DAILY_BRIEF_AGENT_KEY } from "./definitions/daily-brief";
 import { agentRoutes } from "./routes";
@@ -237,6 +237,62 @@ describe("agentRoutes", () => {
       CONVERSATION_SUMMARY_AGENT_KEY,
       "user-1",
       expect.objectContaining({ enabled: false }),
+    );
+  });
+
+  it("accepts Slack and WhatsApp DM source configs and route source keys", async () => {
+    const service = createService({
+      updateConfigForUser: vi.fn(async () => ({ agentKey: CONVERSATION_SUMMARY_AGENT_KEY, delivery: null })),
+    });
+    const app = createRoutesTestApp(service);
+
+    const res = await app.request(`/api/agents/${CONVERSATION_SUMMARY_AGENT_KEY}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sources: [
+          { platform: "slack", targetType: "dm", targetId: "41", label: "Slack DM with Alice" },
+          { platform: "whatsapp", targetType: "dm", targetId: "42", label: "WhatsApp DM with Alice" },
+        ],
+        routes: [
+          {
+            id: "slack-dm-route",
+            sources: ["slack:dm:41"],
+            focus: null,
+            sections: null,
+            maxItemsPerSection: null,
+            schedule: null,
+            destination: { kind: "self" },
+            enabled: true,
+          },
+          {
+            id: "whatsapp-dm-route",
+            sources: ["whatsapp:dm:42"],
+            focus: null,
+            sections: null,
+            maxItemsPerSection: null,
+            schedule: null,
+            destination: { kind: "self" },
+            enabled: true,
+          },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(service.updateConfigForUser).toHaveBeenCalledWith(
+      CONVERSATION_SUMMARY_AGENT_KEY,
+      "user-1",
+      expect.objectContaining({
+        sources: [
+          expect.objectContaining({ platform: "slack", targetType: "dm", targetId: "41" }),
+          expect.objectContaining({ platform: "whatsapp", targetType: "dm", targetId: "42" }),
+        ],
+        routes: [
+          expect.objectContaining({ sources: ["slack:dm:41"] }),
+          expect.objectContaining({ sources: ["whatsapp:dm:42"] }),
+        ],
+      }),
     );
   });
 
@@ -728,12 +784,12 @@ describe("agentRoutes", () => {
         description: null,
         updated_at: "2026-06-27T00:00:00.000Z",
       });
-      const getGroupMetadata = vi.fn(
+      const groupMetadata = vi.fn(
         async () =>
           ({
             subject: "Leads",
-            participants: [{ id: "15550000000@s.whatsapp.net" }],
-          }) as Awaited<ReturnType<WhatsAppBot["getGroupMetadata"]>>,
+            participants: [{ jid: "15550000000@s.whatsapp.net" }],
+          }) as NormalizedGroupMetadata,
       );
       const service = new AgentRunService({
         db,
@@ -744,7 +800,10 @@ describe("agentRoutes", () => {
         runAgent: vi.fn(async () => {
           throw new Error("runAgent should not be called");
         }) as unknown as AgentRunServiceDeps["runAgent"],
-        getWhatsApp: () => ({ getGroupMetadata }),
+        runScheduledAgent: vi.fn(async () => {
+          throw new Error("runScheduledAgent should not be called");
+        }) as unknown as AgentRunServiceDeps["runScheduledAgent"],
+        getWhatsApp: () => ({ groupMetadata }),
       });
       const app = createRoutesTestApp(service, user.id, user.email ?? undefined);
 
@@ -850,6 +909,9 @@ describe("agentRoutes", () => {
         runAgent: vi.fn(async () => {
           throw new Error("runAgent should not be called");
         }) as unknown as AgentRunServiceDeps["runAgent"],
+        runScheduledAgent: vi.fn(async () => {
+          throw new Error("runScheduledAgent should not be called");
+        }) as unknown as AgentRunServiceDeps["runScheduledAgent"],
       });
       const app = createRoutesTestApp(service, user.id, user.email ?? undefined);
 
@@ -936,6 +998,7 @@ describe("agentRoutes", () => {
         users,
         settings: createSettingsRepository(db),
         runAgent,
+        runScheduledAgent: runAgent,
         getSlack: () => ({
           listChannels: vi.fn(async () => [
             { id: "C_A", name: "alpha", type: "public_channel", isMember: true },
@@ -987,6 +1050,9 @@ describe("agentRoutes", () => {
         runAgent: vi.fn(async () => {
           throw new Error("runAgent should not be called");
         }) as unknown as AgentRunServiceDeps["runAgent"],
+        runScheduledAgent: vi.fn(async () => {
+          throw new Error("runScheduledAgent should not be called");
+        }) as unknown as AgentRunServiceDeps["runScheduledAgent"],
         getSlack: () => ({
           listChannels: vi.fn(async () => [{ id: "C_SOURCE", name: "source", type: "public_channel", isMember: true }]),
           isUserInChannel: vi.fn(async () => true),

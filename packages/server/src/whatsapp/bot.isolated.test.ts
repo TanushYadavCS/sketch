@@ -1,4 +1,4 @@
-import type { GroupMetadata, proto } from "@whiskeysockets/baileys";
+import { DisconnectReason, type GroupMetadata, proto } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
@@ -154,6 +154,14 @@ describe("WhatsAppBot.phoneNumber", () => {
       user: { id: "14155238886:0@s.whatsapp.net" },
     };
     expect(bot.phoneNumber).toBe("+14155238886");
+  });
+
+  it("exposes the connected account LID", () => {
+    const bot = new WhatsAppBot({ db, logger: createTestLogger() });
+    (bot as unknown as { sock: { user: { id: string; lid: string } } }).sock = {
+      user: { id: "14155238886:0@s.whatsapp.net", lid: "86702773280883@lid" },
+    };
+    expect(bot.accountLid).toBe("86702773280883@lid");
   });
 });
 
@@ -323,6 +331,64 @@ describe("WhatsAppBot reconnect lifecycle", () => {
     expect(createSocket).not.toHaveBeenCalled();
 
     randomSpy.mockRestore();
+  });
+
+  it("uses the gateway reconnect delay hook for restart-required closes", async () => {
+    const reconnectDelayMs = vi.fn().mockReturnValue(1_000);
+    const bot = new WhatsAppBot({ db, logger: createTestLogger(), reconnectDelayMs });
+    const current = createConnectionSocket();
+    const createSocket = vi.fn().mockResolvedValue(undefined);
+    (bot as unknown as { sock: unknown }).sock = current.socket;
+    (bot as unknown as { activeSocketGeneration: number }).activeSocketGeneration = 1;
+    (bot as unknown as { createSocket: typeof createSocket }).createSocket = createSocket;
+    (
+      bot as unknown as {
+        registerConnectionHandler: (
+          socket: unknown,
+          authState: { clearCreds: () => Promise<void> },
+          socketGeneration: number,
+        ) => void;
+      }
+    ).registerConnectionHandler(current.socket as never, { clearCreds: vi.fn().mockResolvedValue(undefined) }, 1);
+
+    await current.emitConnectionUpdate({
+      connection: "close",
+      lastDisconnect: { error: { output: { statusCode: DisconnectReason.restartRequired } } },
+    });
+    expect(reconnectDelayMs).toHaveBeenCalledWith(DisconnectReason.restartRequired);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(createSocket).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(createSocket).toHaveBeenCalledOnce();
+  });
+
+  it("clears fenced auth and surfaces logged-out without scheduling a reconnect", async () => {
+    const onLoggedOut = vi.fn().mockResolvedValue(undefined);
+    const bot = new WhatsAppBot({ db, logger: createTestLogger(), onLoggedOut });
+    const current = createConnectionSocket();
+    const createSocket = vi.fn().mockResolvedValue(undefined);
+    const clearCreds = vi.fn().mockResolvedValue(undefined);
+    (bot as unknown as { sock: unknown }).sock = current.socket;
+    (bot as unknown as { activeSocketGeneration: number }).activeSocketGeneration = 1;
+    (bot as unknown as { createSocket: typeof createSocket }).createSocket = createSocket;
+    (
+      bot as unknown as {
+        registerConnectionHandler: (
+          socket: unknown,
+          authState: { clearCreds: () => Promise<void> },
+          socketGeneration: number,
+        ) => void;
+      }
+    ).registerConnectionHandler(current.socket as never, { clearCreds }, 1);
+
+    await current.emitConnectionUpdate({
+      connection: "close",
+      lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } },
+    });
+    await vi.runAllTimersAsync();
+    expect(clearCreds).toHaveBeenCalledOnce();
+    expect(onLoggedOut).toHaveBeenCalledWith(1);
+    expect(createSocket).not.toHaveBeenCalled();
   });
 });
 
@@ -875,13 +941,15 @@ describe("WhatsAppBot handleGroupMessage LID resolution", () => {
     (bot as unknown as { registerMessageHandler: () => void }).registerMessageHandler();
 
     const captured: unknown[] = [];
-    bot.onMessage(async (msg) => {
+    const capturedMetadata: unknown[] = [];
+    bot.onMessage(async (msg, metadata) => {
       captured.push(msg);
+      capturedMetadata.push(metadata);
     });
 
     const fire = (payload: unknown) => handlers.get("messages.upsert")?.(payload);
 
-    return { bot, fire, captured };
+    return { bot, fire, captured, capturedMetadata };
   }
 
   function makeGroupMsg(participantJid: string): proto.IWebMessageInfo {
@@ -939,6 +1007,22 @@ describe("WhatsAppBot handleGroupMessage LID resolution", () => {
     const msg = captured[0] as { type: string; senderPhone: string | null };
     expect(msg.type).toBe("group");
     expect(msg.senderPhone).toBeNull();
+  });
+
+  it("forwards an offline append once when a normal notify overlaps", async () => {
+    const { fire, captured, capturedMetadata } = createBotWithMockSocket(async () => "+15550001111");
+
+    await fire({
+      type: "append",
+      messages: [makeGroupMsg("86702773280883@lid")],
+    });
+    await fire({
+      type: "notify",
+      messages: [makeGroupMsg("86702773280883@lid")],
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(capturedMetadata).toEqual([{ socketGeneration: 0, upsertType: "append" }]);
   });
 });
 
@@ -1024,6 +1108,37 @@ describe("WhatsAppBot history sync", () => {
       }),
       "WhatsApp history batch processed",
     );
+  });
+
+  it("threads an empty on-demand response session to the history handler", async () => {
+    const handlers = new Map<string, (payload: Record<string, unknown>) => Promise<void>>();
+    const bot = new WhatsAppBot({ db, logger: createTestLogger() });
+    const mockSock = {
+      user: { id: "99999@s.whatsapp.net", name: "Sketch", lid: undefined },
+      ev: {
+        on: (event: string, handler: (payload: Record<string, unknown>) => Promise<void>) => {
+          handlers.set(event, handler);
+        },
+      },
+    };
+    const historyHandler = vi.fn(async () => ({ persisted: 0, skippedOld: 0, skippedDup: 0 }));
+    (bot as unknown as { sock: typeof mockSock }).sock = mockSock;
+    bot.onHistoryMessages(historyHandler);
+    (bot as unknown as { registerHistoryHandler: () => void }).registerHistoryHandler();
+
+    await handlers.get("messaging-history.set")?.({
+      messages: [],
+      syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+      peerDataRequestSessionId: "request-empty",
+    });
+
+    expect(historyHandler).toHaveBeenCalledWith([], {
+      socketGeneration: 0,
+      isLatest: undefined,
+      progress: undefined,
+      syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+      peerDataRequestSessionId: "request-empty",
+    });
   });
 });
 

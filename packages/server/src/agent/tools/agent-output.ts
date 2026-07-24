@@ -3,6 +3,9 @@ import { z } from "zod/v4";
 import type { AgentKnowledgeRefs, AgentMasthead, AgentOutputItemInput } from "../../db/repositories/agent-outputs";
 import type { ToolResult } from "./types";
 
+export const MAX_AGENT_OUTPUT_PAYLOAD_BYTES = 256 * 1024;
+export const WRITE_AGENT_OUTPUT_TOOL_NAME = "WriteAgentOutput";
+
 const knowledgeRefsSchema = z.object({
   entityIds: z.array(z.string()).default([]),
   fileIds: z.array(z.string()).default([]),
@@ -30,20 +33,29 @@ const itemSchema = z.object({
   knowledgeRefs: knowledgeRefsSchema,
 });
 
-export const writeAgentOutputSchema = z.object({
-  outputDate: z.string().min(1),
-  timezone: z.string().min(1),
-  masthead: z.object({
-    title: z.string().min(1),
-    summary: z.string().min(1),
-    generatedFor: z.string().optional(),
-  }),
-  items: z.array(itemSchema),
-});
+export const writeAgentOutputSchema = z
+  .object({
+    outputDate: z.string().min(1),
+    timezone: z.string().min(1),
+    masthead: z.object({
+      title: z.string().min(1),
+      summary: z.string().min(1),
+      generatedFor: z.string().optional(),
+    }),
+    items: z.array(itemSchema),
+  })
+  .superRefine((payload, ctx) => {
+    if (serializedPayloadBytes(payload) <= MAX_AGENT_OUTPUT_PAYLOAD_BYTES) return;
+    ctx.addIssue({
+      code: "custom",
+      message: `Agent output payload exceeds ${MAX_AGENT_OUTPUT_PAYLOAD_BYTES} bytes.`,
+    });
+  });
 
 export type WriteAgentOutputPayload = z.infer<typeof writeAgentOutputSchema>;
 
 export interface AgentOutputWriter {
+  recordRejectedAttempt?(error: unknown): void;
   write(payload: {
     outputDate: string;
     timezone: string;
@@ -51,6 +63,30 @@ export interface AgentOutputWriter {
     rawPayload: WriteAgentOutputPayload;
     items: AgentOutputItemInput[];
   }): Promise<void>;
+}
+
+export function recordRejectedWriteAgentOutputCall(
+  writer: AgentOutputWriter | undefined,
+  toolName: string,
+  input: unknown,
+): void {
+  if (
+    !writer?.recordRejectedAttempt ||
+    (toolName !== WRITE_AGENT_OUTPUT_TOOL_NAME && !toolName.endsWith(`__${WRITE_AGENT_OUTPUT_TOOL_NAME}`))
+  ) {
+    return;
+  }
+  const result = writeAgentOutputSchema.safeParse(input);
+  if (!result.success) writer.recordRejectedAttempt(result.error);
+}
+
+export function assertAgentOutputPayloadSize(payload: unknown): void {
+  if (serializedPayloadBytes(payload) <= MAX_AGENT_OUTPUT_PAYLOAD_BYTES) return;
+  throw new Error(`Agent output payload exceeds ${MAX_AGENT_OUTPUT_PAYLOAD_BYTES} bytes.`);
+}
+
+function serializedPayloadBytes(payload: unknown): number {
+  return Buffer.byteLength(JSON.stringify(payload) ?? "null", "utf8");
 }
 
 function normalizeRefs(refs: z.infer<typeof knowledgeRefsSchema>): AgentKnowledgeRefs {
@@ -93,14 +129,20 @@ function mapItems(payload: WriteAgentOutputPayload): AgentOutputItemInput[] {
  */
 export function createWriteAgentOutputTool(writer: AgentOutputWriter | undefined) {
   return tool(
-    "WriteAgentOutput",
+    WRITE_AGENT_OUTPUT_TOOL_NAME,
     "Validate and save the complete agent output. Call exactly once when the result is ready.",
     writeAgentOutputSchema.shape,
     async (args): Promise<ToolResult> => {
       if (!writer) {
         return { content: [{ type: "text", text: "WriteAgentOutput is not available for this run." }] };
       }
-      const payload = writeAgentOutputSchema.parse(args);
+      let payload: WriteAgentOutputPayload;
+      try {
+        payload = writeAgentOutputSchema.parse(args);
+      } catch (error) {
+        writer.recordRejectedAttempt?.(error);
+        throw error;
+      }
       await writer.write({
         outputDate: payload.outputDate,
         timezone: payload.timezone,

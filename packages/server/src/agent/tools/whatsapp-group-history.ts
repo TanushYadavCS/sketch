@@ -173,7 +173,7 @@ function afterExclusiveForInclusiveStart(startIso: string): string {
   return toIso(new Date(start.getTime() - 1));
 }
 
-function parseRosterSnapshot(raw: string): WhatsAppRosterSnapshot {
+export function parseWhatsAppGroupRosterSnapshot(raw: string): WhatsAppRosterSnapshot {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -213,7 +213,7 @@ function toDrillAnchor(row: SliceAnchorRow): DrillAnchor {
     lastMessageId: row.last_message_id,
     startedAt: row.started_at,
     endedAt: row.ended_at,
-    rosterSnapshot: parseRosterSnapshot(row.roster_snapshot),
+    rosterSnapshot: parseWhatsAppGroupRosterSnapshot(row.roster_snapshot),
     indexedFileId: row.indexed_file_id,
   };
 }
@@ -468,7 +468,12 @@ function toStoredConversationMessage(row: {
   provider_parent_message_id: string | null;
   is_thread_reply: number;
   provider_timestamp: string | null;
+  provider_from_me: number;
   received_at: string;
+  source: string;
+  effective_at: string | null;
+  connection_key: string | null;
+  backfill_range_id: string | null;
   created_at: string;
 }): StoredConversationMessage {
   return {
@@ -486,7 +491,12 @@ function toStoredConversationMessage(row: {
     providerParentMessageId: row.provider_parent_message_id,
     isThreadReply: row.is_thread_reply === 1,
     providerTimestamp: row.provider_timestamp,
+    providerFromMe: row.provider_from_me === 1,
     receivedAt: row.received_at,
+    source: row.source === "history" ? "history" : "live",
+    effectiveAt: row.effective_at ?? row.received_at,
+    connectionKey: row.connection_key,
+    backfillRangeId: row.backfill_range_id,
     createdAt: row.created_at,
   };
 }

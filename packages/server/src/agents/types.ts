@@ -40,7 +40,12 @@ export interface AgentOutputSavedArgs {
   userId: string;
   outputId: string;
   items: AgentOutputItemInput[];
+  persistedItems?: Array<{
+    id: string;
+    item: AgentOutputItemInput;
+  }>;
   createTasks: boolean;
+  runtimeContext: Record<string, unknown>;
 }
 
 export type AgentStoredItem = AgentStoredItemRow;
@@ -63,11 +68,14 @@ export interface AgentDefaults {
 export interface AgentSourceConfigDef {
   maxSources: number;
   supportsSlackChannels: boolean;
+  supportsSlackDms: boolean;
   supportsWhatsAppGroups: boolean;
+  supportsWhatsAppDms: boolean;
 }
 
 export interface AgentApiItem {
   id: string;
+  taskId?: string | null;
   sectionKey: string;
   title: string;
   summary: string;
@@ -98,6 +106,7 @@ export interface AgentRuntimeContextParams {
     delivery: AgentDeliveryConfig | null;
     sources: AgentSourceConfig[];
     sourceKey: string;
+    routeId?: string;
     firstRunLookbackHours?: number;
     floorWindowToPeriod?: boolean;
     deliveryPlatform?: "slack" | "whatsapp" | null;

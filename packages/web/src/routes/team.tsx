@@ -1,3 +1,4 @@
+import { QuietAddButton } from "@/components/quiet-add-button";
 /**
  * Team page — manage workspace members.
  * Primary use case: add WhatsApp users so they can chat with the bot.
@@ -14,7 +15,7 @@ import { MemberList } from "@/components/team/member-list";
 import type { User } from "@/lib/api";
 import { api } from "@/lib/api";
 import { useDashboardAuth } from "@/routes/dashboard";
-import { PlusIcon, RobotIcon, UsersThreeIcon } from "@phosphor-icons/react";
+import { RobotIcon, UsersThreeIcon } from "@phosphor-icons/react";
 import { Avatar, AvatarFallback } from "@sketch/ui/components/avatar";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
@@ -55,18 +56,10 @@ export function TeamPage() {
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-foreground">Team</h1>
-          <p className="mt-2 text-sm text-muted-foreground">Manage your workspace members and roles.</p>
+          <h1 className="text-[22px] font-medium text-foreground">Access</h1>
+          <p className="mt-1 text-[13px] text-muted-foreground">Manage your workspace members and roles.</p>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="gap-1.5 hover:bg-brand-accent/8"
-          onClick={() => setShowAddDialog(true)}
-        >
-          <PlusIcon size={14} weight="bold" />
-          Add member
-        </Button>
+        <QuietAddButton onClick={() => setShowAddDialog(true)}>Add member</QuietAddButton>
       </div>
 
       <div className="mt-6 w-full">
@@ -271,10 +264,9 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
       </div>
       <p className="mt-4 text-sm font-medium">Your team's empty!</p>
       <p className="mt-1 text-xs text-muted-foreground">Add your first team member to get started.</p>
-      <Button size="sm" onClick={onAdd} className="mt-4">
-        <PlusIcon size={14} weight="bold" />
+      <QuietAddButton onClick={onAdd} className="mt-4">
         Add member
-      </Button>
+      </QuietAddButton>
     </div>
   );
 }

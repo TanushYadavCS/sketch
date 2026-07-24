@@ -22,7 +22,13 @@ export function appendAutomationBuilderLinks(
   artifacts: AutomationArtifact[],
 ): string | null {
   const text = finalText?.trim() ?? "";
-  const missingLinks = artifacts
+  const artifactsByUrl = new Map<string, AutomationArtifact>();
+  for (const artifact of artifacts) {
+    const url = artifact.builderUrl.trim();
+    if (url && !artifactsByUrl.has(url)) artifactsByUrl.set(url, artifact);
+  }
+  const distinctArtifacts = Array.from(artifactsByUrl.values());
+  const missingLinks = distinctArtifacts
     .filter((artifact) => {
       const references = builderUrlReferences(artifact.builderUrl);
       return references.length > 0 && references.every((reference) => !text.includes(reference));
@@ -32,7 +38,8 @@ export function appendAutomationBuilderLinks(
 
   if (missingLinks.length === 0) return text || null;
 
-  const linkBlock =
-    missingLinks.length === 1 ? `Builder link:\n${missingLinks[0]}` : `Builder links:\n${missingLinks.join("\n")}`;
-  return text ? `${text}\n\n${linkBlock}` : `Automation created.\n\n${linkBlock}`;
+  const linkHeading = distinctArtifacts.length === 1 ? "Open your automation:" : "Open your automations:";
+  const linkBlock = `${linkHeading}\n${missingLinks.join("\n")}`;
+  const fallback = "Your automation is ready.";
+  return text ? `${text}\n\n${linkBlock}` : `${fallback}\n\n${linkBlock}`;
 }

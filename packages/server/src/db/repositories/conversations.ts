@@ -1,11 +1,14 @@
-import { type Insertable, type Kysely, type Selectable, sql } from "kysely";
+import { type Expression, type Insertable, type Kysely, type Selectable, type Transaction, sql } from "kysely";
 import type { Attachment } from "../../files";
+import { effectiveWhatsAppMessageTimestamp } from "../../whatsapp/provider-timestamp";
 import { isPg } from "../dialect";
 import type { ConversationCursorsTable, ConversationMessagesTable, ConversationsTable, DB } from "../schema";
 
 export type ConversationRow = Selectable<ConversationsTable>;
 export type ConversationCursorRow = Selectable<ConversationCursorsTable>;
 export type ConversationMessageRow = Selectable<ConversationMessagesTable>;
+export type ConversationMessageSource = "live" | "history";
+type ConversationDb = Kysely<DB> | Transaction<DB>;
 
 export interface ConversationRef {
   platform: string;
@@ -16,6 +19,7 @@ export interface ConversationRef {
 export interface ConversationMessageInsert {
   conversationId: number;
   providerMessageId: string;
+  eventKey?: string | null;
   senderJid?: string | null;
   senderName: string;
   senderUserId?: string | null;
@@ -27,13 +31,18 @@ export interface ConversationMessageInsert {
   providerParentMessageId?: string | null;
   isThreadReply?: boolean;
   providerTimestamp?: string | null;
+  providerFromMe?: boolean;
   receivedAt?: string;
+  source?: ConversationMessageSource;
+  connectionKey?: string | null;
+  backfillRangeId?: string | null;
 }
 
 export interface StoredConversationMessage {
   id: number;
   conversationId: number;
   providerMessageId: string;
+  eventKey?: string | null;
   senderJid: string;
   senderName: string;
   senderUserId: string | null;
@@ -45,7 +54,12 @@ export interface StoredConversationMessage {
   providerParentMessageId: string | null;
   isThreadReply: boolean;
   providerTimestamp: string | null;
+  providerFromMe?: boolean;
   receivedAt: string;
+  source: ConversationMessageSource;
+  effectiveAt: string;
+  connectionKey: string | null;
+  backfillRangeId: string | null;
   createdAt: string;
 }
 
@@ -82,6 +96,41 @@ interface RankedConversationMessageRow extends ConversationMessageRow {
   rank: number;
 }
 
+/**
+ * Cross-conversation search takes authorization as an opaque conversation-id
+ * subquery built by the caller (the tool layer owns the membership predicate,
+ * mirroring how the history tools colocate their authz joins). Embedding the
+ * subquery keeps this a single statement per dialect with no unbounded IN
+ * parameter list. Rank stays internal: dialect rank scales differ (ts_rank
+ * DESC vs bm25 ASC), so the contract is best-first ordering, not a number.
+ *
+ * hasMore is a truncation signal, not a pagination contract: results are
+ * relevance-ordered, and the row-id bounds cannot resume a rank order, so
+ * callers refine the query or raise the limit instead of paging. Matches the
+ * single-conversation searchMessages semantics.
+ */
+export interface SearchMessagesAcrossConversationsOptions {
+  query: string;
+  authorizedConversationIds: Expression<unknown>;
+  currentConversationId?: number;
+  afterMessageId?: number;
+  beforeMessageId?: number;
+  limit?: number;
+  includeBotMessages?: boolean;
+}
+
+export interface CrossConversationSearchMessage extends StoredConversationMessage {
+  conversationPlatform: string;
+  conversationKind: string;
+  conversationDisplayName: string | null;
+}
+
+interface CrossConversationRankedRow extends RankedConversationMessageRow {
+  conversation_platform: string;
+  conversation_kind: string;
+  conversation_display_name: string | null;
+}
+
 function parseAttachments(value: string | null): Attachment[] {
   if (!value) return [];
 
@@ -98,6 +147,7 @@ function toStored(row: ConversationMessageRow): StoredConversationMessage {
     id: row.id,
     conversationId: row.conversation_id,
     providerMessageId: row.provider_message_id,
+    eventKey: row.event_key,
     senderJid: row.sender_jid,
     senderName: row.sender_name,
     senderUserId: row.sender_user_id,
@@ -109,12 +159,17 @@ function toStored(row: ConversationMessageRow): StoredConversationMessage {
     providerParentMessageId: row.provider_parent_message_id,
     isThreadReply: row.is_thread_reply === 1,
     providerTimestamp: row.provider_timestamp,
+    providerFromMe: row.provider_from_me === 1,
     receivedAt: row.received_at,
+    source: row.source === "history" ? "history" : "live",
+    effectiveAt: row.effective_at ?? effectiveWhatsAppMessageTimestamp(row.provider_timestamp, row.received_at),
+    connectionKey: row.connection_key ?? null,
+    backfillRangeId: row.backfill_range_id ?? null,
     createdAt: row.created_at,
   };
 }
 
-function messageUniqueWhere(db: Kysely<DB>, data: ConversationMessageInsert) {
+function legacyMessageUniqueWhere(db: ConversationDb, data: ConversationMessageInsert) {
   return db
     .selectFrom("conversation_messages")
     .selectAll()
@@ -122,6 +177,29 @@ function messageUniqueWhere(db: Kysely<DB>, data: ConversationMessageInsert) {
     .where("provider_message_id", "=", data.providerMessageId)
     .where("sender_jid", "=", data.senderJid ?? "")
     .where("is_bot", "=", data.isBot ? 1 : 0);
+}
+
+async function findExistingMessage(db: ConversationDb, data: ConversationMessageInsert) {
+  if (data.eventKey) {
+    const byEventKey = await db
+      .selectFrom("conversation_messages")
+      .selectAll()
+      .where("event_key", "=", data.eventKey)
+      .executeTakeFirst();
+    if (byEventKey) return byEventKey;
+  }
+  if (data.source === "history" && data.providerFromMe && !data.isBot) {
+    const legacyOutbound = await db
+      .selectFrom("conversation_messages")
+      .selectAll()
+      .where("conversation_id", "=", data.conversationId)
+      .where("provider_message_id", "=", data.providerMessageId)
+      .where("is_bot", "=", 1)
+      .orderBy("id", "asc")
+      .executeTakeFirst();
+    if (legacyOutbound) return legacyOutbound;
+  }
+  return legacyMessageUniqueWhere(db, data).executeTakeFirst();
 }
 
 function sanitizePostgresWebsearchQuery(input: string): string {
@@ -137,6 +215,15 @@ function rankedToStored(row: RankedConversationMessageRow): SearchConversationMe
   return { ...toStored(row), rank: Number(row.rank) };
 }
 
+function crossConversationRowToStored(row: CrossConversationRankedRow): CrossConversationSearchMessage {
+  return {
+    ...toStored(row),
+    conversationPlatform: row.conversation_platform,
+    conversationKind: row.conversation_kind,
+    conversationDisplayName: row.conversation_display_name,
+  };
+}
+
 function mergeSeenMessageId(left: number | null, right: number | null): number | null {
   if (left === null || right === null) return null;
   return Math.min(left, right);
@@ -150,7 +237,84 @@ function whatsappPhoneSenderCandidates(phoneE164?: string | null): string[] {
   );
 }
 
-export function createConversationRepository(db: Kysely<DB>) {
+export function createConversationRepository(db: ConversationDb) {
+  async function reconcileOutboundIdentity(
+    row: ConversationMessageRow,
+    data: ConversationMessageInsert,
+  ): Promise<ConversationMessageRow> {
+    if (!row.is_bot || !data.providerFromMe || !data.eventKey) return row;
+    await db
+      .updateTable("conversation_messages")
+      .set({ event_key: data.eventKey, provider_from_me: 1 })
+      .where("id", "=", row.id)
+      .where("event_key", "is", null)
+      .execute();
+    return db.selectFrom("conversation_messages").selectAll().where("id", "=", row.id).executeTakeFirstOrThrow();
+  }
+
+  async function stampBackfillRangeIfUnowned(
+    row: ConversationMessageRow,
+    backfillRangeId: string | null | undefined,
+  ): Promise<ConversationMessageRow> {
+    if (!backfillRangeId || row.backfill_range_id) return row;
+    await db
+      .updateTable("conversation_messages")
+      .set({ backfill_range_id: backfillRangeId })
+      .where("id", "=", row.id)
+      .where("backfill_range_id", "is", null)
+      .execute();
+    return db.selectFrom("conversation_messages").selectAll().where("id", "=", row.id).executeTakeFirstOrThrow();
+  }
+
+  async function insertMessage(
+    data: ConversationMessageInsert,
+  ): Promise<{ row: StoredConversationMessage; inserted: boolean }> {
+    const existing = await findExistingMessage(db, data);
+    if (existing) {
+      const reconciled = await reconcileOutboundIdentity(existing, data);
+      return { row: toStored(await stampBackfillRangeIfUnowned(reconciled, data.backfillRangeId)), inserted: false };
+    }
+
+    const receivedAt = data.receivedAt ?? new Date().toISOString();
+    const values: Insertable<ConversationMessagesTable> = {
+      conversation_id: data.conversationId,
+      provider_message_id: data.providerMessageId,
+      event_key: data.eventKey ?? null,
+      sender_jid: data.senderJid ?? "",
+      sender_name: data.senderName,
+      sender_user_id: data.senderUserId ?? null,
+      is_bot: data.isBot ? 1 : 0,
+      addressed_to_sketch: data.addressedToSketch ? 1 : 0,
+      text: data.text ?? "",
+      attachments: data.attachments && data.attachments.length > 0 ? JSON.stringify(data.attachments) : null,
+      provider_thread_id: data.providerThreadId ?? null,
+      provider_parent_message_id: data.providerParentMessageId ?? null,
+      is_thread_reply: data.isThreadReply ? 1 : 0,
+      provider_timestamp: data.providerTimestamp ?? null,
+      provider_from_me: data.providerFromMe ? 1 : 0,
+      received_at: receivedAt,
+      source: data.source ?? "live",
+      effective_at: effectiveWhatsAppMessageTimestamp(data.providerTimestamp, receivedAt),
+      connection_key: data.connectionKey ?? null,
+      backfill_range_id: data.backfillRangeId ?? null,
+    };
+
+    try {
+      await db.insertInto("conversation_messages").values(values).execute();
+    } catch {
+      const row = await findExistingMessage(db, data);
+      if (row) {
+        const reconciled = await reconcileOutboundIdentity(row, data);
+        return { row: toStored(await stampBackfillRangeIfUnowned(reconciled, data.backfillRangeId)), inserted: false };
+      }
+      throw new Error("Failed to insert conversation message");
+    }
+
+    const row = await findExistingMessage(db, data);
+    if (!row) throw new Error("Inserted conversation message could not be loaded");
+    return { row: toStored(row), inserted: true };
+  }
+
   async function mergeConversationRows(
     sourceId: number,
     target: ConversationRow,
@@ -171,15 +335,19 @@ export function createConversationRepository(db: Kysely<DB>) {
       return target;
     }
 
-    const sourceMessages = await db
-      .selectFrom("conversation_messages")
-      .select(["id", "provider_message_id", "sender_jid", "is_bot"])
-      .where("conversation_id", "=", source.id)
-      .orderBy("id", "asc")
-      .execute();
-
-    for (const message of sourceMessages) {
-      const duplicate = await db
+    async function findMergeDuplicate(
+      message: Pick<ConversationMessageRow, "id" | "provider_message_id" | "event_key" | "sender_jid" | "is_bot">,
+    ) {
+      if (message.event_key) {
+        const eventDuplicate = await db
+          .selectFrom("conversation_messages")
+          .select("id")
+          .where("event_key", "=", message.event_key)
+          .where("id", "!=", message.id)
+          .executeTakeFirst();
+        if (eventDuplicate) return eventDuplicate;
+      }
+      return db
         .selectFrom("conversation_messages")
         .select("id")
         .where("conversation_id", "=", target.id)
@@ -187,6 +355,17 @@ export function createConversationRepository(db: Kysely<DB>) {
         .where("sender_jid", "=", message.sender_jid)
         .where("is_bot", "=", message.is_bot)
         .executeTakeFirst();
+    }
+
+    const sourceMessages = await db
+      .selectFrom("conversation_messages")
+      .select(["id", "provider_message_id", "event_key", "sender_jid", "is_bot"])
+      .where("conversation_id", "=", source.id)
+      .orderBy("id", "asc")
+      .execute();
+
+    for (const message of sourceMessages) {
+      const duplicate = await findMergeDuplicate(message);
 
       if (duplicate) {
         await db.deleteFrom("conversation_messages").where("id", "=", message.id).execute();
@@ -200,14 +379,7 @@ export function createConversationRepository(db: Kysely<DB>) {
           .where("id", "=", message.id)
           .execute();
       } catch {
-        const conflicting = await db
-          .selectFrom("conversation_messages")
-          .select("id")
-          .where("conversation_id", "=", target.id)
-          .where("provider_message_id", "=", message.provider_message_id)
-          .where("sender_jid", "=", message.sender_jid)
-          .where("is_bot", "=", message.is_bot)
-          .executeTakeFirst();
+        const conflicting = await findMergeDuplicate(message);
         if (!conflicting) throw new Error("Failed to move legacy conversation message");
         await db.deleteFrom("conversation_messages").where("id", "=", message.id).execute();
       }
@@ -428,39 +600,19 @@ export function createConversationRepository(db: Kysely<DB>) {
       return row ? toStored(row) : undefined;
     },
 
-    async insertMessage(
-      data: ConversationMessageInsert,
-    ): Promise<{ row: StoredConversationMessage; inserted: boolean }> {
-      const existing = await messageUniqueWhere(db, data).executeTakeFirst();
-      if (existing) return { row: toStored(existing), inserted: false };
+    async findMessageByEventKey(eventKey: string): Promise<StoredConversationMessage | undefined> {
+      const row = await db
+        .selectFrom("conversation_messages")
+        .selectAll()
+        .where("event_key", "=", eventKey)
+        .executeTakeFirst();
+      return row ? toStored(row) : undefined;
+    },
 
-      const values: Insertable<ConversationMessagesTable> = {
-        conversation_id: data.conversationId,
-        provider_message_id: data.providerMessageId,
-        sender_jid: data.senderJid ?? "",
-        sender_name: data.senderName,
-        sender_user_id: data.senderUserId ?? null,
-        is_bot: data.isBot ? 1 : 0,
-        addressed_to_sketch: data.addressedToSketch ? 1 : 0,
-        text: data.text ?? "",
-        attachments: data.attachments && data.attachments.length > 0 ? JSON.stringify(data.attachments) : null,
-        provider_thread_id: data.providerThreadId ?? null,
-        provider_parent_message_id: data.providerParentMessageId ?? null,
-        is_thread_reply: data.isThreadReply ? 1 : 0,
-        provider_timestamp: data.providerTimestamp ?? null,
-        received_at: data.receivedAt ?? new Date().toISOString(),
-      };
+    insertMessage,
 
-      try {
-        await db.insertInto("conversation_messages").values(values).execute();
-      } catch {
-        const row = await messageUniqueWhere(db, data).executeTakeFirst();
-        if (row) return { row: toStored(row), inserted: false };
-        throw new Error("Failed to insert conversation message");
-      }
-
-      const row = await messageUniqueWhere(db, data).executeTakeFirstOrThrow();
-      return { row: toStored(row), inserted: true };
+    async captureOrGet(data: ConversationMessageInsert): Promise<StoredConversationMessage> {
+      return (await insertMessage(data)).row;
     },
 
     async listMessages(
@@ -557,7 +709,12 @@ export function createConversationRepository(db: Kysely<DB>) {
             m.provider_parent_message_id,
             m.is_thread_reply,
             m.provider_timestamp,
+            m.provider_from_me,
             m.received_at,
+            m.source,
+            m.effective_at,
+            m.connection_key,
+            m.backfill_range_id,
             m.created_at,
             ts_rank(m.search_vector, q.query) AS rank
           FROM conversation_messages m, q
@@ -597,7 +754,12 @@ export function createConversationRepository(db: Kysely<DB>) {
           m.provider_parent_message_id,
           m.is_thread_reply,
           m.provider_timestamp,
+          m.provider_from_me,
           m.received_at,
+          m.source,
+          m.effective_at,
+          m.connection_key,
+          m.backfill_range_id,
           m.created_at,
           bm25(conversation_messages_fts, 5.0, 1.0) AS rank
         FROM conversation_messages_fts
@@ -615,6 +777,121 @@ export function createConversationRepository(db: Kysely<DB>) {
       const visibleRows = rows.rows.slice(0, limit);
       return {
         messages: visibleRows.map(rankedToStored),
+        hasMore: rows.rows.length > limit,
+      };
+    },
+
+    async searchMessagesAcrossConversations(
+      options: SearchMessagesAcrossConversationsOptions,
+    ): Promise<{ messages: CrossConversationSearchMessage[]; hasMore: boolean }> {
+      const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
+      const afterFilter = options.afterMessageId === undefined ? sql`` : sql`AND m.id > ${options.afterMessageId}`;
+      const beforeFilter = options.beforeMessageId === undefined ? sql`` : sql`AND m.id < ${options.beforeMessageId}`;
+      const botFilter = options.includeBotMessages ? sql`` : sql`AND m.is_bot = 0`;
+      const currentConversationFilter =
+        options.currentConversationId === undefined
+          ? sql``
+          : sql`OR m.conversation_id = ${options.currentConversationId}`;
+      const scopeFilter = sql`AND (m.conversation_id IN (${options.authorizedConversationIds}) ${currentConversationFilter})`;
+
+      if (isPg(db)) {
+        const pgQuery = sanitizePostgresWebsearchQuery(options.query);
+        if (!pgQuery) return { messages: [], hasMore: false };
+
+        const rows = await sql<CrossConversationRankedRow>`
+          WITH q AS (
+            SELECT websearch_to_tsquery('simple', ${pgQuery}) AS query
+          )
+          SELECT
+            m.id,
+            m.conversation_id,
+            m.provider_message_id,
+            m.sender_jid,
+            m.sender_name,
+            m.sender_user_id,
+            m.is_bot,
+            m.addressed_to_sketch,
+            m.text,
+            m.attachments,
+            m.provider_thread_id,
+            m.provider_parent_message_id,
+            m.is_thread_reply,
+            m.provider_timestamp,
+            m.provider_from_me,
+            m.received_at,
+            m.source,
+            m.effective_at,
+            m.connection_key,
+            m.backfill_range_id,
+            m.created_at,
+            c.platform AS conversation_platform,
+            c.kind AS conversation_kind,
+            c.display_name AS conversation_display_name,
+            ts_rank(m.search_vector, q.query) AS rank
+          FROM conversation_messages m
+          CROSS JOIN q
+          INNER JOIN conversations c ON c.id = m.conversation_id
+          WHERE m.search_vector @@ q.query
+            ${scopeFilter}
+            ${botFilter}
+            ${afterFilter}
+            ${beforeFilter}
+          ORDER BY rank DESC, m.id DESC
+          LIMIT ${limit + 1}
+        `.execute(db);
+
+        const visibleRows = rows.rows.slice(0, limit);
+        return {
+          messages: visibleRows.map(crossConversationRowToStored),
+          hasMore: rows.rows.length > limit,
+        };
+      }
+
+      const ftsQuery = sanitizeSqliteFtsQuery(options.query);
+      if (!ftsQuery) return { messages: [], hasMore: false };
+
+      const rows = await sql<CrossConversationRankedRow>`
+        SELECT
+          m.id,
+          m.conversation_id,
+          m.provider_message_id,
+          m.sender_jid,
+          m.sender_name,
+          m.sender_user_id,
+          m.is_bot,
+          m.addressed_to_sketch,
+          m.text,
+          m.attachments,
+          m.provider_thread_id,
+          m.provider_parent_message_id,
+          m.is_thread_reply,
+          m.provider_timestamp,
+          m.provider_from_me,
+          m.received_at,
+          m.source,
+          m.effective_at,
+          m.connection_key,
+          m.backfill_range_id,
+          m.created_at,
+          c.platform AS conversation_platform,
+          c.kind AS conversation_kind,
+          c.display_name AS conversation_display_name,
+          bm25(conversation_messages_fts, 5.0, 1.0) AS rank
+        FROM conversation_messages_fts
+        INNER JOIN conversation_messages m ON m.id = conversation_messages_fts.rowid
+        INNER JOIN conversations c ON c.id = m.conversation_id
+        WHERE conversation_messages_fts MATCH ${ftsQuery}
+          ${scopeFilter}
+          ${botFilter}
+          ${afterFilter}
+          ${beforeFilter}
+        ORDER BY rank, m.id DESC
+        LIMIT ${limit + 1}
+      `.execute(db);
+
+      const visibleRows = rows.rows.slice(0, limit);
+      return {
+        messages: visibleRows.map(crossConversationRowToStored),
         hasMore: rows.rows.length > limit,
       };
     },

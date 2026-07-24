@@ -2,7 +2,7 @@
   "name": "@sketch/server",
   "version": "1.1.0",
   "private": true,
-  "license": "Apache-2.0",
+  "license": "Elastic-2.0",
   "type": "module",
   "scripts": {
     "dev": "bash ../../scripts/with-node-version.sh tsx --watch src/index.ts",
@@ -37,6 +37,7 @@
     "@posthog/ai": "^7.12.3",
     "@sketch/shared": "workspace:*",
     "@slack/bolt": "^4.6.0",
+    "@slack/web-api": "^7.14.1",
     "@vscode/ripgrep": "^1.18.0",
     "@whiskeysockets/baileys": "7.0.0-rc.9",
     "ai": "^7.0.14",

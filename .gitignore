@@ -4,7 +4,9 @@ dist/
 data
 data/
 tmp/
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/tenant-info/
 .codex/
 .agents/
 /skills/
@@ -12,3 +14,6 @@ tmp/
 .worktrees/
 apps/macos/.build/
 apps/macos/.dist/
+
+# Local feature-design artifacts
+docs/superpowers/specs/

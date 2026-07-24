@@ -20,6 +20,7 @@ import type { WhatsAppTemplateRequest } from "./templates";
 
 export interface WhatsAppRuntime {
   isConnected: boolean;
+  shouldHandleInboundMessage(message: WhatsAppInboundMessage): boolean;
   onMessage(handler: WhatsAppMessageHandler): void;
   onHistoryMessages(handler: WhatsAppHistoryMessagesHandler): void;
   getCapabilities(target: WhatsAppTarget): WhatsAppCapabilities;
@@ -93,6 +94,8 @@ export function createWhatsAppRuntime(config: WhatsAppRuntimeConfig): WhatsAppRu
         config.groupProviderId === WHATSAPP_NONE_PROVIDER_ID ? null : groupProviders.get(config.groupProviderId);
       return Boolean(dmProvider?.isConnected || groupProvider?.isConnected);
     },
+
+    shouldHandleInboundMessage,
 
     onMessage(handler) {
       for (const provider of config.inboundProviders) {

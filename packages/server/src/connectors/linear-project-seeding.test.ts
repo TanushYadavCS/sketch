@@ -445,7 +445,7 @@ describe("Linear project entity seeding", () => {
     await syncRecordedLinearPayload(db, "sync-run-2");
     const summary = await materializeUnmaterializedFacts(db, createTestLogger());
 
-    expect(summary.entitiesLinked).toBe(1);
+    expect(summary.entitiesLinked).toBe(0);
     const projects = await db.selectFrom("entities").selectAll().where("source_type", "=", "project").execute();
     expect(projects).toHaveLength(1);
     expect(projects[0].id).toBe(firstProject.id);

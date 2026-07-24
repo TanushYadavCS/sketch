@@ -381,6 +381,7 @@ export function buildSystemContext(params: {
     "When the user names a delivery destination, use SearchDeliveryTargets first, then pass the resolved target ID in ManageScheduledTasks delivery.",
     "If a workflow is created from a Slack thread, default future workflow output to the parent channel top-level. Only set delivery.threadTs when the user explicitly asks to post workflow updates in that thread.",
     "When running a scheduled task, return the final message only; Sketch will automatically deliver your returned text to the task's configured Slack/WhatsApp destination, so do not try to find or use a chat-sending tool unless the task explicitly asks you to DM another person.",
+    "When a scheduled task asks for reminders, follow-ups, outstanding commitments, or completed work, you must call ListFollowups first. Its durable follow-up state is authoritative: pending items stay pending, looks-resolved items require user review, confirmed or rejected work must not be reconstructed from chat history, and untracked items must remain labelled as untracked.",
     "For external app events, prefer a Canvas-managed trigger only when a Canvas skill/MCP is available: use Canvas search_components to find the trigger, then create a workflow with triggerConfig.type='canvas'. If Canvas is not available, use a normal scheduled cron/interval/once trigger instead.",
   );
 
@@ -389,7 +390,7 @@ export function buildSystemContext(params: {
       "",
       "## Web Chat Automations",
       "",
-      "When ManageScheduledTasks creates or updates an automation in web chat, the client renders the automation card separately. Briefly introduce the card, but do not paste or link to the builder URL unless the user explicitly asks for the literal URL.",
+      "When ManageScheduledTasks creates or updates an automation in web chat, the client renders the automation card separately. Briefly introduce the card, but do not paste an automation link unless the user explicitly asks for the literal URL. If they do, provide it as an automation link and avoid internal product terminology in the user-facing response.",
     );
   }
 
@@ -466,9 +467,12 @@ export function buildSystemContext(params: {
     "Use ReadChatHistory for chronological paging, missed-message continuation, or reading around a known chat message row id.",
     'For Slack thread-local questions, use SearchChatHistory with scope: "current_thread" when active thread metadata is available.',
     'For wider Slack channel, WhatsApp group, Slack DM, or WhatsApp DM memory, use SearchChatHistory with scope: "conversation". This is how you discover ambient Slack messages that were stored but not inlined.',
-    "SearchChatHistory is scoped to the active chat conversation. It is not org-wide knowledge search and does not replace the existing Search tool for indexed docs, tasks, meetings, or connector data.",
-    "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory around that row id.",
+    "SearchChatHistory scopes conversation and current_thread cover the active chat conversation. It is not org-wide knowledge search and does not replace the existing Search tool for indexed docs, tasks, meetings, or connector data.",
+    'Use SearchChatHistory with scope: "all_chats" when the user asks about something that may live in another Slack channel or WhatsApp group they are a member of — for example "find that message about pricing in my groups". Results are limited server-side to conversations the requesting user belongs to. An optional platform filter narrows to slack or whatsapp.',
+    'scope: "all_chats" works in any context, including shared channels and groups. In a shared context, remember the reply is visible to everyone present, so summarize cross-chat results with judgment rather than quoting private-looking content verbatim.',
+    "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory around that row id when the hit is in the current conversation. For all_chats hits in another conversation, use WhatsAppGroupHistory or SlackChannelHistory with the returned conversation ref and timestamp instead.",
     "For indexed WhatsApp group slices found through Search, use WhatsAppGroupHistory with the sliceId when the user needs the exact raw group messages before, during, or after the slice. WhatsAppGroupHistory can include adjacent dropped banter that was intentionally not indexed, and it is access-scoped server-side.",
+    "For indexed Slack channel slices found through Search, use SlackChannelHistory with the sliceId the same way: it returns the raw channel or thread messages around the slice and is access-scoped server-side by channel membership.",
   );
 
   sections.push(
@@ -499,6 +503,7 @@ export function buildSystemContext(params: {
       "- **SearchEntities** — find projects, people, teams, companies, and products across connected sources. " +
         "Pass multiple name variations to maximize matches. Returns entity IDs.",
       "- **GetEntityContext** — get a cross-source timeline of mentions for an entity (from SearchEntities).",
+      "- **ListFollowups** — read durable conversation-derived pending, untracked, and looks-resolved follow-up state for reminder briefs.",
       "- **ListTasks** — list current tracker-owned tasks by project entity or assignee entity, including status, source, priority, and due date.",
       "",
       'Recency questions ("latest", "most recent", "last X"):',

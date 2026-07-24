@@ -1,3 +1,4 @@
+import { join } from "node:path";
 /**
  * Server bootstrap — wires config, DB, repos, platform adapters, and HTTP into a
  * running server. Extracted from index.ts so the full stack can be instantiated
@@ -5,7 +6,7 @@
  */
 import { serve } from "@hono/node-server";
 import type { Kysely } from "kysely";
-import { createAgentRunLimiter } from "./agent/concurrency-limiter";
+import { type AgentRunAdmissionOptions, createAgentRunLimiter } from "./agent/concurrency-limiter";
 import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/environment";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
@@ -16,6 +17,8 @@ import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
 import type { Config } from "./config";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
+import { ensureSlackConnectorConfig } from "./connectors/slack-provisioning";
+import { archiveAllSlackChannelFiles } from "./connectors/slack-salience";
 import { startSyncScheduler } from "./connectors/sync";
 import { createPricingService } from "./cost/cost-pricing";
 import { OpenRouterPriceMap } from "./cost/openrouter-price-map";
@@ -35,10 +38,12 @@ import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
+import { createWhatsAppInboundEventsRepository } from "./db/repositories/whatsapp-inbound-events";
 import { createWhatsAppProviderEventRepository } from "./db/repositories/whatsapp-provider-events";
 import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
 import type { DB } from "./db/schema";
 import { configureMaterializeDefaults } from "./entities/materialize";
+import { startNormalizationBackfill } from "./entities/normalization-backfill";
 import type { ProposeEntityType } from "./entities/propose";
 import { createApp } from "./http";
 import { buildMcpConfig, createProvider } from "./integrations/factory";
@@ -52,18 +57,27 @@ import { TaskScheduler } from "./scheduler/service";
 import { syncFeaturedSkills } from "./skills/sync";
 import { createConfiguredSlackBot, validateSlackTokens } from "./slack/adapter";
 import type { SlackBot } from "./slack/bot";
+import { createSettingsBackedSlackIndexingFacade } from "./slack/indexing-facade";
 import { createSlackStartupManager } from "./slack/startup";
 import { UserCache } from "./slack/user-cache";
 import { type ProviderContext, createWorkflowStepRecorder, instrumentAgentRun } from "./telemetry/agent-run-telemetry";
 import { initTelemetry } from "./telemetry/setup";
 import { resolveVisionConfigFromAppConfig } from "./vision/service";
 import { wireWhatsAppHandlers } from "./whatsapp/adapter";
+import { createDbAuthState } from "./whatsapp/auth-store";
+import { WhatsAppBackfillWorker } from "./whatsapp/backfill-worker";
 import { WhatsAppBot } from "./whatsapp/bot";
+import type { WhatsAppSocketFacade } from "./whatsapp/facade-contract";
+import { GatewayClientFacade } from "./whatsapp/gateway-client-facade";
+import { InProcessWhatsAppLease, WhatsAppGatewaySupervisor } from "./whatsapp/gateway/supervisor";
+import { InProcessSocketFacade } from "./whatsapp/in-process-socket-facade";
+import { WhatsAppInboundConsumer } from "./whatsapp/inbound-consumer";
 import { WORKFLOW_OUTPUT_INBOX_KIND, deliverProactiveDm } from "./whatsapp/proactive-delivery";
 import { whatsappDeliveryTargetFromTarget } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
 import { WHATSAPP_MANAGED_PROVIDER_ID, createManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
+import { startWhatsAppInboundRetention } from "./whatsapp/retention";
 import { createWhatsAppRuntime } from "./whatsapp/runtime";
 import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
 import { startWhatsAppWindowKeepAliveJob } from "./whatsapp/window-keepalive";
@@ -72,7 +86,7 @@ export interface ServerHandle {
   config: Config;
   server: ReturnType<typeof serve>;
   db: Kysely<DB>;
-  whatsapp: WhatsAppBot;
+  whatsapp: WhatsAppSocketFacade;
   whatsappRuntime: ReturnType<typeof createWhatsAppRuntime>;
   getSlack: () => SlackBot | null;
   shutdown: () => Promise<void>;
@@ -165,8 +179,18 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const tracer = telemetry.tracer;
   const priceMap = new OpenRouterPriceMap({ ttlMs: config.OPENROUTER_PRICE_TTL_HOURS * 60 * 60 * 1000, logger });
   const pricing = createPricingService(priceMap, logger);
-  const agentRunLimiter = createAgentRunLimiter({ limit: config.MAX_CONCURRENT_AGENT_RUNS, logger });
-  const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => agentRunLimiter.run(work);
+  const interactiveAgentRunLimiter = createAgentRunLimiter({
+    limit: config.MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS,
+    queue: "interactive",
+    logger,
+  });
+  const scheduledAgentRunLimiter = createAgentRunLimiter({
+    limit: config.MAX_CONCURRENT_SCHEDULED_AGENT_RUNS,
+    queue: "scheduled",
+    logger,
+  });
+  const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => interactiveAgentRunLimiter.run(work);
+  const limitScheduledAgentExecution = <T>(work: () => Promise<T>): Promise<T> => scheduledAgentRunLimiter.run(work);
 
   /**
    * Current LLM provider context, refreshed at startup and on settings change
@@ -177,7 +201,10 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   const recordWorkflowStep = createWorkflowStepRecorder(tracer, pricing, () => providerCtx);
 
-  const trackedRunAgent = async (params: RunAgentParams): Promise<RunAgentResult> => {
+  const runTrackedAgent = async (
+    params: RunAgentParams,
+    limitExecution: <T>(work: () => Promise<T>) => Promise<T>,
+  ): Promise<RunAgentResult> => {
     const resolvedAgentEnv = removeReservedAgentEnv(
       await agentEnvironmentVariables.listForRuntimeContext({
         ...params,
@@ -215,10 +242,16 @@ export async function createServer(config: Config, options?: CreateServerOptions
           }
         : {}),
     };
-    return limitAgentExecution(() =>
+    return limitExecution(() =>
       instrumentAgentRun(tracer, pricing, providerCtx, enrichedParams, () => runAgent(enrichedParams)),
     );
   };
+  const trackedRunAgent = (params: RunAgentParams): Promise<RunAgentResult> =>
+    runTrackedAgent(params, limitAgentExecution);
+  const trackedScheduledRunAgent = (
+    params: RunAgentParams,
+    admission?: AgentRunAdmissionOptions,
+  ): Promise<RunAgentResult> => runTrackedAgent(params, (work) => scheduledAgentRunLimiter.run(work, admission));
 
   // 4. LLM env from DB
   async function applyLlmEnvFromDb() {
@@ -255,8 +288,88 @@ export async function createServer(config: Config, options?: CreateServerOptions
   let slack: SlackBot | null = null;
 
   // 8. WhatsApp
-  const whatsapp = new WhatsAppBot({ db, logger, groupMetadataStore: whatsappGroupsRepo });
-  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, logger);
+  const usesBaileys = config.WHATSAPP_DM_PROVIDER === "baileys" || config.WHATSAPP_GROUP_PROVIDER === "baileys";
+  let whatsappSupervisor: WhatsAppGatewaySupervisor | null = null;
+  let inProcessWhatsAppLease: InProcessWhatsAppLease | null = null;
+  let whatsappBot: WhatsAppBot | null = null;
+  let whatsapp: WhatsAppSocketFacade;
+  if (config.WHATSAPP_RUNTIME_MODE === "gateway" && usesBaileys) {
+    whatsappSupervisor = new WhatsAppGatewaySupervisor({ db, config, logger });
+    /**
+     * Keeps one application facade stable across gateway child exits and reads
+     * status from the live supervisor client after startup or pairing.
+     */
+    const createGatewayFacade = async (): Promise<GatewayClientFacade> => {
+      const lease = await db
+        .selectFrom("whatsapp_session_lease")
+        .select("gateway_http_token")
+        .where("id", "=", "default")
+        .executeTakeFirst();
+      return new GatewayClientFacade({
+        baseUrl: `http://127.0.0.1:${config.WHATSAPP_GATEWAY_PORT}`,
+        token: lease?.gateway_http_token ?? "gateway-not-started",
+        logger,
+        beforePairingStart: () => whatsappSupervisor?.ensurePairingReady().then(() => undefined) ?? Promise.resolve(),
+        pairingStatus: async () =>
+          whatsappSupervisor?.facade?.pairing.status() ?? { connected: false, phoneNumber: null },
+      });
+    };
+    if (connect) await whatsappSupervisor.start();
+    whatsapp = await createGatewayFacade();
+  } else {
+    inProcessWhatsAppLease = new InProcessWhatsAppLease({
+      db,
+      config,
+      logger,
+      onOwnershipLost: async () => {
+        await whatsappBot?.stop();
+      },
+    });
+    whatsappBot = new WhatsAppBot({
+      db,
+      logger,
+      groupMetadataStore: whatsappGroupsRepo,
+      beforeSocketOpen: usesBaileys
+        ? async () => {
+            await inProcessWhatsAppLease?.acquire();
+            await inProcessWhatsAppLease?.assertOwned();
+          }
+        : undefined,
+      authStateFactory: usesBaileys
+        ? () =>
+            createDbAuthState(db, logger, {
+              withWriteFence: (callback) => {
+                if (!inProcessWhatsAppLease) throw new Error("In-process WhatsApp lease is unavailable");
+                return inProcessWhatsAppLease.withLeaseFence(callback);
+              },
+            })
+        : undefined,
+      onLoggedOut: usesBaileys
+        ? async () => {
+            await inProcessWhatsAppLease?.resetHistoryGeneration();
+          }
+        : undefined,
+    });
+    whatsapp = new InProcessSocketFacade(
+      whatsappBot,
+      logger,
+      usesBaileys
+        ? async () => {
+            await inProcessWhatsAppLease?.resetHistoryGeneration();
+          }
+        : undefined,
+    );
+  }
+  const gatewayInboundSource = {
+    get isConnected() {
+      return whatsappSupervisor?.isConnected ?? false;
+    },
+    onMessage() {},
+    onHistoryMessages() {},
+  };
+  const baileysWhatsApp = createBaileysWhatsAppProviders(whatsapp, whatsappBot ?? gatewayInboundSource, logger, {
+    getLeaseGeneration: () => inProcessWhatsAppLease?.generation ?? null,
+  });
   const watiWhatsApp =
     config.WHATSAPP_DM_PROVIDER === WHATSAPP_WATI_PROVIDER_ID
       ? createWatiWhatsAppProvider({
@@ -448,6 +561,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     whatsapp: whatsappRuntime,
     settingsRepo,
     runAgent: trackedRunAgent,
+    runScheduledAgent: trackedScheduledRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
     listAgentEnvForRuntime: (context) => agentEnvironmentVariables.listForRuntimeContext(context),
@@ -458,11 +572,25 @@ export async function createServer(config: Config, options?: CreateServerOptions
     sendDm: sendDirectMessage,
     recordWorkflowStep,
     limitAgentExecution,
+    limitScheduledAgentExecution,
   });
   await scheduler.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment
-  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config });
+  const slackIndexingFacade = createSettingsBackedSlackIndexingFacade({
+    db,
+    encryptionKey: config.ENCRYPTION_KEY,
+    userCache,
+  });
+  const syncScheduler = startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config, slackIndexingFacade });
+  if ((await settingsRepo.get())?.slack_bot_token) {
+    await ensureSlackConnectorConfig({ db, encryptionKey: config.ENCRYPTION_KEY, logger });
+  }
+
+  // 8.7. Fix 2b normalization backfill — populates indexed corroboration columns
+  // for pre-migration rows in the background; readers stay on the legacy path
+  // until it completes, so this must not block startup readiness.
+  const normalizationBackfill = startNormalizationBackfill(db, logger);
   const whatsappWindowKeepAliveJob = config.WHATSAPP_WINDOW_KEEPALIVE_ENABLED
     ? startWhatsAppWindowKeepAliveJob({
         db,
@@ -485,6 +613,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     users,
     settings: settingsRepo,
     runAgent: trackedRunAgent,
+    runScheduledAgent: trackedScheduledRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
     queueManager,
@@ -530,7 +659,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     createBot: (tokens) => createConfiguredSlackBot(tokens, slackAdapterDeps),
   });
 
-  wireWhatsAppHandlers(whatsappRuntime, {
+  const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, {
     db,
     config,
     logger,
@@ -544,6 +673,37 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+  });
+  const whatsappInboundConsumerRef: { current: WhatsAppInboundConsumer | null } = { current: null };
+  const whatsappBackfillWorker =
+    whatsapp instanceof GatewayClientFacade
+      ? new WhatsAppBackfillWorker({
+          db,
+          config,
+          logger,
+          facade: whatsapp,
+          handlers: whatsappHandlers,
+          shouldHandleInboundMessage: whatsappRuntime.shouldHandleInboundMessage,
+          onRequestAccepted: () => whatsappInboundConsumerRef.current?.wake(),
+        })
+      : null;
+  const whatsappInboundConsumer = new WhatsAppInboundConsumer({
+    db,
+    logger,
+    handlers: whatsappHandlers,
+    shouldHandleInboundMessage: whatsappRuntime.shouldHandleInboundMessage,
+    stagingDir: join(config.DATA_DIR, "wa-staging"),
+    backfillWindowDays: config.WHATSAPP_HISTORY_LOOKBACK_DAYS,
+    backfillWorker: whatsappBackfillWorker ?? undefined,
+  });
+  whatsappInboundConsumerRef.current = whatsappInboundConsumer;
+  await createWhatsAppInboundEventsRepository(db).resetDispatched();
+  whatsappInboundConsumer.start();
+  whatsappBackfillWorker?.start();
+  const whatsappInboundRetention = startWhatsAppInboundRetention({
+    db,
+    logger,
+    stagingDir: join(config.DATA_DIR, "wa-staging"),
   });
 
   // 9. HTTP server
@@ -563,6 +723,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     queueManager,
     onSlackTokensUpdated: async (tokens) => {
       await startSlackBotIfConfigured(tokens);
+      if (tokens?.botToken) {
+        await ensureSlackConnectorConfig({ db, encryptionKey: config.ENCRYPTION_KEY, logger });
+      }
     },
     onSlackDisconnect: async () => {
       if (slack) {
@@ -570,6 +733,25 @@ export async function createServer(config: Config, options?: CreateServerOptions
         slack = null;
       }
       await settingsRepo.update({ slackBotToken: null, slackAppToken: null });
+      /**
+       * Revoke indexed-channel access in the same gesture instead of waiting
+       * for the next scheduled sync: until archival runs, previously emitted
+       * slices stay searchable under their last-known ACLs. The unconfigured
+       * sync path repeats this archival as a backstop, so a failure here only
+       * delays revocation rather than losing it.
+       */
+      try {
+        const slackConnector = await db
+          .selectFrom("connector_configs")
+          .select("id")
+          .where("connector_type", "=", "slack")
+          .executeTakeFirst();
+        if (slackConnector) {
+          await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: slackConnector.id });
+        }
+      } catch (err) {
+        logger.warn({ err }, "Failed to archive Slack files on disconnect; next sync will archive");
+      }
       logger.info("Slack disconnected and tokens cleared");
     },
     onLlmSettingsUpdated: async () => {
@@ -580,12 +762,31 @@ export async function createServer(config: Config, options?: CreateServerOptions
       logger.info("SMTP configuration updated");
     },
     logger,
+    getWhatsAppHealth: () => ({ missingProviderIdEvents: whatsappInboundConsumer.missingProviderIdEvents }),
     localDeviceGateway,
     localClaudeSessionService,
     agentRunService,
     limitAgentExecution,
+    ...(whatsapp instanceof GatewayClientFacade
+      ? {
+          whatsappWakeToken: whatsapp.gatewayToken,
+          onWhatsAppWake: () => whatsappInboundConsumer.wake(),
+          onWhatsAppSocketStateChange: async (
+            change: Parameters<WhatsAppGatewaySupervisor["handleSocketStateChange"]>[0],
+          ) => {
+            const accepted = whatsappSupervisor?.handleSocketStateChange(change) ?? false;
+            if (accepted && change.socketState === "connected") {
+              await whatsappBackfillWorker?.handleConnected({
+                leaseGeneration: change.generation,
+                socketGeneration: change.socketGeneration,
+              });
+            }
+          },
+        }
+      : {}),
   });
   const server = serve({ fetch: app.fetch, port: config.PORT });
+  await whatsappSupervisor?.refreshHealth();
   localDeviceGateway.attach(server);
   logger.info({ port: config.PORT }, "HTTP server started");
 
@@ -593,7 +794,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   if (connect) {
     await startSlackBotIfConfigured().catch(() => {});
 
-    const whatsappConnected = await whatsapp.start();
+    const whatsappConnected = whatsappBot ? await whatsappBot.start() : (await whatsapp.pairing.status()).connected;
     if (whatsappConnected) {
       logger.info("WhatsApp connected");
     } else {
@@ -608,13 +809,22 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 11. Shutdown handle
   async function shutdown() {
     logger.info("Shutting down...");
+    await whatsappBackfillWorker?.stop();
+    await whatsappInboundConsumer.stop();
+    whatsappInboundRetention.stop();
+    normalizationBackfill.stop();
     await telemetry.shutdown();
     await syncScheduler.stop();
     whatsappWindowKeepAliveJob?.stop();
     agentScheduler.stop();
     scheduler.stop();
     if (slack) await slack.stop();
-    await whatsapp.stop();
+    if (whatsappSupervisor) {
+      await whatsappSupervisor.shutdown();
+    } else {
+      await whatsapp.shutdown();
+      await inProcessWhatsAppLease?.release();
+    }
     server.close();
     await db.destroy();
   }

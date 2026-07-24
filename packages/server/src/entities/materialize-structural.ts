@@ -45,7 +45,7 @@ export async function materializeStructuralSeed(
     });
   }
 
-  const entity = (await deps.entityRepo.upsertEntityFromTool({
+  const entity = await deps.entityRepo.upsertEntityFromTool({
     name: fact.subject_name,
     sourceType,
     source: subjectSource,
@@ -54,7 +54,7 @@ export async function materializeStructuralSeed(
     sourceRefId: fact.indexed_file_id ?? undefined,
     metadata,
     provenanceTier: "structural",
-  })) as unknown as EntityRow;
+  });
   if (subjectSource === "zoho_crm" && sourceType === "company") {
     const domains = readCrmAccountDomains(metadataFromRaw);
     for (const [index, domain] of domains.entries()) {
@@ -103,7 +103,7 @@ export async function materializeParentEntity(
   if (!entity) {
     const found = await deps.entityRepo.getEntityBySourceRef(fact.subject_source, fact.subject_source_id);
     if (found) {
-      entity = found as unknown as EntityRow;
+      entity = found;
       deps.index.bySourceRef.set(refKey, entity);
     }
   }

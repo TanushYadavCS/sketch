@@ -34,6 +34,10 @@ function message(overrides: Partial<StoredConversationMessage> = {}): StoredConv
     receivedAt: "2026-07-07T09:00:01.000Z",
     createdAt: "2026-07-07T09:00:01.000Z",
     ...overrides,
+    source: overrides.source ?? "live",
+    effectiveAt: overrides.effectiveAt ?? "2026-07-07T09:00:00.000Z",
+    connectionKey: overrides.connectionKey ?? null,
+    backfillRangeId: overrides.backfillRangeId ?? null,
   };
 }
 

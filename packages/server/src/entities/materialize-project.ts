@@ -1,7 +1,7 @@
 import { registerEntity } from "./materialize-deps";
 import { readJsonObject } from "./materialize-json";
 import { materializeSpineCandidate } from "./materialize-spine-candidate";
-import type { EntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
+import type { IndexEntityRow, IndexedFileFactRow, MaterializeDeps, MaterializeResult } from "./materialize-types";
 import { proposeEntity } from "./propose";
 
 export async function materializeProjectSeed(
@@ -61,7 +61,7 @@ export async function materializeProjectSeed(
     return { kind: "skipped", reason: result.reason };
   }
 
-  const entity = result.entity as unknown as EntityRow;
+  const entity = result.entity;
   const refreshed = await applySeedAliases(deps, entity, extractSeedAliases(raw));
   deps.index.bySourceRef.set(`${subjectSource}:${subjectSourceId}`, refreshed);
   return {
@@ -77,13 +77,17 @@ function extractSeedAliases(raw: Record<string, unknown>): string[] {
   return aliases.filter((alias): alias is string => typeof alias === "string" && alias.trim().length > 0);
 }
 
-async function applySeedAliases(deps: MaterializeDeps, entity: EntityRow, aliases: string[]): Promise<EntityRow> {
+async function applySeedAliases(
+  deps: MaterializeDeps,
+  entity: IndexEntityRow,
+  aliases: string[],
+): Promise<IndexEntityRow> {
   let refreshed = entity;
   for (const alias of aliases) {
     await deps.entityRepo.appendAlias(refreshed.id, alias);
   }
   if (aliases.length > 0) {
-    refreshed = ((await deps.entityRepo.getEntity(refreshed.id)) ?? refreshed) as unknown as EntityRow;
+    refreshed = (await deps.entityRepo.getEntity(refreshed.id)) ?? refreshed;
   }
   registerEntity(deps.index, refreshed);
   return refreshed;

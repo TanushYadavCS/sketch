@@ -29,8 +29,9 @@ import { IntegrationsSection } from "@/components/connections/integrations-secti
 import { McpServersSection } from "@/components/connections/mcp-servers-section";
 import { RemoveMcpDialog } from "@/components/connections/remove-mcp-dialog";
 import { LoadingSkeleton } from "@/components/connections/shared";
+import { QuietAddButton } from "@/components/quiet-add-button";
 import { api } from "@/lib/api";
-import { CheckCircleIcon, MagnifyingGlassIcon, PlusIcon, SpinnerGapIcon, WarningIcon } from "@phosphor-icons/react";
+import { CheckCircleIcon, MagnifyingGlassIcon, SpinnerGapIcon, WarningIcon } from "@phosphor-icons/react";
 import type { AgentEnvironmentVariableRecord, IntegrationConnection, McpServerRecord } from "@sketch/shared";
 import { Button } from "@sketch/ui/components/button";
 import { TabButton } from "@sketch/ui/components/tab-button";
@@ -580,8 +581,8 @@ export function ConnectionsPage() {
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
       <div>
-        <h1 className="text-xl font-semibold text-foreground">Integrations</h1>
-        <p className="mt-2 text-sm text-muted-foreground">Connect apps and tools to extend your workspace.</p>
+        <h1 className="text-[22px] font-medium text-foreground">Integrations</h1>
+        <p className="mt-1 text-[13px] text-muted-foreground">Connect apps and tools to extend your workspace.</p>
       </div>
 
       <div className="mt-6 flex items-center gap-6 border-b border-border">
@@ -624,18 +625,15 @@ export function ConnectionsPage() {
                       <span className="inline-block size-1.5 rounded-full bg-[#FEED01]" />
                       via {provider.type === "canvas" ? "Canvas" : (provider.type ?? "Provider")}
                     </span>
-                    <button
-                      type="button"
+                    <QuietAddButton
                       onClick={() => {
                         setRequestedAppConnect(null);
                         setRequestedAppSearch(null);
                         setShowAddIntegrationDialog(true);
                       }}
-                      className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
                     >
-                      <PlusIcon size={12} weight="bold" />
                       Add app
-                    </button>
+                    </QuietAddButton>
                   </div>
                 )}
                 <IntegrationsSection

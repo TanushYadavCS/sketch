@@ -1,3 +1,4 @@
+import { shouldUseChatViewTransition } from "@/lib/chat-target";
 import {
   BrowserIcon,
   DotsThreeIcon,
@@ -24,6 +25,9 @@ export interface ConversationRowProps {
   channel: ConversationChannel;
   occurredAt: string;
   now?: Date;
+  onConversationIntent?: (conversationId: string) => void;
+  isActive?: boolean;
+  onSelect?: () => void;
 }
 
 const CHANNEL_ICON = {
@@ -71,6 +75,9 @@ export function ConversationRow({
   now,
   onDelete,
   isDeleting,
+  onConversationIntent,
+  isActive = false,
+  onSelect,
 }: ConversationRowProps & ConversationRowActionProps) {
   const ChannelIcon = CHANNEL_ICON[channel];
   const content = (
@@ -91,9 +98,15 @@ export function ConversationRow({
       <Link
         to="/chat/$conversationId"
         params={{ conversationId: id }}
+        viewTransition={shouldUseChatViewTransition()}
+        onMouseEnter={() => onConversationIntent?.(id)}
+        onFocus={() => onConversationIntent?.(id)}
+        onClick={onSelect}
+        aria-current={isActive ? "page" : undefined}
         className={cn(
           "group flex w-full items-center gap-[12px] rounded-[6px] px-[8px] py-[8px]",
           "transition-colors duration-100 ease-out hover:bg-accent",
+          isActive && "bg-accent font-medium",
         )}
       >
         {content}
@@ -111,6 +124,11 @@ export function ConversationRow({
       <Link
         to="/chat/$conversationId"
         params={{ conversationId: id }}
+        viewTransition={shouldUseChatViewTransition()}
+        onMouseEnter={() => onConversationIntent?.(id)}
+        onFocus={() => onConversationIntent?.(id)}
+        onClick={onSelect}
+        aria-current={isActive ? "page" : undefined}
         className="flex min-w-0 flex-1 items-center gap-[12px]"
       >
         {content}

@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { type Kysely, sql } from "kysely";
+import { type Kysely, type RawBuilder, sql } from "kysely";
 import type { IndexedFileFactRaw, LlmTaskCandidate, LlmTaskFactRaw } from "../../connectors/types";
+import { readJsonObject } from "../../entities/materialize-json";
+import {
+  projectFeatureCorroborationKey,
+  projectLlmExtractedNormalization,
+} from "../../entities/normalization-projection";
 import type { DB } from "../schema";
 import { type FileViewer, fileVisibilityPredicate } from "./connectors";
 
@@ -227,6 +232,174 @@ function buildLegacyIndexedFileFactKey(input: UpsertIndexedFileFactInput): strin
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function canonicalizeJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeJson);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, entry]) => [key, canonicalizeJson(entry)]),
+  );
+}
+
+/**
+ * Fingerprints every persisted fact input consumed by materialization:
+ * content_hash, raw, indexed_file_id, connector_config_id, created_by_user_id,
+ * source, fact_type, relation, subject_name, subject_email, subject_source,
+ * subject_source_id, and context_snippet. Structural tasks additionally include
+ * last_seen_sync_run_id because it advances work-cycle observation state; other
+ * fact types exclude that sync bookkeeping value so an unchanged re-emission
+ * does not reopen an otherwise identical verdict. The stored raw JSON is parsed
+ * and recursively key-sorted before hashing, making equivalent payloads stable
+ * across producer property order and database dialects.
+ *
+ * Decision and milestone facts additionally fold in their file's
+ * `source_created_at`/`source_updated_at`. Those materializers derive
+ * `effectiveAt` from the file's source timestamps whenever the raw fact omits an
+ * explicit time (`decidedAt`/`observedAt`), and re-syncs advance those file
+ * columns even for unchanged items. Without folding them in, a timestamp-only
+ * file change would leave the fact's verdict closed and its `effectiveAt` stale.
+ * `synced_at` is intentionally excluded: it moves on every sync, so folding it
+ * would rematerialize these facts each cycle; a fact whose only available time is
+ * `synced_at` accepts a stable-but-stale `effectiveAt` instead of that churn. The
+ * extra element is appended only for these two fact types, so every other fact
+ * type keeps the exact 2a fingerprint and does not spuriously reopen.
+ */
+export interface MaterializationInputHashValues {
+  indexed_file_id: string | null;
+  connector_config_id: string | null;
+  created_by_user_id: string | null;
+  source: string;
+  fact_type: IndexedFileFactType;
+  relation: IndexedFileFactRelation;
+  subject_name: string | null;
+  subject_email: string | null;
+  subject_source: string | null;
+  subject_source_id: string | null;
+  context_snippet: string | null;
+  raw: string | null;
+  last_seen_sync_run_id: string | null;
+  content_hash: string | null;
+  file_source_created_at?: string | null;
+  file_source_updated_at?: string | null;
+}
+
+export function buildMaterializationInputHash(values: MaterializationInputHashValues): string {
+  const canonicalRaw = values.raw === null ? null : canonicalizeJson(JSON.parse(values.raw));
+  const foldsFileTime = values.fact_type === "decision" || values.fact_type === "milestone";
+  const base: unknown[] = [
+    values.content_hash,
+    canonicalRaw,
+    values.indexed_file_id,
+    values.connector_config_id,
+    values.created_by_user_id,
+    values.source,
+    values.fact_type,
+    values.relation,
+    values.subject_name,
+    values.subject_email,
+    values.subject_source,
+    values.subject_source_id,
+    values.context_snippet,
+    values.fact_type === "structural_task" ? values.last_seen_sync_run_id : null,
+  ];
+  if (foldsFileTime) {
+    base.push([values.file_source_created_at ?? null, values.file_source_updated_at ?? null]);
+  }
+  return createHash("sha256").update(JSON.stringify(base)).digest("hex");
+}
+
+interface NormalizationColumns {
+  normalized_subject_name: string | null;
+  normalized_mention_name: string | null;
+  raw_mention_type: string | null;
+  mention_type: string | null;
+  feature_corroboration_key: string | null;
+}
+
+const EMPTY_NORMALIZATION_COLUMNS: NormalizationColumns = {
+  normalized_subject_name: null,
+  normalized_mention_name: null,
+  raw_mention_type: null,
+  mention_type: null,
+  feature_corroboration_key: null,
+};
+
+/**
+ * Derives the persisted normalization projections so indexed corroboration and
+ * third-party lookups avoid table-wide `raw` scans. Only `llm_extracted` (mention
+ * projections) and `feature` (corroboration key) rows carry values; every other
+ * fact type stores nulls. `subjectName` is the already-trimmed stored value, the
+ * same one the count-map and materializer read back.
+ */
+function projectNormalizationColumns(
+  input: UpsertIndexedFileFactInput,
+  subjectName: string | null,
+  rawJson: string | null,
+): NormalizationColumns {
+  if (input.factType === "llm_extracted") {
+    return {
+      ...EMPTY_NORMALIZATION_COLUMNS,
+      ...projectLlmExtractedNormalization(subjectName, readJsonObject(rawJson)),
+    };
+  }
+  if (input.factType === "feature") {
+    return {
+      ...EMPTY_NORMALIZATION_COLUMNS,
+      feature_corroboration_key: projectFeatureCorroborationKey(input.source, readJsonObject(rawJson)),
+    };
+  }
+  return EMPTY_NORMALIZATION_COLUMNS;
+}
+
+/**
+ * Decision and milestone facts fold their file's source timestamps into the
+ * verdict hash; every other fact type skips this read.
+ */
+async function loadFileSourceTimesForHash(
+  db: Kysely<DB>,
+  factType: IndexedFileFactType,
+  indexedFileId: string | null,
+): Promise<{ source_created_at: string | null; source_updated_at: string | null } | null> {
+  if ((factType !== "decision" && factType !== "milestone") || !indexedFileId) return null;
+  return (
+    (await db
+      .selectFrom("indexed_files")
+      .select(["source_created_at", "source_updated_at"])
+      .where("id", "=", indexedFileId)
+      .executeTakeFirst()) ?? null
+  );
+}
+
+function sameMaterializationInputHash(incomingHash: RawBuilder<string | null>): RawBuilder<boolean> {
+  return sql<boolean>`
+    indexed_file_facts.materialization_input_hash = CAST(${incomingHash} AS TEXT)
+    OR (
+      indexed_file_facts.materialization_input_hash IS NULL
+      AND CAST(${incomingHash} AS TEXT) IS NULL
+    )
+  `;
+}
+
+function preserveMaterializedAt(incomingHash: RawBuilder<string | null>): RawBuilder<string | null> {
+  return sql<string | null>`
+    CASE
+      WHEN ${sameMaterializationInputHash(incomingHash)} THEN indexed_file_facts.materialized_at
+      ELSE NULL
+    END
+  `;
+}
+
+function preserveMaterializationAttempts(incomingHash: RawBuilder<string | null>): RawBuilder<number> {
+  return sql<number>`
+    CASE
+      WHEN ${sameMaterializationInputHash(incomingHash)} THEN indexed_file_facts.materialization_attempts
+      ELSE 0
+    END
+  `;
 }
 
 function hasString(value: Record<string, unknown>, key: string): boolean {
@@ -623,7 +796,8 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
       const raw = validateRaw(input);
       const factKey = buildIndexedFileFactKey(input);
       const legacyFactKey = buildLegacyIndexedFileFactKey(input);
-      const values = {
+      const fileSourceTimes = await loadFileSourceTimesForHash(db, input.factType, input.indexedFileId ?? null);
+      const materializationInputs = {
         indexed_file_id: input.indexedFileId ?? null,
         connector_config_id: input.connectorConfigId ?? null,
         created_by_user_id: input.createdByUserId ?? null,
@@ -640,36 +814,45 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         last_seen_sync_run_id: input.lastSeenSyncRunId ?? null,
         deleted_at: null,
         content_hash: input.contentHash ?? null,
+      };
+      const materializationInputHash = buildMaterializationInputHash({
+        ...materializationInputs,
+        file_source_created_at: fileSourceTimes?.source_created_at ?? null,
+        file_source_updated_at: fileSourceTimes?.source_updated_at ?? null,
+      });
+      const projection = projectNormalizationColumns(input, materializationInputs.subject_name, raw);
+      const values = {
+        ...materializationInputs,
+        ...projection,
+        normalization_projected_at: now,
+        materialization_input_hash: materializationInputHash,
         materialized_at: null,
         materialization_attempts: 0,
         updated_at: now,
       };
 
       if (legacyFactKey !== factKey) {
-        const existing = await db
-          .selectFrom("indexed_file_facts")
-          .select(["id", "content_hash", "materialization_attempts"])
+        const incomingHash = sql<string>`${materializationInputHash}`;
+        const result = await db
+          .updateTable("indexed_file_facts")
+          .set({
+            ...values,
+            materialized_at: preserveMaterializedAt(incomingHash),
+            materialization_attempts: preserveMaterializationAttempts(incomingHash),
+          })
           .where("fact_key", "=", legacyFactKey)
           .executeTakeFirst();
-        if (existing) {
-          const attempts = existing.content_hash === values.content_hash ? existing.materialization_attempts : 0;
-          await db
-            .updateTable("indexed_file_facts")
-            .set({ ...values, materialization_attempts: attempts })
-            .where("id", "=", existing.id)
-            .execute();
-          return;
-        }
+        if (Number(result.numUpdatedRows ?? 0) > 0) return;
       }
 
       /**
-       * Re-syncs re-emit facts for unchanged items, so the failed-attempt
-       * counter must survive same-content upserts or the quarantine cap in
-       * materialize-replay.ts would be reset before every sweep and never
-       * engage. The counter only resets when content_hash actually changes.
-       * The null-safe equality is spelled out because SQLite's `IS` and
-       * Postgres' `IS NOT DISTINCT FROM` don't share a syntax.
+       * Re-syncs re-emit facts for unchanged items, so completed verdicts and
+       * failed-attempt counters survive identical materializer inputs. Any
+       * input change atomically reopens the fact and clears its quarantine.
+       * Explicit equality plus the both-NULL branch is portable across SQLite
+       * and Postgres, unlike their dialect-specific null-safe operators.
        */
+      const excludedHash = sql<string | null>`excluded.materialization_input_hash`;
       await db
         .insertInto("indexed_file_facts")
         .values({
@@ -679,14 +862,8 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
         .onConflict((oc) =>
           oc.column("fact_key").doUpdateSet({
             ...values,
-            materialization_attempts: sql<number>`
-              CASE
-                WHEN indexed_file_facts.content_hash = excluded.content_hash
-                  OR (indexed_file_facts.content_hash IS NULL AND excluded.content_hash IS NULL)
-                THEN indexed_file_facts.materialization_attempts
-                ELSE 0
-              END
-            `,
+            materialized_at: preserveMaterializedAt(excludedHash),
+            materialization_attempts: preserveMaterializationAttempts(excludedHash),
           }),
         )
         .execute();
@@ -851,6 +1028,12 @@ export function createIndexedFileFactRepository(db: Kysely<DB>) {
       return Number(result.numUpdatedRows ?? 0);
     },
 
+    /**
+     * Reconciliation intentionally reopens current facts without changing their
+     * input fingerprint. Preserving the fingerprint is coherent: a later
+     * same-input upsert preserves the explicit open state instead of restoring
+     * the old completed verdict, while the next successful sweep can close it.
+     */
     async clearMaterializedAtForActiveFacts(indexedFileIds: string[]): Promise<void> {
       if (indexedFileIds.length === 0) return;
       await db

@@ -51,7 +51,9 @@ interface SystemDeps {
     inboxMetadata?: Record<string, unknown> | null;
   }) => Promise<{ channelId: string; messageRef: string; inboxMessageId?: string }>;
   managedWhatsappInbound?: Pick<ManagedWhatsAppProvider, "handleInboundEvent">;
-  whatsappStatus?: () => { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean };
+  whatsappStatus?: () =>
+    | { connected: boolean; phoneNumber: string | null; pairingInProgress: boolean }
+    | Promise<{ connected: boolean; phoneNumber: string | null; pairingInProgress: boolean }>;
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
   startWhatsAppPairing?: Function;
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
@@ -558,8 +560,12 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     return c.json({ ok: true });
   });
 
-  routes.get("/whatsapp", (c) => {
-    const status = deps.whatsappStatus?.() ?? { connected: false, phoneNumber: null, pairingInProgress: false };
+  routes.get("/whatsapp", async (c) => {
+    const status = (await deps.whatsappStatus?.()) ?? {
+      connected: false,
+      phoneNumber: null,
+      pairingInProgress: false,
+    };
     return c.json(status);
   });
 
@@ -574,7 +580,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       return c.json({ error: { code: "BAD_REQUEST", message: parsed.error.message } }, 400);
     }
 
-    const status = deps.whatsappStatus();
+    const status = await deps.whatsappStatus();
     if (!status.connected || !status.phoneNumber) {
       return c.json({ error: { code: "NOT_CONNECTED", message: "WhatsApp is not connected" } }, 409);
     }
@@ -613,7 +619,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
 
   routes.delete("/whatsapp/pair", async (c) => {
     if (deps.cancelWhatsAppPairing) {
-      deps.cancelWhatsAppPairing();
+      await deps.cancelWhatsAppPairing();
     }
     return c.json({ ok: true });
   });

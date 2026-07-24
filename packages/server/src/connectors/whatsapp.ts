@@ -1,11 +1,16 @@
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { BrowseResult, Connector, ConnectorCredentials, SyncedItem } from "./types";
-import { type WhatsAppChunkerKnobs, chunkWhatsAppIndexingGroups } from "./whatsapp-chunker";
+import {
+  type WhatsAppBackfillGraphKnobs,
+  type WhatsAppChunkerKnobs,
+  chunkWhatsAppIndexingGroups,
+} from "./whatsapp-chunker";
 import {
   DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT,
   WHATSAPP_EMISSION_REFRESH_DAYS,
   emitWhatsAppSyncedItems,
   processWhatsAppSalience,
+  reconcileWhatsAppGroupAcls,
 } from "./whatsapp-salience";
 
 function assertSystemCredentials(credentials: ConnectorCredentials): void {
@@ -33,6 +38,22 @@ function salienceBatchLimitFromScopeConfig(scopeConfig: Record<string, unknown>)
 
 function emissionRefreshDaysFromScopeConfig(scopeConfig: Record<string, unknown>): number {
   return positiveInteger(scopeConfig.emissionRefreshDays) ?? WHATSAPP_EMISSION_REFRESH_DAYS;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function backfillGraphKnobsFromScopeConfig(scopeConfig: Record<string, unknown>): Partial<WhatsAppBackfillGraphKnobs> {
+  return {
+    pageMessages: positiveInteger(scopeConfig.backfillGraphPageMessages),
+    pageTokens: positiveInteger(scopeConfig.backfillGraphPageTokens),
+    cycleMessages: positiveInteger(scopeConfig.backfillGraphCycleMessages),
+    pendingSlicesMax: nonNegativeInteger(scopeConfig.backfillGraphPendingSlicesMax),
+    pendingFilesMax: nonNegativeInteger(scopeConfig.backfillGraphPendingFilesMax),
+    openFactsMax: nonNegativeInteger(scopeConfig.backfillGraphOpenFactsMax),
+  };
 }
 
 export function createWhatsAppConnector(): Connector {
@@ -63,7 +84,14 @@ export function createWhatsAppConnector(): Connector {
       };
     },
 
-    async *sync({ db, credentials, logger, scopeConfig, salienceGenerator }): AsyncGenerator<SyncedItem> {
+    async *sync({
+      db,
+      connectorConfigId,
+      credentials,
+      logger,
+      scopeConfig,
+      salienceGenerator,
+    }): AsyncGenerator<SyncedItem> {
       assertSystemCredentials(credentials);
       if (!db) {
         throw new Error("WhatsApp connector requires database access");
@@ -75,6 +103,7 @@ export function createWhatsAppConnector(): Connector {
         groups,
         logger,
         defaultKnobs: chunkerDefaultsFromScopeConfig(scopeConfig),
+        backfillGraphKnobs: backfillGraphKnobsFromScopeConfig(scopeConfig),
       });
       const salienceSummary = await processWhatsAppSalience({
         db,
@@ -97,6 +126,9 @@ export function createWhatsAppConnector(): Connector {
         yield item;
       }
       logger.info({ emitted, skippedNoScope }, "Completed WhatsApp synced item emission");
+      if (connectorConfigId) {
+        await reconcileWhatsAppGroupAcls({ db, logger, connectorConfigId });
+      }
     },
 
     async getCursor(): Promise<string | null> {

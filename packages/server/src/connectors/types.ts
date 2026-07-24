@@ -9,6 +9,7 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import type { DB } from "../db/schema";
+import type { SlackIndexingFacade } from "../slack/indexing-facade";
 import type { GeminiGenerator } from "./gemini-generate";
 
 export type ConnectorType =
@@ -23,7 +24,13 @@ export type ConnectorType =
   | "fireflies"
   | "otter"
   | "zoho_crm"
-  | "whatsapp";
+  | "whatsapp"
+  | "slack";
+
+export const WHATSAPP_CONNECTOR_TYPE = "whatsapp" satisfies ConnectorType;
+export const SLACK_CONNECTOR_TYPE = "slack" satisfies ConnectorType;
+export const WHATSAPP_CONVERSATION_SLICE_FILE_TYPE = "whatsapp_conversation_slice";
+export const SLACK_CONVERSATION_SLICE_FILE_TYPE = "slack_conversation_slice";
 
 export type AuthType = "oauth" | "api_key" | "service_account" | "system";
 
@@ -482,6 +489,12 @@ export interface Connector {
      */
     resolveNameToEmail?: NameResolver;
     salienceGenerator?: GeminiGenerator | null;
+    /**
+     * Narrow Slack API facade injected from bootstrap for the slack-indexing
+     * connector (rosters, member channels, user emails). Other connectors
+     * ignore it.
+     */
+    slackIndexing?: SlackIndexingFacade | null;
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
     onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;

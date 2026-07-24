@@ -281,7 +281,7 @@ export async function floorRetryForDomains(
   }
 
   if (result.emitted > 0 && opts?.materialize !== false && deps.logger) {
-    await materializeUnmaterializedFacts(deps.db, deps.logger);
+    await materializeUnmaterializedFacts(deps.db, deps.logger, { factTypes: ["llm_relation"] });
   }
 
   deps.logger?.info(result, "engagement-floor: domain retry complete");

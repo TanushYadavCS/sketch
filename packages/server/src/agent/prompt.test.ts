@@ -156,6 +156,9 @@ describe("buildSystemContext", () => {
       expect(result).toContain("must call SearchChatHistory first");
       expect(result).toContain('scope: "current_thread"');
       expect(result).toContain('scope: "conversation"');
+      expect(result).toContain('scope: "all_chats"');
+      expect(result).toContain('"all_chats" works in any context, including shared channels and groups');
+      expect(result).toContain("WhatsAppGroupHistory or SlackChannelHistory with the returned conversation ref");
       expect(result).toContain("does not replace the existing Search tool");
       expect(result).toContain("call ReadChatHistory around that row id");
       expect(result).toContain("use WhatsAppGroupHistory with the sliceId");
@@ -177,6 +180,12 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "slack" });
       expect(result).toContain("Sketch will automatically deliver your returned text");
       expect(result).toContain("do not try to find or use a chat-sending tool");
+    });
+
+    it("tells reminder automations to use durable follow-up state before chat history", () => {
+      const result = buildSystemContext({ platform: "slack" });
+      expect(result).toContain("must call ListFollowups first");
+      expect(result).toContain("durable follow-up state is authoritative");
     });
   });
 
@@ -349,6 +358,12 @@ describe("buildSystemContext", () => {
       const result = buildSystemContext({ platform: "web" });
       expect(result).not.toContain("<url|text>");
       expect(result).not.toContain("write URLs inline");
+    });
+
+    it("uses plain-language automation link guidance", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("automation link");
+      expect(result).not.toContain("builder URL");
     });
 
     it("can mention delivery context without overriding web reply formatting", () => {

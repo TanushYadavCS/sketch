@@ -59,6 +59,8 @@ describe("runPostSyncGraphPipeline", () => {
         db,
         syncLogger: logger,
         affectedIndexedFileIds: ["file-1", "file-2"],
+        sources: [],
+        workCycleReconciles: [],
         coMentionContributesToThreshold: 4,
       });
 
@@ -83,6 +85,8 @@ describe("runPostSyncGraphPipeline", () => {
         db,
         syncLogger: logger,
         affectedIndexedFileIds: ["file-1", "file-2"],
+        sources: [],
+        workCycleReconciles: [],
         coMentionContributesToThreshold: 4,
       });
 
@@ -135,6 +139,8 @@ describe("runPostSyncGraphPipeline", () => {
         db,
         syncLogger: logger,
         affectedIndexedFileIds: [],
+        sources: [],
+        workCycleReconciles: [],
       });
 
       expect(reconcileStructuralAssigneeContributesTo).toHaveBeenCalledTimes(1);
@@ -147,6 +153,8 @@ describe("runPostSyncGraphPipeline", () => {
   });
 
   it("passes FLOOR_RETRY_MAX_FILES_PER_DOMAIN when domain promotion triggers floor retry", async () => {
+    const { materializeUnmaterializedFacts } = await import("../entities/materialize");
+    const { sweepCoMentionContributesTo } = await import("../entities/co-mention-sweep");
     vi.mocked(sweepDomainPromotions).mockResolvedValueOnce({
       scanned: 1,
       promoted: 1,
@@ -162,7 +170,9 @@ describe("runPostSyncGraphPipeline", () => {
       await runPostSyncGraphPipeline({
         db,
         syncLogger: logger,
-        affectedIndexedFileIds: [],
+        affectedIndexedFileIds: ["file-1"],
+        sources: [],
+        workCycleReconciles: [],
         floorRetryMaxFilesPerDomain: 7,
       });
 
@@ -170,6 +180,14 @@ describe("runPostSyncGraphPipeline", () => {
       expect(floorRetryForDomains).toHaveBeenCalledWith({ db, logger: expect.anything() }, ["canvasx.ai"], {
         maxFilesPerDomain: 7,
       });
+      const orderedCalls = [
+        vi.mocked(materializeUnmaterializedFacts).mock.invocationCallOrder[0],
+        vi.mocked(reconcileStructuralAssigneeContributesTo).mock.invocationCallOrder[0],
+        vi.mocked(sweepDomainPromotions).mock.invocationCallOrder[0],
+        vi.mocked(floorRetryForDomains).mock.invocationCallOrder[0],
+        vi.mocked(sweepCoMentionContributesTo).mock.invocationCallOrder[0],
+      ];
+      expect(orderedCalls).toEqual([...orderedCalls].sort((left, right) => left - right));
     } finally {
       await db.destroy();
     }
@@ -200,9 +218,8 @@ describe("runPostSyncGraphPipeline", () => {
         db,
         syncLogger: logger,
         affectedIndexedFileIds: [],
-        connectorConfigId: "connector-a",
-        syncRunId: "sync-new",
-        runCycleReconcile: false,
+        sources: [],
+        workCycleReconciles: [],
       });
       await expect(loadCycle(db, cycle.cycleId)).resolves.toMatchObject({ state: "active", deleted_at: null });
       await expect(openMemberships(db, cycle.cycleId)).resolves.toBe(1);
@@ -211,9 +228,8 @@ describe("runPostSyncGraphPipeline", () => {
         db,
         syncLogger: logger,
         affectedIndexedFileIds: [],
-        connectorConfigId: "connector-a",
-        syncRunId: "sync-new",
-        runCycleReconcile: true,
+        sources: [],
+        workCycleReconciles: [{ connectorConfigId: "connector-a", syncRunId: "sync-new" }],
       });
       await expect(loadCycle(db, cycle.cycleId)).resolves.toMatchObject({
         state: "closed",
@@ -251,9 +267,8 @@ describe("runPostSyncGraphPipeline", () => {
         db,
         syncLogger: logger,
         affectedIndexedFileIds: [],
-        connectorConfigId: "connector-a",
-        syncRunId: "sync-new",
-        runCycleReconcile: true,
+        sources: [],
+        workCycleReconciles: [{ connectorConfigId: "connector-a", syncRunId: "sync-new" }],
       });
 
       await expect(loadCycle(db, cycleA.cycleId)).resolves.toMatchObject({ state: "closed" });

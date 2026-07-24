@@ -116,6 +116,7 @@ function minWordsForSmartEnrichment(fileType: string | null, threadContext: stri
   if (fileType === "email_message") return threadContext ? 1 : 10;
   if (fileType === "calendar_event") return 10;
   if (fileType === "whatsapp_conversation_slice") return 1;
+  if (fileType === "slack_conversation_slice") return 1;
   return 100;
 }
 
@@ -640,6 +641,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
               if (floor.emitted > 0) {
                 await materializeUnmaterializedFacts(db, logger, {
                   embeddingProvider: deps.embeddingProvider,
+                  factTypes: ["llm_relation"],
                 });
               }
               await resetSummaryRetry(db, file.id, fileVersion);
@@ -929,6 +931,7 @@ async function enrichTextDocument(
       if (floor.emitted > 0) {
         await materializeUnmaterializedFacts(db, logger, {
           embeddingProvider,
+          factTypes: ["llm_relation"],
         });
       }
       await resetSummaryRetry(db, file.id, fileVersion);

@@ -67,6 +67,7 @@ async function insertMessage(
     receivedAt?: string;
     isBot?: boolean;
     attachments?: Attachment[];
+    source?: "live" | "history";
   },
 ): Promise<number> {
   const inserted = await createConversationRepository(db).insertMessage({
@@ -79,6 +80,7 @@ async function insertMessage(
     receivedAt: input.receivedAt ?? input.effectiveAt,
     isBot: input.isBot ?? false,
     attachments: input.attachments,
+    source: input.source,
   });
 
   return inserted.row.id;
@@ -402,6 +404,32 @@ function runChunkerSuite(label: string, getDb: () => Promise<Kysely<DB>>) {
         { conversationId: seeded.conversationId, lateArrivals: 1 },
         "late_arrival_skipped",
       );
+    });
+
+    it("excludes history rows from both live reads and late-arrival accounting", async () => {
+      const seeded = await seedEnabledGroup(db);
+      await insertMessage(db, seeded.conversationId, {
+        providerMessageId: "live-cursor",
+        effectiveAt: "2026-07-07T09:00:00.000Z",
+      });
+      await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:30:00.000Z") });
+      await insertMessage(db, seeded.conversationId, {
+        providerMessageId: "history-behind-cursor",
+        effectiveAt: "2026-07-07T08:55:00.000Z",
+        source: "history",
+      });
+      await insertMessage(db, seeded.conversationId, {
+        providerMessageId: "history-after-cursor",
+        effectiveAt: "2026-07-07T09:10:00.000Z",
+        source: "history",
+      });
+
+      const result = await runChunker(db, seeded.group, { now: new Date("2026-07-07T09:31:00.000Z") });
+
+      expect(result.messagesProcessed).toBe(0);
+      expect(result.lateArrivals).toBe(0);
+      expect(result.slicesCreated).toBe(0);
+      await expect(listSlices(db)).resolves.toHaveLength(1);
     });
 
     it("bounds incremental scans by received_at while preserving cursor filtering", async () => {

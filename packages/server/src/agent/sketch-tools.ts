@@ -4,6 +4,7 @@ import { createWriteAgentOutputTool } from "./tools/agent-output";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
+import { createListFollowupsTool } from "./tools/list-followups";
 import { createListTasksTool } from "./tools/list-tasks";
 import { createLocalClaudeSessionTool } from "./tools/local-claude-session";
 import { createLocalRunCommandTool } from "./tools/local-command";
@@ -11,6 +12,7 @@ import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
 import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
 import { createSearchTools } from "./tools/search";
+import { createSlackChannelHistoryTool } from "./tools/slack-channel-history";
 import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
 import {
@@ -39,6 +41,7 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
     createReadChatHistoryTool(deps),
     createSearchChatHistoryTool(deps),
     createWhatsAppGroupHistoryTool(deps),
+    createSlackChannelHistoryTool(deps),
     createProviderConfigTool(deps),
     createSearchDeliveryTargetsTool(deps),
     createLocalRunCommandTool(deps),
@@ -80,6 +83,7 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
         ]
       : []),
     ...createSearchTools(deps),
+    createListFollowupsTool(deps),
     createListTasksTool(deps),
   ];
 }

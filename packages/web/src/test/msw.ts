@@ -331,6 +331,73 @@ export const handlers = [
     });
   }),
 
+  http.get("/api/tasks/:taskId", ({ params }) => {
+    const taskId = String(params.taskId);
+    return HttpResponse.json({
+      task: {
+        id: taskId,
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: "Linked Brief task",
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        proposedAssigneeName: null,
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: taskId,
+        createdByUserId: "user-1",
+        createdByUserName: "Test User",
+        createdByUserEmail: "user@example.com",
+        isOwnedByViewer: true,
+        readonlyReason: null,
+        completedAt: null,
+        updatedAt: "2026-07-17T10:00:00.000Z",
+        canEditStatus: true,
+      },
+    });
+  }),
+
+  http.patch("/api/tasks/:taskId", async ({ params, request }) => {
+    const taskId = String(params.taskId);
+    const body = (await request.json()) as { status: string };
+    return HttpResponse.json({
+      task: {
+        id: taskId,
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: "Linked Brief task",
+        status: body.status,
+        statusRaw: body.status,
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        proposedAssigneeName: null,
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: taskId,
+        createdByUserId: "user-1",
+        createdByUserName: "Test User",
+        createdByUserEmail: "user@example.com",
+        isOwnedByViewer: true,
+        readonlyReason: null,
+        completedAt: body.status === "done" ? "2026-07-17T10:00:00.000Z" : null,
+        updatedAt: "2026-07-17T10:00:00.000Z",
+        canEditStatus: true,
+      },
+    });
+  }),
+
   http.put("/api/entities/:id/members/:fileId", () => {
     return HttpResponse.json({ ok: true });
   }),
@@ -389,6 +456,10 @@ export const handlers = [
 
   http.get("/api/entity-review", () => {
     return HttpResponse.json({ rows: [], total: 0 });
+  }),
+
+  http.get("/api/web-chat/conversations", () => {
+    return HttpResponse.json({ conversations: [] });
   }),
 
   http.get("/api/auth/session", () => {

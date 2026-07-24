@@ -562,7 +562,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
         await materializeUnmaterializedFacts(deps.db, deps.logger.child({ phase: "post-floor-materialize" }), {
           llmPromotionThreshold: deps.llmPromotionThreshold,
           featureAutoMintThreshold: deps.featureAutoMintThreshold,
-          factTypes: [...AI_EXTRACTION_FACT_TYPES],
+          factTypes: ["llm_relation"],
           shouldCancel: deps.shouldCancel,
         });
       }

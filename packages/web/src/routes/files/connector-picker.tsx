@@ -10,14 +10,15 @@ import {
   isOwnedOrPersonalAppConnection,
 } from "@/components/connections/connection-status";
 import { ConnectorLogo } from "@/components/connector-logos";
+import { QuietAddButton } from "@/components/quiet-add-button";
 import type { ConnectorConfig } from "@/lib/api";
 import { api } from "@/lib/api";
 import { INTEGRATIONS, type IntegrationDefinition, type IntegrationType, getIntegration } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
 import {
   type IntegrationConnection,
-  PERSONAL_CANVAS_CONNECTOR_MAPPINGS,
-  personalCanvasConnectorTypeFromAppId,
+  canvasConnectorMappingForType,
+  canvasConnectorTypeFromAppId,
 } from "@sketch/shared";
 
 const SYNC_STATUS_PRECEDENCE: Record<string, number> = {
@@ -80,26 +81,38 @@ function connectorAdoptionSummary(connectedMemberCount: number, teamMemberCount:
   return `${connectedMemberCount.toLocaleString()} of ${denominator.toLocaleString()} ${memberLabel} connected`;
 }
 
-const PERSONAL_CANVAS_CONNECTOR_TYPES = new Set<IntegrationType>(
-  PERSONAL_CANVAS_CONNECTOR_MAPPINGS.map((mapping) => mapping.connectorType as IntegrationType),
-);
-
-function canResolveNativeCanvasConnection(definition: IntegrationDefinition | null): boolean {
-  return !!definition && definition.perUserAuth && PERSONAL_CANVAS_CONNECTOR_TYPES.has(definition.type);
+function canResolveNativeCanvasConnection(definition: IntegrationDefinition | null, isAdmin: boolean): boolean {
+  if (!definition) return false;
+  const mapping = canvasConnectorMappingForType(definition.type);
+  if (!mapping) return false;
+  if (mapping.credentialScope === "organization") return isAdmin && !definition.perUserAuth;
+  return definition.perUserAuth;
 }
 
 function nativeCanvasConnectionForIntegration(
   definition: IntegrationDefinition,
   connections: IntegrationConnection[],
+  isAdmin: boolean,
 ): IntegrationConnection | null {
+  const mapping = canvasConnectorMappingForType(definition.type);
+  if (!mapping) return null;
+
   return (
-    connections.find(
-      (connection) =>
-        connection.status === "active" &&
-        isNativeCanvasAppConnection(connection) &&
-        isOwnedOrPersonalAppConnection(connection) &&
-        personalCanvasConnectorTypeFromAppId(connection.appId) === definition.type,
-    ) ?? null
+    connections.find((connection) => {
+      if (
+        connection.status !== "active" ||
+        !isNativeCanvasAppConnection(connection) ||
+        canvasConnectorTypeFromAppId(connection.appId) !== definition.type
+      ) {
+        return false;
+      }
+      if (mapping.credentialScope === "organization") {
+        if (!isAdmin) return false;
+        if (connection.accessLevel === "organization") return connection.canUse !== false;
+        return connection.isOwnedByViewer !== false;
+      }
+      return isOwnedOrPersonalAppConnection(connection);
+    }) ?? null
   );
 }
 import {
@@ -208,7 +221,7 @@ export function ConnectorPicker({
   };
 
   const effectiveConnectingIntegration = forcedConnectIntegration ?? connectingIntegration;
-  const shouldResolveNativeCanvasConnection = canResolveNativeCanvasConnection(effectiveConnectingIntegration);
+  const shouldResolveNativeCanvasConnection = canResolveNativeCanvasConnection(effectiveConnectingIntegration, isAdmin);
   const integrationProvidersQuery = useQuery({
     queryKey: ["mcp-servers"],
     queryFn: () => api.mcpServers.list(),
@@ -223,7 +236,7 @@ export function ConnectorPicker({
   });
   const nativeCanvasConnection =
     effectiveConnectingIntegration && canvasConnectionsQuery.data
-      ? nativeCanvasConnectionForIntegration(effectiveConnectingIntegration, canvasConnectionsQuery.data)
+      ? nativeCanvasConnectionForIntegration(effectiveConnectingIntegration, canvasConnectionsQuery.data, isAdmin)
       : null;
   const canvasConnectionLookupPending =
     shouldResolveNativeCanvasConnection &&
@@ -778,10 +791,9 @@ function ConnectorRow({
               </Button>
             )}
             {onlyOtherPerUserConnectors && (
-              <Button variant="outline" size="sm" className="h-7 gap-1.5 whitespace-nowrap text-xs" onClick={onConnect}>
-                <PlusIcon size={12} />
+              <QuietAddButton className="whitespace-nowrap" onClick={onConnect}>
                 Connect mine
-              </Button>
+              </QuietAddButton>
             )}
             {needsScopeSetup && canManage && (
               <Button size="sm" className="h-7 whitespace-nowrap text-xs" onClick={() => onManage(connector)}>
@@ -809,10 +821,9 @@ function ConnectorRow({
           </div>
         ) : canConnect ? (
           <div className="flex items-center justify-end gap-2 self-end sm:self-auto sm:shrink-0">
-            <Button variant="outline" size="sm" className="h-7 whitespace-nowrap text-xs" onClick={onConnect}>
-              <PlusIcon size={12} />
+            <QuietAddButton className="whitespace-nowrap" onClick={onConnect}>
               Connect
-            </Button>
+            </QuietAddButton>
           </div>
         ) : (
           <span className="self-end whitespace-nowrap text-xs text-muted-foreground sm:self-auto sm:shrink-0">

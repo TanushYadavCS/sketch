@@ -1,5 +1,7 @@
 import { DailyBriefEmptyState } from "@/components/brief/brief-empty-state";
 import { DailyBrief } from "@/components/brief/daily-brief";
+import { applyTaskOverlayToBriefResponse } from "@/components/brief/task-overlay";
+import type { DailyBriefResponse, TaskStatus } from "@/lib/api";
 import { api } from "@/lib/api";
 import { chatPrefillTargetFromPrompt } from "@/lib/chat-target";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
@@ -8,7 +10,7 @@ import { createRoute, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
 
-const DAILY_BRIEF_QUERY_KEY = ["daily-brief", "latest"];
+export const DAILY_BRIEF_QUERY_KEY = ["daily-brief", "latest"];
 
 export const homeRoute = createRoute({
   getParentRoute: () => dashboardRoute,
@@ -38,8 +40,25 @@ export function HomePage() {
   const brief = briefQuery.data?.brief ?? null;
   const running = briefQuery.data?.running || generateMutation.isPending;
 
+  const updateTaskStatusMutation = useMutation({
+    mutationFn: ({ taskId, status }: { taskId: string; status: TaskStatus }) => api.tasks.updateStatus(taskId, status),
+    onSuccess: ({ task }) => {
+      queryClient.setQueryData<DailyBriefResponse>(DAILY_BRIEF_QUERY_KEY, (current) =>
+        current ? applyTaskOverlayToBriefResponse(current, task) : current,
+      );
+      void queryClient.invalidateQueries({ queryKey: DAILY_BRIEF_QUERY_KEY });
+      toast.success("Task status updated");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to update task status");
+    },
+  });
+  const updatingTaskId = updateTaskStatusMutation.isPending
+    ? (updateTaskStatusMutation.variables?.taskId ?? null)
+    : null;
+
   return (
-    <TabContentContainer className="mx-auto box-border min-h-[calc(100vh-52px)] max-w-4xl px-5 py-10 sm:px-10">
+    <TabContentContainer className="mx-auto box-border min-h-[calc(100vh-3rem)] max-w-4xl px-5 py-10 sm:px-10 md:min-h-screen">
       {brief ? (
         <DailyBrief
           brief={brief}
@@ -49,6 +68,8 @@ export function HomePage() {
           onOpenChat={(prompt) => {
             void navigate(chatPrefillTargetFromPrompt(prompt));
           }}
+          onUpdateTaskStatus={(taskId, status) => updateTaskStatusMutation.mutate({ taskId, status })}
+          updatingTaskId={updatingTaskId}
         />
       ) : (
         <DailyBriefEmptyState
