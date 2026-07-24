@@ -129,6 +129,101 @@ describe("Brief row live task status", () => {
     const row = screen.getByRole("button", { name: /Snapshot title/ });
     expect(within(row).queryByRole("combobox")).not.toBeInTheDocument();
   });
+
+  it("shows the lifecycle status before a friendly Task Attention label", () => {
+    const item = {
+      ...todoItem("t-attention-overdue", "Overdue customer escalation", baseTask({ status: "open" })),
+      structuredPayload: {
+        attentionReasons: ["overdue", "high_priority"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    const row = screen.getByRole("button", { name: /Overdue customer escalation/ });
+    const statusGroups = within(row).getAllByLabelText("Task status and attention");
+    expect(statusGroups).toHaveLength(2);
+    for (const group of statusGroups) {
+      expect(group).toHaveTextContent("Open");
+      expect(group).toHaveTextContent("Overdue");
+      expect(group.textContent?.indexOf("Open")).toBeLessThan(group.textContent?.indexOf("Overdue") ?? -1);
+      expect(group).not.toHaveTextContent("high_priority");
+    }
+  });
+
+  it("uses New for the combined new-and-meaningfully-changed tier", () => {
+    const item = {
+      ...todoItem("t-attention-new-row", "New ownerless follow-up", baseTask({ status: "open" })),
+      structuredPayload: {
+        attentionReasons: ["new_since_last_brief", "meaningfully_changed"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    const row = screen.getByRole("button", { name: /New ownerless follow-up/ });
+    expect(within(row).getAllByText("New")).toHaveLength(2);
+    expect(within(row).queryByText(/new_since_last_brief/)).not.toBeInTheDocument();
+    expect(within(row).queryByText(/meaningfully_changed/)).not.toBeInTheDocument();
+  });
+
+  it("aligns the structural seam across attention rows of varying widths", () => {
+    const overdue = {
+      ...todoItem("t-seam-overdue", "Overdue escalation", baseTask({ status: "open" })),
+      structuredPayload: {
+        attentionReasons: ["overdue"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const newItem = {
+      ...todoItem("t-seam-new", "New inbound task", baseTask({ status: "in_progress" })),
+      structuredPayload: {
+        attentionReasons: ["new_since_last_brief"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([overdue, newItem]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    const rows = screen.getAllByRole("button", { name: /(Overdue escalation|New inbound task)/ });
+    expect(rows).toHaveLength(2);
+    const seamGroups = rows.flatMap((row) =>
+      within(row)
+        .getAllByLabelText("Task status and attention")
+        .filter((group) => group.className.includes("88px_1px")),
+    );
+    expect(seamGroups).toHaveLength(2);
+    for (const group of seamGroups) {
+      const separator = group.querySelector(".bg-border");
+      expect(separator).not.toBeNull();
+      expect(separator?.className).toContain("w-px");
+    }
+    expect(seamGroups[0]?.className).toBe(seamGroups[1]?.className);
+  });
+
+  it("does not expose unknown attention keys or add an attention cluster to ordinary todos", () => {
+    const unknown = {
+      ...todoItem("t-attention-unknown-row", "Future attention task", baseTask({ status: "open" })),
+      structuredPayload: {
+        attentionReasons: ["future_internal_reason"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([unknown, todoItem("t-ordinary-row", "Ordinary task", baseTask({ status: "open" }))]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    const unknownRow = screen.getByRole("button", { name: /Future attention task/ });
+    const ordinaryRow = screen.getByRole("button", { name: /Ordinary task/ });
+    expect(within(unknownRow).queryByLabelText("Task status and attention")).not.toBeInTheDocument();
+    expect(within(unknownRow).queryByText(/future_internal_reason/)).not.toBeInTheDocument();
+    expect(within(ordinaryRow).queryByLabelText("Task status and attention")).not.toBeInTheDocument();
+  });
 });
 
 describe("Inline follow-up review actions", () => {
