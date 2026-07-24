@@ -539,6 +539,56 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
     await db.destroy();
   });
 
+  it("rejects out-of-order socket state pushes before updating cached health", async () => {
+    const db = await createTestDb();
+    const onSocketStateChange = vi.fn().mockResolvedValue(undefined);
+    const supervisor = new WhatsAppGatewaySupervisor({
+      db,
+      config: createTestConfig({ WHATSAPP_RUNTIME_MODE: "gateway" }),
+      logger: createTestLogger(),
+      onSocketStateChange,
+    });
+    const internals = supervisor as unknown as SupervisorInternals;
+    internals.client = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+    });
+    internals.lease = { owner_token: "current-owner", generation: 5 };
+    internals.lastHealth = {
+      socketState: "disconnected",
+      queueDepth: 0,
+      insertFailures: 0,
+      uptime: 1,
+      scriptHash: "hash",
+      contractVersion: "1.0",
+    };
+
+    await expect(
+      supervisor.handleSocketStateChange({
+        ownerToken: "current-owner",
+        generation: 5,
+        socketGeneration: 3,
+        socketState: "connected",
+        occurredAt: "2026-07-17T10:02:00.000Z",
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      supervisor.handleSocketStateChange({
+        ownerToken: "current-owner",
+        generation: 5,
+        socketGeneration: 2,
+        socketState: "disconnected",
+        occurredAt: "2026-07-17T10:01:00.000Z",
+      }),
+    ).resolves.toBe(false);
+
+    expect(supervisor.isConnected).toBe(true);
+    expect(internals.lastHealth.socketState).toBe("connected");
+    expect(onSocketStateChange).toHaveBeenCalledTimes(1);
+    await db.destroy();
+  });
+
   it("does not resurrect connectivity when the current child exits after a connected push", async () => {
     const db = await createTestDb();
     const supervisor = new WhatsAppGatewaySupervisor({

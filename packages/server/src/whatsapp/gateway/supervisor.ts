@@ -196,11 +196,7 @@ export class WhatsAppGatewaySupervisor {
    * child exit clears the cached health and the periodic poll remains a fallback.
    */
   async handleSocketStateChange(change: WhatsAppSocketStateChange): Promise<boolean> {
-    if (!this.client || !this.lease || !this.lastHealth) return false;
-    if (this.lease.owner_token !== change.ownerToken || this.lease.generation !== change.generation) return false;
-    this.lastHealth = { ...this.lastHealth, socketState: change.socketState };
-    await this.publishSocketStateChange(change);
-    return true;
+    return this.publishSocketStateChange(change, true);
   }
 
   async refreshHealth(): Promise<void> {
@@ -470,7 +466,8 @@ export class WhatsAppGatewaySupervisor {
 
   private async publishSocketStateChange(
     change: Omit<WhatsAppSocketStateChange, "socketGeneration"> & { socketGeneration?: number },
-  ): Promise<void> {
+    updateCachedHealth = false,
+  ): Promise<boolean> {
     const socketGeneration = change.socketGeneration ?? this.lastSocketGeneration ?? 1;
     const occurredAt = change.occurredAt ?? new Date(this.now()).toISOString();
     const normalized: WhatsAppSocketStateChange & { occurredAt: string } = {
@@ -478,11 +475,20 @@ export class WhatsAppGatewaySupervisor {
       socketGeneration,
       occurredAt,
     };
-    this.lastSocketGeneration = socketGeneration;
     const publication = this.socketStatePublication.then(async () => {
-      if (this.lastSocketStateChangeAt && normalized.occurredAt < this.lastSocketStateChangeAt) return;
+      if (updateCachedHealth) {
+        if (!this.client || !this.lease || !this.lastHealth) return false;
+        if (this.lease.owner_token !== normalized.ownerToken || this.lease.generation !== normalized.generation) {
+          return false;
+        }
+      }
+      if (this.lastSocketStateChangeAt && normalized.occurredAt < this.lastSocketStateChangeAt) return false;
       this.lastSocketStateChangeAt = normalized.occurredAt;
-      if (isSameWhatsAppSocketStatePublication(this.lastPublishedSocketState, normalized)) return;
+      this.lastSocketGeneration = socketGeneration;
+      if (updateCachedHealth && this.lastHealth) {
+        this.lastHealth = { ...this.lastHealth, socketState: normalized.socketState };
+      }
+      if (isSameWhatsAppSocketStatePublication(this.lastPublishedSocketState, normalized)) return true;
       try {
         await this.options.onSocketStateChange?.(normalized);
         this.lastPublishedSocketState = normalized;
@@ -492,9 +498,13 @@ export class WhatsAppGatewaySupervisor {
           "WhatsApp socket state observer failed",
         );
       }
+      return true;
     });
-    this.socketStatePublication = publication.catch(() => undefined);
-    await publication;
+    this.socketStatePublication = publication.then(
+      () => undefined,
+      () => undefined,
+    );
+    return publication;
   }
 
   private scheduleRespawn(reason: string, context: Record<string, unknown> = {}): void {
