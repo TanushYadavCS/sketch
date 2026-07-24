@@ -754,6 +754,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         db,
         logger,
         facade,
+        now: new Date("2026-07-18T10:00:00.000Z"),
         onSkippedNoScope: () => {
           skipped += 1;
         },
