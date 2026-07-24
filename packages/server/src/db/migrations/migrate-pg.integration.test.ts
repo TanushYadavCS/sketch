@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 152;
+const EXPECTED_MIGRATION_COUNT = 153;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -187,6 +187,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[149]).toBe("154-reclassify-mpim-conversations");
     expect(names[150]).toBe("155-requeue-kept-slice-reemission");
     expect(names[151]).toBe("156-operational-alerts");
+    expect(names[152]).toBe("157-task-activity-events");
   });
 
   it("creates the bounded open-materializable partial index", async () => {
@@ -302,6 +303,110 @@ describe("runMigrations on Postgres — full sequence", () => {
       ]),
     );
   });
+
+  it("creates the append-only task activity schema and indexes", async () => {
+    const columns = await sql<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }>`
+      SELECT column_name, data_type, is_nullable
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'task_activity_events'
+      ORDER BY ordinal_position ASC
+    `.execute(db);
+    expect(columns.rows.map((row) => row.column_name)).toEqual([
+      "id",
+      "task_id",
+      "event_kind",
+      "actor_type",
+      "actor_user_id",
+      "actor_key",
+      "surface",
+      "source_agent_output_id",
+      "changes_json",
+      "evidence_json",
+      "dedupe_key",
+      "occurred_at",
+      "created_at",
+    ]);
+
+    const indexes = await sql<{ indexname: string; indexdef: string }>`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'task_activity_events'
+        AND indexname IN (
+          'idx_task_activity_events_task_time',
+          'idx_task_activity_events_kind_time',
+          'idx_task_activity_events_dedupe_key'
+        )
+      ORDER BY indexname ASC
+    `.execute(db);
+    expect(indexes.rows.map((row) => row.indexname)).toEqual([
+      "idx_task_activity_events_dedupe_key",
+      "idx_task_activity_events_kind_time",
+      "idx_task_activity_events_task_time",
+    ]);
+    expect(indexes.rows.find((row) => row.indexname === "idx_task_activity_events_dedupe_key")?.indexdef).toContain(
+      "UNIQUE",
+    );
+  });
+
+  it("enforces the task activity event, actor, and surface contract", async () => {
+    const freshDb = await createTestPgDb();
+    try {
+      await sql`
+        INSERT INTO tasks
+          (id, source, title, normalized_title, status, status_authority, provenance, source_task_id, updated_at)
+        VALUES
+          ('activity-contract-task', 'summary', 'Contract task', 'contract task', 'open', 'local', 'summary', 'contract-task', '2026-07-23T00:00:00.000Z')
+      `.execute(freshDb);
+      const eventKinds = [
+        "created",
+        "evidence_added",
+        "fields_changed",
+        "status_changed",
+        "completion_proposed",
+        "completion_reviewed",
+      ];
+      for (const [index, eventKind] of eventKinds.entries()) {
+        await sql`
+          INSERT INTO task_activity_events
+            (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+          VALUES
+            (${`activity-contract-${index}`}, 'activity-contract-task', ${eventKind}, 'provider', 'sync', ${`contract-${index}`}, '2026-07-23T00:00:00.000Z')
+        `.execute(freshDb);
+      }
+      await expect(
+        sql`
+        INSERT INTO task_activity_events
+          (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+        VALUES
+          ('invalid-activity-kind', 'activity-contract-task', 'task_created', 'provider', 'sync', 'invalid-kind', '2026-07-23T00:00:00.000Z')
+      `.execute(freshDb),
+      ).rejects.toThrow();
+      await expect(
+        sql`
+        INSERT INTO task_activity_events
+          (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+        VALUES
+          ('invalid-activity-actor', 'activity-contract-task', 'created', 'integration', 'sync', 'invalid-actor', '2026-07-23T00:00:00.000Z')
+      `.execute(freshDb),
+      ).rejects.toThrow();
+      await expect(
+        sql`
+        INSERT INTO task_activity_events
+          (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+        VALUES
+          ('invalid-activity-surface', 'activity-contract-task', 'created', 'provider', 'teams', 'invalid-surface', '2026-07-23T00:00:00.000Z')
+      `.execute(freshDb),
+      ).rejects.toThrow();
+    } finally {
+      await freshDb.destroy();
+    }
+  }, 30000);
 
   it("creates canonical agent output item task links and nulls them when the task is deleted", async () => {
     const freshDb = await createTestPgDb();

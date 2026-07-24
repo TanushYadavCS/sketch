@@ -187,6 +187,298 @@ describe("createConversationFollowupsRepository", () => {
     expect(tasks.every((task) => task.proposed_assignee_name === "External Ashish")).toBe(true);
   });
 
+  it("records task creation and material evidence once across exact Summarizer replay", async () => {
+    const conversationId = await seedConversation(db, "slack", "channel", "C-activity-create");
+    const messageId = await seedMessage(db, conversationId, { providerMessageId: "activity-create" });
+    const repo = createConversationFollowupsRepository(db);
+    const input = {
+      userId: USER_ID,
+      taskMemory: [],
+      allowedMessageIds: [messageId],
+      allowedConversationIds: [conversationId],
+      changes: [newChange("Prepare activity launch", [messageId])],
+      now: NOW,
+    };
+
+    const [created] = await repo.applyTaskChanges(input);
+    const [replayed] = await repo.applyTaskChanges(input);
+    const taskId = appliedTaskId(created);
+
+    expect(replayed).toMatchObject({ status: "applied", kind: "new", taskId });
+    const events = await db
+      .selectFrom("task_activity_events")
+      .select([
+        "task_id",
+        "event_kind",
+        "actor_type",
+        "actor_user_id",
+        "actor_key",
+        "surface",
+        "changes_json",
+        "evidence_json",
+        "occurred_at",
+      ])
+      .where("task_id", "=", taskId)
+      .orderBy("event_kind")
+      .execute();
+    expect(events).toEqual([
+      {
+        task_id: taskId,
+        event_kind: "created",
+        actor_type: "agent",
+        actor_user_id: null,
+        actor_key: "conversation_summary",
+        surface: "summarizer",
+        changes_json: null,
+        evidence_json: null,
+        occurred_at: NOW,
+      },
+      {
+        task_id: taskId,
+        event_kind: "evidence_added",
+        actor_type: "agent",
+        actor_user_id: null,
+        actor_key: "conversation_summary",
+        surface: "summarizer",
+        changes_json: null,
+        evidence_json: JSON.stringify({
+          messageIds: [messageId],
+          messageCount: 1,
+          fileIds: [],
+          fileCount: 0,
+          truncated: false,
+        }),
+        occurred_at: NOW,
+      },
+    ]);
+  });
+
+  it("persists source-supported due dates and records only meaningful changed fields", async () => {
+    const conversationId = await seedConversation(db, "whatsapp", "group", "activity-fields");
+    const createdMessage = await seedMessage(db, conversationId, {
+      providerMessageId: "activity-fields-created",
+      text: "Prepare the launch brief by 2026-07-20.",
+    });
+    const changedMessage = await seedMessage(db, conversationId, {
+      providerMessageId: "activity-fields-changed",
+      text: "The final launch brief is now high priority and due 2026-07-18.",
+    });
+    const repo = createConversationFollowupsRepository(db);
+    const [created] = await repo.applyTaskChanges({
+      userId: USER_ID,
+      taskMemory: [],
+      allowedMessageIds: [createdMessage],
+      allowedConversationIds: [conversationId],
+      changes: [newChange("Prepare launch brief", [createdMessage], { dueAt: "2026-07-20" })],
+      now: NOW,
+    });
+    const taskId = appliedTaskId(created);
+    const memory = await repo.loadTaskMemory({ userId: USER_ID, conversationIds: [conversationId] });
+    const changedInput = {
+      userId: USER_ID,
+      taskMemory: memory,
+      allowedMessageIds: [changedMessage],
+      allowedConversationIds: [conversationId],
+      changes: [
+        changedChange(taskId, [changedMessage], {
+          title: "Prepare final launch brief",
+          priority: "high",
+          dueAt: "2026-07-18",
+        }),
+      ],
+      now: "2026-07-16T11:00:00.000Z",
+    };
+
+    await repo.applyTaskChanges(changedInput);
+    await repo.applyTaskChanges(changedInput);
+
+    await expect(
+      db.selectFrom("tasks").select(["title", "priority", "due_at"]).where("id", "=", taskId).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      title: "Prepare final launch brief",
+      priority: "high",
+      due_at: "2026-07-18",
+    });
+    const events = await db
+      .selectFrom("task_activity_events")
+      .select(["event_kind", "changes_json", "evidence_json"])
+      .where("task_id", "=", taskId)
+      .orderBy("occurred_at")
+      .orderBy("event_kind")
+      .execute();
+    expect(events).toEqual([
+      { event_kind: "created", changes_json: null, evidence_json: null },
+      {
+        event_kind: "evidence_added",
+        changes_json: null,
+        evidence_json: JSON.stringify({
+          messageIds: [createdMessage],
+          messageCount: 1,
+          fileIds: [],
+          fileCount: 0,
+          truncated: false,
+        }),
+      },
+      {
+        event_kind: "evidence_added",
+        changes_json: null,
+        evidence_json: JSON.stringify({
+          messageIds: [changedMessage],
+          messageCount: 1,
+          fileIds: [],
+          fileCount: 0,
+          truncated: false,
+        }),
+      },
+      {
+        event_kind: "fields_changed",
+        changes_json: JSON.stringify({
+          dueAt: { before: "2026-07-20", after: "2026-07-18" },
+          priority: { before: "medium", after: "high" },
+          title: { before: "Prepare launch brief", after: "Prepare final launch brief" },
+        }),
+        evidence_json: null,
+      },
+    ]);
+  });
+
+  it("leaves ambiguous or unsupported due dates absent or unchanged", async () => {
+    const conversationId = await seedConversation(db, "slack", "channel", "C-invalid-due");
+    const ambiguousMessage = await seedMessage(db, conversationId, {
+      providerMessageId: "invalid-due-ambiguous",
+      text: "Prepare this by Friday.",
+    });
+    const unsupportedMessage = await seedMessage(db, conversationId, {
+      providerMessageId: "invalid-due-unsupported",
+      text: "The schedule has not changed.",
+    });
+    const repo = createConversationFollowupsRepository(db);
+    const [created] = await repo.applyTaskChanges({
+      userId: USER_ID,
+      taskMemory: [],
+      allowedMessageIds: [ambiguousMessage],
+      allowedConversationIds: [conversationId],
+      changes: [newChange("Prepare ambiguous deadline", [ambiguousMessage], { dueAt: "Friday" })],
+      now: NOW,
+    });
+    const taskId = appliedTaskId(created);
+    await expect(
+      db.selectFrom("tasks").select("due_at").where("id", "=", taskId).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ due_at: null });
+    await db.updateTable("tasks").set({ due_at: "2026-07-20" }).where("id", "=", taskId).execute();
+    const memory = await repo.loadTaskMemory({ userId: USER_ID, conversationIds: [conversationId] });
+
+    await repo.applyTaskChanges({
+      userId: USER_ID,
+      taskMemory: memory,
+      allowedMessageIds: [unsupportedMessage],
+      allowedConversationIds: [conversationId],
+      changes: [changedChange(taskId, [unsupportedMessage], { dueAt: "2026-07-30" })],
+      now: "2026-07-16T11:00:00.000Z",
+    });
+
+    await expect(
+      db.selectFrom("tasks").select("due_at").where("id", "=", taskId).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ due_at: "2026-07-20" });
+  });
+
+  it("rolls back task and evidence changes when activity recording fails", async () => {
+    const conversationId = await seedConversation(db, "whatsapp", "group", "activity-rollback");
+    const createdMessage = await seedMessage(db, conversationId, { providerMessageId: "activity-rollback-created" });
+    const changedMessage = await seedMessage(db, conversationId, { providerMessageId: "activity-rollback-changed" });
+    const repo = createConversationFollowupsRepository(db);
+    const [created] = await repo.applyTaskChanges({
+      userId: USER_ID,
+      taskMemory: [],
+      allowedMessageIds: [createdMessage],
+      allowedConversationIds: [conversationId],
+      changes: [newChange("Original rollback title", [createdMessage])],
+      now: NOW,
+    });
+    const taskId = appliedTaskId(created);
+    const memory = await repo.loadTaskMemory({ userId: USER_ID, conversationIds: [conversationId] });
+    await db.schema.dropTable("task_activity_events").execute();
+
+    const [result] = await repo.applyTaskChanges({
+      userId: USER_ID,
+      taskMemory: memory,
+      allowedMessageIds: [changedMessage],
+      allowedConversationIds: [conversationId],
+      changes: [changedChange(taskId, [changedMessage], { title: "Must roll back" })],
+      now: "2026-07-16T11:00:00.000Z",
+    });
+
+    expect(result).toEqual({ status: "rejected", kind: "changed", reason: "application_failed" });
+    await expect(
+      db.selectFrom("tasks").select("title").where("id", "=", taskId).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ title: "Original rollback title" });
+    await expect(
+      db.selectFrom("task_message_evidence").select("conversation_message_id").where("task_id", "=", taskId).execute(),
+    ).resolves.toEqual([{ conversation_message_id: createdMessage }]);
+  });
+
+  it("records Completion Review opening once across resolved-verdict replay", async () => {
+    const conversationId = await seedConversation(db, "slack", "channel", "C-activity-review-open");
+    const createdMessage = await seedMessage(db, conversationId, { providerMessageId: "review-open-created" });
+    const resolvedMessage = await seedMessage(db, conversationId, {
+      providerMessageId: "review-open-resolved",
+      text: "The launch brief shipped.",
+    });
+    const repo = createConversationFollowupsRepository(db);
+    const [created] = await repo.applyTaskChanges({
+      userId: USER_ID,
+      taskMemory: [],
+      allowedMessageIds: [createdMessage],
+      allowedConversationIds: [conversationId],
+      changes: [newChange("Ship launch brief", [createdMessage])],
+      now: NOW,
+    });
+    const taskId = appliedTaskId(created);
+    const memory = await repo.loadTaskMemory({ userId: USER_ID, conversationIds: [conversationId] });
+    const input = {
+      userId: USER_ID,
+      taskMemory: memory,
+      allowedMessageIds: [resolvedMessage],
+      allowedConversationIds: [conversationId],
+      changes: [resolvedChange(taskId, [resolvedMessage], "The launch brief shipped.")],
+      now: "2026-07-16T12:00:00.000Z",
+    };
+
+    const [first] = await repo.applyTaskChanges(input);
+    const [replayed] = await repo.applyTaskChanges(input);
+
+    expect(first).toMatchObject({ status: "applied", kind: "resolved", recommendation: { created: true } });
+    expect(replayed).toMatchObject({ status: "applied", kind: "resolved", recommendation: { created: false } });
+    const events = await db
+      .selectFrom("task_activity_events")
+      .select(["event_kind", "actor_type", "actor_key", "surface"])
+      .where("task_id", "=", taskId)
+      .where("event_kind", "in", ["completion_proposed", "evidence_added"])
+      .orderBy("occurred_at")
+      .orderBy("event_kind")
+      .execute();
+    expect(events).toEqual([
+      {
+        event_kind: "evidence_added",
+        actor_type: "agent",
+        actor_key: "conversation_summary",
+        surface: "summarizer",
+      },
+      {
+        event_kind: "completion_proposed",
+        actor_type: "agent",
+        actor_key: "conversation_summary",
+        surface: "summarizer",
+      },
+      {
+        event_kind: "evidence_added",
+        actor_type: "agent",
+        actor_key: "conversation_summary",
+        surface: "summarizer",
+      },
+    ]);
+  });
+
   it("loads bounded open task memory with anchors and dedicated evidence", async () => {
     const conversationId = await seedConversation(db, "whatsapp", "group", "group-memory");
     const messageId = await seedMessage(db, conversationId, { providerMessageId: "wamid.memory" });
@@ -1823,6 +2115,40 @@ describe("createConversationFollowupsRepository", () => {
       review_surface: "slack",
       reviewed_at: "2026-07-16T11:00:00.000Z",
     });
+    const decisions = await db
+      .selectFrom("task_activity_events")
+      .select(["task_id", "event_kind", "actor_user_id", "surface", "changes_json"])
+      .where("task_id", "in", [confirmTaskId, keepTaskId])
+      .where("event_kind", "in", ["completion_reviewed", "status_changed"])
+      .orderBy("task_id")
+      .orderBy("event_kind")
+      .execute();
+    expect(decisions).toEqual(
+      expect.arrayContaining([
+        {
+          task_id: confirmTaskId,
+          event_kind: "completion_reviewed",
+          actor_user_id: USER_ID,
+          surface: "slack",
+          changes_json: JSON.stringify({ reviewState: { before: "pending", after: "accepted" } }),
+        },
+        {
+          task_id: confirmTaskId,
+          event_kind: "status_changed",
+          actor_user_id: USER_ID,
+          surface: "slack",
+          changes_json: JSON.stringify({ status: { before: "open", after: "done" } }),
+        },
+        {
+          task_id: keepTaskId,
+          event_kind: "completion_reviewed",
+          actor_user_id: USER_ID,
+          surface: "whatsapp",
+          changes_json: JSON.stringify({ reviewState: { before: "pending", after: "rejected" } }),
+        },
+      ]),
+    );
+    expect(decisions).toHaveLength(3);
   });
 
   it("expires pending reviews without mutating tasks that became terminal before review", async () => {
@@ -2485,6 +2811,7 @@ async function seedMessage(
     providerMessageId: string;
     providerThreadId?: string | null;
     isThreadReply?: boolean;
+    text?: string;
   },
 ): Promise<number> {
   return (
@@ -2495,6 +2822,7 @@ async function seedMessage(
         provider_message_id: input.providerMessageId,
         sender_name: "Ashish",
         sender_user_id: USER_ID,
+        text: input.text ?? input.providerMessageId,
         attachments: null,
         provider_thread_id: input.providerThreadId ?? null,
         provider_parent_message_id: null,

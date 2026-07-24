@@ -693,6 +693,7 @@ function parseTaskChange(item: AgentOutputItemInput): SummarizerTaskChange[] {
       metadata: {
         title: item.title,
         priority: item.priority,
+        dueAt: readRuntimeString(payload.dueAt),
         parentEntityId: readRuntimeString(payload.parentEntityId),
         assigneeEntityId: readRuntimeString(payload.assigneeEntityId),
         assigneeName: readRuntimeString(payload.assigneeName),

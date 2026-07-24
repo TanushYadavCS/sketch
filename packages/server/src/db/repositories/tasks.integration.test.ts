@@ -114,7 +114,7 @@ describe("createTaskRepository postgres", () => {
 
     expect(first.status).toBe("upserted");
     expect(second).toMatchObject({ status: "upserted", taskId: first.status === "upserted" ? first.taskId : "" });
-    expect(collated).toEqual({ status: "collated", taskId: structural.taskId });
+    expect(collated).toMatchObject({ status: "collated", taskId: structural.taskId });
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: structural.taskId, provenance: "structural", status_authority: "external" });
     expect(evidence).toEqual([
@@ -172,8 +172,8 @@ describe("createTaskRepository postgres", () => {
       knowledgeRefs: { entityIds: ["pg-project-summary"], fileIds: [] },
     });
 
-    expect(collated).toEqual({ status: "collated", taskId: projectSpecific.taskId });
-    expect(collated).not.toEqual({ status: "collated", taskId: parentless.taskId });
+    expect(collated).toMatchObject({ status: "collated", taskId: projectSpecific.taskId });
+    expect(collated.status === "collated" ? collated.taskId : null).not.toBe(parentless.taskId);
   });
 
   it("marks legacy llm task facts materialized without minting tasks on postgres", async () => {

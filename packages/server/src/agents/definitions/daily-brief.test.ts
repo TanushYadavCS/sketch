@@ -135,6 +135,11 @@ describe("dailyBriefDefinition.buildInstructions", () => {
     expect(instructions).toContain("runtime context `maxItemsPerSection`");
     expect(instructions).toContain("`focus` field");
     expect(instructions).toContain("dailyBriefCandidateContext");
+    expect(instructions).toContain("taskAttention");
+    expect(instructions).toContain("Known Task Memory");
+    expect(instructions).toContain("pending_completion_review");
+    expect(instructions).toContain("Do not claim that a task changed");
+    expect(instructions).toContain("produce fewer todos");
     expect(instructions).toContain("evidenceSince");
     expect(instructions).toContain("windowEnd");
 
@@ -205,13 +210,14 @@ describe("dailyBriefDefinition.onOutputSaved task linking", () => {
       fileIds?: string[];
       canonicalTaskId?: string;
       sortOrder?: number;
+      priority?: "high" | "medium" | "low";
     } = {},
   ): AgentOutputItemInput {
     return {
       sectionKey: "todos",
       title,
       summary: `${title} snapshot`,
-      priority: "medium",
+      priority: options.priority ?? "medium",
       label: "todo",
       canonicalTaskId: options.canonicalTaskId,
       structuredPayload: {
@@ -259,6 +265,78 @@ describe("dailyBriefDefinition.onOutputSaved task linking", () => {
       .where("agent_output_items.id", "=", persisted.persistedItems[0].id)
       .executeTakeFirstOrThrow();
     expect(row).toEqual({ id: persisted.persistedItems[0].id, parent_entity_id: "project-a" });
+    const activity = await db
+      .selectFrom("task_activity_events")
+      .innerJoin("tasks", "tasks.id", "task_activity_events.task_id")
+      .select([
+        "task_activity_events.event_kind",
+        "task_activity_events.actor_type",
+        "task_activity_events.actor_key",
+        "task_activity_events.surface",
+        "task_activity_events.source_agent_output_id",
+      ])
+      .where("tasks.parent_entity_id", "=", "project-a")
+      .execute();
+    expect(activity).toHaveLength(2);
+    expect(activity).toEqual(
+      expect.arrayContaining([
+        {
+          event_kind: "created",
+          actor_type: "agent",
+          actor_key: "daily_brief",
+          surface: "daily_brief",
+          source_agent_output_id: persisted.outputId,
+        },
+        {
+          event_kind: "evidence_added",
+          actor_type: "agent",
+          actor_key: "daily_brief",
+          surface: "daily_brief",
+          source_agent_output_id: persisted.outputId,
+        },
+      ]),
+    );
+  });
+
+  it("records a meaningful Brief task field change once across re-emission", async () => {
+    await seedEntity(db, { id: "project-a", name: "Project A" });
+    const initial = await persistItems([todo("Prepare launch plan", { projectId: "project-a" })]);
+    await runHook(initial);
+    const changed = await persistItems([todo("Prepare launch plan", { projectId: "project-a", priority: "high" })]);
+
+    await runHook(changed);
+    await runHook(changed);
+
+    const task = await db
+      .selectFrom("tasks")
+      .select(["id", "priority"])
+      .where("parent_entity_id", "=", "project-a")
+      .executeTakeFirstOrThrow();
+    expect(task.priority).toBe("high");
+    await expect(
+      db
+        .selectFrom("task_activity_events")
+        .select(["event_kind", "changes_json", "source_agent_output_id"])
+        .where("task_id", "=", task.id)
+        .orderBy("event_kind")
+        .execute(),
+    ).resolves.toEqual([
+      {
+        event_kind: "created",
+        changes_json: null,
+        source_agent_output_id: initial.outputId,
+      },
+      {
+        event_kind: "evidence_added",
+        changes_json: null,
+        source_agent_output_id: initial.outputId,
+      },
+      {
+        event_kind: "fields_changed",
+        changes_json: JSON.stringify({ priority: { before: "medium", after: "high" } }),
+        source_agent_output_id: changed.outputId,
+      },
+    ]);
   });
 
   it("links a collated structural task", async () => {
@@ -288,6 +366,13 @@ describe("dailyBriefDefinition.onOutputSaved task linking", () => {
         .where("id", "=", persisted.persistedItems[0].id)
         .executeTakeFirstOrThrow(),
     ).resolves.toEqual({ task_id: "structural-task" });
+    await expect(
+      db
+        .selectFrom("task_activity_events")
+        .select(["task_id", "event_kind"])
+        .where("task_id", "=", "structural-task")
+        .execute(),
+    ).resolves.toEqual([{ task_id: "structural-task", event_kind: "evidence_added" }]);
   });
 
   it("leaves skipped promotion unlinked", async () => {
@@ -954,6 +1039,68 @@ describe("dailyBriefDefinition.reconcileItems", () => {
     expect(result).toEqual(items);
   });
 
+  it("restores canonical Task Attention identity and drops pending-review or quiet task todos", async () => {
+    const todo = (title: string, taskId?: string): AgentOutputItemInput => ({
+      sectionKey: "todos",
+      title,
+      summary: title,
+      priority: "medium",
+      label: "todo",
+      structuredPayload: taskId ? { taskId } : {},
+      knowledgeRefs: { entityIds: [], fileIds: [] },
+      sortOrder: 0,
+    });
+    const result =
+      (await dailyBriefDefinition.reconcileItems?.({
+        db,
+        items: [
+          todo("Active attention task", "task-active"),
+          todo("Pending review task", "task-pending"),
+          todo("Quiet memory task", "task-quiet"),
+          todo("Genuinely new work"),
+        ],
+        runtimeContext: {
+          sections: ["todos"],
+          openDurableTasks: [{ id: "task-active" }, { id: "task-pending" }, { id: "task-quiet" }],
+          taskAttention: {
+            items: [
+              {
+                taskId: "task-active",
+                parentEntityId: "project-1",
+                assigneeEntityId: "person-1",
+                sourcePlatform: "slack",
+                sourceAnchorKey: "slack:42:root",
+                attentionReasons: ["meaningfully_changed"],
+                changedFields: ["priority", "status"],
+              },
+              {
+                taskId: "task-pending",
+                parentEntityId: null,
+                assigneeEntityId: null,
+                sourcePlatform: "whatsapp",
+                sourceAnchorKey: "whatsapp:43:root",
+                attentionReasons: ["pending_completion_review"],
+              },
+            ],
+          },
+        },
+      })) ?? [];
+
+    expect(result.map((item) => item.title)).toEqual(["Active attention task", "Genuinely new work"]);
+    expect(result[0]).toMatchObject({
+      canonicalTaskId: "task-active",
+      structuredPayload: {
+        taskId: "task-active",
+        parentEntityId: "project-1",
+        assigneeEntityId: "person-1",
+        sourcePlatform: "slack",
+        sourceAnchorKey: "slack:42:root",
+        attentionReasons: ["meaningfully_changed"],
+        changedFields: ["priority", "status"],
+      },
+    });
+  });
+
   it("reconciles exact conversation identities without suppressing unrelated same-title todos", async () => {
     const result =
       (await dailyBriefDefinition.reconcileItems?.({
@@ -1164,6 +1311,909 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
       .execute();
     return "person-topology-owner";
   }
+
+  it("separates recent ownerless Task Attention from quiet Known Task Memory", async () => {
+    await seedUser(db);
+    const repo = createTaskRepository(db);
+    const recent = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Prepare the launch brief",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "attention-recent",
+      createdByUserId: "user-1",
+    });
+    const quiet = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Quiet backlog task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "attention-quiet",
+      createdByUserId: "user-1",
+    });
+    await db
+      .insertInto("task_activity_events")
+      .values({
+        id: "activity-recent-created",
+        task_id: recent.taskId,
+        event_kind: "created",
+        actor_type: "agent",
+        actor_user_id: null,
+        actor_key: "conversation_summary",
+        surface: "summarizer",
+        source_agent_output_id: null,
+        changes_json: null,
+        evidence_json: null,
+        dedupe_key: "activity-recent-created",
+        occurred_at: "2026-06-25T07:30:00.000Z",
+      })
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect((context?.openDurableTasks as Array<{ id: string }>).map((task) => task.id)).toEqual(
+      expect.arrayContaining([recent.taskId, quiet.taskId]),
+    );
+    expect(context?.taskAttention).toMatchObject({
+      windowStart: "2026-06-24T23:59:59.999Z",
+      windowEnd: "2026-06-25T23:59:59.999Z",
+      partial: false,
+      items: [
+        {
+          taskId: recent.taskId,
+          title: "Prepare the launch brief",
+          status: "open",
+          lastMeaningfulActivityAt: "2026-06-25T07:30:00.000Z",
+          lastEventKind: "created",
+          changedFields: [],
+          attentionReasons: ["new_since_last_brief", "meaningfully_changed"],
+        },
+      ],
+    });
+  });
+
+  it("ranks an older overdue task before truncating a large relevant candidate set", async () => {
+    await seedUser(db);
+    const repo = createTaskRepository(db);
+    const overdue = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Older overdue task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: "2026-06-20",
+      provenance: "summary",
+      sourceTaskId: "older-overdue",
+      createdByUserId: "user-1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({ updated_at: "2026-01-01T00:00:00.000Z" })
+      .where("id", "=", overdue.taskId)
+      .execute();
+    for (let index = 0; index < 101; index += 1) {
+      const quiet = await repo.upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: `Newer quiet task ${index}`,
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: `newer-quiet-${index}`,
+        createdByUserId: "user-1",
+      });
+      await db
+        .updateTable("tasks")
+        .set({ updated_at: `2026-06-24T${String(index % 24).padStart(2, "0")}:00:00.000Z` })
+        .where("id", "=", quiet.taskId)
+        .execute();
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.taskAttention).toMatchObject({
+      partial: true,
+      items: [
+        {
+          taskId: overdue.taskId,
+          attentionReasons: ["overdue"],
+        },
+      ],
+    });
+  });
+
+  it("normalizes timestamp due dates before ranking the inclusive due-soon boundary", async () => {
+    await seedUser(db);
+    const repo = createTaskRepository(db);
+    const dueSoon = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Older boundary due-soon task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: "2026-07-02T00:00:00.000Z",
+      provenance: "summary",
+      sourceTaskId: "older-boundary-due-soon",
+      createdByUserId: "user-1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({ updated_at: "2026-01-01T00:00:00.000Z" })
+      .where("id", "=", dueSoon.taskId)
+      .execute();
+    for (let index = 0; index < 101; index += 1) {
+      const quiet = await repo.upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: `Boundary newer quiet task ${index}`,
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: `boundary-newer-quiet-${index}`,
+        createdByUserId: "user-1",
+      });
+      await db
+        .updateTable("tasks")
+        .set({ updated_at: `2026-06-24T${String(index % 24).padStart(2, "0")}:00:00.000Z` })
+        .where("id", "=", quiet.taskId)
+        .execute();
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.taskAttention).toMatchObject({
+      partial: true,
+      items: [
+        {
+          taskId: dueSoon.taskId,
+          dueAt: "2026-07-02T00:00:00.000Z",
+          attentionReasons: ["due_soon"],
+        },
+      ],
+    });
+  });
+
+  it("reports a status change when a later in-window event is more recent", async () => {
+    await seedUser(db);
+    const repo = createTaskRepository(db);
+    const changed = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Changed task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "status-then-evidence",
+      createdByUserId: "user-1",
+    });
+    await db
+      .insertInto("task_activity_events")
+      .values([
+        {
+          id: "status-then-evidence-status",
+          task_id: changed.taskId,
+          event_kind: "status_changed",
+          actor_type: "user",
+          actor_user_id: "user-1",
+          actor_key: null,
+          surface: "web",
+          source_agent_output_id: null,
+          changes_json: JSON.stringify({ status: { before: "in_progress", after: "open" } }),
+          evidence_json: null,
+          dedupe_key: "status-then-evidence-status",
+          occurred_at: "2026-06-25T06:30:00.000Z",
+        },
+        {
+          id: "status-then-evidence-later",
+          task_id: changed.taskId,
+          event_kind: "evidence_added",
+          actor_type: "agent",
+          actor_user_id: null,
+          actor_key: "daily_brief",
+          surface: "daily_brief",
+          source_agent_output_id: null,
+          changes_json: null,
+          evidence_json: JSON.stringify({ messageIds: [42] }),
+          dedupe_key: "status-then-evidence-later",
+          occurred_at: "2026-06-25T07:00:00.000Z",
+        },
+      ])
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.taskAttention).toMatchObject({
+      items: [
+        {
+          taskId: changed.taskId,
+          changedFields: ["status"],
+          attentionReasons: ["meaningfully_changed", "status_changed"],
+        },
+      ],
+    });
+  });
+
+  it("uses meaningful activity to order new and changed tasks within one attention tier", async () => {
+    await seedUser(db);
+    const repo = createTaskRepository(db);
+    const created = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "New task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "new-tier-task",
+      createdByUserId: "user-1",
+    });
+    const changed = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Changed task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "changed-tier-task",
+      createdByUserId: "user-1",
+    });
+    await db
+      .insertInto("task_activity_events")
+      .values([
+        {
+          id: "combined-tier-created",
+          task_id: created.taskId,
+          event_kind: "created",
+          actor_type: "agent",
+          actor_user_id: null,
+          actor_key: "daily_brief",
+          surface: "daily_brief",
+          source_agent_output_id: null,
+          changes_json: null,
+          evidence_json: null,
+          dedupe_key: "combined-tier-created",
+          occurred_at: "2026-06-25T06:30:00.000Z",
+        },
+        {
+          id: "combined-tier-changed",
+          task_id: changed.taskId,
+          event_kind: "fields_changed",
+          actor_type: "agent",
+          actor_user_id: null,
+          actor_key: "daily_brief",
+          surface: "daily_brief",
+          source_agent_output_id: null,
+          changes_json: JSON.stringify({ priority: { before: "low", after: "medium" } }),
+          evidence_json: null,
+          dedupe_key: "combined-tier-changed",
+          occurred_at: "2026-06-25T07:00:00.000Z",
+        },
+      ])
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+    const attention = context?.taskAttention as {
+      items: Array<{ taskId: string; attentionReasons: string[] }>;
+    };
+
+    expect(attention.items.map((item) => item.taskId)).toEqual([changed.taskId, created.taskId]);
+    expect(attention.items[0]?.attentionReasons).toEqual(["meaningfully_changed"]);
+    expect(attention.items[1]?.attentionReasons).toEqual(["new_since_last_brief", "meaningfully_changed"]);
+  });
+
+  it("ranks reader-relevant Task Attention without broadening relevance for admins", async () => {
+    await seedUser(db, { authRole: "admin" });
+    await seedUser(db, { id: "user-other", email: "other@example.com" });
+    await db.updateTable("users").set({ email_verified_at: NOW.toISOString() }).where("id", "=", "user-1").execute();
+    await db
+      .insertInto("entities")
+      .values({
+        id: "person-attention-reader",
+        name: "Agent User",
+        source_type: "person",
+        subtype: null,
+        aliases: JSON.stringify(["agent@example.com"]),
+        metadata: JSON.stringify({ email: "agent@example.com" }),
+        source_ref_id: null,
+        status: "active",
+        hotness: 0,
+        created_at: NOW.toISOString(),
+        updated_at: NOW.toISOString(),
+        ai_brief: null,
+      })
+      .execute();
+    const repo = createTaskRepository(db);
+    const createTask = (sourceTaskId: string, options: { dueAt?: string; priority?: string; owner?: string }) =>
+      repo.upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: sourceTaskId,
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId: options.owner === "assigned" ? "person-attention-reader" : null,
+        assigneeName: options.owner === "assigned" ? "Agent User" : null,
+        priority: options.priority ?? "medium",
+        dueAt: options.dueAt ?? null,
+        provenance: "summary",
+        sourceTaskId,
+        createdByUserId: options.owner === "other" || options.owner === "assigned" ? "user-other" : "user-1",
+      });
+    const overdue = await createTask("01-overdue", { dueAt: "2026-06-24" });
+    const pending = await createTask("02-pending", {});
+    const changed = await createTask("03-changed", { owner: "assigned" });
+    const dueSoon = await createTask("04-due-soon", { dueAt: "2026-06-28" });
+    const high = await createTask("05-high", { priority: "high" });
+    const carried = await createTask("06-carried", {});
+    const reassignedCarried = await createTask("07-reassigned-carried", { owner: "other" });
+    await createTask("07-quiet", {});
+    await createTask("08-unrelated-admin-visible", {
+      owner: "other",
+      dueAt: "2026-06-20",
+      priority: "high",
+    });
+    await db
+      .insertInto("task_activity_events")
+      .values([
+        {
+          id: "attention-status-event",
+          task_id: changed.taskId,
+          event_kind: "status_changed",
+          actor_type: "user",
+          actor_user_id: "user-1",
+          actor_key: null,
+          surface: "web",
+          source_agent_output_id: null,
+          changes_json: JSON.stringify({ status: { before: "in_progress", after: "open" } }),
+          evidence_json: null,
+          dedupe_key: "attention-status-event",
+          occurred_at: "2026-06-25T06:30:00.000Z",
+        },
+        {
+          id: "attention-changed-event",
+          task_id: changed.taskId,
+          event_kind: "fields_changed",
+          actor_type: "agent",
+          actor_user_id: null,
+          actor_key: "conversation_summary",
+          surface: "summarizer",
+          source_agent_output_id: null,
+          changes_json: JSON.stringify({ priority: { before: "low", after: "medium" } }),
+          evidence_json: null,
+          dedupe_key: "attention-changed-event",
+          occurred_at: "2026-06-25T07:00:00.000Z",
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("task_activity_events")
+      .values({
+        id: "attention-historical-event",
+        task_id: high.taskId,
+        event_kind: "fields_changed",
+        actor_type: "agent",
+        actor_user_id: null,
+        actor_key: "conversation_summary",
+        surface: "summarizer",
+        source_agent_output_id: null,
+        changes_json: JSON.stringify({ priority: { before: "medium", after: "high" } }),
+        evidence_json: null,
+        dedupe_key: "attention-historical-event",
+        occurred_at: "2026-06-24T07:00:00.000Z",
+      })
+      .execute();
+    await db
+      .insertInto("task_completion_recommendations")
+      .values({
+        id: "attention-pending-review",
+        task_id: pending.taskId,
+        proposed_status: "done",
+        review_state: "pending",
+        review_code: "ATTN1234",
+        evidence_fingerprint: "attention-pending-review",
+        origin_agent_output_id: null,
+        rationale: "Reported complete.",
+        delivery_count: 0,
+        expires_at: "2026-06-25T12:00:00.000Z",
+      })
+      .execute();
+    const outputRepo = createAgentOutputRepository(db);
+    const previous = await outputRepo.createRunning({
+      agentKey: "daily_brief",
+      agentVersion: "test",
+      userId: "user-1",
+      outputDate: "2026-06-24",
+      timezone: "UTC",
+      triggerType: "manual",
+    });
+    await outputRepo.completeOutput({
+      outputId: previous.row.id,
+      masthead: { title: "Previous", summary: "Previous" },
+      rawPayload: {},
+      items: [
+        {
+          sectionKey: "todos",
+          title: "06-carried",
+          summary: "Still active",
+          priority: "medium",
+          label: "todo",
+          canonicalTaskId: carried.taskId,
+          structuredPayload: {},
+          knowledgeRefs: { entityIds: [], fileIds: [] },
+          sortOrder: 0,
+        },
+        {
+          sectionKey: "todos",
+          title: "07-reassigned-carried",
+          summary: "No longer assigned to the reader",
+          priority: "medium",
+          label: "todo",
+          canonicalTaskId: reassignedCarried.taskId,
+          structuredPayload: {},
+          knowledgeRefs: { entityIds: [], fileIds: [] },
+          sortOrder: 1,
+        },
+      ],
+    });
+    await db
+      .updateTable("agent_outputs")
+      .set({ generated_at: "2026-06-25T06:00:00.000Z", updated_at: "2026-06-25T06:00:00.000Z" })
+      .where("id", "=", previous.row.id)
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        generationStartedAt: "2026-06-25T08:00:00.000Z",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+    const attention = context?.taskAttention as {
+      windowStart: string;
+      partial: boolean;
+      items: Array<{ taskId: string; changedFields: string[]; attentionReasons: string[] }>;
+    };
+
+    expect((context?.openDurableTasks as Array<{ id: string }>).map((task) => task.id)).toContain(changed.taskId);
+    expect(attention.windowStart).toBe("2026-06-25T06:00:00.000Z");
+    expect(attention.partial).toBe(false);
+    expect(attention.items.map((item) => item.taskId)).toEqual([
+      overdue.taskId,
+      pending.taskId,
+      changed.taskId,
+      dueSoon.taskId,
+      high.taskId,
+      carried.taskId,
+    ]);
+    expect(attention.items.find((item) => item.taskId === changed.taskId)).toMatchObject({
+      changedFields: ["priority", "status"],
+      attentionReasons: ["meaningfully_changed", "status_changed"],
+    });
+    expect(attention.items.find((item) => item.taskId === pending.taskId)?.attentionReasons).toContain(
+      "pending_completion_review",
+    );
+    expect(attention.items.find((item) => item.taskId === high.taskId)).toMatchObject({
+      lastMeaningfulActivityAt: "2026-06-24T07:00:00.000Z",
+      lastEventKind: "fields_changed",
+      changedFields: [],
+      attentionReasons: ["high_priority"],
+    });
+    expect(attention.items.find((item) => item.taskId === carried.taskId)?.attentionReasons).toEqual([
+      "carried_from_previous_brief",
+    ]);
+    expect(attention.items.map((item) => item.taskId)).not.toContain(reassignedCarried.taskId);
+  });
+
+  it("keeps structural attention reader-relevant and returns only visible file evidence", async () => {
+    const assigneeEntityId = await seedTopologyTaskOwner();
+    await seedConnectorConfig(db);
+    await seedIndexedFile(db, { id: "attention-visible-file", sourceUpdatedAt: NOW.toISOString() });
+    await seedIndexedFile(db, {
+      id: "attention-restricted-file",
+      sourceUpdatedAt: NOW.toISOString(),
+      restrictedTo: "other@example.com",
+    });
+    const repo = createTaskRepository(db);
+    const createStructuralTask = (sourceTaskId: string, assigneeId: string | null) =>
+      repo.upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "linear",
+        externalRef: sourceTaskId,
+        title: sourceTaskId,
+        status: "open",
+        statusRaw: "Todo",
+        statusAuthority: "external",
+        assigneeEntityId: assigneeId,
+        assigneeName: assigneeId ? "Agent User" : null,
+        priority: assigneeId ? "high" : "medium",
+        dueAt: null,
+        provenance: "structural",
+        sourceTaskId,
+      });
+    const assigned = await createStructuralTask("structural-assigned", assigneeEntityId);
+    const carried = await createStructuralTask("structural-carried", null);
+    const unrelated = await createStructuralTask("structural-unrelated", null);
+    const inaccessible = await createStructuralTask("structural-inaccessible", assigneeEntityId);
+    await repo.upsertEvidence(assigned.taskId, "file", "attention-visible-file");
+    await repo.upsertEvidence(assigned.taskId, "file", "attention-restricted-file");
+    await repo.upsertEvidence(carried.taskId, "file", "attention-visible-file");
+    await repo.upsertEvidence(unrelated.taskId, "file", "attention-visible-file");
+    await repo.upsertEvidence(inaccessible.taskId, "file", "attention-restricted-file");
+
+    const outputRepo = createAgentOutputRepository(db);
+    const previous = await outputRepo.createRunning({
+      agentKey: "daily_brief",
+      agentVersion: "test",
+      userId: "user-1",
+      outputDate: "2026-06-24",
+      timezone: "UTC",
+      triggerType: "manual",
+    });
+    await outputRepo.completeOutput({
+      outputId: previous.row.id,
+      masthead: { title: "Previous", summary: "Previous" },
+      rawPayload: {},
+      items: [
+        {
+          sectionKey: "todos",
+          title: "structural-carried",
+          summary: "Still active",
+          priority: "medium",
+          label: "todo",
+          canonicalTaskId: carried.taskId,
+          structuredPayload: {},
+          knowledgeRefs: { entityIds: [], fileIds: [] },
+          sortOrder: 0,
+        },
+      ],
+    });
+    await db
+      .updateTable("agent_outputs")
+      .set({ generated_at: "2026-06-25T06:00:00.000Z", updated_at: "2026-06-25T06:00:00.000Z" })
+      .where("id", "=", previous.row.id)
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+    const attention = context?.taskAttention as {
+      items: Array<{ taskId: string; attentionReasons: string[]; evidence: { fileIds: string[] } }>;
+    };
+
+    expect(attention.items.map((item) => item.taskId)).toEqual([assigned.taskId, carried.taskId]);
+    expect(attention.items[0]).toMatchObject({
+      taskId: assigned.taskId,
+      attentionReasons: ["high_priority"],
+      evidence: { fileIds: ["attention-visible-file"] },
+    });
+    expect(attention.items[1]).toMatchObject({
+      taskId: carried.taskId,
+      attentionReasons: ["carried_from_previous_brief"],
+    });
+    expect(attention.items.map((item) => item.taskId)).not.toEqual(
+      expect.arrayContaining([unrelated.taskId, inaccessible.taskId]),
+    );
+  });
+
+  it("bounds Task Attention evidence and marks the context partial when evidence is truncated", async () => {
+    await seedUser(db);
+    await seedConnectorConfig(db);
+    const task = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Evidence-heavy attention task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "high",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "attention-evidence-heavy",
+      createdByUserId: "user-1",
+    });
+    const messageIds: number[] = [];
+    for (let index = 0; index < 6; index += 1) {
+      const message = await seedConversationMessage(`C-EVIDENCE-${index}`, `evidence-${index}`);
+      messageIds.push(message.messageId);
+      await seedIndexedFile(db, { id: `file-${index}`, sourceUpdatedAt: NOW.toISOString() });
+      await db
+        .insertInto("task_message_evidence")
+        .values({
+          task_id: task.taskId,
+          conversation_message_id: message.messageId,
+          source_platform: "slack",
+          source_conversation_id: message.conversationId,
+          source_provider_thread_id: null,
+          source_anchor_key: `slack:${message.conversationId}:root`,
+        })
+        .execute();
+      await db
+        .insertInto("task_evidence")
+        .values({ task_id: task.taskId, kind: "file", ref_id: `file-${index}` })
+        .execute();
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.taskAttention).toMatchObject({
+      partial: true,
+      items: [
+        {
+          taskId: task.taskId,
+          attentionReasons: ["high_priority"],
+          evidence: {
+            messageIds: messageIds.slice(0, 5),
+            fileIds: ["file-0", "file-1", "file-2", "file-3", "file-4"],
+            truncated: true,
+          },
+        },
+      ],
+    });
+  });
+
+  it("falls back conservatively when Task Activity cannot be loaded", async () => {
+    await seedUser(db);
+    const task = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "High priority fallback task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "high",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "attention-activity-fallback",
+      createdByUserId: "user-1",
+    });
+    await db.schema.dropTable("task_activity_events").execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.taskAttention).toMatchObject({
+      partial: true,
+      items: [
+        {
+          taskId: task.taskId,
+          lastEventKind: null,
+          changedFields: [],
+          attentionReasons: ["high_priority"],
+        },
+      ],
+    });
+  });
+
+  it("marks Task Attention partial when reader assignee identity lookup fails", async () => {
+    await seedUser(db);
+    await db.updateTable("users").set({ email_verified_at: NOW.toISOString() }).where("id", "=", "user-1").execute();
+    const task = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Reader-owned fallback task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "high",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "attention-assignee-lookup-fallback",
+      createdByUserId: "user-1",
+    });
+    await db.schema.dropTable("entity_contact_points").execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.taskAttention).toMatchObject({
+      partial: true,
+      items: [{ taskId: task.taskId, attentionReasons: ["high_priority"] }],
+    });
+  });
 
   it("exposes the shared looks-resolved reminder state and transition mode", async () => {
     await seedUser(db);
@@ -1409,7 +2459,7 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
     ]);
   });
 
-  it("scopes conversation generation context to active Summarizer routes while retaining general tasks", async () => {
+  it("scopes generation context to active Summarizer routes while retaining broad Known Task Memory", async () => {
     await seedUser(db);
     await seedConnectorConfig(db);
     await seedIndexedFile(db, { id: "structural-task-file", sourceUpdatedAt: NOW.toISOString() });
@@ -1576,9 +2626,13 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
     expect((context?.summaryTasks as Array<{ id: string }>).map((task) => task.id)).toEqual([activeSummaryTask.taskId]);
     const openTaskIds = (context?.openDurableTasks as Array<{ id: string }>).map((task) => task.id);
     expect(openTaskIds).toEqual(
-      expect.arrayContaining([activeSummaryTask.taskId, briefTask.taskId, structuralTask.taskId]),
+      expect.arrayContaining([
+        activeSummaryTask.taskId,
+        disabledSummaryTask.taskId,
+        briefTask.taskId,
+        structuralTask.taskId,
+      ]),
     );
-    expect(openTaskIds).not.toContain(disabledSummaryTask.taskId);
   });
 
   it.each([
@@ -1935,7 +2989,7 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
     expect(JSON.stringify(context)).not.toContain("Inactive historical follow-up");
   });
 
-  it("filters inactive summary tasks in SQL before applying brief task limits", async () => {
+  it("keeps route-scoped Summary context separate from bounded Known Task Memory", async () => {
     const assigneeEntityId = await seedTopologyTaskOwner();
     const activeSource = "slack:channel:C_ACTIVE_TASK_CAP";
     const inactiveSource = "slack:channel:C_INACTIVE_TASK_CAP";
@@ -2003,18 +3057,19 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
       config: createTestConfig(),
       users: createUserRepository(db),
       userId: "user-1",
-      maxItemsPerSection: 1,
+      maxItemsPerSection: 5,
       baseContext: {
         outputDate: "2026-06-25",
         timezone: "UTC",
+        maxItemsPerSection: 1,
         sameDayPreviousOutput: null,
         previousDayOutput: null,
       },
     });
 
     expect((context?.summaryTasks as Array<{ id: string }>).map((task) => task.id)).toContain(activeTask.taskId);
-    expect((context?.openDurableTasks as Array<{ id: string }>).map((task) => task.id)).toContain(activeTask.taskId);
-    expect(JSON.stringify(context)).not.toContain("Inactive task");
+    expect(context?.openDurableTasks).toHaveLength(4);
+    expect((context?.taskAttention as { items: unknown[] }).items).toEqual([]);
   });
 
   it("caps fallback reminder items when transition reads fail", async () => {

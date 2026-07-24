@@ -310,7 +310,7 @@ describe("createTaskRepository sqlite", () => {
       .where("id", "=", brief.status === "upserted" ? brief.taskId : "")
       .executeTakeFirstOrThrow();
 
-    expect(collated).toEqual({ status: "collated", taskId: structural.taskId });
+    expect(collated).toMatchObject({ status: "collated", taskId: structural.taskId });
     expect(Number(countAfterCollation.count)).toBe(1);
     expect(tasks.filter((task) => task.title === "Ship Slack capture")).toHaveLength(1);
     expect(tasks.find((task) => task.id === structural.taskId)).toMatchObject({
@@ -440,7 +440,7 @@ describe("createTaskRepository sqlite", () => {
       { task_id: first.status === "upserted" ? first.taskId : "", kind: "conversation_message", ref_id: "message-2" },
       { task_id: first.status === "upserted" ? first.taskId : "", kind: "entity", ref_id: "project-x" },
     ]);
-    expect(collated).toEqual({ status: "collated", taskId: structural.taskId });
+    expect(collated).toMatchObject({ status: "collated", taskId: structural.taskId });
     await expect(
       db.selectFrom("tasks").selectAll().where("title", "=", "Ship Slack capture").execute(),
     ).resolves.toHaveLength(1);
@@ -964,7 +964,7 @@ describe("createTaskRepository sqlite", () => {
     ]);
   });
 
-  it("preserves ownerless Summarizer action items outside personal reminders", async () => {
+  it("preserves reader-owned ownerless Summarizer action items in durable task memory", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedProject(db, "linkedin-workflow-connect", "Linkedin Workflow Connect");
     const repo = createTaskRepository(db);
@@ -989,6 +989,8 @@ describe("createTaskRepository sqlite", () => {
     const personal = await repo.loadOpenDurableTasksForBrief({
       userId: "summary-u1",
       userEmails: ["summary@example.com"],
+      activeSummarySourceKeys: ["route:inactive"],
+      activeSummaryConversationIds: [],
     });
 
     expect(result.status).toBe("upserted");
@@ -999,7 +1001,7 @@ describe("createTaskRepository sqlite", () => {
         proposed_assignee_name: null,
       }),
     ]);
-    expect(personal.map((task) => task.id)).not.toContain(rows[0]?.id);
+    expect(personal.map((task) => task.id)).toContain(rows[0]?.id);
   });
 
   it("leaves Summarizer task parents unlinked when qualified project names are ambiguous", async () => {
@@ -1227,7 +1229,7 @@ describe("createTaskRepository sqlite", () => {
     });
   });
 
-  it("excludes ownerless summary tasks from personal reminders and updates only local task statuses", async () => {
+  it("includes reader-owned ownerless summary tasks and updates only local task statuses", async () => {
     await seedUser(db, "summary-u1", "summary@example.com");
     await seedUser(db, "summary-u2", "other@example.com");
     await seedProject(db, "project-x", "Project X");
@@ -1279,16 +1281,28 @@ describe("createTaskRepository sqlite", () => {
     const adminUpdate = await repo.updateLocalTaskStatus({
       taskId: local.taskId,
       userId: "summary-u2",
-      status: "in_progress",
+      status: "open",
       canEditAllLocalTasks: true,
+    });
+    const repeatedDone = await repo.updateLocalTaskStatus({
+      taskId: local.taskId,
+      userId: "summary-u1",
+      status: "done",
     });
     const externalUpdate = await repo.updateLocalTaskStatus({
       taskId: external.taskId,
       userId: "summary-u1",
       status: "done",
     });
+    const activity = await db
+      .selectFrom("task_activity_events")
+      .select(["event_kind", "changes_json"])
+      .where("task_id", "=", local.taskId)
+      .orderBy("occurred_at")
+      .orderBy("id")
+      .execute();
 
-    expect(durable.map((task) => task.id)).not.toContain(local.taskId);
+    expect(durable.map((task) => task.id)).toContain(local.taskId);
     expect(updated).toMatchObject({
       id: local.taskId,
       status: "done",
@@ -1299,12 +1313,26 @@ describe("createTaskRepository sqlite", () => {
     expect(otherUserUpdate).toBeNull();
     expect(adminUpdate).toMatchObject({
       id: local.taskId,
-      status: "in_progress",
-      status_raw: "in_progress",
+      status: "open",
+      status_raw: "open",
       status_authority: "local",
       completed_at: null,
     });
+    expect(repeatedDone).toMatchObject({
+      id: local.taskId,
+      status: "done",
+      status_raw: "done",
+      status_authority: "local",
+      completed_at: expect.any(String),
+    });
     expect(externalUpdate).toBeNull();
+    expect(activity).toHaveLength(3);
+    expect(activity.map((event) => event.event_kind)).toEqual(["status_changed", "status_changed", "status_changed"]);
+    expect(activity.map((event) => JSON.parse(event.changes_json ?? "{}"))).toEqual([
+      { status: { before: "open", after: "done" } },
+      { status: { before: "done", after: "open" } },
+      { status: { before: "open", after: "done" } },
+    ]);
   });
 
   it("loads recent user-owned summary tasks for Daily Brief including completed protection rows", async () => {
@@ -1453,7 +1481,7 @@ describe("createTaskRepository sqlite", () => {
       .execute();
 
     expect(summary.status).toBe("upserted");
-    expect(brief).toEqual({ status: "collated", taskId: summary.status === "upserted" ? summary.taskId : "" });
+    expect(brief).toMatchObject({ status: "collated", taskId: summary.status === "upserted" ? summary.taskId : "" });
     expect(tasks).toHaveLength(1);
     expect(tasks[0]).toMatchObject({ source: "summary", provenance: "summary", status: "open" });
   });
@@ -1494,7 +1522,7 @@ describe("createTaskRepository sqlite", () => {
       .where("normalized_title", "=", "send launch notes")
       .execute();
 
-    expect(brief).toEqual({ status: "collated", taskId: summary.taskId });
+    expect(brief).toMatchObject({ status: "collated", taskId: summary.taskId });
     expect(tasks).toHaveLength(1);
   });
 
@@ -1530,7 +1558,7 @@ describe("createTaskRepository sqlite", () => {
       .where("normalized_title", "=", "send launch notes")
       .execute();
 
-    expect(brief).toEqual({ status: "collated", taskId: summary.taskId });
+    expect(brief).toMatchObject({ status: "collated", taskId: summary.taskId });
     expect(tasks).toHaveLength(1);
   });
 

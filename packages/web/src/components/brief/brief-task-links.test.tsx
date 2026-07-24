@@ -129,10 +129,127 @@ describe("Brief row live task status", () => {
     const row = screen.getByRole("button", { name: /Snapshot title/ });
     expect(within(row).queryByRole("combobox")).not.toBeInTheDocument();
   });
+
+  it("shows the lifecycle status before a friendly Task Attention label", () => {
+    const item = {
+      ...todoItem("t-attention-overdue", "Overdue customer escalation", baseTask({ status: "open" })),
+      structuredPayload: {
+        attentionReasons: ["overdue", "high_priority"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    const row = screen.getByRole("button", { name: /Overdue customer escalation/ });
+    const statusGroups = within(row).getAllByLabelText("Task status and attention");
+    expect(statusGroups).toHaveLength(2);
+    for (const group of statusGroups) {
+      expect(group).toHaveTextContent("Open");
+      expect(group).toHaveTextContent("Overdue");
+      expect(group.textContent?.indexOf("Open")).toBeLessThan(group.textContent?.indexOf("Overdue") ?? -1);
+      expect(group).not.toHaveTextContent("high_priority");
+    }
+  });
+
+  it("uses New for the combined new-and-meaningfully-changed tier", () => {
+    const item = {
+      ...todoItem("t-attention-new-row", "New ownerless follow-up", baseTask({ status: "open" })),
+      structuredPayload: {
+        attentionReasons: ["new_since_last_brief", "meaningfully_changed"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    const row = screen.getByRole("button", { name: /New ownerless follow-up/ });
+    expect(within(row).getAllByText("New")).toHaveLength(2);
+    expect(within(row).queryByText(/new_since_last_brief/)).not.toBeInTheDocument();
+    expect(within(row).queryByText(/meaningfully_changed/)).not.toBeInTheDocument();
+  });
+
+  it("aligns the structural seam across attention rows of varying widths", () => {
+    const overdue = {
+      ...todoItem("t-seam-overdue", "Overdue escalation", baseTask({ status: "open" })),
+      structuredPayload: {
+        attentionReasons: ["overdue"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const newItem = {
+      ...todoItem("t-seam-new", "New inbound task", baseTask({ status: "in_progress" })),
+      structuredPayload: {
+        attentionReasons: ["new_since_last_brief"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([overdue, newItem]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    const rows = screen.getAllByRole("button", { name: /(Overdue escalation|New inbound task)/ });
+    expect(rows).toHaveLength(2);
+    const seamGroups = rows.flatMap((row) =>
+      within(row)
+        .getAllByLabelText("Task status and attention")
+        .filter((group) => !group.className.includes("sm:hidden")),
+    );
+    expect(seamGroups).toHaveLength(2);
+    for (const group of seamGroups) {
+      expect(group.className).toContain("grid-cols-[88px_1px_minmax(0,1fr)]");
+      const separator = group.querySelector(".bg-border");
+      expect(separator).not.toBeNull();
+      expect(separator?.className).toContain("w-px");
+    }
+    expect(seamGroups[0]?.className).toBe(seamGroups[1]?.className);
+  });
+
+  it("keeps combined lifecycle statuses color coded and on one line", () => {
+    const item = {
+      ...todoItem("t-colored-status", "Active launch handoff", baseTask({ status: "in_progress" })),
+      structuredPayload: {
+        attentionReasons: ["due_soon"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    const row = screen.getByRole("button", { name: /Active launch handoff/ });
+    const statusGroups = within(row).getAllByLabelText("Task status and attention");
+    for (const group of statusGroups) {
+      const lifecycleStatus = within(group).getByText("In progress");
+      expect(lifecycleStatus.className).toContain("whitespace-nowrap");
+      expect(lifecycleStatus.className).toContain("text-amber-600");
+    }
+  });
+
+  it("does not expose unknown attention keys or add an attention cluster to ordinary todos", () => {
+    const unknown = {
+      ...todoItem("t-attention-unknown-row", "Future attention task", baseTask({ status: "open" })),
+      structuredPayload: {
+        attentionReasons: ["future_internal_reason"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([unknown, todoItem("t-ordinary-row", "Ordinary task", baseTask({ status: "open" }))]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    const unknownRow = screen.getByRole("button", { name: /Future attention task/ });
+    const ordinaryRow = screen.getByRole("button", { name: /Ordinary task/ });
+    expect(within(unknownRow).queryByLabelText("Task status and attention")).not.toBeInTheDocument();
+    expect(within(unknownRow).queryByText(/future_internal_reason/)).not.toBeInTheDocument();
+    expect(within(ordinaryRow).queryByLabelText("Task status and attention")).not.toBeInTheDocument();
+  });
 });
 
 describe("Inline follow-up review actions", () => {
-  it("renders the chat action above one grouped completion decision and reports the selected choice", async () => {
+  it("renders the grouped completion decision before the full chat action and reports the selected choice", async () => {
     const user = userEvent.setup();
     const onReviewFollowup = vi.fn();
     const reviewItem = {
@@ -167,8 +284,8 @@ describe("Inline follow-up review actions", () => {
     const markDone = within(decisionGroup).getByRole("button", { name: "Mark as done" });
     expect(decisionGroup).not.toContainElement(chatAction);
     const rowButtons = Array.from((row as HTMLElement).querySelectorAll("button"));
-    expect(rowButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
-      rowButtons.indexOf(markDone as HTMLButtonElement),
+    expect(rowButtons.indexOf(markDone as HTMLButtonElement)).toBeLessThan(
+      rowButtons.indexOf(chatAction as HTMLButtonElement),
     );
 
     await user.click(markDone);
@@ -201,7 +318,7 @@ describe("Inline follow-up review actions", () => {
     expect(screen.queryByRole("button", { name: "Track" })).not.toBeInTheDocument();
   });
 
-  it("groups seed decisions below the chat action and reports the selected choice", async () => {
+  it("renders seed decisions before the full chat action and reports the selected choice", async () => {
     const user = userEvent.setup();
     const onReviewFollowup = vi.fn();
     const reviewItem = {
@@ -237,15 +354,15 @@ describe("Inline follow-up review actions", () => {
     const dismiss = within(decisionGroup).getByRole("button", { name: "Dismiss" });
     expect(decisionGroup).not.toContainElement(chatAction);
     const rowButtons = Array.from((row as HTMLElement).querySelectorAll("button"));
-    expect(rowButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
-      rowButtons.indexOf(dismiss as HTMLButtonElement),
+    expect(rowButtons.indexOf(dismiss as HTMLButtonElement)).toBeLessThan(
+      rowButtons.indexOf(chatAction as HTMLButtonElement),
     );
 
     await user.click(dismiss);
     expect(onReviewFollowup).toHaveBeenCalledWith("seed", "candidate-1", "dismiss");
   });
 
-  it("keeps the chat action above the grouped review decision in the detail drawer", async () => {
+  it("keeps the grouped review decision before the full chat action in the detail drawer", async () => {
     const user = userEvent.setup();
     const onReviewFollowup = vi.fn();
     const reviewItem = {
@@ -280,8 +397,8 @@ describe("Inline follow-up review actions", () => {
     const keepOpen = within(decisionGroup).getByRole("button", { name: "Keep open" });
     const drawerButtons = Array.from(drawer.querySelectorAll("button"));
     expect(decisionGroup).not.toContainElement(chatAction);
-    expect(drawerButtons.indexOf(chatAction as HTMLButtonElement)).toBeLessThan(
-      drawerButtons.indexOf(keepOpen as HTMLButtonElement),
+    expect(drawerButtons.indexOf(keepOpen as HTMLButtonElement)).toBeLessThan(
+      drawerButtons.indexOf(chatAction as HTMLButtonElement),
     );
 
     await user.click(keepOpen);
@@ -323,6 +440,26 @@ describe("Brief detail drawer Current task section", () => {
     await user.click(await screen.findByRole("option", { name: "Done" }));
 
     expect(onUpdateTaskStatus).toHaveBeenCalledWith("task-edit", "done");
+  });
+
+  it("presents priority, status, and update metadata with clear labels", async () => {
+    const user = userEvent.setup();
+    const task = baseTask({ status: "open", priority: "medium" });
+    const brief = briefWithTodos([todoItem("t-current-task-hierarchy", "Snapshot title", task)]);
+
+    renderWithProviders(
+      <DailyBrief brief={brief} running={false} onOpenChat={() => {}} onUpdateTaskStatus={() => {}} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Snapshot title/ }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(within(drawer).getByRole("heading", { name: "Current task" })).toBeInTheDocument();
+    expect(within(drawer).getAllByText("Medium priority")).toHaveLength(1);
+    expect(within(drawer).queryByText("High priority")).not.toBeInTheDocument();
+    expect(within(drawer).getByText("Status")).toBeInTheDocument();
+    expect(within(drawer).getByRole("combobox", { name: /Live task title status/ })).toBeInTheDocument();
+    expect(within(drawer).getByText(/Updated/)).toBeInTheDocument();
   });
 
   it("disables the status select while that task is updating", async () => {
@@ -380,6 +517,214 @@ describe("Brief detail drawer Current task section", () => {
     const drawer = screen.getByRole("dialog");
     expect(within(drawer).queryByRole("combobox")).not.toBeInTheDocument();
     expect(within(drawer).getByText(/creator, assignee, or an admin/i)).toBeInTheDocument();
+  });
+});
+
+describe("Brief detail drawer context block", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("renders the editorial 'Why it's in your brief' label and summary for a non-meeting item", async () => {
+    const user = userEvent.setup();
+    const brief = briefWithTodos([todoItem("t-ctx-1", "Snapshot title", null)]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: /Snapshot title/ }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(within(drawer).getByText("Briefing note")).toBeInTheDocument();
+    expect(within(drawer).getByText("Snapshot summary")).toBeInTheDocument();
+    expect(within(drawer).queryByText(/Why it[\u2019']s in your brief/i)).not.toBeInTheDocument();
+    expect(within(drawer).queryByText(/^Context$/)).not.toBeInTheDocument();
+  });
+
+  it("translates Task Attention reasons into friendly explanations without exposing internal keys", async () => {
+    const user = userEvent.setup();
+    const item = {
+      ...todoItem("t-attention-new", "New customer follow-up", null),
+      summary: "Task Attention: new_since_last_brief, meaningfully_changed.",
+      structuredPayload: {
+        attentionReasons: ["new_since_last_brief", "meaningfully_changed"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: /New customer follow-up/ }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(within(drawer).getByText("New since your last brief")).toBeInTheDocument();
+    expect(within(drawer).getByText("This task was added after your previous brief.")).toBeInTheDocument();
+    expect(within(drawer).queryByText("Recently updated")).not.toBeInTheDocument();
+    expect(within(drawer).queryByText(/new_since_last_brief/)).not.toBeInTheDocument();
+    expect(within(drawer).queryByText(/Task Attention:/)).not.toBeInTheDocument();
+  });
+
+  it("names changed fields in plain language", async () => {
+    const user = userEvent.setup();
+    const item = {
+      ...todoItem("t-attention-changed", "Updated launch handoff", null),
+      summary: "Task Attention: meaningfully_changed; changed: priority, status.",
+      structuredPayload: {
+        attentionReasons: ["meaningfully_changed"],
+        changedFields: ["priority", "status"],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: /Updated launch handoff/ }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(within(drawer).getByText("Recently updated")).toBeInTheDocument();
+    expect(within(drawer).getByText("The priority and status changed since your previous brief.")).toBeInTheDocument();
+    expect(within(drawer).queryByText(/meaningfully_changed/)).not.toBeInTheDocument();
+  });
+
+  it("uses generic friendly copy when changed fields are not user-facing", async () => {
+    const user = userEvent.setup();
+    const item = {
+      ...todoItem("t-attention-unknown-change", "Updated internal task", null),
+      summary: "Task Attention: meaningfully_changed; changed: owner_entity_id.",
+      structuredPayload: {
+        attentionReasons: ["meaningfully_changed"],
+        changedFields: ["owner_entity_id"],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: /Updated internal task/ }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(
+      within(drawer).getByText("Something important about this task changed since your previous brief."),
+    ).toBeInTheDocument();
+    expect(within(drawer).queryByText(/owner entity id/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps a friendly status explanation when status is the only attention reason", async () => {
+    const user = userEvent.setup();
+    const item = {
+      ...todoItem("t-attention-status", "Status changed task", null),
+      summary: "Task Attention: status_changed.",
+      structuredPayload: {
+        attentionReasons: ["status_changed"],
+        changedFields: ["status"],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: /Status changed task/ }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(within(drawer).getByText("Status changed")).toBeInTheDocument();
+    expect(within(drawer).getByText("Its status changed since your previous brief.")).toBeInTheDocument();
+    expect(within(drawer).queryByText(/status_changed/)).not.toBeInTheDocument();
+  });
+
+  it("uses neutral copy for a future attention reason instead of exposing its key", async () => {
+    const user = userEvent.setup();
+    const item = {
+      ...todoItem("t-attention-future", "Future attention task", null),
+      summary: "Task Attention: future_internal_reason.",
+      structuredPayload: {
+        attentionReasons: ["future_internal_reason"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: /Future attention task/ }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(within(drawer).getByText("Recent activity")).toBeInTheDocument();
+    expect(within(drawer).getByText("Sketch noticed recent activity on this task.")).toBeInTheDocument();
+    expect(within(drawer).queryByText(/future_internal_reason/)).not.toBeInTheDocument();
+  });
+
+  it("does not repeat priority when the source value already includes the label", async () => {
+    const user = userEvent.setup();
+    const task = baseTask({ priority: "No priority" });
+    const brief = briefWithTodos([todoItem("t-priority-label", "Task without priority", task)]);
+
+    renderWithProviders(
+      <DailyBrief brief={brief} running={false} onOpenChat={() => {}} onUpdateTaskStatus={() => {}} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Task without priority/ }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(within(drawer).getByText("No priority")).toBeInTheDocument();
+    expect(within(drawer).queryByText("No priority priority")).not.toBeInTheDocument();
+  });
+
+  it("renders nothing when the summary is empty (no label, no body)", async () => {
+    const user = userEvent.setup();
+    const brief = briefWithTodos([{ ...todoItem("t-ctx-empty", "No summary item", null), summary: "" }]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: /No summary item/ }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(within(drawer).queryByText("Briefing note")).not.toBeInTheDocument();
+    expect(within(drawer).queryByText(/Why it[\u2019']s in your brief/i)).not.toBeInTheDocument();
+  });
+
+  it("renders the same editorial context block for a meeting item with a summary", async () => {
+    const user = userEvent.setup();
+    const meetingItem: DailyBriefItem = {
+      id: "meeting-ctx-1",
+      sectionKey: "meetings",
+      title: "Quarterly review",
+      summary: "Recurring sync to align hiring plans.",
+      priority: "medium",
+      label: "meeting",
+      displayRef: null,
+      actionType: null,
+      actionLabel: null,
+      actionPrompt: null,
+      sourceUrl: null,
+      structuredPayload: {
+        startTime: "2026-07-17T15:00:00.000Z",
+        via: null,
+        attendees: [],
+      },
+      knowledgeRefs: { entityIds: [], fileIds: [] },
+      sortOrder: 0,
+    };
+    const brief: DailyBriefData = {
+      ...briefWithTodos([]),
+      sections: {
+        meetings: [meetingItem],
+        todos: [],
+        untracked_followups: [],
+        looks_resolved: [],
+        customer_updates: [],
+        active_projects: [],
+      },
+    };
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: /Quarterly review/ }));
+    const drawer = await screen.findByRole("dialog");
+
+    expect(within(drawer).getByText("Briefing note")).toBeInTheDocument();
+    expect(within(drawer).getByText("Recurring sync to align hiring plans.")).toBeInTheDocument();
+    expect(within(drawer).queryByText(/Why it[\u2019']s in your brief/i)).not.toBeInTheDocument();
+    expect(within(drawer).queryByText(/^Context$/)).not.toBeInTheDocument();
   });
 });
 

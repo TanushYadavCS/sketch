@@ -25,7 +25,7 @@ import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 
-const EXPECTED_MIGRATION_COUNT = 152;
+const EXPECTED_MIGRATION_COUNT = 153;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -221,6 +221,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[149]).toBe("154-reclassify-mpim-conversations");
     expect(names[150]).toBe("155-requeue-kept-slice-reemission");
     expect(names[151]).toBe("156-operational-alerts");
+    expect(names[152]).toBe("157-task-activity-events");
   });
 
   it("resets reviewed combined durability routes for member-source reseeding", async () => {
@@ -496,6 +497,94 @@ describe("runMigrations — full sequence", () => {
       SELECT task_id FROM agent_output_items WHERE id = 'task-link-item'
     `.execute(db);
     expect(item.rows).toEqual([{ task_id: null }]);
+  });
+
+  it("creates the append-only task activity schema and indexes", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const columns = await sql<{ name: string }>`
+      SELECT name
+      FROM pragma_table_info('task_activity_events')
+      ORDER BY cid ASC
+    `.execute(db);
+    expect(columns.rows.map((row) => row.name)).toEqual([
+      "id",
+      "task_id",
+      "event_kind",
+      "actor_type",
+      "actor_user_id",
+      "actor_key",
+      "surface",
+      "source_agent_output_id",
+      "changes_json",
+      "evidence_json",
+      "dedupe_key",
+      "occurred_at",
+      "created_at",
+    ]);
+
+    const indexes = await sql<{ name: string; unique: number }>`
+      SELECT name, "unique"
+      FROM pragma_index_list('task_activity_events')
+      WHERE name IN (
+        'idx_task_activity_events_task_time',
+        'idx_task_activity_events_kind_time',
+        'idx_task_activity_events_dedupe_key'
+      )
+      ORDER BY name ASC
+    `.execute(db);
+    expect(indexes.rows).toEqual([
+      { name: "idx_task_activity_events_dedupe_key", unique: 1 },
+      { name: "idx_task_activity_events_kind_time", unique: 0 },
+      { name: "idx_task_activity_events_task_time", unique: 0 },
+    ]);
+
+    await sql`
+      INSERT INTO tasks
+        (id, source, title, normalized_title, status, status_authority, provenance, source_task_id, updated_at)
+      VALUES
+        ('activity-contract-task', 'summary', 'Contract task', 'contract task', 'open', 'local', 'summary', 'contract-task', '2026-07-23T00:00:00.000Z')
+    `.execute(db);
+    const eventKinds = [
+      "created",
+      "evidence_added",
+      "fields_changed",
+      "status_changed",
+      "completion_proposed",
+      "completion_reviewed",
+    ];
+    for (const [index, eventKind] of eventKinds.entries()) {
+      await sql`
+        INSERT INTO task_activity_events
+          (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+        VALUES
+          (${`activity-contract-${index}`}, 'activity-contract-task', ${eventKind}, 'provider', 'sync', ${`contract-${index}`}, '2026-07-23T00:00:00.000Z')
+      `.execute(db);
+    }
+    await expect(
+      sql`
+      INSERT INTO task_activity_events
+        (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+      VALUES
+        ('invalid-activity-kind', 'activity-contract-task', 'task_created', 'provider', 'sync', 'invalid-kind', '2026-07-23T00:00:00.000Z')
+    `.execute(db),
+    ).rejects.toThrow();
+    await expect(
+      sql`
+      INSERT INTO task_activity_events
+        (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+      VALUES
+        ('invalid-activity-actor', 'activity-contract-task', 'created', 'integration', 'sync', 'invalid-actor', '2026-07-23T00:00:00.000Z')
+    `.execute(db),
+    ).rejects.toThrow();
+    await expect(
+      sql`
+      INSERT INTO task_activity_events
+        (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+      VALUES
+        ('invalid-activity-surface', 'activity-contract-task', 'created', 'provider', 'teams', 'invalid-surface', '2026-07-23T00:00:00.000Z')
+    `.execute(db),
+    ).rejects.toThrow();
   });
 
   it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {

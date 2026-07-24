@@ -44,6 +44,10 @@ vi.mock("./skills/sync", () => ({
   syncFeaturedSkills: vi.fn(),
 }));
 
+vi.mock("./connectors/managed-credential-migration", () => ({
+  migrateManagedConnectorCredentialsToCanvas: vi.fn(),
+}));
+
 // Avoid managed seed side effects during tests
 vi.mock("./managed-seed", () => ({
   runManagedSeed: vi.fn(),
@@ -63,11 +67,16 @@ describe("bootstrap", () => {
     vi.clearAllMocks();
   });
 
-  async function boot(configOverrides: Record<string, unknown> = {}, connect = false) {
+  async function boot(
+    configOverrides: Record<string, unknown> = {},
+    connect = false,
+    externalStartup = true,
+    backgroundWork = true,
+  ) {
     // Lazy import so vi.mock hoisting takes effect
     const { createServer } = await import("./bootstrap");
     const config = createTestConfig({ PORT: 0, LOG_LEVEL: "error", ...configOverrides });
-    handle = await createServer(config, { connect });
+    handle = await createServer(config, { connect, externalStartup, backgroundWork });
     return handle;
   }
 
@@ -90,6 +99,41 @@ describe("bootstrap", () => {
   it("has no Slack bot when tokens are not configured", async () => {
     const h = await boot();
     expect(h.getSlack()).toBeNull();
+  });
+
+  it("runs remote startup work by default", async () => {
+    const { syncFeaturedSkills } = await import("./skills/sync");
+    const { migrateManagedConnectorCredentialsToCanvas } = await import("./connectors/managed-credential-migration");
+
+    await boot();
+
+    expect(syncFeaturedSkills).toHaveBeenCalledOnce();
+    expect(migrateManagedConnectorCredentialsToCanvas).toHaveBeenCalledOnce();
+  });
+
+  it("skips remote startup work when external startup is disabled", async () => {
+    const { syncFeaturedSkills } = await import("./skills/sync");
+    const { migrateManagedConnectorCredentialsToCanvas } = await import("./connectors/managed-credential-migration");
+
+    await boot({}, false, false);
+
+    expect(syncFeaturedSkills).not.toHaveBeenCalled();
+    expect(migrateManagedConnectorCredentialsToCanvas).not.toHaveBeenCalled();
+  });
+
+  it("keeps schedulers and inbound consumers stopped when background work is disabled", async () => {
+    const { AgentScheduler } = await import("./agents/scheduler");
+    const { TaskScheduler } = await import("./scheduler/service");
+    const { WhatsAppInboundConsumer } = await import("./whatsapp/inbound-consumer");
+    const agentStart = vi.spyOn(AgentScheduler.prototype, "start");
+    const taskStart = vi.spyOn(TaskScheduler.prototype, "start");
+    const inboundStart = vi.spyOn(WhatsAppInboundConsumer.prototype, "start");
+
+    await boot({}, false, false, false);
+
+    expect(agentStart).not.toHaveBeenCalled();
+    expect(taskStart).not.toHaveBeenCalled();
+    expect(inboundStart).not.toHaveBeenCalled();
   });
 
   it("configures independent interactive and scheduled agent limiters", async () => {
