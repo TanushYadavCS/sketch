@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
-import type { Kysely } from "kysely";
+import type { Kysely, Selectable } from "kysely";
 import { decrypt, encrypt } from "../../auth/encryption";
-import type { DB } from "../schema";
+import type { DB, SettingsTable } from "../schema";
 
 export interface OrgContext {
   description?: string;
@@ -86,16 +86,175 @@ function decryptSettingsRow<T extends Record<string, unknown>>(row: T, encryptio
   return row;
 }
 
-export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string) {
+/** Default process-local TTL for settings.get(). Writes always invalidate immediately. */
+export const DEFAULT_SETTINGS_CACHE_TTL_MS = 30_000;
+
+export interface SettingsRepositoryOptions {
+  /**
+   * Max age for a successful get() cache entry. Primary freshness is write
+   * invalidation on create/ensure/update; TTL is a safety net only.
+   * Set to 0 to disable TTL expiry (still invalidates on writes).
+   */
+  cacheTtlMs?: number;
+  /** Clock for TTL checks — injectable for tests. */
+  now?: () => number;
+}
+
+type SettingsRow = Selectable<SettingsTable>;
+
+interface SettingsCacheBucket {
+  cacheTtlMs: number;
+  now: () => number;
+  entry: { value: SettingsRow | null; expiresAt: number } | null;
+  inflight: Promise<SettingsRow | null> | null;
+}
+
+/**
+ * Per-db cache root. `generation` is shared so any write invalidates every
+ * bucket. Entries/inflight are partitioned by encryption key and cache policy
+ * so decrypted values and incompatible clock domains cannot cross repositories.
+ */
+interface SettingsDbCacheRoot {
+  generation: number;
+  buckets: Map<string, SettingsCacheBucket[]>;
+}
+
+/**
+ * Cache is shared across repository instances for the same Kysely db +
+ * encryption key. createApp and bootstrap each call createSettingsRepository();
+ * without sharing, middleware would keep a stale row after settings.update()
+ * from another instance. WeakMap drops state when the db is GC'd (tests).
+ */
+const cacheByDb = new WeakMap<object, SettingsDbCacheRoot>();
+
+function cacheRootFor(db: Kysely<DB>): SettingsDbCacheRoot {
+  let root = cacheByDb.get(db);
+  if (!root) {
+    root = { generation: 0, buckets: new Map() };
+    cacheByDb.set(db, root);
+  }
+  return root;
+}
+
+function cacheBucketFor(
+  root: SettingsDbCacheRoot,
+  encryptionKey: string | undefined,
+  cacheTtlMs: number,
+  now: () => number,
+): SettingsCacheBucket {
+  const key = encryptionKey ?? "";
+  let buckets = root.buckets.get(key);
+  if (!buckets) {
+    buckets = [];
+    root.buckets.set(key, buckets);
+  }
+  let bucket = buckets.find((candidate) => candidate.cacheTtlMs === cacheTtlMs && candidate.now === now);
+  if (!bucket) {
+    bucket = { cacheTtlMs, now, entry: null, inflight: null };
+    buckets.push(bucket);
+  }
+  return bucket;
+}
+
+function clearSettingsCacheRoot(root: SettingsDbCacheRoot): void {
+  root.generation += 1;
+  for (const buckets of root.buckets.values()) {
+    for (const bucket of buckets) {
+      bucket.entry = null;
+      bucket.inflight = null;
+    }
+  }
+}
+
+/**
+ * Bust process-local settings.get() cache for a db after a direct settings write
+ * that does not go through createSettingsRepository (e.g. users.remove clearing
+ * whatsapp_fallback_agent_id). Pass the same Kysely (or transaction) handle used
+ * by createSettingsRepository for that process. No-op when nothing has been
+ * cached for this handle.
+ */
+export function invalidateSettingsCache(db: object): void {
+  const root = cacheByDb.get(db);
+  if (!root) return;
+  clearSettingsCacheRoot(root);
+}
+
+/**
+ * Singleton settings row repository with a process-local get() cache.
+ *
+ * Auth middleware, adapters, and agent runtime all call get() frequently for a
+ * single-row document. Cache hits avoid repeated SELECT + decrypt on the hot
+ * path. Mutations (create / ensure / ensureSketchApiKey / update) bust the
+ * cache so jwt_secret, onboarding, and authz flags stay correct after writes.
+ *
+ * Cache state is shared per (Kysely db, encryption key) so every matching
+ * createSettingsRepository handle stays coherent. Writes invalidate all key
+ * buckets for that db. Not distributed across processes.
+ */
+export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string, options?: SettingsRepositoryOptions) {
+  const cacheTtlMs = options?.cacheTtlMs ?? DEFAULT_SETTINGS_CACHE_TTL_MS;
+  const now = options?.now ?? Date.now;
+  const root = cacheRootFor(db);
+  const bucket = cacheBucketFor(root, encryptionKey, cacheTtlMs, now);
+
+  function invalidateCache(): void {
+    clearSettingsCacheRoot(root);
+  }
+
+  function cloneRow(row: SettingsRow): SettingsRow {
+    return { ...row };
+  }
+
+  function readCache(): SettingsRow | null | undefined {
+    if (!bucket.entry) return undefined;
+    if (bucket.cacheTtlMs > 0 && bucket.now() >= bucket.entry.expiresAt) {
+      bucket.entry = null;
+      return undefined;
+    }
+    return bucket.entry.value === null ? null : cloneRow(bucket.entry.value);
+  }
+
+  function writeCache(value: SettingsRow | null, generationAtLoad: number): void {
+    if (generationAtLoad !== root.generation) return;
+    bucket.entry = {
+      value: value === null ? null : cloneRow(value),
+      expiresAt: bucket.cacheTtlMs > 0 ? bucket.now() + bucket.cacheTtlMs : Number.POSITIVE_INFINITY,
+    };
+  }
+
+  async function loadFromDb(): Promise<SettingsRow | null> {
+    const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirst();
+    if (!row) return null;
+    return decryptSettingsRow(row, encryptionKey);
+  }
+
   return {
     async get() {
-      const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirst();
-      if (!row) return null;
-      return decryptSettingsRow(row, encryptionKey);
+      const hit = readCache();
+      if (hit !== undefined) return hit;
+
+      if (bucket.inflight) {
+        const shared = await bucket.inflight;
+        return shared === null ? null : cloneRow(shared);
+      }
+
+      const generationAtLoad = root.generation;
+      const pending = loadFromDb().then((loaded) => {
+        writeCache(loaded, generationAtLoad);
+        return loaded;
+      });
+      bucket.inflight = pending;
+      try {
+        const loaded = await pending;
+        return loaded === null ? null : cloneRow(loaded);
+      } finally {
+        if (bucket.inflight === pending) bucket.inflight = null;
+      }
     },
 
     async create(data: { adminEmail?: string; adminPasswordHash?: string; orgName?: string; botName?: string } = {}) {
       await db.insertInto("settings").values(buildSettingsInsert(encryptionKey, data)).execute();
+      invalidateCache();
 
       return db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
     },
@@ -107,8 +266,12 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
         .onConflict((oc) => oc.column("id").doNothing())
         .execute();
 
+      invalidateCache();
+      const generationAtLoad = root.generation;
       const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
-      return decryptSettingsRow(row, encryptionKey);
+      const decrypted = decryptSettingsRow(row, encryptionKey);
+      writeCache(decrypted, generationAtLoad);
+      return cloneRow(decrypted);
     },
 
     async ensureSketchApiKey(generateApiKey: () => string) {
@@ -118,6 +281,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
         .onConflict((oc) => oc.column("id").doNothing())
         .execute();
 
+      invalidateCache();
       const apiKey = generateApiKey();
       await db
         .updateTable("settings")
@@ -126,8 +290,11 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
         .where("sketch_api_key", "is", null)
         .execute();
 
+      invalidateCache();
+      const generationAtLoad = root.generation;
       const row = await db.selectFrom("settings").selectAll().where("id", "=", "default").executeTakeFirstOrThrow();
       const decrypted = decryptSettingsRow(row, encryptionKey);
+      writeCache(decrypted, generationAtLoad);
       if (!decrypted.sketch_api_key) {
         throw new Error("Sketch API key could not be ensured");
       }
@@ -220,6 +387,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string)
       }
 
       await db.updateTable("settings").set(updates).where("id", "=", "default").execute();
+      invalidateCache();
     },
   };
 }
