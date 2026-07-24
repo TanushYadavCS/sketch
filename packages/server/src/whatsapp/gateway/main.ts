@@ -24,6 +24,7 @@ import { WHATSAPP_GATEWAY_DEFAULT_PORT, WHATSAPP_GATEWAY_HOST, createWhatsAppGat
 import { loadBootId, loadHostId, loadPidStartTime } from "./identity";
 import { whatsappGatewayReconnectDelayMs } from "./reconnect";
 import { GatewaySocketFacade, type WhatsAppGatewaySocketState } from "./socket-facade";
+import { type WhatsAppSocketStatePublication, isSameWhatsAppSocketStatePublication } from "./socket-state-publication";
 
 export const WHATSAPP_GATEWAY_LOGGED_OUT_EXIT_CODE = 64;
 
@@ -86,6 +87,7 @@ export async function runWhatsAppGateway(): Promise<void> {
   let server: ReturnType<typeof serve> | null = null;
   let bot: WhatsAppBot | null = null;
   let lastDisconnectStatusCode: number | undefined;
+  let lastSocketStatePublication: WhatsAppSocketStatePublication | null = null;
   const appNotifier = new WhatsAppGatewayAppNotifier({
     baseUrl: `http://${WHATSAPP_GATEWAY_HOST}:${config.PORT}`,
     token: gatewayHttpToken,
@@ -95,8 +97,10 @@ export async function runWhatsAppGateway(): Promise<void> {
     socketGeneration: number,
     details: { statusCode?: number; reason?: string } = {},
   ): void => {
-    if (socketState === nextState) return;
+    const publication = { socketState: nextState, socketGeneration, ...details };
     socketState = nextState;
+    if (isSameWhatsAppSocketStatePublication(lastSocketStatePublication, publication)) return;
+    lastSocketStatePublication = publication;
     appNotifier.socketStateChanged({
       ownerToken,
       generation: fence.generation,

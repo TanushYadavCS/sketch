@@ -229,6 +229,39 @@ describe("operational alerts", () => {
     await expect(alerts.listDeliveries(active?.id ?? "missing")).resolves.toEqual([]);
   });
 
+  it("does not resolve a replacement outage when reconciling a stale alert row", async () => {
+    const now = new Date("2026-07-17T10:00:00.000Z");
+    const alerts = createOperationalAlertsRepository(db);
+    const service = createOperationalAlertService({ alerts, now: () => now });
+    await service.observeBaileysSocketState({
+      ownerToken: "owner",
+      generation: 1,
+      socketGeneration: 1,
+      socketState: "logged-out",
+      occurredAt: now.toISOString(),
+    });
+    const stale = await alerts.findActive(BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY);
+    expect(stale).toBeDefined();
+    await alerts.resolveById(stale?.id ?? "missing", new Date(now.getTime() + 1_000).toISOString());
+
+    await service.observeBaileysSocketState({
+      ownerToken: "owner",
+      generation: 2,
+      socketGeneration: 2,
+      socketState: "disconnected",
+      occurredAt: new Date(now.getTime() + 2_000).toISOString(),
+      statusCode: 413,
+    });
+    const replacement = await alerts.findActive(BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY);
+    expect(replacement?.id).not.toBe(stale?.id);
+
+    await alerts.resolveById(stale?.id ?? "missing", new Date(now.getTime() + 3_000).toISOString());
+
+    await expect(
+      alerts.findActive(BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY),
+    ).resolves.toMatchObject({ id: replacement?.id, state: "observing" });
+  });
+
   it("keeps an opened disconnect alert retryable through a long outage and delivers it after recovery", async () => {
     let now = new Date("2026-07-17T10:00:00.000Z");
     const alerts = createOperationalAlertsRepository(db);

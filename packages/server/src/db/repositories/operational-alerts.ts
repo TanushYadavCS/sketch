@@ -55,6 +55,41 @@ export function createOperationalAlertsRepository(db: Kysely<DB>) {
     return db.selectFrom("operational_alerts").selectAll().where("id", "=", existing.id).executeTakeFirstOrThrow();
   }
 
+  async function resolveAlert(active: OperationalAlertRow, resolvedAt: string): Promise<void> {
+    await db.transaction().execute(async (trx) => {
+      const result = await trx
+        .updateTable("operational_alerts")
+        .set({ state: "resolved", resolved_at: resolvedAt, updated_at: resolvedAt })
+        .where("id", "=", active.id)
+        .where("state", "in", ["observing", "open"])
+        .where("last_observed_at", "<=", resolvedAt)
+        .executeTakeFirst();
+      if (Number(result.numUpdatedRows) !== 1) return;
+      if (active.state === "open") {
+        await trx
+          .updateTable("operational_alert_deliveries")
+          .set({
+            state: "retry",
+            attempts: 0,
+            next_attempt_at: resolvedAt,
+            claim_token: null,
+            claimed_at: null,
+            updated_at: resolvedAt,
+          })
+          .where("alert_id", "=", active.id)
+          .where("state", "in", ["pending", "retry", "dead"])
+          .execute();
+      } else {
+        await trx
+          .updateTable("operational_alert_deliveries")
+          .set({ state: "skipped", last_error_code: "alert_resolved", updated_at: resolvedAt })
+          .where("alert_id", "=", active.id)
+          .where("state", "in", ["pending", "retry"])
+          .execute();
+      }
+    });
+  }
+
   return {
     findActive,
 
@@ -101,38 +136,18 @@ export function createOperationalAlertsRepository(db: Kysely<DB>) {
     async resolve(type: string, resourceKey: string, resolvedAt: string): Promise<void> {
       const active = await findActive(type, resourceKey);
       if (!active) return;
-      await db.transaction().execute(async (trx) => {
-        const result = await trx
-          .updateTable("operational_alerts")
-          .set({ state: "resolved", resolved_at: resolvedAt, updated_at: resolvedAt })
-          .where("id", "=", active.id)
-          .where("state", "in", ["observing", "open"])
-          .where("last_observed_at", "<=", resolvedAt)
-          .executeTakeFirst();
-        if (Number(result.numUpdatedRows) !== 1) return;
-        if (active.state === "open") {
-          await trx
-            .updateTable("operational_alert_deliveries")
-            .set({
-              state: "retry",
-              attempts: 0,
-              next_attempt_at: resolvedAt,
-              claim_token: null,
-              claimed_at: null,
-              updated_at: resolvedAt,
-            })
-            .where("alert_id", "=", active.id)
-            .where("state", "in", ["pending", "retry", "dead"])
-            .execute();
-        } else {
-          await trx
-            .updateTable("operational_alert_deliveries")
-            .set({ state: "skipped", last_error_code: "alert_resolved", updated_at: resolvedAt })
-            .where("alert_id", "=", active.id)
-            .where("state", "in", ["pending", "retry"])
-            .execute();
-        }
-      });
+      await resolveAlert(active, resolvedAt);
+    },
+
+    async resolveById(id: string, resolvedAt: string): Promise<void> {
+      const active = await db
+        .selectFrom("operational_alerts")
+        .selectAll()
+        .where("id", "=", id)
+        .where("state", "in", ["observing", "open"])
+        .executeTakeFirst();
+      if (!active) return;
+      await resolveAlert(active, resolvedAt);
     },
 
     async listEligibleObserving(now: string): Promise<OperationalAlertRow[]> {

@@ -16,6 +16,7 @@ import {
 import { GatewayClientFacade } from "../gateway-client-facade";
 import { WHATSAPP_GATEWAY_DEFAULT_PORT, WHATSAPP_GATEWAY_HOST } from "./http-server";
 import { loadBootId, loadHostId, loadPidStartTime } from "./identity";
+import { type WhatsAppSocketStatePublication, isSameWhatsAppSocketStatePublication } from "./socket-state-publication";
 
 export const WHATSAPP_GATEWAY_READINESS_TIMEOUT_MS = 30_000;
 export const WHATSAPP_GATEWAY_HEALTH_INTERVAL_MS = 30_000;
@@ -125,7 +126,7 @@ export class WhatsAppGatewaySupervisor {
   private startedSuccessfully = false;
   private respawnScheduled = false;
   private lastHealth: WhatsAppFacadeHealth | null = null;
-  private lastPublishedSocketState: WhatsAppSocketStateChange["socketState"] | null = null;
+  private lastPublishedSocketState: WhatsAppSocketStatePublication | null = null;
   private lastSocketGeneration: number | null = null;
   private lastSocketStateChangeAt: string | null = null;
   private socketStatePublication: Promise<void> = Promise.resolve();
@@ -365,7 +366,7 @@ export class WhatsAppGatewaySupervisor {
         return;
       }
       this.lastHealth = health;
-      if (lease && this.lastPublishedSocketState !== health.socketState) {
+      if (lease && this.lastPublishedSocketState?.socketState !== health.socketState) {
         await this.publishSocketStateChange({
           ownerToken: lease.owner_token,
           generation: lease.generation,
@@ -470,10 +471,10 @@ export class WhatsAppGatewaySupervisor {
     const publication = this.socketStatePublication.then(async () => {
       if (this.lastSocketStateChangeAt && normalized.occurredAt < this.lastSocketStateChangeAt) return;
       this.lastSocketStateChangeAt = normalized.occurredAt;
-      if (this.lastPublishedSocketState === normalized.socketState) return;
+      if (isSameWhatsAppSocketStatePublication(this.lastPublishedSocketState, normalized)) return;
       try {
         await this.options.onSocketStateChange?.(normalized);
-        this.lastPublishedSocketState = normalized.socketState;
+        this.lastPublishedSocketState = normalized;
       } catch (error) {
         this.options.logger.warn(
           { error, socketState: normalized.socketState },

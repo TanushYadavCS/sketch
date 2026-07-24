@@ -475,11 +475,21 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
       socketGeneration: 2,
       socketState: "disconnected",
       occurredAt: "2026-07-17T10:01:00.000Z",
-      statusCode: 413,
+      statusCode: 408,
     });
     expect(supervisor.isConnected).toBe(false);
+
+    await supervisor.handleSocketStateChange({
+      ownerToken: "current-owner",
+      generation: 4,
+      socketGeneration: 3,
+      socketState: "disconnected",
+      occurredAt: "2026-07-17T10:02:00.000Z",
+      statusCode: 413,
+    });
+    expect(onSocketStateChange).toHaveBeenCalledTimes(3);
     expect(onSocketStateChange).toHaveBeenLastCalledWith(
-      expect.objectContaining({ socketState: "disconnected", statusCode: 413 }),
+      expect.objectContaining({ socketGeneration: 3, socketState: "disconnected", statusCode: 413 }),
     );
     await db.destroy();
   });

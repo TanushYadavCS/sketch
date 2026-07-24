@@ -102,7 +102,7 @@ export class OperationalAlertWorker {
     for (const alert of await this.params.alerts.listEligibleObserving(nowIso)) {
       const definition = this.params.definitions.get(alert.type);
       if (!definition || !(await definition.isStillActive(alert))) {
-        await this.params.alerts.resolve(alert.type, alert.resource_key, nowIso);
+        await this.params.alerts.resolveById(alert.id, nowIso);
         continue;
       }
       await this.params.alerts.promote(alert.id, nowIso);
@@ -115,7 +115,7 @@ export class OperationalAlertWorker {
     for (const alert of await this.params.alerts.listOpen()) {
       const definition = this.params.definitions.get(alert.type);
       if (!definition || !(await definition.isStillActive(alert))) {
-        await this.params.alerts.resolve(alert.type, alert.resource_key, nowIso);
+        await this.params.alerts.resolveById(alert.id, nowIso);
         continue;
       }
       openAlerts.push({ alert, definition });
