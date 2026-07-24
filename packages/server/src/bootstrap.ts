@@ -5,6 +5,7 @@ import { join } from "node:path";
  * from tests with a custom Config and { connect: false }.
  */
 import { serve } from "@hono/node-server";
+import { DisconnectReason } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { type AgentRunAdmissionOptions, createAgentRunLimiter } from "./agent/concurrency-limiter";
 import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/environment";
@@ -35,6 +36,7 @@ import { createInboxMessagesRepository } from "./db/repositories/inbox-messages"
 import { createLocalClaudeSessionRepository } from "./db/repositories/local-claude-sessions";
 import { createLocalDeviceRepository } from "./db/repositories/local-devices";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
+import { createOperationalAlertsRepository } from "./db/repositories/operational-alerts";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
@@ -52,6 +54,10 @@ import { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import { LocalDeviceGateway } from "./local-devices/gateway";
 import { createLogger } from "./logger";
 import { runManagedSeed } from "./managed-seed";
+import { createOperationalAlertDefinitions } from "./operational-alerts/definitions";
+import { createOperationalAlertService } from "./operational-alerts/service";
+import { createWhatsAppOperationalAlertTransport } from "./operational-alerts/whatsapp-transport";
+import { OperationalAlertWorker } from "./operational-alerts/worker";
 import { QueueManager } from "./queue";
 import { TaskScheduler } from "./scheduler/service";
 import { syncFeaturedSkills } from "./skills/sync";
@@ -151,6 +157,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
   const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
+  const operationalAlertsRepo = createOperationalAlertsRepository(db);
+  const operationalAlertService = createOperationalAlertService({ alerts: operationalAlertsRepo, logger });
   const agentEnvironmentVariables = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   await backfillFilesConnectorCredentialEncryption(db, config.ENCRYPTION_KEY, logger);
   await runManagedSeed(config, settingsRepo, users);
@@ -293,8 +301,28 @@ export async function createServer(config: Config, options?: CreateServerOptions
   let inProcessWhatsAppLease: InProcessWhatsAppLease | null = null;
   let whatsappBot: WhatsAppBot | null = null;
   let whatsapp: WhatsAppSocketFacade;
+  const observeInProcessBaileysSocketState = async (
+    socketState: "connected" | "disconnected" | "logged-out",
+    socketGeneration: number,
+    statusCode?: number,
+  ): Promise<void> => {
+    const identity = inProcessWhatsAppLease?.socketStateIdentity;
+    if (!identity) return;
+    await operationalAlertService.observeBaileysSocketState({
+      ...identity,
+      socketGeneration,
+      socketState,
+      ...(statusCode === undefined ? {} : { statusCode }),
+      reason: `inprocess_${socketState}`,
+    });
+  };
   if (config.WHATSAPP_RUNTIME_MODE === "gateway" && usesBaileys) {
-    whatsappSupervisor = new WhatsAppGatewaySupervisor({ db, config, logger });
+    whatsappSupervisor = new WhatsAppGatewaySupervisor({
+      db,
+      config,
+      logger,
+      onSocketStateChange: (change) => operationalAlertService.observeBaileysSocketState(change),
+    });
     /**
      * Keeps one application facade stable across gateway child exits and reads
      * status from the live supervisor client after startup or pairing.
@@ -343,6 +371,20 @@ export async function createServer(config: Config, options?: CreateServerOptions
                 return inProcessWhatsAppLease.withLeaseFence(callback);
               },
             })
+        : undefined,
+      onConnectionOpen: usesBaileys
+        ? async (socketGeneration) => {
+            await observeInProcessBaileysSocketState("connected", socketGeneration);
+          }
+        : undefined,
+      onConnectionClose: usesBaileys
+        ? async (statusCode, socketGeneration) => {
+            await observeInProcessBaileysSocketState(
+              statusCode === DisconnectReason.loggedOut ? "logged-out" : "disconnected",
+              socketGeneration,
+              statusCode,
+            );
+          }
         : undefined,
       onLoggedOut: usesBaileys
         ? async () => {
@@ -406,6 +448,29 @@ export async function createServer(config: Config, options?: CreateServerOptions
     ],
     logger,
   });
+  const operationalAlertWorker =
+    connect && usesBaileys
+      ? new OperationalAlertWorker({
+          alerts: operationalAlertsRepo,
+          users,
+          settings: settingsRepo,
+          definitions: createOperationalAlertDefinitions({
+            isBaileysGatewayDisconnected: () =>
+              whatsappSupervisor
+                ? whatsappSupervisor.requiresPairing || !whatsappSupervisor.isConnected
+                : Boolean(whatsappBot && !whatsappBot.isConnected),
+          }),
+          transports: {
+            whatsapp: createWhatsAppOperationalAlertTransport({
+              whatsapp: whatsappRuntime,
+              conversations: conversationsRepo,
+            }),
+          },
+          logger,
+        })
+      : null;
+  operationalAlertService.setWake(() => operationalAlertWorker?.wake());
+  operationalAlertWorker?.start();
 
   const sendDirectMessage = async ({
     userId,
@@ -774,7 +839,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
           onWhatsAppSocketStateChange: async (
             change: Parameters<WhatsAppGatewaySupervisor["handleSocketStateChange"]>[0],
           ) => {
-            const accepted = whatsappSupervisor?.handleSocketStateChange(change) ?? false;
+            const accepted = (await whatsappSupervisor?.handleSocketStateChange(change)) ?? false;
             if (accepted && change.socketState === "connected") {
               await whatsappBackfillWorker?.handleConnected({
                 leaseGeneration: change.generation,
@@ -809,6 +874,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 11. Shutdown handle
   async function shutdown() {
     logger.info("Shutting down...");
+    await operationalAlertWorker?.stop();
     await whatsappBackfillWorker?.stop();
     await whatsappInboundConsumer.stop();
     whatsappInboundRetention.stop();

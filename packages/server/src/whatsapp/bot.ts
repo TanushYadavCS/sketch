@@ -275,7 +275,7 @@ export class WhatsAppBot {
         if (connection === "close") {
           const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
           const errorMsg = lastDisconnect?.error?.message ?? "";
-          await this.onConnectionClose?.(statusCode, this.activeSocketGeneration);
+          if (!this.stopping) await this.onConnectionClose?.(statusCode, this.activeSocketGeneration);
 
           if (statusCode === DisconnectReason.restartRequired) {
             this.logger.info("WhatsApp restart required after pairing — reconnecting");
@@ -616,7 +616,7 @@ export class WhatsAppBot {
 
       if (connection === "close") {
         const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-        await this.onConnectionClose?.(statusCode, socketGeneration);
+        if (!this.stopping) await this.onConnectionClose?.(statusCode, socketGeneration);
 
         if (statusCode === DisconnectReason.loggedOut) {
           this.clearReconnectTimer();

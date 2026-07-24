@@ -13,7 +13,7 @@ import { buildTaskNudgeTemplate } from "./templates";
 
 export const WORKFLOW_OUTPUT_INBOX_KIND = "workflow_output";
 
-const CUSTOMER_SERVICE_WINDOW_MS = 23 * 60 * 60 * 1000;
+export const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 23 * 60 * 60 * 1000;
 const FALLBACK_PROVIDER_CODES = new Set(["contact_not_found", "window_expired"]);
 
 export type ProactiveDeliveryMode = "text" | "nudge" | "parked";
@@ -94,7 +94,7 @@ export async function deliverProactiveDm(params: DeliverProactiveDmParams): Prom
     phoneE164: target.phoneE164,
   });
 
-  if (lastInbound && isInsideCustomerServiceWindow(lastInbound, params.now ?? new Date())) {
+  if (lastInbound && isInsideWhatsAppCustomerServiceWindow(lastInbound, params.now ?? new Date())) {
     try {
       const textSends = await sendTextChunks(resolvedParams);
       return { mode: "text", deliveryTarget, sent: lastSent(textSends), textSends };
@@ -221,7 +221,7 @@ function lastSent(textSends: ProactiveDeliveryTextSend[]): WhatsAppSendResult | 
   return null;
 }
 
-function isInsideCustomerServiceWindow(
+export function isInsideWhatsAppCustomerServiceWindow(
   message: Awaited<
     ReturnType<ReturnType<typeof createConversationRepository>["findLatestInboundWhatsAppDmFromRecipient"]>
   >,
@@ -230,7 +230,7 @@ function isInsideCustomerServiceWindow(
   if (!message) return false;
   const timestamp = parseTimestamp(message.receivedAt) ?? parseTimestamp(message.providerTimestamp);
   if (!timestamp) return false;
-  return now.getTime() - timestamp.getTime() <= CUSTOMER_SERVICE_WINDOW_MS;
+  return now.getTime() - timestamp.getTime() <= WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS;
 }
 
 function parseTimestamp(value: string | null | undefined): Date | null {

@@ -14,6 +14,7 @@ export interface UserRepository {
   findById(id: string): Promise<UserRow | undefined>;
   findFirstAdmin(): Promise<UserRow | undefined>;
   findFirstLocalAdmin(): Promise<UserRow | undefined>;
+  listAdmins(): Promise<UserRow[]>;
   getAllEmailsForUser(id: string): Promise<string[]>;
   getVerifiedEmailsForUser(id: string): Promise<string[]>;
   findByExactName(name: string, excludeUserId?: string): Promise<UserRow | undefined>;
@@ -122,6 +123,16 @@ export function createUserRepository(db: UserDb): UserRepository {
         .where("password_hash", "is not", null)
         .orderBy("created_at", "asc")
         .executeTakeFirst();
+    },
+
+    async listAdmins() {
+      return db
+        .selectFrom("users")
+        .selectAll()
+        .where("auth_role", "=", "admin")
+        .where("type", "!=", "external")
+        .orderBy("created_at", "asc")
+        .execute();
     },
 
     async getAllEmailsForUser(userId: string): Promise<string[]> {
