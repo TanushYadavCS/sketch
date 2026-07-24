@@ -5,6 +5,7 @@ import { join } from "node:path";
  * from tests with a custom Config and { connect: false }.
  */
 import { serve } from "@hono/node-server";
+import { DisconnectReason } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { type AgentRunAdmissionOptions, createAgentRunLimiter } from "./agent/concurrency-limiter";
 import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/environment";
@@ -300,6 +301,21 @@ export async function createServer(config: Config, options?: CreateServerOptions
   let inProcessWhatsAppLease: InProcessWhatsAppLease | null = null;
   let whatsappBot: WhatsAppBot | null = null;
   let whatsapp: WhatsAppSocketFacade;
+  const observeInProcessBaileysSocketState = async (
+    socketState: "connected" | "disconnected" | "logged-out",
+    socketGeneration: number,
+    statusCode?: number,
+  ): Promise<void> => {
+    const identity = inProcessWhatsAppLease?.socketStateIdentity;
+    if (!identity) return;
+    await operationalAlertService.observeBaileysSocketState({
+      ...identity,
+      socketGeneration,
+      socketState,
+      ...(statusCode === undefined ? {} : { statusCode }),
+      reason: `inprocess_${socketState}`,
+    });
+  };
   if (config.WHATSAPP_RUNTIME_MODE === "gateway" && usesBaileys) {
     whatsappSupervisor = new WhatsAppGatewaySupervisor({
       db,
@@ -355,6 +371,20 @@ export async function createServer(config: Config, options?: CreateServerOptions
                 return inProcessWhatsAppLease.withLeaseFence(callback);
               },
             })
+        : undefined,
+      onConnectionOpen: usesBaileys
+        ? async (socketGeneration) => {
+            await observeInProcessBaileysSocketState("connected", socketGeneration);
+          }
+        : undefined,
+      onConnectionClose: usesBaileys
+        ? async (statusCode, socketGeneration) => {
+            await observeInProcessBaileysSocketState(
+              statusCode === DisconnectReason.loggedOut ? "logged-out" : "disconnected",
+              socketGeneration,
+              statusCode,
+            );
+          }
         : undefined,
       onLoggedOut: usesBaileys
         ? async () => {
@@ -419,14 +449,16 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger,
   });
   const operationalAlertWorker =
-    connect && whatsappSupervisor
+    connect && usesBaileys
       ? new OperationalAlertWorker({
           alerts: operationalAlertsRepo,
           users,
           settings: settingsRepo,
           definitions: createOperationalAlertDefinitions({
             isBaileysGatewayDisconnected: () =>
-              Boolean(whatsappSupervisor?.requiresPairing || !whatsappSupervisor?.isConnected),
+              whatsappSupervisor
+                ? whatsappSupervisor.requiresPairing || !whatsappSupervisor.isConnected
+                : Boolean(whatsappBot && !whatsappBot.isConnected),
           }),
           transports: {
             whatsapp: createWhatsAppOperationalAlertTransport({

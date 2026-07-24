@@ -368,11 +368,13 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
   it("contains a health-poll restart rejection and leaves respawn scheduled", async () => {
     const db = await createTestDb();
     const sleepCalls: number[] = [];
+    const onSocketStateChange = vi.fn().mockResolvedValue(undefined);
     const supervisor = new WhatsAppGatewaySupervisor({
       db,
       config: createTestConfig({ WHATSAPP_RUNTIME_MODE: "gateway" }),
       logger: createTestLogger(),
       gatewayScriptPath: fileURLToPath(import.meta.url),
+      onSocketStateChange,
       sleep: async (milliseconds) => {
         sleepCalls.push(milliseconds);
         await new Promise<void>(() => undefined);
@@ -395,6 +397,14 @@ describe("WhatsAppGatewaySupervisor lifecycle", () => {
 
     expect(internals.respawnScheduled).toBe(true);
     expect(sleepCalls).toEqual([1_000]);
+    expect(onSocketStateChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ownerToken: "current-owner",
+        generation: 1,
+        socketState: "disconnected",
+        reason: "health_restart:three consecutive health failures",
+      }),
+    );
     await db.destroy();
   });
 

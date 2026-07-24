@@ -385,6 +385,17 @@ export class WhatsAppGatewaySupervisor {
   }
 
   private async restartFromHealthPoll(reason: string): Promise<void> {
+    const lease = this.lease;
+    if (lease) {
+      if (this.lastHealth) this.lastHealth = { ...this.lastHealth, socketState: "disconnected" };
+      await this.publishSocketStateChange({
+        ownerToken: lease.owner_token,
+        generation: lease.generation,
+        socketState: "disconnected",
+        occurredAt: new Date(this.now()).toISOString(),
+        reason: `health_restart:${reason}`,
+      });
+    }
     try {
       await this.restart(reason);
     } catch (error) {
@@ -619,6 +630,10 @@ export class InProcessWhatsAppLease {
 
   get generation(): number | null {
     return this.fence?.generation ?? null;
+  }
+
+  get socketStateIdentity(): Pick<WhatsAppSocketStateChange, "ownerToken" | "generation"> | null {
+    return this.fence ? { ownerToken: this.fence.ownerToken, generation: this.fence.generation } : null;
   }
 
   async acquire(): Promise<void> {
