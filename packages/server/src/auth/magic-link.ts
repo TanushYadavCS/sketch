@@ -78,6 +78,22 @@ export async function createRateLimitedMagicLinkToken(db: Kysely<DB>, userId: st
 }
 
 /**
+ * Validate a magic link token without consuming it. The confirmation GET uses
+ * this read-only check so link previews cannot spend a single-use token.
+ */
+export async function findValidMagicLinkUserId(db: Kysely<DB>, token: string): Promise<string | null> {
+  const row = await db
+    .selectFrom("magic_link_tokens")
+    .select("user_id")
+    .where("token", "=", token)
+    .where("used_at", "is", null)
+    .where("expires_at", ">", new Date().toISOString())
+    .executeTakeFirst();
+
+  return row?.user_id ?? null;
+}
+
+/**
  * Verify a magic link token. Uses an atomic UPDATE … RETURNING to prevent double-use
  * race conditions and read the user_id in a single query. The WHERE clause ensures only
  * an unused, non-expired token is matched.

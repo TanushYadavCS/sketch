@@ -3,7 +3,7 @@
  * JWTs are signed with a per-deployment secret stored in the settings table,
  * so sessions survive server restarts. Cookie-based with httpOnly, sameSite=lax.
  */
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { type Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Kysely } from "kysely";
@@ -13,6 +13,7 @@ import { signJwt, verifyJwt } from "../auth/jwt";
 import {
   type VerifiedUser,
   createRateLimitedMagicLinkToken,
+  findValidMagicLinkUserId,
   findVerifiedUserByEmail,
   verifyMagicLinkToken,
 } from "../auth/magic-link";
@@ -31,7 +32,9 @@ export type MagicLinkSender = (opts: {
 
 export const SESSION_COOKIE = "sketch_session";
 const PLATFORM_COOKIE = "sketch_platform_session";
+const MAGIC_LINK_CONFIRMATION_COOKIE = "sketch_magic_link_confirmation";
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
+const MAGIC_LINK_CONFIRMATION_MAX_AGE = 5 * 60;
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 type AuthRole = "admin" | "member";
@@ -61,6 +64,53 @@ function safeReturnTo(value: unknown): string | null {
   if (trimmed.startsWith("//")) return null;
   if (trimmed.startsWith("/login")) return null;
   return trimmed;
+}
+
+function escapeHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function magicLinkConfirmationPage(token: string, confirmation: string, returnTo: string | null): string {
+  const returnToInput = returnTo ? `<input type="hidden" name="return_to" value="${escapeHtml(returnTo)}">` : "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Confirm sign in</title>
+</head>
+<body>
+  <main>
+    <h1>Confirm sign in</h1>
+    <p>Continue to securely sign in to Sketch.</p>
+    <form method="post" action="/api/auth/magic-link/confirmation" autocomplete="off">
+      <input type="hidden" name="token" value="${escapeHtml(token)}">
+      <input type="hidden" name="confirmation" value="${escapeHtml(confirmation)}">
+      ${returnToInput}
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>`;
+}
+
+function setMagicLinkConfirmationHeaders(c: Context): void {
+  c.header("Cache-Control", "no-store");
+  c.header("Pragma", "no-cache");
+  c.header("Referrer-Policy", "no-referrer");
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("X-Frame-Options", "DENY");
+  c.header(
+    "Content-Security-Policy",
+    "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  );
+}
+
+function matchesConfirmationCookie(cookie: string | undefined, confirmation: unknown): confirmation is string {
+  if (!cookie || typeof confirmation !== "string") return false;
+  const cookieBytes = Buffer.from(cookie);
+  const confirmationBytes = Buffer.from(confirmation);
+  return cookieBytes.length === confirmationBytes.length && timingSafeEqual(cookieBytes, confirmationBytes);
 }
 
 export async function createSession(c: Context, sub: string, role: AuthRole, jwtSecret: string): Promise<void> {
@@ -246,7 +296,41 @@ export function authRoutes(
       return c.redirect("/login?error=invalid_link");
     }
 
-    const userId = await verifyMagicLinkToken(db, token);
+    const userId = await findValidMagicLinkUserId(db, token);
+    if (!userId) {
+      return c.redirect("/login?error=expired_link");
+    }
+
+    const user = await deps.userRepo.findById(userId);
+    if (!user) {
+      return c.redirect("/login?error=expired_link");
+    }
+    if (user.type === "agent" || user.type === "external") {
+      return c.redirect("/login?error=invalid_link");
+    }
+
+    const confirmation = randomBytes(32).toString("hex");
+    setCookie(c, MAGIC_LINK_CONFIRMATION_COOKIE, confirmation, {
+      httpOnly: true,
+      secure: isSecure(c),
+      sameSite: "Strict",
+      path: "/api/auth/magic-link/confirmation",
+      maxAge: MAGIC_LINK_CONFIRMATION_MAX_AGE,
+    });
+    setMagicLinkConfirmationHeaders(c);
+    return c.html(magicLinkConfirmationPage(token, confirmation, returnTo));
+  });
+
+  routes.post("/magic-link/confirmation", async (c) => {
+    const body = (await c.req.parseBody().catch(() => ({}))) as Record<string, string | File>;
+    const token = body.token;
+    const returnTo = safeReturnTo(body.return_to);
+    const confirmationCookie = getCookie(c, MAGIC_LINK_CONFIRMATION_COOKIE);
+    if (typeof token !== "string" || !matchesConfirmationCookie(confirmationCookie, body.confirmation)) {
+      return c.redirect("/login?error=invalid_link");
+    }
+
+    const userId = await findValidMagicLinkUserId(db, token);
     if (!userId) {
       return c.redirect("/login?error=expired_link");
     }
@@ -264,6 +348,12 @@ export function authRoutes(
       return c.redirect("/login?error=invalid_link");
     }
 
+    const consumedUserId = await verifyMagicLinkToken(db, token);
+    if (consumedUserId !== user.id) {
+      return c.redirect("/login?error=expired_link");
+    }
+
+    deleteCookie(c, MAGIC_LINK_CONFIRMATION_COOKIE, { path: "/api/auth/magic-link/confirmation" });
     await createSession(c, user.id, toAuthRole(user.auth_role), settingsRow.jwt_secret);
     return c.redirect(returnTo ?? "/");
   });

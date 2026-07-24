@@ -33,6 +33,7 @@ const PUBLIC_PATHS = new Set([
   "/api/auth/session",
   "/api/auth/verify-email",
   "/api/auth/magic-link",
+  "/api/auth/magic-link/confirmation",
   "/api/auth/magic-link/verify",
   "/api/health",
   "/api/oauth/google/callback",
