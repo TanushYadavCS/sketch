@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import { createConnectorRepository } from "../db/repositories/connectors";
 import { type ConversationSliceRow, createConversationSlicesRepository } from "../db/repositories/conversation-slices";
-import type { WhatsAppGroupIndexingConfig } from "../db/repositories/whatsapp-groups";
+import { type WhatsAppGroupIndexingConfig, createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import { createWhatsAppIdentityCandidateRepository } from "../db/repositories/whatsapp-identity-candidates";
 import type { DB } from "../db/schema";
 import {
@@ -382,7 +383,14 @@ async function renderSlice(db: Kysely<DB>, context: SliceContext, logger: Logger
   const messages = await listSliceMessages(db, context.slice);
   const rosterBlock = renderWhatsAppRosterBlock(roster.snapshot);
   const transcript = renderWhatsAppTranscript(roster.snapshot, messages);
-  const content = `${rosterBlock}\n\nTranscript:\n${transcript}`;
+  /**
+   * Stored content is transcript-only (plus the group header), matching the
+   * email/Fireflies convention: participant rosters stay out of the body so
+   * they never pollute embeddings or the entity extractor. The roster block
+   * still feeds the salience prompt, and ACLs come from the roster snapshot.
+   */
+  const titleGroup = sanitizeWhatsAppDisplayText(context.groupName) || "WhatsApp group";
+  const content = `Group: ${titleGroup}\n\nTranscript:\n${transcript}`;
   assertNoRawWhatsAppIdentifiers(content);
   return {
     rosterSnapshot: roster.snapshot,
@@ -547,8 +555,25 @@ async function syncedItemForKeptSlice(
   };
 }
 
+/**
+ * Requeued slices (migration 155 cleared their indexed_file_id) still own a
+ * live file row keyed by provider_file_id = slice id. Without the fallback
+ * lookup, a slice whose group no longer resolves any teammate would leave
+ * that old file active under stale ACLs forever.
+ */
+async function findSliceFileId(db: Kysely<DB>, sliceId: string): Promise<string | null> {
+  const row = await db
+    .selectFrom("indexed_files")
+    .select("id")
+    .where("provider_file_id", "=", sliceId)
+    .where("file_type", "=", WHATSAPP_CONVERSATION_SLICE_FILE_TYPE)
+    .where("is_archived", "=", 0)
+    .executeTakeFirst();
+  return row?.id ?? null;
+}
+
 async function archiveLinkedSliceFileIfPresent(db: Kysely<DB>, context: SliceContext): Promise<void> {
-  const indexedFileId = context.slice.indexed_file_id;
+  const indexedFileId = context.slice.indexed_file_id ?? (await findSliceFileId(db, context.slice.id));
   if (!indexedFileId) return;
   await db.transaction().execute(async (trx) => {
     await trx.deleteFrom("file_access").where("indexed_file_id", "=", indexedFileId).execute();
@@ -619,4 +644,98 @@ export async function* emitWhatsAppSyncedItems(options: {
     if (skippedNoScope) options.onSkippedNoScope?.();
     if (item) yield item;
   }
+}
+
+/**
+ * Membership reconciliation independent of slice emission, mirroring
+ * reconcileSlackChannelAcls. Without this a quiet group whose kept slices are
+ * older than the emission refresh window would retain a departed teammate's
+ * access indefinitely, because scope members are otherwise rewritten only when
+ * a slice is (re-)emitted. Rosters come from the synced participant tables,
+ * so this reflects the last observed group state.
+ *
+ * Disabled groups deliberately keep their previously indexed files (the
+ * shipped disable semantic retains history), so membership is reconciled for
+ * every scoped group: a departed member must lose access to retained slices
+ * too.
+ *
+ * Zero-teammate rosters diverge by enablement. Enabled groups archive,
+ * matching the emission-time fail-closed behavior — reversible, because
+ * archival clears the slice link and re-emission relinks once a teammate
+ * returns. Disabled groups are excluded from re-emission, so archiving them
+ * would be permanent; their scope members are cleared instead, which revokes
+ * all access while keeping the retained files recoverable when membership
+ * returns.
+ */
+export async function reconcileWhatsAppGroupAcls(options: {
+  db: Kysely<DB>;
+  logger: Logger;
+  connectorConfigId: string;
+}): Promise<{ scopesRefreshed: number; scopesArchived: number; filesArchived: number }> {
+  const connectorRepo = createConnectorRepository(options.db);
+  const groupRepo = createWhatsAppGroupRepository(options.db);
+  const scopes = await connectorRepo.listAccessScopesForConnector(options.connectorConfigId, "whatsapp_group");
+  if (scopes.length === 0) return { scopesRefreshed: 0, scopesArchived: 0, filesArchived: 0 };
+
+  let scopesRefreshed = 0;
+  let scopesArchived = 0;
+  let filesArchived = 0;
+
+  for (const scope of scopes) {
+    const config = await groupRepo.getIndexingConfig(scope.providerScopeId);
+    if (!config) {
+      options.logger.warn({ groupJid: scope.providerScopeId }, "WhatsApp ACL reconciliation found no group row");
+      continue;
+    }
+
+    const conversation = await options.db
+      .selectFrom("conversations")
+      .select("id")
+      .where("platform", "=", "whatsapp")
+      .where("kind", "=", "group")
+      .where("provider_conversation_id", "=", scope.providerScopeId)
+      .executeTakeFirst();
+    if (!conversation) continue;
+
+    let teammateEmails: string[];
+    try {
+      const roster = await buildWhatsAppRosterSnapshot({
+        db: options.db,
+        groupJid: scope.providerScopeId,
+        conversationId: conversation.id,
+        logger: options.logger,
+      });
+      teammateEmails = await loadTeammateEmails(options.db, roster.snapshot);
+    } catch (err) {
+      options.logger.warn({ err, groupJid: scope.providerScopeId }, "WhatsApp ACL reconciliation roster failed");
+      continue;
+    }
+
+    if (teammateEmails.length === 0) {
+      if (config.indexEnabled) {
+        filesArchived += await connectorRepo.archiveFilesForAccessScopes([scope.id]);
+        scopesArchived += 1;
+        continue;
+      }
+      await connectorRepo.upsertAccessScope(options.connectorConfigId, {
+        scopeType: "whatsapp_group",
+        providerScopeId: scope.providerScopeId,
+        label: sanitizeWhatsAppDisplayText(config.name) || "WhatsApp group",
+        memberEmails: [],
+      });
+      scopesRefreshed += 1;
+      continue;
+    }
+
+    await connectorRepo.upsertAccessScope(options.connectorConfigId, {
+      scopeType: "whatsapp_group",
+      providerScopeId: scope.providerScopeId,
+      label: sanitizeWhatsAppDisplayText(config.name) || "WhatsApp group",
+      memberEmails: teammateEmails,
+    });
+    scopesRefreshed += 1;
+  }
+
+  options.logger.info({ scopesRefreshed, scopesArchived, filesArchived }, "Reconciled WhatsApp group ACLs");
+  return { scopesRefreshed, scopesArchived, filesArchived };
 }

@@ -46,7 +46,7 @@ describe("routine materialization call scopes", () => {
 
     expect(recreateCalls).toHaveLength(1);
     expect(recreateCalls[0]).toContain("factTypes: deps.materializeFactTypes");
-    expect(connectorApi).toContain("runConnectorSync(db, connectorId, logger, config)");
+    expect(connectorApi).toContain("runConnectorSync(db, connectorId, logger, config, {");
     expect(oauthApi.match(/runConnectorSync\(db, connectorConfig\.id, logger, appConfig\)/g)).toHaveLength(3);
     expect(syncRunner).toContain('postSyncMode: "deferred"');
   });

@@ -333,6 +333,31 @@ describe("WhatsAppBot reconnect lifecycle", () => {
     randomSpy.mockRestore();
   });
 
+  it("does not report a disconnect while stopping", async () => {
+    const onConnectionClose = vi.fn().mockResolvedValue(undefined);
+    const bot = new WhatsAppBot({ db, logger: createTestLogger(), onConnectionClose });
+    const current = createConnectionSocket();
+    (bot as unknown as { sock: unknown; activeSocketGeneration: number; stopping: boolean }).sock = current.socket;
+    (bot as unknown as { activeSocketGeneration: number }).activeSocketGeneration = 1;
+    (bot as unknown as { stopping: boolean }).stopping = true;
+    (
+      bot as unknown as {
+        registerConnectionHandler: (
+          socket: unknown,
+          authState: { clearCreds: () => Promise<void> },
+          socketGeneration: number,
+        ) => void;
+      }
+    ).registerConnectionHandler(current.socket as never, { clearCreds: vi.fn().mockResolvedValue(undefined) }, 1);
+
+    await current.emitConnectionUpdate({
+      connection: "close",
+      lastDisconnect: { error: { output: { statusCode: 500 }, message: "shutdown" } },
+    });
+
+    expect(onConnectionClose).not.toHaveBeenCalled();
+  });
+
   it("uses the gateway reconnect delay hook for restart-required closes", async () => {
     const reconnectDelayMs = vi.fn().mockReturnValue(1_000);
     const bot = new WhatsAppBot({ db, logger: createTestLogger(), reconnectDelayMs });

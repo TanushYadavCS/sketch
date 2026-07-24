@@ -542,6 +542,41 @@ export interface WhatsAppSessionLeaseTable {
   disconnected_at: string | null;
 }
 
+export interface OperationalAlertsTable {
+  id: string;
+  type: string;
+  resource_key: string;
+  severity: string;
+  state: string;
+  payload: string;
+  first_observed_at: string;
+  last_observed_at: string;
+  notify_after: string;
+  opened_at: string | null;
+  resolved_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface OperationalAlertDeliveriesTable {
+  id: string;
+  alert_id: string;
+  recipient_user_id: string;
+  channel: string;
+  destination_fingerprint: string;
+  state: Generated<string>;
+  attempts: Generated<number>;
+  next_attempt_at: Generated<string>;
+  claim_token: string | null;
+  claimed_at: string | null;
+  provider_message_id: string | null;
+  last_error_code: string | null;
+  last_error: string | null;
+  sent_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface WhatsAppConnectionTransitionsTable {
   connection_key: string;
   lease_generation: number;
@@ -568,12 +603,23 @@ export interface ConversationSlicesTable {
   salience_claim_token: string | null;
   salience_claimed_at: string | null;
   indexed_file_id: string | null;
+  provider_thread_id: string | null;
   created_at: Generated<string>;
 }
 
 export interface ConversationSliceCursorsTable {
   conversation_id: number;
   last_effective_at: string | null;
+  last_message_id: number | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface ConversationSliceStreamCursorsTable {
+  conversation_id: number;
+  stream_key: string;
   last_message_id: number | null;
   claim_token: string | null;
   claimed_at: string | null;
@@ -1337,6 +1383,8 @@ export interface DB {
   whatsapp_keys: WhatsAppKeysTable;
   whatsapp_inbound_events: WhatsAppInboundEventsTable;
   whatsapp_session_lease: WhatsAppSessionLeaseTable;
+  operational_alerts: OperationalAlertsTable;
+  operational_alert_deliveries: OperationalAlertDeliveriesTable;
   whatsapp_connection_transitions: WhatsAppConnectionTransitionsTable;
   whatsapp_groups: WhatsAppGroupsTable;
   settings: SettingsTable;
@@ -1378,6 +1426,7 @@ export interface DB {
   conversation_messages: ConversationMessagesTable;
   conversation_slices: ConversationSlicesTable;
   conversation_slice_cursors: ConversationSliceCursorsTable;
+  conversation_slice_stream_cursors: ConversationSliceStreamCursorsTable;
   whatsapp_identity_candidates: WhatsAppIdentityCandidatesTable;
   whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
   whatsapp_group_participants: WhatsAppGroupParticipantsTable;

@@ -177,6 +177,15 @@ describe("bootstrap", () => {
     expect(res.status).toBe(200);
   });
 
+  it("starts operational alerts for the default in-process WhatsApp runtime", { timeout: 15_000 }, async () => {
+    const { OperationalAlertWorker } = await import("./operational-alerts/worker");
+    const start = vi.spyOn(OperationalAlertWorker.prototype, "start");
+
+    await boot({}, true);
+
+    expect(start).toHaveBeenCalledOnce();
+  });
+
   it("sends explicit WhatsApp magic-link templates without proactive parking", async () => {
     const h = await boot({ BASE_URL: "https://sketch.test" });
     const users = createUserRepository(h.db);

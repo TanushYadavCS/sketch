@@ -59,9 +59,10 @@ import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createFileSharesRepository } from "../db/repositories/file-shares";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
-import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
+import { applyIndexEnabledSelection, createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
+import { createSettingsBackedSlackIndexingFacade } from "../slack/indexing-facade";
 import {
   type ConnectorPermissions,
   connectorPermissions,
@@ -157,7 +158,9 @@ function syncInBackground(
     >
   >,
 ) {
-  runConnectorSync(db, connectorId, logger, config).catch((err) => {
+  runConnectorSync(db, connectorId, logger, config, {
+    slackIndexingFacade: createSettingsBackedSlackIndexingFacade({ db, encryptionKey: config?.ENCRYPTION_KEY }),
+  }).catch((err) => {
     logger.error({ err, connectorId }, "Background sync failed");
   });
 }
@@ -226,10 +229,15 @@ export async function applyWhatsAppGroupScope(params: {
   const knownGroups = await repo.list();
   const knownJids = new Set(knownGroups.map((group) => group.jid));
   const selectedJids = [...new Set(stringArray(params.scopeConfig.groupJids))].filter((jid) => knownJids.has(jid));
-  await params.db.updateTable("whatsapp_groups").set({ index_enabled: 0 }).execute();
-  if (selectedJids.length > 0) {
-    await params.db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", selectedJids).execute();
-  }
+  /**
+   * Routed through applyIndexEnabledSelection instead of updating
+   * index_enabled directly so newly enabled groups get their kept slices
+   * requeued for re-emission — a direct flag flip would leave stale linked
+   * files that emission never refreshes (linked slices outside the 7-day
+   * window are skipped). The non-transactional variant is required: this
+   * runs inside the scope route's transaction.
+   */
+  await applyIndexEnabledSelection(params.db, selectedJids);
   return { ...params.scopeConfig, groupJids: selectedJids };
 }
 
@@ -332,6 +340,7 @@ function defaultAuthTypeForConnector(connectorType: ConnectorType): AuthType {
     case "otter":
       return "api_key";
     case "whatsapp":
+    case "slack":
       return "system";
   }
 }
@@ -830,6 +839,23 @@ export function connectorRoutes(
 
     const connectorType = parsed.data.connectorType as ConnectorType;
     const connectorMeta = getConnector(connectorType);
+
+    /**
+     * The Slack indexing connector is a bootstrap-provisioned singleton:
+     * connecting the Slack bot creates it, and a second config would run
+     * duplicate syncs over the same channels.
+     */
+    if (connectorType === "slack") {
+      return c.json(
+        {
+          error: {
+            code: "SYSTEM_PROVISIONED",
+            message: "The Slack connector is provisioned automatically when the Slack bot is connected.",
+          },
+        },
+        400,
+      );
+    }
 
     if (isLocalConnectorBlockedInCanvasMode(appConfig, connectorType)) {
       return localConnectorBlockedResponse(c, connectorType);
@@ -2238,7 +2264,7 @@ export function connectorRoutes(
     }
 
     const requestedScope = await db.transaction().execute(async (trx) => {
-      const txConnectorRepo = createConnectorRepository(trx);
+      const txConnectorRepo = createConnectorRepository(trx, appConfig?.ENCRYPTION_KEY);
       const scope =
         config.connector_type === "whatsapp"
           ? await applyWhatsAppGroupScope({ db: trx, scopeConfig: parsed.data.scopeConfig })

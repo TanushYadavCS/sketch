@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { type Insertable, type Kysely, type Selectable, sql } from "kysely";
 import type {
   ConversationSliceCursorsTable,
+  ConversationSliceStreamCursorsTable,
   ConversationSlicesTable,
   DB,
   WhatsAppBackfillCheckpointsTable,
@@ -13,6 +14,7 @@ export type WhatsAppBackfillCheckpointStatus = "in_progress" | "complete" | "fai
 
 export type ConversationSliceRow = Selectable<ConversationSlicesTable>;
 export type ConversationSliceCursorRow = Selectable<ConversationSliceCursorsTable>;
+export type ConversationSliceStreamCursorRow = Selectable<ConversationSliceStreamCursorsTable>;
 export type WhatsAppBackfillCheckpointRow = Selectable<WhatsAppBackfillCheckpointsTable>;
 
 export interface ConversationSliceInsert {
@@ -29,6 +31,28 @@ export interface ConversationSliceInsert {
   salienceVerdict?: ConversationSliceSalienceVerdict | null;
   salienceSignals?: string | null;
   indexedFileId?: string | null;
+  providerThreadId?: string | null;
+}
+
+export interface StreamCursorClaim {
+  conversationId: number;
+  streamKey: string;
+  claimToken: string;
+  now: string;
+  staleBefore: string;
+}
+
+export interface StreamCursorAdvanceIfClaimed {
+  conversationId: number;
+  streamKey: string;
+  lastMessageId: number;
+  claimToken: string;
+}
+
+export interface StreamCursorRelease {
+  conversationId: number;
+  streamKey: string;
+  claimToken: string;
 }
 
 export interface ConversationSliceCursorAdvance {
@@ -88,6 +112,7 @@ function toSliceInsert(input: ConversationSliceInsert): Insertable<ConversationS
     salience_claim_token: null,
     salience_claimed_at: null,
     indexed_file_id: input.indexedFileId ?? null,
+    provider_thread_id: input.providerThreadId ?? null,
   };
 }
 
@@ -155,6 +180,22 @@ export function createConversationSlicesRepository(db: Kysely<DB>) {
 
       if (Number(result.numUpdatedRows ?? 0) === 0) return undefined;
       return db.selectFrom("conversation_slices").selectAll().where("id", "=", sliceId).executeTakeFirstOrThrow();
+    },
+
+    /**
+     * Clears indexed-file links on kept slices so the next emission pass
+     * re-renders and re-upserts them (verdicts persist, no LLM re-judging).
+     * Used when rendered content is stale, e.g. after a channel rename.
+     */
+    async unlinkKeptSliceFiles(conversationId: number): Promise<number> {
+      const result = await db
+        .updateTable("conversation_slices")
+        .set({ indexed_file_id: null })
+        .where("conversation_id", "=", conversationId)
+        .where("salience_verdict", "=", "kept")
+        .where("indexed_file_id", "is not", null)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows ?? 0);
     },
 
     async clearSalienceClaim(sliceId: string, claimToken: string): Promise<boolean> {
@@ -296,6 +337,124 @@ export function createConversationSlicesRepository(db: Kysely<DB>) {
         .selectAll()
         .where("conversation_id", "=", input.conversationId)
         .executeTakeFirstOrThrow();
+    },
+
+    async getStreamCursor(
+      conversationId: number,
+      streamKey: string,
+    ): Promise<ConversationSliceStreamCursorRow | undefined> {
+      return db
+        .selectFrom("conversation_slice_stream_cursors")
+        .selectAll()
+        .where("conversation_id", "=", conversationId)
+        .where("stream_key", "=", streamKey)
+        .executeTakeFirst();
+    },
+
+    async listStreamCursors(conversationId: number): Promise<ConversationSliceStreamCursorRow[]> {
+      return db
+        .selectFrom("conversation_slice_stream_cursors")
+        .selectAll()
+        .where("conversation_id", "=", conversationId)
+        .execute();
+    },
+
+    /**
+     * Transactional stream discovery: inserts a cursor row for every discovered
+     * stream key, then advances the router high-water mark. Callers must run
+     * this inside a transaction so a crash cannot advance the router past a
+     * stream whose cursor row was never persisted (which would orphan the
+     * stream forever — discovery is the only thing that learns about new keys).
+     */
+    async ensureStreamCursorsAndAdvanceRouter(input: {
+      conversationId: number;
+      routerStreamKey: string;
+      streamKeys: string[];
+      routerHighWaterMessageId: number;
+    }): Promise<void> {
+      const now = new Date().toISOString();
+      const keys = [...new Set([input.routerStreamKey, ...input.streamKeys])];
+      for (const streamKey of keys) {
+        await db
+          .insertInto("conversation_slice_stream_cursors")
+          .values({
+            conversation_id: input.conversationId,
+            stream_key: streamKey,
+            updated_at: now,
+          })
+          .onConflict((oc) => oc.columns(["conversation_id", "stream_key"]).doNothing())
+          .execute();
+      }
+      await db
+        .updateTable("conversation_slice_stream_cursors")
+        .set({ last_message_id: input.routerHighWaterMessageId, updated_at: now })
+        .where("conversation_id", "=", input.conversationId)
+        .where("stream_key", "=", input.routerStreamKey)
+        .where((eb) =>
+          eb.or([eb("last_message_id", "is", null), eb("last_message_id", "<", input.routerHighWaterMessageId)]),
+        )
+        .execute();
+    },
+
+    async claimStreamCursorIfPending(input: StreamCursorClaim): Promise<boolean> {
+      await db
+        .insertInto("conversation_slice_stream_cursors")
+        .values({
+          conversation_id: input.conversationId,
+          stream_key: input.streamKey,
+          updated_at: input.now,
+        })
+        .onConflict((oc) => oc.columns(["conversation_id", "stream_key"]).doNothing())
+        .execute();
+
+      const result = await db
+        .updateTable("conversation_slice_stream_cursors")
+        .set({ claim_token: input.claimToken, claimed_at: input.now, updated_at: input.now })
+        .where("conversation_id", "=", input.conversationId)
+        .where("stream_key", "=", input.streamKey)
+        .where((eb) =>
+          eb.or([
+            eb("claim_token", "is", null),
+            eb("claimed_at", "is", null),
+            eb("claimed_at", "<", input.staleBefore),
+          ]),
+        )
+        .executeTakeFirst();
+
+      return Number(result.numUpdatedRows ?? 0) > 0;
+    },
+
+    async advanceStreamCursorIfClaimed(
+      input: StreamCursorAdvanceIfClaimed,
+    ): Promise<ConversationSliceStreamCursorRow | undefined> {
+      const result = await db
+        .updateTable("conversation_slice_stream_cursors")
+        .set({ last_message_id: input.lastMessageId, updated_at: new Date().toISOString() })
+        .where("conversation_id", "=", input.conversationId)
+        .where("stream_key", "=", input.streamKey)
+        .where("claim_token", "=", input.claimToken)
+        .where((eb) => eb.or([eb("last_message_id", "is", null), eb("last_message_id", "<", input.lastMessageId)]))
+        .executeTakeFirst();
+
+      if (Number(result.numUpdatedRows ?? 0) === 0) return undefined;
+      return db
+        .selectFrom("conversation_slice_stream_cursors")
+        .selectAll()
+        .where("conversation_id", "=", input.conversationId)
+        .where("stream_key", "=", input.streamKey)
+        .executeTakeFirstOrThrow();
+    },
+
+    async releaseStreamCursorClaim(input: StreamCursorRelease): Promise<boolean> {
+      const result = await db
+        .updateTable("conversation_slice_stream_cursors")
+        .set({ claim_token: null, claimed_at: null, updated_at: new Date().toISOString() })
+        .where("conversation_id", "=", input.conversationId)
+        .where("stream_key", "=", input.streamKey)
+        .where("claim_token", "=", input.claimToken)
+        .executeTakeFirst();
+
+      return Number(result.numUpdatedRows ?? 0) > 0;
     },
 
     async getBackfillCheckpoint(groupJid: string): Promise<WhatsAppBackfillCheckpointRow | undefined> {

@@ -173,7 +173,7 @@ function afterExclusiveForInclusiveStart(startIso: string): string {
   return toIso(new Date(start.getTime() - 1));
 }
 
-function parseRosterSnapshot(raw: string): WhatsAppRosterSnapshot {
+export function parseWhatsAppGroupRosterSnapshot(raw: string): WhatsAppRosterSnapshot {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -213,7 +213,7 @@ function toDrillAnchor(row: SliceAnchorRow): DrillAnchor {
     lastMessageId: row.last_message_id,
     startedAt: row.started_at,
     endedAt: row.ended_at,
-    rosterSnapshot: parseRosterSnapshot(row.roster_snapshot),
+    rosterSnapshot: parseWhatsAppGroupRosterSnapshot(row.roster_snapshot),
     indexedFileId: row.indexed_file_id,
   };
 }

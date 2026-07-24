@@ -156,6 +156,9 @@ describe("buildSystemContext", () => {
       expect(result).toContain("must call SearchChatHistory first");
       expect(result).toContain('scope: "current_thread"');
       expect(result).toContain('scope: "conversation"');
+      expect(result).toContain('scope: "all_chats"');
+      expect(result).toContain('"all_chats" works in any context, including shared channels and groups');
+      expect(result).toContain("WhatsAppGroupHistory or SlackChannelHistory with the returned conversation ref");
       expect(result).toContain("does not replace the existing Search tool");
       expect(result).toContain("call ReadChatHistory around that row id");
       expect(result).toContain("use WhatsAppGroupHistory with the sliceId");

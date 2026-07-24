@@ -42,6 +42,7 @@ import {
   parseSketchCommand,
 } from "../commands";
 import type { Config } from "../config";
+import { refreshSlackChannelName } from "../connectors/slack-salience";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createChannelRepository } from "../db/repositories/channels";
@@ -110,9 +111,18 @@ function isConversationControlMessage(text: string): boolean {
   return isToolProgressCommand(text) || isReasoningTextCommand(text);
 }
 
-function slackConversationRefForMessage(message: { type: string; channelId: string }) {
+/**
+ * Group DMs (channel_type "mpim") are recorded under their own kind so the
+ * indexing pipeline, which operates on kind "channel" only, never chunks or
+ * indexes them — the feature's scope excludes DMs of every arity. Capture
+ * still runs so mention context keeps working inside group DMs.
+ */
+function slackConversationRefForMessage(message: { type: string; channelId: string; channelType?: string }) {
   if (message.type === "dm") {
     return { platform: "slack", kind: "dm", providerConversationId: message.channelId };
+  }
+  if (message.channelType === "mpim") {
+    return { platform: "slack", kind: "mpim", providerConversationId: message.channelId };
   }
   return { platform: "slack", kind: "channel", providerConversationId: message.channelId };
 }
@@ -760,6 +770,22 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     });
   });
 
+  /**
+   * Channel renames arrive as excluded system messages, so this is the only
+   * signal that refreshes stored metadata: the channels row feeds agent
+   * context and the conversations display name feeds Slack slice rendering
+   * and indexed file names.
+   */
+  slackBot.onChannelRenamed(async (channelId) => {
+    const channelInfo = await slackBot.getChannelInfo(channelId);
+    const channel = await repos.channels.findBySlackChannelId(channelId);
+    if (channel && channel.name !== channelInfo.name) {
+      await repos.channels.update(channel.id, { name: channelInfo.name });
+    }
+    await refreshSlackChannelName({ db, logger, channelId, channelName: channelInfo.name });
+    logger.info({ channelId, name: channelInfo.name }, "Refreshed channel metadata after rename");
+  });
+
   // Passive top-level channel message handler
   slackBot.onChannelMessage(async (message) => {
     try {
@@ -971,7 +997,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           onUsage: (call) => eagerAuxCalls.push(call),
         });
         const capture = await captureSlackMessage({
-          message,
+          message: channel.type === "mpim" ? { ...message, channelType: "mpim" } : message,
           senderName: user.name,
           senderUserId: user.id,
           addressedToSketch: true,

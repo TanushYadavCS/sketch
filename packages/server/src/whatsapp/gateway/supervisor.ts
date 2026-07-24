@@ -16,6 +16,7 @@ import {
 import { GatewayClientFacade } from "../gateway-client-facade";
 import { WHATSAPP_GATEWAY_DEFAULT_PORT, WHATSAPP_GATEWAY_HOST } from "./http-server";
 import { loadBootId, loadHostId, loadPidStartTime } from "./identity";
+import { type WhatsAppSocketStatePublication, isSameWhatsAppSocketStatePublication } from "./socket-state-publication";
 
 export const WHATSAPP_GATEWAY_READINESS_TIMEOUT_MS = 30_000;
 export const WHATSAPP_GATEWAY_HEALTH_INTERVAL_MS = 30_000;
@@ -84,6 +85,7 @@ export interface WhatsAppGatewaySupervisorOptions {
   nodeArgs?: string[];
   stdio?: SpawnOptions["stdio"];
   onOwnershipLost?: () => Promise<void> | void;
+  onSocketStateChange?: (change: WhatsAppSocketStateChange) => Promise<void> | void;
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -124,6 +126,10 @@ export class WhatsAppGatewaySupervisor {
   private startedSuccessfully = false;
   private respawnScheduled = false;
   private lastHealth: WhatsAppFacadeHealth | null = null;
+  private lastPublishedSocketState: WhatsAppSocketStatePublication | null = null;
+  private lastSocketGeneration: number | null = null;
+  private lastSocketStateChangeAt: string | null = null;
+  private socketStatePublication: Promise<void> = Promise.resolve();
   private pairingSpawn: Promise<GatewayClientFacade> | null = null;
   private readonly expectedExits = new WeakSet<ChildProcess>();
 
@@ -189,11 +195,8 @@ export class WhatsAppGatewaySupervisor {
    * route. The lease owner and generation fence stale child notifications, while
    * child exit clears the cached health and the periodic poll remains a fallback.
    */
-  handleSocketStateChange(change: WhatsAppSocketStateChange): boolean {
-    if (!this.client || !this.lease || !this.lastHealth) return false;
-    if (this.lease.owner_token !== change.ownerToken || this.lease.generation !== change.generation) return false;
-    this.lastHealth = { ...this.lastHealth, socketState: change.socketState };
-    return true;
+  async handleSocketStateChange(change: WhatsAppSocketStateChange): Promise<boolean> {
+    return this.publishSocketStateChange(change, true);
   }
 
   async refreshHealth(): Promise<void> {
@@ -359,6 +362,15 @@ export class WhatsAppGatewaySupervisor {
         return;
       }
       this.lastHealth = health;
+      if (lease && this.lastPublishedSocketState?.socketState !== health.socketState) {
+        await this.publishSocketStateChange({
+          ownerToken: lease.owner_token,
+          generation: lease.generation,
+          socketState: health.socketState,
+          occurredAt: new Date(this.now()).toISOString(),
+          reason: "health_poll",
+        });
+      }
       this.healthFailures = 0;
       this.restartAttempt = 0;
     } catch (error) {
@@ -369,6 +381,17 @@ export class WhatsAppGatewaySupervisor {
   }
 
   private async restartFromHealthPoll(reason: string): Promise<void> {
+    const lease = this.lease;
+    if (lease) {
+      if (this.lastHealth) this.lastHealth = { ...this.lastHealth, socketState: "disconnected" };
+      await this.publishSocketStateChange({
+        ownerToken: lease.owner_token,
+        generation: lease.generation,
+        socketState: "disconnected",
+        occurredAt: new Date(this.now()).toISOString(),
+        reason: `health_restart:${reason}`,
+      });
+    }
     try {
       await this.restart(reason);
     } catch (error) {
@@ -416,11 +439,72 @@ export class WhatsAppGatewaySupervisor {
     if (decision.action === "re-pair") {
       this.loggedOut = true;
       this.stopHealthPolling();
+      if (exitedLease) {
+        await this.publishSocketStateChange({
+          ownerToken: exitedLease.owner_token,
+          generation: exitedLease.generation,
+          socketState: "logged-out",
+          occurredAt: new Date(this.now()).toISOString(),
+          reason: "gateway_logged_out",
+        });
+      }
       this.options.logger.warn("WhatsApp gateway logged out; automatic respawn stopped until re-pairing");
       return;
     }
     if (!wasReady && !this.startedSuccessfully) return;
+    if (exitedLease) {
+      await this.publishSocketStateChange({
+        ownerToken: exitedLease.owner_token,
+        generation: exitedLease.generation,
+        socketState: "disconnected",
+        occurredAt: new Date(this.now()).toISOString(),
+        reason: "gateway_process_exit",
+      });
+    }
     this.scheduleRespawn("unexpected gateway exit", { code, signal });
+  }
+
+  private async publishSocketStateChange(
+    change: Omit<WhatsAppSocketStateChange, "socketGeneration"> & { socketGeneration?: number },
+    updateCachedHealth = false,
+  ): Promise<boolean> {
+    const socketGeneration = change.socketGeneration ?? this.lastSocketGeneration ?? 1;
+    const occurredAt = change.occurredAt ?? new Date(this.now()).toISOString();
+    const normalized: WhatsAppSocketStateChange & { occurredAt: string } = {
+      ...change,
+      socketGeneration,
+      occurredAt,
+    };
+    const publication = this.socketStatePublication.then(async () => {
+      if (updateCachedHealth) {
+        if (!this.client || !this.lease || !this.lastHealth) return false;
+        if (this.lease.owner_token !== normalized.ownerToken || this.lease.generation !== normalized.generation) {
+          return false;
+        }
+      }
+      if (this.lastSocketStateChangeAt && normalized.occurredAt < this.lastSocketStateChangeAt) return false;
+      this.lastSocketStateChangeAt = normalized.occurredAt;
+      this.lastSocketGeneration = socketGeneration;
+      if (updateCachedHealth && this.lastHealth) {
+        this.lastHealth = { ...this.lastHealth, socketState: normalized.socketState };
+      }
+      if (isSameWhatsAppSocketStatePublication(this.lastPublishedSocketState, normalized)) return true;
+      try {
+        await this.options.onSocketStateChange?.(normalized);
+        this.lastPublishedSocketState = normalized;
+      } catch (error) {
+        this.options.logger.warn(
+          { error, socketState: normalized.socketState },
+          "WhatsApp socket state observer failed",
+        );
+      }
+      return true;
+    });
+    this.socketStatePublication = publication.then(
+      () => undefined,
+      () => undefined,
+    );
+    return publication;
   }
 
   private scheduleRespawn(reason: string, context: Record<string, unknown> = {}): void {
@@ -556,6 +640,10 @@ export class InProcessWhatsAppLease {
 
   get generation(): number | null {
     return this.fence?.generation ?? null;
+  }
+
+  get socketStateIdentity(): Pick<WhatsAppSocketStateChange, "ownerToken" | "generation"> | null {
+    return this.fence ? { ownerToken: this.fence.ownerToken, generation: this.fence.generation } : null;
   }
 
   async acquire(): Promise<void> {

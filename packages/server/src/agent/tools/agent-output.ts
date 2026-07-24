@@ -4,6 +4,7 @@ import type { AgentKnowledgeRefs, AgentMasthead, AgentOutputItemInput } from "..
 import type { ToolResult } from "./types";
 
 export const MAX_AGENT_OUTPUT_PAYLOAD_BYTES = 256 * 1024;
+export const WRITE_AGENT_OUTPUT_TOOL_NAME = "WriteAgentOutput";
 
 const knowledgeRefsSchema = z.object({
   entityIds: z.array(z.string()).default([]),
@@ -54,6 +55,7 @@ export const writeAgentOutputSchema = z
 export type WriteAgentOutputPayload = z.infer<typeof writeAgentOutputSchema>;
 
 export interface AgentOutputWriter {
+  recordRejectedAttempt?(error: unknown): void;
   write(payload: {
     outputDate: string;
     timezone: string;
@@ -61,6 +63,21 @@ export interface AgentOutputWriter {
     rawPayload: WriteAgentOutputPayload;
     items: AgentOutputItemInput[];
   }): Promise<void>;
+}
+
+export function recordRejectedWriteAgentOutputCall(
+  writer: AgentOutputWriter | undefined,
+  toolName: string,
+  input: unknown,
+): void {
+  if (
+    !writer?.recordRejectedAttempt ||
+    (toolName !== WRITE_AGENT_OUTPUT_TOOL_NAME && !toolName.endsWith(`__${WRITE_AGENT_OUTPUT_TOOL_NAME}`))
+  ) {
+    return;
+  }
+  const result = writeAgentOutputSchema.safeParse(input);
+  if (!result.success) writer.recordRejectedAttempt(result.error);
 }
 
 export function assertAgentOutputPayloadSize(payload: unknown): void {
@@ -112,14 +129,20 @@ function mapItems(payload: WriteAgentOutputPayload): AgentOutputItemInput[] {
  */
 export function createWriteAgentOutputTool(writer: AgentOutputWriter | undefined) {
   return tool(
-    "WriteAgentOutput",
+    WRITE_AGENT_OUTPUT_TOOL_NAME,
     "Validate and save the complete agent output. Call exactly once when the result is ready.",
     writeAgentOutputSchema.shape,
     async (args): Promise<ToolResult> => {
       if (!writer) {
         return { content: [{ type: "text", text: "WriteAgentOutput is not available for this run." }] };
       }
-      const payload = writeAgentOutputSchema.parse(args);
+      let payload: WriteAgentOutputPayload;
+      try {
+        payload = writeAgentOutputSchema.parse(args);
+      } catch (error) {
+        writer.recordRejectedAttempt?.(error);
+        throw error;
+      }
       await writer.write({
         outputDate: payload.outputDate,
         timezone: payload.timezone,

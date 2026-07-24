@@ -10,6 +10,7 @@ import {
   WHATSAPP_EMISSION_REFRESH_DAYS,
   emitWhatsAppSyncedItems,
   processWhatsAppSalience,
+  reconcileWhatsAppGroupAcls,
 } from "./whatsapp-salience";
 
 function assertSystemCredentials(credentials: ConnectorCredentials): void {
@@ -83,7 +84,14 @@ export function createWhatsAppConnector(): Connector {
       };
     },
 
-    async *sync({ db, credentials, logger, scopeConfig, salienceGenerator }): AsyncGenerator<SyncedItem> {
+    async *sync({
+      db,
+      connectorConfigId,
+      credentials,
+      logger,
+      scopeConfig,
+      salienceGenerator,
+    }): AsyncGenerator<SyncedItem> {
       assertSystemCredentials(credentials);
       if (!db) {
         throw new Error("WhatsApp connector requires database access");
@@ -118,6 +126,9 @@ export function createWhatsAppConnector(): Connector {
         yield item;
       }
       logger.info({ emitted, skippedNoScope }, "Completed WhatsApp synced item emission");
+      if (connectorConfigId) {
+        await reconcileWhatsAppGroupAcls({ db, logger, connectorConfigId });
+      }
     },
 
     async getCursor(): Promise<string | null> {

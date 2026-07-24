@@ -31,6 +31,15 @@ import type { ScheduledRunAdmission } from "./queue";
 import { enabledSectionsForScope, maxItemsPerSectionForScope, sourceAsDelivery } from "./routing";
 
 const INTERNAL_OUTPUT_SECTION_ITEM_LIMIT = 25;
+const AGENT_OUTPUT_WRITER_ERROR_LIMIT = 500;
+
+function sanitizeAgentOutputWriterError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const collapsed = message.replace(/\s+/g, " ").trim() || "WriteAgentOutput failed.";
+  return collapsed.length > AGENT_OUTPUT_WRITER_ERROR_LIMIT
+    ? `${collapsed.slice(0, AGENT_OUTPUT_WRITER_ERROR_LIMIT - 1)}…`
+    : collapsed;
+}
 
 export function pairPersistedVisibleItems(
   items: AgentOutputItemInput[],
@@ -90,6 +99,9 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
     const user = await this.deps.users.findById(userId);
     if (!output || !user) return;
 
+    let writeAttempted = false;
+    let lastWriteError: string | null = null;
+    let lastWriteErrorAfterPersistence = false;
     let saved = false;
     const config = await this.resolveConfig(def, user.id);
     const scope = await this.resolveScopeForOutput(def, user, config, output);
@@ -177,6 +189,14 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
         expectedTimezone: output.timezone,
         runtimeContext,
         createTasks: config.createTasks,
+        onAttempt: () => {
+          writeAttempted = true;
+        },
+        onRejected: (error, afterPersistence) => {
+          if (lastWriteErrorAfterPersistence && !afterPersistence) return;
+          lastWriteError = sanitizeAgentOutputWriterError(error);
+          lastWriteErrorAfterPersistence = afterPersistence;
+        },
         onSaved: () => {
           saved = true;
         },
@@ -234,7 +254,11 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
         result = await this.deps.runAgent(agentParams);
       }
       if (!saved) {
-        await this.repo.markFailed(outputId, "Agent did not call WriteAgentOutput.");
+        if (writeAttempted) {
+          await this.repo.markWriteFailed(outputId, lastWriteError ?? "WriteAgentOutput failed.");
+        } else {
+          await this.repo.markFailed(outputId, "Agent did not call WriteAgentOutput.");
+        }
       } else {
         await this.deps.db
           .updateTable("agent_outputs")
@@ -245,8 +269,13 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
       }
     } catch (err) {
       if (err instanceof AgentRunAdmissionCancelledError) return;
-      const message = err instanceof Error ? err.message : String(err);
-      await this.repo.markFailed(outputId, message);
+      const message =
+        !saved && writeAttempted && lastWriteError ? lastWriteError : err instanceof Error ? err.message : String(err);
+      if (!saved && writeAttempted) {
+        await this.repo.markWriteFailed(outputId, message);
+      } else {
+        await this.repo.markFailed(outputId, message);
+      }
       this.deps.logger.error({ err, agentKey, outputId, userId }, "Agent: generation failed");
     }
   }
@@ -420,10 +449,16 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
       expectedTimezone: string;
       runtimeContext: Record<string, unknown>;
       createTasks: boolean;
+      onAttempt: () => void;
+      onRejected: (error: unknown, afterPersistence: boolean) => void;
       onSaved: () => void;
     },
   ): AgentOutputWriter {
     return {
+      recordRejectedAttempt: (error) => {
+        params.onAttempt();
+        params.onRejected(error, false);
+      },
       write: async (payload: {
         outputDate: string;
         timezone: string;
@@ -431,62 +466,70 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
         rawPayload: WriteAgentOutputPayload;
         items: AgentOutputItemInput[];
       }) => {
-        if (payload.outputDate !== params.expectedOutputDate) {
-          throw new Error(`Output date mismatch: expected ${params.expectedOutputDate}, got ${payload.outputDate}`);
-        }
-        if (payload.timezone !== params.expectedTimezone) {
-          throw new Error(`Timezone mismatch: expected ${params.expectedTimezone}, got ${payload.timezone}`);
-        }
-        const visibleSectionKeys = new Set(def.sections.map((s) => s.key));
-        const internalSectionKeys = new Set(def.internalOutputSections ?? []);
-        const filtered = payload.items.filter(
-          (item) =>
-            (visibleSectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey)) ||
-            internalSectionKeys.has(item.sectionKey),
-        );
-        validateAgentOutputLimits({
-          items: filtered,
-          visibleSectionKeys,
-          internalSectionKeys,
-          maxItemsPerSection: params.maxItemsPerSection,
-        });
-        const reconciled = def.reconcileItems
-          ? await def.reconcileItems({ db: this.deps.db, items: filtered, runtimeContext: params.runtimeContext })
-          : filtered;
-        const itemsForHooks = await def.enrichItems(this.deps.db, reconciled);
-        validateAgentOutputLimits({
-          items: itemsForHooks,
-          visibleSectionKeys,
-          internalSectionKeys,
-          maxItemsPerSection: params.maxItemsPerSection,
-        });
-        const visibleItems = itemsForHooks.filter(
-          (item) => visibleSectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey),
-        );
-        await this.validateItemRefs(def, itemsForHooks);
-        const rawPayload = rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext);
-        assertAgentOutputPayloadSize(rawPayload);
-        const persistedRefs = await this.repo.completeOutput({
-          outputId: params.outputId,
-          masthead: payload.masthead,
-          rawPayload,
-          items: visibleItems,
-        });
-        const persistedItems = pairPersistedVisibleItems(visibleItems, persistedRefs);
-        if (def.onOutputSaved) {
-          await def.onOutputSaved({
-            db: this.deps.db,
-            config: this.deps.config,
-            logger: this.deps.logger,
-            userId: params.userId,
-            outputId: params.outputId,
-            items: itemsForHooks,
-            persistedItems,
-            createTasks: params.createTasks,
-            runtimeContext: params.runtimeContext,
+        params.onAttempt();
+        let outputPersisted = false;
+        try {
+          if (payload.outputDate !== params.expectedOutputDate) {
+            throw new Error(`Output date mismatch: expected ${params.expectedOutputDate}, got ${payload.outputDate}`);
+          }
+          if (payload.timezone !== params.expectedTimezone) {
+            throw new Error(`Timezone mismatch: expected ${params.expectedTimezone}, got ${payload.timezone}`);
+          }
+          const visibleSectionKeys = new Set(def.sections.map((s) => s.key));
+          const internalSectionKeys = new Set(def.internalOutputSections ?? []);
+          const filtered = payload.items.filter(
+            (item) =>
+              (visibleSectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey)) ||
+              internalSectionKeys.has(item.sectionKey),
+          );
+          validateAgentOutputLimits({
+            items: filtered,
+            visibleSectionKeys,
+            internalSectionKeys,
+            maxItemsPerSection: params.maxItemsPerSection,
           });
+          const reconciled = def.reconcileItems
+            ? await def.reconcileItems({ db: this.deps.db, items: filtered, runtimeContext: params.runtimeContext })
+            : filtered;
+          const itemsForHooks = await def.enrichItems(this.deps.db, reconciled);
+          validateAgentOutputLimits({
+            items: itemsForHooks,
+            visibleSectionKeys,
+            internalSectionKeys,
+            maxItemsPerSection: params.maxItemsPerSection,
+          });
+          const visibleItems = itemsForHooks.filter(
+            (item) => visibleSectionKeys.has(item.sectionKey) && params.enabledSections.has(item.sectionKey),
+          );
+          await this.validateItemRefs(def, itemsForHooks);
+          const rawPayload = rawPayloadWithRunMetadata(payload.rawPayload, params.runtimeContext);
+          assertAgentOutputPayloadSize(rawPayload);
+          const persistedRefs = await this.repo.completeOutput({
+            outputId: params.outputId,
+            masthead: payload.masthead,
+            rawPayload,
+            items: visibleItems,
+          });
+          outputPersisted = true;
+          const persistedItems = pairPersistedVisibleItems(visibleItems, persistedRefs);
+          if (def.onOutputSaved) {
+            await def.onOutputSaved({
+              db: this.deps.db,
+              config: this.deps.config,
+              logger: this.deps.logger,
+              userId: params.userId,
+              outputId: params.outputId,
+              items: itemsForHooks,
+              persistedItems,
+              createTasks: params.createTasks,
+              runtimeContext: params.runtimeContext,
+            });
+          }
+          params.onSaved();
+        } catch (error) {
+          params.onRejected(error, outputPersisted);
+          throw error;
         }
-        params.onSaved();
       },
     };
   }

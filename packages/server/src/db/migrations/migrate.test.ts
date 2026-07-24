@@ -25,7 +25,7 @@ import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 
-const EXPECTED_MIGRATION_COUNT = 149;
+const EXPECTED_MIGRATION_COUNT = 153;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -217,7 +217,11 @@ describe("runMigrations — full sequence", () => {
     expect(names[145]).toBe("150-task-durability-steel-thread");
     expect(names[146]).toBe("151-agent-output-item-task-links");
     expect(names[147]).toBe("152-reseed-combined-durability-routes");
-    expect(names[148]).toBe("153-task-activity-events");
+    expect(names[148]).toBe("153-slack-conversation-indexing");
+    expect(names[149]).toBe("154-reclassify-mpim-conversations");
+    expect(names[150]).toBe("155-requeue-kept-slice-reemission");
+    expect(names[151]).toBe("156-operational-alerts");
+    expect(names[152]).toBe("157-task-activity-events");
   });
 
   it("resets reviewed combined durability routes for member-source reseeding", async () => {

@@ -137,6 +137,9 @@ export const whatsAppSocketStateChangeSchema = z.object({
   generation: z.number().int().positive(),
   socketGeneration: z.number().int().positive(),
   socketState: whatsAppSocketStateSchema,
+  occurredAt: z.string().datetime({ offset: true }).optional(),
+  statusCode: z.number().int().optional(),
+  reason: z.string().min(1).max(256).optional(),
 });
 
 export type WhatsAppSocketStateChange = z.infer<typeof whatsAppSocketStateChangeSchema>;

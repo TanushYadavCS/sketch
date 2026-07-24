@@ -4,7 +4,9 @@ dist/
 data
 data/
 tmp/
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/tenant-info/
 .codex/
 .agents/
 /skills/
