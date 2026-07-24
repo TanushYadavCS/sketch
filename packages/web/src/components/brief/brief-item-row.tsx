@@ -35,7 +35,11 @@ export function BriefItemRow({
     <article
       className={cn(
         "grid grid-cols-[minmax(0,1fr)] items-center gap-x-3",
-        isFollowupSection ? "sm:grid-cols-[minmax(0,1fr)_auto]" : "sm:grid-cols-[minmax(0,1fr)_168px]",
+        isFollowupSection
+          ? "sm:grid-cols-[minmax(0,1fr)_auto]"
+          : item.actionPrompt
+            ? "sm:grid-cols-[minmax(0,1fr)_168px]"
+            : null,
         !isLast && "border-b border-border/50",
       )}
     >
@@ -45,7 +49,7 @@ export function BriefItemRow({
         className={cn(
           "group grid min-w-0 cursor-pointer items-center gap-x-3 py-2.5 text-left outline-none transition-colors",
           "hover:bg-muted/25 focus-visible:bg-muted/25",
-          item.sectionKey === "todos" && "grid-cols-[88px_minmax(0,1fr)] sm:grid-cols-[88px_minmax(0,1fr)_184px]",
+          item.sectionKey === "todos" && "grid-cols-[88px_minmax(0,1fr)] sm:grid-cols-[88px_minmax(0,1fr)_224px]",
           item.sectionKey === "customer_updates" &&
             "grid-cols-[18px_minmax(0,1fr)] sm:grid-cols-[18px_minmax(0,1fr)_112px]",
           item.sectionKey === "active_projects" && "grid-cols-[minmax(0,1fr)]",
@@ -67,14 +71,14 @@ export function BriefItemRow({
                 aria-label="Task status and attention"
                 className="mt-0.5 grid min-w-0 grid-cols-[auto_1px_minmax(0,1fr)] items-center gap-x-2 font-mono text-[9.5px] uppercase tracking-[0.06em] sm:hidden"
               >
-                <span className="truncate text-muted-foreground">
+                <span className={cn("whitespace-nowrap truncate", tone?.text)}>
                   {liveLabel}
                   {externalStatus ? <span className="ml-1 normal-case tracking-normal">· {externalStatus}</span> : null}
                 </span>
                 <span className="h-3 w-px bg-border" aria-hidden />
                 <span className={cn("flex min-w-0 items-center gap-1.5", attention.text)}>
                   <span className={cn("size-1.5 shrink-0 rounded-full", attention.dot)} aria-hidden />
-                  <span className="truncate">{attention.label}</span>
+                  <span className="whitespace-nowrap truncate">{attention.label}</span>
                 </span>
               </span>
             ) : (
@@ -95,20 +99,20 @@ export function BriefItemRow({
         </span>
 
         {hasLabelColumn ? (
-          <span className="hidden w-[184px] min-w-0 pl-3 font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground/80 sm:flex">
+          <span className="hidden w-[224px] min-w-0 pl-3 font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground/80 sm:flex">
             {liveLabel && attention ? (
               <span
                 aria-label="Task status and attention"
-                className="grid w-full grid-cols-[48px_1px_minmax(0,1fr)] items-center gap-x-2"
+                className="grid w-full grid-cols-[88px_1px_minmax(0,1fr)] items-center gap-x-2"
               >
-                <span className="truncate text-right text-muted-foreground">
+                <span className={cn("whitespace-nowrap truncate text-right", tone?.text)}>
                   {liveLabel}
                   {externalStatus ? <span className="ml-1 normal-case tracking-normal">· {externalStatus}</span> : null}
                 </span>
                 <span className="h-4 w-px bg-border" aria-hidden />
                 <span className={cn("flex min-w-0 items-center gap-1.5", attention.text)}>
                   <span className={cn("size-1.5 shrink-0 rounded-full", attention.dot)} aria-hidden />
-                  <span className="truncate">{attention.label}</span>
+                  <span className="whitespace-nowrap truncate">{attention.label}</span>
                 </span>
               </span>
             ) : liveLabel ? (
@@ -137,13 +141,11 @@ export function BriefItemRow({
             onOpenChat={item.actionPrompt ? () => onOpenChat(item.actionPrompt as string) : undefined}
           />
         </div>
-      ) : (
+      ) : item.actionPrompt ? (
         <div className="flex min-w-0 shrink-0 items-center justify-end py-2.5">
-          {item.actionPrompt ? (
-            <BriefActionButton label={actionLabel} onClick={() => onOpenChat(item.actionPrompt as string)} />
-          ) : null}
+          <BriefActionButton label={actionLabel} onClick={() => onOpenChat(item.actionPrompt as string)} />
         </div>
-      )}
+      ) : null}
     </article>
   );
 }

@@ -199,12 +199,33 @@ describe("Brief row live task status", () => {
     );
     expect(seamGroups).toHaveLength(2);
     for (const group of seamGroups) {
-      expect(group.className).toMatch(/grid-cols-\[\d+px_1px_minmax\(0,1fr\)\]/);
+      expect(group.className).toContain("grid-cols-[88px_1px_minmax(0,1fr)]");
       const separator = group.querySelector(".bg-border");
       expect(separator).not.toBeNull();
       expect(separator?.className).toContain("w-px");
     }
     expect(seamGroups[0]?.className).toBe(seamGroups[1]?.className);
+  });
+
+  it("keeps combined lifecycle statuses color coded and on one line", () => {
+    const item = {
+      ...todoItem("t-colored-status", "Active launch handoff", baseTask({ status: "in_progress" })),
+      structuredPayload: {
+        attentionReasons: ["due_soon"],
+        changedFields: [],
+      } as unknown as DailyBriefItem["structuredPayload"],
+    };
+    const brief = briefWithTodos([item]);
+
+    renderWithProviders(<DailyBrief brief={brief} running={false} onOpenChat={() => {}} />);
+
+    const row = screen.getByRole("button", { name: /Active launch handoff/ });
+    const statusGroups = within(row).getAllByLabelText("Task status and attention");
+    for (const group of statusGroups) {
+      const lifecycleStatus = within(group).getByText("In progress");
+      expect(lifecycleStatus.className).toContain("whitespace-nowrap");
+      expect(lifecycleStatus.className).toContain("text-amber-600");
+    }
   });
 
   it("does not expose unknown attention keys or add an attention cluster to ordinary todos", () => {
