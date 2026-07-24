@@ -224,7 +224,18 @@ describe("createConversationFollowupsRepository", () => {
     expect(events).toEqual([
       {
         task_id: taskId,
-        event_kind: "material_evidence_added",
+        event_kind: "created",
+        actor_type: "agent",
+        actor_user_id: null,
+        actor_key: "conversation_summary",
+        surface: "summarizer",
+        changes_json: null,
+        evidence_json: null,
+        occurred_at: NOW,
+      },
+      {
+        task_id: taskId,
+        event_kind: "evidence_added",
         actor_type: "agent",
         actor_user_id: null,
         actor_key: "conversation_summary",
@@ -237,17 +248,6 @@ describe("createConversationFollowupsRepository", () => {
           fileCount: 0,
           truncated: false,
         }),
-        occurred_at: NOW,
-      },
-      {
-        task_id: taskId,
-        event_kind: "task_created",
-        actor_type: "agent",
-        actor_user_id: null,
-        actor_key: "conversation_summary",
-        surface: "summarizer",
-        changes_json: null,
-        evidence_json: null,
         occurred_at: NOW,
       },
     ]);
@@ -307,8 +307,9 @@ describe("createConversationFollowupsRepository", () => {
       .orderBy("event_kind")
       .execute();
     expect(events).toEqual([
+      { event_kind: "created", changes_json: null, evidence_json: null },
       {
-        event_kind: "material_evidence_added",
+        event_kind: "evidence_added",
         changes_json: null,
         evidence_json: JSON.stringify({
           messageIds: [createdMessage],
@@ -318,9 +319,8 @@ describe("createConversationFollowupsRepository", () => {
           truncated: false,
         }),
       },
-      { event_kind: "task_created", changes_json: null, evidence_json: null },
       {
-        event_kind: "material_evidence_added",
+        event_kind: "evidence_added",
         changes_json: null,
         evidence_json: JSON.stringify({
           messageIds: [changedMessage],
@@ -331,7 +331,7 @@ describe("createConversationFollowupsRepository", () => {
         }),
       },
       {
-        event_kind: "task_fields_changed",
+        event_kind: "fields_changed",
         changes_json: JSON.stringify({
           dueAt: { before: "2026-07-20", after: "2026-07-18" },
           priority: { before: "medium", after: "high" },
@@ -453,25 +453,25 @@ describe("createConversationFollowupsRepository", () => {
       .selectFrom("task_activity_events")
       .select(["event_kind", "actor_type", "actor_key", "surface"])
       .where("task_id", "=", taskId)
-      .where("event_kind", "in", ["completion_review_opened", "material_evidence_added"])
+      .where("event_kind", "in", ["completion_proposed", "evidence_added"])
       .orderBy("occurred_at")
       .orderBy("event_kind")
       .execute();
     expect(events).toEqual([
       {
-        event_kind: "material_evidence_added",
+        event_kind: "evidence_added",
         actor_type: "agent",
         actor_key: "conversation_summary",
         surface: "summarizer",
       },
       {
-        event_kind: "completion_review_opened",
+        event_kind: "completion_proposed",
         actor_type: "agent",
         actor_key: "conversation_summary",
         surface: "summarizer",
       },
       {
-        event_kind: "material_evidence_added",
+        event_kind: "evidence_added",
         actor_type: "agent",
         actor_key: "conversation_summary",
         surface: "summarizer",
@@ -2119,7 +2119,7 @@ describe("createConversationFollowupsRepository", () => {
       .selectFrom("task_activity_events")
       .select(["task_id", "event_kind", "actor_user_id", "surface", "changes_json"])
       .where("task_id", "in", [confirmTaskId, keepTaskId])
-      .where("event_kind", "in", ["completion_review_decided", "task_status_changed"])
+      .where("event_kind", "in", ["completion_reviewed", "status_changed"])
       .orderBy("task_id")
       .orderBy("event_kind")
       .execute();
@@ -2127,21 +2127,21 @@ describe("createConversationFollowupsRepository", () => {
       expect.arrayContaining([
         {
           task_id: confirmTaskId,
-          event_kind: "completion_review_decided",
+          event_kind: "completion_reviewed",
           actor_user_id: USER_ID,
           surface: "slack",
           changes_json: JSON.stringify({ reviewState: { before: "pending", after: "accepted" } }),
         },
         {
           task_id: confirmTaskId,
-          event_kind: "task_status_changed",
+          event_kind: "status_changed",
           actor_user_id: USER_ID,
           surface: "slack",
           changes_json: JSON.stringify({ status: { before: "open", after: "done" } }),
         },
         {
           task_id: keepTaskId,
-          event_kind: "completion_review_decided",
+          event_kind: "completion_reviewed",
           actor_user_id: USER_ID,
           surface: "whatsapp",
           changes_json: JSON.stringify({ reviewState: { before: "pending", after: "rejected" } }),

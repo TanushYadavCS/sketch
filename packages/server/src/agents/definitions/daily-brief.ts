@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 import { sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import { filterAccessibleFileIds } from "../../connectors/search";
@@ -19,7 +19,7 @@ import {
   type ActiveTaskDurabilityRoute,
   createTaskDurabilityTransitionRepository,
 } from "../../db/repositories/task-durability-transition";
-import { createTaskRepository } from "../../db/repositories/tasks";
+import { type PromoteBriefTaskResult, createTaskRepository } from "../../db/repositories/tasks";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { createLogger } from "../../logger";
@@ -1777,43 +1777,7 @@ async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
             todo: item,
             knowledgeRefs: item.knowledgeRefs,
           });
-          if (result.status === "upserted" && result.created) {
-            await createTaskActivityRepository(trx).append({
-              taskId: result.taskId,
-              eventKind: "task_created",
-              actorType: "agent",
-              actorKey: DAILY_BRIEF_AGENT_KEY,
-              surface: "daily_brief",
-              sourceAgentOutputId: args.outputId,
-              identityParts: [result.taskId],
-              occurredAt: new Date().toISOString(),
-            });
-          } else if (result.status === "upserted" && Object.keys(result.changes).length > 0) {
-            await createTaskActivityRepository(trx).append({
-              taskId: result.taskId,
-              eventKind: "task_fields_changed",
-              actorType: "agent",
-              actorKey: DAILY_BRIEF_AGENT_KEY,
-              surface: "daily_brief",
-              sourceAgentOutputId: args.outputId,
-              changes: result.changes,
-              identityParts: [result.taskId, args.outputId, JSON.stringify(result.changes)],
-              occurredAt: new Date().toISOString(),
-            });
-          }
-          if (result.status !== "skipped" && result.evidenceFileIds.length > 0) {
-            await createTaskActivityRepository(trx).append({
-              taskId: result.taskId,
-              eventKind: "material_evidence_added",
-              actorType: "agent",
-              actorKey: DAILY_BRIEF_AGENT_KEY,
-              surface: "daily_brief",
-              sourceAgentOutputId: args.outputId,
-              evidence: { fileIds: result.evidenceFileIds },
-              identityParts: [result.taskId, ...result.evidenceFileIds],
-              occurredAt: new Date().toISOString(),
-            });
-          }
+          await appendBriefTaskActivity(trx, result, args.outputId);
         });
       } catch (err) {
         args.logger.warn({ err, outputId: args.outputId, userId: args.userId }, "Daily Brief: task promotion failed");
@@ -1833,43 +1797,7 @@ async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
           knowledgeRefs: item.knowledgeRefs,
         });
         if (result.status === "skipped") return;
-        if (result.status === "upserted" && result.created) {
-          await createTaskActivityRepository(trx).append({
-            taskId: result.taskId,
-            eventKind: "task_created",
-            actorType: "agent",
-            actorKey: DAILY_BRIEF_AGENT_KEY,
-            surface: "daily_brief",
-            sourceAgentOutputId: args.outputId,
-            identityParts: [result.taskId],
-            occurredAt: new Date().toISOString(),
-          });
-        } else if (result.status === "upserted" && Object.keys(result.changes).length > 0) {
-          await createTaskActivityRepository(trx).append({
-            taskId: result.taskId,
-            eventKind: "task_fields_changed",
-            actorType: "agent",
-            actorKey: DAILY_BRIEF_AGENT_KEY,
-            surface: "daily_brief",
-            sourceAgentOutputId: args.outputId,
-            changes: result.changes,
-            identityParts: [result.taskId, args.outputId, JSON.stringify(result.changes)],
-            occurredAt: new Date().toISOString(),
-          });
-        }
-        if (result.evidenceFileIds.length > 0) {
-          await createTaskActivityRepository(trx).append({
-            taskId: result.taskId,
-            eventKind: "material_evidence_added",
-            actorType: "agent",
-            actorKey: DAILY_BRIEF_AGENT_KEY,
-            surface: "daily_brief",
-            sourceAgentOutputId: args.outputId,
-            evidence: { fileIds: result.evidenceFileIds },
-            identityParts: [result.taskId, ...result.evidenceFileIds],
-            occurredAt: new Date().toISOString(),
-          });
-        }
+        await appendBriefTaskActivity(trx, result, args.outputId);
         const linked = await createAgentOutputRepository(trx).linkItemToTask({
           outputId: args.outputId,
           itemId: persisted.id,
@@ -1885,6 +1813,53 @@ async function onOutputSaved(args: AgentOutputSavedArgs): Promise<void> {
         "Daily Brief: task promotion failed",
       );
     }
+  }
+}
+
+async function appendBriefTaskActivity(
+  db: Transaction<DB>,
+  result: PromoteBriefTaskResult,
+  outputId: string,
+): Promise<void> {
+  if (result.status === "skipped") return;
+  const activity = createTaskActivityRepository(db);
+  const occurredAt = new Date().toISOString();
+  if (result.status === "upserted" && result.created) {
+    await activity.append({
+      taskId: result.taskId,
+      eventKind: "created",
+      actorType: "agent",
+      actorKey: DAILY_BRIEF_AGENT_KEY,
+      surface: "daily_brief",
+      sourceAgentOutputId: outputId,
+      identityParts: [result.taskId],
+      occurredAt,
+    });
+  } else if (result.status === "upserted" && Object.keys(result.changes).length > 0) {
+    await activity.append({
+      taskId: result.taskId,
+      eventKind: "fields_changed",
+      actorType: "agent",
+      actorKey: DAILY_BRIEF_AGENT_KEY,
+      surface: "daily_brief",
+      sourceAgentOutputId: outputId,
+      changes: result.changes,
+      identityParts: [result.taskId, outputId, JSON.stringify(result.changes)],
+      occurredAt,
+    });
+  }
+  if (result.evidenceFileIds.length > 0) {
+    await activity.append({
+      taskId: result.taskId,
+      eventKind: "evidence_added",
+      actorType: "agent",
+      actorKey: DAILY_BRIEF_AGENT_KEY,
+      surface: "daily_brief",
+      sourceAgentOutputId: outputId,
+      evidence: { fileIds: result.evidenceFileIds },
+      identityParts: [result.taskId, ...result.evidenceFileIds],
+      occurredAt,
+    });
   }
 }
 

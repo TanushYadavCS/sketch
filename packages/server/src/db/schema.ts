@@ -1207,14 +1207,26 @@ export interface TaskCompletionRecommendationDeliveriesTable {
   created_at: Generated<string>;
 }
 
+export type TaskActivityEventKind =
+  | "created"
+  | "evidence_added"
+  | "fields_changed"
+  | "status_changed"
+  | "completion_proposed"
+  | "completion_reviewed";
+
+export type TaskActivityActorType = "user" | "agent" | "system" | "provider";
+
+export type TaskActivitySurface = "daily_brief" | "summarizer" | "web" | "slack" | "whatsapp" | "sync" | "system";
+
 export interface TaskActivityEventsTable {
   id: string;
   task_id: string;
-  event_kind: string;
-  actor_type: string;
+  event_kind: TaskActivityEventKind;
+  actor_type: TaskActivityActorType;
   actor_user_id: string | null;
   actor_key: string | null;
-  surface: string;
+  surface: TaskActivitySurface;
   source_agent_output_id: string | null;
   changes_json: string | null;
   evidence_json: string | null;

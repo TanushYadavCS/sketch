@@ -1,17 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Kysely, Transaction } from "kysely";
-import type { DB } from "../schema";
+import type { DB, TaskActivityActorType, TaskActivityEventKind, TaskActivitySurface } from "../schema";
 
-export type TaskActivityEventKind =
-  | "task_created"
-  | "material_evidence_added"
-  | "task_fields_changed"
-  | "task_status_changed"
-  | "completion_review_opened"
-  | "completion_review_decided";
-
-export type TaskActivityActorType = "user" | "agent" | "system";
-export type TaskActivitySurface = "daily_brief" | "summarizer" | "web" | "slack" | "whatsapp" | "system";
+export type { TaskActivityActorType, TaskActivityEventKind, TaskActivitySurface } from "../schema";
 
 export type TaskActivityChanges = Record<string, { before: unknown; after: unknown }>;
 

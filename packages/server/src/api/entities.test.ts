@@ -974,7 +974,7 @@ describe("GET/PATCH /api/entities/:id/tasks", () => {
         .execute(),
     ).resolves.toEqual([
       {
-        event_kind: "task_status_changed",
+        event_kind: "status_changed",
         actor_user_id: adminId,
         surface: "web",
         changes_json: JSON.stringify({ status: { before: "open", after: "done" } }),

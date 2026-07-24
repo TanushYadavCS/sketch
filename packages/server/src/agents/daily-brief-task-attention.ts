@@ -11,6 +11,17 @@ const PENDING_REVIEW_LIMIT = 100;
 const PREVIOUS_TASK_LIMIT = 100;
 const EVIDENCE_LIMIT = 5;
 const MAX_ATTENTION_ITEMS = 50;
+const HIGH_PRIORITY_VALUES = ["high", "urgent", "critical", "p0", "p1"] as const;
+const ATTENTION_RANK_KEYS = [
+  "overdue",
+  "pending_completion_review",
+  "recent_change",
+  "due_soon",
+  "high_priority",
+  "carried_from_previous_brief",
+] as const;
+
+type AttentionRankKey = (typeof ATTENTION_RANK_KEYS)[number];
 
 export type DailyBriefTaskAttentionReason =
   | "new_since_last_brief"
@@ -58,6 +69,7 @@ type CandidateTask = Selectable<TasksTable> & {
   resolved_assignee_name: string | null;
   latest_evidence_at: string | null;
   latest_activity_at: string | null;
+  latest_meaningful_activity_at: string;
   latest_event_kind: TaskActivityEventsTable["event_kind"] | null;
 };
 
@@ -97,7 +109,10 @@ export async function resolveDailyBriefTaskAttention(input: {
       userEmails: input.userEmails,
       assigneeEntityIds: input.assigneeEntityIds,
       carriedTaskIds: previous.failed ? [] : previous.taskIds,
+      windowStart,
       windowEnd,
+      outputDate: input.outputDate,
+      generatedAt: input.generatedAt,
       includeLatestActivity: true,
     });
   } catch {
@@ -107,7 +122,10 @@ export async function resolveDailyBriefTaskAttention(input: {
         userEmails: input.userEmails,
         assigneeEntityIds: input.assigneeEntityIds,
         carriedTaskIds: previous.failed ? [] : previous.taskIds,
+        windowStart,
         windowEnd,
+        outputDate: input.outputDate,
+        generatedAt: input.generatedAt,
         includeLatestActivity: false,
       });
       activityFailed = true;
@@ -203,9 +221,7 @@ export async function resolveDailyBriefTaskAttention(input: {
           proposedAssigneeName: task.proposed_assignee_name,
           sourcePlatform: task.source_platform,
           sourceAnchorKey: task.source_anchor_key,
-          lastMeaningfulActivityAt:
-            task.latest_activity_at ??
-            latestTimestamp(task.valid_from, task.status_changed_at, task.latest_evidence_at, task.created_at),
+          lastMeaningfulActivityAt: task.latest_meaningful_activity_at,
           lastEventKind: task.latest_event_kind,
           changedFields: changedFields(inWindow),
           attentionReasons: reasons,
@@ -279,7 +295,10 @@ async function loadCandidateTasks(
     userEmails: string[];
     assigneeEntityIds: string[];
     carriedTaskIds: string[];
+    windowStart: string;
     windowEnd: string;
+    outputDate: string;
+    generatedAt: string;
     includeLatestActivity: boolean;
   },
 ): Promise<CandidateTask[]> {
@@ -294,6 +313,66 @@ async function loadCandidateTasks(
             and task_evidence.kind = 'file'
             and ${fileAccessFilterSql(input.userEmails)}
         )`;
+  const carriedRank =
+    input.carriedTaskIds.length === 0
+      ? sql<number>`case when 1 = 0 then 1 else 0 end`
+      : sql<number>`case when t.id in (${sql.join(input.carriedTaskIds)}) then 1 else 0 end`;
+  const latestEvidence = sql<string | null>`(
+    select max(cm.received_at)
+    from task_message_evidence tme
+    inner join conversation_messages cm on cm.id = tme.conversation_message_id
+    where tme.task_id = t.id
+  )`;
+  const latestActivity = input.includeLatestActivity
+    ? sql<string | null>`(
+        select tae.occurred_at
+        from task_activity_events tae
+        where tae.task_id = t.id
+          and tae.occurred_at <= ${input.windowEnd}
+        order by tae.occurred_at desc, tae.id desc
+        limit 1
+      )`
+    : sql<string | null>`null`;
+  const changedRank = input.includeLatestActivity
+    ? sql<number>`case when exists (
+        select 1
+        from task_activity_events tae
+        where tae.task_id = t.id
+          and tae.occurred_at > ${input.windowStart}
+          and tae.occurred_at <= ${input.windowEnd}
+      ) then 1 else 0 end`
+    : sql<number>`case when 1 = 0 then 1 else 0 end`;
+  const fallbackMeaningfulActivity = sql<string>`case
+    when coalesce(t.valid_from, '') >= coalesce(t.status_changed_at, '')
+      and coalesce(t.valid_from, '') >= coalesce(${latestEvidence}, '')
+      and coalesce(t.valid_from, '') >= coalesce(t.created_at, '')
+      then t.valid_from
+    when coalesce(t.status_changed_at, '') >= coalesce(${latestEvidence}, '')
+      and coalesce(t.status_changed_at, '') >= coalesce(t.created_at, '')
+      then t.status_changed_at
+    when coalesce(${latestEvidence}, '') >= coalesce(t.created_at, '')
+      then ${latestEvidence}
+    else t.created_at
+  end`;
+  const latestMeaningfulActivity = sql<string>`coalesce(${latestActivity}, ${fallbackMeaningfulActivity})`;
+  const rankExpressions = {
+    overdue: sql<number>`case when t.due_at is not null and t.due_at < ${input.outputDate} then 1 else 0 end`,
+    pending_completion_review: sql<number>`case when exists (
+      select 1
+      from task_completion_recommendations tcr
+      where tcr.task_id = t.id
+        and tcr.review_state = 'pending'
+        and tcr.expires_at > ${input.generatedAt}
+        and tcr.delivery_count <= 3
+    ) then 1 else 0 end`,
+    recent_change: changedRank,
+    due_soon: sql<number>`case when t.due_at is not null
+      and t.due_at >= ${input.outputDate}
+      and t.due_at <= ${addCalendarDays(input.outputDate, 7)}
+      then 1 else 0 end`,
+    high_priority: sql<number>`case when lower(trim(t.priority)) in (${sql.join(HIGH_PRIORITY_VALUES)}) then 1 else 0 end`,
+    carried_from_previous_brief: carriedRank,
+  } satisfies Record<AttentionRankKey, ReturnType<typeof sql<number>>>;
   return db
     .selectFrom("tasks as t")
     .leftJoin("entities as parent", "parent.id", "t.parent_entity_id")
@@ -302,22 +381,11 @@ async function loadCandidateTasks(
     .select([
       "parent.name as resolved_parent_name",
       "assignee.name as resolved_assignee_name",
-      sql<string | null>`(
-        select max(cm.received_at)
-        from task_message_evidence tme
-        inner join conversation_messages cm on cm.id = tme.conversation_message_id
-        where tme.task_id = t.id
-      )`.as("latest_evidence_at"),
+      latestEvidence.as("latest_evidence_at"),
+      latestMeaningfulActivity.as("latest_meaningful_activity_at"),
       ...(input.includeLatestActivity
         ? [
-            sql<string | null>`(
-              select tae.occurred_at
-              from task_activity_events tae
-              where tae.task_id = t.id
-                and tae.occurred_at <= ${input.windowEnd}
-              order by tae.occurred_at desc, tae.id desc
-              limit 1
-            )`.as("latest_activity_at"),
+            latestActivity.as("latest_activity_at"),
             sql<TaskActivityEventsTable["event_kind"] | null>`(
               select tae.event_kind
               from task_activity_events tae
@@ -353,7 +421,10 @@ async function loadCandidateTasks(
         ]),
       ]),
     )
-    .orderBy("t.updated_at", "desc")
+    .$call((query) =>
+      ATTENTION_RANK_KEYS.reduce((rankedQuery, key) => rankedQuery.orderBy(rankExpressions[key], "desc"), query),
+    )
+    .orderBy(latestMeaningfulActivity, "desc")
     .orderBy("t.id", "asc")
     .limit(TASK_CANDIDATE_LIMIT + 1)
     .execute();
@@ -377,11 +448,11 @@ function attentionReasons(input: {
   carried: boolean;
 }): DailyBriefTaskAttentionReason[] {
   const reasons: DailyBriefTaskAttentionReason[] = [];
-  if (input.inWindow.some((event) => event.event_kind === "task_created")) {
+  if (input.inWindow.some((event) => event.event_kind === "created")) {
     reasons.push("new_since_last_brief");
   }
   if (input.inWindow.length > 0) reasons.push("meaningfully_changed");
-  if (input.inWindow[0]?.event_kind === "task_status_changed") reasons.push("status_changed");
+  if (input.inWindow.some((event) => event.event_kind === "status_changed")) reasons.push("status_changed");
   if (input.task.due_at && input.task.due_at < input.outputDate) reasons.push("overdue");
   else if (input.task.due_at && input.task.due_at <= addCalendarDays(input.outputDate, 7)) reasons.push("due_soon");
   if (isHighPriority(input.task.priority)) reasons.push("high_priority");
@@ -393,7 +464,7 @@ function attentionReasons(input: {
 function changedFields(events: ActivityEvent[]): string[] {
   const fields = new Set<string>();
   for (const event of events) {
-    if (event.event_kind === "task_status_changed") fields.add("status");
+    if (event.event_kind === "status_changed") fields.add("status");
     if (!event.changes_json) continue;
     try {
       for (const field of Object.keys(JSON.parse(event.changes_json) as Record<string, unknown>)) fields.add(field);
@@ -403,20 +474,21 @@ function changedFields(events: ActivityEvent[]): string[] {
 }
 
 function compareAttentionItems(left: DailyBriefTaskAttentionItem, right: DailyBriefTaskAttentionItem): number {
-  for (const reason of [
-    "overdue",
-    "pending_completion_review",
-    "new_since_last_brief",
-    "meaningfully_changed",
-    "due_soon",
-    "high_priority",
-    "carried_from_previous_brief",
-  ] as const) {
-    const delta = Number(right.attentionReasons.includes(reason)) - Number(left.attentionReasons.includes(reason));
+  for (const key of ATTENTION_RANK_KEYS) {
+    const delta = Number(hasAttentionRank(right, key)) - Number(hasAttentionRank(left, key));
     if (delta !== 0) return delta;
   }
   const activityOrder = right.lastMeaningfulActivityAt.localeCompare(left.lastMeaningfulActivityAt);
   return activityOrder !== 0 ? activityOrder : left.taskId.localeCompare(right.taskId);
+}
+
+function hasAttentionRank(item: DailyBriefTaskAttentionItem, key: AttentionRankKey): boolean {
+  if (key === "recent_change") {
+    return (
+      item.attentionReasons.includes("new_since_last_brief") || item.attentionReasons.includes("meaningfully_changed")
+    );
+  }
+  return item.attentionReasons.includes(key);
 }
 
 async function loadEvidence(db: Kysely<DB>, taskIds: string[], userEmails: string[]) {
@@ -464,15 +536,6 @@ async function loadEvidence(db: Kysely<DB>, taskIds: string[], userEmails: strin
   return result;
 }
 
-function latestTimestamp(...values: Array<string | null | undefined>): string {
-  return (
-    values
-      .filter((value): value is string => Boolean(value))
-      .sort()
-      .at(-1) ?? new Date(0).toISOString()
-  );
-}
-
 function outputDateWindowEndMs(outputDate: string, timezone: string): number {
   return parseOnceSchedule(`${outputDate}T23:59:59.999`, timezone).getTime();
 }
@@ -484,5 +547,7 @@ function addCalendarDays(date: string, days: number): string {
 }
 
 function isHighPriority(priority: string | null): boolean {
-  return priority ? ["high", "urgent", "critical", "p0", "p1"].includes(priority.trim().toLowerCase()) : false;
+  if (!priority) return false;
+  const normalized = priority.trim().toLowerCase();
+  return HIGH_PRIORITY_VALUES.some((value) => value === normalized);
 }

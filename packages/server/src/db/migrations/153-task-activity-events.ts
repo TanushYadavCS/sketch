@@ -16,6 +16,18 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .addColumn("dedupe_key", "text", (col) => col.notNull())
     .addColumn("occurred_at", "text", (col) => col.notNull())
     .addColumn("created_at", "text", (col) => col.notNull().defaultTo(sql`CURRENT_TIMESTAMP`))
+    .addCheckConstraint(
+      "task_activity_events_event_kind_check",
+      sql`event_kind in ('created', 'evidence_added', 'fields_changed', 'status_changed', 'completion_proposed', 'completion_reviewed')`,
+    )
+    .addCheckConstraint(
+      "task_activity_events_actor_type_check",
+      sql`actor_type in ('user', 'agent', 'system', 'provider')`,
+    )
+    .addCheckConstraint(
+      "task_activity_events_surface_check",
+      sql`surface in ('daily_brief', 'summarizer', 'web', 'slack', 'whatsapp', 'sync', 'system')`,
+    )
     .execute();
 
   await db.schema

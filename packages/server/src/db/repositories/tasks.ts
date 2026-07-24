@@ -535,7 +535,7 @@ export function createTaskRepository(db: Kysely<DB>) {
 
           await createTaskActivityRepository(trx).append({
             taskId: existing.id,
-            eventKind: "task_status_changed",
+            eventKind: "status_changed",
             actorType: "user",
             actorUserId: input.userId,
             surface: input.surface ?? "web",

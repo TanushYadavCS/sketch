@@ -120,7 +120,7 @@ describe("GET/PATCH /api/tasks/:taskId", () => {
     ).resolves.toEqual([
       {
         task_id: task.taskId,
-        event_kind: "task_status_changed",
+        event_kind: "status_changed",
         actor_type: "user",
         actor_user_id: memberId,
         surface: "web",

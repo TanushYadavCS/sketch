@@ -120,14 +120,14 @@ describe("follow-up review routes", () => {
         .execute(),
     ).resolves.toEqual([
       {
-        event_kind: "completion_review_decided",
+        event_kind: "completion_reviewed",
         actor_type: "user",
         actor_user_id: "user-1",
         surface: "web",
         changes_json: JSON.stringify({ reviewState: { before: "pending", after: "accepted" } }),
       },
       {
-        event_kind: "task_status_changed",
+        event_kind: "status_changed",
         actor_type: "user",
         actor_user_id: "user-1",
         surface: "web",

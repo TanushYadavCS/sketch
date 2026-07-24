@@ -281,14 +281,14 @@ describe("dailyBriefDefinition.onOutputSaved task linking", () => {
     expect(activity).toEqual(
       expect.arrayContaining([
         {
-          event_kind: "task_created",
+          event_kind: "created",
           actor_type: "agent",
           actor_key: "daily_brief",
           surface: "daily_brief",
           source_agent_output_id: persisted.outputId,
         },
         {
-          event_kind: "material_evidence_added",
+          event_kind: "evidence_added",
           actor_type: "agent",
           actor_key: "daily_brief",
           surface: "daily_brief",
@@ -322,17 +322,17 @@ describe("dailyBriefDefinition.onOutputSaved task linking", () => {
         .execute(),
     ).resolves.toEqual([
       {
-        event_kind: "material_evidence_added",
+        event_kind: "created",
         changes_json: null,
         source_agent_output_id: initial.outputId,
       },
       {
-        event_kind: "task_created",
+        event_kind: "evidence_added",
         changes_json: null,
         source_agent_output_id: initial.outputId,
       },
       {
-        event_kind: "task_fields_changed",
+        event_kind: "fields_changed",
         changes_json: JSON.stringify({ priority: { before: "medium", after: "high" } }),
         source_agent_output_id: changed.outputId,
       },
@@ -372,7 +372,7 @@ describe("dailyBriefDefinition.onOutputSaved task linking", () => {
         .select(["task_id", "event_kind"])
         .where("task_id", "=", "structural-task")
         .execute(),
-    ).resolves.toEqual([{ task_id: "structural-task", event_kind: "material_evidence_added" }]);
+    ).resolves.toEqual([{ task_id: "structural-task", event_kind: "evidence_added" }]);
   });
 
   it("leaves skipped promotion unlinked", async () => {
@@ -1356,7 +1356,7 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
       .values({
         id: "activity-recent-created",
         task_id: recent.taskId,
-        event_kind: "task_created",
+        event_kind: "created",
         actor_type: "agent",
         actor_user_id: null,
         actor_key: "conversation_summary",
@@ -1396,12 +1396,264 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
           title: "Prepare the launch brief",
           status: "open",
           lastMeaningfulActivityAt: "2026-06-25T07:30:00.000Z",
-          lastEventKind: "task_created",
+          lastEventKind: "created",
           changedFields: [],
           attentionReasons: ["new_since_last_brief", "meaningfully_changed"],
         },
       ],
     });
+  });
+
+  it("ranks an older overdue task before truncating a large relevant candidate set", async () => {
+    await seedUser(db);
+    const repo = createTaskRepository(db);
+    const overdue = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Older overdue task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: "2026-06-20",
+      provenance: "summary",
+      sourceTaskId: "older-overdue",
+      createdByUserId: "user-1",
+    });
+    await db
+      .updateTable("tasks")
+      .set({ updated_at: "2026-01-01T00:00:00.000Z" })
+      .where("id", "=", overdue.taskId)
+      .execute();
+    for (let index = 0; index < 101; index += 1) {
+      const quiet = await repo.upsertTask({
+        parentEntityId: null,
+        parentSourceRef: null,
+        parentName: null,
+        source: "summary",
+        externalRef: null,
+        title: `Newer quiet task ${index}`,
+        status: "open",
+        statusRaw: "open",
+        statusAuthority: "local",
+        assigneeEntityId: null,
+        assigneeName: null,
+        priority: "medium",
+        dueAt: null,
+        provenance: "summary",
+        sourceTaskId: `newer-quiet-${index}`,
+        createdByUserId: "user-1",
+      });
+      await db
+        .updateTable("tasks")
+        .set({ updated_at: `2026-06-24T${String(index % 24).padStart(2, "0")}:00:00.000Z` })
+        .where("id", "=", quiet.taskId)
+        .execute();
+    }
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.taskAttention).toMatchObject({
+      partial: true,
+      items: [
+        {
+          taskId: overdue.taskId,
+          attentionReasons: ["overdue"],
+        },
+      ],
+    });
+  });
+
+  it("reports a status change when a later in-window event is more recent", async () => {
+    await seedUser(db);
+    const repo = createTaskRepository(db);
+    const changed = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Changed task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "status-then-evidence",
+      createdByUserId: "user-1",
+    });
+    await db
+      .insertInto("task_activity_events")
+      .values([
+        {
+          id: "status-then-evidence-status",
+          task_id: changed.taskId,
+          event_kind: "status_changed",
+          actor_type: "user",
+          actor_user_id: "user-1",
+          actor_key: null,
+          surface: "web",
+          source_agent_output_id: null,
+          changes_json: JSON.stringify({ status: { before: "in_progress", after: "open" } }),
+          evidence_json: null,
+          dedupe_key: "status-then-evidence-status",
+          occurred_at: "2026-06-25T06:30:00.000Z",
+        },
+        {
+          id: "status-then-evidence-later",
+          task_id: changed.taskId,
+          event_kind: "evidence_added",
+          actor_type: "agent",
+          actor_user_id: null,
+          actor_key: "daily_brief",
+          surface: "daily_brief",
+          source_agent_output_id: null,
+          changes_json: null,
+          evidence_json: JSON.stringify({ messageIds: [42] }),
+          dedupe_key: "status-then-evidence-later",
+          occurred_at: "2026-06-25T07:00:00.000Z",
+        },
+      ])
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+
+    expect(context?.taskAttention).toMatchObject({
+      items: [
+        {
+          taskId: changed.taskId,
+          changedFields: ["status"],
+          attentionReasons: ["meaningfully_changed", "status_changed"],
+        },
+      ],
+    });
+  });
+
+  it("uses meaningful activity to order new and changed tasks within one attention tier", async () => {
+    await seedUser(db);
+    const repo = createTaskRepository(db);
+    const created = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "New task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "new-tier-task",
+      createdByUserId: "user-1",
+    });
+    const changed = await repo.upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Changed task",
+      status: "open",
+      statusRaw: "open",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "changed-tier-task",
+      createdByUserId: "user-1",
+    });
+    await db
+      .insertInto("task_activity_events")
+      .values([
+        {
+          id: "combined-tier-created",
+          task_id: created.taskId,
+          event_kind: "created",
+          actor_type: "agent",
+          actor_user_id: null,
+          actor_key: "daily_brief",
+          surface: "daily_brief",
+          source_agent_output_id: null,
+          changes_json: null,
+          evidence_json: null,
+          dedupe_key: "combined-tier-created",
+          occurred_at: "2026-06-25T06:30:00.000Z",
+        },
+        {
+          id: "combined-tier-changed",
+          task_id: changed.taskId,
+          event_kind: "fields_changed",
+          actor_type: "agent",
+          actor_user_id: null,
+          actor_key: "daily_brief",
+          surface: "daily_brief",
+          source_agent_output_id: null,
+          changes_json: JSON.stringify({ priority: { before: "low", after: "medium" } }),
+          evidence_json: null,
+          dedupe_key: "combined-tier-changed",
+          occurred_at: "2026-06-25T07:00:00.000Z",
+        },
+      ])
+      .execute();
+
+    const context = await dailyBriefDefinition.augmentRuntimeContext?.({
+      db,
+      config: createTestConfig(),
+      users: createUserRepository(db),
+      userId: "user-1",
+      maxItemsPerSection: 5,
+      baseContext: {
+        outputDate: "2026-06-25",
+        timezone: "UTC",
+        sameDayPreviousOutput: null,
+        previousDayOutput: null,
+      },
+    });
+    const attention = context?.taskAttention as {
+      items: Array<{ taskId: string; attentionReasons: string[] }>;
+    };
+
+    expect(attention.items.map((item) => item.taskId)).toEqual([changed.taskId, created.taskId]);
+    expect(attention.items[0]?.attentionReasons).toEqual(["meaningfully_changed"]);
+    expect(attention.items[1]?.attentionReasons).toEqual(["new_since_last_brief", "meaningfully_changed"]);
   });
 
   it("ranks reader-relevant Task Attention without broadening relevance for admins", async () => {
@@ -1464,7 +1716,7 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
         {
           id: "attention-status-event",
           task_id: changed.taskId,
-          event_kind: "task_status_changed",
+          event_kind: "status_changed",
           actor_type: "user",
           actor_user_id: "user-1",
           actor_key: null,
@@ -1478,7 +1730,7 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
         {
           id: "attention-changed-event",
           task_id: changed.taskId,
-          event_kind: "task_fields_changed",
+          event_kind: "fields_changed",
           actor_type: "agent",
           actor_user_id: null,
           actor_key: "conversation_summary",
@@ -1496,7 +1748,7 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
       .values({
         id: "attention-historical-event",
         task_id: high.taskId,
-        event_kind: "task_fields_changed",
+        event_kind: "fields_changed",
         actor_type: "agent",
         actor_user_id: null,
         actor_key: "conversation_summary",
@@ -1600,14 +1852,14 @@ describe("dailyBriefDefinition.augmentRuntimeContext", () => {
     ]);
     expect(attention.items.find((item) => item.taskId === changed.taskId)).toMatchObject({
       changedFields: ["priority", "status"],
-      attentionReasons: ["meaningfully_changed"],
+      attentionReasons: ["meaningfully_changed", "status_changed"],
     });
     expect(attention.items.find((item) => item.taskId === pending.taskId)?.attentionReasons).toContain(
       "pending_completion_review",
     );
     expect(attention.items.find((item) => item.taskId === high.taskId)).toMatchObject({
       lastMeaningfulActivityAt: "2026-06-24T07:00:00.000Z",
-      lastEventKind: "task_fields_changed",
+      lastEventKind: "fields_changed",
       changedFields: [],
       attentionReasons: ["high_priority"],
     });

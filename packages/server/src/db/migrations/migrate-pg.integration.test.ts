@@ -350,6 +350,60 @@ describe("runMigrations on Postgres — full sequence", () => {
     );
   });
 
+  it("enforces the task activity event, actor, and surface contract", async () => {
+    const freshDb = await createTestPgDb();
+    try {
+      await sql`
+        INSERT INTO tasks
+          (id, source, title, normalized_title, status, status_authority, provenance, source_task_id, updated_at)
+        VALUES
+          ('activity-contract-task', 'summary', 'Contract task', 'contract task', 'open', 'local', 'summary', 'contract-task', '2026-07-23T00:00:00.000Z')
+      `.execute(freshDb);
+      const eventKinds = [
+        "created",
+        "evidence_added",
+        "fields_changed",
+        "status_changed",
+        "completion_proposed",
+        "completion_reviewed",
+      ];
+      for (const [index, eventKind] of eventKinds.entries()) {
+        await sql`
+          INSERT INTO task_activity_events
+            (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+          VALUES
+            (${`activity-contract-${index}`}, 'activity-contract-task', ${eventKind}, 'provider', 'sync', ${`contract-${index}`}, '2026-07-23T00:00:00.000Z')
+        `.execute(freshDb);
+      }
+      await expect(
+        sql`
+        INSERT INTO task_activity_events
+          (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+        VALUES
+          ('invalid-activity-kind', 'activity-contract-task', 'task_created', 'provider', 'sync', 'invalid-kind', '2026-07-23T00:00:00.000Z')
+      `.execute(freshDb),
+      ).rejects.toThrow();
+      await expect(
+        sql`
+        INSERT INTO task_activity_events
+          (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+        VALUES
+          ('invalid-activity-actor', 'activity-contract-task', 'created', 'integration', 'sync', 'invalid-actor', '2026-07-23T00:00:00.000Z')
+      `.execute(freshDb),
+      ).rejects.toThrow();
+      await expect(
+        sql`
+        INSERT INTO task_activity_events
+          (id, task_id, event_kind, actor_type, surface, dedupe_key, occurred_at)
+        VALUES
+          ('invalid-activity-surface', 'activity-contract-task', 'created', 'provider', 'teams', 'invalid-surface', '2026-07-23T00:00:00.000Z')
+      `.execute(freshDb),
+      ).rejects.toThrow();
+    } finally {
+      await freshDb.destroy();
+    }
+  }, 30000);
+
   it("creates canonical agent output item task links and nulls them when the task is deleted", async () => {
     const freshDb = await createTestPgDb();
     try {

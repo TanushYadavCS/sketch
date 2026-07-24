@@ -728,7 +728,7 @@ async function appendReviewDecisionActivity(
   const surface = toTaskActivitySurface(input.surface);
   await activity.append({
     taskId: input.taskId,
-    eventKind: "completion_review_decided",
+    eventKind: "completion_reviewed",
     actorType: "user",
     actorUserId: input.userId,
     surface,
@@ -739,7 +739,7 @@ async function appendReviewDecisionActivity(
   if (input.nextTaskStatus && input.previousTaskStatus !== input.nextTaskStatus) {
     await activity.append({
       taskId: input.taskId,
-      eventKind: "task_status_changed",
+      eventKind: "status_changed",
       actorType: "user",
       actorUserId: input.userId,
       surface,
@@ -757,6 +757,7 @@ function toTaskActivitySurface(surface: string): TaskActivitySurface {
     surface === "web" ||
     surface === "slack" ||
     surface === "whatsapp" ||
+    surface === "sync" ||
     surface === "system"
   ) {
     return surface;
@@ -901,7 +902,7 @@ async function applyTaskChange(
     if (promoted.status === "upserted" && promoted.created) {
       await activity.append({
         taskId,
-        eventKind: "task_created",
+        eventKind: "created",
         actorType: "agent",
         actorKey: "conversation_summary",
         surface: "summarizer",
@@ -913,7 +914,7 @@ async function applyTaskChange(
     if (insertedMessageIds.length > 0) {
       await activity.append({
         taskId,
-        eventKind: "material_evidence_added",
+        eventKind: "evidence_added",
         actorType: "agent",
         actorKey: "conversation_summary",
         surface: "summarizer",
@@ -961,7 +962,7 @@ async function applyTaskChange(
   if (insertedMessageIds.length > 0) {
     await activity.append({
       taskId: task.id,
-      eventKind: "material_evidence_added",
+      eventKind: "evidence_added",
       actorType: "agent",
       actorKey: "conversation_summary",
       surface: "summarizer",
@@ -1018,7 +1019,7 @@ async function applyTaskChange(
     if (Object.keys(changes).length > 0) {
       await activity.append({
         taskId: task.id,
-        eventKind: "task_fields_changed",
+        eventKind: "fields_changed",
         actorType: "agent",
         actorKey: "conversation_summary",
         surface: "summarizer",
@@ -1049,7 +1050,7 @@ async function applyTaskChange(
   if (recommendation.created) {
     await activity.append({
       taskId: task.id,
-      eventKind: "completion_review_opened",
+      eventKind: "completion_proposed",
       actorType: "agent",
       actorKey: "conversation_summary",
       surface: "summarizer",

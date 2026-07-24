@@ -1327,11 +1327,7 @@ describe("createTaskRepository sqlite", () => {
     });
     expect(externalUpdate).toBeNull();
     expect(activity).toHaveLength(3);
-    expect(activity.map((event) => event.event_kind)).toEqual([
-      "task_status_changed",
-      "task_status_changed",
-      "task_status_changed",
-    ]);
+    expect(activity.map((event) => event.event_kind)).toEqual(["status_changed", "status_changed", "status_changed"]);
     expect(activity.map((event) => JSON.parse(event.changes_json ?? "{}"))).toEqual([
       { status: { before: "open", after: "done" } },
       { status: { before: "done", after: "open" } },
