@@ -220,7 +220,7 @@ describe("managed login redirect", () => {
   });
 });
 
-describe("magic link return_to", () => {
+describe("magic link confirmation", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {
@@ -234,7 +234,7 @@ describe("magic link return_to", () => {
     } catch {}
   });
 
-  it("preserves a safe integrations return path through verification", async () => {
+  function createMagicLinkApp() {
     const logger = {
       info: vi.fn(),
       warn: vi.fn(),
@@ -244,8 +244,14 @@ describe("magic link return_to", () => {
     const app = createApp(db, createTestConfig({ BASE_URL: "https://sketch.test" }), {
       logger: logger as never,
     });
-    const returnTo = "/integrations?connect=github";
+    return { app, logger };
+  }
 
+  async function requestMagicLink(
+    app: ReturnType<typeof createApp>,
+    logger: ReturnType<typeof createMagicLinkApp>["logger"],
+    returnTo?: string,
+  ) {
     const requestRes = await app.request("/api/auth/magic-link", {
       method: "POST",
       body: JSON.stringify({ email: "admin@test.com", returnTo }),
@@ -256,13 +262,129 @@ describe("magic link return_to", () => {
       .map(([data]) => (data as { magicLinkUrl?: string }).magicLinkUrl)
       .find(Boolean);
     expect(magicLinkUrl).toBeDefined();
+    return new URL(magicLinkUrl as string);
+  }
 
-    const url = new URL(magicLinkUrl as string);
+  async function openConfirmation(app: ReturnType<typeof createApp>, url: URL) {
+    const response = await app.request(`${url.pathname}${url.search}`);
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    const confirmation = html.match(/name="confirmation" value="([^"]+)"/)?.[1];
+    const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(confirmation).toBeDefined();
+    expect(cookie).toContain("sketch_magic_link_confirmation=");
+    return { confirmation: confirmation as string, cookie: cookie as string, response };
+  }
+
+  function confirmMagicLink(
+    app: ReturnType<typeof createApp>,
+    url: URL,
+    confirmation: string,
+    cookie?: string,
+    returnTo?: string,
+  ) {
+    const body = new URLSearchParams({
+      token: url.searchParams.get("token") as string,
+      confirmation,
+    });
+    if (returnTo) body.set("return_to", returnTo);
+    return app.request("/api/auth/magic-link/confirmation", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      body: body.toString(),
+    });
+  }
+
+  it("does not consume a magic link when GET is prefetched", async () => {
+    const { app, logger } = createMagicLinkApp();
+    const url = await requestMagicLink(app, logger);
+
+    const prefetchedRes = await app.request(`${url.pathname}${url.search}`);
+    expect(prefetchedRes.status).toBe(200);
+    expect(prefetchedRes.headers.get("cache-control")).toBe("no-store");
+    expect(prefetchedRes.headers.get("referrer-policy")).toBe("no-referrer");
+    const html = await prefetchedRes.text();
+    const styleNonce = html.match(/<style nonce="([^"]+)">/)?.[1];
+    expect(styleNonce).toBeDefined();
+    expect(prefetchedRes.headers.get("content-security-policy")).toContain(`style-src 'nonce-${styleNonce}'`);
+    expect(prefetchedRes.headers.get("content-security-policy")).toContain("img-src 'self'");
+    expect(html).toContain('src="/logos/sketch-icon-dark.png"');
+    expect(html).toContain('class="card"');
+    expect(html).toContain("This secure link can only be used once.");
+
+    const humanRes = await app.request(`${url.pathname}${url.search}`);
+    expect(humanRes.status).toBe(200);
+  });
+
+  it("creates a session after explicit confirmation and preserves a safe return path", async () => {
+    const { app, logger } = createMagicLinkApp();
+    const returnTo = "/integrations?connect=github";
+    const url = await requestMagicLink(app, logger, returnTo);
     expect(url.searchParams.get("return_to")).toBe(returnTo);
 
-    const verifyRes = await app.request(`${url.pathname}${url.search}`);
+    const { confirmation, cookie } = await openConfirmation(app, url);
+    const verifyRes = await confirmMagicLink(app, url, confirmation, cookie, returnTo);
     expect(verifyRes.status).toBe(302);
     expect(verifyRes.headers.get("location")).toBe(returnTo);
+    expect(verifyRes.headers.get("set-cookie")).toContain("sketch_session=");
+  });
+
+  it("rejects replay after a successful confirmation", async () => {
+    const { app, logger } = createMagicLinkApp();
+    const url = await requestMagicLink(app, logger);
+    const { confirmation, cookie } = await openConfirmation(app, url);
+
+    const firstRes = await confirmMagicLink(app, url, confirmation, cookie);
+    expect(firstRes.status).toBe(302);
+    expect(firstRes.headers.get("location")).toBe("/");
+
+    const replayRes = await confirmMagicLink(app, url, confirmation, cookie);
+    expect(replayRes.status).toBe(302);
+    expect(replayRes.headers.get("location")).toBe("/login?error=expired_link");
+    expect(replayRes.headers.get("set-cookie") ?? "").not.toContain("sketch_session=");
+  });
+
+  it("rejects an expired token before confirmation", async () => {
+    const { app, logger } = createMagicLinkApp();
+    const url = await requestMagicLink(app, logger);
+    await db
+      .updateTable("magic_link_tokens")
+      .set({ expires_at: new Date(Date.now() - 1_000).toISOString() })
+      .where("token", "=", url.searchParams.get("token") as string)
+      .execute();
+
+    const response = await app.request(`${url.pathname}${url.search}`);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/login?error=expired_link");
+  });
+
+  it("drops an unsafe return path during confirmation", async () => {
+    const { app, logger } = createMagicLinkApp();
+    const url = await requestMagicLink(app, logger);
+    const { confirmation, cookie } = await openConfirmation(app, url);
+
+    const response = await confirmMagicLink(app, url, confirmation, cookie, "https://attacker.test/steal");
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/");
+    expect(response.headers.get("set-cookie")).toContain("sketch_session=");
+  });
+
+  it("requires the same-site confirmation cookie without consuming the token", async () => {
+    const { app, logger } = createMagicLinkApp();
+    const url = await requestMagicLink(app, logger);
+    const { confirmation, cookie } = await openConfirmation(app, url);
+
+    const missingCookieRes = await confirmMagicLink(app, url, confirmation);
+    expect(missingCookieRes.status).toBe(302);
+    expect(missingCookieRes.headers.get("location")).toBe("/login?error=invalid_link");
+
+    const confirmedRes = await confirmMagicLink(app, url, confirmation, cookie);
+    expect(confirmedRes.status).toBe(302);
+    expect(confirmedRes.headers.get("location")).toBe("/");
+    expect(confirmedRes.headers.get("set-cookie")).toContain("sketch_session=");
   });
 });
 
