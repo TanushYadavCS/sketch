@@ -327,4 +327,27 @@ describe("operational alerts", () => {
       expect.objectContaining({ state: "sent", attempts: 0, provider_message_id: "recovery-message" }),
     ]);
   });
+
+  it("contains persistence failures so alert monitoring cannot interrupt the socket lifecycle", async () => {
+    const alerts = createOperationalAlertsRepository(db);
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    vi.spyOn(alerts, "observe").mockRejectedValue(new Error("database unavailable"));
+    const service = createOperationalAlertService({ alerts, logger });
+
+    await expect(
+      service.observeBaileysSocketState({
+        ownerToken: "owner",
+        generation: 1,
+        socketGeneration: 1,
+        socketState: "disconnected",
+        statusCode: 413,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ socketState: "disconnected", statusCode: 413 }),
+      "Operational alert observation failed",
+    );
+  });
 });

@@ -158,7 +158,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const channels = createChannelRepository(db);
   const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const operationalAlertsRepo = createOperationalAlertsRepository(db);
-  const operationalAlertService = createOperationalAlertService({ alerts: operationalAlertsRepo });
+  const operationalAlertService = createOperationalAlertService({ alerts: operationalAlertsRepo, logger });
   const agentEnvironmentVariables = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   await backfillFilesConnectorCredentialEncryption(db, config.ENCRYPTION_KEY, logger);
   await runManagedSeed(config, settingsRepo, users);
