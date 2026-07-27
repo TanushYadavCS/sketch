@@ -48,6 +48,7 @@ function task(overrides: Partial<Selectable<TasksTable>> = {}): Selectable<Tasks
     source_provider_thread_id: "thread-1",
     source_anchor_key: "slack:42:thread-1",
     origin_agent_output_id: "summary-output-1",
+    revision: 0,
     created_at: "2026-07-17T08:00:00.000Z",
     updated_at: "2026-07-17T09:00:00.000Z",
     ...overrides,

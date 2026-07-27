@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 153;
+const EXPECTED_MIGRATION_COUNT = 154;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -188,6 +188,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[150]).toBe("155-requeue-kept-slice-reemission");
     expect(names[151]).toBe("156-operational-alerts");
     expect(names[152]).toBe("157-task-activity-events");
+    expect(names[153]).toBe("158-task-human-authority");
   });
 
   it("creates the bounded open-materializable partial index", async () => {
@@ -403,6 +404,101 @@ describe("runMigrations on Postgres — full sequence", () => {
           ('invalid-activity-surface', 'activity-contract-task', 'created', 'provider', 'teams', 'invalid-surface', '2026-07-23T00:00:00.000Z')
       `.execute(freshDb),
       ).rejects.toThrow();
+    } finally {
+      await freshDb.destroy();
+    }
+  }, 30000);
+
+  it("creates task authority revision, protection, and proposal schema", async () => {
+    const revision = await sql<{ column_name: string; data_type: string; is_nullable: string }>`
+      SELECT column_name, data_type, is_nullable
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'tasks'
+        AND column_name = 'revision'
+    `.execute(db);
+    const tables = await sql<{ table_name: string }>`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name IN (
+          'task_field_protections',
+          'task_change_proposals',
+          'task_change_proposal_fields',
+          'task_change_proposal_evidence'
+        )
+      ORDER BY table_name
+    `.execute(db);
+
+    expect(revision.rows).toEqual([{ column_name: "revision", data_type: "integer", is_nullable: "NO" }]);
+    expect(tables.rows.map((row) => row.table_name)).toEqual([
+      "task_change_proposal_evidence",
+      "task_change_proposal_fields",
+      "task_change_proposals",
+      "task_field_protections",
+    ]);
+  });
+
+  it("enforces one pending proposal per task and preserves explicit null proposal values", async () => {
+    const freshDb = await createTestPgDb();
+    try {
+      await sql`
+        INSERT INTO tasks
+          (id, source, title, normalized_title, status, status_authority, provenance, source_task_id, updated_at)
+        VALUES
+          ('proposal-contract-task', 'summary', 'Contract task', 'contract task', 'open', 'local', 'summary', 'proposal-contract-task', '2026-07-27T00:00:00.000Z')
+      `.execute(freshDb);
+      await freshDb
+        .insertInto("task_change_proposals")
+        .values({
+          id: "proposal-1",
+          task_id: "proposal-contract-task",
+          state: "pending",
+          logical_fingerprint: "fingerprint-1",
+          dedupe_key: "dedupe-1",
+          supersedes_proposal_id: null,
+          reviewed_at: null,
+          reviewed_by_user_id: null,
+          review_surface: null,
+        })
+        .execute();
+      await freshDb
+        .insertInto("task_change_proposal_fields")
+        .values({
+          proposal_id: "proposal-1",
+          field: "due_at",
+          observed_revision: 0,
+          base_value_json: JSON.stringify("2026-08-01"),
+          proposed_value_json: JSON.stringify(null),
+          rationale: "The due date was explicitly removed.",
+          source_occurred_at: "2026-07-27T00:00:00.000Z",
+          origin_agent_output_id: null,
+        })
+        .execute();
+      await expect(
+        freshDb
+          .insertInto("task_change_proposals")
+          .values({
+            id: "proposal-2",
+            task_id: "proposal-contract-task",
+            state: "pending",
+            logical_fingerprint: "fingerprint-2",
+            dedupe_key: "dedupe-2",
+            supersedes_proposal_id: null,
+            reviewed_at: null,
+            reviewed_by_user_id: null,
+            review_surface: null,
+          })
+          .execute(),
+      ).rejects.toThrow();
+      const field = await freshDb
+        .selectFrom("task_change_proposal_fields")
+        .select(["base_value_json", "proposed_value_json"])
+        .where("proposal_id", "=", "proposal-1")
+        .executeTakeFirstOrThrow();
+
+      expect(JSON.parse(field.base_value_json)).toBe("2026-08-01");
+      expect(JSON.parse(field.proposed_value_json)).toBeNull();
     } finally {
       await freshDb.destroy();
     }

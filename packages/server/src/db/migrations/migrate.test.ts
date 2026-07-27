@@ -25,7 +25,7 @@ import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 
-const EXPECTED_MIGRATION_COUNT = 153;
+const EXPECTED_MIGRATION_COUNT = 154;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -222,6 +222,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[150]).toBe("155-requeue-kept-slice-reemission");
     expect(names[151]).toBe("156-operational-alerts");
     expect(names[152]).toBe("157-task-activity-events");
+    expect(names[153]).toBe("158-task-human-authority");
   });
 
   it("resets reviewed combined durability routes for member-source reseeding", async () => {
@@ -585,6 +586,133 @@ describe("runMigrations — full sequence", () => {
         ('invalid-activity-surface', 'activity-contract-task', 'created', 'provider', 'teams', 'invalid-surface', '2026-07-23T00:00:00.000Z')
     `.execute(db),
     ).rejects.toThrow();
+  });
+
+  it("creates task authority schema and backfills the latest human status decision", async () => {
+    const migrator = createMigrator(db);
+    const beforeAuthority = await migrator.migrateTo("157-task-activity-events");
+    expect(beforeAuthority.error).toBeUndefined();
+    await sql`INSERT INTO users (id, name) VALUES ('authority-user', 'Authority User')`.execute(db);
+    await sql`
+      INSERT INTO tasks
+        (id, source, title, normalized_title, status, status_authority, provenance, source_task_id, updated_at)
+      VALUES
+        ('authority-task', 'summary', 'Authority task', 'authority task', 'done', 'local', 'summary', 'authority-task', '2026-07-27T00:00:00.000Z')
+    `.execute(db);
+    await sql`
+      INSERT INTO task_activity_events
+        (id, task_id, event_kind, actor_type, actor_user_id, surface, dedupe_key, occurred_at)
+      VALUES
+        ('authority-event-a', 'authority-task', 'status_changed', 'user', 'authority-user', 'web', 'authority-a', '2026-07-27T01:00:00.000Z'),
+        ('authority-event-b', 'authority-task', 'status_changed', 'user', 'authority-user', 'slack', 'authority-b', '2026-07-27T01:00:00.000Z'),
+        ('authority-event-c', 'authority-task', 'status_changed', 'agent', null, 'summarizer', 'authority-c', '2026-07-27T02:00:00.000Z')
+    `.execute(db);
+
+    const latest = await migrator.migrateToLatest();
+    expect(latest.error).toBeUndefined();
+
+    const columns = await sql<{ name: string }>`
+      SELECT name FROM pragma_table_info('tasks') WHERE name = 'revision'
+    `.execute(db);
+    expect(columns.rows).toEqual([{ name: "revision" }]);
+    await expect(
+      db.selectFrom("tasks").select("revision").where("id", "=", "authority-task").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ revision: 0 });
+    await expect(
+      db
+        .selectFrom("task_field_protections")
+        .select(["task_id", "field", "protected_by_user_id", "activity_event_id", "protected_at"])
+        .execute(),
+    ).resolves.toEqual([
+      {
+        task_id: "authority-task",
+        field: "status",
+        protected_by_user_id: "authority-user",
+        activity_event_id: "authority-event-b",
+        protected_at: "2026-07-27T01:00:00.000Z",
+      },
+    ]);
+
+    await db
+      .insertInto("task_change_proposals")
+      .values({
+        id: "proposal-a",
+        task_id: "authority-task",
+        state: "pending",
+        logical_fingerprint: "fingerprint-a",
+        dedupe_key: "dedupe-a",
+        supersedes_proposal_id: null,
+        reviewed_at: null,
+        reviewed_by_user_id: null,
+        review_surface: null,
+      })
+      .execute();
+    await db
+      .insertInto("task_change_proposal_fields")
+      .values({
+        proposal_id: "proposal-a",
+        field: "due_at",
+        observed_revision: 0,
+        base_value_json: "null",
+        proposed_value_json: JSON.stringify("2026-08-15"),
+        rationale: "A due date was stated.",
+        source_occurred_at: "2026-07-27T02:00:00.000Z",
+        origin_agent_output_id: null,
+      })
+      .execute();
+    await expect(
+      db
+        .insertInto("task_change_proposals")
+        .values({
+          id: "proposal-b",
+          task_id: "authority-task",
+          state: "pending",
+          logical_fingerprint: "fingerprint-b",
+          dedupe_key: "dedupe-b",
+          supersedes_proposal_id: null,
+          reviewed_at: null,
+          reviewed_by_user_id: null,
+          review_surface: null,
+        })
+        .execute(),
+    ).rejects.toThrow();
+    await expect(
+      db
+        .selectFrom("task_change_proposal_fields")
+        .select(["base_value_json", "proposed_value_json"])
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ base_value_json: "null", proposed_value_json: JSON.stringify("2026-08-15") });
+
+    const down = await migrator.migrateDown();
+    expect(down.error).toBeInstanceOf(Error);
+    const protectionColumns = await sql<{ name: string }>`
+      SELECT name FROM pragma_table_info('task_field_protections')
+    `.execute(db);
+    expect(protectionColumns.rows.length).toBeGreaterThan(0);
+  });
+
+  it("removes empty task authority schema during a guarded migration rollback", async () => {
+    await runMigrations(db, { quiet: true });
+    const migrator = createMigrator(db);
+    const down = await migrator.migrateDown();
+    expect(down.error).toBeUndefined();
+
+    const taskColumns = await sql<{ name: string }>`
+      SELECT name FROM pragma_table_info('tasks') WHERE name = 'revision'
+    `.execute(db);
+    const authorityTables = await sql<{ name: string }>`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table'
+        AND name IN (
+          'task_field_protections',
+          'task_change_proposals',
+          'task_change_proposal_fields',
+          'task_change_proposal_evidence'
+        )
+    `.execute(db);
+    expect(taskColumns.rows).toEqual([]);
+    expect(authorityTables.rows).toEqual([]);
   });
 
   it("migration 140 retires unassigned local agent tasks without touching structural tasks", async () => {

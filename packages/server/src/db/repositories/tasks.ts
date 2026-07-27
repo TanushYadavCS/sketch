@@ -7,7 +7,8 @@ import type { AgentKnowledgeRefs, AgentOutputItemInput } from "./agent-outputs";
 import type { FileViewer } from "./connectors";
 import { fileVisibilityPredicate } from "./connectors";
 import { normalizeContactPointValue, whereLiveEntity } from "./entities";
-import { type TaskActivityChanges, type TaskActivitySurface, createTaskActivityRepository } from "./task-activity";
+import { createLocalTaskMutationPolicy } from "./local-task-mutations";
+import type { TaskActivityChanges, TaskActivitySurface } from "./task-activity";
 
 export const TEST_ACCOUNT_ENTITY_ID = "24d4ef8a-47eb-4510-a951-7d9bae036786";
 const BRIEF_TASK_ID_SEPARATOR = "\u001f";
@@ -477,77 +478,15 @@ export function createTaskRepository(db: Kysely<DB>) {
     },
 
     async updateLocalTaskStatus(input: UpdateLocalTaskStatusInput): Promise<Selectable<TasksTable> | null> {
-      const mutationId = randomUUID();
-      return db.transaction().execute(async (trx) => {
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          const existing = await trx
-            .selectFrom("tasks")
-            .selectAll()
-            .where("id", "=", input.taskId)
-            .where("valid_to", "is", null)
-            .executeTakeFirst();
-          if (
-            !existing ||
-            !canEditLocalTask(
-              existing,
-              input.userId,
-              input.assigneeEntityIds ?? [],
-              input.canEditAllLocalTasks === true,
-            ) ||
-            existing.status_authority !== "local" ||
-            (existing.provenance !== "brief" && existing.provenance !== "summary")
-          ) {
-            return null;
-          }
-          if (existing.status === input.status) return existing;
-
-          const previousStatusChangedAt = Date.parse(existing.status_changed_at ?? "");
-          const now = new Date(
-            Number.isFinite(previousStatusChangedAt) ? Math.max(Date.now(), previousStatusChangedAt + 1) : Date.now(),
-          ).toISOString();
-          let update = trx
-            .updateTable("tasks")
-            .set({
-              status: input.status,
-              status_raw: input.status,
-              status_authority: "local",
-              status_changed_at: now,
-              completed_at: input.status === "done" ? now : null,
-              updated_at: now,
-            })
-            .where("id", "=", input.taskId)
-            .where("valid_to", "is", null)
-            .where("status", "=", existing.status)
-            .where("status_authority", "=", "local")
-            .where("provenance", "in", ["brief", "summary"]);
-          if (input.canEditAllLocalTasks !== true) {
-            update = update.where((eb) =>
-              eb.or([
-                eb("created_by_user_id", "=", input.userId),
-                ...((input.assigneeEntityIds?.length ?? 0) > 0
-                  ? [eb("assignee_entity_id", "in", input.assigneeEntityIds ?? [])]
-                  : []),
-              ]),
-            );
-          }
-          const result = await update.executeTakeFirst();
-          if (Number(result.numUpdatedRows ?? 0) === 0) continue;
-
-          await createTaskActivityRepository(trx).append({
-            taskId: existing.id,
-            eventKind: "status_changed",
-            actorType: "user",
-            actorUserId: input.userId,
-            surface: input.surface ?? "web",
-            changes: { status: { before: existing.status, after: input.status } },
-            identityParts: [existing.id, mutationId],
-            occurredAt: now,
-          });
-          return trx.selectFrom("tasks").selectAll().where("id", "=", input.taskId).executeTakeFirstOrThrow();
-        }
-
-        return null;
+      const result = await createLocalTaskMutationPolicy(db).mutateHumanTask({
+        taskId: input.taskId,
+        userId: input.userId,
+        assigneeEntityIds: input.assigneeEntityIds,
+        canEditAllLocalTasks: input.canEditAllLocalTasks,
+        changes: { status: input.status },
+        surface: input.surface ?? "web",
       });
+      return result.status === "applied" || result.status === "unchanged" ? result.task : null;
     },
   };
 }
@@ -1363,17 +1302,6 @@ function visibleTaskQuery(
           : []),
       ]),
     );
-}
-
-function canEditLocalTask(
-  task: Selectable<TasksTable>,
-  userId: string,
-  assigneeEntityIds: string[],
-  canEditAllLocalTasks = false,
-): boolean {
-  if (canEditAllLocalTasks) return true;
-  if (task.created_by_user_id === userId) return true;
-  return Boolean(task.assignee_entity_id && assigneeEntityIds.includes(task.assignee_entity_id));
 }
 
 async function findLiveProjectForTask(db: Kysely<DB>, parentSourceRef: string | null, parentName: string | null) {

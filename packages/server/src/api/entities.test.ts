@@ -982,6 +982,71 @@ describe("GET/PATCH /api/entities/:id/tasks", () => {
     ]);
   });
 
+  it("uses the same revision and field-protection policy for entity-scoped metadata edits", async () => {
+    const local = await createTaskRepository(db).upsertTask({
+      parentEntityId: "task-project",
+      parentSourceRef: null,
+      parentName: "Task Project",
+      source: "summary",
+      externalRef: null,
+      title: "Prepare launch copy",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "entity-metadata-edit",
+      createdByUserId: adminId,
+    });
+
+    const edited = await app.request(`/api/entities/task-project/tasks/${local.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expectedRevision: 0,
+        title: "Publish launch copy",
+        priority: null,
+        dueAt: "2026-08-20",
+      }),
+    });
+    const stale = await app.request(`/api/entities/task-project/tasks/${local.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedRevision: 0, dueAt: null }),
+    });
+
+    expect(edited.status).toBe(200);
+    await expect(edited.json()).resolves.toMatchObject({
+      task: {
+        id: local.taskId,
+        title: "Publish launch copy",
+        priority: null,
+        dueAt: "2026-08-20",
+        revision: 1,
+        protectedFields: ["dueAt", "priority", "title"],
+      },
+    });
+    expect(stale.status).toBe(409);
+    await expect(
+      db
+        .selectFrom("task_activity_events")
+        .select(["event_kind", "changes_json"])
+        .where("task_id", "=", local.taskId)
+        .execute(),
+    ).resolves.toEqual([
+      {
+        event_kind: "fields_changed",
+        changes_json: JSON.stringify({
+          dueAt: { before: null, after: "2026-08-20" },
+          priority: { before: "medium", after: null },
+          title: { before: "Prepare launch copy", after: "Publish launch copy" },
+        }),
+      },
+    ]);
+  });
+
   it("lets admins read and patch project-local summary tasks from other users", async () => {
     const member = await seedMember(db);
     const repo = createTaskRepository(db);
@@ -1200,7 +1265,10 @@ describe("GET/PATCH /api/entities/:id/tasks", () => {
     });
     expect(memberListRes.status).toBe(200);
     expect(memberListBody.tasks.some((task) => task.id === proposed.taskId)).toBe(false);
-    expect(patchRes.status).toBe(403);
+    expect(patchRes.status).toBe(404);
+    await expect(patchRes.json()).resolves.toEqual({
+      error: { code: "NOT_FOUND", message: "Task not found" },
+    });
   });
 
   it("returns summary tasks for a private declared project that is visible in the drawer profile", async () => {
@@ -1277,7 +1345,7 @@ describe("GET/PATCH /api/entities/:id/tasks", () => {
     });
 
     expect(invalid.status).toBe(400);
-    expect(forbidden.status).toBe(403);
+    expect(forbidden.status).toBe(404);
   });
 });
 

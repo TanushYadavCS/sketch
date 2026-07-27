@@ -98,7 +98,7 @@ describe("follow-up review routes", () => {
     expect(first.status).toBe(200);
     await expect(first.json()).resolves.toMatchObject({
       review: { kind: "completion", id: "recommendation-1", state: "accepted", canReview: false },
-      task: { id: created.taskId, status: "done" },
+      task: { id: created.taskId, status: "done", revision: 1, protectedFields: ["status"] },
     });
 
     const retry = await request("confirm_done");
@@ -132,6 +132,24 @@ describe("follow-up review routes", () => {
         actor_user_id: "user-1",
         surface: "web",
         changes_json: JSON.stringify({ status: { before: "open", after: "done" } }),
+      },
+    ]);
+    await expect(
+      db
+        .selectFrom("task_field_protections")
+        .innerJoin("task_activity_events", "task_activity_events.id", "task_field_protections.activity_event_id")
+        .select([
+          "task_field_protections.field",
+          "task_field_protections.protected_by_user_id",
+          "task_activity_events.event_kind",
+        ])
+        .where("task_field_protections.task_id", "=", created.taskId)
+        .execute(),
+    ).resolves.toEqual([
+      {
+        field: "status",
+        protected_by_user_id: "user-1",
+        event_kind: "status_changed",
       },
     ]);
   });

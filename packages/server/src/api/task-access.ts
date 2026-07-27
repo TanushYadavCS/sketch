@@ -2,7 +2,7 @@ import type { Context } from "hono";
 import type { Kysely, Selectable } from "kysely";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createUserRepository } from "../db/repositories/users";
-import type { DB, TasksTable } from "../db/schema";
+import type { DB, TaskProtectedField, TasksTable } from "../db/schema";
 import { type FileViewer, getContentViewer, isAdmin } from "./auth-helpers";
 
 export const TASK_STATUSES = new Set(["open", "in_progress", "done", "dropped"]);
@@ -49,6 +49,7 @@ export function readonlyReason(
 }
 
 type TaskCreator = { name: string; email: string | null };
+export type TaskEditableField = "status" | "title" | "priority" | "dueAt";
 
 export async function loadTaskCreators(
   db: Kysely<DB>,
@@ -65,12 +66,36 @@ export async function loadTaskCreators(
   return new Map(rows.map((row) => [row.id, { name: row.name, email: row.email }]));
 }
 
+export async function loadTaskProtectedFields(
+  db: Kysely<DB>,
+  tasks: Selectable<TasksTable>[],
+): Promise<Map<string, TaskEditableField[]>> {
+  const ids = [...new Set(tasks.map((task) => task.id))];
+  if (ids.length === 0) return new Map();
+  const rows = await db
+    .selectFrom("task_field_protections")
+    .select(["task_id", "field"])
+    .where("task_id", "in", ids)
+    .orderBy("field")
+    .limit(ids.length * 4)
+    .execute();
+  const byTask = new Map<string, TaskEditableField[]>();
+  for (const row of rows) {
+    const fields = byTask.get(row.task_id) ?? [];
+    fields.push(protectedFieldToEditableField(row.field));
+    byTask.set(row.task_id, fields);
+  }
+  return byTask;
+}
+
 export function toTaskDto(
   task: Selectable<TasksTable>,
   access: Pick<TaskAccessContext, "userId" | "assigneeEntityIds" | "canEditAllLocalTasks">,
   creators: Map<string, TaskCreator> = new Map(),
+  protectedFields: TaskEditableField[] = [],
 ) {
   const creator = task.created_by_user_id ? (creators.get(task.created_by_user_id) ?? null) : null;
+  const canEdit = canEditTaskStatus(task, access);
   return {
     id: task.id,
     parentEntityId: task.parent_entity_id,
@@ -96,8 +121,20 @@ export function toTaskDto(
     readonlyReason: readonlyReason(task, access),
     completedAt: task.completed_at,
     updatedAt: task.updated_at,
-    canEditStatus: canEditTaskStatus(task, access),
+    revision: task.revision,
+    canEditStatus: canEdit,
+    canEditFields: {
+      title: canEdit,
+      priority: canEdit,
+      dueAt: canEdit,
+      status: canEdit,
+    },
+    protectedFields,
   };
+}
+
+function protectedFieldToEditableField(field: TaskProtectedField): TaskEditableField {
+  return field === "due_at" ? "dueAt" : field;
 }
 
 export async function loadViewerPersonEntityIds(

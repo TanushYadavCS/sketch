@@ -1203,6 +1203,7 @@ export interface TasksTable {
   source_provider_thread_id: string | null;
   source_anchor_key: string | null;
   origin_agent_output_id: string | null;
+  revision: Generated<number>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
@@ -1279,6 +1280,52 @@ export interface TaskActivityEventsTable {
   dedupe_key: string;
   occurred_at: string;
   created_at: Generated<string>;
+}
+
+export type TaskProtectedField = "status" | "title" | "priority" | "due_at";
+
+export interface TaskFieldProtectionsTable {
+  task_id: string;
+  field: TaskProtectedField;
+  protected_by_user_id: string | null;
+  activity_event_id: string | null;
+  protected_at: string;
+}
+
+export type TaskChangeProposalState = "pending" | "accepted" | "rejected" | "superseded";
+export type TaskChangeProposalField = "title" | "priority" | "due_at";
+export type TaskChangeProposalEvidenceKind = "conversation_message" | "file" | "entity" | "fact" | "mention";
+
+export interface TaskChangeProposalsTable {
+  id: string;
+  task_id: string;
+  state: TaskChangeProposalState;
+  logical_fingerprint: string;
+  dedupe_key: string;
+  supersedes_proposal_id: string | null;
+  reviewed_at: string | null;
+  reviewed_by_user_id: string | null;
+  review_surface: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface TaskChangeProposalFieldsTable {
+  proposal_id: string;
+  field: TaskChangeProposalField;
+  observed_revision: number;
+  base_value_json: string;
+  proposed_value_json: string;
+  rationale: string;
+  source_occurred_at: string;
+  origin_agent_output_id: string | null;
+}
+
+export interface TaskChangeProposalEvidenceTable {
+  proposal_id: string;
+  field: TaskChangeProposalField;
+  kind: TaskChangeProposalEvidenceKind;
+  ref_id: string;
 }
 
 export interface TaskDurabilityRouteStateTable {
@@ -1465,6 +1512,10 @@ export interface DB {
   task_completion_recommendation_evidence: TaskCompletionRecommendationEvidenceTable;
   task_completion_recommendation_deliveries: TaskCompletionRecommendationDeliveriesTable;
   task_activity_events: TaskActivityEventsTable;
+  task_field_protections: TaskFieldProtectionsTable;
+  task_change_proposals: TaskChangeProposalsTable;
+  task_change_proposal_fields: TaskChangeProposalFieldsTable;
+  task_change_proposal_evidence: TaskChangeProposalEvidenceTable;
   task_durability_route_state: TaskDurabilityRouteStateTable;
   task_seed_candidates: TaskSeedCandidatesTable;
   work_cycles: WorkCyclesTable;

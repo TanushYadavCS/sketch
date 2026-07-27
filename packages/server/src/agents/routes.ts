@@ -1,6 +1,13 @@
 import { Hono } from "hono";
 import type { Kysely, Selectable } from "kysely";
-import { type TaskAccessContext, canEditTaskStatus, resolveTaskAccessContext, toTaskDto } from "../api/task-access";
+import {
+  type TaskAccessContext,
+  type TaskEditableField,
+  canEditTaskStatus,
+  loadTaskProtectedFields,
+  resolveTaskAccessContext,
+  toTaskDto,
+} from "../api/task-access";
 import type {
   AgentDeliveryConfig,
   AgentDeliveryMention,
@@ -40,9 +47,13 @@ export interface DailyBriefTaskState {
   statusRaw: string | null;
   statusAuthority: string;
   priority: string | null;
+  dueAt: string | null;
   completedAt: string | null;
   updatedAt: string;
+  revision: number;
   canEditStatus: boolean;
+  canEditFields: Record<TaskEditableField, boolean>;
+  protectedFields: TaskEditableField[];
   readonlyReason: "not_owner" | "external_authority" | null;
 }
 
@@ -105,8 +116,12 @@ function legacyTaskLinkCandidate(
   return { taskId };
 }
 
-function toDailyBriefTaskState(task: Selectable<TasksTable>, access: TaskAccessContext): DailyBriefTaskState {
-  const dto = toTaskDto(task, access);
+function toDailyBriefTaskState(
+  task: Selectable<TasksTable>,
+  access: TaskAccessContext,
+  protectedFields: TaskEditableField[] = [],
+): DailyBriefTaskState {
+  const dto = toTaskDto(task, access, new Map(), protectedFields);
   return {
     id: dto.id,
     title: dto.title,
@@ -114,9 +129,13 @@ function toDailyBriefTaskState(task: Selectable<TasksTable>, access: TaskAccessC
     statusRaw: dto.statusRaw,
     statusAuthority: dto.statusAuthority,
     priority: dto.priority,
+    dueAt: dto.dueAt,
     completedAt: dto.completedAt,
     updatedAt: dto.updatedAt,
+    revision: dto.revision,
     canEditStatus: dto.canEditStatus,
+    canEditFields: dto.canEditFields,
+    protectedFields: dto.protectedFields,
     readonlyReason: dto.readonlyReason,
   };
 }
@@ -126,6 +145,7 @@ export async function hydrateDailyBriefTaskState(params: {
   userId: string;
   access: TaskAccessContext;
   loadVisibleTasks: (taskIds: string[], access: TaskAccessContext) => Promise<Selectable<TasksTable>[]>;
+  loadProtectedFields?: (tasks: Selectable<TasksTable>[]) => Promise<Map<string, TaskEditableField[]>>;
   logger: Pick<Logger, "debug">;
 }): Promise<Omit<AgentOutputApi, "sections"> & { sections: Record<string, HydratedDailyBriefItem[]> }> {
   const candidateByItem = new Map<AgentApiItem, TaskLinkCandidate>();
@@ -178,6 +198,7 @@ export async function hydrateDailyBriefTaskState(params: {
 
   const visibleTasks = idsToLoad.length === 0 ? [] : await params.loadVisibleTasks(idsToLoad, params.access);
   const visibleById = new Map(visibleTasks.map((task) => [task.id, task]));
+  const protectedFieldsByTask = params.loadProtectedFields ? await params.loadProtectedFields(visibleTasks) : new Map();
   let canonicalHydrated = 0;
   let legacyHydrated = 0;
   const sections: Record<string, HydratedDailyBriefItem[]> = {};
@@ -200,7 +221,7 @@ export async function hydrateDailyBriefTaskState(params: {
       return {
         ...item,
         taskId: task.id,
-        task: toDailyBriefTaskState(task, params.access),
+        task: toDailyBriefTaskState(task, params.access, protectedFieldsByTask.get(task.id)),
       };
     });
   }
@@ -384,6 +405,7 @@ export async function hydrateDailyBriefState(params: {
     userId: params.userId,
     access: params.access,
     loadVisibleTasks: params.loadVisibleTasks,
+    loadProtectedFields: (tasks) => loadTaskProtectedFields(params.db, tasks),
     logger: params.logger,
   });
   const sections: Record<string, HydratedDailyBriefItem[]> = Object.fromEntries(
@@ -534,7 +556,9 @@ export function followupReviewRoutes(service: AgentRunService, db: Kysely<DB>) {
   const taskState = async (taskId: string | undefined, access: TaskAccessContext) => {
     if (!taskId) return null;
     const task = (await tasks.listVisibleTasksByIds([taskId], access))[0];
-    return task ? toDailyBriefTaskState(task, access) : null;
+    if (!task) return null;
+    const protectedFields = await loadTaskProtectedFields(db, [task]);
+    return toDailyBriefTaskState(task, access, protectedFields.get(task.id));
   };
 
   routes.patch("/task-completion-recommendations/:recommendationId", async (c) => {

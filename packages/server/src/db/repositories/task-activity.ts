@@ -27,14 +27,15 @@ const EVIDENCE_IDENTIFIER_LIMIT = 5;
 
 export function createTaskActivityRepository(db: Kysely<DB> | Transaction<DB>) {
   return {
-    async append(input: AppendTaskActivityInput): Promise<{ created: boolean }> {
+    async append(input: AppendTaskActivityInput): Promise<{ id: string; created: boolean }> {
       const changes = normalizeChanges(input.changes);
       const evidence = normalizeEvidence(input.evidence);
       const dedupeKey = activityDedupeKey(input.eventKind, input.identityParts);
+      const id = randomUUID();
       const result = await db
         .insertInto("task_activity_events")
         .values({
-          id: randomUUID(),
+          id,
           task_id: input.taskId,
           event_kind: input.eventKind,
           actor_type: input.actorType,
@@ -49,7 +50,14 @@ export function createTaskActivityRepository(db: Kysely<DB> | Transaction<DB>) {
         })
         .onConflict((oc) => oc.column("dedupe_key").doNothing())
         .executeTakeFirst();
-      return { created: Number(result.numInsertedOrUpdatedRows ?? 0) > 0 };
+      const created = Number(result.numInsertedOrUpdatedRows ?? 0) > 0;
+      if (created) return { id, created: true };
+      const existing = await db
+        .selectFrom("task_activity_events")
+        .select("id")
+        .where("dedupe_key", "=", dedupeKey)
+        .executeTakeFirstOrThrow();
+      return { id: existing.id, created: false };
     },
   };
 }

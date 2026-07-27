@@ -129,6 +129,162 @@ describe("GET/PATCH /api/tasks/:taskId", () => {
     ]);
   });
 
+  it("edits task metadata against the observed revision and protects each human-authored field", async () => {
+    const task = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Draft launch notes",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "editable-metadata",
+      createdByUserId: memberId,
+    });
+
+    const edited = await app.request(`/api/tasks/${task.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expectedRevision: 0,
+        title: "  Publish launch notes  ",
+        priority: "high",
+        dueAt: "2026-08-15",
+        status: "in_progress",
+      }),
+    });
+    const stale = await app.request(`/api/tasks/${task.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedRevision: 0, priority: "low" }),
+    });
+    const staleIdempotent = await app.request(`/api/tasks/${task.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedRevision: 0, priority: "high" }),
+    });
+
+    expect(edited.status).toBe(200);
+    await expect(edited.json()).resolves.toMatchObject({
+      task: {
+        id: task.taskId,
+        title: "Publish launch notes",
+        priority: "high",
+        dueAt: "2026-08-15",
+        status: "in_progress",
+        revision: 1,
+        canEditFields: {
+          title: true,
+          priority: true,
+          dueAt: true,
+          status: true,
+        },
+        protectedFields: ["dueAt", "priority", "status", "title"],
+      },
+    });
+    expect(stale.status).toBe(409);
+    await expect(stale.json()).resolves.toEqual({
+      error: { code: "TASK_CHANGED", message: "Task changed since it was loaded" },
+    });
+    expect(staleIdempotent.status).toBe(200);
+    await expect(staleIdempotent.json()).resolves.toMatchObject({ task: { revision: 1, priority: "high" } });
+    await expect(
+      db
+        .selectFrom("tasks")
+        .select(["title", "normalized_title"])
+        .where("id", "=", task.taskId)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ title: "Publish launch notes", normalized_title: "publish launch notes" });
+
+    await expect(
+      db
+        .selectFrom("task_field_protections")
+        .select(["field", "protected_by_user_id", "activity_event_id"])
+        .where("task_id", "=", task.taskId)
+        .orderBy("field")
+        .execute(),
+    ).resolves.toEqual([
+      { field: "due_at", protected_by_user_id: memberId, activity_event_id: expect.any(String) },
+      { field: "priority", protected_by_user_id: memberId, activity_event_id: expect.any(String) },
+      { field: "status", protected_by_user_id: memberId, activity_event_id: expect.any(String) },
+      { field: "title", protected_by_user_id: memberId, activity_event_id: expect.any(String) },
+    ]);
+    await expect(
+      db
+        .selectFrom("task_activity_events")
+        .select(["event_kind", "changes_json"])
+        .where("task_id", "=", task.taskId)
+        .execute(),
+    ).resolves.toEqual([
+      {
+        event_kind: "fields_changed",
+        changes_json: JSON.stringify({
+          dueAt: { before: null, after: "2026-08-15" },
+          priority: { before: "medium", after: "high" },
+          status: { before: "open", after: "in_progress" },
+          title: { before: "Draft launch notes", after: "Publish launch notes" },
+        }),
+      },
+    ]);
+  });
+
+  it("rejects malformed, unknown, and oversized task edits through the public API", async () => {
+    const task = await createTaskRepository(db).upsertTask({
+      parentEntityId: null,
+      parentSourceRef: null,
+      parentName: null,
+      source: "summary",
+      externalRef: null,
+      title: "Validate edits",
+      status: "open",
+      statusRaw: "action_item",
+      statusAuthority: "local",
+      assigneeEntityId: null,
+      assigneeName: null,
+      priority: "medium",
+      dueAt: null,
+      provenance: "summary",
+      sourceTaskId: "validate-edits",
+      createdByUserId: memberId,
+    });
+    const cases: Array<{ body: unknown; status: number }> = [
+      { body: {}, status: 400 },
+      { body: { expectedRevision: 0, parentEntityId: "project-x" }, status: 400 },
+      { body: { title: "Missing revision" }, status: 400 },
+      { body: { expectedRevision: -1, title: "Bad revision" }, status: 400 },
+      { body: { expectedRevision: 0, title: "   " }, status: 400 },
+      { body: { expectedRevision: 0, title: "🧭".repeat(241) }, status: 400 },
+      { body: { expectedRevision: 0, priority: "urgent" }, status: 400 },
+      { body: { expectedRevision: 0, dueAt: "2026-02-30" }, status: 400 },
+      { body: { expectedRevision: 0, dueAt: "2026-8-1" }, status: 400 },
+    ];
+    for (const testCase of cases) {
+      const response = await app.request(`/api/tasks/${task.taskId}`, {
+        method: "PATCH",
+        headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+        body: JSON.stringify(testCase.body),
+      });
+      expect(response.status).toBe(testCase.status);
+    }
+
+    const oversized = await app.request(`/api/tasks/${task.taskId}`, {
+      method: "PATCH",
+      headers: { Cookie: memberCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedRevision: 0, title: "a".repeat(9 * 1024) }),
+    });
+    expect(oversized.status).toBe(413);
+    await expect(
+      db.selectFrom("tasks").select("revision").where("id", "=", task.taskId).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ revision: 0 });
+  });
+
   it("lets an assignee and admin update local tasks while hiding them from unrelated members", async () => {
     const repo = createTaskRepository(db);
     const assigned = await repo.upsertTask({

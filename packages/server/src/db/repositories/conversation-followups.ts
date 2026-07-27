@@ -3,8 +3,9 @@ import { type Kysely, type Selectable, type Transaction, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import type { DB, TasksTable } from "../schema";
 import type { AgentOutputItemInput } from "./agent-outputs";
+import { mutateHumanTaskInTransaction } from "./local-task-mutations";
 import { type TaskActivitySurface, createTaskActivityRepository } from "./task-activity";
-import { type ConversationTaskSourceAnchor, type TaskStatus, createTaskRepository } from "./tasks";
+import { type ConversationTaskSourceAnchor, createTaskRepository } from "./tasks";
 
 const RECOMMENDATION_EXPIRY_MS = 48 * 60 * 60 * 1000;
 const RECOMMENDATION_DELIVERY_LIMIT = 3;
@@ -602,12 +603,17 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
             return { status: "stale" as const };
           }
           if (input.action === "confirm_done") {
-            const taskUpdated = await updateActionableTaskStatus(trx, recommendation.task_id, "done", input.now, {
+            const taskMutation = await mutateHumanTaskInTransaction(trx, {
+              taskId: recommendation.task_id,
               userId: input.userId,
               assigneeEntityIds: input.assigneeEntityIds,
               canEditAllLocalTasks: input.canEditAllLocalTasks,
+              changes: { status: "done" },
+              surface: toTaskActivitySurface(input.surface),
+              mutationId: recommendation.recommendation_id,
+              now: input.now,
             });
-            if (!taskUpdated) {
+            if (taskMutation.status !== "applied") {
               const failure = await classifyReviewFailure(trx, recommendation.task_id, input);
               if (failure === "unauthorized") throw new ReviewAuthorizationChangedError(failure);
               await trx
@@ -630,8 +636,6 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
               decisionState: state,
               userId: input.userId,
               surface: input.surface,
-              previousTaskStatus: recommendation.status,
-              nextTaskStatus: "done",
               now: input.now,
             });
             return { status: "confirmed" as const, taskId: recommendation.task_id };
@@ -664,8 +668,6 @@ export function createConversationFollowupsRepository(db: Kysely<DB>) {
             decisionState: state,
             userId: input.userId,
             surface: input.surface,
-            previousTaskStatus: recommendation.status,
-            nextTaskStatus: null,
             now: input.now,
           });
           return { status: "kept_open" as const, taskId: recommendation.task_id };
@@ -719,8 +721,6 @@ async function appendReviewDecisionActivity(
     decisionState: "accepted" | "rejected";
     userId: string;
     surface: string;
-    previousTaskStatus: string;
-    nextTaskStatus: string | null;
     now: string;
   },
 ): Promise<void> {
@@ -736,18 +736,6 @@ async function appendReviewDecisionActivity(
     identityParts: [input.recommendationId, input.decisionState],
     occurredAt: input.now,
   });
-  if (input.nextTaskStatus && input.previousTaskStatus !== input.nextTaskStatus) {
-    await activity.append({
-      taskId: input.taskId,
-      eventKind: "status_changed",
-      actorType: "user",
-      actorUserId: input.userId,
-      surface,
-      changes: { status: { before: input.previousTaskStatus, after: input.nextTaskStatus } },
-      identityParts: [input.recommendationId, input.previousTaskStatus, input.nextTaskStatus],
-      occurredAt: input.now,
-    });
-  }
 }
 
 function toTaskActivitySurface(surface: string): TaskActivitySurface {
@@ -1766,45 +1754,6 @@ async function classifyReviewFailure(
     task.created_by_user_id === authorization.userId ||
     Boolean(task.assignee_entity_id && authorization.assigneeEntityIds.includes(task.assignee_entity_id));
   return authorized ? "stale" : "unauthorized";
-}
-
-async function updateActionableTaskStatus(
-  db: Kysely<DB> | Transaction<DB>,
-  taskId: string,
-  status: TaskStatus,
-  now: string,
-  authorization: {
-    userId: string;
-    assigneeEntityIds: string[];
-    canEditAllLocalTasks?: boolean;
-  },
-): Promise<boolean> {
-  let query = db
-    .updateTable("tasks")
-    .set({
-      status,
-      status_raw: status,
-      status_authority: "local",
-      status_changed_at: now,
-      completed_at: status === "done" ? now : null,
-      updated_at: now,
-    })
-    .where("id", "=", taskId)
-    .where("valid_to", "is", null)
-    .where("status", "in", ["open", "in_progress"])
-    .where("status_authority", "=", "local")
-    .where("provenance", "in", ["summary", "brief"]);
-  if (authorization.canEditAllLocalTasks !== true) {
-    const assigneeIds = [...new Set(authorization.assigneeEntityIds)].filter(Boolean);
-    query = query.where((eb) =>
-      eb.or([
-        eb("created_by_user_id", "=", authorization.userId),
-        ...(assigneeIds.length > 0 ? [eb("assignee_entity_id", "in", assigneeIds)] : []),
-      ]),
-    );
-  }
-  const updated = await query.executeTakeFirst();
-  return Number(updated.numUpdatedRows ?? 0) > 0;
 }
 
 async function touchActionableTaskForReview(
