@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dailyBriefRoutes, followupReviewRoutes } from "../agents/routes";
 import { AgentRunService, type AgentRunServiceDeps } from "../agents/service";
 import { createSettingsRepository } from "../db/repositories/settings";
@@ -21,6 +21,8 @@ describe("inline follow-up review fixture", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
     db = await createTestDb();
     await db
       .insertInto("users")
@@ -36,6 +38,7 @@ describe("inline follow-up review fixture", () => {
 
   afterEach(async () => {
     await db.destroy();
+    vi.useRealTimers();
   });
 
   it("seeds a brief that can complete and track follow-ups through the public review routes", async () => {
