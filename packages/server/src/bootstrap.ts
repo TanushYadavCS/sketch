@@ -16,6 +16,11 @@ import { resolveAgentRuntimeProviderConfigFromSettings } from "./agent/runtime/p
 import { createAgentOutputDeliveryService } from "./agents/output-delivery";
 import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
+import { createAiSdkAutomationAuthoringGenerator } from "./automation/authoring/generator";
+import { createAutomationAuthoringProviderLoader } from "./automation/authoring/provider";
+import { createAutomationAuthoringService } from "./automation/authoring/service";
+import { createAutomationAuthoringTelemetry } from "./automation/authoring/telemetry";
+import { createChatAutomationAuthoring } from "./automation/chat-authoring";
 import type { Config } from "./config";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
 import { ensureSlackConnectorConfig } from "./connectors/slack-provisioning";
@@ -203,6 +208,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   });
   const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => interactiveAgentRunLimiter.run(work);
   const limitScheduledAgentExecution = <T>(work: () => Promise<T>): Promise<T> => scheduledAgentRunLimiter.run(work);
+  let chatAutomationAuthoring: ReturnType<typeof createChatAutomationAuthoring> | undefined;
 
   /**
    * Current LLM provider context, refreshed at startup and on settings change
@@ -248,6 +254,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
       loadAgentRuntimeProviderConfig:
         params.loadAgentRuntimeProviderConfig ??
         (async () => resolveAgentRuntimeProviderConfigFromSettings(await settingsRepo.get())),
+      automationAuthoringEnabled:
+        params.contextType !== "scheduled_task" && config.AUTOMATION_AUTHORING_MODEL !== undefined,
+      chatAutomationAuthoring: params.contextType !== "scheduled_task" ? chatAutomationAuthoring : undefined,
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,
@@ -643,6 +652,31 @@ export async function createServer(config: Config, options?: CreateServerOptions
     limitAgentExecution,
     limitScheduledAgentExecution,
   });
+  if (config.AUTOMATION_AUTHORING_MODEL) {
+    const loadAuthoringProvider = createAutomationAuthoringProviderLoader({
+      modelId: config.AUTOMATION_AUTHORING_MODEL,
+      loadProviderConfig: async () => resolveAgentRuntimeProviderConfigFromSettings(await settingsRepo.get()),
+    });
+    const authoring = createAutomationAuthoringService({
+      loadProvider: async () => {
+        const provider = await loadAuthoringProvider();
+        return {
+          provider: "openrouter",
+          modelId: provider.modelId,
+          model: provider.model,
+        };
+      },
+      generator: createAiSdkAutomationAuthoringGenerator(),
+      telemetry: createAutomationAuthoringTelemetry({ logger, pricing }),
+      configuredModelId: config.AUTOMATION_AUTHORING_MODEL,
+    });
+    chatAutomationAuthoring = createChatAutomationAuthoring({
+      db,
+      authoring,
+      scheduler,
+      loadIntegrationProvider,
+    });
+  }
   if (backgroundWork) await scheduler.start();
 
   // 8.6. Connector sync scheduler — recovers stale syncs, runs periodic sync + enrichment

@@ -890,7 +890,22 @@ describe("Scheduled Tasks API", () => {
       content: "Stale prompt",
     });
 
-    const refreshTaskSchedule = vi.fn(async () => null);
+    let refreshObserved:
+      | {
+          revision: number;
+          title: string | null;
+          content: Awaited<ReturnType<typeof stepContent.getByTask>>;
+        }
+      | undefined;
+    const refreshTaskSchedule = vi.fn(async (taskId: string) => {
+      const committedRow = await tasks.getById(taskId);
+      refreshObserved = {
+        revision: committedRow?.revision ?? -1,
+        title: committedRow?.title ?? null,
+        content: await stepContent.getByTask(taskId),
+      };
+      return null;
+    });
     const app = createApp(db, config, {
       scheduler: {
         pauseTask: vi.fn(),
@@ -918,6 +933,11 @@ describe("Scheduled Tasks API", () => {
       scheduleValue: "120",
     });
     expect(refreshTaskSchedule).toHaveBeenCalledWith("task-builder");
+    expect(refreshObserved).toMatchObject({
+      revision: 1,
+      title: "Daily account brief",
+      content: [{ step_id: "agent-1", content: "Check account activity and summarize changes." }],
+    });
 
     const row = await tasks.getById("task-builder");
     expect(row).toMatchObject({

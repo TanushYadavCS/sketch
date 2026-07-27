@@ -12,6 +12,7 @@ import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import { AGENT_BUILT_IN_TOOL_NAMES, VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
 import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
+import type { ChatAutomationAuthoring } from "../automation/chat-authoring";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
@@ -313,6 +314,8 @@ export interface RunAgentParams {
   taskContext?: TaskContext;
   getSlack?: () => SlackBot | null;
   scheduler?: TaskScheduler;
+  chatAutomationAuthoring?: ChatAutomationAuthoring;
+  automationAuthoringEnabled?: boolean;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
@@ -788,6 +791,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
     indexedSources,
     agentInstructions: params.agentInstructions,
     visionAnalysisEnabled: visualAnalysisAllowed,
+    automationAuthoringEnabled: params.automationAuthoringEnabled,
   });
   const claudeMdContext = await loadAgentRuntimeClaudeMdContext({
     orgClaudeDir: params.claudeConfigDir,
@@ -1142,6 +1146,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     indexedSources,
     agentInstructions: params.agentInstructions,
     visionAnalysisEnabled: visualAnalysisAllowed,
+    automationAuthoringEnabled: params.automationAuthoringEnabled,
   });
 
   const sdkBuiltInTools = resolveSdkBuiltInTools(params.agentAllowedTools);
@@ -1203,6 +1208,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     loadIntegrationProvider: params.loadIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,
+    chatAuthoring: params.chatAutomationAuthoring,
     stepContentRepo: params.stepContentRepo,
     automationRunsRepo: params.automationRunsRepo,
     queueManager: params.queueManager,

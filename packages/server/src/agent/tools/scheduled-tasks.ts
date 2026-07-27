@@ -1,6 +1,7 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { z } from "zod/v4";
+import type { ChatAutomationAuthoring, ChatAutomationAuthoringResult } from "../../automation/chat-authoring";
 import {
   AutomationValidationError,
   validateAutomationBuilderSaveRequest,
@@ -139,10 +140,33 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
   step_apps: z.array(z.string()).optional().describe("Updated MCP server slugs for updateStepContent action."),
 };
 
-type WorkflowStepInput = z.infer<typeof workflowStepSchema>;
+const authoredScheduledTasksSchema = {
+  action: z.enum(["list", "add", "update", "remove", "pause", "resume", "run", "getRun"]).describe(
+    `Action to perform.
+- 'add': create an automation from the user's natural-language request
+- 'update': edit an automation from the user's natural-language request (requires task_id)
+- 'list': list automations in this context
+- 'remove': delete an automation (requires task_id)
+- 'pause': pause an automation (requires task_id)
+- 'resume': resume a paused automation (requires task_id)
+- 'run': manually trigger an automation (requires task_id)
+- 'getRun': inspect run results (requires task_id, optional run_id for specific run)`,
+  ),
+  request: z
+    .string()
+    .optional()
+    .describe(
+      "The user's natural-language automation request. Required for add and update; preserve their intent verbatim.",
+    ),
+  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun."),
+  run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),
+};
+
+export type WorkflowStepInput = z.infer<typeof workflowStepSchema>;
 
 type ManageScheduledTasksParams = {
   action: "list" | "add" | "update" | "remove" | "pause" | "resume" | "run" | "getRun" | "updateStepContent";
+  request?: string;
   prompt?: string;
   schedule_type?: "cron" | "interval" | "once" | "external";
   schedule_value?: string;
@@ -181,6 +205,7 @@ export interface ManageScheduledTasksDeps {
   activeQueueKey?: string;
   config?: { BASE_URL?: string; PORT: number };
   automationArtifactCollector?: AutomationArtifactCollector;
+  chatAuthoring?: ChatAutomationAuthoring;
 }
 
 function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
@@ -445,7 +470,7 @@ function buildBuilderUrl(taskId: string, config: ManageScheduledTasksDeps["confi
 }
 
 function buildArtifactTags(params: {
-  steps: WorkflowStepInput[];
+  steps: Array<WorkflowStep & { apps?: string[] }>;
   scheduleType: string;
   deliveryPlatform: string;
 }): string[] {
@@ -463,7 +488,7 @@ function buildArtifactScheduleLabel(params: {
   scheduleType: string;
   scheduleValue: string;
   timezone: string;
-  steps: WorkflowStepInput[];
+  steps: Array<WorkflowStep & { apps?: string[] }>;
 }): string {
   if (params.scheduleType === "external") {
     const trigger = params.steps.find((step) => step.type === "trigger")?.triggerConfig;
@@ -480,7 +505,7 @@ function buildArtifactScheduleLabel(params: {
 function collectAutomationArtifact(params: {
   deps: ManageScheduledTasksDeps;
   task: ScheduledTask;
-  steps: WorkflowStepInput[];
+  steps: Array<WorkflowStep & { apps?: string[] }>;
   scheduleType: string;
   scheduleValue: string;
   timezone: string;
@@ -510,6 +535,89 @@ function collectAutomationArtifact(params: {
   return builderUrl;
 }
 
+const LEGACY_AUTHORING_FIELDS = [
+  "prompt",
+  "schedule_type",
+  "schedule_value",
+  "timezone",
+  "session_mode",
+  "title",
+  "description",
+  "steps",
+  "edges",
+  "output_target",
+  "output_platform",
+  "output_thread_ts",
+  "output_mode",
+  "delivery",
+  "step_id",
+  "step_content",
+  "step_apps",
+] as const satisfies readonly (keyof ManageScheduledTasksParams)[];
+
+function hasLegacyAuthoringFields(params: ManageScheduledTasksParams): boolean {
+  return LEGACY_AUTHORING_FIELDS.some((field) => hasOwn(params, field));
+}
+
+async function handleConfiguredChatAuthoring(
+  params: ManageScheduledTasksParams,
+  deps: ManageScheduledTasksDeps,
+): Promise<{ content: { type: "text"; text: string }[] }> {
+  const text = (msg: string) => ({ content: [{ type: "text" as const, text: msg }] });
+  const chatAuthoring = deps.chatAuthoring;
+  if (!chatAuthoring) {
+    return text("Error: automation authoring is not configured.");
+  }
+  if (params.action === "updateStepContent") {
+    return text(
+      "Error: direct step-content updates are unavailable while automation authoring is configured. Use update with a natural-language request so the change is applied as a full automation edit.",
+    );
+  }
+  if (params.action !== "add" && params.action !== "update") {
+    return text("Error: this action is not an automation authoring action.");
+  }
+  if (hasLegacyAuthoringFields(params)) {
+    return text(
+      "Error: structured automation fields cannot be supplied while automation authoring is configured. Pass only the user's natural-language request.",
+    );
+  }
+  const request = params.request?.trim();
+  if (!request) {
+    return text(`Error: request is required for ${params.action} action.`);
+  }
+  if (params.action === "update" && !params.task_id) {
+    return text("Error: task_id is required for update action.");
+  }
+
+  let result: ChatAutomationAuthoringResult;
+  try {
+    result = await chatAuthoring.author({
+      action: params.action === "add" ? "create" : "edit",
+      request,
+      ...(params.task_id ? { taskId: params.task_id } : {}),
+      taskContext: deps.taskContext,
+    });
+  } catch {
+    return text("Error: automation authoring is temporarily unavailable. No changes were saved.");
+  }
+
+  if (result.kind === "clarification") return text(result.message);
+  if (result.kind === "error") return text(`Error: ${result.message}`);
+
+  if (params.action === "add") {
+    collectAutomationArtifact({
+      deps,
+      task: result.task,
+      steps: result.artifact.steps,
+      scheduleType: result.artifact.scheduleType,
+      scheduleValue: result.artifact.scheduleValue,
+      timezone: result.artifact.timezone,
+    });
+  }
+  const verb = params.action === "add" ? "created" : "updated";
+  return text(`Automation ${verb}:\n${JSON.stringify(result.task, null, 2)}`);
+}
+
 export async function handleManageScheduledTasks(
   params: ManageScheduledTasksParams,
   deps: ManageScheduledTasksDeps,
@@ -523,6 +631,10 @@ export async function handleManageScheduledTasks(
     "Error: Action steps require a broker-capable integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.";
   const FRESH_SESSION_ONLY_MSG =
     "Error: scheduled automations currently support only 'fresh' session_mode. Omit session_mode or set it to 'fresh'.";
+
+  if (deps.chatAuthoring && (action === "add" || action === "update" || action === "updateStepContent")) {
+    return handleConfiguredChatAuthoring(params, deps);
+  }
 
   /** Returns an error response if any action step is present but no broker-capable
    *  provider is configured. Returns null when validation passes (no action steps,
@@ -1067,7 +1179,7 @@ export function createManageScheduledTasksTool(deps: Partial<ManageScheduledTask
   return tool(
     "ManageScheduledTasks",
     "Manage scheduled tasks that run automatically. Platform, delivery target, and creator are filled in automatically from context. Do not ask the user for these.",
-    manageScheduledTasksSchema,
+    deps.chatAuthoring ? authoredScheduledTasksSchema : manageScheduledTasksSchema,
     async (params) => {
       if (!deps.scheduler || !deps.taskContext) {
         return { content: [{ type: "text" as const, text: "Scheduled tasks are not available in this context." }] };
@@ -1083,6 +1195,7 @@ export function createManageScheduledTasksTool(deps: Partial<ManageScheduledTask
         activeQueueKey: deps.activeQueueKey,
         config: deps.config,
         automationArtifactCollector: deps.automationArtifactCollector,
+        chatAuthoring: deps.chatAuthoring,
       });
     },
   );

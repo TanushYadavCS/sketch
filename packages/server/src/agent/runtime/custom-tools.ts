@@ -176,6 +176,7 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     loadIntegrationProvider: params.loadIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,
+    chatAuthoring: params.chatAutomationAuthoring,
     stepContentRepo: params.stepContentRepo,
     automationRunsRepo: params.automationRunsRepo,
     queueManager: params.queueManager,
