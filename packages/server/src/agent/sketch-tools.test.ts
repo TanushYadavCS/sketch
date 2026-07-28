@@ -451,8 +451,8 @@ describe("createSketchMcpServer", () => {
 });
 
 describe("handleGetTeamDirectory", () => {
-  it("returns all users except current user", async () => {
-    const alice = makeUser({ id: "user-alice", name: "Alice" });
+  it("includes the current user and distinguishes workspace access from org role", async () => {
+    const alice = makeUser({ id: "user-alice", name: "Alice", auth_role: "admin", role: "Engineering Lead" });
     const bob = makeUser({ id: "user-bob", name: "Bob" });
     const result = await handleGetTeamDirectory({
       userRepo: makeUserRepoMock({
@@ -463,8 +463,24 @@ describe("handleGetTeamDirectory", () => {
     });
 
     const parsed = JSON.parse(result.content[0].text);
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0]).toMatchObject({ id: "user-bob", name: "Bob" });
+    expect(parsed).toHaveLength(2);
+    expect(parsed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "user-alice",
+          name: "Alice",
+          role: "Engineering Lead",
+          workspaceRole: "admin",
+          isCurrentUser: true,
+        }),
+        expect.objectContaining({
+          id: "user-bob",
+          name: "Bob",
+          workspaceRole: "member",
+          isCurrentUser: false,
+        }),
+      ]),
+    );
   });
 
   it("returns channels from the recipient's connected accounts", async () => {
