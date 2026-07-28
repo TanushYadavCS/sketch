@@ -36,7 +36,7 @@ import { skillsRoutes } from "./api/skills";
 import { verifyJwt } from "./auth/jwt";
 import { entityReviewRoutes } from "./entities/review";
 
-import { oauthRoutes } from "./api/oauth";
+import { oauthRoutes, resolveOrigin } from "./api/oauth";
 import { systemRoutes } from "./api/system";
 import { taskRoutes } from "./api/tasks";
 import { usageRoutes } from "./api/usage";
@@ -697,12 +697,15 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       if (!isValidPlatformSession) {
         const loginUrl = createManagedLoginUrl(managedUrl);
         const requestUrl = new URL(c.req.url);
+        const isSlackResult = path === "/channels" && requestUrl.searchParams.has("slack");
         const returnTo =
           path === "/login"
             ? requestUrl.searchParams.get("return_to")
-            : path === "/integrations" || path.startsWith("/integrations/")
-              ? `${requestUrl.pathname}${requestUrl.search}`
-              : null;
+            : isSlackResult
+              ? new URL(`${requestUrl.pathname}${requestUrl.search}`, resolveOrigin(c, config.BASE_URL)).toString()
+              : path === "/integrations" || path.startsWith("/integrations/")
+                ? `${requestUrl.pathname}${requestUrl.search}`
+                : null;
         if (returnTo) {
           loginUrl.searchParams.set("return_to", returnTo);
         }

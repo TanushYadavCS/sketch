@@ -180,6 +180,25 @@ describe("managed login redirect", () => {
     );
   });
 
+  it("preserves Slack connection results when redirecting to managed login", async () => {
+    const app = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://app.getsketch.ai/platform/",
+        MANAGED_AUTH_SECRET: "managed-secret-at-least-32chars-long",
+        BASE_URL: "https://tenant.getsketch.ai",
+      }),
+    );
+
+    const res = await app.request("/channels?slack=error&reason=workspace_in_use");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      `https://app.getsketch.ai/platform/login?return_to=${encodeURIComponent(
+        "https://tenant.getsketch.ai/channels?slack=error&reason=workspace_in_use",
+      )}`,
+    );
+  });
+
   it("does not affect API routes", async () => {
     const app = createApp(
       db,
