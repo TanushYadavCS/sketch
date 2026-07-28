@@ -6,7 +6,12 @@ import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockAuth = vi.hoisted(() => ({
-  value: { role: "admin" as "admin" | "member", displayName: "User", displayIdentifier: "user@test.com" },
+  value: {
+    role: "admin" as "admin" | "member",
+    displayName: "User",
+    displayIdentifier: "user@test.com",
+    managedUrl: undefined as string | undefined,
+  },
 }));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
@@ -47,7 +52,12 @@ function channelsHandler(
 
 describe("ChannelsPage", () => {
   beforeEach(() => {
-    mockAuth.value = { role: "admin", displayName: "User", displayIdentifier: "user@test.com" };
+    mockAuth.value = {
+      role: "admin",
+      displayName: "User",
+      displayIdentifier: "user@test.com",
+      managedUrl: undefined,
+    };
   });
 
   it("renders both platform cards", async () => {
@@ -83,11 +93,35 @@ describe("ChannelsPage", () => {
       expect(screen.getByText("Connected")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
     });
+
+    it("shows Add to Slack for a disconnected managed tenant", async () => {
+      mockAuth.value = {
+        role: "admin",
+        displayName: "User",
+        displayIdentifier: "user@test.com",
+        managedUrl: "https://app.getsketch.ai/",
+      };
+      channelsHandler({ configured: false, connected: null }, { configured: false, connected: null });
+      renderWithProviders(<ChannelsPage />);
+
+      const link = await screen.findByRole("link", { name: "Add to Slack" });
+      const url = new URL(link.getAttribute("href") ?? "");
+
+      expect(url.origin).toBe("https://app.getsketch.ai");
+      expect(url.pathname).toBe("/api/slack/connections/authorization");
+      expect(url.searchParams.get("return_to")).toBe(`${window.location.origin}/channels`);
+      expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
+    });
   });
 
   describe("member access", () => {
     it("renders disconnected channels without mutation controls for members", async () => {
-      mockAuth.value = { role: "member", displayName: "Member", displayIdentifier: "member@test.com" };
+      mockAuth.value = {
+        role: "member",
+        displayName: "Member",
+        displayIdentifier: "member@test.com",
+        managedUrl: undefined,
+      };
       channelsHandler(
         { configured: false, connected: null },
         { configured: false, connected: null },
@@ -106,7 +140,12 @@ describe("ChannelsPage", () => {
     });
 
     it("renders connected channels without action menus for members", async () => {
-      mockAuth.value = { role: "member", displayName: "Member", displayIdentifier: "member@test.com" };
+      mockAuth.value = {
+        role: "member",
+        displayName: "Member",
+        displayIdentifier: "member@test.com",
+        managedUrl: undefined,
+      };
       channelsHandler(
         { configured: true, connected: true },
         { configured: true, connected: true, phoneNumber: "+1234567890" },

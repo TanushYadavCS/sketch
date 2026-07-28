@@ -6,6 +6,12 @@ export function managedLoginUrl(managedUrl: string, returnTo?: string | null): s
   return url.toString();
 }
 
+export function managedSlackAuthorizationUrl(managedUrl: string, returnTo: string): string {
+  const url = new URL(`${managedUrl.replace(/\/+$/, "")}/api/slack/connections/authorization`);
+  url.searchParams.set("return_to", returnTo);
+  return url.toString();
+}
+
 export function redirectToManagedLogin(managedUrl: string, returnTo?: string | null): never {
   throw redirect({ href: managedLoginUrl(managedUrl, returnTo) });
 }

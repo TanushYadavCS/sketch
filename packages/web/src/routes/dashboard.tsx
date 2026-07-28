@@ -11,6 +11,7 @@ export interface AuthContext {
   email?: string;
   userId?: string;
   name?: string;
+  managedUrl?: string;
   displayName: string;
   displayIdentifier: string;
 }
@@ -53,6 +54,7 @@ async function checkAuth(returnTo?: string): Promise<{ auth: AuthContext }> {
       email: session.email,
       userId: session.userId,
       name: session.name,
+      managedUrl: status.managedUrl,
       displayName: session.name ?? "User",
       displayIdentifier: session.email ?? session.name ?? "User",
     },

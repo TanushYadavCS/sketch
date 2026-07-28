@@ -52,9 +52,10 @@ import { Label } from "@sketch/ui/components/label";
 import { Skeleton } from "@sketch/ui/components/skeleton";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute } from "@tanstack/react-router";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute, useDashboardAuth } from "./dashboard";
+import { managedSlackAuthorizationUrl } from "./managed-redirect";
 
 export const channelsRoute = createRoute({
   getParentRoute: () => dashboardRoute,
@@ -64,6 +65,7 @@ export const channelsRoute = createRoute({
 
 export function ChannelsPage() {
   const auth = useDashboardAuth();
+  const queryClient = useQueryClient();
   const canManageChannels = auth.role === "admin";
   const { data, isLoading } = useQuery({
     queryKey: ["channels", "status"],
@@ -72,6 +74,34 @@ export function ChannelsPage() {
   });
 
   const allDisconnected = data?.channels?.every((ch) => ch.connected !== true);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const result = url.searchParams.get("slack");
+    if (!result) return;
+
+    const reason = url.searchParams.get("reason");
+    url.searchParams.delete("slack");
+    url.searchParams.delete("reason");
+    window.history.replaceState(null, "", url);
+
+    if (result === "connected") {
+      toast.success("Slack connected.");
+      queryClient.invalidateQueries({ queryKey: ["channels", "status"] });
+      return;
+    }
+    if (result === "cancelled") {
+      toast.info("Slack connection cancelled.");
+      return;
+    }
+
+    const messages: Record<string, string> = {
+      workspace_in_use: "That Slack workspace is already connected to another tenant.",
+      different_workspace_connected: "This tenant is already connected to a different Slack workspace.",
+      oauth_exchange_failed: "Slack could not be connected. Please try again.",
+    };
+    toast.error(messages[reason ?? ""] ?? "Slack could not be connected. Please try again.");
+  }, [queryClient]);
 
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">
@@ -100,7 +130,12 @@ export function ChannelsPage() {
           </>
         ) : (
           data?.channels.map((channel) => (
-            <PlatformCard key={channel.platform} channel={channel} canManage={canManageChannels} />
+            <PlatformCard
+              key={channel.platform}
+              channel={channel}
+              canManage={canManageChannels}
+              managedUrl={auth.managedUrl}
+            />
           ))
         )}
       </div>
@@ -108,9 +143,17 @@ export function ChannelsPage() {
   );
 }
 
-function PlatformCard({ channel, canManage }: { channel: ChannelStatus; canManage: boolean }) {
+function PlatformCard({
+  channel,
+  canManage,
+  managedUrl,
+}: {
+  channel: ChannelStatus;
+  canManage: boolean;
+  managedUrl?: string;
+}) {
   if (channel.platform === "slack") {
-    return <SlackCard channel={channel} canManage={canManage} />;
+    return <SlackCard channel={channel} canManage={canManage} managedUrl={managedUrl} />;
   }
   if (channel.platform === "email") {
     return <EmailCard channel={channel} canManage={canManage} />;
@@ -118,7 +161,15 @@ function PlatformCard({ channel, canManage }: { channel: ChannelStatus; canManag
   return <WhatsAppCard channel={channel} canManage={canManage} />;
 }
 
-function SlackCard({ channel, canManage }: { channel: ChannelStatus; canManage: boolean }) {
+function SlackCard({
+  channel,
+  canManage,
+  managedUrl,
+}: {
+  channel: ChannelStatus;
+  canManage: boolean;
+  managedUrl?: string;
+}) {
   const queryClient = useQueryClient();
   const [showConnectDialog, setShowConnectDialog] = useState(false);
   const [showDisconnectDialog, setShowDisconnectDialog] = useState(false);
@@ -160,7 +211,20 @@ function SlackCard({ channel, canManage }: { channel: ChannelStatus; canManage: 
             <span className="text-sm font-medium">Slack</span>
           </div>
           <div className="flex items-center gap-2">
-            {canManage && !isConfigured && (
+            {canManage && !isConfigured && managedUrl && (
+              <Button variant="ghost" size="sm" className="gap-1.5 hover:bg-brand-accent/8" asChild>
+                <a
+                  href={managedSlackAuthorizationUrl(
+                    managedUrl,
+                    new URL("/channels", window.location.origin).toString(),
+                  )}
+                >
+                  <SlackLogoIcon size={14} weight="bold" />
+                  Add to Slack
+                </a>
+              </Button>
+            )}
+            {canManage && !isConfigured && !managedUrl && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -203,7 +267,13 @@ function SlackCard({ channel, canManage }: { channel: ChannelStatus; canManage: 
         </div>
       </div>
 
-      <SlackConnectDialog open={showConnectDialog} onOpenChange={setShowConnectDialog} onConnected={handleConnected} />
+      {!managedUrl && (
+        <SlackConnectDialog
+          open={showConnectDialog}
+          onOpenChange={setShowConnectDialog}
+          onConnected={handleConnected}
+        />
+      )}
 
       <AlertDialog open={showDisconnectDialog} onOpenChange={setShowDisconnectDialog}>
         <AlertDialogContent>
