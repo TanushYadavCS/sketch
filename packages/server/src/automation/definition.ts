@@ -216,6 +216,9 @@ export function formatAutomationScheduleLabel(
 ): string {
   if (definition.scheduleType === "external") {
     const trigger = definition.steps.find((step) => step.type === "trigger")?.triggerConfig;
+    if (trigger?.type === "slack_channel_message") {
+      return `Slack channel message${trigger.channelId ? ` - ${trigger.channelId}` : ""}`;
+    }
     if (trigger?.type === "canvas") {
       const parts = ["Canvas"];
       if (trigger.app) parts.push(trigger.app);
@@ -391,13 +394,26 @@ function validateTriggerSchedule(
     return;
   }
   if (request.scheduleType === "external") {
-    if (config.type !== "webhook" && config.type !== "canvas") {
+    if (config.type !== "webhook" && config.type !== "canvas" && config.type !== "slack_channel_message") {
       addIssue(
         issues,
         "TRIGGER_CONFIG_MISMATCH",
-        "External automations require webhook or canvas trigger config",
+        "External automations require webhook, canvas, or Slack channel message trigger config",
         "steps",
       );
+    }
+    if (config.type === "slack_channel_message") {
+      if (request.scheduleValue !== "slack_channel_message") {
+        addIssue(
+          issues,
+          "TRIGGER_CONFIG_MISMATCH",
+          "Slack channel message triggers require schedule value slack_channel_message",
+          "scheduleValue",
+        );
+      }
+      if (!config.channelId) {
+        addIssue(issues, "TRIGGER_CONFIG_REQUIRED", "Slack channel message trigger requires channelId", "steps");
+      }
     }
     return;
   }
@@ -451,10 +467,12 @@ function validateScheduleValue(request: AutomationBuilderSaveRequest, issues: Bu
 export function scheduledTaskFieldsFromSaveRequest(
   request: AutomationBuilderSaveRequest,
 ): Partial<Selectable<ScheduledTasksTable>> {
+  const trigger = request.steps.find((step) => step.type === "trigger")?.triggerConfig;
+  const isSlackChannelMessage = trigger?.type === "slack_channel_message";
   return {
     prompt: request.prompt,
-    schedule_type: request.scheduleType,
-    schedule_value: request.scheduleValue,
+    schedule_type: isSlackChannelMessage ? "external" : request.scheduleType,
+    schedule_value: isSlackChannelMessage ? "slack_channel_message" : request.scheduleValue,
     timezone: request.timezone,
     status: request.status,
     title: request.title,

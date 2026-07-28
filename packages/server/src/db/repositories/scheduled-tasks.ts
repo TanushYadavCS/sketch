@@ -83,6 +83,17 @@ export function createScheduledTaskRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    async listActiveSlackChannelMessageTriggers(): Promise<ScheduledTaskRow[]> {
+      return db
+        .selectFrom("scheduled_tasks")
+        .selectAll()
+        .where("status", "=", "active")
+        .where("schedule_type", "=", "external")
+        .where("schedule_value", "=", "slack_channel_message")
+        .orderBy("created_at", "asc")
+        .execute();
+    },
+
     async countActiveForUserWithin(userId: string, startAt: string, endAt: string): Promise<number> {
       const row = await db
         .selectFrom("scheduled_tasks")

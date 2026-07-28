@@ -162,6 +162,9 @@ function isCanvasManaged(task: ScheduledTaskListItem): boolean {
 }
 
 function getTriggerDetail(task: ScheduledTaskListItem): string {
+  if (task.triggerConfig?.type === "slack_channel_message") {
+    return `Slack channel message · ${task.triggerConfig.channelId}`;
+  }
   if (isCanvasManaged(task)) {
     const config = task.triggerConfig;
     const parts = ["Canvas"];
@@ -174,6 +177,9 @@ function getTriggerDetail(task: ScheduledTaskListItem): string {
 }
 
 function getTaskScheduleLabel(task: ScheduledTaskListItem): string {
+  if (task.triggerConfig?.type === "slack_channel_message") {
+    return `Trigger · Slack channel message · ${task.triggerConfig.channelId}`;
+  }
   if (!isCanvasManaged(task)) return task.scheduleLabel;
 
   const config = task.triggerConfig;

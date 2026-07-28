@@ -1,20 +1,31 @@
 import { z } from "zod";
 
-export const workflowTriggerConfigSchema = z.object({
-  type: z.enum(["webhook", "schedule", "canvas"]),
-  scheduleType: z.enum(["cron", "interval", "once"]).optional(),
-  scheduleValue: z.string().optional(),
-  timezone: z.string().optional(),
-  app: z.string().optional(),
-  eventDescription: z.string().optional(),
-  componentKey: z.string().optional(),
-  configuredProps: z.record(z.string(), z.unknown()).optional(),
-  status: z.enum(["pending_canvas_setup", "active", "error"]).optional(),
-  canvasWorkflowId: z.string().optional(),
-  canvasTriggerNodeId: z.string().optional(),
-  canvasActionNodeId: z.string().optional(),
-  errorMessage: z.string().optional(),
-});
+export const workflowTriggerConfigSchema = z
+  .object({
+    type: z.enum(["webhook", "schedule", "canvas", "slack_channel_message"]),
+    channelId: z.string().trim().min(1).optional(),
+    scheduleType: z.enum(["cron", "interval", "once"]).optional(),
+    scheduleValue: z.string().optional(),
+    timezone: z.string().optional(),
+    app: z.string().optional(),
+    eventDescription: z.string().optional(),
+    componentKey: z.string().optional(),
+    configuredProps: z.record(z.string(), z.unknown()).optional(),
+    status: z.enum(["pending_canvas_setup", "active", "error"]).optional(),
+    canvasWorkflowId: z.string().optional(),
+    canvasTriggerNodeId: z.string().optional(),
+    canvasActionNodeId: z.string().optional(),
+    errorMessage: z.string().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.type === "slack_channel_message" && !value.channelId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["channelId"],
+        message: "Slack channel message trigger requires channelId",
+      });
+    }
+  });
 
 export type WorkflowTriggerConfig = z.infer<typeof workflowTriggerConfigSchema>;
 

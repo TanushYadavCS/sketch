@@ -14,6 +14,7 @@
  * camelCase ScheduledTask application type.
  */
 import { randomUUID } from "node:crypto";
+import { workflowTriggerConfigSchema } from "@sketch/shared";
 import { Cron } from "croner";
 import type { Kysely } from "kysely";
 import type { McpServerConfig, runAgent } from "../agent/runner";
@@ -46,6 +47,16 @@ import { getScheduledTaskRowQueueKey } from "./queue-key";
 import type { ScheduledTask } from "./types";
 
 type AgentExecutionQueue = "interactive" | "scheduled";
+
+function parseSlackTriggerSteps(value: string | null): Array<{ type?: string; triggerConfig?: unknown }> {
+  if (!value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? (parsed as Array<{ type?: string; triggerConfig?: unknown }>) : [];
+  } catch {
+    return [];
+  }
+}
 
 export interface TaskSchedulerDeps {
   db: Kysely<DB>;
@@ -205,6 +216,7 @@ export class TaskScheduler {
   private async executeTaskNow(
     task: ScheduledTaskRow,
     executionQueue: AgentExecutionQueue,
+    trigger?: { provided: boolean; data: unknown },
   ): Promise<AutomationExecutionResult> {
     const { config, logger, loadIntegrationProvider } = this.deps;
     const delivery = resolveWorkflowDelivery(task);
@@ -216,7 +228,7 @@ export class TaskScheduler {
 
     const result = await executeAutomation({
       task,
-      triggerData: { scheduledAt: new Date().toISOString(), taskId: task.id },
+      triggerData: trigger?.provided ? trigger.data : { scheduledAt: new Date().toISOString(), taskId: task.id },
       db: this.deps.db,
       logger,
       config,
@@ -257,6 +269,7 @@ export class TaskScheduler {
     task: ScheduledTaskRow,
     getTask: () => Promise<ScheduledTaskRow | null>,
     executionQueue: AgentExecutionQueue,
+    trigger?: { provided: boolean; data: unknown },
   ): Promise<AutomationExecutionResult | null> {
     const queueKey = this.getQueueKey(task);
     return new Promise<AutomationExecutionResult | null>((resolve, reject) => {
@@ -267,7 +280,7 @@ export class TaskScheduler {
             resolve(null);
             return;
           }
-          resolve(await this.executeTaskNow(current, executionQueue));
+          resolve(await this.executeTaskNow(current, executionQueue, trigger));
         } catch (err) {
           reject(err);
         }
@@ -458,15 +471,28 @@ export class TaskScheduler {
     return this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive");
   }
 
-  async enqueueTaskById(id: string): Promise<void> {
+  async enqueueTaskById(id: string, ...triggerData: [] | [unknown]): Promise<void> {
     const row = await this.repo.getById(id);
     if (!row) throw new Error(`Task ${id} not found`);
     if (row.status === "completed" && row.schedule_type === "once") return;
     if (row.status !== "active") throw new Error(`Task ${id} is not active`);
 
-    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive").catch((err) => {
+    const trigger = triggerData.length === 0 ? undefined : { provided: true, data: triggerData[0] };
+    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive", trigger).catch((err) => {
       this.deps.logger.error({ err, taskId: id }, "Automation background execution failed");
     });
+  }
+
+  async dispatchSlackChannelMessage(channelId: string, triggerData: unknown): Promise<void> {
+    const tasks = await this.repo.listActiveSlackChannelMessageTriggers();
+    for (const task of tasks) {
+      const steps = parseSlackTriggerSteps(task.steps);
+      const trigger = steps.find((step) => step?.type === "trigger")?.triggerConfig;
+      const parsed = workflowTriggerConfigSchema.safeParse(trigger);
+      if (!parsed.success || parsed.data.type !== "slack_channel_message" || parsed.data.channelId !== channelId)
+        continue;
+      await this.enqueueTaskById(task.id, triggerData);
+    }
   }
 
   async getTaskById(id: string): Promise<ScheduledTask | null> {

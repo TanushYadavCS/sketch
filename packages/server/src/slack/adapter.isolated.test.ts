@@ -79,6 +79,10 @@ function makeStoredMessage(overrides: Record<string, unknown> = {}) {
     isThreadReply: false,
     providerTimestamp: null,
     receivedAt: "2025-01-01",
+    source: "live" as const,
+    effectiveAt: "2025-01-01",
+    connectionKey: null,
+    backfillRangeId: null,
     createdAt: "2025-01-01",
     ...overrides,
   };
@@ -922,6 +926,43 @@ describe("slack/adapter", () => {
       expect(deps.runAgent).not.toHaveBeenCalled();
     });
 
+    it("dispatches a newly captured top-level message to Slack triggers", async () => {
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+
+      await channel({ text: "ambient update", userId: "S1", channelId: "C1", ts: "2", type: "channel_message" });
+
+      expect(dispatchSlackChannelMessage).toHaveBeenCalledWith(
+        "C1",
+        expect.objectContaining({
+          type: "slack_channel_message",
+          channelId: "C1",
+          messageTs: "2",
+          text: "ambient update",
+          userId: "S1",
+          capturedMessageId: 1,
+          conversationId: 1,
+        }),
+      );
+    });
+
+    it("does not dispatch a duplicate passive message", async () => {
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      vi.mocked(deps.repos.conversations.insertMessage).mockResolvedValue({
+        row: makeStoredMessage(),
+        inserted: false,
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+
+      await channel({ text: "duplicate", userId: "S1", channelId: "C1", ts: "2", type: "channel_message" });
+
+      expect(dispatchSlackChannelMessage).not.toHaveBeenCalled();
+    });
+
     it("captures passive top-level channel messages without running the agent", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
@@ -971,6 +1012,17 @@ describe("slack/adapter", () => {
       );
       expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "1", "Now tracking that follow-up.");
       expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
+    it("never dispatches a passive thread message to Slack triggers", async () => {
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { thread } = getHandlers();
+
+      await thread({ text: "reply", userId: "S1", channelId: "C1", ts: "2", threadTs: "1", type: "thread_message" });
+
+      expect(dispatchSlackChannelMessage).not.toHaveBeenCalled();
     });
 
     it("captures passive thread messages without running the agent", async () => {

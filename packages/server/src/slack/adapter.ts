@@ -347,10 +347,13 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     await slackBot.publishHomeView(slackUserId, view);
   };
 
-  const resolvePassiveSender = async (slackUserId: string) => {
+  const resolvePassiveSender = async (message: Parameters<SlackMessageHandler>[0]) => {
+    if (!message.userId) {
+      return { senderName: "Slack bot", senderUserId: null };
+    }
     const [user, userInfo] = await Promise.all([
-      repos.users.findBySlackId(slackUserId),
-      slackDeps.userCache.resolve(slackUserId, (id) => slackBot.getUserInfo(id)),
+      repos.users.findBySlackId(message.userId),
+      slackDeps.userCache.resolve(message.userId, (id) => slackBot.getUserInfo(id)),
     ]);
     return {
       senderName: user?.name ?? userInfo.realName,
@@ -433,7 +436,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     const captured = await repos.conversations.insertMessage({
       conversationId: conversation.id,
       providerMessageId: message.ts,
-      senderJid: message.userId,
+      senderJid: message.userId ?? message.botId ?? "unknown",
       senderName: params.senderName,
       senderUserId: params.senderUserId ?? null,
       addressedToSketch: params.addressedToSketch,
@@ -503,6 +506,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
   // DM handler
   slackBot.onMessage(async (message) => {
+    if (!message.userId) return;
     const replyToUser = (text: string): Promise<unknown> =>
       message.threadTs
         ? slackBot.postThreadReply(message.channelId, message.threadTs, text)
@@ -799,8 +803,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         maxBytes: maxFileBytes,
         logger,
       });
-      const sender = await resolvePassiveSender(message.userId);
-      await captureSlackMessage({
+      const sender = await resolvePassiveSender(message);
+      const capture = await captureSlackMessage({
         message,
         senderName: sender.senderName,
         senderUserId: sender.senderUserId,
@@ -817,6 +821,21 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         if (followupReview.handled) {
           await slackBot.postThreadReply(message.channelId, message.ts, followupReview.message);
         }
+      }
+      if (capture.inserted && scheduler) {
+        await scheduler.dispatchSlackChannelMessage(message.channelId, {
+          type: "slack_channel_message",
+          channelId: message.channelId,
+          messageTs: message.ts,
+          text: message.text,
+          userId: message.userId ?? null,
+          botId: message.botId ?? null,
+          appId: message.appId ?? null,
+          subtype: message.subtype ?? null,
+          files: message.files ?? [],
+          capturedMessageId: capture.captured?.id ?? null,
+          conversationId: capture.conversation.id,
+        });
       }
     } catch (err) {
       logger.warn({ err, channelId: message.channelId }, "Failed to capture passive Slack channel message");
@@ -837,7 +856,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         maxBytes: maxFileBytes,
         logger,
       });
-      const sender = await resolvePassiveSender(message.userId);
+      const sender = await resolvePassiveSender(message);
       await captureSlackMessage({
         message,
         senderName: sender.senderName,
@@ -872,6 +891,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
   // Channel mention handler
   slackBot.onChannelMention(async (message) => {
+    const userId = message.userId;
+    if (!userId) return;
     const threadTs = message.threadTs ?? message.ts;
     const activeQueueKey = `${message.channelId}:${threadTs}`;
     const mentionQueue = queue.getQueue(activeQueueKey);
@@ -883,7 +904,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       let clearAssistantStatus: (() => Promise<void>) | null = null;
 
       try {
-        user = await resolveUser(message.userId);
+        user = await resolveUser(userId);
 
         let channel = await ensureChannelRow(message.channelId);
 

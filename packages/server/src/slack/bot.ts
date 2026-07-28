@@ -66,7 +66,10 @@ interface RawSlackFile {
 
 export interface SlackMessage {
   text: string;
-  userId: string;
+  userId?: string;
+  botId?: string;
+  appId?: string;
+  subtype?: string;
   channelId: string;
   ts: string;
   type: "dm" | "channel_message" | "channel_mention" | "thread_message";
@@ -130,6 +133,7 @@ export class SlackBot {
   private appHomeOpenedHandler: AppHomeOpenedHandler | null = null;
   private homeActionHandler: HomeActionHandler | null = null;
   private botUserId: string | null = null;
+  private botId: string | null = null;
   private seenEvents = new Map<string, number>();
   private seenEventsTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -205,11 +209,16 @@ export class SlackBot {
   async start(): Promise<void> {
     const auth = await this.app.client.auth.test();
     this.botUserId = auth.user_id ?? null;
-    this.logger.info({ botUserId: this.botUserId }, "Resolved bot user ID");
+    this.botId = "bot_id" in auth && typeof auth.bot_id === "string" ? auth.bot_id : null;
+    this.logger.info({ botUserId: this.botUserId, botId: this.botId }, "Resolved bot IDs");
 
     this.app.message(async ({ message }) => {
-      if (!("user" in message) || !message.user) return;
-      if (message.user === this.botUserId) return;
+      const userId = "user" in message && typeof message.user === "string" ? message.user : undefined;
+      const botId = "bot_id" in message && typeof message.bot_id === "string" ? message.bot_id : undefined;
+      const appId = "app_id" in message && typeof message.app_id === "string" ? message.app_id : undefined;
+      const subtype = "subtype" in message && typeof message.subtype === "string" ? message.subtype : undefined;
+      if (!userId && !botId) return;
+      if (userId === this.botUserId || botId === this.botId) return;
 
       const isIm = "channel_type" in message && message.channel_type === "im";
       const channelType =
@@ -219,7 +228,7 @@ export class SlackBot {
       const mentionsBot = this.botUserId ? text.includes(`<@${this.botUserId}>`) : false;
 
       if (isIm) {
-        if (!this.handler) return;
+        if (!userId || !this.handler) return;
 
         const hasText = "text" in message && message.text;
         const rawFiles = "files" in message && Array.isArray(message.files) ? message.files : [];
@@ -236,7 +245,10 @@ export class SlackBot {
         await this.handler({
           type: "dm",
           text: hasText ? (message as { text: string }).text : "",
-          userId: message.user,
+          ...(userId ? { userId } : {}),
+          ...(botId ? { botId } : {}),
+          ...(appId ? { appId } : {}),
+          ...(subtype ? { subtype } : {}),
           channelId: message.channel,
           ts: message.ts,
           ...(threadTs ? { threadTs } : {}),
@@ -264,6 +276,7 @@ export class SlackBot {
       }
 
       if (threadTs && this.threadMessageHandler) {
+        if (!userId) return;
         const hasText = text.length > 0;
         const rawFiles = "files" in message && Array.isArray(message.files) ? message.files : [];
         const hasFiles = rawFiles.length > 0;
@@ -279,7 +292,10 @@ export class SlackBot {
         await this.threadMessageHandler({
           type: "thread_message",
           text,
-          userId: message.user,
+          ...(userId ? { userId } : {}),
+          ...(botId ? { botId } : {}),
+          ...(appId ? { appId } : {}),
+          ...(subtype ? { subtype } : {}),
           channelId: message.channel,
           ts: message.ts,
           threadTs,
@@ -306,7 +322,10 @@ export class SlackBot {
           type: "channel_message",
           ...(channelType ? { channelType } : {}),
           text,
-          userId: message.user,
+          ...(userId ? { userId } : {}),
+          ...(botId ? { botId } : {}),
+          ...(appId ? { appId } : {}),
+          ...(subtype ? { subtype } : {}),
           channelId: message.channel,
           ts: message.ts,
           ...(files.length > 0 && { files }),
