@@ -700,7 +700,9 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         const returnTo =
           path === "/login"
             ? requestUrl.searchParams.get("return_to")
-            : path === "/integrations" || path.startsWith("/integrations/")
+            : path === "/integrations" ||
+                path.startsWith("/integrations/") ||
+                (path === "/channels" && requestUrl.searchParams.has("slack"))
               ? `${requestUrl.pathname}${requestUrl.search}`
               : null;
         if (returnTo) {
