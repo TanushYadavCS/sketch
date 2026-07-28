@@ -76,7 +76,20 @@ export function ChannelsPage() {
   const allDisconnected = data?.channels?.every((ch) => ch.connected !== true);
 
   useEffect(() => {
+    if (!auth.managedUrl) return;
+
     const url = new URL(window.location.href);
+    if (url.searchParams.get("connect") === "slack") {
+      url.searchParams.delete("connect");
+      window.history.replaceState(null, "", url);
+      if (canManageChannels) {
+        window.location.assign(
+          managedSlackAuthorizationUrl(auth.managedUrl, new URL("/channels", window.location.origin).toString()),
+        );
+      }
+      return;
+    }
+
     const result = url.searchParams.get("slack");
     if (!result) return;
 
@@ -101,7 +114,7 @@ export function ChannelsPage() {
       oauth_exchange_failed: "Slack could not be connected. Please try again.",
     };
     toast.error(messages[reason ?? ""] ?? "Slack could not be connected. Please try again.");
-  }, [queryClient]);
+  }, [auth.managedUrl, canManageChannels, queryClient]);
 
   return (
     <div className="mx-auto box-content max-w-4xl px-10 py-8">

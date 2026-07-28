@@ -186,6 +186,7 @@ describe("managed login redirect", () => {
       createTestConfig({
         MANAGED_URL: "https://app.getsketch.ai/platform/",
         MANAGED_AUTH_SECRET: "managed-secret-at-least-32chars-long",
+        BASE_URL: "https://tenant.getsketch.ai",
       }),
     );
 
@@ -193,7 +194,7 @@ describe("managed login redirect", () => {
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
       `https://app.getsketch.ai/platform/login?return_to=${encodeURIComponent(
-        "/channels?slack=error&reason=workspace_in_use",
+        "https://tenant.getsketch.ai/channels?slack=error&reason=workspace_in_use",
       )}`,
     );
   });

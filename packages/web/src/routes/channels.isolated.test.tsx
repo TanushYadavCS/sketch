@@ -13,6 +13,11 @@ const mockAuth = vi.hoisted(() => ({
     managedUrl: undefined as string | undefined,
   },
 }));
+const mockToast = vi.hoisted(() => ({
+  success: vi.fn(),
+  info: vi.fn(),
+  error: vi.fn(),
+}));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@tanstack/react-router")>();
@@ -22,6 +27,10 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
       auth: mockAuth.value,
     }),
   };
+});
+vi.mock("sonner", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("sonner")>();
+  return { ...mod, toast: mockToast };
 });
 
 import { ChannelsPage } from "./channels";
@@ -52,6 +61,8 @@ function channelsHandler(
 
 describe("ChannelsPage", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
+    window.history.replaceState(null, "", "/channels");
     mockAuth.value = {
       role: "admin",
       displayName: "User",
@@ -111,6 +122,54 @@ describe("ChannelsPage", () => {
       expect(url.pathname).toBe("/api/slack/connections/authorization");
       expect(url.searchParams.get("return_to")).toBe(`${window.location.origin}/channels`);
       expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
+    });
+
+    it("shows a successful managed callback and removes its query parameters", async () => {
+      mockAuth.value = {
+        role: "admin",
+        displayName: "User",
+        displayIdentifier: "user@test.com",
+        managedUrl: "https://app.getsketch.ai/",
+      };
+      window.history.replaceState(null, "", "/channels?slack=connected");
+      channelsHandler({ configured: true, connected: true }, { configured: false, connected: null });
+
+      renderWithProviders(<ChannelsPage />);
+
+      await waitFor(() => expect(mockToast.success).toHaveBeenCalledWith("Slack connected."));
+      expect(window.location.search).toBe("");
+    });
+
+    it("resumes Slack authorization after managed login", async () => {
+      const assignSpy = vi.spyOn(window.location, "assign").mockImplementation(() => undefined);
+      mockAuth.value = {
+        role: "admin",
+        displayName: "User",
+        displayIdentifier: "user@test.com",
+        managedUrl: "https://app.getsketch.ai/",
+      };
+      window.history.replaceState(null, "", "/channels?connect=slack");
+      channelsHandler({ configured: false, connected: null }, { configured: false, connected: null });
+
+      renderWithProviders(<ChannelsPage />);
+
+      await waitFor(() => expect(assignSpy).toHaveBeenCalledOnce());
+      const authorizationUrl = new URL(String(assignSpy.mock.calls[0]?.[0]));
+      expect(authorizationUrl.origin).toBe("https://app.getsketch.ai");
+      expect(authorizationUrl.pathname).toBe("/api/slack/connections/authorization");
+      expect(authorizationUrl.searchParams.get("return_to")).toBe(`${window.location.origin}/channels`);
+      expect(window.location.search).toBe("");
+    });
+
+    it("ignores managed callback parameters in a self-hosted deployment", async () => {
+      window.history.replaceState(null, "", "/channels?slack=connected");
+      channelsHandler({ configured: false, connected: null }, { configured: false, connected: null });
+
+      renderWithProviders(<ChannelsPage />);
+
+      await screen.findByText("Slack");
+      expect(mockToast.success).not.toHaveBeenCalled();
+      expect(window.location.search).toBe("?slack=connected");
     });
   });
 
