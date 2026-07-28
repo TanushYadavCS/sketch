@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.0] -- 2026-07-28
+
+- Introduces a WhatsApp gateway child process for durable inbound queuing, preventing socket starvation and message drops.
+- Adds WhatsApp group history backfill (30 days) for context graph indexing, capturing missed messages during reconnects.
+- Indexes Slack channels into the knowledge graph via conversation-slice chunking, LLM salience, and access-scoped privacy controls.
+- Rebuilds web application shell with Claude-style sidebar, live chat recents, and responsive navigation.
+- Adds live task state and inline review actions to Daily Brief items, linking outputs to durable tasks.
+- Isolates scheduled agent concurrency into separate interactive and scheduled queues to prevent fan-out delays.
+- Coalesces scheduled post-sync graph pipelines into a single cycle-end run to reduce memory churn.
+- Adds indexed corroboration and a checkpointed backfill for fact materialization to replace JSON payload scans.
+- Introduces cross-conversation chat search across Slack channels and WhatsApp groups.
+- Moves Entity Explorer and Knowledge Graph to Your Org as the new home with deep-linked tabs.
+- Adds configurable PostgreSQL connection pool size via `POSTGRES_POOL_MAX`.
+- Caches `settings.get()` with write invalidation to avoid repeated database queries.
+- Slims the materialization lookup index to only required columns, reducing heap usage.
+- Selects backlog-sweep candidates without loading raw payloads to bound per-sweep memory.
+- Improves chat interface resilience with automatic stream recovery, prefetching, and reduced-motion transitions.
+- Preserves fact materialization verdicts across re-syncs via input hashing to avoid reprocessing.
+- Notifies admins on WhatsApp Baileys disconnects with durable operational alerts.
+- Splits automation authoring from execution model selection.
+- Switches license from Apache 2.0 to Elastic License 2.0.
+- Fixes integration card resolution and simplifies automation link wording.
+- Preserves encryption key when updating connector scope.
+- Prevents magic-link prefetch from consuming sign-in tokens.
+- Includes caller in team directory listings.
+- Keeps participant rosters out of indexed slice content.
+
 ## [1.1.0] -- 2026-07-13
 
 - Indexes opted-in WhatsApp group conversations into the context graph with gap-watermark chunking, LLM salience gating, identity resolution, and access-scoped privacy controls.
