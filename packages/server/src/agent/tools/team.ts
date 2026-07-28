@@ -41,16 +41,16 @@ export async function handleGetTeamDirectory(
 ): Promise<ToolResult> {
   if (!deps.userRepo) return { content: [{ type: "text" as const, text: "Team directory not available." }] };
   const users = await deps.userRepo.list();
-  const directory = users
-    .filter((u) => u.id !== deps.currentUserId)
-    .map((u) => ({
-      id: u.id,
-      name: u.name,
-      role: u.role ?? null,
-      type: u.type,
-      description: u.description ?? "No description",
-      channels: [...(u.slack_user_id ? ["slack"] : []), ...(u.whatsapp_number ? ["whatsapp"] : [])],
-    }));
+  const directory = users.map((u) => ({
+    id: u.id,
+    name: u.name,
+    role: u.role ?? null,
+    workspaceRole: u.auth_role,
+    isCurrentUser: u.id === deps.currentUserId,
+    type: u.type,
+    description: u.description ?? "No description",
+    channels: [...(u.slack_user_id ? ["slack"] : []), ...(u.whatsapp_number ? ["whatsapp"] : [])],
+  }));
   return { content: [{ type: "text" as const, text: JSON.stringify(directory, null, 2) }] };
 }
 
@@ -58,7 +58,7 @@ export function createTeamTools(deps: SketchMcpDeps) {
   return [
     tool(
       "GetTeamDirectory",
-      "Discover team members and their roles. Returns all team members except yourself.",
+      "Discover team members and their roles, including yourself. `role` is the org or job role, `workspaceRole` is workspace access (`admin` or `member`), and `isCurrentUser` identifies the caller.",
       {},
       async () => handleGetTeamDirectory(deps),
     ),
