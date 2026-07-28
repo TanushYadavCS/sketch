@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.1] -- 2026-07-28
+
+Adds a managed Slack connection path from the Channels page, letting admins connect the managed Slack app via platform OAuth if skipped during onboarding, with result feedback and preserved return path.
+
 ## [1.2.0] -- 2026-07-28
 
 - Introduces a WhatsApp gateway child process for durable inbound queuing, preventing socket starvation and message drops.
