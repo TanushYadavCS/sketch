@@ -187,6 +187,24 @@ describe("buildSystemContext", () => {
       expect(result).toContain("must call ListFollowups first");
       expect(result).toContain("durable follow-up state is authoritative");
     });
+
+    it("routes semantic authoring through natural-language ManageScheduledTasks requests when configured", () => {
+      const result = buildSystemContext({ platform: "slack", automationAuthoringEnabled: true });
+
+      expect(result).toContain("pass the user's requested change as a natural-language request");
+      expect(result).toContain("Do not construct or pass automation definition fields");
+      expect(result).toContain("Never use updateStepContent");
+      expect(result).toContain("list, pause, resume, run, delete, and inspect run history");
+      expect(result).toContain("include the resolved target ID and label in the natural-language");
+    });
+
+    it("preserves legacy structured authoring guidance when authoring is not configured", () => {
+      const result = buildSystemContext({ platform: "slack" });
+
+      expect(result).not.toContain("Do not construct or pass automation definition fields");
+      expect(result).not.toContain("Never use updateStepContent");
+      expect(result).toContain("pass the resolved target ID in ManageScheduledTasks delivery");
+    });
   });
 
   describe("file attachments section", () => {

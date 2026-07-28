@@ -123,6 +123,224 @@ const whatsappGroupContext: TaskContext = {
 
 const stepContentRepo = makeMockStepContentRepo();
 
+describe("handleManageScheduledTasks — configured chat authoring", () => {
+  it("routes natural-language creation through the authorer and collects the saved artifact", async () => {
+    const scheduler = makeMockScheduler();
+    const savedTask = makeTask({ id: "authored-task", title: "Daily brief", prompt: "Daily brief" });
+    const chatAuthoring = {
+      author: vi.fn().mockResolvedValue({
+        kind: "saved",
+        task: savedTask,
+        artifact: {
+          steps: [
+            {
+              id: "trigger",
+              type: "trigger",
+              label: "Schedule",
+              icon: "clock",
+              position: { x: 0, y: 0 },
+              triggerConfig: { type: "schedule" },
+            },
+            {
+              id: "brief",
+              type: "agent",
+              label: "Write brief",
+              icon: "sketch-ai",
+              position: { x: 260, y: 0 },
+              agentMode: "sketch",
+            },
+          ],
+          scheduleType: "cron",
+          scheduleValue: "0 9 * * 1-5",
+          timezone: "Asia/Kolkata",
+        },
+      }),
+    };
+    const automationArtifactCollector = {
+      collect: vi.fn(),
+      drain: vi.fn(),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationArtifactCollector"]>;
+
+    const result = await handleManageScheduledTasks(
+      { action: "add", request: "Every weekday at 9, send me a concise daily brief" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
+        chatAuthoring,
+        automationArtifactCollector,
+      },
+    );
+
+    expect(chatAuthoring.author).toHaveBeenCalledWith({
+      action: "create",
+      request: "Every weekday at 9, send me a concise daily brief",
+      taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
+    });
+    expect(scheduler.addTask).not.toHaveBeenCalled();
+    expect(result.content[0].text).toContain("Automation created:");
+    expect(automationArtifactCollector.collect).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: "authored-task", title: "Daily brief" }),
+    );
+  });
+
+  it("routes natural-language editing through the authorer for database-backed ownership validation", async () => {
+    const scheduler = makeMockScheduler();
+    const chatAuthoring = {
+      author: vi.fn().mockResolvedValue({
+        kind: "saved",
+        task: makeTask({ title: "Shorter brief" }),
+        artifact: {
+          steps: [],
+          scheduleType: "cron",
+          scheduleValue: "0 9 * * 1-5",
+          timezone: "UTC",
+        },
+      }),
+    };
+
+    await handleManageScheduledTasks(
+      { action: "update", task_id: "task-1", request: "Make the summary shorter" },
+      { scheduler, stepContentRepo, taskContext: dmContext, chatAuthoring },
+    );
+
+    expect(scheduler.getTaskById).not.toHaveBeenCalled();
+    expect(chatAuthoring.author).toHaveBeenCalledWith({
+      action: "edit",
+      request: "Make the summary shorter",
+      taskId: "task-1",
+      taskContext: dmContext,
+    });
+    expect(scheduler.updateTask).not.toHaveBeenCalled();
+  });
+
+  it("masks another owner's configured edit and does not emit a new-automation artifact", async () => {
+    const scheduler = makeMockScheduler();
+    const chatAuthoring = {
+      author: vi.fn().mockResolvedValue({ kind: "error", message: "Automation not found." }),
+    };
+    const automationArtifactCollector = {
+      collect: vi.fn(),
+      drain: vi.fn(),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationArtifactCollector"]>;
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "task-1", request: "Rename it" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, createdBy: "other-user" },
+        chatAuthoring,
+        automationArtifactCollector,
+      },
+    );
+
+    expect(result.content[0].text).toBe("Error: Automation not found.");
+    expect(result.content[0].text).not.toContain("Roopak");
+    expect(chatAuthoring.author).toHaveBeenCalledOnce();
+    expect(automationArtifactCollector.collect).not.toHaveBeenCalled();
+  });
+
+  it("rejects legacy structured add and update fields instead of persisting a main-model bypass", async () => {
+    const scheduler = makeMockScheduler();
+    const chatAuthoring = { author: vi.fn() };
+
+    const addResult = await handleManageScheduledTasks(
+      {
+        action: "add",
+        request: "Create a brief",
+        prompt: "Main-model prompt",
+        schedule_type: "cron",
+        schedule_value: "0 9 * * *",
+      },
+      { scheduler, stepContentRepo, taskContext: dmContext, chatAuthoring },
+    );
+    const updateResult = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "task-1",
+        request: "Change it",
+        title: "Main-model title",
+      },
+      { scheduler, stepContentRepo, taskContext: dmContext, chatAuthoring },
+    );
+
+    expect(addResult.content[0].text).toContain("structured automation fields");
+    expect(updateResult.content[0].text).toContain("structured automation fields");
+    expect(chatAuthoring.author).not.toHaveBeenCalled();
+    expect(scheduler.addTask).not.toHaveBeenCalled();
+    expect(scheduler.updateTask).not.toHaveBeenCalled();
+  });
+
+  it("rejects direct step-content updates and requires a full authored edit", async () => {
+    const scheduler = makeMockScheduler();
+    const chatAuthoring = { author: vi.fn() };
+
+    const result = await handleManageScheduledTasks(
+      { action: "updateStepContent", task_id: "task-1", step_id: "brief", step_content: "Rewrite this" },
+      { scheduler, stepContentRepo, taskContext: dmContext, chatAuthoring },
+    );
+
+    expect(result.content[0].text).toContain("full automation edit");
+    expect(chatAuthoring.author).not.toHaveBeenCalled();
+    expect(stepContentRepo.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each(["list", "remove", "pause", "resume", "run", "getRun"] as const)(
+    "keeps %s deterministic without invoking the authorer",
+    async (action) => {
+      const scheduler = makeMockScheduler();
+      const chatAuthoring = { author: vi.fn() };
+      const automationRunsRepo = {
+        getLatest: vi.fn().mockResolvedValue({ id: "run-1" }),
+        deleteByTaskId: vi.fn().mockResolvedValue(undefined),
+      } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationRunsRepo"]>;
+
+      await handleManageScheduledTasks(action === "list" ? { action } : { action, task_id: "task-1" }, {
+        scheduler,
+        stepContentRepo,
+        automationRunsRepo,
+        taskContext: dmContext,
+        chatAuthoring,
+      });
+
+      expect(chatAuthoring.author).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { result: { kind: "clarification", message: "Which timezone should I use?" }, expected: "Which timezone" },
+    { result: { kind: "error", message: "Automation authoring is temporarily unavailable." }, expected: "Error:" },
+  ])("does not collect an artifact for $result.kind", async ({ result: authoringResult, expected }) => {
+    const scheduler = makeMockScheduler();
+    const chatAuthoring = { author: vi.fn().mockResolvedValue(authoringResult) };
+    const automationArtifactCollector = {
+      collect: vi.fn(),
+      drain: vi.fn(),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationArtifactCollector"]>;
+
+    const result = await handleManageScheduledTasks(
+      { action: "add", request: "Create something" },
+      { scheduler, stepContentRepo, taskContext: dmContext, chatAuthoring, automationArtifactCollector },
+    );
+
+    expect(result.content[0].text).toContain(expected);
+    expect(automationArtifactCollector.collect).not.toHaveBeenCalled();
+    expect(scheduler.addTask).not.toHaveBeenCalled();
+  });
+
+  it("preserves legacy add behavior when no authorer is configured", async () => {
+    const scheduler = makeMockScheduler();
+
+    await handleManageScheduledTasks(
+      { action: "add", prompt: "Do it", schedule_type: "cron", schedule_value: "0 9 * * 1" },
+      { scheduler, stepContentRepo, taskContext: dmContext },
+    );
+
+    expect(scheduler.addTask).toHaveBeenCalledOnce();
+  });
+});
+
 describe("handleManageScheduledTasks — list", () => {
   it("scopes by createdBy for DM context", async () => {
     const scheduler = makeMockScheduler();

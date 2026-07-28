@@ -330,6 +330,7 @@ export function buildSystemContext(params: {
   indexedSources?: Array<{ source: string; fileCount: number }>;
   agentInstructions?: string | null;
   visionAnalysisEnabled?: boolean;
+  automationAuthoringEnabled?: boolean;
 }): string {
   const sections: string[] = [];
 
@@ -378,12 +379,23 @@ export function buildSystemContext(params: {
     "## Scheduled Tasks",
     "",
     "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. The creation context is filled in automatically, but final delivery is editable through the delivery fields.",
-    "When the user names a delivery destination, use SearchDeliveryTargets first, then pass the resolved target ID in ManageScheduledTasks delivery.",
+    params.automationAuthoringEnabled
+      ? "When the user names a delivery destination, use SearchDeliveryTargets first, then include the resolved target ID and label in the natural-language ManageScheduledTasks request."
+      : "When the user names a delivery destination, use SearchDeliveryTargets first, then pass the resolved target ID in ManageScheduledTasks delivery.",
     "If a workflow is created from a Slack thread, default future workflow output to the parent channel top-level. Only set delivery.threadTs when the user explicitly asks to post workflow updates in that thread.",
     "When running a scheduled task, return the final message only; Sketch will automatically deliver your returned text to the task's configured Slack/WhatsApp destination, so do not try to find or use a chat-sending tool unless the task explicitly asks you to DM another person.",
     "When a scheduled task asks for reminders, follow-ups, outstanding commitments, or completed work, you must call ListFollowups first. Its durable follow-up state is authoritative: pending items stay pending, looks-resolved items require user review, confirmed or rejected work must not be reconstructed from chat history, and untracked items must remain labelled as untracked.",
     "For external app events, prefer a Canvas-managed trigger only when a Canvas skill/MCP is available: use Canvas search_components to find the trigger, then create a workflow with triggerConfig.type='canvas'. If Canvas is not available, use a normal scheduled cron/interval/once trigger instead.",
   );
+
+  if (params.automationAuthoringEnabled) {
+    sections.push(
+      "When creating or semantically editing an automation, pass the user's requested change as a natural-language request to ManageScheduledTasks. For edits, include the task ID.",
+      "Do not construct or pass automation definition fields such as schedules, timezones, delivery, titles, descriptions, steps, edges, prompts, scripts, apps, modes, skills, MCP servers, or models. The automation authoring model owns the complete definition.",
+      "Never use updateStepContent. Prompt, script, app, mode, skill, MCP, schedule, delivery, and structural changes must use a full ManageScheduledTasks update with the user's natural-language request.",
+      "Operational actions remain deterministic: use ManageScheduledTasks directly to list, pause, resume, run, delete, and inspect run history without an authoring request.",
+    );
+  }
 
   if (params.platform === "web") {
     sections.push(

@@ -48,6 +48,7 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
     createLocalClaudeSessionTool(deps),
     createManageScheduledTasksTool({
       scheduler: deps.scheduler,
+      chatAuthoring: deps.chatAuthoring,
       taskContext: deps.taskContext,
       stepContentRepo: deps.stepContentRepo,
       automationRunsRepo: deps.automationRunsRepo,

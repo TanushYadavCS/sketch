@@ -1,13 +1,12 @@
 import { type Context, Hono } from "hono";
-import { type Kysely, type Selectable, sql } from "kysely";
+import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
 import {
   AutomationValidationError,
   buildAutomationDefinition,
   parseAutomationBuilderSaveRequest,
-  scheduledTaskFieldsFromSaveRequest,
-  validateAutomationBuilderSaveRequest,
 } from "../automation/definition";
+import { replaceAutomationDefinition } from "../automation/persistence";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
@@ -479,8 +478,16 @@ export function scheduledTaskRoutes(
     const brokerCapable = request.steps.some((step) => step.type === "action")
       ? await hasBrokerCapableProvider()
       : true;
+    const userId = await resolveUserId(c.get("sub"));
+    let saveResult: Awaited<ReturnType<typeof replaceAutomationDefinition>>;
     try {
-      validateAutomationBuilderSaveRequest({ request, brokerCapable });
+      saveResult = await replaceAutomationDefinition({
+        db,
+        taskId: id,
+        request,
+        actor: { userId, canManageAnyTask: c.get("role") === "admin" },
+        brokerCapable,
+      });
     } catch (err) {
       if (err instanceof AutomationValidationError) {
         logger?.warn(
@@ -494,62 +501,6 @@ export function scheduledTaskRoutes(
       }
       throw err;
     }
-
-    const userId = await resolveUserId(c.get("sub"));
-    let updatedRow: ScheduledTaskRow | undefined;
-    const contentEntries = Object.values(request.stepContent).filter((content) =>
-      request.steps.some((step) => step.id === content.stepId && step.type !== "trigger"),
-    );
-
-    const saveResult = await db.transaction().execute(async (trx) => {
-      const current = await trx.selectFrom("scheduled_tasks").selectAll().where("id", "=", id).executeTakeFirst();
-      if (!current) return { kind: "not_found" as const };
-      if (!canAccess(current, userId, c.get("role"))) return { kind: "not_found" as const };
-      if (request.expectedRevision !== undefined && current.revision !== request.expectedRevision) {
-        return { kind: "revision_conflict" as const, currentRevision: current.revision };
-      }
-
-      const fields = scheduledTaskFieldsFromSaveRequest(request);
-      let update = trx
-        .updateTable("scheduled_tasks")
-        .set({
-          ...fields,
-          revision: sql<number>`revision + 1`,
-          updated_at: sql`CURRENT_TIMESTAMP`,
-          last_edited_by: userId,
-        })
-        .where("id", "=", id);
-      if (request.expectedRevision !== undefined) {
-        update = update.where("revision", "=", request.expectedRevision);
-      }
-      const updateResult = await update.executeTakeFirst();
-      if (Number(updateResult.numUpdatedRows ?? 0) === 0) {
-        const latest = await trx
-          .selectFrom("scheduled_tasks")
-          .select("revision")
-          .where("id", "=", id)
-          .executeTakeFirst();
-        return { kind: "revision_conflict" as const, currentRevision: latest?.revision ?? current.revision };
-      }
-
-      const txStepContentRepo = createAutomationStepContentRepository(trx);
-      await txStepContentRepo.deleteOrphanedSteps(
-        id,
-        contentEntries.map((content) => content.stepId),
-      );
-      for (const content of contentEntries) {
-        await txStepContentRepo.upsert({
-          taskId: id,
-          stepId: content.stepId,
-          contentType: content.contentType,
-          content: content.content,
-          apps: content.apps,
-        });
-      }
-
-      updatedRow = await trx.selectFrom("scheduled_tasks").selectAll().where("id", "=", id).executeTakeFirst();
-      return { kind: "saved" as const };
-    });
 
     if (saveResult.kind === "not_found") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
@@ -568,7 +519,7 @@ export function scheduledTaskRoutes(
     }
 
     await scheduler.refreshTaskSchedule(id);
-    const refreshed = (await repo.getById(id)) ?? updatedRow ?? result.row;
+    const refreshed = (await repo.getById(id)) ?? saveResult.row;
     return c.json({ automation: await loadFullDefinition(refreshed) });
   });
 

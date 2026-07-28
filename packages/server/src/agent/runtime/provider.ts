@@ -178,6 +178,10 @@ export function createAgentRuntimeProvider(
       headers: config.headers,
       fetch: deps.fetch,
       includeUsage: true,
+      // OpenRouter advertises JSON-schema structured output for the authoring model.
+      // Without this flag the AI SDK silently downgrades Output.object to JSON-object
+      // mode, allowing prose that fails the automation schema.
+      supportsStructuredOutputs: config.provider === "openrouter",
     });
     return {
       provider: config.provider,

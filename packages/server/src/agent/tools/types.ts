@@ -1,5 +1,6 @@
 import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
+import type { ChatAutomationAuthoring } from "../../automation/chat-authoring";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import type { createConversationRepository } from "../../db/repositories/conversations";
@@ -94,6 +95,7 @@ export interface SketchMcpDeps {
   taskContext?: TaskContext;
   getSlack?: () => SlackBot | null;
   scheduler?: TaskScheduler;
+  chatAuthoring?: ChatAutomationAuthoring;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
