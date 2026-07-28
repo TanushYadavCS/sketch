@@ -1,5 +1,7 @@
 import { NoObjectGeneratedError, Output, generateText } from "ai";
+import { z } from "zod";
 import { extractRuntimeModelUsage } from "../../agent/runtime/usage";
+import { automationAuthoringOutputSchema } from "./schema";
 import {
   AutomationAuthoringGeneratedOutputError,
   type StructuredAutomationAuthoringGeneration,
@@ -67,7 +69,14 @@ export function createAiSdkAutomationAuthoringGenerator(
       try {
         const result = await runGenerateText({
           model: params.provider.model,
-          instructions: params.instructions,
+          instructions: `${params.instructions}
+
+Return exactly one transport JSON object with the keys kind, definitionJson, and question.
+- For kind "definition", set definitionJson to the JSON-encoded definition object and question to an empty string.
+- For kind "clarification", set definitionJson to an empty string and question to the clarification question.
+
+The decoded semantic output must conform exactly to this schema:
+${JSON.stringify(z.toJSONSchema(automationAuthoringOutputSchema))}`,
           prompt: params.prompt,
           output: Output.object({ schema: params.outputSchema }),
           maxRetries: params.maxRetries,
@@ -75,11 +84,23 @@ export function createAiSdkAutomationAuthoringGenerator(
           maxOutputTokens: params.maxOutputTokens,
           include: { requestBody: false, requestMessages: false, responseBody: false },
         });
-        return generationFrom({
+        const generation = generationFrom({
           output: result.output,
           model: result.response.modelId || params.provider.modelId,
           usage: result.usage,
         });
+        try {
+          const transport = params.outputSchema.parse(result.output);
+          return {
+            ...generation,
+            output:
+              transport.kind === "definition"
+                ? { kind: "definition", definition: JSON.parse(transport.definitionJson) }
+                : { kind: "clarification", question: transport.question },
+          };
+        } catch {
+          throw new AutomationAuthoringGeneratedOutputError(undefined, generation);
+        }
       } catch (error) {
         if (!isNoObjectGeneratedError(error)) throw error;
         const structuredError = error as NoObjectGeneratedLike;

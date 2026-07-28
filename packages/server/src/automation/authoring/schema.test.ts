@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
   automationAuthoringDefinitionSchema,
   automationAuthoringOutputSchema,
+  automationAuthoringTransportSchema,
   toAutomationBuilderSaveRequest,
 } from "./schema";
 
@@ -105,6 +107,16 @@ describe("automation authoring schema", () => {
 
     expect(automationAuthoringDefinitionSchema.safeParse(mismatched).success).toBe(false);
     expect(automationAuthoringDefinitionSchema.safeParse(orphaned).success).toBe(false);
+  });
+
+  it("uses a Claude-compatible native structured-output transport schema", () => {
+    const schema = JSON.stringify(z.toJSONSchema(automationAuthoringTransportSchema));
+
+    expect(schema).not.toContain('"oneOf"');
+    expect(schema).not.toContain('"minItems"');
+    expect(schema).toContain('"definitionJson"');
+    expect(schema).toContain('"question"');
+    expect(schema).toContain('"additionalProperties":false');
   });
 
   it("allows one concise clarification instead of a definition", () => {

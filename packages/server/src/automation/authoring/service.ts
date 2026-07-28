@@ -5,6 +5,7 @@ import { AutomationValidationError, validateAutomationBuilderSaveRequest } from 
 import {
   type AutomationAuthoringOutput,
   automationAuthoringOutputSchema,
+  automationAuthoringTransportSchema,
   toAutomationBuilderSaveRequest,
 } from "./schema";
 import type {
@@ -37,7 +38,7 @@ export interface StructuredAutomationAuthoringGenerator {
     provider: AutomationAuthoringProvider;
     instructions: string;
     prompt: string;
-    outputSchema: typeof automationAuthoringOutputSchema;
+    outputSchema: typeof automationAuthoringTransportSchema;
     attempt: number;
     maxRetries: 0;
     timeoutMs: number;
@@ -295,7 +296,7 @@ export function createAutomationAuthoringService(deps: {
                   repair,
                   priorDraft,
                 }),
-          outputSchema: automationAuthoringOutputSchema,
+          outputSchema: automationAuthoringTransportSchema,
           attempt,
           maxRetries: 0,
           timeoutMs: remainingMs,

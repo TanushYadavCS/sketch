@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { validAuthoringDefinition } from "./fixtures";
 import { createAiSdkAutomationAuthoringGenerator } from "./generator";
-import { automationAuthoringOutputSchema } from "./schema";
+import { automationAuthoringTransportSchema } from "./schema";
 import { AutomationAuthoringGeneratedOutputError, type StructuredAutomationAuthoringGenerator } from "./service";
 
 const provider = {
@@ -16,7 +16,7 @@ function request(): Parameters<StructuredAutomationAuthoringGenerator["generate"
     provider,
     instructions: "Return a definition",
     prompt: "Create a digest",
-    outputSchema: automationAuthoringOutputSchema,
+    outputSchema: automationAuthoringTransportSchema,
     attempt: 1,
     maxRetries: 0,
     timeoutMs: 30_000,
@@ -27,7 +27,11 @@ function request(): Parameters<StructuredAutomationAuthoringGenerator["generate"
 describe("AI SDK automation authoring generator", () => {
   it("uses structured output with hard retry, timeout, output, and retained-body bounds", async () => {
     const generateText = vi.fn().mockResolvedValue({
-      output: { kind: "definition", definition: validAuthoringDefinition },
+      output: {
+        kind: "definition",
+        definitionJson: JSON.stringify(validAuthoringDefinition),
+        question: "",
+      },
       response: { modelId: "anthropic/claude-sonnet-4.6" },
       usage: {
         inputTokens: 120,
@@ -50,7 +54,7 @@ describe("AI SDK automation authoring generator", () => {
     expect(generateText).toHaveBeenCalledWith(
       expect.objectContaining({
         model: provider.model,
-        instructions: "Return a definition",
+        instructions: expect.stringMatching(/Return a definition[\s\S]*definitionJson[\s\S]*"steps"/),
         prompt: "Create a digest",
         maxRetries: 0,
         timeout: { totalMs: 30_000 },
@@ -59,6 +63,26 @@ describe("AI SDK automation authoring generator", () => {
         output: expect.anything(),
       }),
     );
+  });
+
+  it("decodes a clarification from the provider-compatible transport", async () => {
+    const generateText = vi.fn().mockResolvedValue({
+      output: {
+        kind: "clarification",
+        definitionJson: "",
+        question: "Which Slack channel should receive the digest?",
+      },
+      response: { modelId: "anthropic/claude-sonnet-4.6" },
+      usage: {},
+    });
+    const generator = createAiSdkAutomationAuthoringGenerator({ generateText });
+
+    await expect(generator.generate(request())).resolves.toMatchObject({
+      output: {
+        kind: "clarification",
+        question: "Which Slack channel should receive the digest?",
+      },
+    });
   });
 
   it("classifies structured-output parse failures as validation failures with usage but no response text", async () => {

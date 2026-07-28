@@ -76,6 +76,7 @@ describe("agent runtime provider factory", () => {
 
     expect(provider.provider).toBe("openrouter");
     expect(provider.modelId).toBe("vendor/non-claude-live-model");
+    expect((provider.model as { supportsStructuredOutputs?: boolean }).supportsStructuredOutputs).toBe(true);
     expect(provider.preparePrompt({ systemPrompt: "sys", prompt: "user", cacheBreakpoints: true })).toEqual({
       instructions: "sys",
       messages: [{ role: "user", content: "user" }],

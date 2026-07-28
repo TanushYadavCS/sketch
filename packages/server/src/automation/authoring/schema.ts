@@ -44,6 +44,19 @@ export const automationAuthoringDefinitionSchema = automationBuilderSaveRequestS
     }
   });
 
+/**
+ * Claude's native structured-output subset rejects constraints in the complete
+ * authoring schema. Carry definitions as JSON text inside a strict flat object,
+ * then validate the decoded value against the complete application schema.
+ */
+export const automationAuthoringTransportSchema = z
+  .object({
+    kind: z.enum(["definition", "clarification"]),
+    definitionJson: z.string(),
+    question: z.string(),
+  })
+  .strict();
+
 export const automationAuthoringOutputSchema = z.discriminatedUnion("kind", [
   z
     .object({
