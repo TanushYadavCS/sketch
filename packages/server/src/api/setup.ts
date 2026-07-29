@@ -12,6 +12,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import { slackApiCall } from "../slack/api";
 import { createSession } from "./auth";
 import { denyIfNotAdmin } from "./auth-helpers";
+import { getOnboardingReadiness } from "./onboarding-readiness";
 
 async function verifySlackTokens(botToken: string, appToken: string): Promise<{ workspaceName?: string }> {
   const auth = await slackApiCall(botToken, "auth.test");
@@ -159,24 +160,16 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   routes.get("/status", async (c) => {
     const row = await settings.get();
     const adminUser = deps.userRepo ? await deps.userRepo.findFirstLocalAdmin() : undefined;
-    const hasAdmin = Boolean(adminUser ?? row?.admin_email);
-    const hasIdentity = Boolean(row?.org_name?.trim() && row?.bot_name?.trim());
-    const hasSlack = Boolean(row?.slack_bot_token?.trim() && row?.slack_app_token?.trim());
-    const hasAnthropic = row?.llm_provider === "anthropic" && Boolean(row?.anthropic_api_key?.trim());
-    const hasBedrock =
-      row?.llm_provider === "bedrock" &&
-      Boolean(row?.aws_access_key_id?.trim() && row?.aws_secret_access_key?.trim() && row?.aws_region?.trim());
-    const hasOpenRouter =
-      row?.llm_provider === "openrouter" && Boolean(row?.anthropic_api_key?.trim() && row?.model_id?.trim());
-    const hasLlm = Boolean(hasAnthropic || hasBedrock || hasOpenRouter);
+    const { hasAdmin, hasIdentity, hasLlm, readyToComplete } = getOnboardingReadiness(row, Boolean(adminUser));
+    const isManaged = Boolean(deps.managedUrl);
+    const hasSlack = Boolean(row?.slack_bot_token?.trim() && (isManaged || row?.slack_app_token?.trim()));
     const provider = row?.llm_provider;
     const llmProvider = isLlmProvider(provider) ? provider : null;
     const isCompleted = Boolean(row?.onboarding_completed_at);
-    const isManaged = Boolean(deps.managedUrl);
     let currentStep: number;
     if (isCompleted) {
       currentStep = 5;
-    } else if (hasLlm) {
+    } else if (readyToComplete) {
       currentStep = 5;
     } else if (isManaged) {
       currentStep = hasIdentity ? 4 : hasAdmin ? 2 : 0;
@@ -185,6 +178,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     }
     return c.json({
       completed: isCompleted,
+      readyToComplete,
       currentStep,
       adminEmail: adminUser?.email ?? row?.admin_email ?? null,
       orgName: row?.org_name ?? null,

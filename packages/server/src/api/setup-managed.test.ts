@@ -52,6 +52,15 @@ describe("GET /api/setup/status", () => {
       expect(body.currentStep).toBe(3);
     });
 
+    it("does not report Slack connected when only a bot token is configured", async () => {
+      await settings.create({ adminEmail: "admin@test.com", adminPasswordHash: "hash" });
+      await settings.update({ slackBotToken: "xoxb-test" });
+      const app = createTestSetupApp(settings);
+      const res = await app.request("/api/setup/status");
+      const body = await res.json();
+      expect(body.slackConnected).toBe(false);
+    });
+
     it("returns currentStep 4 when admin, identity, and slack are set", async () => {
       await settings.create({ adminEmail: "admin@test.com", adminPasswordHash: "hash" });
       await settings.update({ orgName: "Acme", botName: "Sketch" });
@@ -102,6 +111,26 @@ describe("GET /api/setup/status", () => {
       const res = await app.request("/api/setup/status");
       const body = await res.json();
       expect(body.currentStep).toBe(5);
+      expect(body.readyToComplete).toBe(true);
+    });
+
+    it("does not report ready when an LLM exists without admin or identity", async () => {
+      await settings.create();
+      await settings.update({ llmProvider: "anthropic", anthropicApiKey: "sk-ant-test" });
+      const app = createTestSetupApp(settings, { managedUrl });
+      const res = await app.request("/api/setup/status");
+      const body = await res.json();
+      expect(body.currentStep).toBe(0);
+      expect(body.readyToComplete).toBe(false);
+    });
+
+    it("treats a managed bot token as a connected Slack installation", async () => {
+      await settings.create({ adminEmail: "admin@test.com", adminPasswordHash: "hash" });
+      await settings.update({ slackBotToken: "xoxb-test" });
+      const app = createTestSetupApp(settings, { managedUrl });
+      const res = await app.request("/api/setup/status");
+      const body = await res.json();
+      expect(body.slackConnected).toBe(true);
     });
   });
 

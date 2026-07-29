@@ -36,6 +36,7 @@ function OnboardingRoutePage() {
 
 const defaultSetupStatus: SetupStatus = {
   completed: false,
+  readyToComplete: false,
   currentStep: 0,
   adminEmail: null,
   orgName: null,

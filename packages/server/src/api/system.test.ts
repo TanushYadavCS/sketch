@@ -2180,7 +2180,7 @@ describe("POST /api/system/onboarding-introductions", () => {
   });
 });
 
-describe("POST /api/system/onboarding/complete", () => {
+describe("POST /api/system/onboarding/ensure-complete", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {
@@ -2196,7 +2196,7 @@ describe("POST /api/system/onboarding/complete", () => {
     const settingsRepo = createSettingsRepository(db);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
 
-    const res = await app.request("/api/system/onboarding/complete", {
+    const res = await app.request("/api/system/onboarding/ensure-complete", {
       method: "POST",
     });
 
@@ -2207,7 +2207,7 @@ describe("POST /api/system/onboarding/complete", () => {
     const settingsRepo = createSettingsRepository(db);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
 
-    const res = await app.request("/api/system/onboarding/complete", {
+    const res = await app.request("/api/system/onboarding/ensure-complete", {
       method: "POST",
       headers: { Authorization: "Bearer wrong-secret" },
     });
@@ -2215,12 +2215,75 @@ describe("POST /api/system/onboarding/complete", () => {
     expect(res.status).toBe(401);
   });
 
-  it("sets onboarding_completed_at in settings", async () => {
+  it("returns 409 without changing settings when prerequisites are incomplete", async () => {
     const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/onboarding/ensure-complete", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: {
+        code: "SETUP_INCOMPLETE",
+        message: "Tenant onboarding prerequisites are incomplete",
+        missing: ["identity", "llm"],
+      },
+    });
+
+    expect((await settingsRepo.get())?.onboarding_completed_at).toBeNull();
+  });
+
+  it("sets onboarding_completed_at when all prerequisites are ready", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    await settingsRepo.update({
+      orgName: "Acme",
+      botName: "Sketch",
+      llmProvider: "anthropic",
+      anthropicApiKey: "sk-ant-test",
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/onboarding/ensure-complete", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, completed: true, changed: true });
+    expect((await settingsRepo.get())?.onboarding_completed_at).not.toBeNull();
+  });
+
+  it("keeps the original completion timestamp when called again", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const originalTimestamp = "2026-07-29T09:52:19.000Z";
+    await settingsRepo.update({ onboardingCompletedAt: originalTimestamp });
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
 
-    const before = await settingsRepo.get();
-    expect(before?.onboarding_completed_at).toBeNull();
+    const res = await app.request("/api/system/onboarding/ensure-complete", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, completed: true, changed: false });
+    expect((await settingsRepo.get())?.onboarding_completed_at).toBe(originalTimestamp);
+  });
+
+  it("keeps the existing onboarding/complete endpoint as a validated alias", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    await settingsRepo.update({
+      orgName: "Acme",
+      botName: "Sketch",
+      llmProvider: "anthropic",
+      anthropicApiKey: "sk-ant-test",
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
 
     const res = await app.request("/api/system/onboarding/complete", {
       method: "POST",
@@ -2228,36 +2291,7 @@ describe("POST /api/system/onboarding/complete", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({ ok: true });
-
-    const after = await settingsRepo.get();
-    expect(after?.onboarding_completed_at).toBeDefined();
-    expect(after?.onboarding_completed_at).not.toBeNull();
-  });
-
-  it("is idempotent: calling again when already completed returns 200", async () => {
-    const settingsRepo = createSettingsRepository(db);
-    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
-
-    const res1 = await app.request("/api/system/onboarding/complete", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
-    });
-    expect(res1.status).toBe(200);
-
-    const afterFirst = await settingsRepo.get();
-    const firstTimestamp = afterFirst?.onboarding_completed_at;
-
-    const res2 = await app.request("/api/system/onboarding/complete", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
-    });
-    expect(res2.status).toBe(200);
-
-    const afterSecond = await settingsRepo.get();
-    expect(afterSecond?.onboarding_completed_at).toBeDefined();
-    expect(afterSecond?.onboarding_completed_at).not.toBeNull();
+    expect(await res.json()).toEqual({ ok: true, completed: true, changed: true });
   });
 });
 

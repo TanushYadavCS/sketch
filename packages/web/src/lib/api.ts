@@ -248,6 +248,7 @@ export interface WhatsAppGroupMemberLabel {
 
 export interface SetupStatus {
   completed: boolean;
+  readyToComplete: boolean;
   currentStep: number;
   adminEmail: string | null;
   orgName: string | null;

@@ -352,6 +352,7 @@ describe("OnboardingPage navigation and flow", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 2,
           adminEmail: "admin@test.com",
           orgName: null,
@@ -391,6 +392,7 @@ describe("OnboardingPage navigation and flow", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 4,
           adminEmail: "admin@test.com",
           orgName: "Acme",
@@ -451,6 +453,7 @@ describe("OnboardingPage navigation and flow", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 4,
           adminEmail: "admin@test.com",
           orgName: "Acme",
@@ -565,6 +568,7 @@ describe("Managed mode onboarding", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 2,
           adminEmail: "admin@managed.com",
           orgName: null,
@@ -588,6 +592,7 @@ describe("Managed mode onboarding", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 2,
           adminEmail: "admin@managed.com",
           orgName: null,
@@ -617,6 +622,7 @@ describe("Managed mode onboarding", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 2,
           adminEmail: "admin@managed.com",
           orgName: null,
