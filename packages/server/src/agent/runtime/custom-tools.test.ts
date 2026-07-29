@@ -197,8 +197,6 @@ describe("AI SDK custom Sketch tool provider", () => {
       mcp__sketch__SearchEntities: { queries: ["alpha"] },
       mcp__sketch__GetEntityContext: { entityId: "entity-1", limit: 1 },
       mcp__sketch__GetFileContent: { fileId: "file-1" },
-      mcp__sketch__WhatsAppGroupHistory: { sliceId: "slice-1" },
-      mcp__sketch__SlackChannelHistory: { sliceId: "slice-1" },
     } satisfies Record<string, Record<string, unknown>>;
 
     expect(Object.keys(smokeInputs).sort()).toEqual(Object.keys(tools).sort());

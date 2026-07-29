@@ -10,11 +10,13 @@ import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-gr
 import type { DB } from "../../db/schema";
 import { createTestDb, createTestLogger, createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { stableWhatsAppParticipantJidRef } from "../../whatsapp/identity-resolution";
+import { createReadChatHistoryTool } from "./chat-history";
 import { handleAllChatsSearch } from "./chat-search";
 import type { SketchMcpDeps } from "./types";
 
 const USER_ID = "user-roopak";
 const USER_EMAIL = "roopak@example.com";
+const USER_WHATSAPP_NUMBER = "+15550001234";
 
 interface SeededConversation {
   conversationId: number;
@@ -29,6 +31,7 @@ async function seedUser(db: Kysely<DB>, options: { emailVerified?: boolean } = {
     name: "Roopak",
     email: USER_EMAIL,
     emailVerified: options.emailVerified ?? true,
+    whatsappNumber: USER_WHATSAPP_NUMBER,
   });
 }
 
@@ -179,6 +182,19 @@ async function seedWhatsAppGroup(
     updated_at: "2026-07-17T09:00:00.000Z",
   });
   await groups.setIndexEnabled(groupJid, options.indexEnabled ?? true);
+  if (options.memberEmails.includes(USER_EMAIL)) {
+    await db
+      .insertInto("whatsapp_group_participants")
+      .values({
+        group_jid: groupJid,
+        participant_jid: "15550001234@s.whatsapp.net",
+        phone_e164: USER_WHATSAPP_NUMBER,
+        lid: null,
+        admin_role: null,
+        last_seen_at: "2026-07-17T09:00:00.000Z",
+      })
+      .execute();
+  }
   const conversations = createConversationRepository(db);
   const conversation = await conversations.getOrCreate({
     platform: "whatsapp",
@@ -307,7 +323,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(outcome.body.messages).toHaveLength(0);
     });
 
-    it("excludes conversations whose only indexed file is archived", async () => {
+    it("searches raw Slack history even when its indexed file is archived", async () => {
       await seedSlackChannel(db, {
         channelId: "C3",
         text: "archived channel content",
@@ -318,10 +334,10 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const outcome = await handleAllChatsSearch({ query: "archived channel content" }, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      expect(outcome.body.messages).toHaveLength(0);
+      expect(outcome.body.messages).toHaveLength(1);
     });
 
-    it("excludes share_with_everyone files from authorization", async () => {
+    it("searches raw Slack history independently of indexed-file sharing state", async () => {
       await seedSlackChannel(db, {
         channelId: "C4",
         text: "broadcast topic",
@@ -332,10 +348,10 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const outcome = await handleAllChatsSearch({ query: "broadcast topic" }, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      expect(outcome.body.messages).toHaveLength(0);
+      expect(outcome.body.messages).toHaveLength(1);
     });
 
-    it("excludes WhatsApp groups with indexing disabled", async () => {
+    it("searches WhatsApp group history when indexing is disabled", async () => {
       await seedWhatsAppGroup(db, {
         text: "disabled group content",
         memberEmails: [USER_EMAIL],
@@ -345,7 +361,140 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const outcome = await handleAllChatsSearch({ query: "disabled group content" }, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(1);
+    });
+
+    it("excludes WhatsApp groups where the requester is not a current participant", async () => {
+      await seedWhatsAppGroup(db, {
+        text: "other group secret",
+        memberEmails: ["other@example.com"],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const outcome = await handleAllChatsSearch({ query: "other group secret" }, depsFor(db));
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(0);
+      expect(outcome.body.noMatchMeaning).toContain("does not prove");
+    });
+
+    it("revokes retained WhatsApp history when the requester leaves the group", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "departed group retained history",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const before = await handleAllChatsSearch({ query: "departed group retained" }, depsFor(db));
+      expect(before.ok && before.body.messages).toHaveLength(1);
+
+      await db
+        .deleteFrom("whatsapp_group_participants")
+        .where("group_jid", "=", seeded.groupJid)
+        .where("phone_e164", "=", USER_WHATSAPP_NUMBER)
+        .execute();
+
+      const after = await handleAllChatsSearch({ query: "departed group retained" }, depsFor(db));
+      expect(after.ok && after.body.messages).toHaveLength(0);
+    });
+
+    it("reads sanitized chronology around an authorized cross-chat search hit", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "context before the decision",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+        displayName: "Decision Room",
+      });
+      const conversations = createConversationRepository(db);
+      const anchor = await conversations.insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: `${seeded.groupJid}:2`,
+        senderJid: "15550001111@s.whatsapp.net",
+        senderName: "Tara",
+        text: "cobalt launch decision approved",
+        receivedAt: "2026-07-17T09:13:00.000Z",
+      });
+      await conversations.insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: `${seeded.groupJid}:3`,
+        senderJid: "15550001111@s.whatsapp.net",
+        senderName: "Tara",
+        text: "context after the decision",
+        receivedAt: "2026-07-17T09:14:00.000Z",
+      });
+      const current = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "dm",
+        providerConversationId: "D-CURRENT",
+      });
+      const trigger = await conversations.insertMessage({
+        conversationId: current.id,
+        providerMessageId: "trigger-read-cross-chat",
+        senderJid: "U-ROOPAK",
+        senderName: "Roopak",
+        text: "show me the surrounding context",
+        receivedAt: "2026-07-17T09:15:00.000Z",
+      });
+      const deps = depsFor(db, {
+        conversationRepo: conversations,
+        conversationContext: { conversationId: current.id, currentMessageId: trigger.row.id },
+      });
+      const search = await handleAllChatsSearch({ query: "cobalt launch decision" }, deps);
+      expect(search.ok).toBe(true);
+      if (!search.ok) return;
+      const hit = search.body.messages[0];
+      const conversationRef = (hit?.conversation as { ref: string }).ref;
+      const readTool = createReadChatHistoryTool(deps) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+
+      const result = await readTool.handler({
+        conversationRef,
+        anchorMessageId: anchor.row.id,
+        limit: 3,
+      });
+      const body = JSON.parse(result.content[0]?.text ?? "{}") as {
+        messages: Array<Record<string, unknown>>;
+      };
+      expect(body.messages.map((message) => message.text)).toEqual([
+        "context before the decision",
+        "cobalt launch decision approved",
+        "context after the decision",
+      ]);
+      expect(body.messages.every((message) => !("senderJid" in message))).toBe(true);
+      expect(
+        body.messages.every((message) => (message.conversation as { name: string }).name === "Decision Room"),
+      ).toBe(true);
+    });
+
+    it("does not reveal whether a cross-chat conversation ref exists after access is revoked", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "revoked read target",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      await db
+        .deleteFrom("whatsapp_group_participants")
+        .where("group_jid", "=", seeded.groupJid)
+        .where("phone_e164", "=", USER_WHATSAPP_NUMBER)
+        .execute();
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, { conversationRepo: createConversationRepository(db) }),
+      ) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+
+      const denied = await readTool.handler({
+        conversationRef: `conversation:${seeded.conversationId}`,
+        anchorMessageId: seeded.messageId,
+      });
+      const guessed = await readTool.handler({
+        conversationRef: "conversation:999999",
+        anchorMessageId: seeded.messageId,
+      });
+      expect(denied.content[0]?.text).toBe(guessed.content[0]?.text);
     });
 
     it("never returns other DM conversations but includes the current DM", async () => {
@@ -503,7 +652,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(outcome.body.messages).toHaveLength(0);
     });
 
-    it("denies without an authenticated requesting user and without a verified email", async () => {
+    it("denies without an authenticated requester or any usable provider identity", async () => {
       await seedSlackChannel(db, {
         channelId: "C8",
         text: "gated content",
@@ -518,6 +667,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(anonymous.ok).toBe(false);
 
       await db.updateTable("users").set({ email_verified_at: null }).where("id", "=", USER_ID).execute();
+      await db.updateTable("users").set({ whatsapp_number: null }).where("id", "=", USER_ID).execute();
       const unverified = await handleAllChatsSearch({ query: "gated content" }, depsFor(db));
       expect(unverified.ok).toBe(false);
     });

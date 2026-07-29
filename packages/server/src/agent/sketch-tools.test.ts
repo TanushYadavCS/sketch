@@ -109,7 +109,8 @@ describe("createSketchMcpServer", () => {
     const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
     expect(tools.ReadChatHistory).toBeDefined();
     expect(tools.SearchChatHistory).toBeDefined();
-    expect(tools.WhatsAppGroupHistory).toBeDefined();
+    expect(tools.WhatsAppGroupHistory).toBeUndefined();
+    expect(tools.SlackChannelHistory).toBeUndefined();
   });
 
   it("does not expose integration card rendering tools", () => {

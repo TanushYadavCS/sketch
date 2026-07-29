@@ -1,7 +1,8 @@
-import type { Expression, Kysely } from "kysely";
+import { type Expression, type Kysely, sql } from "kysely";
 import { type CrossConversationSearchMessage, createConversationRepository } from "../../db/repositories/conversations";
 import type { DB } from "../../db/schema";
 import { parseSlackRosterSnapshot } from "../../slack/identity-resolution";
+import { normalizeWhatsAppIdentityPhone } from "../../whatsapp/identity-resolution";
 import { sanitizeWhatsAppDisplayText } from "../../whatsapp/privacy";
 import { renderSlackChannelHistoryMessages } from "./slack-channel-history";
 import type { SketchMcpDeps } from "./types";
@@ -19,29 +20,47 @@ export interface AllChatsSearchArgs {
 }
 
 export type AllChatsSearchOutcome =
-  | { ok: true; body: { messages: Array<Record<string, unknown>>; hasMore: boolean } }
+  | {
+      ok: true;
+      body: {
+        messages: Array<Record<string, unknown>>;
+        hasMore: boolean;
+        noMatchMeaning?: string;
+      };
+    }
   | { ok: false; message: string };
 
-/**
- * Verified emails only for cross-conversation authorization: the pooled
- * getAllEmailsForUser includes an unverified primary address, which must not
- * unlock membership-scoped chat content. Existing single-conversation tools
- * are unaffected.
- */
-async function resolveVerifiedUserEmails(deps: SketchMcpDeps): Promise<string[]> {
-  if (!deps.currentUserId || !deps.userRepo?.getVerifiedEmailsForUser) return [];
-  const emails = await deps.userRepo.getVerifiedEmailsForUser(deps.currentUserId);
-  return [...new Set(emails.map((email) => email.trim().toLowerCase()).filter((email) => email.length > 0))];
+export interface ChatHistoryAccessIdentity {
+  verifiedEmails: string[];
+  whatsappPhone: string | null;
 }
 
 /**
- * The membership predicate, byte-for-byte the same join the two history tools
- * authorize with, evaluated at conversation granularity. A conversation is
- * searchable only while at least one live (unarchived, not shared-with-everyone)
- * indexed file links one of its slices to an access scope containing the
- * caller's verified email. This inherits every revocation path the slice layer
- * already has: roster reconciliation, Slack disconnect archival, and the
- * archive leak-class fixes from the Slack indexing review rounds.
+ * Slack membership is keyed by verified email, while WhatsApp membership is
+ * keyed by the authenticated user's normalized WhatsApp number. The pooled
+ * getAllEmailsForUser includes an unverified primary address, so it must not
+ * unlock membership-scoped chat content.
+ */
+export async function resolveChatHistoryAccessIdentity(deps: SketchMcpDeps): Promise<ChatHistoryAccessIdentity> {
+  if (!deps.currentUserId || !deps.userRepo) {
+    return { verifiedEmails: [], whatsappPhone: null };
+  }
+  const [emails, user] = await Promise.all([
+    deps.userRepo.getVerifiedEmailsForUser?.(deps.currentUserId) ?? Promise.resolve([]),
+    deps.userRepo.findById(deps.currentUserId),
+  ]);
+  return {
+    verifiedEmails: [...new Set(emails.map((email) => email.trim().toLowerCase()).filter((email) => email.length > 0))],
+    whatsappPhone: normalizeWhatsAppIdentityPhone(user?.whatsapp_number ?? null),
+  };
+}
+
+/**
+ * Raw chat-history authorization is deliberately independent of knowledge
+ * indexing. Slack uses the current channel-membership ACL cache maintained by
+ * reconciliation. WhatsApp uses the current synced participant roster
+ * directly, so index_enabled and the existence or state of slices/indexed
+ * files cannot grant or deny access.
  *
  * Tenancy invariant: conversations carry no tenant/connector dimension, so
  * this predicate is sound only under one-database-per-tenant with singleton
@@ -49,50 +68,53 @@ async function resolveVerifiedUserEmails(deps: SketchMcpDeps): Promise<string[]>
  */
 export function authorizedSearchableConversationIds(
   db: Kysely<DB>,
-  userEmails: string[],
+  identity: ChatHistoryAccessIdentity,
   platform?: ChatSearchPlatform,
 ): Expression<unknown> {
   const slackArm = db
     .selectFrom("conversations")
-    .innerJoin("conversation_slices", "conversation_slices.conversation_id", "conversations.id")
-    .innerJoin("indexed_files", "indexed_files.id", "conversation_slices.indexed_file_id")
-    .innerJoin("access_scopes", "access_scopes.id", "indexed_files.access_scope_id")
+    .innerJoin("access_scopes", "access_scopes.provider_scope_id", "conversations.provider_conversation_id")
     .innerJoin("access_scope_members", "access_scope_members.access_scope_id", "access_scopes.id")
     .select("conversations.id")
     .distinct()
     .where("conversations.platform", "=", "slack")
     .where("conversations.kind", "=", "channel")
-    .where("indexed_files.source", "=", "slack")
-    .where("indexed_files.is_archived", "=", 0)
-    .where("indexed_files.share_with_everyone", "=", 0)
-    .whereRef("indexed_files.provider_file_id", "=", "conversation_slices.id")
     .where("access_scopes.scope_type", "=", "slack_channel")
-    .whereRef("access_scopes.provider_scope_id", "=", "conversations.provider_conversation_id")
-    .where("access_scope_members.email", "in", userEmails);
+    .where("access_scope_members.email", "in", identity.verifiedEmails.length > 0 ? identity.verifiedEmails : [""]);
 
   const whatsappArm = db
     .selectFrom("conversations")
-    .innerJoin("whatsapp_groups", "whatsapp_groups.jid", "conversations.provider_conversation_id")
-    .innerJoin("conversation_slices", "conversation_slices.conversation_id", "conversations.id")
-    .innerJoin("indexed_files", "indexed_files.id", "conversation_slices.indexed_file_id")
-    .innerJoin("access_scopes", "access_scopes.id", "indexed_files.access_scope_id")
-    .innerJoin("access_scope_members", "access_scope_members.access_scope_id", "access_scopes.id")
+    .innerJoin(
+      "whatsapp_group_participants",
+      "whatsapp_group_participants.group_jid",
+      "conversations.provider_conversation_id",
+    )
     .select("conversations.id")
     .distinct()
     .where("conversations.platform", "=", "whatsapp")
     .where("conversations.kind", "=", "group")
-    .where("whatsapp_groups.index_enabled", "=", 1)
-    .where("indexed_files.source", "=", "whatsapp")
-    .where("indexed_files.is_archived", "=", 0)
-    .where("indexed_files.share_with_everyone", "=", 0)
-    .whereRef("indexed_files.provider_file_id", "=", "conversation_slices.id")
-    .where("access_scopes.scope_type", "=", "whatsapp_group")
-    .whereRef("access_scopes.provider_scope_id", "=", "conversations.provider_conversation_id")
-    .where("access_scope_members.email", "in", userEmails);
+    .where("whatsapp_group_participants.phone_e164", "=", identity.whatsappPhone ?? "");
 
   if (platform === "slack") return slackArm;
   if (platform === "whatsapp") return whatsappArm;
   return slackArm.union(whatsappArm);
+}
+
+export async function isChatHistoryConversationAuthorized(
+  deps: SketchMcpDeps,
+  conversationId: number,
+): Promise<boolean> {
+  if (!deps.db || !deps.currentUserId) return false;
+  if (deps.conversationContext?.conversationId === conversationId) return true;
+  const identity = await resolveChatHistoryAccessIdentity(deps);
+  if (identity.verifiedEmails.length === 0 && !identity.whatsappPhone) return false;
+  const row = await deps.db
+    .selectFrom("conversations")
+    .select("id")
+    .where("id", "=", conversationId)
+    .where(sql<boolean>`conversations.id IN (${authorizedSearchableConversationIds(deps.db, identity)})`)
+    .executeTakeFirst();
+  return row !== undefined;
 }
 
 interface ConversationRenderGroup {
@@ -227,12 +249,12 @@ export async function renderAllChatsSearchResults(
 
 /**
  * Availability contract: all_chats is authorized purely by the requesting
- * user's membership (currentUserId → verified emails → access scopes), and is
- * allowed from any run context including shared channels and groups. Product
- * decision 2026-07-21: results may surface in shared destinations; the caller's
- * membership is the sole boundary, matching how the user could quote the same
- * content by hand. Runs without an authenticated requesting user (no
- * currentUserId) are denied.
+ * user's current provider membership and is allowed from any run context
+ * including shared channels and groups. Product decision 2026-07-21: current
+ * membership grants access to retained history; removal revokes it. Results may
+ * surface in shared destinations because the caller's membership is the sole
+ * boundary, matching how the user could quote the same content by hand. Runs
+ * without an authenticated requesting user are denied.
  *
  * The current conversation is additionally always searchable regardless of the
  * scope join: whoever triggered the run can already read it via
@@ -250,9 +272,12 @@ export async function handleAllChatsSearch(
   if (!deps.currentUserId) {
     return { ok: false, message: "Cross-chat search requires an authenticated requesting user." };
   }
-  const userEmails = await resolveVerifiedUserEmails(deps);
-  if (userEmails.length === 0) {
-    return { ok: false, message: "Cross-chat search requires a verified account email." };
+  const identity = await resolveChatHistoryAccessIdentity(deps);
+  if (identity.verifiedEmails.length === 0 && !identity.whatsappPhone) {
+    return {
+      ok: false,
+      message: "Cross-chat search requires a verified Slack email or linked WhatsApp number.",
+    };
   }
 
   let currentConversationId: number | undefined;
@@ -277,7 +302,7 @@ export async function handleAllChatsSearch(
   const conversationRepo = deps.conversationRepo ?? createConversationRepository(deps.db);
   const result = await conversationRepo.searchMessagesAcrossConversations({
     query: args.query,
-    authorizedConversationIds: authorizedSearchableConversationIds(deps.db, userEmails, args.platform),
+    authorizedConversationIds: authorizedSearchableConversationIds(deps.db, identity, args.platform),
     currentConversationId,
     afterMessageId: args.afterMessageId,
     beforeMessageId: effectiveBeforeMessageId,
@@ -290,6 +315,12 @@ export async function handleAllChatsSearch(
     body: {
       messages: await renderAllChatsSearchResults(deps.db, result.messages),
       hasMore: result.hasMore,
+      ...(result.messages.length === 0
+        ? {
+            noMatchMeaning:
+              "No matching messages were found in chats authorized for this requester. This does not prove that matching messages were never persisted or that inaccessible chats contain no matches.",
+          }
+        : {}),
     },
   };
 }

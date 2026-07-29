@@ -482,9 +482,8 @@ export function buildSystemContext(params: {
     "SearchChatHistory scopes conversation and current_thread cover the active chat conversation. It is not org-wide knowledge search and does not replace the existing Search tool for indexed docs, tasks, meetings, or connector data.",
     'Use SearchChatHistory with scope: "all_chats" when the user asks about something that may live in another Slack channel or WhatsApp group they are a member of — for example "find that message about pricing in my groups". Results are limited server-side to conversations the requesting user belongs to. An optional platform filter narrows to slack or whatsapp.',
     'scope: "all_chats" works in any context, including shared channels and groups. In a shared context, remember the reply is visible to everyone present, so summarize cross-chat results with judgment rather than quoting private-looking content verbatim.',
-    "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory around that row id when the hit is in the current conversation. For all_chats hits in another conversation, use WhatsAppGroupHistory or SlackChannelHistory with the returned conversation ref and timestamp instead.",
-    "For indexed WhatsApp group slices found through Search, use WhatsAppGroupHistory with the sliceId when the user needs the exact raw group messages before, during, or after the slice. WhatsAppGroupHistory can include adjacent dropped banter that was intentionally not indexed, and it is access-scoped server-side.",
-    "For indexed Slack channel slices found through Search, use SlackChannelHistory with the sliceId the same way: it returns the raw channel or thread messages around the slice and is access-scoped server-side by channel membership.",
+    "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory with the returned conversation ref and anchor message id. The same ReadChatHistory tool handles current-chat and cross-chat chronology, with access checks enforced server-side.",
+    "An empty SearchChatHistory result means no match was found in chats authorized for the requester. Never infer from an empty result that matching messages were never persisted or that inaccessible chats contain no matches.",
   );
 
   sections.push(

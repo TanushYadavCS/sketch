@@ -12,7 +12,6 @@ import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
 import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
 import { createSearchTools } from "./tools/search";
-import { createSlackChannelHistoryTool } from "./tools/slack-channel-history";
 import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
 import {
@@ -23,7 +22,6 @@ import {
 } from "./tools/types";
 import { createSendFileToChatTool } from "./tools/upload";
 import { createVisualAnalysisTool } from "./tools/visual-analysis";
-import { createWhatsAppGroupHistoryTool } from "./tools/whatsapp-group-history";
 
 export { handleResolveInboxWorkflow, handleUpdateInboxWorkflow } from "./tools/inbox-workflows";
 export { handleSearchUsers, handleSendMessageToUser, handleSendMessageToUsers } from "./tools/messaging";
@@ -40,8 +38,6 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
     createSendFileToChatTool(deps, absWorkspace),
     createReadChatHistoryTool(deps),
     createSearchChatHistoryTool(deps),
-    createWhatsAppGroupHistoryTool(deps),
-    createSlackChannelHistoryTool(deps),
     createProviderConfigTool(deps),
     createSearchDeliveryTargetsTool(deps),
     createLocalRunCommandTool(deps),

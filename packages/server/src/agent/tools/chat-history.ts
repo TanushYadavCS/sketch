@@ -1,9 +1,13 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
-import type { StoredConversationMessage } from "../../db/repositories/conversations";
+import {
+  type CrossConversationSearchMessage,
+  type StoredConversationMessage,
+  createConversationRepository,
+} from "../../db/repositories/conversations";
 import type { Attachment } from "../../files";
-import { handleAllChatsSearch } from "./chat-search";
-import type { SketchMcpDeps } from "./types";
+import { handleAllChatsSearch, isChatHistoryConversationAuthorized, renderAllChatsSearchResults } from "./chat-search";
+import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const READ_CHAT_HISTORY_TOOL_NAME = "ReadChatHistory";
 export const SEARCH_CHAT_HISTORY_TOOL_NAME = "SearchChatHistory";
@@ -37,11 +41,103 @@ function renderMessage(message: StoredConversationMessage & { rank?: number }): 
   };
 }
 
+function parseConversationRef(value: string): number | null {
+  const match = /^conversation:(\d+)$/u.exec(value);
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+function unavailableCrossConversationResult(): ToolResult {
+  return {
+    content: [
+      {
+        type: "text",
+        text: "The requested chat history is unavailable or you no longer have access to it.",
+      },
+    ],
+  };
+}
+
+async function readAroundMessage(
+  repo: ReturnType<typeof createConversationRepository>,
+  conversationId: number,
+  anchorMessageId: number,
+  options: {
+    limit?: number;
+    includeBotMessages?: boolean;
+    beforeMessageId?: number;
+    providerThreadId?: string | null;
+  },
+): Promise<{ messages: StoredConversationMessage[]; hasMore: boolean }> {
+  const limit = Math.max(1, Math.min(options.limit ?? 50, 100));
+  const beforeLimit = Math.floor((limit - 1) / 2);
+  const afterLimit = limit - beforeLimit;
+  const before =
+    beforeLimit > 0
+      ? await repo.listMessages(conversationId, {
+          beforeMessageId: anchorMessageId,
+          limit: beforeLimit,
+          order: "desc",
+          includeBotMessages: options.includeBotMessages,
+          providerThreadId: options.providerThreadId,
+        })
+      : { messages: [], hasMore: false };
+  const after = await repo.listMessages(conversationId, {
+    afterMessageId: anchorMessageId - 1,
+    beforeMessageId: options.beforeMessageId,
+    limit: afterLimit,
+    order: "asc",
+    includeBotMessages: options.includeBotMessages,
+    providerThreadId: options.providerThreadId,
+  });
+  if (!after.messages.some((message) => message.id === anchorMessageId)) {
+    return { messages: [], hasMore: false };
+  }
+  return {
+    messages: [...before.messages.reverse(), ...after.messages],
+    hasMore: before.hasMore || after.hasMore,
+  };
+}
+
+async function renderCrossConversationRead(
+  deps: SketchMcpDeps,
+  conversationId: number,
+  messages: StoredConversationMessage[],
+): Promise<Array<Record<string, unknown>> | null> {
+  if (!deps.db) return null;
+  const conversation = await deps.db
+    .selectFrom("conversations")
+    .select(["platform", "kind", "display_name"])
+    .where("id", "=", conversationId)
+    .executeTakeFirst();
+  if (!conversation) return null;
+  const enriched: CrossConversationSearchMessage[] = messages.map((message) => ({
+    ...message,
+    conversationPlatform: conversation.platform,
+    conversationKind: conversation.kind,
+    conversationDisplayName: conversation.display_name,
+  }));
+  return renderAllChatsSearchResults(deps.db, enriched);
+}
+
 export function createReadChatHistoryTool(deps: SketchMcpDeps) {
   return tool(
     READ_CHAT_HISTORY_TOOL_NAME,
-    "Read persisted messages from the current chat conversation in chronological row-id order. Use this for chronological paging or reading around a known message id. Do not use this as the first tool for targeted keyword, topic, decision, person, project, or phrase lookup; use SearchChatHistory first.",
+    "Read persisted messages chronologically from the current chat or from an authorized conversation returned by SearchChatHistory. Use conversationRef and anchorMessageId to read around a cross-chat search hit. Do not use this as the first tool for targeted keyword, topic, decision, person, project, or phrase lookup; use SearchChatHistory first.",
     {
+      conversationRef: z
+        .string()
+        .optional()
+        .describe(
+          "Opaque conversation ref returned by SearchChatHistory, such as conversation:42. Omit to read the current chat.",
+        ),
+      anchorMessageId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Center the read around this message row id returned by SearchChatHistory."),
       scope: z
         .enum(["conversation", "current_thread"])
         .optional()
@@ -54,11 +150,44 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
       order: z.enum(["asc", "desc"]).optional().describe("Message row-id order. Default asc."),
       includeBotMessages: z.boolean().optional().describe("Include Sketch's persisted visible replies. Default false."),
     },
-    async ({ scope, afterMessageId, beforeMessageId, limit, order, includeBotMessages }) => {
-      const conversationId = deps.conversationContext?.conversationId;
-      if (!conversationId || !deps.conversationRepo) {
+    async ({
+      conversationRef,
+      anchorMessageId,
+      scope,
+      afterMessageId,
+      beforeMessageId,
+      limit,
+      order,
+      includeBotMessages,
+    }) => {
+      if (conversationRef && scope === "current_thread") {
+        return {
+          content: [{ type: "text" as const, text: "Current-thread scope cannot be used with conversationRef." }],
+        };
+      }
+      if (anchorMessageId && (afterMessageId || beforeMessageId || order)) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "anchorMessageId cannot be combined with row-id bounds or order.",
+            },
+          ],
+        };
+      }
+
+      const referencedConversationId = conversationRef ? parseConversationRef(conversationRef) : null;
+      if (conversationRef && !referencedConversationId) return unavailableCrossConversationResult();
+      const conversationId = referencedConversationId ?? deps.conversationContext?.conversationId;
+      const repo = deps.conversationRepo ?? (deps.db ? createConversationRepository(deps.db) : undefined);
+      if (!conversationId || !repo) {
         return { content: [{ type: "text" as const, text: "Chat history is not available in this run." }] };
       }
+      const isCrossConversation = conversationId !== deps.conversationContext?.conversationId;
+      if (isCrossConversation && !(await isChatHistoryConversationAuthorized(deps, conversationId))) {
+        return unavailableCrossConversationResult();
+      }
+
       const providerThreadId = deps.conversationContext?.providerThreadId;
       const currentMessageId = deps.conversationContext?.currentMessageId;
       const effectiveBeforeMessageId =
@@ -72,14 +201,31 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
         };
       }
 
-      const result = await deps.conversationRepo.listMessages(conversationId, {
-        afterMessageId,
-        beforeMessageId: effectiveBeforeMessageId,
-        limit,
-        order,
-        includeBotMessages,
-        providerThreadId: effectiveScope === "current_thread" ? providerThreadId : undefined,
-      });
+      if (anchorMessageId && currentMessageId && anchorMessageId >= currentMessageId) {
+        return unavailableCrossConversationResult();
+      }
+      const threadId = !isCrossConversation && effectiveScope === "current_thread" ? providerThreadId : undefined;
+      const result = anchorMessageId
+        ? await readAroundMessage(repo, conversationId, anchorMessageId, {
+            limit,
+            includeBotMessages,
+            beforeMessageId: currentMessageId,
+            providerThreadId: threadId,
+          })
+        : await repo.listMessages(conversationId, {
+            afterMessageId,
+            beforeMessageId: effectiveBeforeMessageId,
+            limit,
+            order,
+            includeBotMessages,
+            providerThreadId: threadId,
+          });
+      if (anchorMessageId && result.messages.length === 0) return unavailableCrossConversationResult();
+
+      const messages = isCrossConversation
+        ? await renderCrossConversationRead(deps, conversationId, result.messages)
+        : result.messages.map(renderMessage);
+      if (!messages) return unavailableCrossConversationResult();
 
       return {
         content: [
@@ -87,9 +233,9 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
             type: "text" as const,
             text: JSON.stringify(
               {
-                messages: result.messages.map(renderMessage),
+                messages,
                 hasMore: result.hasMore,
-                nextCursor: result.nextCursor,
+                ...("nextCursor" in result ? { nextCursor: result.nextCursor } : {}),
               },
               null,
               2,
