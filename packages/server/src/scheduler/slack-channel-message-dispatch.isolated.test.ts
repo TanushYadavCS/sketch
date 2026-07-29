@@ -132,9 +132,27 @@ describe("TaskScheduler.dispatchSlackChannelMessage", () => {
     expect(enqueueTaskById).toHaveBeenCalledOnce();
     const triggerData = enqueueTaskById.mock.calls[0]?.[1] as { files: Array<{ localPath: string }> };
     expect(triggerData.files[0]?.localPath).toMatch(
-      /^(?:\/private)?\/tmp\/slack-trigger-test\/workspaces\/user-1\/automation-trigger-files\//,
+      /^(?:\/private)?\/tmp\/slack-trigger-test\/automation-trigger-files\/[^/]+\//,
     );
     await expect(readFile(triggerData.files[0]?.localPath ?? "", "utf8")).resolves.toBe("jpeg-bytes");
+  });
+
+  it("removes the isolated trigger file workspace after execution", async () => {
+    const sourcePath = "/tmp/slack-trigger-test/workspaces/channel-C_MATCH/attachments/source.jpeg";
+    await mkdir("/tmp/slack-trigger-test/workspaces/channel-C_MATCH/attachments", { recursive: true });
+    await writeFile(sourcePath, "jpeg-bytes");
+    await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
+    const scheduler = new TaskScheduler(makeDeps(db) as never);
+
+    await scheduler.dispatchSlackChannelMessage("C_MATCH", {
+      files: [{ name: "source.jpeg", localPath: sourcePath }],
+    });
+
+    await vi.waitFor(() => expect(executionParams).toHaveLength(1));
+    const triggerData = executionParams[0]?.triggerData as { files: Array<{ localPath: string }> };
+    await vi.waitFor(async () => {
+      await expect(readFile(triggerData.files[0]?.localPath ?? "", "utf8")).rejects.toThrow();
+    });
   });
 
   it("rejects Slack trigger file symlinks that escape the source channel workspace", async () => {
@@ -230,15 +248,14 @@ describe("TaskScheduler.dispatchSlackChannelMessage", () => {
     await expect(readFile(triggerData.files[0]?.localPath ?? "", "utf8")).resolves.toBe("bound-agent-bytes");
   });
 
-  it("rejects a symlinked automation trigger destination directory", async () => {
+  it("rejects a symlinked automation trigger staging root", async () => {
     const sourceDir = "/tmp/slack-trigger-test/workspaces/channel-C_MATCH/attachments";
     const sourcePath = `${sourceDir}/source.txt`;
     const outsideDir = "/tmp/slack-trigger-test/outside-destination";
     await mkdir(sourceDir, { recursive: true });
-    await mkdir("/tmp/slack-trigger-test/workspaces/channel-C_OUT", { recursive: true });
     await mkdir(outsideDir, { recursive: true });
     await writeFile(sourcePath, "source-bytes");
-    await symlink(outsideDir, "/tmp/slack-trigger-test/workspaces/channel-C_OUT/automation-trigger-files");
+    await symlink(outsideDir, "/tmp/slack-trigger-test/automation-trigger-files");
     await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
     const scheduler = new TaskScheduler(makeDeps(db) as never);
     const enqueueTaskById = vi.spyOn(scheduler, "enqueueTaskById").mockResolvedValue(undefined);
@@ -247,8 +264,7 @@ describe("TaskScheduler.dispatchSlackChannelMessage", () => {
       files: [{ name: "source.txt", localPath: sourcePath }],
     });
 
-    const triggerData = enqueueTaskById.mock.calls[0]?.[1] as { files: Array<{ localPath?: string }> };
-    expect(triggerData.files[0]?.localPath).toBeUndefined();
+    expect(enqueueTaskById).not.toHaveBeenCalled();
   });
 
   it("fails closed when the task creator is no longer a member of the Slack channel", async () => {
@@ -266,7 +282,8 @@ describe("TaskScheduler.dispatchSlackChannelMessage", () => {
   it("continues dispatching later matching tasks when an enqueue fails", async () => {
     const first = await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
     const second = await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
-    const scheduler = new TaskScheduler(makeDeps(db) as never);
+    const deps = makeDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
     const enqueueTaskByIdImpl = scheduler.enqueueTaskById.bind(scheduler);
     const enqueueTaskById = vi.spyOn(scheduler, "enqueueTaskById");
     enqueueTaskById.mockRejectedValueOnce(new Error("task no longer active")).mockImplementation(enqueueTaskByIdImpl);
@@ -276,6 +293,7 @@ describe("TaskScheduler.dispatchSlackChannelMessage", () => {
     await vi.waitFor(() => expect(executionParams).toHaveLength(1));
     expect(enqueueTaskById).toHaveBeenNthCalledWith(1, first.id, { messageTs: "1.2" });
     expect(enqueueTaskById).toHaveBeenNthCalledWith(2, second.id, { messageTs: "1.2" });
+    expect(deps.getSlack().isUserInChannel).toHaveBeenCalledOnce();
   });
 
   it("does not dispatch wrong-channel, paused, malformed, or non-Slack external workflows", async () => {

@@ -139,9 +139,15 @@ describe("ScheduledTasksPage", () => {
       }),
     ]);
 
+    const user = userEvent.setup();
     renderWithProviders(<ScheduledTasksPage />);
 
     expect(await screen.findByText("Trigger · Slack channel message · C123")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Show details for Post the Monday revenue summary/i }));
+    expect(await screen.findByText("Trigger-based")).toBeInTheDocument();
+    expect(screen.getByText("Slack channel message · C123")).toBeInTheDocument();
+    expect(screen.queryByText("Timezone")).not.toBeInTheDocument();
+    expect(screen.queryByText("Next run")).not.toBeInTheDocument();
   });
 
   it("shows the empty state when there are no tasks", async () => {

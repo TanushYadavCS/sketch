@@ -638,9 +638,9 @@ describe("executeAutomation action steps", () => {
   });
 
   it("executes server-owned integration actions with bounded workspace files", async () => {
-    const workspaceDir = "/tmp/sketch-runtime-test/workspaces/user-1";
-    const filePath = `${workspaceDir}/automation-trigger-files/bug.jpeg`;
-    await mkdir(`${workspaceDir}/automation-trigger-files`, { recursive: true });
+    const trustedLocalFileRoot = "/tmp/sketch-runtime-test/automation-trigger-files/run-1";
+    const filePath = `${trustedLocalFileRoot}/bug.jpeg`;
+    await mkdir(trustedLocalFileRoot, { recursive: true });
     await writeFile(filePath, "jpeg-bytes");
     const executeAction = vi.fn().mockResolvedValue({ id: "clickup-task-1" });
     const params = makeParams({
@@ -648,6 +648,7 @@ describe("executeAutomation action steps", () => {
         { id: "act1", type: "action", label: "Create ClickUp task", icon: "code", position: { x: 0, y: 100 } },
       ]),
       triggerData: { filePath },
+      trustedLocalFileRoot,
       stepContentRepo: makeStepContent([
         {
           stepId: "act1",
@@ -703,7 +704,7 @@ describe("executeAutomation action steps", () => {
     const result = await executeAutomation(params as never);
 
     expect(result.status).toBe("failed");
-    expect(result.stepOutputs.act1.error?.message).toContain("outside the automation workspace");
+    expect(result.stepOutputs.act1.error?.message).toContain("outside the trusted automation file roots");
     expect(executeAction).not.toHaveBeenCalled();
   });
 

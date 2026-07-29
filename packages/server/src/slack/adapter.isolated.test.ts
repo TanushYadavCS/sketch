@@ -1350,6 +1350,22 @@ describe("slack/adapter", () => {
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
     });
 
+    it("dispatches newly captured top-level mentions to channel automations", async () => {
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(dispatchSlackChannelMessage).toHaveBeenCalledWith(
+        "C1",
+        expect.objectContaining({ channelId: "C1", messageTs: "1", text: "help", userId: "S1" }),
+        { sourceWorkspaceDir: "/tmp/test-data/workspaces/channel-C1" },
+      );
+    });
+
     it("passes teammate messaging deps to agent for channel mentions", async () => {
       const deps = makeDeps();
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);

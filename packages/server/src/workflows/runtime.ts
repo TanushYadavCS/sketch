@@ -60,6 +60,7 @@ export interface ExecuteAutomationParams {
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
+  trustedLocalFileRoot?: string;
 }
 
 export type AutomationExecutionEvent =
@@ -435,6 +436,7 @@ async function executeWorkflowStep(params: {
       workspaceDir,
       loadIntegrationProvider: runtimeParams.loadIntegrationProvider,
       listAgentEnvForRuntime: runtimeParams.listAgentEnvForRuntime,
+      trustedLocalFileRoot: runtimeParams.trustedLocalFileRoot,
     });
   }
 
@@ -698,6 +700,7 @@ interface ActionStepParams {
   workspaceDir: string;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
+  trustedLocalFileRoot?: string;
 }
 
 async function executeActionStep(params: ActionStepParams): Promise<unknown> {
@@ -739,6 +742,7 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
         const configuredProps = await materializeIntegrationActionFiles({
           request,
           workspaceDir,
+          trustedLocalFileRoot: params.trustedLocalFileRoot,
         });
         return integrationProvider.executeAction({
           userEmail: creatorEmail,
@@ -813,18 +817,20 @@ const MAX_INTEGRATION_ACTION_FILE_BYTES = 25 * 1024 * 1024;
 async function materializeIntegrationActionFiles(params: {
   request: ScriptIntegrationActionRequest;
   workspaceDir: string;
+  trustedLocalFileRoot?: string;
 }): Promise<Record<string, unknown>> {
   const files = params.request.localFiles ?? [];
   if (files.length > MAX_INTEGRATION_ACTION_FILES) {
     throw new Error(`Integration actions support at most ${MAX_INTEGRATION_ACTION_FILES} local files`);
   }
-  const workspaceRealPath = await realpath(params.workspaceDir);
+  const allowedRoots = [await realpath(params.workspaceDir)];
+  if (params.trustedLocalFileRoot) allowedRoots.push(await realpath(params.trustedLocalFileRoot));
   const configuredProps = { ...params.request.configuredProps };
   let totalBytes = 0;
   for (const file of files) {
     const fileRealPath = await realpath(file.path);
-    if (!fileRealPath.startsWith(`${workspaceRealPath}${sep}`)) {
-      throw new Error("Integration action file is outside the automation workspace");
+    if (!allowedRoots.some((root) => fileRealPath.startsWith(`${root}${sep}`))) {
+      throw new Error("Integration action file is outside the trusted automation file roots");
     }
     if (!file.configuredProp.trim()) throw new Error("Integration action file configuredProp is required");
     const content = await readFile(fileRealPath);

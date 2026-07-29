@@ -15,7 +15,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { constants, createWriteStream } from "node:fs";
-import { mkdir, open, realpath, stat } from "node:fs/promises";
+import { mkdir, open, realpath, rm, stat } from "node:fs/promises";
 import { basename, join, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { workflowTriggerConfigSchema } from "@sketch/shared";
@@ -78,36 +78,41 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function copySlackTriggerFilesToTaskWorkspace(params: {
+interface CopiedSlackTriggerFiles {
+  triggerData: unknown;
+  localFileRoot?: string;
+}
+
+async function copySlackTriggerFilesToIsolatedWorkspace(params: {
   dataDir: string;
   task: ScheduledTaskRow;
   triggerData: unknown;
   sourceWorkspaceDir: string;
   logger: Logger;
-}): Promise<unknown> {
-  if (!isRecord(params.triggerData) || !Array.isArray(params.triggerData.files)) return params.triggerData;
+}): Promise<CopiedSlackTriggerFiles> {
+  if (!isRecord(params.triggerData) || !Array.isArray(params.triggerData.files)) {
+    return { triggerData: params.triggerData };
+  }
 
   const workspaceRoot = resolve(params.dataDir, "workspaces");
   const sourceWorkspace = resolve(params.sourceWorkspaceDir);
-  const destinationWorkspace = resolve(resolveAutomationWorkspaceDir(params.dataDir, params.task));
-  const destinationDir = join(destinationWorkspace, "automation-trigger-files");
+  const stagingRoot = resolve(params.dataDir, "automation-trigger-files");
+  const destinationName = randomUUID();
+  const destinationDir = join(stagingRoot, destinationName);
   let destinationDirPromise: Promise<string> | null = null;
   const prepareDestinationDir = () => {
     destinationDirPromise ??= (async () => {
-      await mkdir(destinationDir, { recursive: true });
-      const [workspaceRootPath, destinationWorkspacePath, destinationDirPath] = await Promise.all([
-        realpath(workspaceRoot),
-        realpath(destinationWorkspace),
+      await mkdir(destinationDir, { recursive: true, mode: 0o700 });
+      const [dataDirPath, stagingRootPath, destinationDirPath] = await Promise.all([
+        realpath(params.dataDir),
+        realpath(stagingRoot),
         realpath(destinationDir),
       ]);
-      const relativeDestinationWorkspace = destinationWorkspace.slice(workspaceRoot.length + 1);
-      const expectedDestinationWorkspacePath = resolve(workspaceRootPath, relativeDestinationWorkspace);
       if (
-        !destinationWorkspace.startsWith(`${workspaceRoot}${sep}`) ||
-        destinationWorkspacePath !== expectedDestinationWorkspacePath ||
-        destinationDirPath !== join(destinationWorkspacePath, "automation-trigger-files")
+        stagingRootPath !== join(dataDirPath, "automation-trigger-files") ||
+        destinationDirPath !== join(stagingRootPath, destinationName)
       ) {
-        throw new Error("Invalid automation trigger destination workspace");
+        throw new Error("Invalid automation trigger staging workspace");
       }
       return destinationDirPath;
     })();
@@ -171,7 +176,10 @@ async function copySlackTriggerFilesToTaskWorkspace(params: {
     }),
   );
 
-  return { ...params.triggerData, files };
+  return {
+    triggerData: { ...params.triggerData, files },
+    ...(destinationDirPromise ? { localFileRoot: await destinationDirPromise } : {}),
+  };
 }
 
 export interface TaskSchedulerDeps {
@@ -332,7 +340,7 @@ export class TaskScheduler {
   private async executeTaskNow(
     task: ScheduledTaskRow,
     executionQueue: AgentExecutionQueue,
-    trigger?: { provided: boolean; data: unknown },
+    trigger?: { provided: boolean; data: unknown; localFileRoot?: string },
   ): Promise<AutomationExecutionResult> {
     const { config, logger, loadIntegrationProvider } = this.deps;
     const delivery = resolveWorkflowDelivery(task);
@@ -364,6 +372,7 @@ export class TaskScheduler {
         executionQueue === "scheduled" ? this.deps.limitScheduledAgentExecution : this.deps.limitAgentExecution,
       loadAgentRuntimeProviderConfig: async () =>
         resolveAgentRuntimeProviderConfigFromSettings(await this.deps.settingsRepo.get()),
+      trustedLocalFileRoot: trigger?.localFileRoot,
     });
 
     const now = new Date().toISOString();
@@ -385,7 +394,7 @@ export class TaskScheduler {
     task: ScheduledTaskRow,
     getTask: () => Promise<ScheduledTaskRow | null>,
     executionQueue: AgentExecutionQueue,
-    trigger?: { provided: boolean; data: unknown },
+    trigger?: { provided: boolean; data: unknown; localFileRoot?: string },
   ): Promise<AutomationExecutionResult | null> {
     const queueKey = this.getQueueKey(task);
     return new Promise<AutomationExecutionResult | null>((resolve, reject) => {
@@ -587,16 +596,26 @@ export class TaskScheduler {
     return this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive");
   }
 
-  async enqueueTaskById(id: string, ...triggerData: [] | [unknown]): Promise<void> {
+  async enqueueTaskById(
+    id: string,
+    ...triggerData: [] | [unknown] | [unknown, { localFileRoot: string }]
+  ): Promise<void> {
     const row = await this.repo.getById(id);
     if (!row) throw new Error(`Task ${id} not found`);
     if (row.status === "completed" && row.schedule_type === "once") return;
     if (row.status !== "active") throw new Error(`Task ${id} is not active`);
 
-    const trigger = triggerData.length === 0 ? undefined : { provided: true, data: triggerData[0] };
-    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive", trigger).catch((err) => {
-      this.deps.logger.error({ err, taskId: id }, "Automation background execution failed");
-    });
+    const trigger =
+      triggerData.length === 0
+        ? undefined
+        : { provided: true, data: triggerData[0], localFileRoot: triggerData[1]?.localFileRoot };
+    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive", trigger)
+      .catch((err) => {
+        this.deps.logger.error({ err, taskId: id }, "Automation background execution failed");
+      })
+      .finally(async () => {
+        if (trigger?.localFileRoot) await rm(trigger.localFileRoot, { recursive: true, force: true });
+      });
   }
 
   private async canDispatchSlackChannelMessage(task: ScheduledTaskRow, channelId: string): Promise<boolean> {
@@ -647,15 +666,23 @@ export class TaskScheduler {
     options?: { sourceWorkspaceDir?: string },
   ): Promise<void> {
     const tasks = await this.repo.listActiveSlackChannelMessageTriggers();
+    const membershipChecks = new Map<string, Promise<boolean>>();
     for (const task of tasks) {
       const steps = parseSlackTriggerSteps(task.steps);
       const trigger = steps.find((step) => step?.type === "trigger")?.triggerConfig;
       const parsed = workflowTriggerConfigSchema.safeParse(trigger);
       if (!parsed.success || parsed.data.type !== "slack_channel_message" || parsed.data.channelId !== channelId)
         continue;
-      if (!(await this.canDispatchSlackChannelMessage(task, channelId))) continue;
+      const membershipKey = task.created_by ?? `task:${task.id}`;
+      let membershipCheck = membershipChecks.get(membershipKey);
+      if (!membershipCheck) {
+        membershipCheck = this.canDispatchSlackChannelMessage(task, channelId);
+        membershipChecks.set(membershipKey, membershipCheck);
+      }
+      if (!(await membershipCheck)) continue;
+      let localFileRoot: string | undefined;
       try {
-        const taskTriggerData = await copySlackTriggerFilesToTaskWorkspace({
+        const copied = await copySlackTriggerFilesToIsolatedWorkspace({
           dataDir: this.deps.config.DATA_DIR,
           task,
           triggerData,
@@ -666,8 +693,14 @@ export class TaskScheduler {
               : resolve(this.deps.config.DATA_DIR, "workspaces", ".invalid-slack-channel")),
           logger: this.deps.logger,
         });
-        await this.enqueueTaskById(task.id, taskTriggerData);
+        localFileRoot = copied.localFileRoot;
+        if (localFileRoot) {
+          await this.enqueueTaskById(task.id, copied.triggerData, { localFileRoot });
+        } else {
+          await this.enqueueTaskById(task.id, copied.triggerData);
+        }
       } catch (err) {
+        if (localFileRoot) await rm(localFileRoot, { recursive: true, force: true });
         this.deps.logger.warn(
           { err, taskId: task.id, channelId },
           "TaskScheduler: failed to enqueue Slack channel message trigger",

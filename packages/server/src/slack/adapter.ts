@@ -1045,6 +1045,25 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           displayName: channel.name,
         });
         if (!capture.captured) return;
+        if (capture.inserted && !message.threadTs && channel.type !== "mpim" && scheduler) {
+          await scheduler.dispatchSlackChannelMessage(
+            message.channelId,
+            {
+              type: "slack_channel_message",
+              channelId: message.channelId,
+              messageTs: message.ts,
+              text: message.text,
+              userId: message.userId ?? null,
+              botId: message.botId ?? null,
+              appId: message.appId ?? null,
+              subtype: message.subtype ?? null,
+              files: filesForAutomationTrigger(message.files, attachments),
+              capturedMessageId: capture.captured.id,
+              conversationId: capture.conversation.id,
+            },
+            { sourceWorkspaceDir: workspaceDir },
+          );
+        }
 
         const cursor = await repos.conversations.getCursor({
           conversationId: capture.conversation.id,
