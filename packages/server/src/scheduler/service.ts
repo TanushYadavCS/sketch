@@ -483,6 +483,48 @@ export class TaskScheduler {
     });
   }
 
+  private async canDispatchSlackChannelMessage(task: ScheduledTaskRow, channelId: string): Promise<boolean> {
+    if (!task.created_by) {
+      this.deps.logger.warn({ taskId: task.id, channelId }, "TaskScheduler: skipping Slack trigger without a creator");
+      return false;
+    }
+
+    try {
+      const creator = await this.deps.userRepo.findById(task.created_by);
+      if (!creator?.slack_user_id) {
+        this.deps.logger.warn(
+          { taskId: task.id, channelId },
+          "TaskScheduler: skipping Slack trigger without a Slack creator",
+        );
+        return false;
+      }
+
+      const slack = this.deps.getSlack();
+      if (!slack) {
+        this.deps.logger.warn(
+          { taskId: task.id, channelId },
+          "TaskScheduler: skipping Slack trigger while Slack is unavailable",
+        );
+        return false;
+      }
+
+      const isMember = await slack.isUserInChannel(channelId, creator.slack_user_id);
+      if (!isMember) {
+        this.deps.logger.warn(
+          { taskId: task.id, channelId },
+          "TaskScheduler: skipping Slack trigger for a non-member creator",
+        );
+      }
+      return isMember;
+    } catch (err) {
+      this.deps.logger.warn(
+        { err, taskId: task.id, channelId },
+        "TaskScheduler: failed to verify Slack trigger membership",
+      );
+      return false;
+    }
+  }
+
   async dispatchSlackChannelMessage(channelId: string, triggerData: unknown): Promise<void> {
     const tasks = await this.repo.listActiveSlackChannelMessageTriggers();
     for (const task of tasks) {
@@ -491,7 +533,15 @@ export class TaskScheduler {
       const parsed = workflowTriggerConfigSchema.safeParse(trigger);
       if (!parsed.success || parsed.data.type !== "slack_channel_message" || parsed.data.channelId !== channelId)
         continue;
-      await this.enqueueTaskById(task.id, triggerData);
+      if (!(await this.canDispatchSlackChannelMessage(task, channelId))) continue;
+      try {
+        await this.enqueueTaskById(task.id, triggerData);
+      } catch (err) {
+        this.deps.logger.warn(
+          { err, taskId: task.id, channelId },
+          "TaskScheduler: failed to enqueue Slack channel message trigger",
+        );
+      }
     }
   }
 

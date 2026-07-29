@@ -365,7 +365,8 @@ describe("slack/adapter", () => {
     });
 
     it("records group DM (mpim) captures under their own conversation kind", async () => {
-      const deps = makeDeps();
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { channel } = getHandlers();
 
@@ -382,6 +383,7 @@ describe("slack/adapter", () => {
         { platform: "slack", kind: "mpim", providerConversationId: "G_MPIM" },
         expect.anything(),
       );
+      expect(dispatchSlackChannelMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -905,7 +907,11 @@ describe("slack/adapter", () => {
   describe("passive channel handler", () => {
     it("handles a top-level follow-up command without running the agent", async () => {
       const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: "Marked the follow-up done." });
-      const deps = makeDeps({ followupReviewHandler });
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({
+        followupReviewHandler,
+        scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"],
+      });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { channel } = getHandlers();
 
@@ -923,6 +929,7 @@ describe("slack/adapter", () => {
         surface: "slack",
       });
       expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "2", "Marked the follow-up done.");
+      expect(dispatchSlackChannelMessage).not.toHaveBeenCalled();
       expect(deps.runAgent).not.toHaveBeenCalled();
     });
 

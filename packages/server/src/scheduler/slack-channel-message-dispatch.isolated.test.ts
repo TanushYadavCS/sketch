@@ -18,12 +18,17 @@ vi.mock("../workflows/runtime", () => ({
 }));
 
 function makeDeps(db: Kysely<DB>) {
+  const slack = {
+    postMessage: vi.fn(),
+    postThreadReply: vi.fn(),
+    isUserInChannel: vi.fn().mockResolvedValue(true),
+  };
   return {
     db,
     config: createTestConfig({ DATA_DIR: "/tmp/slack-trigger-test" }),
     logger: createTestLogger(),
     queueManager: new QueueManager(),
-    getSlack: () => ({ postMessage: vi.fn(), postThreadReply: vi.fn(), isConnected: true }),
+    getSlack: () => slack,
     whatsapp: { isConnected: false },
     settingsRepo: { get: vi.fn().mockResolvedValue({}) },
     runAgent: vi.fn(),
@@ -34,7 +39,7 @@ function makeDeps(db: Kysely<DB>) {
       update: vi.fn().mockResolvedValue(undefined),
     },
     stepContentRepo: { getByTask: vi.fn().mockResolvedValue([]) },
-    userRepo: { findById: vi.fn().mockResolvedValue({ id: "user-1", email: "user@example.com" }) },
+    userRepo: { findById: vi.fn().mockResolvedValue({ id: "user-1", slack_user_id: "U_CREATOR" }) },
   };
 }
 
@@ -83,13 +88,42 @@ describe("TaskScheduler.dispatchSlackChannelMessage", () => {
 
   it("dispatches an active exact-channel trigger once and preserves its object payload", async () => {
     await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
-    const scheduler = new TaskScheduler(makeDeps(db) as never);
+    const deps = makeDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
     const triggerData = { messageTs: "1.2", nested: { exact: true } };
 
     await scheduler.dispatchSlackChannelMessage("C_MATCH", triggerData);
 
     await vi.waitFor(() => expect(executionParams).toHaveLength(1));
+    expect(deps.getSlack().isUserInChannel).toHaveBeenCalledWith("C_MATCH", "U_CREATOR");
     expect(executionParams[0]?.triggerData).toBe(triggerData);
+  });
+
+  it("fails closed when the task creator is no longer a member of the Slack channel", async () => {
+    await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
+    const deps = makeDeps(db);
+    deps.getSlack().isUserInChannel.mockResolvedValue(false);
+    const scheduler = new TaskScheduler(deps as never);
+
+    await scheduler.dispatchSlackChannelMessage("C_MATCH", { messageTs: "1.2" });
+
+    expect(executionParams).toHaveLength(0);
+    expect(deps.getSlack().isUserInChannel).toHaveBeenCalledWith("C_MATCH", "U_CREATOR");
+  });
+
+  it("continues dispatching later matching tasks when an enqueue fails", async () => {
+    const first = await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
+    const second = await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
+    const scheduler = new TaskScheduler(makeDeps(db) as never);
+    const enqueueTaskByIdImpl = scheduler.enqueueTaskById.bind(scheduler);
+    const enqueueTaskById = vi.spyOn(scheduler, "enqueueTaskById");
+    enqueueTaskById.mockRejectedValueOnce(new Error("task no longer active")).mockImplementation(enqueueTaskByIdImpl);
+
+    await scheduler.dispatchSlackChannelMessage("C_MATCH", { messageTs: "1.2" });
+
+    await vi.waitFor(() => expect(executionParams).toHaveLength(1));
+    expect(enqueueTaskById).toHaveBeenNthCalledWith(1, first.id, { messageTs: "1.2" });
+    expect(enqueueTaskById).toHaveBeenNthCalledWith(2, second.id, { messageTs: "1.2" });
   });
 
   it("does not dispatch wrong-channel, paused, malformed, or non-Slack external workflows", async () => {

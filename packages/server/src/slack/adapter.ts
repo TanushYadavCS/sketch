@@ -812,6 +812,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         attachments,
         displayName: channel.name,
       });
+      let followupReviewHandled = false;
       if (sender.senderUserId) {
         const followupReview = await handleFollowupReviewCommand({
           text: message.text,
@@ -819,10 +820,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           surface: "slack",
         });
         if (followupReview.handled) {
+          followupReviewHandled = true;
           await slackBot.postThreadReply(message.channelId, message.ts, followupReview.message);
         }
       }
-      if (capture.inserted && scheduler) {
+      if (capture.inserted && !followupReviewHandled && message.channelType !== "mpim" && scheduler) {
         await scheduler.dispatchSlackChannelMessage(message.channelId, {
           type: "slack_channel_message",
           channelId: message.channelId,
