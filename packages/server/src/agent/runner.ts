@@ -43,6 +43,7 @@ import type { TranscriptionSettings } from "../transcription/service";
 import { resolveTranscriptionConfig } from "../transcription/service";
 import type { VisionConfig } from "../vision/service";
 import { resolveVisionConfig } from "../vision/service";
+import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
 import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
 import { createCanUseTool } from "./permissions";
@@ -313,6 +314,7 @@ export interface RunAgentParams {
   persistSession?: boolean;
   taskContext?: TaskContext;
   getSlack?: () => SlackBot | null;
+  getWhatsApp?: () => Pick<WhatsAppSocketFacade, "groupMetadata" | "resolveLid"> | null;
   scheduler?: TaskScheduler;
   chatAutomationAuthoring?: ChatAutomationAuthoring;
   automationAuthoringEnabled?: boolean;
@@ -1205,6 +1207,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     workspaceDir: absWorkspace,
     db: params.db,
     getSlack: params.getSlack,
+    getWhatsApp: params.getWhatsApp,
     loadIntegrationProvider: params.loadIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,

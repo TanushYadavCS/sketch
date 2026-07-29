@@ -173,6 +173,7 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     workspaceDir: resolve(params.workspaceDir),
     db: params.db,
     getSlack: params.getSlack,
+    getWhatsApp: params.getWhatsApp,
     loadIntegrationProvider: params.loadIntegrationProvider,
     taskContext: params.taskContext,
     scheduler: params.scheduler,

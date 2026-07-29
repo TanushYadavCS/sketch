@@ -673,6 +673,55 @@ describe("WhatsAppBot group metadata persistence", () => {
       subject: "Product Team",
       desc: "Roadmap syncs",
       participants: [{ jid: "15551234567@s.whatsapp.net", phoneE164: "+15551234567", lid: null, admin: "admin" }],
+      participantIdentityComplete: true,
+    });
+  });
+
+  it("uses one identity-resolution pass for refreshed provider metadata and persistence", async () => {
+    const bot = new WhatsAppBot({
+      db,
+      logger: createTestLogger(),
+      groupMetadataStore: createWhatsAppGroupRepository(db),
+    });
+    const getPNForLID = vi.fn().mockResolvedValueOnce("15551234567@s.whatsapp.net").mockResolvedValueOnce(null);
+    const groupMetadata = vi.fn().mockResolvedValue({
+      subject: "Product Team",
+      desc: null,
+      participants: [{ id: "participant@lid", admin: null }],
+    });
+    (
+      bot as unknown as {
+        sock: {
+          groupMetadata: typeof groupMetadata;
+          signalRepository: { lidMapping: { getPNForLID: typeof getPNForLID } };
+        };
+      }
+    ).sock = { groupMetadata, signalRepository: { lidMapping: { getPNForLID } } };
+
+    await expect(bot.getProviderGroupMetadata("123@g.us", { refresh: true })).resolves.toEqual({
+      id: "123@g.us",
+      subject: "Product Team",
+      desc: null,
+      participants: [
+        {
+          jid: "participant@lid",
+          phoneE164: "+15551234567",
+          lid: "participant@lid",
+          admin: null,
+        },
+      ],
+      participantIdentityComplete: true,
+    });
+    expect(getPNForLID).toHaveBeenCalledOnce();
+    await expect(
+      db
+        .selectFrom("whatsapp_group_participants")
+        .select(["participant_jid", "phone_e164"])
+        .where("group_jid", "=", "123@g.us")
+        .executeTakeFirst(),
+    ).resolves.toEqual({
+      participant_jid: "participant@lid",
+      phone_e164: "+15551234567",
     });
   });
 
@@ -708,6 +757,7 @@ describe("WhatsAppBot group metadata persistence", () => {
         { jid: "15551000001@s.whatsapp.net", phoneE164: "+15551000001", lid: "participant-one@lid", admin: "admin" },
         { jid: "participant-two@lid", phoneE164: "+15551000002", lid: "participant-two@lid", admin: null },
       ],
+      participantIdentityComplete: true,
     });
     await expect(
       db

@@ -11,11 +11,12 @@ import type { DB } from "../../db/schema";
 import { createTestDb, createTestLogger, createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { stableWhatsAppParticipantJidRef } from "../../whatsapp/identity-resolution";
 import { createReadChatHistoryTool } from "./chat-history";
-import { handleAllChatsSearch } from "./chat-search";
+import { ChatHistoryAccessResolver, handleAllChatsSearch } from "./chat-search";
 import type { SketchMcpDeps } from "./types";
 
 const USER_ID = "user-roopak";
 const USER_EMAIL = "roopak@example.com";
+const USER_SLACK_ID = "U-ROOPAK";
 const USER_WHATSAPP_NUMBER = "+15550001234";
 
 interface SeededConversation {
@@ -31,6 +32,7 @@ async function seedUser(db: Kysely<DB>, options: { emailVerified?: boolean } = {
     name: "Roopak",
     email: USER_EMAIL,
     emailVerified: options.emailVerified ?? true,
+    slackUserId: USER_SLACK_ID,
     whatsappNumber: USER_WHATSAPP_NUMBER,
   });
 }
@@ -243,8 +245,47 @@ function depsFor(db: Kysely<DB>, overrides: Partial<SketchMcpDeps> = {}): Sketch
     db,
     currentUserId: USER_ID,
     userRepo: createUserRepository(db),
+    getSlack: () =>
+      ({
+        isUserInChannel: async () => true,
+      }) as unknown as NonNullable<ReturnType<NonNullable<SketchMcpDeps["getSlack"]>>>,
     ...overrides,
   } as unknown as SketchMcpDeps;
+}
+
+async function snapshotKnowledgeGraphState(db: Kysely<DB>) {
+  const [
+    slices,
+    indexedFiles,
+    chunks,
+    facts,
+    entities,
+    entityMentions,
+    entitySourceRefs,
+    relationships,
+    relationshipEvidence,
+  ] = await Promise.all([
+    db.selectFrom("conversation_slices").selectAll().orderBy("id").execute(),
+    db.selectFrom("indexed_files").selectAll().orderBy("id").execute(),
+    db.selectFrom("document_chunks").selectAll().orderBy("id").execute(),
+    db.selectFrom("indexed_file_facts").selectAll().orderBy("id").execute(),
+    db.selectFrom("entities").selectAll().orderBy("id").execute(),
+    db.selectFrom("entity_mentions").selectAll().orderBy("id").execute(),
+    db.selectFrom("entity_source_refs").selectAll().orderBy("id").execute(),
+    db.selectFrom("entity_relationships").selectAll().orderBy("id").execute(),
+    db.selectFrom("entity_relationship_evidence").selectAll().orderBy("id").execute(),
+  ]);
+  return {
+    slices,
+    indexedFiles,
+    chunks,
+    facts,
+    entities,
+    entityMentions,
+    entitySourceRefs,
+    relationships,
+    relationshipEvidence,
+  };
 }
 
 function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { shared?: boolean } = {}) {
@@ -310,14 +351,50 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       }
     });
 
-    it("excludes conversations where the caller is not a scope member", async () => {
+    it("uses live Slack membership instead of indexed-file access scopes", async () => {
+      const checks: Array<[string, string]> = [];
       await seedSlackChannel(db, {
         channelId: "C2",
         text: "secret finance topic",
-        memberEmails: ["other@example.com"],
+        memberEmails: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
-      const outcome = await handleAllChatsSearch({ query: "secret finance" }, depsFor(db));
+      const outcome = await handleAllChatsSearch(
+        { query: "secret finance" },
+        depsFor(db, {
+          getSlack: () =>
+            ({
+              isUserInChannel: async (channelId: string, slackUserId: string) => {
+                checks.push([channelId, slackUserId]);
+                return false;
+              },
+            }) as unknown as NonNullable<ReturnType<NonNullable<SketchMcpDeps["getSlack"]>>>,
+        }),
+      );
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(0);
+      expect(checks).toContainEqual(["C2", USER_SLACK_ID]);
+    });
+
+    it("fails closed when live Slack membership cannot be checked", async () => {
+      await seedSlackChannel(db, {
+        channelId: "C2-ERROR",
+        text: "provider failure secret",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const outcome = await handleAllChatsSearch(
+        { query: "provider failure secret" },
+        depsFor(db, {
+          getSlack: () =>
+            ({
+              isUserInChannel: async () => {
+                throw new Error("Slack unavailable");
+              },
+            }) as unknown as NonNullable<ReturnType<NonNullable<SketchMcpDeps["getSlack"]>>>,
+        }),
+      );
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(0);
@@ -398,6 +475,187 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
+    it("uses a complete live WhatsApp roster before the persisted fallback", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "live roster removal marker",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const outcome = await handleAllChatsSearch(
+        { query: "live roster removal" },
+        depsFor(db, {
+          getWhatsApp: () => ({
+            groupMetadata: async () => ({
+              id: seeded.groupJid,
+              subject: "Deal Room",
+              desc: null,
+              participants: [
+                {
+                  jid: "15550009999@s.whatsapp.net",
+                  phoneE164: "+15550009999",
+                  lid: null,
+                  admin: null,
+                },
+              ],
+              participantIdentityComplete: true,
+            }),
+            resolveLid: async () => null,
+          }),
+        }),
+      );
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(0);
+    });
+
+    it("allows a live WhatsApp member before the DB roster catches up", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "live roster addition marker",
+        memberEmails: ["other@example.com"],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const outcome = await handleAllChatsSearch(
+        { query: "live roster addition" },
+        depsFor(db, {
+          getWhatsApp: () => ({
+            groupMetadata: async () => ({
+              id: seeded.groupJid,
+              subject: "Deal Room",
+              desc: null,
+              participants: [
+                {
+                  jid: "15550001234@s.whatsapp.net",
+                  phoneE164: USER_WHATSAPP_NUMBER,
+                  lid: null,
+                  admin: null,
+                },
+              ],
+            }),
+            resolveLid: async () => null,
+          }),
+        }),
+      );
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(1);
+    });
+
+    it.each(["getter-error", "error", "null", "empty", "unresolved", "incomplete", "missing-marker"] as const)(
+      "falls back to persisted WhatsApp membership for %s provider metadata",
+      async (providerResult) => {
+        const seeded = await seedWhatsAppGroup(db, {
+          text: `fallback ${providerResult} marker`,
+          memberEmails: [USER_EMAIL],
+          connectorConfigId: whatsappConfigId,
+          indexEnabled: false,
+        });
+        const outcome = await handleAllChatsSearch(
+          { query: `fallback ${providerResult}` },
+          depsFor(db, {
+            getWhatsApp: () => {
+              if (providerResult === "getter-error") throw new Error("WhatsApp facade unavailable");
+              return {
+                groupMetadata: async () => {
+                  if (providerResult === "error") throw new Error("WhatsApp unavailable");
+                  if (providerResult === "null") return null;
+                  if (providerResult === "empty") {
+                    return { id: seeded.groupJid, subject: "Deal Room", desc: null, participants: [] };
+                  }
+                  if (providerResult === "incomplete") {
+                    return {
+                      id: seeded.groupJid,
+                      subject: "Deal Room",
+                      desc: null,
+                      participants: [
+                        {
+                          jid: "15550009999@s.whatsapp.net",
+                          phoneE164: "+15550009999",
+                          lid: null,
+                          admin: null,
+                        },
+                      ],
+                      participantIdentityComplete: false,
+                    };
+                  }
+                  if (providerResult === "missing-marker") {
+                    return {
+                      id: seeded.groupJid,
+                      subject: "Deal Room",
+                      desc: null,
+                      participants: [
+                        {
+                          jid: "15550009999@s.whatsapp.net",
+                          phoneE164: "+15550009999",
+                          lid: null,
+                          admin: null,
+                        },
+                      ],
+                    };
+                  }
+                  return {
+                    id: seeded.groupJid,
+                    subject: "Deal Room",
+                    desc: null,
+                    participants: [
+                      {
+                        jid: "86702773280883@lid",
+                        phoneE164: null,
+                        lid: "86702773280883@lid",
+                        admin: null,
+                      },
+                    ],
+                  };
+                },
+                resolveLid: async () => null,
+              };
+            },
+          }),
+        );
+        expect(outcome.ok).toBe(true);
+        if (!outcome.ok) return;
+        expect(outcome.body.messages).toHaveLength(1);
+      },
+    );
+
+    it("uses the pre-refresh WhatsApp fallback when an incomplete provider result mutates persistence", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "pre-refresh fallback marker",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const outcome = await handleAllChatsSearch(
+        { query: "pre-refresh fallback" },
+        depsFor(db, {
+          getWhatsApp: () => ({
+            groupMetadata: async () => {
+              await db.deleteFrom("whatsapp_group_participants").where("group_jid", "=", seeded.groupJid).execute();
+              return {
+                id: seeded.groupJid,
+                subject: "Deal Room",
+                desc: null,
+                participants: [
+                  {
+                    jid: "15550009999@s.whatsapp.net",
+                    phoneE164: "+15550009999",
+                    lid: null,
+                    admin: null,
+                  },
+                ],
+                participantIdentityComplete: false,
+              };
+            },
+            resolveLid: async () => null,
+          }),
+        }),
+      );
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(1);
+    });
+
     it("reads sanitized chronology around an authorized cross-chat search hit", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "context before the decision",
@@ -466,6 +724,176 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(
         body.messages.every((message) => (message.conversation as { name: string }).name === "Decision Room"),
       ).toBe(true);
+    });
+
+    it("reuses the live WhatsApp membership decision for Search then Read in one agent run", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "cached membership target",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      let metadataCalls = 0;
+      const deps = depsFor(db, {
+        conversationRepo: createConversationRepository(db),
+        getWhatsApp: () => ({
+          groupMetadata: async (_jid, options) => {
+            metadataCalls += 1;
+            expect(options).toEqual({ refresh: true });
+            return {
+              id: seeded.groupJid,
+              subject: "Deal Room",
+              desc: null,
+              participants: [
+                {
+                  jid: "15550001234@s.whatsapp.net",
+                  phoneE164: USER_WHATSAPP_NUMBER,
+                  lid: null,
+                  admin: null,
+                },
+              ],
+            };
+          },
+          resolveLid: async () => null,
+        }),
+      });
+      const access = new ChatHistoryAccessResolver(deps);
+      const graphBefore = await snapshotKnowledgeGraphState(db);
+      const search = await handleAllChatsSearch({ query: "cached membership target" }, deps, access);
+      expect(search.ok).toBe(true);
+      if (!search.ok) return;
+      const readTool = createReadChatHistoryTool(deps, access) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+      const read = await readTool.handler({
+        conversationRef: `conversation:${seeded.conversationId}`,
+        anchorMessageId: seeded.messageId,
+      });
+      expect(JSON.parse(read.content[0]?.text ?? "{}").messages).toHaveLength(1);
+      expect(metadataCalls).toBe(1);
+      expect(await snapshotKnowledgeGraphState(db)).toEqual(graphBefore);
+    });
+
+    it("keeps cross-chat Slack reads inside the anchor thread", async () => {
+      const conversations = createConversationRepository(db);
+      const channel = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C-THREADS",
+      });
+      const firstRoot = await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "1000.000",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "alpha thread root",
+        providerThreadId: "1000.000",
+        receivedAt: "2026-07-17T09:00:00.000Z",
+      });
+      await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "2000.000",
+        senderJid: "U0OTHER",
+        senderName: "Other",
+        text: "unrelated thread root",
+        providerThreadId: "2000.000",
+        receivedAt: "2026-07-17T09:01:00.000Z",
+      });
+      const anchor = await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "1000.001",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "alpha thread launch decision",
+        providerThreadId: "1000.000",
+        providerParentMessageId: "1000.000",
+        isThreadReply: true,
+        receivedAt: "2026-07-17T09:02:00.000Z",
+      });
+      await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "2000.001",
+        senderJid: "U0OTHER",
+        senderName: "Other",
+        text: "unrelated interleaved reply",
+        providerThreadId: "2000.000",
+        providerParentMessageId: "2000.000",
+        isThreadReply: true,
+        receivedAt: "2026-07-17T09:03:00.000Z",
+      });
+      const finalReply = await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "1000.002",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "alpha thread follow-up",
+        providerThreadId: "1000.000",
+        providerParentMessageId: "1000.000",
+        isThreadReply: true,
+        receivedAt: "2026-07-17T09:04:00.000Z",
+      });
+      const deps = depsFor(db, { conversationRepo: conversations });
+      const readTool = createReadChatHistoryTool(deps) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+      const result = await readTool.handler({
+        conversationRef: `conversation:${channel.id}`,
+        anchorMessageId: anchor.row.id,
+        limit: 5,
+      });
+      const body = JSON.parse(result.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number; text: string }>;
+      };
+      expect(body.messages.map((message) => message.id)).toEqual([firstRoot.row.id, anchor.row.id, finalReply.row.id]);
+      expect(body.messages.map((message) => message.text)).not.toContain("unrelated interleaved reply");
+    });
+
+    it("reads legacy Slack anchors without thread metadata while excluding newer thread rows", async () => {
+      const conversations = createConversationRepository(db);
+      const channel = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C-LEGACY",
+      });
+      const before = await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "legacy-1",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "legacy channel context",
+        receivedAt: "2026-07-17T09:00:00.000Z",
+      });
+      const anchor = await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "legacy-2",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "legacy launch decision",
+        receivedAt: "2026-07-17T09:01:00.000Z",
+      });
+      await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "modern-thread-1",
+        senderJid: "U0OTHER",
+        senderName: "Other",
+        text: "new thread should stay out",
+        providerThreadId: "3000.000",
+        receivedAt: "2026-07-17T09:02:00.000Z",
+      });
+      const readTool = createReadChatHistoryTool(depsFor(db, { conversationRepo: conversations })) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+
+      const result = await readTool.handler({
+        conversationRef: `conversation:${channel.id}`,
+        anchorMessageId: anchor.row.id,
+        limit: 5,
+      });
+      const body = JSON.parse(result.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number; text: string }>;
+      };
+      expect(body.messages.map((message) => message.id)).toEqual([before.row.id, anchor.row.id]);
+      expect(body.messages.map((message) => message.text)).not.toContain("new thread should stay out");
     });
 
     it("does not reveal whether a cross-chat conversation ref exists after access is revoked", async () => {
@@ -592,6 +1020,32 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(whatsappOnly.body.messages).toHaveLength(2);
     });
 
+    it("does not query WhatsApp when search is restricted to Slack", async () => {
+      await seedSlackChannel(db, {
+        channelId: "C-SLACK-ONLY",
+        text: "slack-only provider marker",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      let whatsappCalls = 0;
+      const outcome = await handleAllChatsSearch(
+        { query: "slack-only provider", platform: "slack" },
+        depsFor(db, {
+          getWhatsApp: () => ({
+            groupMetadata: async () => {
+              whatsappCalls += 1;
+              return null;
+            },
+            resolveLid: async () => null,
+          }),
+        }),
+      );
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(1);
+      expect(whatsappCalls).toBe(0);
+    });
+
     it("excludes bot messages by default and includes them on request", async () => {
       const seeded = await seedSlackChannel(db, {
         channelId: "C6",
@@ -668,6 +1122,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
 
       await db.updateTable("users").set({ email_verified_at: null }).where("id", "=", USER_ID).execute();
       await db.updateTable("users").set({ whatsapp_number: null }).where("id", "=", USER_ID).execute();
+      await db.updateTable("users").set({ slack_user_id: null }).where("id", "=", USER_ID).execute();
       const unverified = await handleAllChatsSearch({ query: "gated content" }, depsFor(db));
       expect(unverified.ok).toBe(false);
     });

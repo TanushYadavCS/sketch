@@ -496,11 +496,17 @@ export async function* emitSlackSyncedItems(options: {
 }
 
 /**
+ * Membership reconciliation independent of content emission. Without this a
+ * quiet channel outside the re-emission window would retain a departed
+ * teammate's access indefinitely, and a channel the bot was removed from
+ * would keep serving its indexed slices forever.
+ */
+/**
  * Disconnect handling: with no bot token the sync cannot verify channel
- * membership, so both knowledge files and raw-history membership grants must
- * fail closed. Archival is reversible — kept slices retain their salience
- * verdicts and re-emit on reconnect, while reconciliation rebuilds the
- * membership grants.
+ * membership, so previously emitted slices must not stay readable under the
+ * last-known ACLs. Archival is reversible — kept slices keep their salience
+ * verdicts and re-emit on reconnect because archiving clears their
+ * indexed_file_id link.
  */
 export async function archiveAllSlackChannelFiles(options: {
   db: Kysely<DB>;
@@ -511,14 +517,6 @@ export async function archiveAllSlackChannelFiles(options: {
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
   if (scopes.length === 0) return 0;
   const filesArchived = await repo.archiveFilesForAccessScopes(scopes.map((scope) => scope.id));
-  for (const scope of scopes) {
-    await repo.upsertAccessScope(options.connectorConfigId, {
-      scopeType: "slack_channel",
-      providerScopeId: scope.providerScopeId,
-      label: scope.label ?? scope.providerScopeId,
-      memberEmails: [],
-    });
-  }
   if (filesArchived > 0) {
     options.logger.info({ filesArchived }, "Archived Slack slices: Slack is disconnected");
   }
@@ -570,46 +568,49 @@ export async function reconcileSlackChannelAcls(options: {
 }): Promise<{ scopesRefreshed: number; scopesArchived: number; filesArchived: number }> {
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
+  if (scopes.length === 0) return { scopesRefreshed: 0, scopesArchived: 0, filesArchived: 0 };
+
   const visible = new Map((await options.facade.listMemberChannels()).map((channel) => [channel.id, channel.name]));
-  const existingByChannel = new Map(scopes.map((scope) => [scope.providerScopeId, scope]));
   let scopesRefreshed = 0;
   let scopesArchived = 0;
   let filesArchived = 0;
 
-  for (const [channelId, channelName] of visible) {
+  for (const scope of scopes) {
+    const channelName = visible.get(scope.providerScopeId);
+    if (channelName === undefined) {
+      filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
+      scopesArchived += 1;
+      options.logger.info(
+        { channelId: scope.providerScopeId },
+        "Archived Slack slices for channel no longer visible to the bot",
+      );
+      continue;
+    }
+
     let roster: SlackRosterSnapshot;
     try {
       roster = await resolveSlackChannelRoster({
         db: options.db,
         facade: options.facade,
-        channelId,
+        channelId: scope.providerScopeId,
         channelName,
         logger: options.logger,
       });
     } catch (err) {
-      options.logger.warn({ err, channelId }, "Slack ACL reconciliation roster failed");
+      options.logger.warn({ err, channelId: scope.providerScopeId }, "Slack ACL reconciliation roster failed");
       continue;
     }
 
     const teammateEmails = teammateEmailsFromRoster(roster);
-    const existing = existingByChannel.get(channelId);
     if (teammateEmails.length === 0) {
-      if (existing) {
-        filesArchived += await repo.archiveFilesForAccessScopes([existing.id]);
-      }
-      await repo.upsertAccessScope(options.connectorConfigId, {
-        scopeType: "slack_channel",
-        providerScopeId: channelId,
-        label: `#${channelName}`,
-        memberEmails: [],
-      });
+      filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
       scopesArchived += 1;
       continue;
     }
 
     await repo.upsertAccessScope(options.connectorConfigId, {
       scopeType: "slack_channel",
-      providerScopeId: channelId,
+      providerScopeId: scope.providerScopeId,
       label: `#${channelName}`,
       memberEmails: teammateEmails,
     });
@@ -618,25 +619,9 @@ export async function reconcileSlackChannelAcls(options: {
     await refreshSlackChannelName({
       db: options.db,
       logger: options.logger,
-      channelId,
+      channelId: scope.providerScopeId,
       channelName,
     });
-  }
-
-  for (const scope of scopes) {
-    if (visible.has(scope.providerScopeId)) continue;
-    filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
-    await repo.upsertAccessScope(options.connectorConfigId, {
-      scopeType: "slack_channel",
-      providerScopeId: scope.providerScopeId,
-      label: scope.label ?? scope.providerScopeId,
-      memberEmails: [],
-    });
-    scopesArchived += 1;
-    options.logger.info(
-      { channelId: scope.providerScopeId },
-      "Revoked Slack channel history access for channel no longer visible to the bot",
-    );
   }
 
   const summary = { scopesRefreshed, scopesArchived, filesArchived };

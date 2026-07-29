@@ -494,7 +494,10 @@ export class WhatsAppBot {
     groupJid: string,
     opts: { refresh?: boolean } = {},
   ): Promise<ProviderWhatsAppGroupMetadata | undefined> {
-    const meta = opts.refresh ? await this.refreshGroupMetadata(groupJid) : await this.getGroupMetadata(groupJid);
+    if (opts.refresh) {
+      return (await this.refreshGroupMetadataWithProviderResult(groupJid))?.providerMetadata;
+    }
+    const meta = await this.getGroupMetadata(groupJid);
     return meta ? this.toProviderGroupMetadata(groupJid, meta) : undefined;
   }
 
@@ -964,13 +967,20 @@ export class WhatsAppBot {
   }
 
   private async refreshGroupMetadata(groupJid: string): Promise<GroupMetadata | undefined> {
+    return (await this.refreshGroupMetadataWithProviderResult(groupJid))?.meta;
+  }
+
+  private async refreshGroupMetadataWithProviderResult(
+    groupJid: string,
+  ): Promise<{ meta: GroupMetadata; providerMetadata: ProviderWhatsAppGroupMetadata } | undefined> {
     try {
       const meta = await this.sock?.groupMetadata(groupJid);
       if (meta) {
         this.groupMetaCache.set(groupJid, { meta, expires: Date.now() + GROUP_META_TTL_MS });
-        await this.persistGroupMetadata(groupJid, meta, new Date().toISOString());
+        const providerMetadata = await this.persistGroupMetadata(groupJid, meta, new Date().toISOString());
+        return { meta, providerMetadata };
       }
-      return meta;
+      return undefined;
     } catch (err) {
       this.logger.warn({ err, groupJid }, "Failed to fetch group metadata");
       return undefined;
@@ -990,10 +1000,16 @@ export class WhatsAppBot {
       subject: meta.subject ?? "Unknown Group",
       desc: meta.desc ?? null,
       participants: collected.participants,
+      participantIdentityComplete:
+        collected.skippedCount === 0 && collected.participants.every((participant) => participant.phoneE164 !== null),
     };
   }
 
-  private async persistGroupMetadata(groupJid: string, meta: GroupMetadata, updatedAt: string): Promise<void> {
+  private async persistGroupMetadata(
+    groupJid: string,
+    meta: GroupMetadata,
+    updatedAt: string,
+  ): Promise<ProviderWhatsAppGroupMetadata> {
     const providerMetadata = await this.toProviderGroupMetadata(groupJid, meta);
     await this.groupMetadataStore?.upsert({
       jid: groupJid,
@@ -1007,6 +1023,7 @@ export class WhatsAppBot {
       updatedAt,
       this.logger,
     );
+    return providerMetadata;
   }
 
   /**

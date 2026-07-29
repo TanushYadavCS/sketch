@@ -16,6 +16,7 @@ import type { TaskContext } from "../../scheduler/types";
 import type { SlackBot } from "../../slack/bot";
 import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
+import type { WhatsAppSocketFacade } from "../../whatsapp/facade-contract";
 import type { WhatsAppTemplateRequest } from "../../whatsapp/templates";
 import type { AuxCostCollector } from "../aux-cost";
 import type { AgentOutputWriter } from "./agent-output";
@@ -94,6 +95,7 @@ export interface SketchMcpDeps {
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   taskContext?: TaskContext;
   getSlack?: () => SlackBot | null;
+  getWhatsApp?: () => Pick<WhatsAppSocketFacade, "groupMetadata" | "resolveLid"> | null;
   scheduler?: TaskScheduler;
   chatAuthoring?: ChatAutomationAuthoring;
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;

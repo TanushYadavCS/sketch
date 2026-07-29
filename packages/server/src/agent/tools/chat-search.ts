@@ -1,9 +1,10 @@
-import { type Expression, type Kysely, sql } from "kysely";
+import type { Expression, Kysely } from "kysely";
 import { type CrossConversationSearchMessage, createConversationRepository } from "../../db/repositories/conversations";
 import type { DB } from "../../db/schema";
 import { parseSlackRosterSnapshot } from "../../slack/identity-resolution";
 import { normalizeWhatsAppIdentityPhone } from "../../whatsapp/identity-resolution";
 import { sanitizeWhatsAppDisplayText } from "../../whatsapp/privacy";
+import { whatsappJidToPhoneE164 } from "../../whatsapp/provider";
 import { renderSlackChannelHistoryMessages } from "./slack-channel-history";
 import type { SketchMcpDeps } from "./types";
 import { parseWhatsAppGroupRosterSnapshot, renderWhatsAppGroupHistoryMessages } from "./whatsapp-group-history";
@@ -31,90 +32,231 @@ export type AllChatsSearchOutcome =
   | { ok: false; message: string };
 
 export interface ChatHistoryAccessIdentity {
-  verifiedEmails: string[];
+  slackUserId: string | null;
   whatsappPhone: string | null;
 }
 
 /**
- * Slack membership is keyed by verified email, while WhatsApp membership is
- * keyed by the authenticated user's normalized WhatsApp number. The pooled
- * getAllEmailsForUser includes an unverified primary address, so it must not
- * unlock membership-scoped chat content.
+ * Raw history uses provider membership rather than knowledge-index ACLs.
+ * Slack fails closed when live membership cannot be checked. WhatsApp prefers
+ * a complete live roster and falls back to the last persisted roster when the
+ * provider is unavailable or returns ambiguous participant identities.
  */
 export async function resolveChatHistoryAccessIdentity(deps: SketchMcpDeps): Promise<ChatHistoryAccessIdentity> {
   if (!deps.currentUserId || !deps.userRepo) {
-    return { verifiedEmails: [], whatsappPhone: null };
+    return { slackUserId: null, whatsappPhone: null };
   }
-  const [emails, user] = await Promise.all([
-    deps.userRepo.getVerifiedEmailsForUser?.(deps.currentUserId) ?? Promise.resolve([]),
-    deps.userRepo.findById(deps.currentUserId),
-  ]);
+  const user = await deps.userRepo.findById(deps.currentUserId);
   return {
-    verifiedEmails: [...new Set(emails.map((email) => email.trim().toLowerCase()).filter((email) => email.length > 0))],
+    slackUserId: user?.slack_user_id?.trim() || null,
     whatsappPhone: normalizeWhatsAppIdentityPhone(user?.whatsapp_number ?? null),
   };
 }
 
-/**
- * Raw chat-history authorization is deliberately independent of knowledge
- * indexing. Slack uses the current channel-membership ACL cache maintained by
- * reconciliation. WhatsApp uses the current synced participant roster
- * directly, so index_enabled and the existence or state of slices/indexed
- * files cannot grant or deny access.
- *
- * Tenancy invariant: conversations carry no tenant/connector dimension, so
- * this predicate is sound only under one-database-per-tenant with singleton
- * Slack/WhatsApp system connectors.
- */
-export function authorizedSearchableConversationIds(
-  db: Kysely<DB>,
-  identity: ChatHistoryAccessIdentity,
-  platform?: ChatSearchPlatform,
-): Expression<unknown> {
-  const slackArm = db
+export function authorizedSearchableConversationIds(db: Kysely<DB>, conversationIds: number[]): Expression<unknown> {
+  return db
     .selectFrom("conversations")
-    .innerJoin("access_scopes", "access_scopes.provider_scope_id", "conversations.provider_conversation_id")
-    .innerJoin("access_scope_members", "access_scope_members.access_scope_id", "access_scopes.id")
     .select("conversations.id")
-    .distinct()
-    .where("conversations.platform", "=", "slack")
-    .where("conversations.kind", "=", "channel")
-    .where("access_scopes.scope_type", "=", "slack_channel")
-    .where("access_scope_members.email", "in", identity.verifiedEmails.length > 0 ? identity.verifiedEmails : [""]);
+    .where("conversations.id", "in", conversationIds.length > 0 ? conversationIds : [-1]);
+}
 
-  const whatsappArm = db
-    .selectFrom("conversations")
-    .innerJoin(
-      "whatsapp_group_participants",
-      "whatsapp_group_participants.group_jid",
-      "conversations.provider_conversation_id",
-    )
-    .select("conversations.id")
-    .distinct()
-    .where("conversations.platform", "=", "whatsapp")
-    .where("conversations.kind", "=", "group")
-    .where("whatsapp_group_participants.phone_e164", "=", identity.whatsappPhone ?? "");
+type ConversationAccessRow = {
+  id: number;
+  platform: string;
+  kind: string;
+  providerConversationId: string;
+};
 
-  if (platform === "slack") return slackArm;
-  if (platform === "whatsapp") return whatsappArm;
-  return slackArm.union(whatsappArm);
+type WhatsAppMembershipDecision = "member" | "not-member" | "ambiguous";
+
+const MEMBERSHIP_CHECK_CONCURRENCY = 4;
+
+function phoneFromParticipantJid(jid: string): string | null {
+  if (!jid.endsWith("@s.whatsapp.net")) return null;
+  return normalizeWhatsAppIdentityPhone(whatsappJidToPhoneE164(jid));
+}
+
+async function mapAuthorizedConversations(
+  rows: ConversationAccessRow[],
+  check: (row: ConversationAccessRow) => Promise<boolean>,
+): Promise<number[]> {
+  const authorized: number[] = [];
+  for (let offset = 0; offset < rows.length; offset += MEMBERSHIP_CHECK_CONCURRENCY) {
+    const batch = rows.slice(offset, offset + MEMBERSHIP_CHECK_CONCURRENCY);
+    const decisions = await Promise.all(batch.map(async (row) => ({ id: row.id, allowed: await check(row) })));
+    for (const decision of decisions) {
+      if (decision.allowed) authorized.push(decision.id);
+    }
+  }
+  return authorized;
+}
+
+export class ChatHistoryAccessResolver {
+  private readonly slackDecisions = new Map<string, Promise<boolean>>();
+  private readonly whatsappDecisions = new Map<string, Promise<boolean>>();
+  private readonly identity: Promise<ChatHistoryAccessIdentity>;
+
+  constructor(private readonly deps: SketchMcpDeps) {
+    this.identity = resolveChatHistoryAccessIdentity(deps);
+  }
+
+  async hasUsableIdentity(): Promise<boolean> {
+    const identity = await this.identity;
+    return Boolean(identity.slackUserId || identity.whatsappPhone);
+  }
+
+  async isConversationAuthorized(conversationId: number): Promise<boolean> {
+    if (!this.deps.db || !this.deps.currentUserId) return false;
+    if (this.deps.conversationContext?.conversationId === conversationId) return true;
+    const row = await this.deps.db
+      .selectFrom("conversations")
+      .select(["id", "platform", "kind", "provider_conversation_id as providerConversationId"])
+      .where("id", "=", conversationId)
+      .executeTakeFirst();
+    if (!row) return false;
+    return this.isConversationRowAuthorized(row);
+  }
+
+  async authorizedConversationIds(platform?: ChatSearchPlatform): Promise<number[]> {
+    if (!this.deps.db || !this.deps.currentUserId) return [];
+    let query = this.deps.db
+      .selectFrom("conversations")
+      .select(["id", "platform", "kind", "provider_conversation_id as providerConversationId"])
+      .where((eb) =>
+        eb.or([
+          eb.and([eb("platform", "=", "slack"), eb("kind", "=", "channel")]),
+          eb.and([eb("platform", "=", "whatsapp"), eb("kind", "=", "group")]),
+        ]),
+      );
+    if (platform) query = query.where("platform", "=", platform);
+    const rows = await query.execute();
+    return mapAuthorizedConversations(rows, (row) => this.isConversationRowAuthorized(row));
+  }
+
+  private async isConversationRowAuthorized(row: ConversationAccessRow): Promise<boolean> {
+    if (row.platform === "slack" && row.kind === "channel") {
+      return this.cachedDecision(this.slackDecisions, row.providerConversationId, () =>
+        this.resolveSlackMembership(row.providerConversationId),
+      );
+    }
+    if (row.platform === "whatsapp" && row.kind === "group") {
+      return this.cachedDecision(this.whatsappDecisions, row.providerConversationId, () =>
+        this.resolveWhatsAppMembership(row.providerConversationId),
+      );
+    }
+    return false;
+  }
+
+  private cachedDecision(
+    cache: Map<string, Promise<boolean>>,
+    key: string,
+    resolve: () => Promise<boolean>,
+  ): Promise<boolean> {
+    const existing = cache.get(key);
+    if (existing) return existing;
+    const pending = resolve().catch(() => false);
+    cache.set(key, pending);
+    return pending;
+  }
+
+  private async resolveSlackMembership(channelId: string): Promise<boolean> {
+    const identity = await this.identity;
+    const slack = this.deps.getSlack?.() ?? null;
+    if (!identity.slackUserId || !slack) return false;
+    try {
+      return await slack.isUserInChannel(channelId, identity.slackUserId);
+    } catch {
+      return false;
+    }
+  }
+
+  private async resolveWhatsAppMembership(groupJid: string): Promise<boolean> {
+    if (!this.deps.db) return false;
+    const identity = await this.identity;
+    if (!identity.whatsappPhone) return false;
+    const fallback = await this.hasPersistedWhatsAppMembership(groupJid, identity.whatsappPhone);
+    let provider: ReturnType<NonNullable<SketchMcpDeps["getWhatsApp"]>> = null;
+    try {
+      provider = this.deps.getWhatsApp?.() ?? null;
+    } catch {
+      return fallback;
+    }
+    if (!provider) return fallback;
+    const decision = await this.resolveProviderWhatsAppMembership(provider, groupJid, identity.whatsappPhone);
+    return decision === "ambiguous" ? fallback : decision === "member";
+  }
+
+  private async hasPersistedWhatsAppMembership(groupJid: string, phone: string): Promise<boolean> {
+    if (!this.deps.db) return false;
+    const row = await this.deps.db
+      .selectFrom("whatsapp_group_participants")
+      .select("participant_jid")
+      .where("group_jid", "=", groupJid)
+      .where("phone_e164", "=", phone)
+      .executeTakeFirst();
+    return row !== undefined;
+  }
+
+  private async resolveProviderWhatsAppMembership(
+    provider: NonNullable<ReturnType<NonNullable<SketchMcpDeps["getWhatsApp"]>>>,
+    groupJid: string,
+    requesterPhone: string,
+  ): Promise<WhatsAppMembershipDecision> {
+    let metadata: Awaited<ReturnType<typeof provider.groupMetadata>>;
+    try {
+      metadata = await provider.groupMetadata(groupJid, { refresh: true });
+    } catch {
+      return "ambiguous";
+    }
+    if (!metadata || metadata.id !== groupJid || metadata.participants.length === 0) return "ambiguous";
+
+    let complete = metadata.participantIdentityComplete === true;
+    let matched = false;
+    for (const participant of metadata.participants) {
+      let participantPhone =
+        normalizeWhatsAppIdentityPhone(participant.phoneE164) ?? phoneFromParticipantJid(participant.jid);
+      if (!participantPhone) {
+        const lid = participant.lid ?? (participant.jid.endsWith("@lid") ? participant.jid : null);
+        if (lid) {
+          try {
+            const phoneJid = await provider.resolveLid(lid);
+            participantPhone = phoneJid ? phoneFromParticipantJid(phoneJid) : null;
+          } catch {
+            participantPhone = null;
+          }
+        }
+      }
+      if (!participantPhone) {
+        complete = false;
+        continue;
+      }
+      if (participantPhone === requesterPhone) matched = true;
+    }
+    if (matched) return "member";
+    return complete ? "not-member" : "ambiguous";
+  }
 }
 
 export async function isChatHistoryConversationAuthorized(
   deps: SketchMcpDeps,
   conversationId: number,
+  access = new ChatHistoryAccessResolver(deps),
 ): Promise<boolean> {
-  if (!deps.db || !deps.currentUserId) return false;
-  if (deps.conversationContext?.conversationId === conversationId) return true;
-  const identity = await resolveChatHistoryAccessIdentity(deps);
-  if (identity.verifiedEmails.length === 0 && !identity.whatsappPhone) return false;
-  const row = await deps.db
+  return access.isConversationAuthorized(conversationId);
+}
+
+async function hasCurrentConversation(
+  db: Kysely<DB>,
+  conversationId: number | undefined,
+  platform: ChatSearchPlatform | undefined,
+): Promise<number | undefined> {
+  if (conversationId === undefined) return undefined;
+  const row = await db
     .selectFrom("conversations")
-    .select("id")
+    .select(["id", "platform"])
     .where("id", "=", conversationId)
-    .where(sql<boolean>`conversations.id IN (${authorizedSearchableConversationIds(deps.db, identity)})`)
     .executeTakeFirst();
-  return row !== undefined;
+  return row && (!platform || row.platform === platform) ? row.id : undefined;
 }
 
 interface ConversationRenderGroup {
@@ -249,9 +391,11 @@ export async function renderAllChatsSearchResults(
 
 /**
  * Availability contract: all_chats is authorized purely by the requesting
- * user's current provider membership and is allowed from any run context
- * including shared channels and groups. Product decision 2026-07-21: current
- * membership grants access to retained history; removal revokes it. Results may
+ * user's provider membership and is allowed from any run context including
+ * shared channels and groups. Slack requires a live membership confirmation.
+ * WhatsApp uses a complete live roster when available and otherwise retains
+ * the last-known roster across disconnects or loss of bot group access; a
+ * complete live roster that omits the requester revokes access. Results may
  * surface in shared destinations because the caller's membership is the sole
  * boundary, matching how the user could quote the same content by hand. Runs
  * without an authenticated requesting user are denied.
@@ -265,6 +409,7 @@ export async function renderAllChatsSearchResults(
 export async function handleAllChatsSearch(
   args: AllChatsSearchArgs,
   deps: SketchMcpDeps,
+  access = new ChatHistoryAccessResolver(deps),
 ): Promise<AllChatsSearchOutcome> {
   if (!deps.db) {
     return { ok: false, message: "Cross-chat search is not available in this run." };
@@ -272,26 +417,17 @@ export async function handleAllChatsSearch(
   if (!deps.currentUserId) {
     return { ok: false, message: "Cross-chat search requires an authenticated requesting user." };
   }
-  const identity = await resolveChatHistoryAccessIdentity(deps);
-  if (identity.verifiedEmails.length === 0 && !identity.whatsappPhone) {
+  if (!(await access.hasUsableIdentity())) {
     return {
       ok: false,
-      message: "Cross-chat search requires a verified Slack email or linked WhatsApp number.",
+      message: "Cross-chat search requires a linked Slack or WhatsApp account.",
     };
   }
 
-  let currentConversationId: number | undefined;
-  const contextConversationId = deps.conversationContext?.conversationId;
-  if (contextConversationId !== undefined) {
-    const current = await deps.db
-      .selectFrom("conversations")
-      .select(["id", "platform", "kind"])
-      .where("id", "=", contextConversationId)
-      .executeTakeFirst();
-    if (current && (!args.platform || current.platform === args.platform)) {
-      currentConversationId = current.id;
-    }
-  }
+  const [authorizedConversationIds, currentConversationId] = await Promise.all([
+    access.authorizedConversationIds(args.platform),
+    hasCurrentConversation(deps.db, deps.conversationContext?.conversationId, args.platform),
+  ]);
 
   const currentMessageId = deps.conversationContext?.currentMessageId;
   const effectiveBeforeMessageId =
@@ -302,7 +438,7 @@ export async function handleAllChatsSearch(
   const conversationRepo = deps.conversationRepo ?? createConversationRepository(deps.db);
   const result = await conversationRepo.searchMessagesAcrossConversations({
     query: args.query,
-    authorizedConversationIds: authorizedSearchableConversationIds(deps.db, identity, args.platform),
+    authorizedConversationIds: authorizedSearchableConversationIds(deps.db, authorizedConversationIds),
     currentConversationId,
     afterMessageId: args.afterMessageId,
     beforeMessageId: effectiveBeforeMessageId,

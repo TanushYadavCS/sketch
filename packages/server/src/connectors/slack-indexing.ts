@@ -22,10 +22,10 @@ function positiveInteger(value: unknown): number | undefined {
 
 /**
  * Indexes Slack channels Sketch is a member of into the knowledge graph:
- * reconcile raw-history channel ACLs first, then chunk captured messages into
- * per-stream slices, gate them through LLM salience, and emit kept slices as
- * indexed files. Membership is the opt-in — there is no per-channel flag or
- * registry.
+ * chunk captured messages into per-stream slices, gate them through LLM
+ * salience, emit kept slices as indexed files, then reconcile channel ACLs
+ * independent of emission. Membership is the opt-in — there is no per-channel
+ * flag or registry.
  */
 export function createSlackIndexingConnector(): Connector {
   return {
@@ -56,8 +56,6 @@ export function createSlackIndexingConnector(): Connector {
         return;
       }
 
-      await reconcileSlackChannelAcls({ db, logger, facade: slackIndexing, connectorConfigId });
-
       await chunkSlackConversations({ db, logger });
 
       await processSlackSalience({
@@ -83,6 +81,7 @@ export function createSlackIndexingConnector(): Connector {
         yield item;
       }
 
+      await reconcileSlackChannelAcls({ db, logger, facade: slackIndexing, connectorConfigId });
       logger.info({ emitted, skippedNoScope }, "Completed Slack indexing sync");
     },
 

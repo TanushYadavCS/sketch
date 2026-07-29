@@ -6,7 +6,12 @@ import {
   createConversationRepository,
 } from "../../db/repositories/conversations";
 import type { Attachment } from "../../files";
-import { handleAllChatsSearch, isChatHistoryConversationAuthorized, renderAllChatsSearchResults } from "./chat-search";
+import {
+  ChatHistoryAccessResolver,
+  handleAllChatsSearch,
+  isChatHistoryConversationAuthorized,
+  renderAllChatsSearchResults,
+} from "./chat-search";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const READ_CHAT_HISTORY_TOOL_NAME = "ReadChatHistory";
@@ -121,7 +126,25 @@ async function renderCrossConversationRead(
   return renderAllChatsSearchResults(deps.db, enriched);
 }
 
-export function createReadChatHistoryTool(deps: SketchMcpDeps) {
+async function loadCrossConversationAnchorThread(
+  deps: SketchMcpDeps,
+  conversationId: number,
+  anchorMessageId: number,
+): Promise<{ ok: true; providerThreadId?: string | null } | { ok: false }> {
+  if (!deps.db) return { ok: false };
+  const row = await deps.db
+    .selectFrom("conversation_messages")
+    .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
+    .select(["conversations.platform", "conversation_messages.provider_thread_id"])
+    .where("conversation_messages.conversation_id", "=", conversationId)
+    .where("conversation_messages.id", "=", anchorMessageId)
+    .executeTakeFirst();
+  if (!row) return { ok: false };
+  if (row.platform !== "slack") return { ok: true };
+  return { ok: true, providerThreadId: row.provider_thread_id };
+}
+
+export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new ChatHistoryAccessResolver(deps)) {
   return tool(
     READ_CHAT_HISTORY_TOOL_NAME,
     "Read persisted messages chronologically from the current chat or from an authorized conversation returned by SearchChatHistory. Use conversationRef and anchorMessageId to read around a cross-chat search hit. Do not use this as the first tool for targeted keyword, topic, decision, person, project, or phrase lookup; use SearchChatHistory first.",
@@ -184,7 +207,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
         return { content: [{ type: "text" as const, text: "Chat history is not available in this run." }] };
       }
       const isCrossConversation = conversationId !== deps.conversationContext?.conversationId;
-      if (isCrossConversation && !(await isChatHistoryConversationAuthorized(deps, conversationId))) {
+      if (isCrossConversation && !(await isChatHistoryConversationAuthorized(deps, conversationId, access))) {
         return unavailableCrossConversationResult();
       }
 
@@ -204,7 +227,12 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
       if (anchorMessageId && currentMessageId && anchorMessageId >= currentMessageId) {
         return unavailableCrossConversationResult();
       }
-      const threadId = !isCrossConversation && effectiveScope === "current_thread" ? providerThreadId : undefined;
+      let threadId = !isCrossConversation && effectiveScope === "current_thread" ? providerThreadId : undefined;
+      if (isCrossConversation && anchorMessageId) {
+        const anchor = await loadCrossConversationAnchorThread(deps, conversationId, anchorMessageId);
+        if (!anchor.ok) return unavailableCrossConversationResult();
+        threadId = anchor.providerThreadId;
+      }
       const result = anchorMessageId
         ? await readAroundMessage(repo, conversationId, anchorMessageId, {
             limit,
@@ -247,7 +275,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
   );
 }
 
-export function createSearchChatHistoryTool(deps: SketchMcpDeps) {
+export function createSearchChatHistoryTool(deps: SketchMcpDeps, access = new ChatHistoryAccessResolver(deps)) {
   return tool(
     SEARCH_CHAT_HISTORY_TOOL_NAME,
     "Search persisted messages in the current chat conversation by keyword, topic, name, decision, project, phrase, or older chat reference. Use this as the first tool for targeted chat-history discovery, even when only some missed messages were inlined. Use scope 'all_chats' to search across every Slack channel and WhatsApp group the requesting user is a member of. Use ReadChatHistory only for chronological paging or reading around a known message id.",
@@ -291,6 +319,7 @@ export function createSearchChatHistoryTool(deps: SketchMcpDeps) {
         const outcome = await handleAllChatsSearch(
           { query, platform, afterMessageId, beforeMessageId, limit, includeBotMessages },
           deps,
+          access,
         );
         if (!outcome.ok) {
           return { content: [{ type: "text" as const, text: outcome.message }] };

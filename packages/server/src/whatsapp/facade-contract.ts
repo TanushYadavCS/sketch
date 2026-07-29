@@ -90,6 +90,7 @@ export const normalizedGroupMetadataSchema = z.object({
   subject: z.string(),
   desc: z.string().nullable().optional(),
   participants: z.array(normalizedGroupParticipantSchema),
+  participantIdentityComplete: z.boolean().optional(),
 });
 
 export const whatsAppGroupMetadataOptionsSchema = z.object({ refresh: z.boolean() });

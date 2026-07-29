@@ -209,6 +209,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const limitAgentExecution = <T>(work: () => Promise<T>): Promise<T> => interactiveAgentRunLimiter.run(work);
   const limitScheduledAgentExecution = <T>(work: () => Promise<T>): Promise<T> => scheduledAgentRunLimiter.run(work);
   let chatAutomationAuthoring: ReturnType<typeof createChatAutomationAuthoring> | undefined;
+  let whatsapp!: WhatsAppSocketFacade;
 
   /**
    * Current LLM provider context, refreshed at startup and on settings change
@@ -239,6 +240,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
         : null;
     const enrichedParams = {
       ...params,
+      getWhatsApp: params.getWhatsApp ?? (() => whatsapp),
       loadTranscriptionSettings,
       visionConfig: params.visionConfig ?? resolveVisionConfigFromAppConfig(config, transcriptionSettings),
       geminiConfig: params.geminiConfig ?? {
@@ -313,7 +315,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
   let whatsappSupervisor: WhatsAppGatewaySupervisor | null = null;
   let inProcessWhatsAppLease: InProcessWhatsAppLease | null = null;
   let whatsappBot: WhatsAppBot | null = null;
-  let whatsapp: WhatsAppSocketFacade;
   const observeInProcessBaileysSocketState = async (
     socketState: "connected" | "disconnected" | "logged-out",
     socketGeneration: number,

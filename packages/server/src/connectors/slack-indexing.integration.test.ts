@@ -941,43 +941,6 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .where("id", "=", slice.row.id)
         .executeTakeFirstOrThrow();
       expect(goneSlice.indexed_file_id).toBeNull();
-      const goneMembers = await db
-        .selectFrom("access_scope_members")
-        .select("email")
-        .where("access_scope_id", "=", goneScope)
-        .execute();
-      expect(goneMembers).toEqual([]);
-    });
-
-    it("creates raw-history membership scopes for visible channels without indexed slices", async () => {
-      await ensureSlackConnectorConfig({ db, logger });
-      const config = await db
-        .selectFrom("connector_configs")
-        .select("id")
-        .where("connector_type", "=", "slack")
-        .executeTakeFirstOrThrow();
-
-      const summary = await reconcileSlackChannelAcls({
-        db,
-        logger,
-        facade: fakeFacade(),
-        connectorConfigId: config.id,
-      });
-      expect(summary.scopesRefreshed).toBe(1);
-
-      const scope = await db
-        .selectFrom("access_scopes")
-        .select("id")
-        .where("connector_config_id", "=", config.id)
-        .where("scope_type", "=", "slack_channel")
-        .where("provider_scope_id", "=", "C1")
-        .executeTakeFirstOrThrow();
-      const members = await db
-        .selectFrom("access_scope_members")
-        .select("email")
-        .where("access_scope_id", "=", scope.id)
-        .execute();
-      expect(members.map((row) => row.email)).toEqual(["roopak@example.com"]);
     });
 
     it("archives all channel files on disconnect so stale ACLs stop granting reads", async () => {
@@ -1050,12 +1013,6 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .where("id", "=", slice.row.id)
         .executeTakeFirstOrThrow();
       expect(clearedSlice.indexed_file_id).toBeNull();
-      const members = await db
-        .selectFrom("access_scope_members")
-        .select("email")
-        .where("access_scope_id", "=", scopeId)
-        .execute();
-      expect(members).toEqual([]);
 
       expect(await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: config.id })).toBe(0);
     });

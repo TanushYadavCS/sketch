@@ -100,6 +100,36 @@ describe("GatewayClientFacade", () => {
     ).resolves.toBeNull();
   });
 
+  it("round-trips refreshed group metadata completeness through the client contract", async () => {
+    let request: { input: string; body: unknown } | null = null;
+    const facade = new GatewayClientFacade({
+      baseUrl: "http://127.0.0.1:3901",
+      token: "secret",
+      logger: createTestLogger(),
+      fetch: async (input, init) => {
+        request = { input: String(input), body: JSON.parse(String(init?.body)) };
+        return json({
+          result: {
+            id: "123@g.us",
+            subject: "Product Team",
+            desc: null,
+            participants: [],
+            participantIdentityComplete: false,
+          },
+        });
+      },
+    });
+
+    await expect(facade.groupMetadata("123@g.us", { refresh: true })).resolves.toMatchObject({
+      id: "123@g.us",
+      participantIdentityComplete: false,
+    });
+    expect(request).toEqual({
+      input: "http://127.0.0.1:3901/group-metadata-queries",
+      body: { jid: "123@g.us", opts: { refresh: true } },
+    });
+  });
+
   it("fails on non-success gateway responses", async () => {
     const facade = new GatewayClientFacade({
       baseUrl: "http://127.0.0.1:3901",
