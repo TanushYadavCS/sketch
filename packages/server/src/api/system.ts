@@ -854,7 +854,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       return c.json({ ok: true, completed: true, changed: false });
     }
 
-    const adminUser = deps.userRepo ? await deps.userRepo.findFirstLocalAdmin() : undefined;
+    const adminUser = deps.userRepo ? await deps.userRepo.findFirstAdmin() : undefined;
     const readiness = getOnboardingReadiness(row, Boolean(adminUser));
     if (!readiness.readyToComplete) {
       return c.json(
@@ -869,12 +869,12 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       );
     }
 
-    await settings.update({ onboardingCompletedAt: new Date().toISOString() });
-    return c.json({ ok: true, completed: true, changed: true });
+    const changed = await settings.completeOnboarding(new Date().toISOString());
+    return c.json({ ok: true, completed: true, changed });
   };
 
   routes.post("/onboarding/complete", ensureOnboardingComplete);
-  routes.post("/onboarding/ensure-complete", ensureOnboardingComplete);
+  routes.put("/onboarding/completion", ensureOnboardingComplete);
 
   return routes;
 }

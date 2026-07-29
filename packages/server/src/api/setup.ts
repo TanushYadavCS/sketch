@@ -159,7 +159,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
    */
   routes.get("/status", async (c) => {
     const row = await settings.get();
-    const adminUser = deps.userRepo ? await deps.userRepo.findFirstLocalAdmin() : undefined;
+    const adminUser = deps.userRepo ? await deps.userRepo.findFirstAdmin() : undefined;
     const { hasAdmin, hasIdentity, hasLlm, readyToComplete } = getOnboardingReadiness(row, Boolean(adminUser));
     const isManaged = Boolean(deps.managedUrl);
     const hasSlack = Boolean(row?.slack_bot_token?.trim() && (isManaged || row?.slack_app_token?.trim()));
@@ -421,9 +421,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
 
   routes.post("/complete", async (c) => {
     const existing = await settings.get();
-    const hasAdmin = deps.userRepo
-      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
-      : Boolean(existing?.admin_email);
+    const hasAdmin = deps.userRepo ? Boolean(await deps.userRepo.findFirstAdmin()) : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
         { error: { code: "SETUP_INCOMPLETE", message: "Admin account must be created before completing setup" } },
@@ -431,9 +429,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       );
     }
 
-    await settings.update({
-      onboardingCompletedAt: new Date().toISOString(),
-    });
+    await settings.completeOnboarding(new Date().toISOString());
 
     return c.json({ success: true });
   });

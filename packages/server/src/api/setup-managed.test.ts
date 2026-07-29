@@ -2,13 +2,17 @@ import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSettingsRepository } from "../db/repositories/settings";
+import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import { setupRoutes } from "./setup";
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 
-function createTestSetupApp(settings: SettingsRepo, deps?: { managedUrl?: string }) {
+function createTestSetupApp(
+  settings: SettingsRepo,
+  deps?: { managedUrl?: string; userRepo?: ReturnType<typeof createUserRepository> },
+) {
   const app = new Hono();
   app.route("/api/setup", setupRoutes(settings, deps));
   return app;
@@ -112,6 +116,50 @@ describe("GET /api/setup/status", () => {
       const body = await res.json();
       expect(body.currentStep).toBe(5);
       expect(body.readyToComplete).toBe(true);
+    });
+
+    it("reports a passwordless managed admin as ready", async () => {
+      await settings.create();
+      const userRepo = createUserRepository(db);
+      await userRepo.create({
+        name: "Admin",
+        email: "admin@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "admin",
+      });
+      await settings.update({
+        orgName: "Acme",
+        botName: "Sketch",
+        llmProvider: "anthropic",
+        anthropicApiKey: "sk-ant-test",
+      });
+      const app = createTestSetupApp(settings, { managedUrl, userRepo });
+
+      const res = await app.request("/api/setup/status");
+      const body = await res.json();
+
+      expect(body.currentStep).toBe(5);
+      expect(body.readyToComplete).toBe(true);
+      expect(body.adminEmail).toBe("admin@test.com");
+    });
+
+    it("completes setup for a passwordless managed admin", async () => {
+      await settings.create();
+      const userRepo = createUserRepository(db);
+      await userRepo.create({
+        name: "Admin",
+        email: "admin@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "admin",
+      });
+      const app = createTestSetupApp(settings, { managedUrl, userRepo });
+
+      const res = await app.request("/api/setup/complete", { method: "POST" });
+
+      expect(res.status).toBe(200);
+      expect((await settings.get())?.onboarding_completed_at).not.toBeNull();
     });
 
     it("does not report ready when an LLM exists without admin or identity", async () => {

@@ -62,6 +62,27 @@ describe("Settings repository", () => {
     expect(row?.admin_email).toBe("a@b.com");
   });
 
+  it("sets the onboarding completion timestamp only once", async () => {
+    await settings.create();
+
+    expect(await settings.completeOnboarding("2026-07-29T10:00:00.000Z")).toBe(true);
+    expect(await settings.completeOnboarding("2026-07-29T10:01:00.000Z")).toBe(false);
+    expect((await settings.get())?.onboarding_completed_at).toBe("2026-07-29T10:00:00.000Z");
+  });
+
+  it("refreshes a cached incomplete row after another process completes onboarding", async () => {
+    await settings.create();
+    expect((await settings.get())?.onboarding_completed_at).toBeNull();
+    await db
+      .updateTable("settings")
+      .set({ onboarding_completed_at: "2026-07-29T10:00:00.000Z" })
+      .where("id", "=", "default")
+      .execute();
+
+    expect(await settings.completeOnboarding("2026-07-29T10:01:00.000Z")).toBe(false);
+    expect((await settings.get())?.onboarding_completed_at).toBe("2026-07-29T10:00:00.000Z");
+  });
+
   it("update() persists Slack and LLM settings fields", async () => {
     await settings.create({ adminEmail: "a@b.com", adminPasswordHash: "hash" });
     await settings.update({

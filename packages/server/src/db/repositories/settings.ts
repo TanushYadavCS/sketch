@@ -301,6 +301,17 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
       return decrypted.sketch_api_key;
     },
 
+    async completeOnboarding(completedAt: string): Promise<boolean> {
+      const result = await db
+        .updateTable("settings")
+        .set({ onboarding_completed_at: completedAt })
+        .where("id", "=", "default")
+        .where("onboarding_completed_at", "is", null)
+        .executeTakeFirst();
+      invalidateCache();
+      return result.numUpdatedRows > 0n;
+    },
+
     async update(
       data: Partial<{
         adminEmail: string;
