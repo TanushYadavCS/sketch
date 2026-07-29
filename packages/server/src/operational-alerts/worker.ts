@@ -178,7 +178,7 @@ export class OperationalAlertWorker {
         const settings = await this.params.settings.get();
         const orgName = settings?.org_name?.trim() || "your organisation";
         const botName = settings?.bot_name?.trim() || "Sketch";
-        const rendered = definition.render(alert, { orgName, botName });
+        const rendered = await definition.render(alert, { orgName, botName, recipientName: recipient.name });
         const sent = await transport.send({
           alert,
           recipient: { id: recipient.id, name: recipient.name, destination },
