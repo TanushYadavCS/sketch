@@ -342,6 +342,40 @@ describe("CanvasProvider", () => {
     });
   });
 
+  it("executes a Canvas action through the configured REST endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ success: true, data: { id: "task-1" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
+
+    await expect(
+      provider.executeAction({
+        userEmail: "priya@example.com",
+        componentKey: "clickup-create-task-with-attachment",
+        configuredProps: { name: "Bug report" },
+      }),
+    ).resolves.toEqual({ id: "task-1" });
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(String(url)).toBe("https://canvas.example.com/api/direct-executions/action");
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: {
+        Authorization: "Bearer sk-test",
+        "Content-Type": "application/json",
+        "X-User-Email": "priya@example.com",
+      },
+      body: JSON.stringify({
+        componentKey: "clickup-create-task-with-attachment",
+        configuredProps: { name: "Bug report" },
+      }),
+    });
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it("mints Sketch connector credentials with user and role headers", async () => {
     const envelope = {
       version: 1,

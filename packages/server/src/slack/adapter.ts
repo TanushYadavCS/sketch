@@ -165,6 +165,10 @@ export async function validateSlackTokens(botToken: string, appToken?: string) {
   await slackApiCall(botToken, "auth.test");
 }
 
+interface DownloadedSlackAttachment extends Attachment {
+  slackFileIndex: number;
+}
+
 async function downloadSlackFiles(
   files: SlackFile[],
   botToken: string | null | undefined,
@@ -172,20 +176,29 @@ async function downloadSlackFiles(
   maxBytes: number,
   logger: Logger,
   failureLogMessage = "Failed to download file",
-): Promise<Attachment[]> {
-  const attachments: Attachment[] = [];
-  for (const file of files) {
+): Promise<DownloadedSlackAttachment[]> {
+  const attachments: DownloadedSlackAttachment[] = [];
+  for (const [slackFileIndex, file] of files.entries()) {
     try {
       if (!botToken) {
         throw new Error("Slack bot token not configured");
       }
       const downloaded = await downloadSlackFile(file.urlPrivate, botToken, attachDir, maxBytes, logger);
-      attachments.push(downloaded);
+      attachments.push({ ...downloaded, slackFileIndex });
     } catch (err) {
       logger.warn({ err, fileName: file.name }, failureLogMessage);
     }
   }
   return attachments;
+}
+
+function filesForAutomationTrigger(files: SlackFile[] | undefined, attachments: Attachment[]) {
+  return (files ?? []).map((file, slackFileIndex) => {
+    const attachment = attachments.find(
+      (candidate) => (candidate as Partial<DownloadedSlackAttachment>).slackFileIndex === slackFileIndex,
+    );
+    return attachment ? { ...file, localPath: attachment.localPath } : file;
+  });
 }
 
 async function downloadMessageAttachments(params: {
@@ -825,19 +838,23 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         }
       }
       if (capture.inserted && !followupReviewHandled && message.channelType !== "mpim" && scheduler) {
-        await scheduler.dispatchSlackChannelMessage(message.channelId, {
-          type: "slack_channel_message",
-          channelId: message.channelId,
-          messageTs: message.ts,
-          text: message.text,
-          userId: message.userId ?? null,
-          botId: message.botId ?? null,
-          appId: message.appId ?? null,
-          subtype: message.subtype ?? null,
-          files: message.files ?? [],
-          capturedMessageId: capture.captured?.id ?? null,
-          conversationId: capture.conversation.id,
-        });
+        await scheduler.dispatchSlackChannelMessage(
+          message.channelId,
+          {
+            type: "slack_channel_message",
+            channelId: message.channelId,
+            messageTs: message.ts,
+            text: message.text,
+            userId: message.userId ?? null,
+            botId: message.botId ?? null,
+            appId: message.appId ?? null,
+            subtype: message.subtype ?? null,
+            files: filesForAutomationTrigger(message.files, attachments),
+            capturedMessageId: capture.captured?.id ?? null,
+            conversationId: capture.conversation.id,
+          },
+          { sourceWorkspaceDir: workspaceDir },
+        );
       }
     } catch (err) {
       logger.warn({ err, channelId: message.channelId }, "Failed to capture passive Slack channel message");

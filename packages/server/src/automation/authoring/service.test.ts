@@ -75,12 +75,17 @@ describe("automation authoring service", () => {
         attempt: 1,
         maxRetries: 0,
         timeoutMs: expect.any(Number),
-        maxOutputTokens: 4096,
+        maxOutputTokens: 8192,
       }),
     );
     expect(generate.mock.calls[0]?.[0].timeoutMs).toBeGreaterThan(0);
-    expect(generate.mock.calls[0]?.[0].timeoutMs).toBeLessThanOrEqual(30_000);
+    expect(generate.mock.calls[0]?.[0].timeoutMs).toBeLessThanOrEqual(60_000);
     expect(generate.mock.calls[0]?.[0].prompt).toContain('"brokerCapable":true');
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("native Slack channel message trigger");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("server-authenticated localPath");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.integrations.executeAction");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("fetch Slack urlPrivate without authentication");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("Do not implement this as polling");
   });
 
   it("returns one concise clarification without validating or drafting", async () => {
@@ -112,6 +117,25 @@ describe("automation authoring service", () => {
       question: "Which Slack channel should receive it?",
     });
     expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives code-heavy replacement edits enough output budget", async () => {
+    const { service, generate } = createHarness([{ kind: "definition", definition: validAuthoringDefinition }]);
+    const codeHeavyRequest = `Rewrite the action script using this runtime contract:\n${"return structuredResult;\n".repeat(300)}`;
+
+    await service.edit({
+      request: codeHeavyRequest,
+      existing: existingAutomationDefinition,
+      brokerCapable: true,
+    });
+
+    expect(generate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: "edit",
+        maxOutputTokens: 8192,
+        prompt: expect.stringContaining(JSON.stringify(codeHeavyRequest).slice(1, -1)),
+      }),
+    );
   });
 
   it("edits from the complete existing definition and carries its execution model by stable step id", async () => {
@@ -306,7 +330,7 @@ describe("automation authoring service", () => {
     expect(generate).toHaveBeenCalledTimes(1);
   });
 
-  it("shares one thirty-second deadline across the validation retry", async () => {
+  it("shares one sixty-second deadline across the validation retry", async () => {
     let clock = 0;
     const generate = vi
       .fn<StructuredAutomationAuthoringGenerator["generate"]>()
@@ -346,8 +370,8 @@ describe("automation authoring service", () => {
       brokerCapable: true,
     });
 
-    expect(generate.mock.calls[0]?.[0].timeoutMs).toBe(30_000);
-    expect(generate.mock.calls[1]?.[0].timeoutMs).toBe(5_000);
+    expect(generate.mock.calls[0]?.[0].timeoutMs).toBe(60_000);
+    expect(generate.mock.calls[1]?.[0].timeoutMs).toBe(35_000);
   });
 
   it("classifies provider aborts as a fail-closed timeout without retrying", async () => {
@@ -388,6 +412,47 @@ describe("automation authoring service", () => {
     ).rejects.toBeInstanceOf(AutomationAuthoringTimeoutError);
     expect(generate).toHaveBeenCalledTimes(1);
     expect(telemetry.recordAttempt).toHaveBeenCalledWith(expect.objectContaining({ validationOutcome: "timeout" }));
+  });
+
+  it("retries transient provider failures before giving up", async () => {
+    const { service, generate, telemetry } = createHarness([]);
+    const providerError = Object.assign(new Error("upstream unavailable"), {
+      name: "APICallError",
+      statusCode: 503,
+    });
+    generate
+      .mockRejectedValueOnce(providerError)
+      .mockResolvedValueOnce(generation({ kind: "definition", definition: validAuthoringDefinition }));
+
+    const result = await service.create({
+      request: "Create a digest",
+      serverContext: {
+        taskId: "task-new",
+        platform: "slack",
+        contextType: "dm",
+        deliveryDefaults: {
+          platform: "slack",
+          targetType: "dm",
+          targetId: "U123",
+          threadTs: null,
+          mode: "deliver",
+        },
+        timezone: "Asia/Kolkata",
+        currentTime: "2026-07-27T12:00:00.000Z",
+      },
+      brokerCapable: true,
+    });
+
+    expect(result.kind).toBe("definition");
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(telemetry.recordAttempt).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ attempt: 1, validationOutcome: "provider_error" }),
+    );
+    expect(telemetry.recordAttempt).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ attempt: 2, validationOutcome: "valid" }),
+    );
   });
 
   it("uses existing graph validation before returning a generated definition", async () => {

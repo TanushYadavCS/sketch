@@ -1,3 +1,4 @@
+import { mkdir, writeFile } from "node:fs/promises";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
 import { runAgentRuntimeCore } from "../agent/runtime/core";
@@ -634,6 +635,76 @@ describe("executeAutomation action steps", () => {
     expect(onEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: "step.completed", stepId: "act1", outputSummary: expect.any(String) }),
     );
+  });
+
+  it("executes server-owned integration actions with bounded workspace files", async () => {
+    const workspaceDir = "/tmp/sketch-runtime-test/workspaces/user-1";
+    const filePath = `${workspaceDir}/automation-trigger-files/bug.jpeg`;
+    await mkdir(`${workspaceDir}/automation-trigger-files`, { recursive: true });
+    await writeFile(filePath, "jpeg-bytes");
+    const executeAction = vi.fn().mockResolvedValue({ id: "clickup-task-1" });
+    const params = makeParams({
+      task: makeActionTask([
+        { id: "act1", type: "action", label: "Create ClickUp task", icon: "code", position: { x: 0, y: 100 } },
+      ]),
+      triggerData: { filePath },
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: `
+            return ctx.integrations.executeAction({
+              componentKey: "clickup-create-task-with-attachment",
+              configuredProps: { name: "Bug report" },
+              localFiles: [{ path: input.filePath, configuredProp: "file_content_base64" }]
+            });
+          `,
+        },
+      ]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider({ executeAction })),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(executeAction).toHaveBeenCalledWith({
+      userEmail: "roopak@canvasx.ai",
+      componentKey: "clickup-create-task-with-attachment",
+      configuredProps: {
+        name: "Bug report",
+        file_content_base64: Buffer.from("jpeg-bytes").toString("base64"),
+      },
+    });
+  });
+
+  it("rejects integration action files outside the automation workspace", async () => {
+    const outsidePath = "/tmp/sketch-runtime-outside.jpeg";
+    await writeFile(outsidePath, "not-allowed");
+    const executeAction = vi.fn();
+    const params = makeParams({
+      task: makeActionTask([
+        { id: "act1", type: "action", label: "Create ClickUp task", icon: "code", position: { x: 0, y: 100 } },
+      ]),
+      triggerData: { filePath: outsidePath },
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: `
+            return ctx.integrations.executeAction({
+              componentKey: "clickup-create-task-with-attachment",
+              configuredProps: {},
+              localFiles: [{ path: input.filePath, configuredProp: "file_content_base64" }]
+            });
+          `,
+        },
+      ]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider({ executeAction })),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("outside the automation workspace");
+    expect(executeAction).not.toHaveBeenCalled();
   });
 
   it("fails the action step with a clear error when the provider is not broker-capable", async () => {

@@ -1,6 +1,7 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { z } from "zod/v4";
+import { AutomationAuthoringValidationError } from "../../automation/authoring/service";
 import type { ChatAutomationAuthoring, ChatAutomationAuthoringResult } from "../../automation/chat-authoring";
 import {
   AutomationValidationError,
@@ -598,7 +599,10 @@ async function handleConfiguredChatAuthoring(
       ...(params.task_id ? { taskId: params.task_id } : {}),
       taskContext: deps.taskContext,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof AutomationAuthoringValidationError) {
+      return text("Error: automation authoring could not produce a valid definition. No changes were saved.");
+    }
     return text("Error: automation authoring is temporarily unavailable. No changes were saved.");
   }
 

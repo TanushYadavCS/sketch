@@ -1,3 +1,4 @@
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
@@ -14,6 +15,8 @@ vi.mock("../workflows/runtime", () => ({
     executionParams.push(params);
     return { runId: "run-1", status: "completed", finalOutput: null, stepOutputs: {} };
   }),
+  resolveAutomationWorkspaceDir: (dataDir: string, task: { context_type: string; created_by: string | null }) =>
+    `${dataDir}/workspaces/${task.context_type === "dm" ? task.created_by : "channel-C_OUT"}`,
   testAutomationStep: vi.fn(),
 }));
 
@@ -84,6 +87,7 @@ describe("TaskScheduler.dispatchSlackChannelMessage", () => {
 
   afterEach(async () => {
     await db.destroy();
+    await rm("/tmp/slack-trigger-test", { recursive: true, force: true });
   });
 
   it("dispatches an active exact-channel trigger once and preserves its object payload", async () => {
@@ -97,6 +101,154 @@ describe("TaskScheduler.dispatchSlackChannelMessage", () => {
     await vi.waitFor(() => expect(executionParams).toHaveLength(1));
     expect(deps.getSlack().isUserInChannel).toHaveBeenCalledWith("C_MATCH", "U_CREATOR");
     expect(executionParams[0]?.triggerData).toBe(triggerData);
+  });
+
+  it("copies authenticated Slack files into each automation workspace before dispatch", async () => {
+    const sourcePath = "/tmp/slack-trigger-test/workspaces/channel-C_MATCH/attachments/source.jpeg";
+    await mkdir("/tmp/slack-trigger-test/workspaces/channel-C_MATCH/attachments", { recursive: true });
+    await writeFile(sourcePath, "jpeg-bytes");
+    await repo.add({
+      ...baseTask,
+      context_type: "dm",
+      delivery_target: "D_USER",
+      steps: slackTrigger("C_MATCH"),
+    });
+    const scheduler = new TaskScheduler(makeDeps(db) as never);
+    const enqueueTaskById = vi.spyOn(scheduler, "enqueueTaskById").mockResolvedValue(undefined);
+
+    await scheduler.dispatchSlackChannelMessage("C_MATCH", {
+      messageTs: "1.2",
+      files: [
+        {
+          name: "source.jpeg",
+          mimetype: "image/jpeg",
+          size: 10,
+          urlPrivate: "https://files.slack.com/source.jpeg",
+          localPath: sourcePath,
+        },
+      ],
+    });
+
+    expect(enqueueTaskById).toHaveBeenCalledOnce();
+    const triggerData = enqueueTaskById.mock.calls[0]?.[1] as { files: Array<{ localPath: string }> };
+    expect(triggerData.files[0]?.localPath).toMatch(
+      /^(?:\/private)?\/tmp\/slack-trigger-test\/workspaces\/user-1\/automation-trigger-files\//,
+    );
+    await expect(readFile(triggerData.files[0]?.localPath ?? "", "utf8")).resolves.toBe("jpeg-bytes");
+  });
+
+  it("rejects Slack trigger file symlinks that escape the source channel workspace", async () => {
+    const attachmentsDir = "/tmp/slack-trigger-test/workspaces/channel-C_MATCH/attachments";
+    const outsidePath = "/tmp/slack-trigger-test/outside.txt";
+    const sourcePath = `${attachmentsDir}/source.txt`;
+    await mkdir(attachmentsDir, { recursive: true });
+    await writeFile(outsidePath, "sensitive-bytes");
+    await symlink(outsidePath, sourcePath);
+    await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
+    const scheduler = new TaskScheduler(makeDeps(db) as never);
+    const enqueueTaskById = vi.spyOn(scheduler, "enqueueTaskById").mockResolvedValue(undefined);
+
+    await scheduler.dispatchSlackChannelMessage("C_MATCH", {
+      channelId: "C_MATCH",
+      files: [{ name: "source.txt", localPath: sourcePath }],
+    });
+
+    const triggerData = enqueueTaskById.mock.calls[0]?.[1] as { files: Array<{ localPath?: string }> };
+    expect(triggerData.files[0]?.localPath).toBeUndefined();
+  });
+
+  it("uses the dispatched channel rather than a mismatched payload channel for source containment", async () => {
+    const otherDir = "/tmp/slack-trigger-test/workspaces/channel-C_OTHER/attachments";
+    const sourcePath = `${otherDir}/source.txt`;
+    await mkdir(otherDir, { recursive: true });
+    await writeFile(sourcePath, "other-channel-bytes");
+    await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
+    const scheduler = new TaskScheduler(makeDeps(db) as never);
+    const enqueueTaskById = vi.spyOn(scheduler, "enqueueTaskById").mockResolvedValue(undefined);
+
+    await scheduler.dispatchSlackChannelMessage("C_MATCH", {
+      channelId: "C_OTHER",
+      files: [{ name: "source.txt", localPath: sourcePath }],
+    });
+
+    const triggerData = enqueueTaskById.mock.calls[0]?.[1] as { files: Array<{ localPath?: string }> };
+    expect(triggerData.files[0]?.localPath).toBeUndefined();
+  });
+
+  it("rejects source channel identifiers containing path traversal", async () => {
+    const sourceDir = "/tmp/slack-trigger-test/workspaces/user-1/attachments";
+    const sourcePath = `${sourceDir}/source.txt`;
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(sourcePath, "user-workspace-bytes");
+    await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH/../user-1") });
+    const scheduler = new TaskScheduler(makeDeps(db) as never);
+    const enqueueTaskById = vi.spyOn(scheduler, "enqueueTaskById").mockResolvedValue(undefined);
+
+    await scheduler.dispatchSlackChannelMessage("C_MATCH/../user-1", {
+      files: [{ name: "source.txt", localPath: sourcePath }],
+    });
+
+    const triggerData = enqueueTaskById.mock.calls[0]?.[1] as { files: Array<{ localPath?: string }> };
+    expect(triggerData.files[0]?.localPath).toBeUndefined();
+  });
+
+  it("rejects a source channel workspace symlink to a sibling workspace", async () => {
+    const outsideDir = "/tmp/slack-trigger-test/workspaces/user-2";
+    const sourcePath = `${outsideDir}/source.txt`;
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(sourcePath, "outside-channel-bytes");
+    await mkdir("/tmp/slack-trigger-test/workspaces", { recursive: true });
+    await symlink(outsideDir, "/tmp/slack-trigger-test/workspaces/channel-C_MATCH");
+    await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
+    const scheduler = new TaskScheduler(makeDeps(db) as never);
+    const enqueueTaskById = vi.spyOn(scheduler, "enqueueTaskById").mockResolvedValue(undefined);
+
+    await scheduler.dispatchSlackChannelMessage("C_MATCH", {
+      files: [{ name: "source.txt", localPath: sourcePath }],
+    });
+
+    const triggerData = enqueueTaskById.mock.calls[0]?.[1] as { files: Array<{ localPath?: string }> };
+    expect(triggerData.files[0]?.localPath).toBeUndefined();
+  });
+
+  it("accepts the trusted nested workspace for a bound-agent channel", async () => {
+    const sourceWorkspaceDir = "/tmp/slack-trigger-test/workspaces/agent-A/channel-C_MATCH";
+    const sourcePath = `${sourceWorkspaceDir}/attachments/source.txt`;
+    await mkdir(`${sourceWorkspaceDir}/attachments`, { recursive: true });
+    await writeFile(sourcePath, "bound-agent-bytes");
+    await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
+    const scheduler = new TaskScheduler(makeDeps(db) as never);
+    const enqueueTaskById = vi.spyOn(scheduler, "enqueueTaskById").mockResolvedValue(undefined);
+
+    await scheduler.dispatchSlackChannelMessage(
+      "C_MATCH",
+      { files: [{ name: "source.txt", localPath: sourcePath }] },
+      { sourceWorkspaceDir },
+    );
+
+    const triggerData = enqueueTaskById.mock.calls[0]?.[1] as { files: Array<{ localPath?: string }> };
+    await expect(readFile(triggerData.files[0]?.localPath ?? "", "utf8")).resolves.toBe("bound-agent-bytes");
+  });
+
+  it("rejects a symlinked automation trigger destination directory", async () => {
+    const sourceDir = "/tmp/slack-trigger-test/workspaces/channel-C_MATCH/attachments";
+    const sourcePath = `${sourceDir}/source.txt`;
+    const outsideDir = "/tmp/slack-trigger-test/outside-destination";
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir("/tmp/slack-trigger-test/workspaces/channel-C_OUT", { recursive: true });
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(sourcePath, "source-bytes");
+    await symlink(outsideDir, "/tmp/slack-trigger-test/workspaces/channel-C_OUT/automation-trigger-files");
+    await repo.add({ ...baseTask, steps: slackTrigger("C_MATCH") });
+    const scheduler = new TaskScheduler(makeDeps(db) as never);
+    const enqueueTaskById = vi.spyOn(scheduler, "enqueueTaskById").mockResolvedValue(undefined);
+
+    await scheduler.dispatchSlackChannelMessage("C_MATCH", {
+      files: [{ name: "source.txt", localPath: sourcePath }],
+    });
+
+    const triggerData = enqueueTaskById.mock.calls[0]?.[1] as { files: Array<{ localPath?: string }> };
+    expect(triggerData.files[0]?.localPath).toBeUndefined();
   });
 
   it("fails closed when the task creator is no longer a member of the Slack channel", async () => {

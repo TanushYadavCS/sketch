@@ -16,8 +16,8 @@ import type {
 } from "./telemetry";
 
 const MAX_GENERATION_ATTEMPTS = 2;
-const GENERATION_TIMEOUT_MS = 30_000;
-const MAX_OUTPUT_TOKENS = 4096;
+const GENERATION_TIMEOUT_MS = 60_000;
+const MAX_OUTPUT_TOKENS = 8192;
 
 export interface AutomationAuthoringProvider {
   provider: "openrouter";
@@ -135,8 +135,17 @@ function isTimeoutFailure(error: unknown): boolean {
   );
 }
 
+function isRetryableProviderFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "AbortError" || error.name === "AutomationAuthoringTimeoutError") return false;
+  const statusCode = (error as Error & { statusCode?: unknown }).statusCode;
+  if (typeof statusCode === "number") return statusCode === 408 || statusCode === 429 || statusCode >= 500;
+  if (error.name === "APICallError") return true;
+  return /(?:fetch|network|socket|connection|reset|temporarily unavailable)/i.test(error.message);
+}
+
 function authoringInstructions(operation: AutomationAuthoringOperation): string {
-  return `You design Sketch automations. Return a complete ${operation === "create" ? "new" : "replacement"} definition or one concise clarification question only when essential information is missing. Preserve every unspecified property and every stable step ID during edits. Never choose or emit an execution model or operational status. Keep the returned top-level schedule fields identical to the returned trigger step configuration. Every non-trigger step needs matching step content, and the graph must be connected and acyclic.`;
+  return `You design Sketch automations. Return a complete ${operation === "create" ? "new" : "replacement"} definition or one concise clarification question only when essential information is missing. Preserve every unspecified property and every stable step ID during edits. Never choose or emit an execution model or operational status. Keep the returned top-level schedule fields identical to the returned trigger step configuration. Every non-trigger step needs matching step content, and the graph must be connected and acyclic. For requests to run when a message is posted in a Slack channel, use the native Slack channel message trigger: set the trigger config type to "slack_channel_message", include the stable Slack channel ID in channelId, set scheduleType to "external" and scheduleValue to "slack_channel_message", and pass the message text and attachments through trigger data to the workflow. Trigger files can include a server-authenticated localPath inside the automation workspace. When an integration action needs those bytes, call ctx.integrations.executeAction with localFiles entries containing path and configuredProp; do not read or base64-encode the file in the script, put file bytes in CLI arguments, or fetch Slack urlPrivate without authentication. Do not implement this as polling or a scheduled Slack history check. Use the automation's native delivery configuration for the reply rather than adding a Slack send-message action solely for delivery.`;
 }
 
 function createPrompt(input: {
@@ -328,7 +337,11 @@ export function createAutomationAuthoringService(deps: {
           validationOutcome = "timeout";
           throw new AutomationAuthoringTimeoutError();
         }
-        if (!isValidationFailure(error)) throw error;
+        if (!isValidationFailure(error)) {
+          validationOutcome = "provider_error";
+          if (attempt < MAX_GENERATION_ATTEMPTS && isRetryableProviderFailure(error)) continue;
+          throw error;
+        }
         validationOutcome = "invalid";
         validationIssueCodes =
           error instanceof AutomationValidationError

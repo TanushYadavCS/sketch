@@ -7,6 +7,10 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { handleManageScheduledTasks } from "../agent/sketch-tools";
+import {
+  AutomationAuthoringGeneratedOutputError,
+  AutomationAuthoringValidationError,
+} from "../automation/authoring/service";
 import type { TaskScheduler } from "./service";
 import type { ScheduledTask } from "./types";
 import type { TaskContext } from "./types";
@@ -212,6 +216,24 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
       taskContext: dmContext,
     });
     expect(scheduler.updateTask).not.toHaveBeenCalled();
+  });
+
+  it("reports invalid generated output separately from provider unavailability", async () => {
+    const scheduler = makeMockScheduler();
+    const chatAuthoring = {
+      author: vi
+        .fn()
+        .mockRejectedValue(new AutomationAuthoringValidationError(new AutomationAuthoringGeneratedOutputError())),
+    };
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "task-1", request: "Rewrite the action script" },
+      { scheduler, stepContentRepo, taskContext: dmContext, chatAuthoring },
+    );
+
+    expect(result.content[0].text).toBe(
+      "Error: automation authoring could not produce a valid definition. No changes were saved.",
+    );
   });
 
   it("masks another owner's configured edit and does not emit a new-automation artifact", async () => {

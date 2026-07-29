@@ -857,6 +857,29 @@ describe("web chat API", () => {
     await expect(users.findById(admin.id)).resolves.toMatchObject({ tool_progress: "off" });
   });
 
+  it("passes the live Slack resolver into web chat agent runs", async () => {
+    await seedAdmin(db);
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult());
+    const getSlack = vi.fn(() => null);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      getSlack,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Find my Slack channels" }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ getSlack }));
+  });
+
   it("rejects invalid web chat progress settings", async () => {
     await seedAdmin(db);
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {

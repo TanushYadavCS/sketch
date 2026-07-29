@@ -939,7 +939,21 @@ describe("slack/adapter", () => {
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { channel } = getHandlers();
 
-      await channel({ text: "ambient update", userId: "S1", channelId: "C1", ts: "2", type: "channel_message" });
+      await channel({
+        text: "ambient update",
+        userId: "S1",
+        channelId: "C1",
+        ts: "2",
+        type: "channel_message",
+        files: [
+          {
+            name: "test.txt",
+            urlPrivate: "https://files.slack.com/files-pri/test.txt",
+            mimetype: "text/plain",
+            size: 100,
+          },
+        ],
+      });
 
       expect(dispatchSlackChannelMessage).toHaveBeenCalledWith(
         "C1",
@@ -949,10 +963,51 @@ describe("slack/adapter", () => {
           messageTs: "2",
           text: "ambient update",
           userId: "S1",
+          files: [
+            expect.objectContaining({
+              name: "test.txt",
+              localPath: "/tmp/test.txt",
+            }),
+          ],
           capturedMessageId: 1,
           conversationId: 1,
         }),
+        { sourceWorkspaceDir: "/tmp/test-data/workspaces/channel-C1" },
       );
+    });
+
+    it("keeps Slack file descriptors aligned when an earlier same-sized download fails", async () => {
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      vi.mocked(downloadSlackFile).mockRejectedValueOnce(new Error("download failed")).mockResolvedValueOnce({
+        originalName: "second.txt",
+        mimeType: "text/plain; charset=utf-8",
+        localPath: "/tmp/second.txt",
+        sizeBytes: 100,
+      });
+      const { channel } = getHandlers();
+
+      await channel({
+        text: "two files",
+        userId: "S1",
+        channelId: "C1",
+        ts: "2",
+        type: "channel_message",
+        files: [
+          { name: "first.txt", urlPrivate: "https://files.slack.com/first.txt", mimetype: "text/plain", size: 100 },
+          { name: "second.txt", urlPrivate: "https://files.slack.com/second.txt", mimetype: "text/plain", size: 100 },
+        ],
+      });
+
+      const triggerData = dispatchSlackChannelMessage.mock.calls[0]?.[1] as {
+        files: Array<{ name: string; localPath?: string }>;
+      };
+      expect(triggerData.files).toEqual([
+        expect.objectContaining({ name: "first.txt" }),
+        expect.objectContaining({ name: "second.txt", localPath: "/tmp/second.txt" }),
+      ]);
+      expect(triggerData.files[0]?.localPath).toBeUndefined();
     });
 
     it("does not dispatch a duplicate passive message", async () => {
