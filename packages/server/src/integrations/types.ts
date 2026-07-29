@@ -56,7 +56,7 @@ export interface IntegrationProvider {
    * or null for HTTP-only providers (no CLI surface).
    */
   getBrokerSpec(params: { userEmail: string | null; claudeConfigDir: string }): BrokerSpec | null;
-  executeAction?(request: IntegrationActionRequest): Promise<unknown>;
+  executeAction?(request: IntegrationActionRequest, signal?: AbortSignal): Promise<unknown>;
 }
 
 /**

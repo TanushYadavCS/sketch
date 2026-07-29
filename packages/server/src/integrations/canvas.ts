@@ -143,8 +143,10 @@ export class CanvasProvider implements IntegrationProvider {
     return true;
   }
 
-  async executeAction(request: IntegrationActionRequest): Promise<unknown> {
+  async executeAction(request: IntegrationActionRequest, signal?: AbortSignal): Promise<unknown> {
     const url = new URL("/api/direct-executions/action", this.apiUrl);
+    const requestSignal = AbortSignal.timeout(ACTION_REQUEST_TIMEOUT_MS);
+    const combinedSignal = signal ? AbortSignal.any([signal, requestSignal]) : requestSignal;
     const res = await fetch(url, {
       method: "POST",
       headers: this.headers(request.userEmail),
@@ -152,7 +154,7 @@ export class CanvasProvider implements IntegrationProvider {
         componentKey: request.componentKey,
         configuredProps: request.configuredProps,
       }),
-      signal: AbortSignal.timeout(ACTION_REQUEST_TIMEOUT_MS),
+      signal: combinedSignal,
     });
     if (!res.ok) throw await this.parseError(res, `Canvas action execution failed: ${res.status} ${res.statusText}`);
     const body = (await res.json()) as { success?: boolean; data?: unknown; message?: string; error?: string };

@@ -606,6 +606,22 @@ function buildTriggerSamplePayload(task: ScheduledTaskRow, step: WorkflowStep): 
       receivedAt: new Date().toISOString(),
     };
   }
+  if (config?.type === "slack_channel_message") {
+    return {
+      type: "slack_channel_message",
+      taskId: task.id,
+      channelId: config.channelId ?? null,
+      messageTs: "1710000000.000000",
+      text: "Example Slack channel message",
+      userId: "U123456",
+      botId: null,
+      appId: null,
+      subtype: null,
+      files: [],
+      capturedMessageId: null,
+      conversationId: config.channelId ?? null,
+    };
+  }
   return { type: "webhook", taskId: task.id, receivedAt: new Date().toISOString() };
 }
 
@@ -682,7 +698,7 @@ export interface ScriptContext {
   env: Readonly<Record<string, string>>;
   workspaceDir: string;
   integrations: {
-    executeAction(request: ScriptIntegrationActionRequest): Promise<unknown>;
+    executeAction(request: ScriptIntegrationActionRequest, signal?: AbortSignal): Promise<unknown>;
   };
 }
 
@@ -728,6 +744,17 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
       integrationEnv: integrationAccess.envVars,
     });
 
+    const timeoutMs = (step.timeout ?? 1800) * 1000;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener(
+        "abort",
+        () => reject(new Error(`Action step ${step.id} timed out after ${timeoutMs}ms`)),
+        { once: true },
+      );
+    });
+
     const ctx = buildScriptContext({
       taskId: params.taskId,
       runId,
@@ -744,23 +771,13 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
           workspaceDir,
           trustedLocalFileRoot: params.trustedLocalFileRoot,
         });
-        return integrationProvider.executeAction({
+        const actionRequest = {
           userEmail: creatorEmail,
           componentKey: request.componentKey,
           configuredProps,
-        });
+        };
+        return integrationProvider.executeAction(actionRequest, controller.signal);
       },
-    });
-
-    const timeoutMs = (step.timeout ?? 1800) * 1000;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      controller.signal.addEventListener(
-        "abort",
-        () => reject(new Error(`Action step ${step.id} timed out after ${timeoutMs}ms`)),
-        { once: true },
-      );
     });
 
     try {
@@ -850,7 +867,7 @@ function buildScriptContext(params: {
   logger: Logger;
   env: Readonly<Record<string, string>>;
   workspaceDir: string;
-  executeIntegrationAction: (request: ScriptIntegrationActionRequest) => Promise<unknown>;
+  executeIntegrationAction: (request: ScriptIntegrationActionRequest, signal?: AbortSignal) => Promise<unknown>;
 }): ScriptContext {
   const log =
     params.logger.child?.({ taskId: params.taskId, runId: params.runId, stepId: params.stepId }) ?? params.logger;

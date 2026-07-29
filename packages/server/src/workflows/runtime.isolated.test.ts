@@ -470,6 +470,41 @@ describe("executeAutomation agent steps", () => {
 });
 
 describe("testAutomationStep", () => {
+  it("builds a representative Slack channel-message payload for trigger step tests", async () => {
+    const params = makeParams({
+      task: makeTask({
+        steps: JSON.stringify([
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Slack message",
+            icon: "slack",
+            position: { x: 0, y: 0 },
+            triggerConfig: { type: "slack_channel_message", channelId: "C123" },
+          },
+        ]),
+      }),
+    });
+
+    const result = await testAutomationStep({ ...params, stepId: "trigger" } as never);
+
+    expect(result.status).toBe("completed");
+    expect(result.finalOutput).toEqual({
+      type: "slack_channel_message",
+      taskId: "task-1",
+      channelId: "C123",
+      messageTs: "1710000000.000000",
+      text: "Example Slack channel message",
+      userId: "U123456",
+      botId: null,
+      appId: null,
+      subtype: null,
+      files: [],
+      capturedMessageId: null,
+      conversationId: "C123",
+    });
+  });
+
   it("uses the latest completed upstream output instead of the current step-test run", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],
@@ -667,14 +702,17 @@ describe("executeAutomation action steps", () => {
     const result = await executeAutomation(params as never);
 
     expect(result.status).toBe("completed");
-    expect(executeAction).toHaveBeenCalledWith({
-      userEmail: "roopak@canvasx.ai",
-      componentKey: "clickup-create-task-with-attachment",
-      configuredProps: {
-        name: "Bug report",
-        file_content_base64: Buffer.from("jpeg-bytes").toString("base64"),
+    expect(executeAction).toHaveBeenCalledWith(
+      {
+        userEmail: "roopak@canvasx.ai",
+        componentKey: "clickup-create-task-with-attachment",
+        configuredProps: {
+          name: "Bug report",
+          file_content_base64: Buffer.from("jpeg-bytes").toString("base64"),
+        },
       },
-    });
+      expect.any(AbortSignal),
+    );
   });
 
   it("rejects integration action files outside the automation workspace", async () => {

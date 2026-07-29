@@ -376,6 +376,30 @@ describe("CanvasProvider", () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("propagates caller cancellation to Canvas action requests", async () => {
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new CanvasProvider("https://canvas.example.com", "sk-test", "provider-1");
+    const controller = new AbortController();
+    const request = provider.executeAction(
+      {
+        userEmail: "priya@example.com",
+        componentKey: "clickup-create-task",
+        configuredProps: {},
+      },
+      controller.signal,
+    );
+
+    controller.abort();
+
+    await expect(request).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("mints Sketch connector credentials with user and role headers", async () => {
     const envelope = {
       version: 1,
