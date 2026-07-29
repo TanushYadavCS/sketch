@@ -161,7 +161,9 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
       template.language,
     );
     if (!mapping) {
-      throw new Error(`No approved WhatsApp template mapping configured for ${template.key}`);
+      throw Object.assign(new Error(`No approved WhatsApp template mapping configured for ${template.key}`), {
+        providerCode: "template_not_found",
+      });
     }
 
     const phone = targetPhoneDigits(target);

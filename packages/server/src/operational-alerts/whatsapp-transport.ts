@@ -5,6 +5,7 @@ import { buildProactiveUpdateTemplate } from "../whatsapp/templates";
 import { type OperationalAlertChannelTransport, OperationalAlertRetryableError } from "./types";
 
 const TEMPLATE_FALLBACK_PROVIDER_CODES = new Set(["contact_not_found", "window_expired"]);
+const TEMPLATE_MAPPING_MISSING_PROVIDER_CODE = "template_not_found";
 
 function providerCodeFromError(error: unknown): string | null {
   if (!error || typeof error !== "object") return null;
@@ -56,6 +57,20 @@ export function createWhatsAppOperationalAlertTransport(params: {
         }
       }
 
+      /**
+       * A purpose-built alert template needs an ops-provisioned mapping row that
+       * may not exist yet on an upgraded tenant. Falling back to the generic
+       * proactive-update template keeps the alert deliverable instead of letting
+       * the delivery retry to death on a configuration gap.
+       */
+      if (input.template) {
+        try {
+          const sent = requireSent(await params.whatsapp.sendTemplate(target, input.template));
+          return { providerMessageId: sent.providerMessageId };
+        } catch (error) {
+          if (providerCodeFromError(error) !== TEMPLATE_MAPPING_MISSING_PROVIDER_CODE) throw error;
+        }
+      }
       const sent = requireSent(
         await params.whatsapp.sendTemplate(
           target,

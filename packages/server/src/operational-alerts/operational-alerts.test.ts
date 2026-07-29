@@ -1,11 +1,11 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createOperationalAlertsRepository } from "../db/repositories/operational-alerts";
+import { type OperationalAlertRow, createOperationalAlertsRepository } from "../db/repositories/operational-alerts";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { createOperationalAlertDefinitions } from "./definitions";
+import { channelsReconnectUrl, createOperationalAlertDefinitions } from "./definitions";
 import { BAILEYS_DISCONNECT_GRACE_MS, createOperationalAlertService } from "./service";
 import { BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY, OperationalAlertRetryableError } from "./types";
 import { OperationalAlertWorker } from "./worker";
@@ -77,7 +77,11 @@ describe("operational alerts", () => {
       alerts,
       users,
       settings,
-      definitions: createOperationalAlertDefinitions({ isBaileysGatewayDisconnected: () => true }),
+      definitions: createOperationalAlertDefinitions({
+        isBaileysGatewayDisconnected: () => true,
+        getConnectedWhatsAppNumber: () => "+91 9980470200",
+        reconnectUrl: "https://goosebumps.getsketch.ai/channels",
+      }),
       transports: { whatsapp: { send } },
       logger: createTestLogger(),
       now: () => now,
@@ -91,7 +95,16 @@ describe("operational alerts", () => {
       expect.objectContaining({
         recipient: expect.objectContaining({ id: "admin-1", destination: "+919876543210" }),
         orgName: "Goosebumps",
-        directMessage: expect.stringContaining("status code 413"),
+        directMessage:
+          "Hi Admin One, your WhatsApp connection for +91 9980470200 needs a quick reconnect. Please rescan the QR code on https://goosebumps.getsketch.ai/channels to restore the group updates.",
+        template: expect.objectContaining({
+          key: "whatsapp.reconnect_notification",
+          params: {
+            recipientName: "Admin One",
+            phoneNumber: "+91 9980470200",
+            reconnectUrl: "https://goosebumps.getsketch.ai/channels",
+          },
+        }),
       }),
     );
     const opened = await alerts.findActive(BAILEYS_DISCONNECTED_ALERT_TYPE, BAILEYS_GATEWAY_RESOURCE_KEY);
@@ -320,9 +333,10 @@ describe("operational alerts", () => {
     await worker.drain();
     await worker.stop();
 
-    expect(transport.send).toHaveBeenLastCalledWith(
-      expect.objectContaining({ directMessage: expect.stringContaining(`recovered at ${now.toISOString()}`) }),
-    );
+    const recoverySend = transport.send.mock.calls.at(-1)?.[0] as { directMessage: string; template?: unknown };
+    expect(recoverySend.directMessage).toContain("is now reconnected");
+    expect(recoverySend.directMessage).not.toContain(now.toISOString());
+    expect(recoverySend.template).toBeUndefined();
     await expect(alerts.listDeliveries(active?.id ?? "missing")).resolves.toEqual([
       expect.objectContaining({ state: "sent", attempts: 0, provider_message_id: "recovery-message" }),
     ]);
@@ -349,5 +363,63 @@ describe("operational alerts", () => {
       expect.objectContaining({ socketState: "disconnected", statusCode: 413 }),
       "Operational alert observation failed",
     );
+  });
+});
+
+describe("baileys disconnect alert copy", () => {
+  const context = { orgName: "Goosebumps", botName: "Sketch", recipientName: "Ashish" };
+  const alertRow = {
+    payload: JSON.stringify({
+      version: 1,
+      socketState: "disconnected",
+      occurredAt: "2026-07-29T06:55:47.436Z",
+      statusCode: 428,
+      reason: "inprocess_disconnected",
+    }),
+    resolved_at: null,
+  } as OperationalAlertRow;
+
+  it("falls back to the org name and a described location when the number and URL are unavailable", async () => {
+    const definitions = createOperationalAlertDefinitions({
+      isBaileysGatewayDisconnected: () => true,
+      getConnectedWhatsAppNumber: () => {
+        throw new Error("gateway down");
+      },
+    });
+    const definition = definitions.get(BAILEYS_DISCONNECTED_ALERT_TYPE);
+    const rendered = await definition?.render(alertRow, context);
+
+    expect(rendered?.directMessage).toBe(
+      "Hi Ashish, your WhatsApp connection for Goosebumps needs a quick reconnect. Please rescan the QR code on Settings > Channels in your Sketch dashboard to restore the group updates.",
+    );
+    expect(rendered?.template?.params).toMatchObject({ phoneNumber: "Goosebumps" });
+  });
+
+  it("never leaks technical jargon into the delivered copy", async () => {
+    const definitions = createOperationalAlertDefinitions({
+      isBaileysGatewayDisconnected: () => true,
+      getConnectedWhatsAppNumber: () => "+91 9980470200",
+      reconnectUrl: "https://goosebumps.getsketch.ai/channels",
+    });
+    const definition = definitions.get(BAILEYS_DISCONNECTED_ALERT_TYPE);
+    const rendered = await definition?.render(alertRow, context);
+
+    for (const text of [rendered?.directMessage ?? "", rendered?.templateSummary ?? ""]) {
+      expect(text).not.toMatch(/baileys|status code|428|inprocess_disconnected|\d{4}-\d{2}-\d{2}T/i);
+    }
+  });
+});
+
+describe("channelsReconnectUrl", () => {
+  it("builds the channels page URL from a configured base URL", () => {
+    expect(channelsReconnectUrl("https://goosebumps.getsketch.ai")).toBe("https://goosebumps.getsketch.ai/channels");
+    expect(channelsReconnectUrl("https://goosebumps.getsketch.ai/")).toBe("https://goosebumps.getsketch.ai/channels");
+  });
+
+  it("returns null for missing or malformed base URLs", () => {
+    expect(channelsReconnectUrl(undefined)).toBeNull();
+    expect(channelsReconnectUrl("")).toBeNull();
+    expect(channelsReconnectUrl("not a url")).toBeNull();
+    expect(channelsReconnectUrl("ftp://example.com")).toBeNull();
   });
 });

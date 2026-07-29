@@ -59,7 +59,7 @@ import { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import { LocalDeviceGateway } from "./local-devices/gateway";
 import { createLogger } from "./logger";
 import { runManagedSeed } from "./managed-seed";
-import { createOperationalAlertDefinitions } from "./operational-alerts/definitions";
+import { channelsReconnectUrl, createOperationalAlertDefinitions } from "./operational-alerts/definitions";
 import { createOperationalAlertService } from "./operational-alerts/service";
 import { createWhatsAppOperationalAlertTransport } from "./operational-alerts/whatsapp-transport";
 import { OperationalAlertWorker } from "./operational-alerts/worker";
@@ -472,6 +472,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
               whatsappSupervisor
                 ? whatsappSupervisor.requiresPairing || !whatsappSupervisor.isConnected
                 : Boolean(whatsappBot && !whatsappBot.isConnected),
+            getConnectedWhatsAppNumber: async () => (await whatsapp.pairing.status()).phoneNumber ?? null,
+            reconnectUrl: channelsReconnectUrl(config.BASE_URL),
           }),
           transports: {
             whatsapp: createWhatsAppOperationalAlertTransport({

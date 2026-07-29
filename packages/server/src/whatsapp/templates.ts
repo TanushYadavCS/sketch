@@ -3,6 +3,7 @@ export const WHATSAPP_TEMPLATE_KEYS = {
   taskNudge: "whatsapp.task_nudge",
   magicLink: "whatsapp.magic_link",
   introduction: "whatsapp.introduction",
+  reconnectNotification: "whatsapp.reconnect_notification",
 } as const;
 
 export type WhatsAppTemplateKey = (typeof WHATSAPP_TEMPLATE_KEYS)[keyof typeof WHATSAPP_TEMPLATE_KEYS] | string;
@@ -31,6 +32,31 @@ export function buildProactiveUpdateTemplate(params: {
       messageSummary: params.messageSummary,
     },
     fallbackText: params.fallbackText ?? params.messageSummary,
+    language: params.language,
+  };
+}
+
+/**
+ * Matches the Meta-approved `whatsapp_reconnect_notification` provider template:
+ * "Hi {{1}}, your WhatsApp connection for {{2}} needs a quick reconnect. Please rescan
+ * the QR code on {{3}} to restore the group updates." Provider mappings bind the
+ * numbered placeholders to the logical params recipientName, phoneNumber, reconnectUrl.
+ */
+export function buildReconnectNotificationTemplate(params: {
+  recipientName?: string | null;
+  phoneNumber: string;
+  reconnectUrl: string;
+  fallbackText: string;
+  language?: string;
+}): WhatsAppTemplateRequest {
+  return {
+    key: WHATSAPP_TEMPLATE_KEYS.reconnectNotification,
+    params: {
+      recipientName: params.recipientName ?? "there",
+      phoneNumber: params.phoneNumber,
+      reconnectUrl: params.reconnectUrl,
+    },
+    fallbackText: params.fallbackText,
     language: params.language,
   };
 }
