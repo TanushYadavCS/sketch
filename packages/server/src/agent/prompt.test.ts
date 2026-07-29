@@ -196,6 +196,8 @@ describe("buildSystemContext", () => {
       expect(result).toContain("Never use updateStepContent");
       expect(result).toContain("list, pause, resume, run, delete, and inspect run history");
       expect(result).toContain("include the resolved target ID and label in the natural-language");
+      expect(result).toContain("call SearchDeliveryTargets with platform='slack' and targetType='channel' first");
+      expect(result).toContain("never invent a channel ID");
     });
 
     it("preserves legacy structured authoring guidance when authoring is not configured", () => {

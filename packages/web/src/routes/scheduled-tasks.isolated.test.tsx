@@ -129,6 +129,27 @@ describe("ScheduledTasksPage", () => {
     expect(screen.getByText("Mondays at 9:00 AM")).toBeInTheDocument();
   });
 
+  it("renders a Slack channel message trigger and channel in the automation list", async () => {
+    installTaskHandlers([
+      buildTask({
+        scheduleType: "external",
+        scheduleValue: "slack_channel_message",
+        scheduleLabel: "Slack channel message - C123",
+        triggerConfig: { type: "slack_channel_message", channelId: "C123" },
+      }),
+    ]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    expect(await screen.findByText("Trigger · Slack channel message · C123")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Show details for Post the Monday revenue summary/i }));
+    expect(await screen.findByText("Trigger-based")).toBeInTheDocument();
+    expect(screen.getByText("Slack channel message · C123")).toBeInTheDocument();
+    expect(screen.queryByText("Timezone")).not.toBeInTheDocument();
+    expect(screen.queryByText("Next run")).not.toBeInTheDocument();
+  });
+
   it("shows the empty state when there are no tasks", async () => {
     installTaskHandlers([]);
 

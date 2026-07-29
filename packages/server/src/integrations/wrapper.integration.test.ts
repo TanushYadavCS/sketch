@@ -233,20 +233,33 @@ describe("CanvasProvider.getBrokerSpec", () => {
     expect(spec.launcherEnvName).toBe("CANVAS_CLI");
     expect(spec.credentialEnv).toEqual({
       CANVAS_API_KEY_MCP: "key-1",
+      CANVAS_MCP_URL: "https://canvas.example.com/mcp",
       CANVAS_USER_EMAIL: "u@example.com",
     });
+  });
+
+  it("does not duplicate an MCP path already present in the API URL", () => {
+    const provider = new CanvasProvider("https://canvas.example.com/mcp", "key-1", "p1");
+    const spec = provider.getBrokerSpec({ userEmail: null, claudeConfigDir: "/etc/claude" });
+    expect(spec.credentialEnv.CANVAS_MCP_URL).toBe("https://canvas.example.com/mcp");
   });
 
   it("omits CANVAS_USER_EMAIL when userEmail is null", () => {
     const provider = new CanvasProvider("https://canvas.example.com", "key-1", "p1");
     const spec = provider.getBrokerSpec({ userEmail: null, claudeConfigDir: "/etc/claude" });
-    expect(spec.credentialEnv).toEqual({ CANVAS_API_KEY_MCP: "key-1" });
+    expect(spec.credentialEnv).toEqual({
+      CANVAS_API_KEY_MCP: "key-1",
+      CANVAS_MCP_URL: "https://canvas.example.com/mcp",
+    });
   });
 
   it("omits CANVAS_API_KEY_MCP when apiKey is empty", () => {
     const provider = new CanvasProvider("https://canvas.example.com", "", "p1");
     const spec = provider.getBrokerSpec({ userEmail: "u@example.com", claudeConfigDir: "/etc/claude" });
-    expect(spec.credentialEnv).toEqual({ CANVAS_USER_EMAIL: "u@example.com" });
+    expect(spec.credentialEnv).toEqual({
+      CANVAS_MCP_URL: "https://canvas.example.com/mcp",
+      CANVAS_USER_EMAIL: "u@example.com",
+    });
   });
 });
 

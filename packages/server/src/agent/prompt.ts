@@ -391,6 +391,7 @@ export function buildSystemContext(params: {
   if (params.automationAuthoringEnabled) {
     sections.push(
       "When creating or semantically editing an automation, pass the user's requested change as a natural-language request to ManageScheduledTasks. For edits, include the task ID.",
+      "When the user names a Slack channel as the source for a native Slack channel-message trigger, call SearchDeliveryTargets with platform='slack' and targetType='channel' first. Pass the matched channel's targetId and label in the natural-language authoring request; never invent a channel ID. If there is no unique match, ask the user to clarify.",
       "Do not construct or pass automation definition fields such as schedules, timezones, delivery, titles, descriptions, steps, edges, prompts, scripts, apps, modes, skills, MCP servers, or models. The automation authoring model owns the complete definition.",
       "Never use updateStepContent. Prompt, script, app, mode, skill, MCP, schedule, delivery, and structural changes must use a full ManageScheduledTasks update with the user's natural-language request.",
       "Operational actions remain deterministic: use ManageScheduledTasks directly to list, pause, resume, run, delete, and inspect run history without an authoring request.",

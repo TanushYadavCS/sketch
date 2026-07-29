@@ -46,16 +46,13 @@ import {
 import type { QueueManager } from "../queue";
 import type { TaskScheduler } from "../scheduler/service";
 import type { ScheduledTask } from "../scheduler/types";
+import type { SlackBot } from "../slack/bot";
 import { transcribeAudioFile } from "../transcription/service";
 import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 
 type UserRepo = ReturnType<typeof createUserRepository>;
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepo = ReturnType<typeof createInboxMessagesRepository>;
-type SlackDmResolver = {
-  openDmChannel(slackUserId: string, botToken?: string): Promise<string | null>;
-};
-
 interface WebChatRouteDeps {
   db: Kysely<DB>;
   config: Config;
@@ -70,7 +67,7 @@ interface WebChatRouteDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   queueManager?: QueueManager;
-  getSlack?: () => SlackDmResolver | null;
+  getSlack?: () => SlackBot | null;
   sendDm?: (params: {
     userId: string;
     platform: string;
@@ -1679,6 +1676,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               userEmail: currentUser.email,
               userPhone: currentUser.whatsapp_number,
               logger: deps.logger,
+              getSlack: deps.getSlack,
               platform: deliveryPlatform,
               responseSurface: "web",
               contextType: "dm",

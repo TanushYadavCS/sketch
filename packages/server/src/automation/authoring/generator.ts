@@ -1,4 +1,4 @@
-import { NoObjectGeneratedError, Output, generateText } from "ai";
+import { NoObjectGeneratedError, NoOutputGeneratedError, Output, generateText } from "ai";
 import { z } from "zod";
 import { extractRuntimeModelUsage } from "../../agent/runtime/usage";
 import { automationAuthoringOutputSchema } from "./schema";
@@ -57,12 +57,14 @@ export function createAiSdkAutomationAuthoringGenerator(
   deps: {
     generateText?: GenerateTextLike;
     isNoObjectGeneratedError?: (error: unknown) => boolean;
+    isNoOutputGeneratedError?: (error: unknown) => boolean;
   } = {},
 ): StructuredAutomationAuthoringGenerator {
   const runGenerateText: GenerateTextLike =
     deps.generateText ??
     ((input) => generateText(input as Parameters<typeof generateText>[0]) as Promise<GenerateTextResultLike>);
   const isNoObjectGeneratedError = deps.isNoObjectGeneratedError ?? NoObjectGeneratedError.isInstance;
+  const isNoOutputGeneratedError = deps.isNoOutputGeneratedError ?? NoOutputGeneratedError.isInstance;
 
   return {
     async generate(params) {
@@ -102,7 +104,7 @@ ${JSON.stringify(z.toJSONSchema(automationAuthoringOutputSchema))}`,
           throw new AutomationAuthoringGeneratedOutputError(undefined, generation);
         }
       } catch (error) {
-        if (!isNoObjectGeneratedError(error)) throw error;
+        if (!isNoObjectGeneratedError(error) && !isNoOutputGeneratedError(error)) throw error;
         const structuredError = error as NoObjectGeneratedLike;
         throw new AutomationAuthoringGeneratedOutputError(
           undefined,

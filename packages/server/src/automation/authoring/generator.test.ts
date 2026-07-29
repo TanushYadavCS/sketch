@@ -85,6 +85,19 @@ describe("AI SDK automation authoring generator", () => {
     });
   });
 
+  it("classifies missing structured output as a validation failure", async () => {
+    const generateText = vi.fn().mockRejectedValue({ name: "AI_NoOutputGeneratedError" });
+    const generator = createAiSdkAutomationAuthoringGenerator({
+      generateText,
+      isNoOutputGeneratedError: (error) =>
+        Boolean(
+          error && typeof error === "object" && (error as { name?: string }).name === "AI_NoOutputGeneratedError",
+        ),
+    });
+
+    await expect(generator.generate(request())).rejects.toBeInstanceOf(AutomationAuthoringGeneratedOutputError);
+  });
+
   it("classifies structured-output parse failures as validation failures with usage but no response text", async () => {
     const generateText = vi.fn().mockRejectedValue({
       name: "AI_NoObjectGeneratedError",

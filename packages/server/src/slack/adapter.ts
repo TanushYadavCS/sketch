@@ -165,6 +165,10 @@ export async function validateSlackTokens(botToken: string, appToken?: string) {
   await slackApiCall(botToken, "auth.test");
 }
 
+interface DownloadedSlackAttachment extends Attachment {
+  slackFileIndex: number;
+}
+
 async function downloadSlackFiles(
   files: SlackFile[],
   botToken: string | null | undefined,
@@ -172,20 +176,29 @@ async function downloadSlackFiles(
   maxBytes: number,
   logger: Logger,
   failureLogMessage = "Failed to download file",
-): Promise<Attachment[]> {
-  const attachments: Attachment[] = [];
-  for (const file of files) {
+): Promise<DownloadedSlackAttachment[]> {
+  const attachments: DownloadedSlackAttachment[] = [];
+  for (const [slackFileIndex, file] of files.entries()) {
     try {
       if (!botToken) {
         throw new Error("Slack bot token not configured");
       }
       const downloaded = await downloadSlackFile(file.urlPrivate, botToken, attachDir, maxBytes, logger);
-      attachments.push(downloaded);
+      attachments.push({ ...downloaded, slackFileIndex });
     } catch (err) {
       logger.warn({ err, fileName: file.name }, failureLogMessage);
     }
   }
   return attachments;
+}
+
+function filesForAutomationTrigger(files: SlackFile[] | undefined, attachments: Attachment[]) {
+  return (files ?? []).map((file, slackFileIndex) => {
+    const attachment = attachments.find(
+      (candidate) => (candidate as Partial<DownloadedSlackAttachment>).slackFileIndex === slackFileIndex,
+    );
+    return attachment ? { ...file, localPath: attachment.localPath } : file;
+  });
 }
 
 async function downloadMessageAttachments(params: {
@@ -347,10 +360,13 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     await slackBot.publishHomeView(slackUserId, view);
   };
 
-  const resolvePassiveSender = async (slackUserId: string) => {
+  const resolvePassiveSender = async (message: Parameters<SlackMessageHandler>[0]) => {
+    if (!message.userId) {
+      return { senderName: "Slack bot", senderUserId: null };
+    }
     const [user, userInfo] = await Promise.all([
-      repos.users.findBySlackId(slackUserId),
-      slackDeps.userCache.resolve(slackUserId, (id) => slackBot.getUserInfo(id)),
+      repos.users.findBySlackId(message.userId),
+      slackDeps.userCache.resolve(message.userId, (id) => slackBot.getUserInfo(id)),
     ]);
     return {
       senderName: user?.name ?? userInfo.realName,
@@ -433,7 +449,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     const captured = await repos.conversations.insertMessage({
       conversationId: conversation.id,
       providerMessageId: message.ts,
-      senderJid: message.userId,
+      senderJid: message.userId ?? message.botId ?? "unknown",
       senderName: params.senderName,
       senderUserId: params.senderUserId ?? null,
       addressedToSketch: params.addressedToSketch,
@@ -503,6 +519,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
   // DM handler
   slackBot.onMessage(async (message) => {
+    if (!message.userId) return;
     const replyToUser = (text: string): Promise<unknown> =>
       message.threadTs
         ? slackBot.postThreadReply(message.channelId, message.threadTs, text)
@@ -799,8 +816,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         maxBytes: maxFileBytes,
         logger,
       });
-      const sender = await resolvePassiveSender(message.userId);
-      await captureSlackMessage({
+      const sender = await resolvePassiveSender(message);
+      const capture = await captureSlackMessage({
         message,
         senderName: sender.senderName,
         senderUserId: sender.senderUserId,
@@ -808,6 +825,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         attachments,
         displayName: channel.name,
       });
+      let followupReviewHandled = false;
       if (sender.senderUserId) {
         const followupReview = await handleFollowupReviewCommand({
           text: message.text,
@@ -815,8 +833,28 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           surface: "slack",
         });
         if (followupReview.handled) {
+          followupReviewHandled = true;
           await slackBot.postThreadReply(message.channelId, message.ts, followupReview.message);
         }
+      }
+      if (capture.inserted && !followupReviewHandled && message.channelType !== "mpim" && scheduler) {
+        await scheduler.dispatchSlackChannelMessage(
+          message.channelId,
+          {
+            type: "slack_channel_message",
+            channelId: message.channelId,
+            messageTs: message.ts,
+            text: message.text,
+            userId: message.userId ?? null,
+            botId: message.botId ?? null,
+            appId: message.appId ?? null,
+            subtype: message.subtype ?? null,
+            files: filesForAutomationTrigger(message.files, attachments),
+            capturedMessageId: capture.captured?.id ?? null,
+            conversationId: capture.conversation.id,
+          },
+          { sourceWorkspaceDir: workspaceDir },
+        );
       }
     } catch (err) {
       logger.warn({ err, channelId: message.channelId }, "Failed to capture passive Slack channel message");
@@ -837,7 +875,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         maxBytes: maxFileBytes,
         logger,
       });
-      const sender = await resolvePassiveSender(message.userId);
+      const sender = await resolvePassiveSender(message);
       await captureSlackMessage({
         message,
         senderName: sender.senderName,
@@ -872,6 +910,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
   // Channel mention handler
   slackBot.onChannelMention(async (message) => {
+    const userId = message.userId;
+    if (!userId) return;
     const threadTs = message.threadTs ?? message.ts;
     const activeQueueKey = `${message.channelId}:${threadTs}`;
     const mentionQueue = queue.getQueue(activeQueueKey);
@@ -883,7 +923,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       let clearAssistantStatus: (() => Promise<void>) | null = null;
 
       try {
-        user = await resolveUser(message.userId);
+        user = await resolveUser(userId);
 
         let channel = await ensureChannelRow(message.channelId);
 
@@ -1005,6 +1045,25 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           displayName: channel.name,
         });
         if (!capture.captured) return;
+        if (capture.inserted && !message.threadTs && channel.type !== "mpim" && scheduler) {
+          await scheduler.dispatchSlackChannelMessage(
+            message.channelId,
+            {
+              type: "slack_channel_message",
+              channelId: message.channelId,
+              messageTs: message.ts,
+              text: message.text,
+              userId: message.userId ?? null,
+              botId: message.botId ?? null,
+              appId: message.appId ?? null,
+              subtype: message.subtype ?? null,
+              files: filesForAutomationTrigger(message.files, attachments),
+              capturedMessageId: capture.captured.id,
+              conversationId: capture.conversation.id,
+            },
+            { sourceWorkspaceDir: workspaceDir },
+          );
+        }
 
         const cursor = await repos.conversations.getCursor({
           conversationId: capture.conversation.id,

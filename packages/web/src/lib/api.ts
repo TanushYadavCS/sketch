@@ -153,7 +153,8 @@ export interface ScheduledTaskOriginChatMessage {
 }
 
 export interface WorkflowTriggerConfig {
-  type: "webhook" | "schedule" | "canvas";
+  type: "webhook" | "schedule" | "canvas" | "slack_channel_message";
+  channelId?: string;
   scheduleType?: "cron" | "interval" | "once";
   scheduleValue?: string;
   timezone?: string;
