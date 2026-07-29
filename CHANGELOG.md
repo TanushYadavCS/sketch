@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.2] -- 2026-07-29
+
+- Replaces raw technical WhatsApp disconnect alerts with plain-language messages and a direct reconnect link, using the Meta-approved WATI template when outside the service window.
+
 ## [1.2.1] -- 2026-07-28
 
 Adds a managed Slack connection path from the Channels page, letting admins connect the managed Slack app via platform OAuth if skipped during onboarding, with result feedback and preserved return path.
