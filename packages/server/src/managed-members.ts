@@ -3,6 +3,23 @@ import type { Config } from "./config";
 
 const MANAGED_MEMBER_REQUEST_TIMEOUT_MS = 30_000;
 
+let managedMemberSyncTail = Promise.resolve();
+
+export async function withManagedMemberSyncLock<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = managedMemberSyncTail;
+  let release = () => {};
+  managedMemberSyncTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
 export interface ManagedMemberRegistrationInput {
   tenantUserId: string;
   email: string;
@@ -160,53 +177,66 @@ export async function removeManagedTenantMember(
 
 export async function reconcileManagedTenantMembers(
   config: Config,
-  users: Array<{
-    id: string;
-    type: string;
-    email: string | null;
-    whatsapp_number: string | null;
-    name: string;
-  }>,
+  users:
+    | Array<{
+        id: string;
+        type: string;
+        email: string | null;
+        whatsapp_number: string | null;
+        name: string;
+      }>
+    | (() => Promise<
+        Array<{
+          id: string;
+          type: string;
+          email: string | null;
+          whatsapp_number: string | null;
+          name: string;
+        }>
+      >),
   logger: Logger,
 ): Promise<ManagedMemberReconciliationResult> {
   if (!(managedPlatformUrl(config) && config.MANAGED_WHATSAPP_TENANT_TOKEN)) {
     return { skipped: true, total: 0, synced: 0, conflictUserIds: [], failedUserIds: [] };
   }
 
-  const humanUsers = users.flatMap((user) =>
-    user.type === "human" && user.email && user.whatsapp_number
-      ? [{ ...user, email: user.email, whatsappNumber: user.whatsapp_number }]
-      : [],
-  );
-  const desiredStatus = config.WHATSAPP_DM_PROVIDER === "managed" ? "active" : "inactive";
-  const conflictUserIds: string[] = [];
-  const failedUserIds: string[] = [];
-  let synced = 0;
+  return withManagedMemberSyncLock(async () => {
+    const currentUsers = typeof users === "function" ? await users() : users;
+    const humanUsers = currentUsers.flatMap((user) =>
+      user.type === "human" && user.email && user.whatsapp_number
+        ? [{ ...user, email: user.email, whatsappNumber: user.whatsapp_number }]
+        : [],
+    );
+    const desiredStatus = config.WHATSAPP_DM_PROVIDER === "managed" ? "active" : "inactive";
+    const conflictUserIds: string[] = [];
+    const failedUserIds: string[] = [];
+    let synced = 0;
 
-  for (const user of humanUsers) {
-    try {
-      const result = await registerManagedTenantMember(config, {
-        tenantUserId: user.id,
-        email: user.email,
-        name: user.name,
-        phoneNumber: user.whatsappNumber,
-        sendInvite: false,
-        managedWhatsappDmEnabled: config.WHATSAPP_DM_PROVIDER === "managed",
-      });
-      if (result.mappingStatus === desiredStatus) synced += 1;
-      else if (result.mappingStatus === "inactive_conflict") conflictUserIds.push(user.id);
-      else failedUserIds.push(user.id);
-    } catch (err) {
-      failedUserIds.push(user.id);
-      logger.warn({ err, userId: user.id }, "Managed member reconciliation failed");
+    for (const user of humanUsers) {
+      try {
+        const result = await registerManagedTenantMember(config, {
+          tenantUserId: user.id,
+          email: user.email,
+          name: user.name,
+          phoneNumber: user.whatsappNumber,
+          sendInvite: false,
+          managedWhatsappDmEnabled: config.WHATSAPP_DM_PROVIDER === "managed",
+        });
+        if (result.mappingStatus === desiredStatus) synced += 1;
+        else if (result.mappingStatus === "inactive_conflict") conflictUserIds.push(user.id);
+        else failedUserIds.push(user.id);
+      } catch (err) {
+        failedUserIds.push(user.id);
+        logger.warn({ err, userId: user.id }, "Managed member reconciliation failed");
+      }
     }
-  }
 
-  return {
-    skipped: false,
-    total: humanUsers.length,
-    synced,
-    conflictUserIds,
-    failedUserIds,
-  };
+    return {
+      skipped: false,
+      total: humanUsers.length,
+      synced,
+      conflictUserIds,
+      failedUserIds,
+    };
+  });
 }

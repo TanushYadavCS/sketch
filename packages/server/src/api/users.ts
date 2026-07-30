@@ -30,6 +30,7 @@ import {
   type ManagedMemberRegistrationInput,
   type ManagedMemberRegistrationResult,
   type ManagedMemberRemovalInput,
+  withManagedMemberSyncLock,
 } from "../managed-members";
 import type { SlackBot } from "../slack/bot";
 
@@ -239,6 +240,19 @@ async function syncManagedMemberMapping(
 
 export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
   const routes = new Hono();
+
+  routes.use("*", async (c, next) => {
+    const isMemberMutation =
+      c.req.method === "PATCH" ||
+      c.req.method === "DELETE" ||
+      (c.req.method === "POST" && !c.req.path.endsWith("/verification"));
+    if (!isMemberMutation) {
+      await next();
+      return;
+    }
+
+    await withManagedMemberSyncLock(next);
+  });
 
   routes.get("/", async (c) => {
     const list = await users.list();

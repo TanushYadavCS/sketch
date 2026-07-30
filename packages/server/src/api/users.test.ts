@@ -15,6 +15,7 @@ import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
+import { withManagedMemberSyncLock } from "../managed-members";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 
 const PASSWORD = "testpassword123";
@@ -874,6 +875,45 @@ describe("Users API — agent fields", () => {
     expect(update.status).toBe(400);
     const body = await update.json();
     expect(body.error.message).toContain("allowedTools");
+  });
+
+  it("serializes member mutations with managed member reconciliation", async () => {
+    const users = createUserRepository(db);
+    const agent = await users.create({ name: "Before reconciliation", type: "agent" });
+    let releaseLock = () => {};
+    let confirmLockAcquired = () => {};
+    const lockAcquired = new Promise<void>((resolve) => {
+      confirmLockAcquired = resolve;
+    });
+    const holdLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const blocker = withManagedMemberSyncLock(async () => {
+      confirmLockAcquired();
+      await holdLock;
+    });
+    await lockAcquired;
+
+    let mutationSettled = false;
+    const mutation = Promise.resolve(
+      app.request(`/api/users/${agent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ name: "After reconciliation" }),
+      }),
+    ).finally(() => {
+      mutationSettled = true;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(mutationSettled).toBe(false);
+    expect((await users.findById(agent.id))?.name).toBe("Before reconciliation");
+
+    releaseLock();
+    await blocker;
+    const response = await mutation;
+    expect(response.status).toBe(200);
+    expect((await users.findById(agent.id))?.name).toBe("After reconciliation");
   });
 
   describe("Slack channel bindings", () => {

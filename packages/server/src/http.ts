@@ -628,7 +628,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           : undefined,
         sendDm: deps?.sendDm,
         managedWhatsappInbound: deps?.managedWhatsapp,
-        reconcileManagedMembers: async () => reconcileManagedTenantMembers(config, await users.list(), logger),
+        reconcileManagedMembers: async () => reconcileManagedTenantMembers(config, () => users.list(), logger),
         validateManagedWhatsappInboundIdentity: async (tenantUserId, senderPhoneE164) => {
           const user = await users.findById(tenantUserId);
           return user?.type === "human" && user.whatsapp_number === senderPhoneE164;
