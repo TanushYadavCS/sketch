@@ -42,6 +42,7 @@ describe("GET /api/setup/status", () => {
       const res = await app.request("/api/setup/status");
       const body = await res.json();
       expect(body.currentStep).toBe(0);
+      expect(body.managed).toBe(false);
     });
 
     it("returns currentStep 2 when admin exists", async () => {
@@ -183,6 +184,7 @@ describe("GET /api/setup/status", () => {
 
       expect(body.currentStep).toBe(5);
       expect(body.readyToComplete).toBe(true);
+      expect(body.managed).toBe(true);
       expect(body.adminEmail).toBe("admin@test.com");
     });
 

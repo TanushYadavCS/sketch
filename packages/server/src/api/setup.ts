@@ -190,6 +190,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     return c.json({
       completed: isCompleted,
       readyToComplete,
+      managed: isManaged,
       currentStep,
       adminEmail: deps.userRepo ? (adminUser?.email ?? null) : (row?.admin_email ?? null),
       orgName: row?.org_name ?? null,

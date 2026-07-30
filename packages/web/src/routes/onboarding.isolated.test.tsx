@@ -587,7 +587,7 @@ describe("Managed mode onboarding", () => {
     expect(screen.queryByRole("button", { name: "Channels" })).not.toBeInTheDocument();
   });
 
-  it("renders bot name input as disabled when managedUrl is set", () => {
+  it("renders bot name input as disabled when managed mode is set", () => {
     renderWithProviders(
       <OnboardingPage
         initialSetupStatus={{
@@ -600,7 +600,7 @@ describe("Managed mode onboarding", () => {
           slackConnected: false,
           llmConnected: false,
           llmProvider: null,
-          managedUrl: "https://app.getsketch.ai",
+          managed: true,
         }}
       />,
     );
@@ -630,7 +630,7 @@ describe("Managed mode onboarding", () => {
           slackConnected: false,
           llmConnected: false,
           llmProvider: null,
-          managedUrl: "https://app.getsketch.ai",
+          managed: true,
         }}
       />,
     );

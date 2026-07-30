@@ -37,6 +37,7 @@ function OnboardingRoutePage() {
 const defaultSetupStatus: SetupStatus = {
   completed: false,
   readyToComplete: false,
+  managed: false,
   currentStep: 0,
   adminEmail: null,
   orgName: null,
@@ -50,7 +51,7 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
   const navigate = useNavigate();
   const { logoSrc } = useTheme();
   const setupStatus = initialSetupStatus ?? defaultSetupStatus;
-  const isManaged = Boolean(setupStatus.managedUrl);
+  const isManaged = setupStatus.managed ?? Boolean(setupStatus.managedUrl);
 
   const managedInternalSteps = [2, 4] as const;
   const managedDisplaySteps = [
