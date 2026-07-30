@@ -48,6 +48,20 @@ vi.mock("./connectors/managed-credential-migration", () => ({
   migrateManagedConnectorCredentialsToCanvas: vi.fn(),
 }));
 
+vi.mock("./managed-members", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./managed-members")>();
+  return {
+    ...actual,
+    reconcileManagedTenantMembers: vi.fn().mockResolvedValue({
+      skipped: false,
+      total: 0,
+      synced: 0,
+      conflictUserIds: [],
+      failedUserIds: [],
+    }),
+  };
+});
+
 // Avoid managed seed side effects during tests
 vi.mock("./managed-seed", () => ({
   runManagedSeed: vi.fn(),
@@ -104,21 +118,32 @@ describe("bootstrap", () => {
   it("runs remote startup work by default", async () => {
     const { syncFeaturedSkills } = await import("./skills/sync");
     const { migrateManagedConnectorCredentialsToCanvas } = await import("./connectors/managed-credential-migration");
+    const { reconcileManagedTenantMembers } = await import("./managed-members");
 
     await boot();
 
     expect(syncFeaturedSkills).toHaveBeenCalledOnce();
     expect(migrateManagedConnectorCredentialsToCanvas).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(reconcileManagedTenantMembers).toHaveBeenCalledOnce());
   });
 
   it("skips remote startup work when external startup is disabled", async () => {
     const { syncFeaturedSkills } = await import("./skills/sync");
     const { migrateManagedConnectorCredentialsToCanvas } = await import("./connectors/managed-credential-migration");
+    const { reconcileManagedTenantMembers } = await import("./managed-members");
 
-    await boot({}, false, false);
+    await boot(
+      {
+        MANAGED_WHATSAPP_PLATFORM_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      },
+      false,
+      false,
+    );
 
     expect(syncFeaturedSkills).not.toHaveBeenCalled();
     expect(migrateManagedConnectorCredentialsToCanvas).not.toHaveBeenCalled();
+    expect(reconcileManagedTenantMembers).not.toHaveBeenCalled();
   });
 
   it("keeps schedulers and inbound consumers stopped when background work is disabled", async () => {
@@ -232,5 +257,85 @@ describe("bootstrap", () => {
     const h = await boot();
     await expect(h.shutdown()).resolves.toBeUndefined();
     handle = null; // prevent double-shutdown in afterEach
+  });
+
+  it("waits for active managed member reconciliation during shutdown", async () => {
+    const { reconcileManagedTenantMembers } = await import("./managed-members");
+    let confirmStarted = () => {};
+    let releaseReconciliation = () => {};
+    const started = new Promise<void>((resolve) => {
+      confirmStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      releaseReconciliation = resolve;
+    });
+    vi.mocked(reconcileManagedTenantMembers).mockImplementationOnce(async () => {
+      confirmStarted();
+      await blocked;
+      return { skipped: false, total: 0, synced: 0, conflictUserIds: [], failedUserIds: [] };
+    });
+    const h = await boot();
+    await started;
+
+    let shutdownCompleted = false;
+    const shutdown = h.shutdown().then(() => {
+      shutdownCompleted = true;
+    });
+    handle = null;
+    await Promise.resolve();
+    expect(shutdownCompleted).toBe(false);
+
+    releaseReconciliation();
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(shutdownCompleted).toBe(true);
+  });
+
+  it("waits for manual managed member reconciliation during shutdown", async () => {
+    const { reconcileManagedTenantMembers } = await import("./managed-members");
+    let confirmStarted = () => {};
+    let releaseReconciliation = () => {};
+    const started = new Promise<void>((resolve) => {
+      confirmStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      releaseReconciliation = resolve;
+    });
+    vi.mocked(reconcileManagedTenantMembers).mockImplementationOnce(async () => {
+      confirmStarted();
+      await blocked;
+      return { skipped: false, total: 0, synced: 0, conflictUserIds: [], failedUserIds: [] };
+    });
+    const h = await boot({ SYSTEM_SECRET: "test-system-secret" }, false, false);
+    const reconciliation = request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-system-secret" },
+    });
+    await started;
+
+    let shutdownCompleted = false;
+    const shutdown = h.shutdown().then(() => {
+      shutdownCompleted = true;
+    });
+    handle = null;
+    await Promise.resolve();
+    expect(shutdownCompleted).toBe(false);
+    const lateReconciliation = await request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-system-secret" },
+    });
+    expect(lateReconciliation.status).toBe(200);
+    await expect(lateReconciliation.json()).resolves.toEqual({
+      skipped: true,
+      total: 0,
+      synced: 0,
+      conflictUserIds: [],
+      failedUserIds: [],
+    });
+    expect(reconcileManagedTenantMembers).toHaveBeenCalledOnce();
+
+    releaseReconciliation();
+    await expect(reconciliation.then((response) => response.status)).resolves.toBe(200);
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(shutdownCompleted).toBe(true);
   });
 });

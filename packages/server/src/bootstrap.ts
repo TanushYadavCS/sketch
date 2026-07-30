@@ -58,6 +58,7 @@ import type { IntegrationProvider, IntegrationStatus } from "./integrations/type
 import { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import { LocalDeviceGateway } from "./local-devices/gateway";
 import { createLogger } from "./logger";
+import { reconcileManagedTenantMembers } from "./managed-members";
 import { runManagedSeed } from "./managed-seed";
 import { channelsReconnectUrl, createOperationalAlertDefinitions } from "./operational-alerts/definitions";
 import { createOperationalAlertService } from "./operational-alerts/service";
@@ -818,6 +819,42 @@ export async function createServer(config: Config, options?: CreateServerOptions
       })
     : null;
 
+  let managedMemberReconciliationPromise: ReturnType<typeof reconcileManagedTenantMembers> | null = null;
+  let managedMemberReconciliationShuttingDown = false;
+  const runManagedMemberReconciliation = () => {
+    if (managedMemberReconciliationShuttingDown) {
+      return Promise.resolve({ skipped: true, total: 0, synced: 0, conflictUserIds: [], failedUserIds: [] });
+    }
+    if (managedMemberReconciliationPromise) return managedMemberReconciliationPromise;
+    const run = reconcileManagedTenantMembers(config, users, logger).then((result) => {
+      if (!result.skipped) {
+        logger.info(
+          {
+            total: result.total,
+            synced: result.synced,
+            conflicts: result.conflictUserIds.length,
+            failed: result.failedUserIds.length,
+          },
+          "Managed member reconciliation completed",
+        );
+      }
+      return result;
+    });
+    managedMemberReconciliationPromise = run;
+    const clearRun = () => {
+      if (managedMemberReconciliationPromise === run) {
+        managedMemberReconciliationPromise = null;
+      }
+    };
+    void run.then(clearRun, clearRun);
+    return run;
+  };
+  const startManagedMemberReconciliation = () => {
+    void runManagedMemberReconciliation().catch((err) => {
+      logger.warn({ err }, "Managed member reconciliation could not start");
+    });
+  };
+
   // 9. HTTP server
   const app = createApp(db, config, {
     whatsapp,
@@ -879,6 +916,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     localClaudeSessionService,
     agentRunService,
     limitAgentExecution,
+    reconcileManagedMembers: runManagedMemberReconciliation,
     ...(whatsapp instanceof GatewayClientFacade
       ? {
           whatsappWakeToken: whatsapp.gatewayToken,
@@ -902,6 +940,13 @@ export async function createServer(config: Config, options?: CreateServerOptions
   localDeviceGateway.attach(server);
   logger.info({ port: config.PORT }, "HTTP server started");
 
+  const managedMemberReconciliationEnabled = backgroundWork && externalStartup;
+  const managedMemberReconciliationTimer = managedMemberReconciliationEnabled
+    ? setInterval(startManagedMemberReconciliation, 5 * 60 * 1000)
+    : null;
+  managedMemberReconciliationTimer?.unref();
+  if (managedMemberReconciliationEnabled) startManagedMemberReconciliation();
+
   // 10. Start platforms
   if (connect) {
     await startSlackBotIfConfigured().catch(() => {});
@@ -921,6 +966,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 11. Shutdown handle
   async function shutdown() {
     logger.info("Shutting down...");
+    managedMemberReconciliationShuttingDown = true;
+    if (managedMemberReconciliationTimer) clearInterval(managedMemberReconciliationTimer);
     await operationalAlertWorker?.stop();
     if (backgroundWork) {
       await whatsappBackfillWorker?.stop();
@@ -928,6 +975,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     }
     whatsappInboundRetention?.stop();
     normalizationBackfill?.stop();
+    await managedMemberReconciliationPromise?.catch(() => undefined);
     await telemetry.shutdown();
     await syncScheduler?.stop();
     whatsappWindowKeepAliveJob?.stop();

@@ -2576,6 +2576,31 @@ describe("RBAC", () => {
       expect(body.user.name).toBe("Updated by Peer");
     });
 
+    it("requires an admin for human contact mutations that can change managed routing", async () => {
+      const app = createApp(db, config);
+      const { jwtSecret } = await setupWithAdmin(app);
+      const { memberId, memberCookie } = await createMemberSession(jwtSecret);
+
+      const createRes = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          name: "Claimed User",
+          type: "human",
+          email: "claimed-user@test.com",
+          whatsappNumber: "+14155550017",
+        }),
+      });
+      expect(createRes.status).toBe(403);
+
+      const updateRes = await app.request(`/api/users/${memberId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ whatsappNumber: "+14155550018" }),
+      });
+      expect(updateRes.status).toBe(403);
+    });
+
     it("POST /api/users/:id/verification returns 400 NO_EMAIL for user without email", async () => {
       const app = createApp(db, config);
       const { jwtSecret } = await setupWithAdmin(app);

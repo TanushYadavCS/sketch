@@ -94,6 +94,8 @@ export interface User {
   created_at: string;
 }
 
+export type ManagedWhatsappMappingStatus = "active" | "inactive" | "inactive_conflict" | "unchanged" | "failed";
+
 export interface ScheduledTaskListItem {
   id: string;
   platform: "slack" | "whatsapp";
@@ -2196,7 +2198,11 @@ export const api = {
       whatsappGroupJids?: string[] | null;
       isWhatsappFallback?: boolean;
     }) {
-      return request<{ user: User; verificationSent?: boolean }>("/api/users", {
+      return request<{
+        user: User;
+        verificationSent?: boolean;
+        managedWhatsappMappingStatus?: ManagedWhatsappMappingStatus;
+      }>("/api/users", {
         method: "POST",
         body: JSON.stringify(data),
       });
@@ -2217,7 +2223,11 @@ export const api = {
         isWhatsappFallback?: boolean;
       },
     ) {
-      return request<{ user: User; verificationSent?: boolean }>(`/api/users/${id}`, {
+      return request<{
+        user: User;
+        verificationSent?: boolean;
+        managedWhatsappMappingStatus?: ManagedWhatsappMappingStatus;
+      }>(`/api/users/${id}`, {
         method: "PATCH",
         body: JSON.stringify(data),
       });
@@ -2238,7 +2248,11 @@ export const api = {
       );
     },
     promote(id: string, data: { name: string; email?: string | null; role?: string | null }) {
-      return request<{ user: User; verificationSent?: boolean }>(`/api/users/${id}/promote`, {
+      return request<{
+        user: User;
+        verificationSent?: boolean;
+        managedWhatsappMappingStatus?: ManagedWhatsappMappingStatus;
+      }>(`/api/users/${id}/promote`, {
         method: "POST",
         body: JSON.stringify(data),
       });
