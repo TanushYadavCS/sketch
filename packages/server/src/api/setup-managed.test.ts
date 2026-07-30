@@ -19,6 +19,10 @@ function createTestSetupApp(
   },
 ) {
   const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("role", "admin");
+    await next();
+  });
   app.route("/api/setup", setupRoutes(settings, deps));
   return app;
 }
@@ -78,6 +82,7 @@ describe("GET /api/setup/status", () => {
       const res = await app.request("/api/setup/status");
       const body = await res.json();
       expect(body.slackConnected).toBe(true);
+      expect(body.currentStep).toBe(2);
     });
 
     it("returns currentStep 4 when admin, identity, and slack are set", async () => {
@@ -124,7 +129,7 @@ describe("GET /api/setup/status", () => {
       const res = await app.request("/api/setup/status");
       const body = await res.json();
 
-      expect(body.currentStep).toBe(4);
+      expect(body.currentStep).toBe(0);
       expect(body.readyToComplete).toBe(false);
       expect(body.adminEmail).toBeNull();
     });

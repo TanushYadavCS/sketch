@@ -182,10 +182,14 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       currentStep = 5;
     } else if (readyToComplete) {
       currentStep = 5;
+    } else if (!hasAdmin) {
+      currentStep = 0;
+    } else if (!hasIdentity) {
+      currentStep = 2;
     } else if (isManaged) {
-      currentStep = hasIdentity ? 4 : hasAdmin ? 2 : 0;
+      currentStep = 4;
     } else {
-      currentStep = hasSlack ? 4 : hasIdentity ? 3 : hasAdmin ? 2 : 0;
+      currentStep = hasSlack ? 4 : 3;
     }
     return c.json({
       completed: isCompleted,
@@ -272,6 +276,9 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/identity", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
       ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
@@ -350,6 +357,9 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/llm/verify", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
       ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
@@ -388,6 +398,9 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/llm", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
       ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
@@ -432,6 +445,9 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/complete", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const existing = await settings.get();
     if (existing?.onboarding_completed_at) {
       return c.json({ success: true });

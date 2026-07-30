@@ -1086,6 +1086,65 @@ describe("Auth endpoints", () => {
       expect((await settings.get())?.onboarding_completed_at).not.toBeNull();
     });
 
+    it("rejects managed members from setup mutations", async () => {
+      const settings = createSettingsRepository(db);
+      const users = createUserRepository(db);
+      await settings.create();
+      await users.create({
+        name: "Platform Admin",
+        email: "platform-admin@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "admin",
+      });
+      await users.create({
+        name: "Platform Member",
+        email: "platform-member@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "member",
+      });
+      await settings.completeOnboarding(new Date().toISOString());
+
+      const app = createApp(db, createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET }));
+      const token = await makePlatformToken("platform-member@test.com", "member");
+      const cookie = `sketch_platform_session=${token}`;
+      const llmSettings = {
+        provider: "bedrock",
+        awsAccessKeyId: "AKIA-test",
+        awsSecretAccessKey: "secret-test",
+        awsRegion: "ap-south-1",
+      };
+      const requests = [
+        app.request("/api/setup/identity", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: cookie },
+          body: JSON.stringify({ orgName: "Hijacked", botName: "Hijacked" }),
+        }),
+        app.request("/api/setup/llm/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: cookie },
+          body: JSON.stringify(llmSettings),
+        }),
+        app.request("/api/setup/llm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: cookie },
+          body: JSON.stringify(llmSettings),
+        }),
+        app.request("/api/setup/complete", {
+          method: "POST",
+          headers: { Cookie: cookie },
+        }),
+      ];
+
+      for (const response of await Promise.all(requests)) {
+        expect(response.status).toBe(403);
+        expect(await response.json()).toEqual({
+          error: { code: "FORBIDDEN", message: "Admin role required" },
+        });
+      }
+    });
+
     it("uses auth_role for managed platform cookie sessions", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
