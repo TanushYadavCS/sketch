@@ -167,12 +167,43 @@ describe("GET /api/setup/status", () => {
         passwordHash: null,
         authRole: "admin",
       });
+      await settings.update({
+        orgName: "Acme",
+        botName: "Sketch",
+        llmProvider: "anthropic",
+        anthropicApiKey: "sk-ant-test",
+      });
       const app = createTestSetupApp(settings, { managedUrl, userRepo });
 
       const res = await app.request("/api/setup/complete", { method: "POST" });
 
       expect(res.status).toBe(200);
       expect((await settings.get())?.onboarding_completed_at).not.toBeNull();
+    });
+
+    it("rejects completion when managed prerequisites are missing", async () => {
+      await settings.create();
+      const userRepo = createUserRepository(db);
+      await userRepo.create({
+        name: "Admin",
+        email: "admin@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "admin",
+      });
+      const app = createTestSetupApp(settings, { managedUrl, userRepo });
+
+      const res = await app.request("/api/setup/complete", { method: "POST" });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: {
+          code: "SETUP_INCOMPLETE",
+          message: "Tenant onboarding prerequisites are incomplete",
+          missing: ["identity", "llm"],
+        },
+      });
+      expect((await settings.get())?.onboarding_completed_at).toBeNull();
     });
 
     it("does not report ready when an LLM exists without admin or identity", async () => {

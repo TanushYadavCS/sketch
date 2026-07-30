@@ -424,10 +424,21 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
 
   routes.post("/complete", async (c) => {
     const existing = await settings.get();
-    const hasAdmin = deps.userRepo ? Boolean(await deps.userRepo.findFirstAdmin()) : Boolean(existing?.admin_email);
-    if (!hasAdmin) {
+    if (existing?.onboarding_completed_at) {
+      return c.json({ success: true });
+    }
+
+    const adminUser = deps.userRepo ? await deps.userRepo.findFirstAdmin() : undefined;
+    const readiness = getOnboardingReadiness(existing, Boolean(adminUser));
+    if (!readiness.readyToComplete) {
       return c.json(
-        { error: { code: "SETUP_INCOMPLETE", message: "Admin account must be created before completing setup" } },
+        {
+          error: {
+            code: "SETUP_INCOMPLETE",
+            message: "Tenant onboarding prerequisites are incomplete",
+            missing: readiness.missing,
+          },
+        },
         409,
       );
     }

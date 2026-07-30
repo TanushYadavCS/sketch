@@ -1044,7 +1044,7 @@ describe("Auth endpoints", () => {
       expect(body.role).toBe("admin");
     });
 
-    it("lets a passwordless managed admin complete setup through the full middleware stack", async () => {
+    it("routes a passwordless managed admin through middleware and enforces setup readiness", async () => {
       const settings = createSettingsRepository(db);
       const users = createUserRepository(db);
       await settings.create();
@@ -1067,7 +1067,25 @@ describe("Auth endpoints", () => {
         headers: { Cookie: `sketch_platform_session=${token}` },
       });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        error: { code: "SETUP_INCOMPLETE", missing: ["identity", "llm"] },
+      });
+      expect((await settings.get())?.onboarding_completed_at).toBeNull();
+
+      await settings.update({
+        orgName: "Acme",
+        botName: "Sketch",
+        llmProvider: "anthropic",
+        anthropicApiKey: "sk-ant-test",
+      });
+      const readyRes = await app.request("/api/setup/complete", {
+        method: "POST",
+        headers: { Cookie: `sketch_platform_session=${token}` },
+      });
+
+      expect(readyRes.status).toBe(200);
+      await readyRes.text();
       expect((await settings.get())?.onboarding_completed_at).not.toBeNull();
     });
 
@@ -1456,6 +1474,13 @@ describe("Setup endpoints", () => {
 
     it("returns completed true after onboarding completion", async () => {
       await seedAdmin(db);
+      const settings = createSettingsRepository(db);
+      await settings.update({
+        orgName: "Acme",
+        botName: "Sketch",
+        llmProvider: "anthropic",
+        anthropicApiKey: "sk-ant-test",
+      });
       const app = createApp(db, config);
       const cookie = await loginAdmin(app);
       await app.request("/api/setup/complete", { method: "POST", headers: { Cookie: cookie } });
@@ -1900,6 +1925,13 @@ describe("Setup endpoints", () => {
   describe("POST /api/setup/complete", () => {
     it("stores onboarding completion timestamp", async () => {
       await seedAdmin(db);
+      const settings = createSettingsRepository(db);
+      await settings.update({
+        orgName: "Acme",
+        botName: "Sketch",
+        llmProvider: "anthropic",
+        anthropicApiKey: "sk-ant-test",
+      });
       const app = createApp(db, config);
       const cookie = await loginAdmin(app);
 
@@ -1909,7 +1941,6 @@ describe("Setup endpoints", () => {
       });
       expect(res.status).toBe(200);
 
-      const settings = createSettingsRepository(db);
       const row = await settings.get();
       expect(row?.onboarding_completed_at).toBeTruthy();
     });
