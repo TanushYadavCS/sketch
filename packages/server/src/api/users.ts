@@ -452,16 +452,20 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         reportsTo: reportsTo ?? undefined,
         allowedTools: parsed.data.allowedTools ?? undefined,
       });
-      const managedWhatsappMappingStatus =
-        user.type === "human" && user.email && user.whatsapp_number
-          ? await syncManagedMemberMapping(deps, {
-              tenantUserId: user.id,
-              email: user.email,
-              name: user.name,
-              phoneNumber: user.whatsapp_number,
-              sendInvite: false,
-            })
-          : undefined;
+      let managedWhatsappMappingStatus: ManagedMemberRegistrationResult["mappingStatus"] | "failed" | undefined;
+      if (user.type === "human" && user.email && user.whatsapp_number) {
+        await withManagedMemberSyncLock(user.id, async () => {
+          const currentUser = await users.findById(user.id);
+          if (currentUser?.type !== "human" || !currentUser.email || !currentUser.whatsapp_number) return;
+          managedWhatsappMappingStatus = await syncManagedMemberMapping(deps, {
+            tenantUserId: currentUser.id,
+            email: currentUser.email,
+            name: currentUser.name,
+            phoneNumber: currentUser.whatsapp_number,
+            sendInvite: false,
+          });
+        });
+      }
 
       let boundSlackChannelIds: string[] = [];
       if (parsed.data.slackChannelIds && deps.channels) {

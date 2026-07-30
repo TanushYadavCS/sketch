@@ -285,6 +285,78 @@ describe("Users API — agent fields", () => {
     fetchMock.mockRestore();
   });
 
+  it("locks and re-reads a new member before post-create routing sync", async () => {
+    const users = createUserRepository(db);
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_DM_PROVIDER: "managed",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    let memberId = "";
+    let releaseLock = () => {};
+    let confirmLockAcquired = () => {};
+    const lockAcquired = new Promise<void>((resolve) => {
+      confirmLockAcquired = resolve;
+    });
+    const holdLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    let blocker = Promise.resolve();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementationOnce(async (_url, init) => {
+        memberId = JSON.parse(String(init?.body)).tenantUserId;
+        blocker = withManagedMemberSyncLock(memberId, async () => {
+          confirmLockAcquired();
+          await holdLock;
+        });
+        await lockAcquired;
+        return new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 });
+      })
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, mappingStatus: "active", emailSent: false }), { status: 200 }),
+      );
+
+    const createRequest = managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Before Create Sync",
+        type: "human",
+        email: "create.sync@gmail.com",
+        whatsappNumber: "+14155550130",
+      }),
+    });
+    await vi.waitFor(async () => {
+      expect(memberId).not.toBe("");
+      expect(await users.findById(memberId)).toBeDefined();
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await users.update(memberId, {
+      name: "After Create Sync",
+      whatsappNumber: "+14155550131",
+    });
+
+    releaseLock();
+    await blocker;
+    const res = await createRequest;
+    expect(res.status).toBe(201);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+      tenantUserId: memberId,
+      name: "After Create Sync",
+      phoneNumber: "+14155550131",
+      sendInvite: false,
+      managedWhatsappDmEnabled: true,
+    });
+    fetchMock.mockRestore();
+  });
+
   it("preserves membership sync without enabling shared routing for non-managed DMs", async () => {
     const managedApp = createApp(
       db,
