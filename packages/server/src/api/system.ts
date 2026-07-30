@@ -11,6 +11,7 @@ import type { createInboxMessagesRepository } from "../db/repositories/inbox-mes
 import type { createMcpServerRepository } from "../db/repositories/mcp-servers";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
+import type { ManagedMemberRegistrationInput } from "../managed-members";
 import { upsertSlackIdentity } from "../slack/upsert-identity";
 import { InvalidManagedWhatsAppInboundEventError } from "../whatsapp/providers/managed";
 import type { ManagedWhatsAppProvider } from "../whatsapp/providers/managed";
@@ -66,6 +67,7 @@ interface SystemDeps {
     conflictUserIds: string[];
     failedUserIds: string[];
   }>;
+  syncManagedMemberMapping?: (input: ManagedMemberRegistrationInput) => Promise<void>;
   withManagedMemberSyncLocks?: <T>(tenantUserIds: string[], operation: () => Promise<T>) => Promise<T>;
   validateManagedWhatsappInboundIdentity?: (tenantUserId: string, senderPhoneE164: string) => Promise<boolean>;
 }
@@ -376,24 +378,32 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       await withManagedMemberMutationLocks(deps, existingUser ? [existingUser.id] : [], async () => {
         const displayName = parsed.data.name || normalizedAdminEmail.split("@")[0];
         const currentUser = await userRepo.findByEmail(normalizedAdminEmail);
-        if (currentUser) {
-          await userRepo.update(currentUser.id, {
-            name: displayName,
-            email: normalizedAdminEmail,
-            emailVerified: true,
-            ...(adminPasswordHash !== undefined ? { passwordHash: adminPasswordHash } : {}),
-            ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
-            authRole: "admin",
-          });
-        } else {
-          await userRepo.create({
-            name: displayName,
-            email: normalizedAdminEmail,
-            emailVerified: true,
-            passwordHash: adminPasswordHash ?? null,
-            ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
-            authRole: "admin",
-          });
+        const user = currentUser
+          ? await userRepo.update(currentUser.id, {
+              name: displayName,
+              email: normalizedAdminEmail,
+              emailVerified: true,
+              ...(adminPasswordHash !== undefined ? { passwordHash: adminPasswordHash } : {}),
+              ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
+              authRole: "admin",
+            })
+          : await userRepo.create({
+              name: displayName,
+              email: normalizedAdminEmail,
+              emailVerified: true,
+              passwordHash: adminPasswordHash ?? null,
+              ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
+              authRole: "admin",
+            });
+        if (user.type === "human" && user.email && user.whatsapp_number) {
+          const memberToSync: ManagedMemberRegistrationInput = {
+            tenantUserId: user.id,
+            email: user.email,
+            name: user.name,
+            phoneNumber: user.whatsapp_number,
+            sendInvite: false,
+          };
+          await deps.syncManagedMemberMapping?.(memberToSync);
         }
       });
     }

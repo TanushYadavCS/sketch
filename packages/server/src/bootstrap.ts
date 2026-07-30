@@ -820,7 +820,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
     : null;
 
   let managedMemberReconciliationPromise: ReturnType<typeof reconcileManagedTenantMembers> | null = null;
+  let managedMemberReconciliationShuttingDown = false;
   const runManagedMemberReconciliation = () => {
+    if (managedMemberReconciliationShuttingDown) {
+      return Promise.resolve({ skipped: true, total: 0, synced: 0, conflictUserIds: [], failedUserIds: [] });
+    }
     if (managedMemberReconciliationPromise) return managedMemberReconciliationPromise;
     const run = reconcileManagedTenantMembers(config, users, logger).then((result) => {
       if (!result.skipped) {
@@ -962,6 +966,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 11. Shutdown handle
   async function shutdown() {
     logger.info("Shutting down...");
+    managedMemberReconciliationShuttingDown = true;
+    if (managedMemberReconciliationTimer) clearInterval(managedMemberReconciliationTimer);
     await operationalAlertWorker?.stop();
     if (backgroundWork) {
       await whatsappBackfillWorker?.stop();
@@ -969,7 +975,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
     }
     whatsappInboundRetention?.stop();
     normalizationBackfill?.stop();
-    if (managedMemberReconciliationTimer) clearInterval(managedMemberReconciliationTimer);
     await managedMemberReconciliationPromise?.catch(() => undefined);
     await telemetry.shutdown();
     await syncScheduler?.stop();

@@ -78,6 +78,7 @@ import type { LocalClaudeSessionService } from "./local-devices/claude-sessions"
 import type { LocalDeviceGateway } from "./local-devices/gateway";
 import {
   type ManagedMemberReconciliationResult,
+  type ManagedMemberRegistrationInput,
   reconcileManagedTenantMembers,
   registerManagedTenantMember,
   removeManagedTenantMember,
@@ -210,6 +211,11 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
   const identities = createProviderIdentityRepository(db, config.ENCRYPTION_KEY);
+  const syncManagedMemberMapping = (input: ManagedMemberRegistrationInput) =>
+    registerManagedTenantMember(config, {
+      ...input,
+      managedWhatsappDmEnabled: config.WHATSAPP_DM_PROVIDER === "managed",
+    });
   const localClaudeEventDispatcher =
     deps?.localClaudeSessionService && deps.runAgent && deps.queueManager
       ? createLocalClaudeEventDispatcher({
@@ -442,11 +448,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       whatsappGroups,
       getSlack: deps?.getSlack,
       registerManagedMember: (input) => registerManagedTenantMember(config, input),
-      syncManagedMemberMapping: (input) =>
-        registerManagedTenantMember(config, {
-          ...input,
-          managedWhatsappDmEnabled: config.WHATSAPP_DM_PROVIDER === "managed",
-        }),
+      syncManagedMemberMapping,
       removeManagedMember: (input) => removeManagedTenantMember(config, input),
     }),
   );
@@ -633,6 +635,13 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         managedWhatsappInbound: deps?.managedWhatsapp,
         reconcileManagedMembers:
           deps?.reconcileManagedMembers ?? (async () => reconcileManagedTenantMembers(config, users, logger)),
+        syncManagedMemberMapping: async (input) => {
+          try {
+            await syncManagedMemberMapping(input);
+          } catch (err) {
+            logger.warn({ err, userId: input.tenantUserId }, "Managed WhatsApp member mapping sync failed");
+          }
+        },
         withManagedMemberSyncLocks,
         validateManagedWhatsappInboundIdentity: async (tenantUserId, senderPhoneE164) => {
           const user = await users.findById(tenantUserId);

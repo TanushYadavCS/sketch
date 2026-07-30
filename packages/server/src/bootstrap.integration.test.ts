@@ -319,6 +319,19 @@ describe("bootstrap", () => {
     handle = null;
     await Promise.resolve();
     expect(shutdownCompleted).toBe(false);
+    const lateReconciliation = await request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-system-secret" },
+    });
+    expect(lateReconciliation.status).toBe(200);
+    await expect(lateReconciliation.json()).resolves.toEqual({
+      skipped: true,
+      total: 0,
+      synced: 0,
+      conflictUserIds: [],
+      failedUserIds: [],
+    });
+    expect(reconcileManagedTenantMembers).toHaveBeenCalledOnce();
 
     releaseReconciliation();
     await expect(reconciliation.then((response) => response.status)).resolves.toBe(200);
