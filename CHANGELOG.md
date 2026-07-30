@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.4] -- 2026-07-30
+
+- Fixes conversation context retrieval by selecting the newest eligible backlog and correctly scoping Slack mentions to channel roots or active threads, ensuring accurate agent issue creation.
+
 ## [1.2.3] -- 2026-07-30
 
 - Adds a `slack_channel_message` automation trigger that dispatches new top-level Slack channel messages to matching active automations.
