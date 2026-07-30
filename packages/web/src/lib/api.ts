@@ -257,7 +257,7 @@ export interface SetupStatus {
   slackConnected: boolean;
   whatsappConnected?: boolean;
   llmConnected: boolean;
-  llmProvider: LlmProvider | null;
+  llmProvider: LlmProvider | "vertex" | "openai-compatible" | null;
   managedUrl?: string;
 }
 

@@ -1,3 +1,4 @@
+import type { AgentRuntimeProviderKind } from "../agent/runtime/contracts";
 import { resolveAgentRuntimeProviderConfigFromSettings } from "../agent/runtime/provider";
 import type { createSettingsRepository } from "../db/repositories/settings";
 
@@ -10,6 +11,7 @@ export interface OnboardingReadiness {
   hasAdmin: boolean;
   hasIdentity: boolean;
   hasLlm: boolean;
+  llmProvider: AgentRuntimeProviderKind | null;
   readyToComplete: boolean;
   missing: OnboardingPrerequisite[];
 }
@@ -21,7 +23,8 @@ export function getOnboardingReadiness(
 ): OnboardingReadiness {
   const hasAdmin = hasAdminUser ?? Boolean(row?.admin_email?.trim());
   const hasIdentity = Boolean(row?.org_name?.trim() && row?.bot_name?.trim());
-  const hasLlm = Boolean(resolveAgentRuntimeProviderConfigFromSettings(row ?? null, env));
+  const llmConfig = resolveAgentRuntimeProviderConfigFromSettings(row ?? null, env);
+  const hasLlm = Boolean(llmConfig);
   const missing: OnboardingPrerequisite[] = [];
 
   if (!hasAdmin) missing.push("admin");
@@ -32,6 +35,7 @@ export function getOnboardingReadiness(
     hasAdmin,
     hasIdentity,
     hasLlm,
+    llmProvider: llmConfig?.provider ?? null,
     readyToComplete: missing.length === 0,
     missing,
   };

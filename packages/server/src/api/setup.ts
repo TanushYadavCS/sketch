@@ -3,7 +3,6 @@
  * Only status/account are public; subsequent setup steps require auth.
  */
 import { randomBytes } from "node:crypto";
-import { isLlmProvider } from "@sketch/shared";
 import { Hono } from "hono";
 import { z } from "zod";
 import { hashPassword } from "../auth/password";
@@ -167,15 +166,13 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   routes.get("/status", async (c) => {
     const row = await settings.get();
     const adminUser = deps.userRepo ? await findSetupAdmin(deps.userRepo, isManaged) : undefined;
-    const { hasAdmin, hasIdentity, hasLlm, readyToComplete } = getOnboardingReadiness(
+    const { hasAdmin, hasIdentity, hasLlm, llmProvider, readyToComplete } = getOnboardingReadiness(
       row,
       deps.userRepo ? Boolean(adminUser) : undefined,
     );
     const hasSlack = Boolean(
       row?.slack_bot_token?.trim() && ((deps.slackMode ?? "socket") === "http" || row?.slack_app_token?.trim()),
     );
-    const provider = row?.llm_provider;
-    const llmProvider = isLlmProvider(provider) ? provider : null;
     const isCompleted = Boolean(row?.onboarding_completed_at);
     let currentStep: number;
     if (isCompleted) {

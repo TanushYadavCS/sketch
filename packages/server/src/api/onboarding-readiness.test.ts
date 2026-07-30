@@ -20,9 +20,9 @@ function readySettings(overrides: Partial<SettingsRow> = {}): SettingsRow {
 
 describe("getOnboardingReadiness", () => {
   it.each([
-    ["Anthropic", { ANTHROPIC_API_KEY: "sk-ant-env" }],
-    ["Bedrock with ambient AWS credentials", { CLAUDE_CODE_USE_BEDROCK: "1" }],
-    ["Vertex", { CLAUDE_CODE_USE_VERTEX: "1" }],
+    ["Anthropic", { ANTHROPIC_API_KEY: "sk-ant-env" }, "anthropic"],
+    ["Bedrock with ambient AWS credentials", { CLAUDE_CODE_USE_BEDROCK: "1" }, "bedrock"],
+    ["Vertex", { CLAUDE_CODE_USE_VERTEX: "1" }, "vertex"],
     [
       "a custom Anthropic endpoint",
       {
@@ -30,10 +30,12 @@ describe("getOnboardingReadiness", () => {
         ANTHROPIC_AUTH_TOKEN: "gateway-token",
         ANTHROPIC_MODEL: "gateway-model",
       },
+      "anthropic",
     ],
-  ])("counts environment-backed %s configuration as ready", (_name, env) => {
+  ])("counts environment-backed %s configuration as ready", (_name, env, llmProvider) => {
     expect(getOnboardingReadiness(readySettings(), undefined, env)).toMatchObject({
       hasLlm: true,
+      llmProvider,
       readyToComplete: true,
       missing: [],
     });

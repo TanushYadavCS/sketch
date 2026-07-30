@@ -414,6 +414,26 @@ describe("OnboardingPage navigation and flow", () => {
     expect(screen.getByText("Sketch is ready")).toBeInTheDocument();
   });
 
+  it("shows the resolved environment LLM provider on the completion step", () => {
+    renderWithProviders(
+      <OnboardingPage
+        initialSetupStatus={{
+          completed: false,
+          readyToComplete: true,
+          currentStep: 5,
+          adminEmail: "admin@test.com",
+          orgName: "Acme",
+          botName: "Sketch",
+          slackConnected: true,
+          llmConnected: true,
+          llmProvider: "vertex",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Google Vertex (Sonnet)")).toBeInTheDocument();
+  });
+
   it("allows navigating back to Account step from progress indicator", async () => {
     server.use(
       http.post("/api/setup/slack/verify", () => {

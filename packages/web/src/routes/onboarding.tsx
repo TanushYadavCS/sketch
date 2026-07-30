@@ -91,10 +91,8 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
   const [whatsappConnected, setWhatsappConnected] = useState(false);
   const [whatsappPhone, setWhatsappPhone] = useState<string | undefined>(undefined);
 
-  const [llmProvider, setLlmProvider] = useState<"anthropic" | "bedrock">(
-    setupStatus.llmProvider === "anthropic" || setupStatus.llmProvider === "bedrock"
-      ? setupStatus.llmProvider
-      : "anthropic",
+  const [llmProvider, setLlmProvider] = useState<NonNullable<SetupStatus["llmProvider"]>>(
+    setupStatus.llmProvider ?? "anthropic",
   );
   const [llmConnected, setLlmConnected] = useState(setupStatus.llmConnected);
 
@@ -291,7 +289,7 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
     case 4:
       content = (
         <StepConfigureLLM
-          initialProvider={llmProvider}
+          initialProvider={llmProvider === "bedrock" ? "bedrock" : "anthropic"}
           initialConnected={llmConnected}
           onNext={({ provider, connected }) => {
             setLlmProvider(provider);
