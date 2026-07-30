@@ -156,6 +156,19 @@ export async function registerManagedTenantMember(
       "Managed WhatsApp routing sync was not confirmed",
     );
   }
+  const routingStatusMatchesIntent =
+    input.managedWhatsappDmEnabled === undefined ||
+    mappingStatus === "unchanged" ||
+    (input.managedWhatsappDmEnabled
+      ? mappingStatus === "active" || mappingStatus === "inactive_conflict"
+      : mappingStatus === "inactive");
+  if (!routingStatusMatchesIntent) {
+    throw new ManagedMemberRegistrationError(
+      502,
+      "ROUTING_SYNC_UNCONFIRMED",
+      "Managed WhatsApp routing sync was not confirmed",
+    );
+  }
   if (input.sendInvite !== false && !emailSent) {
     throw new ManagedMemberRegistrationError(502, "INVITE_DELIVERY_FAILED", "Managed member invite delivery failed");
   }

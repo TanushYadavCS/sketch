@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type ManagedMemberUser, reconcileManagedTenantMembers, withManagedMemberSyncLock } from "./managed-members";
+import {
+  type ManagedMemberUser,
+  reconcileManagedTenantMembers,
+  registerManagedTenantMember,
+  withManagedMemberSyncLock,
+} from "./managed-members";
 import { createTestConfig, createTestLogger } from "./test-utils";
 
 describe("managed member reconciliation", () => {
@@ -127,6 +132,43 @@ describe("managed member reconciliation", () => {
       synced: 1,
       conflictUserIds: [],
       failedUserIds: [],
+    });
+  });
+});
+
+describe("managed member registration", () => {
+  it.each([
+    { managedWhatsappDmEnabled: true, mappingStatus: "inactive" },
+    { managedWhatsappDmEnabled: false, mappingStatus: "active" },
+  ] as const)("rejects $mappingStatus when managed DMs are $managedWhatsappDmEnabled", async (testCase) => {
+    const requestFetch = vi.fn(async () =>
+      Response.json({
+        ok: true,
+        mappingStatus: testCase.mappingStatus,
+        emailSent: false,
+        whatsappSent: false,
+      }),
+    );
+
+    await expect(
+      registerManagedTenantMember(
+        createTestConfig({
+          MANAGED_WHATSAPP_PLATFORM_URL: "https://platform.test",
+          MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        }),
+        {
+          tenantUserId: "user-a",
+          email: "member@example.com",
+          name: "Member",
+          phoneNumber: "+14155550100",
+          sendInvite: false,
+          managedWhatsappDmEnabled: testCase.managedWhatsappDmEnabled,
+        },
+        requestFetch,
+      ),
+    ).rejects.toMatchObject({
+      status: 502,
+      code: "ROUTING_SYNC_UNCONFIRMED",
     });
   });
 });
