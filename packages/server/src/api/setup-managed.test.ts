@@ -166,7 +166,7 @@ describe("GET /api/setup/status", () => {
       expect(body.readyToComplete).toBe(true);
     });
 
-    it("reports a passwordless managed admin as ready", async () => {
+    it("reports a passwordless managed admin as ready without exposing its email", async () => {
       await settings.create();
       const userRepo = createUserRepository(db);
       await userRepo.create({
@@ -190,7 +190,7 @@ describe("GET /api/setup/status", () => {
       expect(body.currentStep).toBe(5);
       expect(body.readyToComplete).toBe(true);
       expect(body.managed).toBe(true);
-      expect(body.adminEmail).toBe("admin@test.com");
+      expect(body.adminEmail).toBeNull();
     });
 
     it("allows a passwordless managed admin to configure identity and LLM settings", async () => {

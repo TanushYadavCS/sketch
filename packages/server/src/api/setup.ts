@@ -196,7 +196,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       readyToComplete,
       managed: isManaged,
       currentStep,
-      adminEmail: deps.userRepo ? (adminUser?.email ?? null) : (row?.admin_email ?? null),
+      adminEmail: isManaged ? null : deps.userRepo ? (adminUser?.email ?? null) : (row?.admin_email ?? null),
       orgName: row?.org_name ?? null,
       botName: row?.bot_name ?? "Sketch",
       slackConnected: hasSlack,
