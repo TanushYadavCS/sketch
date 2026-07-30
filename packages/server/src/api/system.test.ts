@@ -1057,6 +1057,41 @@ describe("PUT /api/system/users", () => {
     expect(syncedAdmin?.password_hash).toBeNull();
   });
 
+  it("locks an existing Slack user when the bulk sync changes their email", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const existing = await userRepo.create({
+      email: "alice-old@acme.com",
+      name: "Alice Old",
+      slackUserId: "U111",
+      emailVerified: true,
+    });
+    const lockRecorder = createManagedMemberLockRecorder();
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      withManagedMemberSyncLocks: lockRecorder.withLocks,
+    });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [{ email: "alice-new@acme.com", name: "Alice Updated", slackUserId: "U111" }],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, created: 0, updated: 1 });
+    expect(lockRecorder.calls).toEqual([[existing.id]]);
+    const synced = await userRepo.findById(existing.id);
+    expect(synced?.email).toBe("alice-new@acme.com");
+    expect(synced?.name).toBe("Alice Updated");
+  });
+
   it("bulk upserts users by WhatsApp number and email", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);

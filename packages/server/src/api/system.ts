@@ -208,10 +208,14 @@ class SystemUserSyncConflictError extends Error {}
 
 async function resolveManagedMemberMutationIds(
   userRepo: UserRepo,
-  users: Array<{ email?: string; whatsappNumber?: string }>,
+  users: Array<{ email?: string; slackUserId?: string; whatsappNumber?: string }>,
 ): Promise<string[]> {
   const ids = new Set<string>();
   for (const user of users) {
+    if (user.slackUserId) {
+      const existingBySlack = await userRepo.findBySlackId(user.slackUserId);
+      if (existingBySlack) ids.add(existingBySlack.id);
+    }
     if (user.email) {
       const existingByEmail = await userRepo.findByEmail(user.email.trim().toLowerCase());
       if (existingByEmail) ids.add(existingByEmail.id);
@@ -534,6 +538,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       userRepo,
       parsed.data.users.map((user) => ({
         ...(user.email ? { email: user.email } : {}),
+        ...(user.slackUserId ? { slackUserId: user.slackUserId } : {}),
         ...(user.whatsappNumber ? { whatsappNumber: user.whatsappNumber } : {}),
       })),
     );
