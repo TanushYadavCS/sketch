@@ -859,7 +859,12 @@ describe("POST /api/system/users", () => {
   it("creates a verified WhatsApp member user and returns userId", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
-    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+    const syncManagedMemberMapping = vi.fn(async () => {});
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      syncManagedMemberMapping,
+    });
 
     const res = await app.request("/api/system/users", {
       method: "POST",
@@ -883,6 +888,13 @@ describe("POST /api/system/users", () => {
     expect(user?.email).toBe("contractor@gmail.com");
     expect(user?.name).toBe("Contractor");
     expect(user?.email_verified_at).toBeTruthy();
+    expect(syncManagedMemberMapping).toHaveBeenCalledWith({
+      tenantUserId: user?.id,
+      email: "contractor@gmail.com",
+      name: "Contractor",
+      phoneNumber: "+14155550111",
+      sendInvite: false,
+    });
   });
 
   it("serializes an existing WhatsApp member update by stable user id", async () => {
@@ -1117,10 +1129,12 @@ describe("PUT /api/system/users", () => {
       emailVerified: true,
     });
     const lockRecorder = createManagedMemberLockRecorder();
+    const syncManagedMemberMapping = vi.fn(async () => {});
     const app = createTestSystemApp(settingsRepo, {
       systemSecret: SYSTEM_SECRET,
       userRepo,
       withManagedMemberSyncLocks: lockRecorder.withLocks,
+      syncManagedMemberMapping,
     });
 
     const res = await app.request("/api/system/users", {
@@ -1149,6 +1163,26 @@ describe("PUT /api/system/users", () => {
     expect(bob?.name).toBe("Bob WhatsApp");
     expect(bob?.auth_role).toBe("member");
     expect(lockRecorder.calls).toEqual([[existing.id]]);
+    expect(syncManagedMemberMapping.mock.calls).toEqual([
+      [
+        {
+          tenantUserId: existing.id,
+          email: "alice@acme.com",
+          name: "Alice WhatsApp",
+          phoneNumber: "+14155552671",
+          sendInvite: false,
+        },
+      ],
+      [
+        {
+          tenantUserId: bob?.id,
+          email: "bob@acme.com",
+          name: "Bob WhatsApp",
+          phoneNumber: "+919876543210",
+          sendInvite: false,
+        },
+      ],
+    ]);
   });
 
   it("bulk upserts Slack and WhatsApp identities from one row", async () => {

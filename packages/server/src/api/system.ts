@@ -238,6 +238,22 @@ function withManagedMemberMutationLocks<T>(
   return deps.withManagedMemberSyncLocks ? deps.withManagedMemberSyncLocks(tenantUserIds, operation) : operation();
 }
 
+function managedMemberRegistrationInput(user: {
+  id: string;
+  email: string | null;
+  name: string;
+  whatsapp_number: string | null;
+}): ManagedMemberRegistrationInput | undefined {
+  if (!user.email || !user.whatsapp_number) return undefined;
+  return {
+    tenantUserId: user.id,
+    email: user.email,
+    name: user.name,
+    phoneNumber: user.whatsapp_number,
+    sendInvite: false,
+  };
+}
+
 function buildWhatsAppIntroMessage(botName: string, orgName: string | null | undefined): string {
   const orgLabel = orgName?.trim() || "your workspace";
   return `Hi, I'm ${botName}, your AI coworker in ${orgLabel}. You can message me here when you need help with your workspace.`;
@@ -395,15 +411,9 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
               ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
               authRole: "admin",
             });
-        if (user.type === "human" && user.email && user.whatsapp_number) {
-          const memberToSync: ManagedMemberRegistrationInput = {
-            tenantUserId: user.id,
-            email: user.email,
-            name: user.name,
-            phoneNumber: user.whatsapp_number,
-            sendInvite: false,
-          };
-          await deps.syncManagedMemberMapping?.(memberToSync);
+        if (user.type === "human") {
+          const memberToSync = managedMemberRegistrationInput(user);
+          if (memberToSync) await deps.syncManagedMemberMapping?.(memberToSync);
         }
       });
     }
@@ -511,6 +521,8 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
             409,
           );
         }
+        const memberToSync = managedMemberRegistrationInput(result.user);
+        if (memberToSync) await deps.syncManagedMemberMapping?.(memberToSync);
         return c.json({ ok: true, userId: result.user.id });
       }
 
@@ -554,10 +566,11 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     );
 
     try {
-      const result = await withManagedMemberMutationLocks(deps, mutationIds, () =>
-        userRepo.transaction(async (users) => {
+      const result = await withManagedMemberMutationLocks(deps, mutationIds, async () => {
+        const transactionResult = await userRepo.transaction(async (users) => {
           let created = 0;
           let updated = 0;
+          const membersToSync = new Map<string, ManagedMemberRegistrationInput>();
 
           for (const user of parsed.data.users) {
             let rowCreated = false;
@@ -589,15 +602,21 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
               }
               if (whatsappResult.status === "created") rowCreated = true;
               if (whatsappResult.status === "updated") rowUpdated = true;
+              const memberToSync = managedMemberRegistrationInput(whatsappResult.user);
+              if (memberToSync) membersToSync.set(memberToSync.tenantUserId, memberToSync);
             }
 
             if (rowCreated) created += 1;
             else if (rowUpdated) updated += 1;
           }
 
-          return { created, updated };
-        }),
-      );
+          return { created, updated, membersToSync: [...membersToSync.values()] };
+        });
+        for (const memberToSync of transactionResult.membersToSync) {
+          await deps.syncManagedMemberMapping?.(memberToSync);
+        }
+        return transactionResult;
+      });
 
       return c.json({ ok: true, created: result.created, updated: result.updated });
     } catch (error) {
