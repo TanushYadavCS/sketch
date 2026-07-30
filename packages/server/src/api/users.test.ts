@@ -15,7 +15,7 @@ import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
-import { withManagedMemberSyncLock } from "../managed-members";
+import * as managedMembers from "../managed-members";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 
 const PASSWORD = "testpassword123";
@@ -311,7 +311,7 @@ describe("Users API — agent fields", () => {
       .spyOn(globalThis, "fetch")
       .mockImplementationOnce(async (_url, init) => {
         memberId = JSON.parse(String(init?.body)).tenantUserId;
-        blocker = withManagedMemberSyncLock(memberId, async () => {
+        blocker = managedMembers.withManagedMemberSyncLock(memberId, async () => {
           confirmLockAcquired();
           await holdLock;
         });
@@ -960,11 +960,12 @@ describe("Users API — agent fields", () => {
     const holdLock = new Promise<void>((resolve) => {
       releaseLock = resolve;
     });
-    const blocker = withManagedMemberSyncLock(agent.id, async () => {
+    const blocker = managedMembers.withManagedMemberSyncLock(agent.id, async () => {
       confirmLockAcquired();
       await holdLock;
     });
     await lockAcquired;
+    const lockSpy = vi.spyOn(managedMembers, "withManagedMemberSyncLock");
 
     let mutationSettled = false;
     const mutation = Promise.resolve(
@@ -977,7 +978,7 @@ describe("Users API — agent fields", () => {
       mutationSettled = true;
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(lockSpy).toHaveBeenCalledWith(agent.id, expect.any(Function)));
     expect(mutationSettled).toBe(false);
     expect((await users.findById(agent.id))?.name).toBe("Before reconciliation");
 

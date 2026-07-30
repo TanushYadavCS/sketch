@@ -391,7 +391,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
 
     if (deps.userRepo) {
       const userRepo = deps.userRepo;
-      await withManagedMemberMutationLocks(deps, existingUser ? [existingUser.id] : [], async () => {
+      const userId = await withManagedMemberMutationLocks(deps, existingUser ? [existingUser.id] : [], async () => {
         const displayName = parsed.data.name || normalizedAdminEmail.split("@")[0];
         const currentUser = await userRepo.findByEmail(normalizedAdminEmail);
         const user = currentUser
@@ -411,8 +411,12 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
               ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
               authRole: "admin",
             });
-        if (user.type === "human") {
-          const memberToSync = managedMemberRegistrationInput(user);
+        return user.id;
+      });
+      await withManagedMemberMutationLocks(deps, [userId], async () => {
+        const currentUser = await userRepo.findById(userId);
+        if (currentUser?.type === "human") {
+          const memberToSync = managedMemberRegistrationInput(currentUser);
           if (memberToSync) await deps.syncManagedMemberMapping?.(memberToSync);
         }
       });

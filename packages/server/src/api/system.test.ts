@@ -623,7 +623,14 @@ describe("PUT /api/system/identity", () => {
   it("creates admin user row with WhatsApp number", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
-    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+    const lockRecorder = createManagedMemberLockRecorder();
+    const syncManagedMemberMapping = vi.fn(async () => {});
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      withManagedMemberSyncLocks: lockRecorder.withLocks,
+      syncManagedMemberMapping,
+    });
 
     const res = await app.request("/api/system/identity", {
       method: "PUT",
@@ -642,6 +649,14 @@ describe("PUT /api/system/identity", () => {
     const user = await userRepo.findByEmail("wa-admin@acme.com");
     expect(user?.auth_role).toBe("admin");
     expect(user?.whatsapp_number).toBe("+14155552671");
+    expect(lockRecorder.calls).toEqual([[], [user?.id]]);
+    expect(syncManagedMemberMapping).toHaveBeenCalledWith({
+      tenantUserId: user?.id,
+      email: "wa-admin@acme.com",
+      name: "WhatsApp Admin",
+      phoneNumber: "+14155552671",
+      sendInvite: false,
+    });
   });
 
   it("updates existing user row with name and verified email when user already exists", async () => {
@@ -712,7 +727,7 @@ describe("PUT /api/system/identity", () => {
     expect(user?.name).toBe("Admin Updated");
     expect(user?.auth_role).toBe("admin");
     expect(user?.whatsapp_number).toBe("+919876543210");
-    expect(lockRecorder.calls).toEqual([[existing.id]]);
+    expect(lockRecorder.calls).toEqual([[existing.id], [existing.id]]);
     expect(syncManagedMemberMapping).toHaveBeenCalledWith({
       tenantUserId: existing.id,
       email: "admin-wa-update@acme.com",
