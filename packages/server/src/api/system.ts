@@ -566,11 +566,11 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     );
 
     try {
-      const result = await withManagedMemberMutationLocks(deps, mutationIds, async () => {
-        const transactionResult = await userRepo.transaction(async (users) => {
+      const result = await withManagedMemberMutationLocks(deps, mutationIds, () =>
+        userRepo.transaction(async (users) => {
           let created = 0;
           let updated = 0;
-          const membersToSync = new Map<string, ManagedMemberRegistrationInput>();
+          const memberIdsToSync = new Set<string>();
 
           for (const user of parsed.data.users) {
             let rowCreated = false;
@@ -602,21 +602,24 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
               }
               if (whatsappResult.status === "created") rowCreated = true;
               if (whatsappResult.status === "updated") rowUpdated = true;
-              const memberToSync = managedMemberRegistrationInput(whatsappResult.user);
-              if (memberToSync) membersToSync.set(memberToSync.tenantUserId, memberToSync);
+              memberIdsToSync.add(whatsappResult.user.id);
             }
 
             if (rowCreated) created += 1;
             else if (rowUpdated) updated += 1;
           }
 
-          return { created, updated, membersToSync: [...membersToSync.values()] };
+          return { created, updated, memberIdsToSync: [...memberIdsToSync] };
+        }),
+      );
+      for (const memberId of result.memberIdsToSync) {
+        await withManagedMemberMutationLocks(deps, [memberId], async () => {
+          const currentUser = await userRepo.findById(memberId);
+          if (currentUser?.type !== "human") return;
+          const memberToSync = managedMemberRegistrationInput(currentUser);
+          if (memberToSync) await deps.syncManagedMemberMapping?.(memberToSync);
         });
-        for (const memberToSync of transactionResult.membersToSync) {
-          await deps.syncManagedMemberMapping?.(memberToSync);
-        }
-        return transactionResult;
-      });
+      }
 
       return c.json({ ok: true, created: result.created, updated: result.updated });
     } catch (error) {

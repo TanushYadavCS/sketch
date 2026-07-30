@@ -1162,7 +1162,7 @@ describe("PUT /api/system/users", () => {
     expect(bob?.email).toBe("bob@acme.com");
     expect(bob?.name).toBe("Bob WhatsApp");
     expect(bob?.auth_role).toBe("member");
-    expect(lockRecorder.calls).toEqual([[existing.id]]);
+    expect(lockRecorder.calls).toEqual([[existing.id], [existing.id], [bob?.id]]);
     expect(syncManagedMemberMapping.mock.calls).toEqual([
       [
         {
