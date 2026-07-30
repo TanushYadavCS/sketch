@@ -92,6 +92,7 @@ type UserRepo = ReturnType<typeof createUserRepository>;
 
 interface SetupDeps {
   managedUrl?: string;
+  slackMode?: "socket" | "http";
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
   userRepo?: UserRepo;
@@ -162,7 +163,9 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     const adminUser = deps.userRepo ? await deps.userRepo.findFirstAdmin() : undefined;
     const { hasAdmin, hasIdentity, hasLlm, readyToComplete } = getOnboardingReadiness(row, Boolean(adminUser));
     const isManaged = Boolean(deps.managedUrl);
-    const hasSlack = Boolean(row?.slack_bot_token?.trim() && (isManaged || row?.slack_app_token?.trim()));
+    const hasSlack = Boolean(
+      row?.slack_bot_token?.trim() && ((deps.slackMode ?? "socket") === "http" || row?.slack_app_token?.trim()),
+    );
     const provider = row?.llm_provider;
     const llmProvider = isLlmProvider(provider) ? provider : null;
     const isCompleted = Boolean(row?.onboarding_completed_at);

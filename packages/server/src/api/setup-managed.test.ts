@@ -11,7 +11,11 @@ type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 
 function createTestSetupApp(
   settings: SettingsRepo,
-  deps?: { managedUrl?: string; userRepo?: ReturnType<typeof createUserRepository> },
+  deps?: {
+    managedUrl?: string;
+    slackMode?: "socket" | "http";
+    userRepo?: ReturnType<typeof createUserRepository>;
+  },
 ) {
   const app = new Hono();
   app.route("/api/setup", setupRoutes(settings, deps));
@@ -63,6 +67,15 @@ describe("GET /api/setup/status", () => {
       const res = await app.request("/api/setup/status");
       const body = await res.json();
       expect(body.slackConnected).toBe(false);
+    });
+
+    it("reports bot-only Slack connected in HTTP mode", async () => {
+      await settings.create({ adminEmail: "admin@test.com", adminPasswordHash: "hash" });
+      await settings.update({ slackBotToken: "xoxb-test" });
+      const app = createTestSetupApp(settings, { slackMode: "http" });
+      const res = await app.request("/api/setup/status");
+      const body = await res.json();
+      expect(body.slackConnected).toBe(true);
     });
 
     it("returns currentStep 4 when admin, identity, and slack are set", async () => {
@@ -172,13 +185,22 @@ describe("GET /api/setup/status", () => {
       expect(body.readyToComplete).toBe(false);
     });
 
-    it("treats a managed bot token as a connected Slack installation", async () => {
+    it("treats a managed HTTP bot token as a connected Slack installation", async () => {
       await settings.create({ adminEmail: "admin@test.com", adminPasswordHash: "hash" });
       await settings.update({ slackBotToken: "xoxb-test" });
-      const app = createTestSetupApp(settings, { managedUrl });
+      const app = createTestSetupApp(settings, { managedUrl, slackMode: "http" });
       const res = await app.request("/api/setup/status");
       const body = await res.json();
       expect(body.slackConnected).toBe(true);
+    });
+
+    it("requires an app token for managed Socket Mode", async () => {
+      await settings.create({ adminEmail: "admin@test.com", adminPasswordHash: "hash" });
+      await settings.update({ slackBotToken: "xoxb-test" });
+      const app = createTestSetupApp(settings, { managedUrl, slackMode: "socket" });
+      const res = await app.request("/api/setup/status");
+      const body = await res.json();
+      expect(body.slackConnected).toBe(false);
     });
   });
 

@@ -1044,6 +1044,33 @@ describe("Auth endpoints", () => {
       expect(body.role).toBe("admin");
     });
 
+    it("lets a passwordless managed admin complete setup through the full middleware stack", async () => {
+      const settings = createSettingsRepository(db);
+      const users = createUserRepository(db);
+      await settings.create();
+      await users.create({
+        name: "Platform Admin",
+        email: "platform-admin@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "admin",
+      });
+      const managedConfig = createTestConfig({
+        MANAGED_AUTH_SECRET: MANAGED_SECRET,
+        MANAGED_URL: "https://app.getsketch.ai",
+      });
+      const app = createApp(db, managedConfig);
+      const token = await makePlatformToken("platform-admin@test.com", "admin");
+
+      const res = await app.request("/api/setup/complete", {
+        method: "POST",
+        headers: { Cookie: `sketch_platform_session=${token}` },
+      });
+
+      expect(res.status).toBe(200);
+      expect((await settings.get())?.onboarding_completed_at).not.toBeNull();
+    });
+
     it("uses auth_role for managed platform cookie sessions", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
