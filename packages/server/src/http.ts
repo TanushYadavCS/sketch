@@ -415,6 +415,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route(
     "/api/setup",
     setupRoutes(settings, {
+      managedAuthEnabled: Boolean(config.MANAGED_AUTH_SECRET),
       managedUrl: config.MANAGED_URL,
       slackMode: config.SLACK_MODE,
       onSlackTokensUpdated: deps?.onSlackTokensUpdated,

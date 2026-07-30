@@ -12,6 +12,7 @@ type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 function createTestSetupApp(
   settings: SettingsRepo,
   deps?: {
+    managedAuthEnabled?: boolean;
     managedUrl?: string;
     slackMode?: "socket" | "http";
     userRepo?: ReturnType<typeof createUserRepository>;
@@ -175,7 +176,7 @@ describe("GET /api/setup/status", () => {
         llmProvider: "anthropic",
         anthropicApiKey: "sk-ant-test",
       });
-      const app = createTestSetupApp(settings, { managedUrl, userRepo });
+      const app = createTestSetupApp(settings, { managedAuthEnabled: true, userRepo });
 
       const res = await app.request("/api/setup/status");
       const body = await res.json();
@@ -195,7 +196,7 @@ describe("GET /api/setup/status", () => {
         passwordHash: null,
         authRole: "admin",
       });
-      const app = createTestSetupApp(settings, { managedUrl, userRepo });
+      const app = createTestSetupApp(settings, { managedAuthEnabled: true, userRepo });
 
       const identityRes = await app.request("/api/setup/identity", {
         method: "POST",
@@ -242,7 +243,7 @@ describe("GET /api/setup/status", () => {
         anthropicApiKey: "sk-ant-test",
       });
       const userRepo = createUserRepository(db);
-      const app = createTestSetupApp(settings, { managedUrl, userRepo });
+      const app = createTestSetupApp(settings, { managedAuthEnabled: true, userRepo });
 
       const res = await app.request("/api/setup/status");
       const body = await res.json();
@@ -267,7 +268,7 @@ describe("GET /api/setup/status", () => {
         llmProvider: "anthropic",
         anthropicApiKey: "sk-ant-test",
       });
-      const app = createTestSetupApp(settings, { managedUrl, userRepo });
+      const app = createTestSetupApp(settings, { managedAuthEnabled: true, userRepo });
 
       const res = await app.request("/api/setup/complete", { method: "POST" });
 

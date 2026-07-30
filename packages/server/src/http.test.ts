@@ -1044,7 +1044,7 @@ describe("Auth endpoints", () => {
       expect(body.role).toBe("admin");
     });
 
-    it("routes a passwordless managed admin through middleware and enforces setup readiness", async () => {
+    it("routes a passwordless managed admin through setup without requiring a managed URL", async () => {
       const settings = createSettingsRepository(db);
       const users = createUserRepository(db);
       await settings.create();
@@ -1055,10 +1055,7 @@ describe("Auth endpoints", () => {
         passwordHash: null,
         authRole: "admin",
       });
-      const managedConfig = createTestConfig({
-        MANAGED_AUTH_SECRET: MANAGED_SECRET,
-        MANAGED_URL: "https://app.getsketch.ai",
-      });
+      const managedConfig = createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET });
       const app = createApp(db, managedConfig);
       const token = await makePlatformToken("platform-admin@test.com", "admin");
 

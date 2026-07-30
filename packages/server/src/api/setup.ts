@@ -95,6 +95,7 @@ function findSetupAdmin(userRepo: UserRepo, isManaged: boolean) {
 }
 
 interface SetupDeps {
+  managedAuthEnabled?: boolean;
   managedUrl?: string;
   slackMode?: "socket" | "http";
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
@@ -156,6 +157,7 @@ async function upsertSetupAdmin(userRepo: UserRepo, email: string, passwordHash:
 
 export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   const routes = new Hono();
+  const isManaged = deps.managedAuthEnabled ?? Boolean(deps.managedUrl);
 
   /**
    * Reports onboarding progress as a step index. Self-hosted runs the full flow
@@ -164,12 +166,11 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
    */
   routes.get("/status", async (c) => {
     const row = await settings.get();
-    const adminUser = deps.userRepo ? await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)) : undefined;
+    const adminUser = deps.userRepo ? await findSetupAdmin(deps.userRepo, isManaged) : undefined;
     const { hasAdmin, hasIdentity, hasLlm, readyToComplete } = getOnboardingReadiness(
       row,
       deps.userRepo ? Boolean(adminUser) : undefined,
     );
-    const isManaged = Boolean(deps.managedUrl);
     const hasSlack = Boolean(
       row?.slack_bot_token?.trim() && ((deps.slackMode ?? "socket") === "http" || row?.slack_app_token?.trim()),
     );
@@ -205,7 +206,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
 
-    if (deps.managedUrl) {
+    if (isManaged) {
       return c.json({ error: { code: "FORBIDDEN", message: "Slack is managed via Marketplace" } }, 403);
     }
 
@@ -272,7 +273,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   routes.post("/identity", async (c) => {
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)))
+      ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -290,7 +291,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
 
     await settings.update({
       orgName: parsed.data.orgName.trim(),
-      botName: deps.managedUrl ? "Sketch" : parsed.data.botName.trim(),
+      botName: isManaged ? "Sketch" : parsed.data.botName.trim(),
     });
 
     return c.json({ success: true });
@@ -300,13 +301,13 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
 
-    if (deps.managedUrl) {
+    if (isManaged) {
       return c.json({ error: { code: "FORBIDDEN", message: "Slack is managed via Marketplace" } }, 403);
     }
 
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)))
+      ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -350,7 +351,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   routes.post("/llm/verify", async (c) => {
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)))
+      ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -388,7 +389,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   routes.post("/llm", async (c) => {
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)))
+      ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -435,7 +436,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       return c.json({ success: true });
     }
 
-    const adminUser = deps.userRepo ? await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)) : undefined;
+    const adminUser = deps.userRepo ? await findSetupAdmin(deps.userRepo, isManaged) : undefined;
     const readiness = getOnboardingReadiness(existing, deps.userRepo ? Boolean(adminUser) : undefined);
     if (!readiness.readyToComplete) {
       return c.json(
