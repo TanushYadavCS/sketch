@@ -307,7 +307,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     createAuthMiddleware(settings, {
       managedAuthSecret: config.MANAGED_AUTH_SECRET,
       managedUrl: config.MANAGED_URL,
-      hasLocalAdmin: async () => Boolean(await users.findFirstLocalAdmin()),
+      hasSetupAdmin: async () =>
+        Boolean(await (config.MANAGED_AUTH_SECRET ? users.findFirstAdmin() : users.findFirstLocalAdmin())),
       resolveLocalSessionUser: async (sub) => {
         let user = await users.findById(sub);
         if (!user && sub.includes("@")) {
@@ -414,7 +415,9 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route(
     "/api/setup",
     setupRoutes(settings, {
+      managedAuthEnabled: Boolean(config.MANAGED_AUTH_SECRET),
       managedUrl: config.MANAGED_URL,
+      slackMode: config.SLACK_MODE,
       onSlackTokensUpdated: deps?.onSlackTokensUpdated,
       onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
       userRepo: users,

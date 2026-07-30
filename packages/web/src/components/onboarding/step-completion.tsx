@@ -10,13 +10,15 @@ interface OnboardingData {
   slackWorkspace?: string;
   whatsappConnected: boolean;
   whatsappPhone?: string;
-  llmProvider: LlmProvider;
+  llmProvider: LlmProvider | "vertex" | "openai-compatible";
 }
 
-const LLM_LABELS: Record<LlmProvider, string> = {
+const LLM_LABELS: Record<LlmProvider | "vertex" | "openai-compatible", string> = {
   anthropic: "Anthropic (Sonnet)",
   bedrock: "AWS Bedrock (Sonnet)",
   openrouter: "OpenRouter",
+  vertex: "Google Vertex (Sonnet)",
+  "openai-compatible": "OpenAI-compatible",
 };
 
 interface StepCompletionProps {

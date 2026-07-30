@@ -249,6 +249,8 @@ export interface WhatsAppGroupMemberLabel {
 
 export interface SetupStatus {
   completed: boolean;
+  readyToComplete: boolean;
+  managed?: boolean;
   currentStep: number;
   adminEmail: string | null;
   orgName: string | null;
@@ -256,7 +258,7 @@ export interface SetupStatus {
   slackConnected: boolean;
   whatsappConnected?: boolean;
   llmConnected: boolean;
-  llmProvider: LlmProvider | null;
+  llmProvider: LlmProvider | "vertex" | "openai-compatible" | null;
   managedUrl?: string;
 }
 

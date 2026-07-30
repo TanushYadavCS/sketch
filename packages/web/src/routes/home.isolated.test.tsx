@@ -35,6 +35,7 @@ describe("Home route", () => {
   it("sends authenticated users to Home from the root route", async () => {
     vi.mocked(api.setup.status).mockResolvedValue({
       completed: true,
+      readyToComplete: true,
       currentStep: 5,
       adminEmail: "admin@example.com",
       orgName: "Acme",

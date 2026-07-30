@@ -3,7 +3,6 @@
  * Only status/account are public; subsequent setup steps require auth.
  */
 import { randomBytes } from "node:crypto";
-import { isLlmProvider } from "@sketch/shared";
 import { Hono } from "hono";
 import { z } from "zod";
 import { hashPassword } from "../auth/password";
@@ -12,6 +11,7 @@ import type { createUserRepository } from "../db/repositories/users";
 import { slackApiCall } from "../slack/api";
 import { createSession } from "./auth";
 import { denyIfNotAdmin } from "./auth-helpers";
+import { getOnboardingReadiness } from "./onboarding-readiness";
 
 async function verifySlackTokens(botToken: string, appToken: string): Promise<{ workspaceName?: string }> {
   const auth = await slackApiCall(botToken, "auth.test");
@@ -89,8 +89,14 @@ async function verifyAnthropicApiKey(apiKey: string): Promise<void> {
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
 
+function findSetupAdmin(userRepo: UserRepo, isManaged: boolean) {
+  return isManaged ? userRepo.findFirstAdmin() : userRepo.findFirstLocalAdmin();
+}
+
 interface SetupDeps {
+  managedAuthEnabled?: boolean;
   managedUrl?: string;
+  slackMode?: "socket" | "http";
   onSlackTokensUpdated?: (tokens?: { botToken: string; appToken: string }) => Promise<void>;
   onLlmSettingsUpdated?: () => Promise<void>;
   userRepo?: UserRepo;
@@ -150,6 +156,7 @@ async function upsertSetupAdmin(userRepo: UserRepo, email: string, passwordHash:
 
 export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   const routes = new Hono();
+  const isManaged = deps.managedAuthEnabled ?? Boolean(deps.managedUrl);
 
   /**
    * Reports onboarding progress as a step index. Self-hosted runs the full flow
@@ -158,35 +165,35 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
    */
   routes.get("/status", async (c) => {
     const row = await settings.get();
-    const adminUser = deps.userRepo ? await deps.userRepo.findFirstLocalAdmin() : undefined;
-    const hasAdmin = Boolean(adminUser ?? row?.admin_email);
-    const hasIdentity = Boolean(row?.org_name?.trim() && row?.bot_name?.trim());
-    const hasSlack = Boolean(row?.slack_bot_token?.trim() && row?.slack_app_token?.trim());
-    const hasAnthropic = row?.llm_provider === "anthropic" && Boolean(row?.anthropic_api_key?.trim());
-    const hasBedrock =
-      row?.llm_provider === "bedrock" &&
-      Boolean(row?.aws_access_key_id?.trim() && row?.aws_secret_access_key?.trim() && row?.aws_region?.trim());
-    const hasOpenRouter =
-      row?.llm_provider === "openrouter" && Boolean(row?.anthropic_api_key?.trim() && row?.model_id?.trim());
-    const hasLlm = Boolean(hasAnthropic || hasBedrock || hasOpenRouter);
-    const provider = row?.llm_provider;
-    const llmProvider = isLlmProvider(provider) ? provider : null;
+    const adminUser = deps.userRepo ? await findSetupAdmin(deps.userRepo, isManaged) : undefined;
+    const { hasAdmin, hasIdentity, hasLlm, llmProvider, readyToComplete } = getOnboardingReadiness(
+      row,
+      deps.userRepo ? Boolean(adminUser) : undefined,
+    );
+    const hasSlack = Boolean(
+      row?.slack_bot_token?.trim() && ((deps.slackMode ?? "socket") === "http" || row?.slack_app_token?.trim()),
+    );
     const isCompleted = Boolean(row?.onboarding_completed_at);
-    const isManaged = Boolean(deps.managedUrl);
     let currentStep: number;
     if (isCompleted) {
       currentStep = 5;
-    } else if (hasLlm) {
+    } else if (readyToComplete) {
       currentStep = 5;
+    } else if (!hasAdmin) {
+      currentStep = 0;
+    } else if (!hasIdentity) {
+      currentStep = 2;
     } else if (isManaged) {
-      currentStep = hasIdentity ? 4 : hasAdmin ? 2 : 0;
+      currentStep = 4;
     } else {
-      currentStep = hasSlack ? 4 : hasIdentity ? 3 : hasAdmin ? 2 : 0;
+      currentStep = hasSlack ? 4 : 3;
     }
     return c.json({
       completed: isCompleted,
+      readyToComplete,
+      managed: isManaged,
       currentStep,
-      adminEmail: adminUser?.email ?? row?.admin_email ?? null,
+      adminEmail: isManaged ? null : deps.userRepo ? (adminUser?.email ?? null) : (row?.admin_email ?? null),
       orgName: row?.org_name ?? null,
       botName: row?.bot_name ?? "Sketch",
       slackConnected: hasSlack,
@@ -201,7 +208,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
 
-    if (deps.managedUrl) {
+    if (isManaged) {
       return c.json({ error: { code: "FORBIDDEN", message: "Slack is managed via Marketplace" } }, 403);
     }
 
@@ -266,9 +273,12 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/identity", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -286,7 +296,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
 
     await settings.update({
       orgName: parsed.data.orgName.trim(),
-      botName: deps.managedUrl ? "Sketch" : parsed.data.botName.trim(),
+      botName: isManaged ? "Sketch" : parsed.data.botName.trim(),
     });
 
     return c.json({ success: true });
@@ -296,13 +306,13 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     const denied = denyIfNotAdmin(c);
     if (denied) return denied;
 
-    if (deps.managedUrl) {
+    if (isManaged) {
       return c.json({ error: { code: "FORBIDDEN", message: "Slack is managed via Marketplace" } }, 403);
     }
 
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -344,9 +354,12 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/llm/verify", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -382,9 +395,12 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/llm", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      ? Boolean(await findSetupAdmin(deps.userRepo, isManaged))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -426,20 +442,30 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   });
 
   routes.post("/complete", async (c) => {
+    const denied = denyIfNotAdmin(c);
+    if (denied) return denied;
+
     const existing = await settings.get();
-    const hasAdmin = deps.userRepo
-      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
-      : Boolean(existing?.admin_email);
-    if (!hasAdmin) {
+    if (existing?.onboarding_completed_at) {
+      return c.json({ success: true });
+    }
+
+    const adminUser = deps.userRepo ? await findSetupAdmin(deps.userRepo, isManaged) : undefined;
+    const readiness = getOnboardingReadiness(existing, deps.userRepo ? Boolean(adminUser) : undefined);
+    if (!readiness.readyToComplete) {
       return c.json(
-        { error: { code: "SETUP_INCOMPLETE", message: "Admin account must be created before completing setup" } },
+        {
+          error: {
+            code: "SETUP_INCOMPLETE",
+            message: "Tenant onboarding prerequisites are incomplete",
+            missing: readiness.missing,
+          },
+        },
         409,
       );
     }
 
-    await settings.update({
-      onboardingCompletedAt: new Date().toISOString(),
-    });
+    await settings.completeOnboarding(new Date().toISOString());
 
     return c.json({ success: true });
   });

@@ -4,7 +4,7 @@ import { whatsappNumberSchema } from "@sketch/shared";
  * System API routes — internal management endpoints authenticated by bearer token.
  * Used by managed deployments to update configuration (e.g. Slack tokens) remotely.
  */
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { z } from "zod";
 import type { createEntityRepository } from "../db/repositories/entities";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
@@ -17,6 +17,7 @@ import type { ManagedWhatsAppProvider } from "../whatsapp/providers/managed";
 import { buildIntroductionTemplate } from "../whatsapp/templates";
 import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { upsertWhatsAppIdentity } from "../whatsapp/upsert-identity";
+import { getOnboardingReadiness } from "./onboarding-readiness";
 
 type InboxMessagesRepo = ReturnType<typeof createInboxMessagesRepository>;
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
@@ -847,10 +848,33 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
   });
 
-  routes.post("/onboarding/complete", async (c) => {
-    await settings.update({ onboardingCompletedAt: new Date().toISOString() });
-    return c.json({ ok: true });
-  });
+  const ensureOnboardingComplete = async (c: Context) => {
+    const row = await settings.get();
+    if (row?.onboarding_completed_at) {
+      return c.json({ ok: true, completed: true, changed: false });
+    }
+
+    const adminUser = deps.userRepo ? await deps.userRepo.findFirstAdmin() : undefined;
+    const readiness = getOnboardingReadiness(row, deps.userRepo ? Boolean(adminUser) : undefined);
+    if (!readiness.readyToComplete) {
+      return c.json(
+        {
+          error: {
+            code: "SETUP_INCOMPLETE",
+            message: "Tenant onboarding prerequisites are incomplete",
+            missing: readiness.missing,
+          },
+        },
+        409,
+      );
+    }
+
+    const changed = await settings.completeOnboarding(new Date().toISOString());
+    return c.json({ ok: true, completed: true, changed });
+  };
+
+  routes.post("/onboarding/complete", ensureOnboardingComplete);
+  routes.put("/onboarding/completion", ensureOnboardingComplete);
 
   return routes;
 }
