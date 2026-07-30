@@ -1,3 +1,4 @@
+import { resolveAgentRuntimeProviderConfigFromSettings } from "../agent/runtime/provider";
 import type { createSettingsRepository } from "../db/repositories/settings";
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
@@ -13,16 +14,14 @@ export interface OnboardingReadiness {
   missing: OnboardingPrerequisite[];
 }
 
-export function getOnboardingReadiness(row: SettingsRow, hasAdminUser?: boolean): OnboardingReadiness {
+export function getOnboardingReadiness(
+  row: SettingsRow,
+  hasAdminUser?: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): OnboardingReadiness {
   const hasAdmin = hasAdminUser ?? Boolean(row?.admin_email?.trim());
   const hasIdentity = Boolean(row?.org_name?.trim() && row?.bot_name?.trim());
-  const hasAnthropic = row?.llm_provider === "anthropic" && Boolean(row?.anthropic_api_key?.trim());
-  const hasBedrock =
-    row?.llm_provider === "bedrock" &&
-    Boolean(row?.aws_access_key_id?.trim() && row?.aws_secret_access_key?.trim() && row?.aws_region?.trim());
-  const hasOpenRouter =
-    row?.llm_provider === "openrouter" && Boolean(row?.anthropic_api_key?.trim() && row?.model_id?.trim());
-  const hasLlm = hasAnthropic || hasBedrock || hasOpenRouter;
+  const hasLlm = Boolean(resolveAgentRuntimeProviderConfigFromSettings(row ?? null, env));
   const missing: OnboardingPrerequisite[] = [];
 
   if (!hasAdmin) missing.push("admin");
