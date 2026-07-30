@@ -77,6 +77,7 @@ import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-d
 import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
 import {
+  type ManagedMemberReconciliationResult,
   reconcileManagedTenantMembers,
   registerManagedTenantMember,
   removeManagedTenantMember,
@@ -142,6 +143,7 @@ interface AppDeps {
   onWhatsAppWake?: () => Promise<void> | void;
   onWhatsAppSocketStateChange?: (change: WhatsAppSocketStateChange) => Promise<void> | void;
   getWhatsAppHealth?: () => { missingProviderIdEvents: number };
+  reconcileManagedMembers?: () => Promise<ManagedMemberReconciliationResult>;
 }
 
 /**
@@ -629,7 +631,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           : undefined,
         sendDm: deps?.sendDm,
         managedWhatsappInbound: deps?.managedWhatsapp,
-        reconcileManagedMembers: async () => reconcileManagedTenantMembers(config, users, logger),
+        reconcileManagedMembers:
+          deps?.reconcileManagedMembers ?? (async () => reconcileManagedTenantMembers(config, users, logger)),
         withManagedMemberSyncLocks,
         validateManagedWhatsappInboundIdentity: async (tenantUserId, senderPhoneE164) => {
           const user = await users.findById(tenantUserId);

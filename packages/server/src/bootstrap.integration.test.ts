@@ -289,4 +289,40 @@ describe("bootstrap", () => {
     await expect(shutdown).resolves.toBeUndefined();
     expect(shutdownCompleted).toBe(true);
   });
+
+  it("waits for manual managed member reconciliation during shutdown", async () => {
+    const { reconcileManagedTenantMembers } = await import("./managed-members");
+    let confirmStarted = () => {};
+    let releaseReconciliation = () => {};
+    const started = new Promise<void>((resolve) => {
+      confirmStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      releaseReconciliation = resolve;
+    });
+    vi.mocked(reconcileManagedTenantMembers).mockImplementationOnce(async () => {
+      confirmStarted();
+      await blocked;
+      return { skipped: false, total: 0, synced: 0, conflictUserIds: [], failedUserIds: [] };
+    });
+    const h = await boot({ SYSTEM_SECRET: "test-system-secret" }, false, false);
+    const reconciliation = request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-system-secret" },
+    });
+    await started;
+
+    let shutdownCompleted = false;
+    const shutdown = h.shutdown().then(() => {
+      shutdownCompleted = true;
+    });
+    handle = null;
+    await Promise.resolve();
+    expect(shutdownCompleted).toBe(false);
+
+    releaseReconciliation();
+    await expect(reconciliation.then((response) => response.status)).resolves.toBe(200);
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(shutdownCompleted).toBe(true);
+  });
 });

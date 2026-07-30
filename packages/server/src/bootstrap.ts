@@ -819,6 +819,38 @@ export async function createServer(config: Config, options?: CreateServerOptions
       })
     : null;
 
+  let managedMemberReconciliationPromise: ReturnType<typeof reconcileManagedTenantMembers> | null = null;
+  const runManagedMemberReconciliation = () => {
+    if (managedMemberReconciliationPromise) return managedMemberReconciliationPromise;
+    const run = reconcileManagedTenantMembers(config, users, logger).then((result) => {
+      if (!result.skipped) {
+        logger.info(
+          {
+            total: result.total,
+            synced: result.synced,
+            conflicts: result.conflictUserIds.length,
+            failed: result.failedUserIds.length,
+          },
+          "Managed member reconciliation completed",
+        );
+      }
+      return result;
+    });
+    managedMemberReconciliationPromise = run;
+    const clearRun = () => {
+      if (managedMemberReconciliationPromise === run) {
+        managedMemberReconciliationPromise = null;
+      }
+    };
+    void run.then(clearRun, clearRun);
+    return run;
+  };
+  const startManagedMemberReconciliation = () => {
+    void runManagedMemberReconciliation().catch((err) => {
+      logger.warn({ err }, "Managed member reconciliation could not start");
+    });
+  };
+
   // 9. HTTP server
   const app = createApp(db, config, {
     whatsapp,
@@ -880,6 +912,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     localClaudeSessionService,
     agentRunService,
     limitAgentExecution,
+    reconcileManagedMembers: runManagedMemberReconciliation,
     ...(whatsapp instanceof GatewayClientFacade
       ? {
           whatsappWakeToken: whatsapp.gatewayToken,
@@ -903,41 +936,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
   localDeviceGateway.attach(server);
   logger.info({ port: config.PORT }, "HTTP server started");
 
-  let managedMemberReconciliationPromise: Promise<void> | null = null;
-  const runManagedMemberReconciliation = async () => {
-    if (managedMemberReconciliationPromise) return managedMemberReconciliationPromise;
-    const run = (async () => {
-      try {
-        const result = await reconcileManagedTenantMembers(config, users, logger);
-        if (!result.skipped) {
-          logger.info(
-            {
-              total: result.total,
-              synced: result.synced,
-              conflicts: result.conflictUserIds.length,
-              failed: result.failedUserIds.length,
-            },
-            "Managed member reconciliation completed",
-          );
-        }
-      } catch (err) {
-        logger.warn({ err }, "Managed member reconciliation could not start");
-      }
-    })();
-    managedMemberReconciliationPromise = run;
-    void run.then(() => {
-      if (managedMemberReconciliationPromise === run) {
-        managedMemberReconciliationPromise = null;
-      }
-    });
-    return run;
-  };
   const managedMemberReconciliationEnabled = backgroundWork && externalStartup;
   const managedMemberReconciliationTimer = managedMemberReconciliationEnabled
-    ? setInterval(() => void runManagedMemberReconciliation(), 5 * 60 * 1000)
+    ? setInterval(startManagedMemberReconciliation, 5 * 60 * 1000)
     : null;
   managedMemberReconciliationTimer?.unref();
-  if (managedMemberReconciliationEnabled) void runManagedMemberReconciliation();
+  if (managedMemberReconciliationEnabled) startManagedMemberReconciliation();
 
   // 10. Start platforms
   if (connect) {
@@ -966,7 +970,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     whatsappInboundRetention?.stop();
     normalizationBackfill?.stop();
     if (managedMemberReconciliationTimer) clearInterval(managedMemberReconciliationTimer);
-    await managedMemberReconciliationPromise;
+    await managedMemberReconciliationPromise?.catch(() => undefined);
     await telemetry.shutdown();
     await syncScheduler?.stop();
     whatsappWindowKeepAliveJob?.stop();
