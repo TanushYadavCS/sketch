@@ -29,6 +29,16 @@ function hasCompletePersistedLlmSettings(row: SettingsRow): boolean {
   return false;
 }
 
+function resolveReadinessLlmConfig(row: SettingsRow, env: NodeJS.ProcessEnv) {
+  const runtimeConfig = resolveAgentRuntimeProviderConfigFromSettings(row ?? null, env);
+  if (!row?.llm_provider || hasCompletePersistedLlmSettings(row)) {
+    return runtimeConfig;
+  }
+
+  const environmentConfig = resolveAgentRuntimeProviderConfigFromSettings(null, env);
+  return environmentConfig?.provider === row.llm_provider ? runtimeConfig : null;
+}
+
 export function getOnboardingReadiness(
   row: SettingsRow,
   hasAdminUser?: boolean,
@@ -36,9 +46,7 @@ export function getOnboardingReadiness(
 ): OnboardingReadiness {
   const hasAdmin = hasAdminUser ?? Boolean(row?.admin_email?.trim());
   const hasIdentity = Boolean(row?.org_name?.trim() && row?.bot_name?.trim());
-  const llmConfig = hasCompletePersistedLlmSettings(row)
-    ? resolveAgentRuntimeProviderConfigFromSettings(row ?? null, env)
-    : resolveAgentRuntimeProviderConfigFromSettings(null, env);
+  const llmConfig = resolveReadinessLlmConfig(row, env);
   const hasLlm = Boolean(llmConfig);
   const missing: OnboardingPrerequisite[] = [];
 

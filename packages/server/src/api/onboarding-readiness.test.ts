@@ -89,4 +89,22 @@ describe("getOnboardingReadiness", () => {
       missing: [],
     });
   });
+
+  it("rejects a different ambient provider when persisted settings select Bedrock", () => {
+    expect(
+      getOnboardingReadiness(
+        readySettings({
+          llm_provider: "bedrock",
+          model_id: "us.anthropic.claude-sonnet-4-6",
+        }),
+        undefined,
+        { ANTHROPIC_API_KEY: "sk-ant-env" },
+      ),
+    ).toMatchObject({
+      hasLlm: false,
+      llmProvider: null,
+      readyToComplete: false,
+      missing: ["llm"],
+    });
+  });
 });
