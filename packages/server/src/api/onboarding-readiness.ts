@@ -13,8 +13,8 @@ export interface OnboardingReadiness {
   missing: OnboardingPrerequisite[];
 }
 
-export function getOnboardingReadiness(row: SettingsRow, hasAdminUser = false): OnboardingReadiness {
-  const hasAdmin = hasAdminUser || Boolean(row?.admin_email?.trim());
+export function getOnboardingReadiness(row: SettingsRow, hasAdminUser?: boolean): OnboardingReadiness {
+  const hasAdmin = hasAdminUser ?? Boolean(row?.admin_email?.trim());
   const hasIdentity = Boolean(row?.org_name?.trim() && row?.bot_name?.trim());
   const hasAnthropic = row?.llm_provider === "anthropic" && Boolean(row?.anthropic_api_key?.trim());
   const hasBedrock =

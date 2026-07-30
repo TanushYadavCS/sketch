@@ -855,7 +855,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
 
     const adminUser = deps.userRepo ? await deps.userRepo.findFirstAdmin() : undefined;
-    const readiness = getOnboardingReadiness(row, Boolean(adminUser));
+    const readiness = getOnboardingReadiness(row, deps.userRepo ? Boolean(adminUser) : undefined);
     if (!readiness.readyToComplete) {
       return c.json(
         {

@@ -2237,6 +2237,37 @@ describe("PUT /api/system/onboarding/completion", () => {
     expect((await settingsRepo.get())?.onboarding_completed_at).toBeNull();
   });
 
+  it("does not use legacy admin_email when the user repository has no admin", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const admin = await userRepo.findFirstAdmin();
+    if (!admin) throw new Error("Expected seeded admin");
+    await userRepo.update(admin.id, { authRole: "member" });
+    await settingsRepo.update({
+      adminEmail: admin.email ?? "admin@test.com",
+      orgName: "Acme",
+      botName: "Sketch",
+      llmProvider: "anthropic",
+      anthropicApiKey: "sk-ant-test",
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/onboarding/completion", {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: {
+        code: "SETUP_INCOMPLETE",
+        message: "Tenant onboarding prerequisites are incomplete",
+        missing: ["admin"],
+      },
+    });
+    expect((await settingsRepo.get())?.onboarding_completed_at).toBeNull();
+  });
+
   it("sets onboarding_completed_at when all prerequisites are ready", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);

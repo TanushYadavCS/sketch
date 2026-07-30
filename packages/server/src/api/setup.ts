@@ -161,7 +161,10 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   routes.get("/status", async (c) => {
     const row = await settings.get();
     const adminUser = deps.userRepo ? await deps.userRepo.findFirstAdmin() : undefined;
-    const { hasAdmin, hasIdentity, hasLlm, readyToComplete } = getOnboardingReadiness(row, Boolean(adminUser));
+    const { hasAdmin, hasIdentity, hasLlm, readyToComplete } = getOnboardingReadiness(
+      row,
+      deps.userRepo ? Boolean(adminUser) : undefined,
+    );
     const isManaged = Boolean(deps.managedUrl);
     const hasSlack = Boolean(
       row?.slack_bot_token?.trim() && ((deps.slackMode ?? "socket") === "http" || row?.slack_app_token?.trim()),
@@ -183,7 +186,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       completed: isCompleted,
       readyToComplete,
       currentStep,
-      adminEmail: adminUser?.email ?? row?.admin_email ?? null,
+      adminEmail: deps.userRepo ? (adminUser?.email ?? null) : (row?.admin_email ?? null),
       orgName: row?.org_name ?? null,
       botName: row?.bot_name ?? "Sketch",
       slackConnected: hasSlack,
@@ -429,7 +432,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     }
 
     const adminUser = deps.userRepo ? await deps.userRepo.findFirstAdmin() : undefined;
-    const readiness = getOnboardingReadiness(existing, Boolean(adminUser));
+    const readiness = getOnboardingReadiness(existing, deps.userRepo ? Boolean(adminUser) : undefined);
     if (!readiness.readyToComplete) {
       return c.json(
         {

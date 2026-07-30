@@ -157,6 +157,24 @@ describe("GET /api/setup/status", () => {
       expect(body.adminEmail).toBe("admin@test.com");
     });
 
+    it("does not report a stale legacy admin when the repository has no admin", async () => {
+      await settings.create({ adminEmail: "legacy-admin@test.com" });
+      await settings.update({
+        orgName: "Acme",
+        botName: "Sketch",
+        llmProvider: "anthropic",
+        anthropicApiKey: "sk-ant-test",
+      });
+      const userRepo = createUserRepository(db);
+      const app = createTestSetupApp(settings, { managedUrl, userRepo });
+
+      const res = await app.request("/api/setup/status");
+      const body = await res.json();
+
+      expect(body.readyToComplete).toBe(false);
+      expect(body.adminEmail).toBeNull();
+    });
+
     it("completes setup for a passwordless managed admin", async () => {
       await settings.create();
       const userRepo = createUserRepository(db);
