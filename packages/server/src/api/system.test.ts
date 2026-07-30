@@ -73,11 +73,23 @@ function createTestSystemApp(
       conflictUserIds: string[];
       failedUserIds: string[];
     }>;
+    withManagedMemberSyncLocks?: <T>(tenantUserIds: string[], operation: () => Promise<T>) => Promise<T>;
   },
 ) {
   const app = new Hono();
   app.route("/api/system", systemRoutes(settingsRepo, deps));
   return app;
+}
+
+function createManagedMemberLockRecorder() {
+  const calls: string[][] = [];
+  return {
+    calls,
+    withLocks: async <T>(tenantUserIds: string[], operation: () => Promise<T>): Promise<T> => {
+      calls.push(tenantUserIds);
+      return operation();
+    },
+  };
 }
 
 describe("PUT /api/system/slack/tokens", () => {
@@ -665,8 +677,13 @@ describe("PUT /api/system/identity", () => {
       emailVerified: true,
       authRole: "admin",
     });
+    const lockRecorder = createManagedMemberLockRecorder();
 
-    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      withManagedMemberSyncLocks: lockRecorder.withLocks,
+    });
 
     const res = await app.request("/api/system/identity", {
       method: "PUT",
@@ -686,6 +703,7 @@ describe("PUT /api/system/identity", () => {
     expect(user?.name).toBe("Admin Updated");
     expect(user?.auth_role).toBe("admin");
     expect(user?.whatsapp_number).toBe("+919876543210");
+    expect(lockRecorder.calls).toEqual([[existing.id]]);
   });
 
   it("returns 409 when admin WhatsApp number belongs to another user", async () => {
@@ -851,6 +869,40 @@ describe("POST /api/system/users", () => {
     expect(user?.email_verified_at).toBeTruthy();
   });
 
+  it("serializes an existing WhatsApp member update by stable user id", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const existing = await userRepo.create({
+      email: "member@acme.com",
+      name: "Member",
+      whatsappNumber: "+14155550111",
+      type: "human",
+    });
+    const lockRecorder = createManagedMemberLockRecorder();
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      withManagedMemberSyncLocks: lockRecorder.withLocks,
+    });
+
+    const res = await app.request("/api/system/users", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email: "member@acme.com",
+        name: "Member Updated",
+        whatsappNumber: "+14155550111",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await userRepo.findById(existing.id))?.name).toBe("Member Updated");
+    expect(lockRecorder.calls).toEqual([[existing.id]]);
+  });
+
   it("returns and verifies the existing user when the email already exists", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
@@ -1013,7 +1065,12 @@ describe("PUT /api/system/users", () => {
       name: "Alice Old",
       emailVerified: true,
     });
-    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+    const lockRecorder = createManagedMemberLockRecorder();
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      withManagedMemberSyncLocks: lockRecorder.withLocks,
+    });
 
     const res = await app.request("/api/system/users", {
       method: "PUT",
@@ -1040,6 +1097,7 @@ describe("PUT /api/system/users", () => {
     expect(bob?.email).toBe("bob@acme.com");
     expect(bob?.name).toBe("Bob WhatsApp");
     expect(bob?.auth_role).toBe("member");
+    expect(lockRecorder.calls).toEqual([[existing.id]]);
   });
 
   it("bulk upserts Slack and WhatsApp identities from one row", async () => {

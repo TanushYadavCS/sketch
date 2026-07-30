@@ -11,7 +11,7 @@ import {
   parseAllowedTools,
   whatsappNumberSchema,
 } from "@sketch/shared";
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import { z } from "zod";
@@ -240,19 +240,14 @@ async function syncManagedMemberMapping(
 
 export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
   const routes = new Hono();
-
-  routes.use("*", async (c, next) => {
-    const isMemberMutation =
-      c.req.method === "PATCH" ||
-      c.req.method === "DELETE" ||
-      (c.req.method === "POST" && !c.req.path.endsWith("/verification"));
-    if (!isMemberMutation) {
+  const serializeManagedMemberMutation: MiddlewareHandler = async (c, next) => {
+    const tenantUserId = c.req.param("id");
+    if (!tenantUserId) {
       await next();
       return;
     }
-
-    await withManagedMemberSyncLock(next);
-  });
+    await withManagedMemberSyncLock(tenantUserId, next);
+  };
 
   routes.get("/", async (c) => {
     const list = await users.list();
@@ -513,7 +508,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     }
   });
 
-  routes.patch("/:id", async (c) => {
+  routes.patch("/:id", serializeManagedMemberMutation, async (c) => {
     const id = c.req.param("id");
 
     const existing = await users.findById(id);
@@ -751,7 +746,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     }
   });
 
-  routes.post("/:id/promote", async (c) => {
+  routes.post("/:id/promote", serializeManagedMemberMutation, async (c) => {
     const id = c.req.param("id");
     const existing = await users.findById(id);
     if (!existing) {
@@ -878,7 +873,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     return c.json({ success: true, sent: result.sent });
   });
 
-  routes.delete("/:id", async (c) => {
+  routes.delete("/:id", serializeManagedMemberMutation, async (c) => {
     const sub = c.get("sub");
     const id = c.req.param("id");
     if (id === sub) {

@@ -908,7 +908,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     if (managedMemberReconciliationRunning) return;
     managedMemberReconciliationRunning = true;
     try {
-      const result = await reconcileManagedTenantMembers(config, () => users.list(), logger);
+      const result = await reconcileManagedTenantMembers(config, users, logger);
       if (!result.skipped) {
         logger.info(
           {

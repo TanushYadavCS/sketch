@@ -888,7 +888,7 @@ describe("Users API — agent fields", () => {
     const holdLock = new Promise<void>((resolve) => {
       releaseLock = resolve;
     });
-    const blocker = withManagedMemberSyncLock(async () => {
+    const blocker = withManagedMemberSyncLock(agent.id, async () => {
       confirmLockAcquired();
       await holdLock;
     });

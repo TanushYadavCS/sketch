@@ -66,6 +66,7 @@ interface SystemDeps {
     conflictUserIds: string[];
     failedUserIds: string[];
   }>;
+  withManagedMemberSyncLocks?: <T>(tenantUserIds: string[], operation: () => Promise<T>) => Promise<T>;
   validateManagedWhatsappInboundIdentity?: (tenantUserId: string, senderPhoneE164: string) => Promise<boolean>;
 }
 
@@ -205,6 +206,32 @@ function parseWorkflowMetadata(value: string | null): { openingMessageSent?: boo
 
 class SystemUserSyncConflictError extends Error {}
 
+async function resolveManagedMemberMutationIds(
+  userRepo: UserRepo,
+  users: Array<{ email?: string; whatsappNumber?: string }>,
+): Promise<string[]> {
+  const ids = new Set<string>();
+  for (const user of users) {
+    if (user.email) {
+      const existingByEmail = await userRepo.findByEmail(user.email.trim().toLowerCase());
+      if (existingByEmail) ids.add(existingByEmail.id);
+    }
+    if (user.whatsappNumber) {
+      const existingByWhatsapp = await userRepo.findByWhatsappNumber(user.whatsappNumber);
+      if (existingByWhatsapp) ids.add(existingByWhatsapp.id);
+    }
+  }
+  return [...ids];
+}
+
+function withManagedMemberMutationLocks<T>(
+  deps: SystemDeps,
+  tenantUserIds: string[],
+  operation: () => Promise<T>,
+): Promise<T> {
+  return deps.withManagedMemberSyncLocks ? deps.withManagedMemberSyncLocks(tenantUserIds, operation) : operation();
+}
+
 function buildWhatsAppIntroMessage(botName: string, orgName: string | null | undefined): string {
   const orgLabel = orgName?.trim() || "your workspace";
   return `Hi, I'm ${botName}, your AI coworker in ${orgLabel}. You can message me here when you need help with your workspace.`;
@@ -341,26 +368,30 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
 
     if (deps.userRepo) {
-      const displayName = parsed.data.name || normalizedAdminEmail.split("@")[0];
-      if (existingUser) {
-        await deps.userRepo.update(existingUser.id, {
-          name: displayName,
-          email: normalizedAdminEmail,
-          emailVerified: true,
-          ...(adminPasswordHash !== undefined ? { passwordHash: adminPasswordHash } : {}),
-          ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
-          authRole: "admin",
-        });
-      } else {
-        await deps.userRepo.create({
-          name: displayName,
-          email: normalizedAdminEmail,
-          emailVerified: true,
-          passwordHash: adminPasswordHash ?? null,
-          ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
-          authRole: "admin",
-        });
-      }
+      const userRepo = deps.userRepo;
+      await withManagedMemberMutationLocks(deps, existingUser ? [existingUser.id] : [], async () => {
+        const displayName = parsed.data.name || normalizedAdminEmail.split("@")[0];
+        const currentUser = await userRepo.findByEmail(normalizedAdminEmail);
+        if (currentUser) {
+          await userRepo.update(currentUser.id, {
+            name: displayName,
+            email: normalizedAdminEmail,
+            emailVerified: true,
+            ...(adminPasswordHash !== undefined ? { passwordHash: adminPasswordHash } : {}),
+            ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
+            authRole: "admin",
+          });
+        } else {
+          await userRepo.create({
+            name: displayName,
+            email: normalizedAdminEmail,
+            emailVerified: true,
+            passwordHash: adminPasswordHash ?? null,
+            ...(whatsappNumber !== undefined ? { whatsappNumber } : {}),
+            authRole: "admin",
+          });
+        }
+      });
     }
 
     return c.json({ ok: true });
@@ -444,41 +475,47 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
 
     const email = parsed.data.email.toLowerCase();
-    if (parsed.data.whatsappNumber) {
-      const result = await upsertWhatsAppIdentity(deps.userRepo, {
+    const userRepo = deps.userRepo;
+    const mutationIds = parsed.data.whatsappNumber
+      ? await resolveManagedMemberMutationIds(userRepo, [{ email, whatsappNumber: parsed.data.whatsappNumber }])
+      : [];
+    return withManagedMemberMutationLocks(deps, mutationIds, async () => {
+      if (parsed.data.whatsappNumber) {
+        const result = await upsertWhatsAppIdentity(userRepo, {
+          email,
+          name: parsed.data.name,
+          whatsappNumber: parsed.data.whatsappNumber,
+        });
+        if (result.status === "conflict") {
+          return c.json(
+            {
+              error: {
+                code: "CONFLICT",
+                message: "User is already linked to a different WhatsApp identity",
+              },
+            },
+            409,
+          );
+        }
+        return c.json({ ok: true, userId: result.user.id });
+      }
+
+      const existing = await userRepo.findByEmail(email);
+      if (existing) {
+        if (!existing.email_verified_at) {
+          await userRepo.update(existing.id, { emailVerified: true });
+        }
+        return c.json({ ok: true, userId: existing.id });
+      }
+
+      const user = await userRepo.create({
         email,
         name: parsed.data.name,
-        whatsappNumber: parsed.data.whatsappNumber,
+        emailVerified: true,
       });
-      if (result.status === "conflict") {
-        return c.json(
-          {
-            error: {
-              code: "CONFLICT",
-              message: "User is already linked to a different WhatsApp identity",
-            },
-          },
-          409,
-        );
-      }
-      return c.json({ ok: true, userId: result.user.id });
-    }
 
-    const existing = await deps.userRepo.findByEmail(email);
-    if (existing) {
-      if (!existing.email_verified_at) {
-        await deps.userRepo.update(existing.id, { emailVerified: true });
-      }
-      return c.json({ ok: true, userId: existing.id });
-    }
-
-    const user = await deps.userRepo.create({
-      email,
-      name: parsed.data.name,
-      emailVerified: true,
+      return c.json({ ok: true, userId: user.id });
     });
-
-    return c.json({ ok: true, userId: user.id });
   });
 
   routes.put("/users", async (c) => {
@@ -492,49 +529,60 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
       return c.json({ error: { code: "BAD_REQUEST", message: parsed.error.message } }, 400);
     }
 
+    const userRepo = deps.userRepo;
+    const mutationIds = await resolveManagedMemberMutationIds(
+      userRepo,
+      parsed.data.users.map((user) => ({
+        ...(user.email ? { email: user.email } : {}),
+        ...(user.whatsappNumber ? { whatsappNumber: user.whatsappNumber } : {}),
+      })),
+    );
+
     try {
-      const result = await deps.userRepo.transaction(async (users) => {
-        let created = 0;
-        let updated = 0;
+      const result = await withManagedMemberMutationLocks(deps, mutationIds, () =>
+        userRepo.transaction(async (users) => {
+          let created = 0;
+          let updated = 0;
 
-        for (const user of parsed.data.users) {
-          let rowCreated = false;
-          let rowUpdated = false;
+          for (const user of parsed.data.users) {
+            let rowCreated = false;
+            let rowUpdated = false;
 
-          if (user.slackUserId) {
-            const slackResult = await upsertSlackIdentity(users, {
-              name: user.name,
-              email: user.email as string,
-              slackUserId: user.slackUserId,
-            });
-            if (slackResult.status === "conflict") {
-              throw new SystemUserSyncConflictError(
-                `User ${slackResult.conflict.email} is already linked to another Slack user`,
-              );
+            if (user.slackUserId) {
+              const slackResult = await upsertSlackIdentity(users, {
+                name: user.name,
+                email: user.email as string,
+                slackUserId: user.slackUserId,
+              });
+              if (slackResult.status === "conflict") {
+                throw new SystemUserSyncConflictError(
+                  `User ${slackResult.conflict.email} is already linked to another Slack user`,
+                );
+              }
+              if (slackResult.status === "created") rowCreated = true;
+              if (slackResult.status === "updated") rowUpdated = true;
             }
-            if (slackResult.status === "created") rowCreated = true;
-            if (slackResult.status === "updated") rowUpdated = true;
+
+            if (user.whatsappNumber) {
+              const whatsappResult = await upsertWhatsAppIdentity(users, {
+                name: user.name,
+                email: user.email,
+                whatsappNumber: user.whatsappNumber,
+              });
+              if (whatsappResult.status === "conflict") {
+                throw new SystemUserSyncConflictError("User is already linked to a different WhatsApp identity");
+              }
+              if (whatsappResult.status === "created") rowCreated = true;
+              if (whatsappResult.status === "updated") rowUpdated = true;
+            }
+
+            if (rowCreated) created += 1;
+            else if (rowUpdated) updated += 1;
           }
 
-          if (user.whatsappNumber) {
-            const whatsappResult = await upsertWhatsAppIdentity(users, {
-              name: user.name,
-              email: user.email,
-              whatsappNumber: user.whatsappNumber,
-            });
-            if (whatsappResult.status === "conflict") {
-              throw new SystemUserSyncConflictError("User is already linked to a different WhatsApp identity");
-            }
-            if (whatsappResult.status === "created") rowCreated = true;
-            if (whatsappResult.status === "updated") rowUpdated = true;
-          }
-
-          if (rowCreated) created += 1;
-          else if (rowUpdated) updated += 1;
-        }
-
-        return { created, updated };
-      });
+          return { created, updated };
+        }),
+      );
 
       return c.json({ ok: true, created: result.created, updated: result.updated });
     } catch (error) {

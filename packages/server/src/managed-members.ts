@@ -3,21 +3,48 @@ import type { Config } from "./config";
 
 const MANAGED_MEMBER_REQUEST_TIMEOUT_MS = 30_000;
 
-let managedMemberSyncTail = Promise.resolve();
+const managedMemberSyncTails = new Map<string, Promise<void>>();
 
-export async function withManagedMemberSyncLock<T>(operation: () => Promise<T>): Promise<T> {
-  const previous = managedMemberSyncTail;
+export async function withManagedMemberSyncLock<T>(tenantUserId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = managedMemberSyncTails.get(tenantUserId) ?? Promise.resolve();
   let release = () => {};
-  managedMemberSyncTail = new Promise<void>((resolve) => {
+  const current = new Promise<void>((resolve) => {
     release = resolve;
   });
+  managedMemberSyncTails.set(tenantUserId, current);
 
   await previous;
   try {
     return await operation();
   } finally {
     release();
+    if (managedMemberSyncTails.get(tenantUserId) === current) {
+      managedMemberSyncTails.delete(tenantUserId);
+    }
   }
+}
+
+export async function withManagedMemberSyncLocks<T>(tenantUserIds: string[], operation: () => Promise<T>): Promise<T> {
+  const uniqueIds = [...new Set(tenantUserIds)].sort();
+  const acquire = (index: number): Promise<T> => {
+    const tenantUserId = uniqueIds[index];
+    if (!tenantUserId) return operation();
+    return withManagedMemberSyncLock(tenantUserId, () => acquire(index + 1));
+  };
+  return acquire(0);
+}
+
+export interface ManagedMemberUser {
+  id: string;
+  type: string;
+  email: string | null;
+  whatsapp_number: string | null;
+  name: string;
+}
+
+export interface ManagedMemberUserSource {
+  list(): Promise<ManagedMemberUser[]>;
+  findById(id: string): Promise<ManagedMemberUser | undefined>;
 }
 
 export interface ManagedMemberRegistrationInput {
@@ -177,48 +204,33 @@ export async function removeManagedTenantMember(
 
 export async function reconcileManagedTenantMembers(
   config: Config,
-  users:
-    | Array<{
-        id: string;
-        type: string;
-        email: string | null;
-        whatsapp_number: string | null;
-        name: string;
-      }>
-    | (() => Promise<
-        Array<{
-          id: string;
-          type: string;
-          email: string | null;
-          whatsapp_number: string | null;
-          name: string;
-        }>
-      >),
+  users: ManagedMemberUserSource,
   logger: Logger,
 ): Promise<ManagedMemberReconciliationResult> {
   if (!(managedPlatformUrl(config) && config.MANAGED_WHATSAPP_TENANT_TOKEN)) {
     return { skipped: true, total: 0, synced: 0, conflictUserIds: [], failedUserIds: [] };
   }
 
-  return withManagedMemberSyncLock(async () => {
-    const currentUsers = typeof users === "function" ? await users() : users;
-    const humanUsers = currentUsers.flatMap((user) =>
-      user.type === "human" && user.email && user.whatsapp_number
-        ? [{ ...user, email: user.email, whatsappNumber: user.whatsapp_number }]
-        : [],
-    );
-    const desiredStatus = config.WHATSAPP_DM_PROVIDER === "managed" ? "active" : "inactive";
-    const conflictUserIds: string[] = [];
-    const failedUserIds: string[] = [];
-    let synced = 0;
+  const currentUsers = await users.list();
+  const humanUserIds = currentUsers.flatMap((user) =>
+    user.type === "human" && user.email && user.whatsapp_number ? [user.id] : [],
+  );
+  const desiredStatus = config.WHATSAPP_DM_PROVIDER === "managed" ? "active" : "inactive";
+  const conflictUserIds: string[] = [];
+  const failedUserIds: string[] = [];
+  let synced = 0;
 
-    for (const user of humanUsers) {
+  for (const tenantUserId of humanUserIds) {
+    await withManagedMemberSyncLock(tenantUserId, async () => {
+      const user = await users.findById(tenantUserId);
+      if (user?.type !== "human" || !user.email || !user.whatsapp_number) return;
+
       try {
         const result = await registerManagedTenantMember(config, {
           tenantUserId: user.id,
           email: user.email,
           name: user.name,
-          phoneNumber: user.whatsappNumber,
+          phoneNumber: user.whatsapp_number,
           sendInvite: false,
           managedWhatsappDmEnabled: config.WHATSAPP_DM_PROVIDER === "managed",
         });
@@ -229,14 +241,14 @@ export async function reconcileManagedTenantMembers(
         failedUserIds.push(user.id);
         logger.warn({ err, userId: user.id }, "Managed member reconciliation failed");
       }
-    }
+    });
+  }
 
-    return {
-      skipped: false,
-      total: humanUsers.length,
-      synced,
-      conflictUserIds,
-      failedUserIds,
-    };
-  });
+  return {
+    skipped: false,
+    total: humanUserIds.length,
+    synced,
+    conflictUserIds,
+    failedUserIds,
+  };
 }
