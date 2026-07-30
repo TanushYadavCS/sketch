@@ -127,12 +127,16 @@ function formatConversationBacklogMessages(messages: ConversationBacklogMessage[
 
 function buildConversationBacklogNotice(params: ConversationBacklogContext): string {
   const lowerBound = params.afterMessageId ?? 0;
+  const olderHistoryBounds =
+    lowerBound > 0
+      ? `afterMessageId ${lowerBound}, beforeMessageId ${params.nextCursor ?? params.beforeMessageId}`
+      : `beforeMessageId ${params.nextCursor ?? params.beforeMessageId}`;
   const lines = [
     `Missed chat messages are shown below using durable row ids. Included messages are after messageId ${lowerBound} and before the current messageId ${params.beforeMessageId}.`,
   ];
   if (params.hasMore) {
     lines.push(
-      `Only the newest ${params.messages.length} missed messages are inlined. If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially. For the omitted older messages, use ReadChatHistory with afterMessageId ${lowerBound}, beforeMessageId ${params.nextCursor ?? params.beforeMessageId}, and includeBotMessages false.`,
+      `Only the newest ${params.messages.length} missed messages are inlined. If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially. For the omitted older messages, use ReadChatHistory with ${olderHistoryBounds}, and includeBotMessages false.`,
     );
   }
   return lines.join("\n");

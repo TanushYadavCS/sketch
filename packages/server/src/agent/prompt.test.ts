@@ -983,7 +983,29 @@ describe("buildSketchContext", () => {
       );
       expect(result).toContain("Only the newest 0 missed messages are inlined.");
       expect(result).toContain(
-        "For the omitted older messages, use ReadChatHistory with afterMessageId 0, beforeMessageId 25, and includeBotMessages false.",
+        "For the omitted older messages, use ReadChatHistory with beforeMessageId 25, and includeBotMessages false.",
+      );
+      expect(result).not.toContain("ReadChatHistory with afterMessageId 0");
+    });
+
+    it("preserves an existing lower bound when continuing a truncated backlog", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "summarize",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        conversationBacklog: {
+          afterMessageId: 10,
+          beforeMessageId: 50,
+          hasMore: true,
+          nextCursor: 25,
+          messages: [],
+        },
+      });
+
+      expect(result).toContain(
+        "For the omitted older messages, use ReadChatHistory with afterMessageId 10, beforeMessageId 25, and includeBotMessages false.",
       );
     });
   });
