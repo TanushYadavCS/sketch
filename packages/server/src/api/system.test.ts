@@ -1092,13 +1092,16 @@ describe("PUT /api/system/users", () => {
       email: "alice-old@acme.com",
       name: "Alice Old",
       slackUserId: "U111",
+      whatsappNumber: "+14155552671",
       emailVerified: true,
     });
     const lockRecorder = createManagedMemberLockRecorder();
+    const syncManagedMemberMapping = vi.fn(async () => {});
     const app = createTestSystemApp(settingsRepo, {
       systemSecret: SYSTEM_SECRET,
       userRepo,
       withManagedMemberSyncLocks: lockRecorder.withLocks,
+      syncManagedMemberMapping,
     });
 
     const res = await app.request("/api/system/users", {
@@ -1114,10 +1117,17 @@ describe("PUT /api/system/users", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, created: 0, updated: 1 });
-    expect(lockRecorder.calls).toEqual([[existing.id]]);
+    expect(lockRecorder.calls).toEqual([[existing.id], [existing.id]]);
     const synced = await userRepo.findById(existing.id);
     expect(synced?.email).toBe("alice-new@acme.com");
     expect(synced?.name).toBe("Alice Updated");
+    expect(syncManagedMemberMapping).toHaveBeenCalledWith({
+      tenantUserId: existing.id,
+      email: "alice-new@acme.com",
+      name: "Alice Updated",
+      phoneNumber: "+14155552671",
+      sendInvite: false,
+    });
   });
 
   it("bulk upserts users by WhatsApp number and email", async () => {

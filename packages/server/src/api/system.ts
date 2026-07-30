@@ -589,6 +589,7 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
               }
               if (slackResult.status === "created") rowCreated = true;
               if (slackResult.status === "updated") rowUpdated = true;
+              if (slackResult.user.whatsapp_number) memberIdsToSync.add(slackResult.user.id);
             }
 
             if (user.whatsappNumber) {
