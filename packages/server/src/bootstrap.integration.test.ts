@@ -48,6 +48,20 @@ vi.mock("./connectors/managed-credential-migration", () => ({
   migrateManagedConnectorCredentialsToCanvas: vi.fn(),
 }));
 
+vi.mock("./managed-members", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./managed-members")>();
+  return {
+    ...actual,
+    reconcileManagedTenantMembers: vi.fn().mockResolvedValue({
+      skipped: false,
+      total: 0,
+      synced: 0,
+      conflictUserIds: [],
+      failedUserIds: [],
+    }),
+  };
+});
+
 // Avoid managed seed side effects during tests
 vi.mock("./managed-seed", () => ({
   runManagedSeed: vi.fn(),
@@ -104,21 +118,32 @@ describe("bootstrap", () => {
   it("runs remote startup work by default", async () => {
     const { syncFeaturedSkills } = await import("./skills/sync");
     const { migrateManagedConnectorCredentialsToCanvas } = await import("./connectors/managed-credential-migration");
+    const { reconcileManagedTenantMembers } = await import("./managed-members");
 
     await boot();
 
     expect(syncFeaturedSkills).toHaveBeenCalledOnce();
     expect(migrateManagedConnectorCredentialsToCanvas).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(reconcileManagedTenantMembers).toHaveBeenCalledOnce());
   });
 
   it("skips remote startup work when external startup is disabled", async () => {
     const { syncFeaturedSkills } = await import("./skills/sync");
     const { migrateManagedConnectorCredentialsToCanvas } = await import("./connectors/managed-credential-migration");
+    const { reconcileManagedTenantMembers } = await import("./managed-members");
 
-    await boot({}, false, false);
+    await boot(
+      {
+        MANAGED_WHATSAPP_PLATFORM_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+      },
+      false,
+      false,
+    );
 
     expect(syncFeaturedSkills).not.toHaveBeenCalled();
     expect(migrateManagedConnectorCredentialsToCanvas).not.toHaveBeenCalled();
+    expect(reconcileManagedTenantMembers).not.toHaveBeenCalled();
   });
 
   it("keeps schedulers and inbound consumers stopped when background work is disabled", async () => {

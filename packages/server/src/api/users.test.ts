@@ -262,6 +262,7 @@ describe("Users API — agent fields", () => {
           phoneNumber: "+14155550106",
           sendInvite: true,
         }),
+        signal: expect.any(AbortSignal),
       }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -276,6 +277,7 @@ describe("Users API — agent fields", () => {
           sendInvite: false,
           managedWhatsappDmEnabled: true,
         }),
+        signal: expect.any(AbortSignal),
       }),
     );
     expect(body.managedWhatsappMappingStatus).toBe("active");

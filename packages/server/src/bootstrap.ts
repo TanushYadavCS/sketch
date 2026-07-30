@@ -926,11 +926,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
       managedMemberReconciliationRunning = false;
     }
   };
-  const managedMemberReconciliationTimer = backgroundWork
+  const managedMemberReconciliationEnabled = backgroundWork && externalStartup;
+  const managedMemberReconciliationTimer = managedMemberReconciliationEnabled
     ? setInterval(() => void runManagedMemberReconciliation(), 5 * 60 * 1000)
     : null;
   managedMemberReconciliationTimer?.unref();
-  if (backgroundWork) void runManagedMemberReconciliation();
+  if (managedMemberReconciliationEnabled) void runManagedMemberReconciliation();
 
   // 10. Start platforms
   if (connect) {

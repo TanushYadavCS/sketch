@@ -1,6 +1,8 @@
 import type { Logger } from "pino";
 import type { Config } from "./config";
 
+const MANAGED_MEMBER_REQUEST_TIMEOUT_MS = 30_000;
+
 export interface ManagedMemberRegistrationInput {
   tenantUserId: string;
   email: string;
@@ -84,6 +86,7 @@ export async function registerManagedTenantMember(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(input),
+    signal: AbortSignal.timeout(MANAGED_MEMBER_REQUEST_TIMEOUT_MS),
   });
 
   const body = await response.json().catch(() => null);
@@ -142,6 +145,7 @@ export async function removeManagedTenantMember(
       headers: {
         Authorization: `Bearer ${config.MANAGED_WHATSAPP_TENANT_TOKEN}`,
       },
+      signal: AbortSignal.timeout(MANAGED_MEMBER_REQUEST_TIMEOUT_MS),
     },
   );
 
