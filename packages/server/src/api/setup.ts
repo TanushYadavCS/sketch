@@ -160,7 +160,9 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
    */
   routes.get("/status", async (c) => {
     const row = await settings.get();
-    const adminUser = deps.userRepo ? await deps.userRepo.findFirstAdmin() : undefined;
+    const adminUser = deps.userRepo
+      ? await (deps.managedUrl ? deps.userRepo.findFirstAdmin() : deps.userRepo.findFirstLocalAdmin())
+      : undefined;
     const { hasAdmin, hasIdentity, hasLlm, readyToComplete } = getOnboardingReadiness(
       row,
       deps.userRepo ? Boolean(adminUser) : undefined,
@@ -431,7 +433,9 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       return c.json({ success: true });
     }
 
-    const adminUser = deps.userRepo ? await deps.userRepo.findFirstAdmin() : undefined;
+    const adminUser = deps.userRepo
+      ? await (deps.managedUrl ? deps.userRepo.findFirstAdmin() : deps.userRepo.findFirstLocalAdmin())
+      : undefined;
     const readiness = getOnboardingReadiness(existing, deps.userRepo ? Boolean(adminUser) : undefined);
     if (!readiness.readyToComplete) {
       return c.json(

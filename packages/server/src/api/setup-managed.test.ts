@@ -98,6 +98,34 @@ describe("GET /api/setup/status", () => {
       const body = await res.json();
       expect(body.currentStep).toBe(5);
     });
+
+    it("does not treat a passwordless admin as a configured self-hosted admin", async () => {
+      await settings.create();
+      const userRepo = createUserRepository(db);
+      await userRepo.create({
+        name: "Admin",
+        email: "admin@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "admin",
+      });
+      await settings.update({
+        orgName: "Acme",
+        botName: "Sketch",
+        slackBotToken: "xoxb-test",
+        slackAppToken: "xapp-test",
+        llmProvider: "anthropic",
+        anthropicApiKey: "sk-ant-test",
+      });
+      const app = createTestSetupApp(settings, { userRepo });
+
+      const res = await app.request("/api/setup/status");
+      const body = await res.json();
+
+      expect(body.currentStep).toBe(4);
+      expect(body.readyToComplete).toBe(false);
+      expect(body.adminEmail).toBeNull();
+    });
   });
 
   describe("managed mode (managedUrl set)", () => {
