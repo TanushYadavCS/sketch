@@ -16,6 +16,19 @@ export interface OnboardingReadiness {
   missing: OnboardingPrerequisite[];
 }
 
+function hasCompletePersistedLlmSettings(row: SettingsRow): boolean {
+  if (row?.llm_provider === "anthropic") {
+    return Boolean(row.anthropic_api_key?.trim());
+  }
+  if (row?.llm_provider === "bedrock") {
+    return Boolean(row.aws_access_key_id?.trim() && row.aws_secret_access_key?.trim() && row.aws_region?.trim());
+  }
+  if (row?.llm_provider === "openrouter") {
+    return Boolean(row.anthropic_api_key?.trim() && row.model_id?.trim());
+  }
+  return false;
+}
+
 export function getOnboardingReadiness(
   row: SettingsRow,
   hasAdminUser?: boolean,
@@ -23,7 +36,9 @@ export function getOnboardingReadiness(
 ): OnboardingReadiness {
   const hasAdmin = hasAdminUser ?? Boolean(row?.admin_email?.trim());
   const hasIdentity = Boolean(row?.org_name?.trim() && row?.bot_name?.trim());
-  const llmConfig = resolveAgentRuntimeProviderConfigFromSettings(row ?? null, env);
+  const llmConfig = hasCompletePersistedLlmSettings(row)
+    ? resolveAgentRuntimeProviderConfigFromSettings(row ?? null, env)
+    : resolveAgentRuntimeProviderConfigFromSettings(null, env);
   const hasLlm = Boolean(llmConfig);
   const missing: OnboardingPrerequisite[] = [];
 

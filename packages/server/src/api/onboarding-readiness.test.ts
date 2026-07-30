@@ -53,4 +53,40 @@ describe("getOnboardingReadiness", () => {
       missing: ["llm"],
     });
   });
+
+  it("rejects incomplete persisted Bedrock settings without ambient Bedrock routing", () => {
+    expect(
+      getOnboardingReadiness(
+        readySettings({
+          llm_provider: "bedrock",
+          model_id: "us.anthropic.claude-sonnet-4-6",
+        }),
+        undefined,
+        {},
+      ),
+    ).toMatchObject({
+      hasLlm: false,
+      llmProvider: null,
+      readyToComplete: false,
+      missing: ["llm"],
+    });
+  });
+
+  it("uses ambient Bedrock routing when persisted Bedrock settings are incomplete", () => {
+    expect(
+      getOnboardingReadiness(
+        readySettings({
+          llm_provider: "bedrock",
+          model_id: "us.anthropic.claude-sonnet-4-6",
+        }),
+        undefined,
+        { CLAUDE_CODE_USE_BEDROCK: "1" },
+      ),
+    ).toMatchObject({
+      hasLlm: true,
+      llmProvider: "bedrock",
+      readyToComplete: true,
+      missing: [],
+    });
+  });
 });
