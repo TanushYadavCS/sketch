@@ -374,6 +374,7 @@ export interface RunAgentParams {
     conversationId: number;
     currentMessageId?: number;
     providerThreadId?: string | null;
+    isThreadReply?: boolean;
   };
   agentRuntime?: AgentRuntimeKind;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;

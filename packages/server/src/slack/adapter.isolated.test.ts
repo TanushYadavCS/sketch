@@ -429,6 +429,22 @@ describe("slack/adapter", () => {
       );
     });
 
+    it("loads durable DM backlog without a Slack thread filter", async () => {
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith({
+        conversationId: 1,
+        afterMessageId: null,
+        beforeMessageId: 1,
+        limit: 10,
+      });
+    });
+
     it("appends an integration connection link to DM replies", async () => {
       const deps = makeDeps({
         config: createTestConfig({
@@ -1228,17 +1244,8 @@ describe("slack/adapter", () => {
       expect(deps.repos.channels.create).not.toHaveBeenCalled();
     });
 
-    it("loads channel-wide backlog on top-level mention", async () => {
+    it("loads only top-level backlog on a new top-level mention", async () => {
       const deps = makeDeps();
-      vi.mocked(deps.repos.conversations.getCursor).mockResolvedValueOnce({
-        id: 1,
-        conversation_id: 1,
-        scope_type: "slack_thread",
-        scope_key: "1",
-        last_seen_message_id: 10,
-        created_at: "2025-01-01",
-        updated_at: "2025-01-01",
-      });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { mention } = getHandlers();
 
@@ -1248,15 +1255,21 @@ describe("slack/adapter", () => {
       expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith(
         expect.objectContaining({
           conversationId: 1,
-          afterMessageId: 10,
+          afterMessageId: undefined,
           beforeMessageId: 1,
           limit: 10,
           providerThreadId: undefined,
+          isThreadReply: false,
         }),
       );
       expect(deps.runAgent).toHaveBeenCalledWith(
         expect.objectContaining({
-          conversationContext: { conversationId: 1, currentMessageId: 1, providerThreadId: undefined },
+          conversationContext: {
+            conversationId: 1,
+            currentMessageId: 1,
+            providerThreadId: undefined,
+            isThreadReply: false,
+          },
         }),
       );
     });
@@ -1285,6 +1298,7 @@ describe("slack/adapter", () => {
           beforeMessageId: 1,
           limit: 10,
           providerThreadId: "1",
+          isThreadReply: undefined,
         }),
       );
       expect(deps.runAgent).toHaveBeenCalledWith(

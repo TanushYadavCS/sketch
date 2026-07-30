@@ -60,6 +60,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
         return { content: [{ type: "text" as const, text: "Chat history is not available in this run." }] };
       }
       const providerThreadId = deps.conversationContext?.providerThreadId;
+      const isThreadReply = deps.conversationContext?.isThreadReply;
       const currentMessageId = deps.conversationContext?.currentMessageId;
       const effectiveBeforeMessageId =
         beforeMessageId && currentMessageId
@@ -79,6 +80,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps) {
         order,
         includeBotMessages,
         providerThreadId: effectiveScope === "current_thread" ? providerThreadId : undefined,
+        ...(effectiveScope === "conversation" && isThreadReply !== undefined ? { isThreadReply } : {}),
       });
 
       return {

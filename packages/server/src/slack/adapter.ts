@@ -1076,6 +1076,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           beforeMessageId: capture.captured.id,
           limit: INLINE_BACKLOG_LIMIT,
           providerThreadId: message.threadTs ? threadTs : undefined,
+          isThreadReply: message.threadTs ? undefined : false,
         });
         const conversationBacklog =
           backlog.messages.length > 0 || backlog.hasMore
@@ -1178,6 +1179,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             conversationId: capture.conversation.id,
             currentMessageId: capture.captured.id,
             providerThreadId: message.threadTs ? threadTs : undefined,
+            ...(message.threadTs ? {} : { isThreadReply: false }),
           },
         });
 
