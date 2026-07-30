@@ -66,6 +66,13 @@ function createTestSystemApp(
     startWhatsAppPairing?: ReturnType<typeof vi.fn>;
     cancelWhatsAppPairing?: ReturnType<typeof vi.fn>;
     disconnectWhatsApp?: () => Promise<void>;
+    reconcileManagedMembers?: () => Promise<{
+      skipped: boolean;
+      total: number;
+      synced: number;
+      conflictUserIds: string[];
+      failedUserIds: string[];
+    }>;
   },
 ) {
   const app = new Hono();
@@ -196,6 +203,59 @@ describe("PUT /api/system/slack/tokens", () => {
 
     const decrypted = await settingsRepo.get();
     expect(decrypted?.slack_bot_token).toBe("xoxb-encrypted-token");
+  });
+});
+
+describe("POST /api/system/managed-member-reconciliations", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedAdmin(db);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("runs the configured reconciliation behind system authentication", async () => {
+    const reconcileManagedMembers = vi.fn(async () => ({
+      skipped: false,
+      total: 3,
+      synced: 2,
+      conflictUserIds: [],
+      failedUserIds: ["user-3"],
+    }));
+    const app = createTestSystemApp(createSettingsRepository(db), {
+      systemSecret: SYSTEM_SECRET,
+      reconcileManagedMembers,
+    });
+
+    const res = await app.request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      skipped: false,
+      total: 3,
+      synced: 2,
+      conflictUserIds: [],
+      failedUserIds: ["user-3"],
+    });
+    expect(reconcileManagedMembers).toHaveBeenCalledOnce();
+  });
+
+  it("returns unavailable when reconciliation is not configured", async () => {
+    const app = createTestSystemApp(createSettingsRepository(db), { systemSecret: SYSTEM_SECRET });
+
+    const res = await app.request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(503);
   });
 });
 

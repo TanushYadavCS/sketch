@@ -82,6 +82,7 @@ export function TeamPage() {
               onEdit={setEditingUser}
               onRemove={setRemovingUser}
               onLink={setLinkingUser}
+              canManageHumanMembers={auth.role === "admin"}
             />
           )
         ) : isLoading ? (
@@ -94,6 +95,7 @@ export function TeamPage() {
       <AddMemberDialog
         open={showAddDialog}
         users={users}
+        canAddHuman={auth.role === "admin"}
         onOpenChange={setShowAddDialog}
         onSuccess={() => {
           queryClient.invalidateQueries({ queryKey: ["users"] });
@@ -105,6 +107,7 @@ export function TeamPage() {
         users={users}
         currentUserId={auth.userId}
         canManageAuthRoles={auth.role === "admin"}
+        canEditContact={auth.role === "admin"}
         onOpenChange={(open) => !open && setEditingUser(null)}
         onSuccess={() => {
           setEditingUser(null);

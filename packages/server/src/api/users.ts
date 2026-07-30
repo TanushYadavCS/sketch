@@ -28,6 +28,7 @@ import { createEmailTransport, sendVerificationEmail } from "../email";
 import {
   ManagedMemberRegistrationError,
   type ManagedMemberRegistrationInput,
+  type ManagedMemberRegistrationResult,
   type ManagedMemberRemovalInput,
 } from "../managed-members";
 import type { SlackBot } from "../slack/bot";
@@ -49,6 +50,7 @@ interface UserRoutesDeps {
   whatsappGroups?: WhatsAppGroupRepo;
   getSlack?: () => SlackBot | null;
   registerManagedMember?: (input: ManagedMemberRegistrationInput) => Promise<unknown>;
+  syncManagedMemberMapping?: (input: ManagedMemberRegistrationInput) => Promise<ManagedMemberRegistrationResult>;
   removeManagedMember?: (input: ManagedMemberRemovalInput) => Promise<unknown>;
 }
 
@@ -221,6 +223,20 @@ function managedRegistrationResponse(err: unknown) {
   };
 }
 
+async function syncManagedMemberMapping(
+  deps: UserRoutesDeps,
+  input: ManagedMemberRegistrationInput,
+): Promise<ManagedMemberRegistrationResult["mappingStatus"] | "failed" | undefined> {
+  if (!deps.syncManagedMemberMapping) return undefined;
+  try {
+    const result = await deps.syncManagedMemberMapping(input);
+    return result.mappingStatus;
+  } catch (err) {
+    deps.logger.warn({ err, userId: input.tenantUserId }, "Managed WhatsApp member mapping sync failed");
+    return "failed";
+  }
+}
+
 export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
   const routes = new Hono();
 
@@ -286,6 +302,10 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     const userType = parsed.data.type ?? "human";
     const humanEmail = parsed.data.email?.trim().toLowerCase() ?? null;
     const humanWhatsappNumber = parsed.data.whatsappNumber ?? null;
+
+    if (userType === "human" && c.get("role") !== "admin") {
+      return c.json({ error: { code: "FORBIDDEN", message: "Admin role required" } }, 403);
+    }
 
     if (userType === "human" && (!humanEmail || !humanWhatsappNumber)) {
       return c.json(humanContactError(), 400);
@@ -423,6 +443,16 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         reportsTo: reportsTo ?? undefined,
         allowedTools: parsed.data.allowedTools ?? undefined,
       });
+      const managedWhatsappMappingStatus =
+        user.type === "human" && user.email && user.whatsapp_number
+          ? await syncManagedMemberMapping(deps, {
+              tenantUserId: user.id,
+              email: user.email,
+              name: user.name,
+              phoneNumber: user.whatsapp_number,
+              sendInvite: false,
+            })
+          : undefined;
 
       let boundSlackChannelIds: string[] = [];
       if (parsed.data.slackChannelIds && deps.channels) {
@@ -454,6 +484,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         {
           user: serializeUser(user, boundSlackChannelIds, boundWhatsAppGroupJids, isWhatsappFallback),
           verificationSent,
+          ...(managedWhatsappMappingStatus ? { managedWhatsappMappingStatus } : {}),
         },
         201,
       );
@@ -481,6 +512,14 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     if (!parsed.success) {
       const message = parsed.error.issues[0]?.message ?? "Invalid request";
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
+    }
+
+    if (
+      existing.type === "human" &&
+      (parsed.data.email !== undefined || parsed.data.whatsappNumber !== undefined) &&
+      c.get("role") !== "admin"
+    ) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Admin role required" } }, 403);
     }
 
     if (parsed.data.authRole !== undefined) {
@@ -640,6 +679,16 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         reportsTo: reportsToValue,
         allowedTools: parsed.data.allowedTools,
       });
+      const managedWhatsappMappingStatus =
+        user.type === "human" && user.email && user.whatsapp_number
+          ? await syncManagedMemberMapping(deps, {
+              tenantUserId: user.id,
+              email: user.email,
+              name: user.name,
+              phoneNumber: user.whatsapp_number,
+              sendInvite: false,
+            })
+          : undefined;
 
       if (parsed.data.slackChannelIds !== undefined && deps.channels) {
         await deps.channels.setAgentForSlackChannelIds(user.id, parsed.data.slackChannelIds);
@@ -675,6 +724,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       return c.json({
         user: serializeUser(user, boundSlackChannelIds, boundWhatsAppGroupJids, isWhatsappFallback),
         verificationSent,
+        ...(managedWhatsappMappingStatus ? { managedWhatsappMappingStatus } : {}),
       });
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
@@ -695,6 +745,9 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     }
     if (existing.type !== "external") {
       return c.json({ error: { code: "VALIDATION_ERROR", message: "Only external users can be promoted" } }, 400);
+    }
+    if (c.get("role") !== "admin") {
+      return c.json({ error: { code: "FORBIDDEN", message: "Admin role required" } }, 403);
     }
 
     const body = await c.req.json();
@@ -756,6 +809,16 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     if (!promoted) {
       return c.json({ error: { code: "NOT_FOUND", message: "User not found" } }, 404);
     }
+    const managedWhatsappMappingStatus =
+      promoted.email && promoted.whatsapp_number
+        ? await syncManagedMemberMapping(deps, {
+            tenantUserId: promoted.id,
+            email: promoted.email,
+            name: promoted.name,
+            phoneNumber: promoted.whatsapp_number,
+            sendInvite: false,
+          })
+        : undefined;
 
     let verificationSent = false;
     if (promoted.email) {
@@ -764,7 +827,11 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       verificationSent = result.sent;
     }
 
-    return c.json({ user: serializeUser(promoted), verificationSent });
+    return c.json({
+      user: serializeUser(promoted),
+      verificationSent,
+      ...(managedWhatsappMappingStatus ? { managedWhatsappMappingStatus } : {}),
+    });
   });
 
   // Resend verification email
@@ -810,10 +877,13 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
     if (sub.includes("@") && existing.email?.toLowerCase() === sub.toLowerCase()) {
       return c.json({ error: { code: "FORBIDDEN", message: "Cannot delete your own account" } }, 403);
     }
+    if (existing.type === "human" && c.get("role") !== "admin") {
+      return c.json({ error: { code: "FORBIDDEN", message: "Admin role required" } }, 403);
+    }
 
     if (existing.type === "human" && existing.email && deps.removeManagedMember) {
       try {
-        await deps.removeManagedMember({ email: existing.email });
+        await deps.removeManagedMember({ tenantUserId: existing.id, email: existing.email });
       } catch (err) {
         const response = managedRegistrationResponse(err);
         return c.json(response.body, response.status as 400);

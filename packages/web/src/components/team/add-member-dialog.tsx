@@ -53,15 +53,17 @@ const addAgentSchema = z.object({
 export function AddMemberDialog({
   open,
   users,
+  canAddHuman = true,
   onOpenChange,
   onSuccess,
 }: {
   open: boolean;
   users: User[];
+  canAddHuman?: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess: () => void;
 }) {
-  const [memberType, setMemberType] = useState<"human" | "agent">("human");
+  const [memberType, setMemberType] = useState<"human" | "agent">(() => (canAddHuman ? "human" : "agent"));
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [email, setEmail] = useState("");
@@ -101,7 +103,11 @@ export function AddMemberDialog({
             }),
       }),
     onSuccess: (data) => {
-      if (data.verificationSent) {
+      if (data.managedWhatsappMappingStatus === "inactive_conflict") {
+        toast.warning("Member added, but WhatsApp DMs are inactive because this number is active on another tenant.");
+      } else if (data.managedWhatsappMappingStatus === "failed") {
+        toast.warning("Member added, but WhatsApp routing is still syncing and will retry automatically.");
+      } else if (data.verificationSent) {
         toast.success("Member added. Verification email sent.");
       } else {
         toast.success(memberType === "agent" ? "Agent added" : "Member added");
@@ -119,7 +125,7 @@ export function AddMemberDialog({
   });
 
   const resetAndClose = () => {
-    setMemberType("human");
+    setMemberType(canAddHuman ? "human" : "agent");
     setName("");
     setRole("");
     setEmail("");
@@ -165,17 +171,19 @@ export function AddMemberDialog({
 
         <div className="max-h-[50vh] space-y-4 overflow-y-auto py-2 pr-1">
           <div className="flex rounded-md border border-border">
-            <button
-              type="button"
-              className={`flex-1 rounded-l-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                memberType === "human"
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-transparent text-muted-foreground hover:text-foreground"
-              }`}
-              onClick={() => setMemberType("human")}
-            >
-              Human
-            </button>
+            {canAddHuman && (
+              <button
+                type="button"
+                className={`flex-1 rounded-l-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  memberType === "human"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-transparent text-muted-foreground hover:text-foreground"
+                }`}
+                onClick={() => setMemberType("human")}
+              >
+                Human
+              </button>
+            )}
             <button
               type="button"
               className={`flex-1 rounded-r-md px-3 py-1.5 text-sm font-medium transition-colors ${

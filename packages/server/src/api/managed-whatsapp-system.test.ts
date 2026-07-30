@@ -107,6 +107,33 @@ describe("POST /api/system/whatsapp/managed/events", () => {
     expect(handleInboundEvent).toHaveBeenCalledWith(payload);
   });
 
+  it("fails closed when the forwarded tenant user no longer owns the sender phone", async () => {
+    const handleInboundEvent = vi.fn();
+    const validateManagedWhatsappInboundIdentity = vi.fn(async () => false);
+    const app = new Hono();
+    app.route(
+      "/api/system",
+      systemRoutes(createSettingsRepository(db), {
+        systemSecret: SYSTEM_SECRET,
+        managedWhatsappInbound: { handleInboundEvent },
+        validateManagedWhatsappInboundIdentity,
+      }),
+    );
+
+    const res = await app.request("/api/system/whatsapp/managed/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: `Bearer ${SYSTEM_SECRET}` },
+      body: JSON.stringify(validPayload({ tenantUserId: "stale-user-id" })),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: { code: "IDENTITY_MISMATCH", message: "Managed WhatsApp sender identity is stale" },
+    });
+    expect(validateManagedWhatsappInboundIdentity).toHaveBeenCalledWith("stale-user-id", "+15551234567");
+    expect(handleInboundEvent).not.toHaveBeenCalled();
+  });
+
   it("accepts explicit null optional fields as omitted text message metadata", async () => {
     const provider = createManagedWhatsAppProvider({
       platformUrl: "https://app.getsketch.ai",

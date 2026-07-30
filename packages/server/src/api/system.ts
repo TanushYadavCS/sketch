@@ -59,6 +59,14 @@ interface SystemDeps {
   // biome-ignore lint/complexity/noBannedTypes: Function is needed here to accommodate Vitest mock types in tests
   cancelWhatsAppPairing?: Function;
   disconnectWhatsApp?: () => Promise<void>;
+  reconcileManagedMembers?: () => Promise<{
+    skipped: boolean;
+    total: number;
+    synced: number;
+    conflictUserIds: string[];
+    failedUserIds: string[];
+  }>;
+  validateManagedWhatsappInboundIdentity?: (tenantUserId: string, senderPhoneE164: string) => Promise<boolean>;
 }
 
 const tokenSchema = z.object({
@@ -284,6 +292,13 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     }
 
     return c.json({ success: true });
+  });
+
+  routes.post("/managed-member-reconciliations", async (c) => {
+    if (!deps.reconcileManagedMembers) {
+      return c.json({ error: { code: "UNAVAILABLE", message: "Managed member reconciliation is unavailable" } }, 503);
+    }
+    return c.json(await deps.reconcileManagedMembers());
   });
 
   routes.put("/identity", async (c) => {
@@ -547,6 +562,23 @@ export function systemRoutes(settings: SettingsRepo, deps: SystemDeps) {
     const body = await c.req.json().catch(() => undefined);
     if (body === undefined) {
       return c.json({ error: { code: "BAD_REQUEST", message: "Invalid JSON body" } }, 400);
+    }
+    if (deps.validateManagedWhatsappInboundIdentity && typeof body === "object" && body !== null) {
+      const event = body as Record<string, unknown>;
+      if (event.type === "message") {
+        const tenantUserId = typeof event.tenantUserId === "string" ? event.tenantUserId.trim() : "";
+        const senderPhoneE164 = typeof event.senderPhoneE164 === "string" ? event.senderPhoneE164.trim() : "";
+        if (
+          !tenantUserId ||
+          !senderPhoneE164 ||
+          !(await deps.validateManagedWhatsappInboundIdentity(tenantUserId, senderPhoneE164))
+        ) {
+          return c.json(
+            { error: { code: "IDENTITY_MISMATCH", message: "Managed WhatsApp sender identity is stale" } },
+            409,
+          );
+        }
+      }
     }
 
     try {

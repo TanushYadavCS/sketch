@@ -76,7 +76,11 @@ import type { IntegrationProvider } from "./integrations/types";
 import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-dispatcher";
 import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
-import { registerManagedTenantMember, removeManagedTenantMember } from "./managed-members";
+import {
+  reconcileManagedTenantMembers,
+  registerManagedTenantMember,
+  removeManagedTenantMember,
+} from "./managed-members";
 import { createManagedLoginUrl } from "./managed-url";
 import { mcpOAuthRoutes } from "./mcp/oauth/routes";
 import { mountPublicMcpServer } from "./mcp/server/transport";
@@ -435,6 +439,11 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       whatsappGroups,
       getSlack: deps?.getSlack,
       registerManagedMember: (input) => registerManagedTenantMember(config, input),
+      syncManagedMemberMapping: (input) =>
+        registerManagedTenantMember(config, {
+          ...input,
+          managedWhatsappDmEnabled: config.WHATSAPP_DM_PROVIDER === "managed",
+        }),
       removeManagedMember: (input) => removeManagedTenantMember(config, input),
     }),
   );
@@ -619,6 +628,11 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           : undefined,
         sendDm: deps?.sendDm,
         managedWhatsappInbound: deps?.managedWhatsapp,
+        reconcileManagedMembers: async () => reconcileManagedTenantMembers(config, await users.list(), logger),
+        validateManagedWhatsappInboundIdentity: async (tenantUserId, senderPhoneE164) => {
+          const user = await users.findById(tenantUserId);
+          return user?.type === "human" && user.whatsapp_number === senderPhoneE164;
+        },
         whatsappStatus: whatsapp
           ? async () => ({
               ...(await whatsapp.pairing.status()),

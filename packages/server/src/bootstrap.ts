@@ -58,6 +58,7 @@ import type { IntegrationProvider, IntegrationStatus } from "./integrations/type
 import { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import { LocalDeviceGateway } from "./local-devices/gateway";
 import { createLogger } from "./logger";
+import { reconcileManagedTenantMembers } from "./managed-members";
 import { runManagedSeed } from "./managed-seed";
 import { channelsReconnectUrl, createOperationalAlertDefinitions } from "./operational-alerts/definitions";
 import { createOperationalAlertService } from "./operational-alerts/service";
@@ -902,6 +903,35 @@ export async function createServer(config: Config, options?: CreateServerOptions
   localDeviceGateway.attach(server);
   logger.info({ port: config.PORT }, "HTTP server started");
 
+  let managedMemberReconciliationRunning = false;
+  const runManagedMemberReconciliation = async () => {
+    if (managedMemberReconciliationRunning) return;
+    managedMemberReconciliationRunning = true;
+    try {
+      const result = await reconcileManagedTenantMembers(config, await users.list(), logger);
+      if (!result.skipped) {
+        logger.info(
+          {
+            total: result.total,
+            synced: result.synced,
+            conflicts: result.conflictUserIds.length,
+            failed: result.failedUserIds.length,
+          },
+          "Managed member reconciliation completed",
+        );
+      }
+    } catch (err) {
+      logger.warn({ err }, "Managed member reconciliation could not start");
+    } finally {
+      managedMemberReconciliationRunning = false;
+    }
+  };
+  const managedMemberReconciliationTimer = backgroundWork
+    ? setInterval(() => void runManagedMemberReconciliation(), 5 * 60 * 1000)
+    : null;
+  managedMemberReconciliationTimer?.unref();
+  if (backgroundWork) void runManagedMemberReconciliation();
+
   // 10. Start platforms
   if (connect) {
     await startSlackBotIfConfigured().catch(() => {});
@@ -928,6 +958,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     }
     whatsappInboundRetention?.stop();
     normalizationBackfill?.stop();
+    if (managedMemberReconciliationTimer) clearInterval(managedMemberReconciliationTimer);
     await telemetry.shutdown();
     await syncScheduler?.stop();
     whatsappWindowKeepAliveJob?.stop();
