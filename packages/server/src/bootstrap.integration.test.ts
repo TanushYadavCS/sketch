@@ -258,4 +258,35 @@ describe("bootstrap", () => {
     await expect(h.shutdown()).resolves.toBeUndefined();
     handle = null; // prevent double-shutdown in afterEach
   });
+
+  it("waits for active managed member reconciliation during shutdown", async () => {
+    const { reconcileManagedTenantMembers } = await import("./managed-members");
+    let confirmStarted = () => {};
+    let releaseReconciliation = () => {};
+    const started = new Promise<void>((resolve) => {
+      confirmStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      releaseReconciliation = resolve;
+    });
+    vi.mocked(reconcileManagedTenantMembers).mockImplementationOnce(async () => {
+      confirmStarted();
+      await blocked;
+      return { skipped: false, total: 0, synced: 0, conflictUserIds: [], failedUserIds: [] };
+    });
+    const h = await boot();
+    await started;
+
+    let shutdownCompleted = false;
+    const shutdown = h.shutdown().then(() => {
+      shutdownCompleted = true;
+    });
+    handle = null;
+    await Promise.resolve();
+    expect(shutdownCompleted).toBe(false);
+
+    releaseReconciliation();
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(shutdownCompleted).toBe(true);
+  });
 });

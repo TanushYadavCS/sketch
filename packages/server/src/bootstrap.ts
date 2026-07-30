@@ -903,28 +903,34 @@ export async function createServer(config: Config, options?: CreateServerOptions
   localDeviceGateway.attach(server);
   logger.info({ port: config.PORT }, "HTTP server started");
 
-  let managedMemberReconciliationRunning = false;
+  let managedMemberReconciliationPromise: Promise<void> | null = null;
   const runManagedMemberReconciliation = async () => {
-    if (managedMemberReconciliationRunning) return;
-    managedMemberReconciliationRunning = true;
-    try {
-      const result = await reconcileManagedTenantMembers(config, users, logger);
-      if (!result.skipped) {
-        logger.info(
-          {
-            total: result.total,
-            synced: result.synced,
-            conflicts: result.conflictUserIds.length,
-            failed: result.failedUserIds.length,
-          },
-          "Managed member reconciliation completed",
-        );
+    if (managedMemberReconciliationPromise) return managedMemberReconciliationPromise;
+    const run = (async () => {
+      try {
+        const result = await reconcileManagedTenantMembers(config, users, logger);
+        if (!result.skipped) {
+          logger.info(
+            {
+              total: result.total,
+              synced: result.synced,
+              conflicts: result.conflictUserIds.length,
+              failed: result.failedUserIds.length,
+            },
+            "Managed member reconciliation completed",
+          );
+        }
+      } catch (err) {
+        logger.warn({ err }, "Managed member reconciliation could not start");
       }
-    } catch (err) {
-      logger.warn({ err }, "Managed member reconciliation could not start");
-    } finally {
-      managedMemberReconciliationRunning = false;
-    }
+    })();
+    managedMemberReconciliationPromise = run;
+    void run.then(() => {
+      if (managedMemberReconciliationPromise === run) {
+        managedMemberReconciliationPromise = null;
+      }
+    });
+    return run;
   };
   const managedMemberReconciliationEnabled = backgroundWork && externalStartup;
   const managedMemberReconciliationTimer = managedMemberReconciliationEnabled
@@ -960,6 +966,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     whatsappInboundRetention?.stop();
     normalizationBackfill?.stop();
     if (managedMemberReconciliationTimer) clearInterval(managedMemberReconciliationTimer);
+    await managedMemberReconciliationPromise;
     await telemetry.shutdown();
     await syncScheduler?.stop();
     whatsappWindowKeepAliveJob?.stop();

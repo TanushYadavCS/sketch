@@ -94,4 +94,39 @@ describe("managed member reconciliation", () => {
     releaseLock();
     await blocker;
   });
+
+  it("counts unchanged mappings as synchronized", async () => {
+    const user: ManagedMemberUser = {
+      id: "user-a",
+      type: "human",
+      email: "member@example.com",
+      whatsapp_number: "+14155550100",
+      name: "Member",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ ok: true, mappingStatus: "unchanged", emailSent: false, whatsappSent: false })),
+    );
+
+    const result = await reconcileManagedTenantMembers(
+      createTestConfig({
+        MANAGED_WHATSAPP_PLATFORM_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_DM_PROVIDER: "managed",
+      }),
+      {
+        list: vi.fn(async () => [user]),
+        findById: vi.fn(async () => user),
+      },
+      createTestLogger(),
+    );
+
+    expect(result).toEqual({
+      skipped: false,
+      total: 1,
+      synced: 1,
+      conflictUserIds: [],
+      failedUserIds: [],
+    });
+  });
 });

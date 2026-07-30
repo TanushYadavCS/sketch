@@ -234,7 +234,7 @@ export async function reconcileManagedTenantMembers(
           sendInvite: false,
           managedWhatsappDmEnabled: config.WHATSAPP_DM_PROVIDER === "managed",
         });
-        if (result.mappingStatus === desiredStatus) synced += 1;
+        if (result.mappingStatus === desiredStatus || result.mappingStatus === "unchanged") synced += 1;
         else if (result.mappingStatus === "inactive_conflict") conflictUserIds.push(user.id);
         else failedUserIds.push(user.id);
       } catch (err) {
