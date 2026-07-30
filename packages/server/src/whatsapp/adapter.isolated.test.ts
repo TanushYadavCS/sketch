@@ -503,6 +503,59 @@ describe("whatsapp/adapter", () => {
       expect(agentCall.userName).toBe("Alice");
     });
 
+    it("injects durable missed messages into Baileys DM context", async () => {
+      const deps = makeDeps();
+      vi.mocked(deps.repos.conversations.listBacklog).mockResolvedValue({
+        messages: [
+          {
+            id: 42,
+            conversationId: 1,
+            providerMessageId: "recent-dm",
+            senderJid: "1234567890@s.whatsapp.net",
+            senderName: "Alice",
+            senderUserId: "u1",
+            isBot: false,
+            addressedToSketch: false,
+            text: "latest missed DM message",
+            attachments: [],
+            providerThreadId: null,
+            providerParentMessageId: null,
+            isThreadReply: false,
+            providerTimestamp: null,
+            receivedAt: "2025-01-01T00:00:00.000Z",
+            source: "live",
+            effectiveAt: "2025-01-01T00:00:00.000Z",
+            connectionKey: null,
+            backfillRangeId: null,
+            createdAt: "2025-01-01T00:00:00.000Z",
+          },
+        ],
+        hasMore: false,
+      });
+      const { mock, getHandler } = createMockWhatsApp();
+      wireWhatsAppHandlers(mock as never, deps);
+      const handler = getHandler();
+
+      await handler({
+        type: "dm",
+        text: "what did I just say?",
+        jid: "1234@s.whatsapp.net",
+        messageId: "m1",
+        pushName: "Alice",
+        rawMessage: {},
+        phoneNumber: "+1234567890",
+      });
+      await flush();
+
+      expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith({
+        conversationId: 1,
+        afterMessageId: null,
+        beforeMessageId: 1,
+        limit: 10,
+      });
+      expect(vi.mocked(deps.runAgent).mock.calls[0][0].userMessage).toContain("latest missed DM message");
+    });
+
     it("runs the durable dispatch hook before queued DM work", async () => {
       const deps = makeDeps();
       const { mock } = createMockWhatsApp();
@@ -1950,9 +2003,12 @@ describe("whatsapp/adapter", () => {
       });
       await flush();
 
-      expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith(
-        expect.objectContaining({ conversationId: 1, beforeMessageId: expect.any(Number), limit: 10 }),
-      );
+      expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith({
+        conversationId: 1,
+        afterMessageId: null,
+        beforeMessageId: expect.any(Number),
+        limit: 10,
+      });
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.userMessage).toContain("Bob");
       expect(agentCall.userMessage).toContain("earlier msg");

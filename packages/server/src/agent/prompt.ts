@@ -132,7 +132,7 @@ function buildConversationBacklogNotice(params: ConversationBacklogContext): str
   ];
   if (params.hasMore) {
     lines.push(
-      `Only ${params.messages.length} missed messages are inlined. If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially. For chronological continuation, use ReadChatHistory with afterMessageId ${params.nextCursor ?? lowerBound}, beforeMessageId ${params.beforeMessageId}, and includeBotMessages false.`,
+      `Only the newest ${params.messages.length} missed messages are inlined. If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially. For the omitted older messages, use ReadChatHistory with afterMessageId ${lowerBound}, beforeMessageId ${params.nextCursor ?? params.beforeMessageId}, and includeBotMessages false.`,
     );
   }
   return lines.join("\n");

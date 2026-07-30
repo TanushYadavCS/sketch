@@ -319,6 +319,65 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       expect(backlog.hasMore).toBe(false);
     });
 
+    it.each([
+      ["WhatsApp DM", "whatsapp", "dm", "dm:+15550000001"],
+      ["WhatsApp group", "whatsapp", "group", "busy-group@g.us"],
+      ["Slack DM", "slack", "dm", "D-busy"],
+    ])("returns the newest backlog tail in chronological order for %s", async (_label, platform, kind, providerId) => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform,
+        kind,
+        providerConversationId: providerId,
+      });
+      const watermark = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "watermark",
+        senderJid: "111@s.whatsapp.net",
+        senderName: "Alice",
+        text: "already seen",
+      });
+      const missedIds: number[] = [];
+      for (let index = 1; index <= 17; index += 1) {
+        const message = await repo.insertMessage({
+          conversationId: conversation.id,
+          providerMessageId: `missed-${index}`,
+          senderJid: "222@s.whatsapp.net",
+          senderName: "Bob",
+          text: `missed ${index}`,
+        });
+        missedIds.push(message.row.id);
+      }
+      await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "bot",
+        senderJid: "bot",
+        senderName: "Sketch",
+        text: "bot reply",
+        isBot: true,
+      });
+      const trigger = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "trigger",
+        senderJid: "333@s.whatsapp.net",
+        senderName: "Carol",
+        text: "@Sketch respond",
+        addressedToSketch: true,
+      });
+
+      const backlog = await repo.listBacklog({
+        conversationId: conversation.id,
+        afterMessageId: watermark.row.id,
+        beforeMessageId: trigger.row.id,
+        limit: 10,
+      });
+
+      const expected = missedIds.slice(-10);
+      expect(backlog.messages.map((message) => message.id)).toEqual(expected);
+      expect(backlog.hasMore).toBe(true);
+      expect(backlog.nextCursor).toBe(expected[0]);
+    });
+
     it("pages history with limit plus one and optional bot inclusion", async () => {
       const repo = createConversationRepository(db);
       const conversation = await repo.getOrCreate({
@@ -690,6 +749,117 @@ function runRepositorySuite(label: string, getDb: () => Promise<Kysely<DB>>, opt
       expect(backlog.messages[0].providerThreadId).toBe("1");
       expect(backlog.messages[0].providerParentMessageId).toBe("1");
       expect(backlog.messages[0].isThreadReply).toBe(true);
+    });
+
+    it("returns the newest top-level Slack backlog without replies from other threads", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C-top-level",
+      });
+      const rootIds: number[] = [];
+      for (let index = 1; index <= 17; index += 1) {
+        const providerThreadId = `root-${index}`;
+        const root = await repo.insertMessage({
+          conversationId: conversation.id,
+          providerMessageId: providerThreadId,
+          senderJid: "S1",
+          senderName: "Alice",
+          text: `root ${index}`,
+          providerThreadId,
+        });
+        rootIds.push(root.row.id);
+        await repo.insertMessage({
+          conversationId: conversation.id,
+          providerMessageId: `reply-${index}`,
+          senderJid: "S2",
+          senderName: "Bob",
+          text: `reply ${index}`,
+          providerThreadId,
+          providerParentMessageId: providerThreadId,
+          isThreadReply: true,
+        });
+      }
+      const trigger = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "trigger",
+        senderJid: "S1",
+        senderName: "Alice",
+        text: "@Sketch help",
+        addressedToSketch: true,
+        providerThreadId: "trigger",
+      });
+
+      const backlog = await repo.listBacklog({
+        conversationId: conversation.id,
+        beforeMessageId: trigger.row.id,
+        limit: 10,
+        isThreadReply: false,
+      });
+
+      const expected = rootIds.slice(-10);
+      expect(backlog.messages.map((message) => message.id)).toEqual(expected);
+      expect(backlog.messages.every((message) => !message.isThreadReply)).toBe(true);
+      expect(backlog.hasMore).toBe(true);
+      expect(backlog.nextCursor).toBe(expected[0]);
+    });
+
+    it("returns the newest backlog tail from the active Slack thread", async () => {
+      const repo = createConversationRepository(db);
+      const conversation = await repo.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C-thread-tail",
+      });
+      const targetIds: number[] = [];
+      for (let index = 1; index <= 17; index += 1) {
+        const target = await repo.insertMessage({
+          conversationId: conversation.id,
+          providerMessageId: `target-${index}`,
+          senderJid: "S1",
+          senderName: "Alice",
+          text: `target reply ${index}`,
+          providerThreadId: "target-root",
+          providerParentMessageId: "target-root",
+          isThreadReply: true,
+        });
+        targetIds.push(target.row.id);
+        await repo.insertMessage({
+          conversationId: conversation.id,
+          providerMessageId: `other-${index}`,
+          senderJid: "S2",
+          senderName: "Bob",
+          text: `other reply ${index}`,
+          providerThreadId: "other-root",
+          providerParentMessageId: "other-root",
+          isThreadReply: true,
+        });
+      }
+      const trigger = await repo.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "thread-trigger",
+        senderJid: "S1",
+        senderName: "Alice",
+        text: "@Sketch help",
+        addressedToSketch: true,
+        providerThreadId: "target-root",
+        providerParentMessageId: "target-root",
+        isThreadReply: true,
+      });
+
+      const backlog = await repo.listBacklog({
+        conversationId: conversation.id,
+        beforeMessageId: trigger.row.id,
+        limit: 10,
+        providerThreadId: "target-root",
+      });
+
+      const expected = targetIds.slice(-10);
+      expect(backlog.messages.map((message) => message.id)).toEqual(expected);
+      expect(backlog.messages.every((message) => message.providerThreadId === "target-root")).toBe(true);
+      expect(backlog.hasMore).toBe(true);
+      expect(backlog.nextCursor).toBe(expected[0]);
     });
 
     it("stores independent scoped cursors", async () => {

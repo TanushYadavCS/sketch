@@ -981,8 +981,9 @@ describe("buildSketchContext", () => {
       expect(result).toContain(
         "If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially.",
       );
+      expect(result).toContain("Only the newest 0 missed messages are inlined.");
       expect(result).toContain(
-        "For chronological continuation, use ReadChatHistory with afterMessageId 25, beforeMessageId 50, and includeBotMessages false.",
+        "For the omitted older messages, use ReadChatHistory with afterMessageId 0, beforeMessageId 25, and includeBotMessages false.",
       );
     });
   });
