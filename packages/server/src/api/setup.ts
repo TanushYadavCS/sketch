@@ -90,6 +90,10 @@ async function verifyAnthropicApiKey(apiKey: string): Promise<void> {
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 type UserRepo = ReturnType<typeof createUserRepository>;
 
+function findSetupAdmin(userRepo: UserRepo, isManaged: boolean) {
+  return isManaged ? userRepo.findFirstAdmin() : userRepo.findFirstLocalAdmin();
+}
+
 interface SetupDeps {
   managedUrl?: string;
   slackMode?: "socket" | "http";
@@ -160,9 +164,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
    */
   routes.get("/status", async (c) => {
     const row = await settings.get();
-    const adminUser = deps.userRepo
-      ? await (deps.managedUrl ? deps.userRepo.findFirstAdmin() : deps.userRepo.findFirstLocalAdmin())
-      : undefined;
+    const adminUser = deps.userRepo ? await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)) : undefined;
     const { hasAdmin, hasIdentity, hasLlm, readyToComplete } = getOnboardingReadiness(
       row,
       deps.userRepo ? Boolean(adminUser) : undefined,
@@ -270,7 +272,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   routes.post("/identity", async (c) => {
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      ? Boolean(await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -304,7 +306,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
 
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      ? Boolean(await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -348,7 +350,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   routes.post("/llm/verify", async (c) => {
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      ? Boolean(await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -386,7 +388,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
   routes.post("/llm", async (c) => {
     const existing = await settings.get();
     const hasAdmin = deps.userRepo
-      ? Boolean(await deps.userRepo.findFirstLocalAdmin())
+      ? Boolean(await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)))
       : Boolean(existing?.admin_email);
     if (!hasAdmin) {
       return c.json(
@@ -433,9 +435,7 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
       return c.json({ success: true });
     }
 
-    const adminUser = deps.userRepo
-      ? await (deps.managedUrl ? deps.userRepo.findFirstAdmin() : deps.userRepo.findFirstLocalAdmin())
-      : undefined;
+    const adminUser = deps.userRepo ? await findSetupAdmin(deps.userRepo, Boolean(deps.managedUrl)) : undefined;
     const readiness = getOnboardingReadiness(existing, deps.userRepo ? Boolean(adminUser) : undefined);
     if (!readiness.readyToComplete) {
       return c.json(

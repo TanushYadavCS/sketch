@@ -185,6 +185,54 @@ describe("GET /api/setup/status", () => {
       expect(body.adminEmail).toBe("admin@test.com");
     });
 
+    it("allows a passwordless managed admin to configure identity and LLM settings", async () => {
+      await settings.create();
+      const userRepo = createUserRepository(db);
+      await userRepo.create({
+        name: "Admin",
+        email: "admin@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "admin",
+      });
+      const app = createTestSetupApp(settings, { managedUrl, userRepo });
+
+      const identityRes = await app.request("/api/setup/identity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orgName: "Acme", botName: "Ignored in managed mode" }),
+      });
+      expect(identityRes.status).toBe(200);
+
+      const llmSettings = {
+        provider: "bedrock",
+        awsAccessKeyId: "AKIA-test",
+        awsSecretAccessKey: "secret-test",
+        awsRegion: "ap-south-1",
+      };
+      const verifyRes = await app.request("/api/setup/llm/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(llmSettings),
+      });
+      expect(verifyRes.status).toBe(200);
+
+      const llmRes = await app.request("/api/setup/llm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(llmSettings),
+      });
+      expect(llmRes.status).toBe(200);
+      expect(await settings.get()).toMatchObject({
+        org_name: "Acme",
+        bot_name: "Sketch",
+        llm_provider: "bedrock",
+        aws_access_key_id: "AKIA-test",
+        aws_secret_access_key: "secret-test",
+        aws_region: "ap-south-1",
+      });
+    });
+
     it("does not report a stale legacy admin when the repository has no admin", async () => {
       await settings.create({ adminEmail: "legacy-admin@test.com" });
       await settings.update({
