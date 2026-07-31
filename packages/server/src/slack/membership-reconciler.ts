@@ -66,6 +66,10 @@ export class SlackMembershipReconciler {
     return this.recordParticipantMutation(channelId, () => this.participants.upsert(channelId, slackUserId));
   }
 
+  recordParticipantObserved(channelId: string, slackUserId: string): Promise<void> {
+    return this.enqueueChannelMutation(channelId, () => this.participants.upsert(channelId, slackUserId));
+  }
+
   recordParticipantLeft(channelId: string, slackUserId: string): Promise<void> {
     return this.recordParticipantMutation(channelId, () => this.participants.remove(channelId, slackUserId));
   }

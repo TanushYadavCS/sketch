@@ -764,6 +764,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
     sendDm: sendDirectMessage,
     recordSlackChannelParticipantJoined: (channelId: string, slackUserId: string) =>
       slackMembershipReconciler.recordParticipantJoined(channelId, slackUserId),
+    recordSlackChannelParticipantObserved: (channelId: string, slackUserId: string) =>
+      slackMembershipReconciler.recordParticipantObserved(channelId, slackUserId),
     recordSlackChannelParticipantLeft: (channelId: string, slackUserId: string) =>
       slackMembershipReconciler.recordParticipantLeft(channelId, slackUserId),
     onSlackChannelDiscovered: () => {

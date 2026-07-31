@@ -958,8 +958,10 @@ describe("slack/adapter", () => {
       const conversations = makeConversationsRepo();
       conversations.find.mockResolvedValueOnce(undefined).mockResolvedValue(makeConversation());
       const onSlackChannelDiscovered = vi.fn();
+      const recordSlackChannelParticipantObserved = vi.fn().mockResolvedValue(undefined);
       const deps = makeDeps({
         onSlackChannelDiscovered,
+        recordSlackChannelParticipantObserved,
         repos: {
           ...makeDeps().repos,
           conversations: conversations as unknown as SlackAdapterDeps["repos"]["conversations"],
@@ -978,6 +980,8 @@ describe("slack/adapter", () => {
       await channel({ ...message, ts: "2" });
 
       expect(onSlackChannelDiscovered).toHaveBeenCalledOnce();
+      expect(recordSlackChannelParticipantObserved).toHaveBeenNthCalledWith(1, "C1", "S1");
+      expect(recordSlackChannelParticipantObserved).toHaveBeenNthCalledWith(2, "C1", "S1");
     });
 
     it("handles a top-level follow-up command without running the agent", async () => {

@@ -134,6 +134,22 @@ describe("SlackMembershipReconciler", () => {
     ).resolves.toEqual([]);
   });
 
+  it("preserves event order when an observed message is followed by a leave", async () => {
+    const reconciler = new SlackMembershipReconciler({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => null,
+    });
+
+    const observed = reconciler.recordParticipantObserved("C1", "U1");
+    const left = reconciler.recordParticipantLeft("C1", "U1");
+    await Promise.all([observed, left]);
+
+    await expect(
+      db.selectFrom("slack_channel_participants").selectAll().where("channel_id", "=", "C1").execute(),
+    ).resolves.toEqual([]);
+  });
+
   it("does not restore an in-flight provider snapshot after disconnect clears the roster", async () => {
     const conversations = createConversationRepository(db);
     await conversations.getOrCreate({
