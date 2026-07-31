@@ -762,6 +762,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+    onSlackChannelDiscovered: () => {
+      void slackMembershipReconciler.wake().catch((err) => {
+        logger.warn({ err }, "Slack membership reconciliation failed after channel discovery");
+      });
+    },
   };
 
   const startSlackBotIfConfigured = createSlackStartupManager({
@@ -898,6 +903,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
         await slack.stop();
         slack = null;
       }
+      await slackChannelParticipantsRepo.clearAll();
       await settingsRepo.update({ slackBotToken: null, slackAppToken: null });
       /**
        * Revoke indexed-channel access in the same gesture instead of waiting

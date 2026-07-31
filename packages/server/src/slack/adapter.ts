@@ -156,6 +156,7 @@ export interface SlackAdapterDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
+  onSlackChannelDiscovered?: () => void;
   sendDm: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
@@ -446,12 +447,18 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     displayName?: string | null;
   }) => {
     const { message } = params;
-    const conversation = await repos.conversations.getOrCreate(
-      slackConversationRefForMessage(message),
-      params.displayName,
-    );
+    const conversationRef = slackConversationRefForMessage(message);
+    const existingConversation = await repos.conversations.find(conversationRef);
+    const conversation =
+      existingConversation &&
+      (params.displayName === undefined || params.displayName === existingConversation.display_name)
+        ? existingConversation
+        : await repos.conversations.getOrCreate(conversationRef, params.displayName);
     if (message.userId && conversation.platform === "slack" && conversation.kind === "channel") {
       await slackChannelParticipants.upsert(message.channelId, message.userId);
+    }
+    if (!existingConversation && conversation.platform === "slack" && conversation.kind === "channel") {
+      deps.onSlackChannelDiscovered?.();
     }
 
     if (isConversationControlMessage(message.text)) {

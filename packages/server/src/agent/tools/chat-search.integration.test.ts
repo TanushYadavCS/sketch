@@ -5,6 +5,7 @@ import { reconcileWhatsAppGroupAcls } from "../../connectors/whatsapp-salience";
 import { createConnectorRepository } from "../../db/repositories/connectors";
 import { createConversationSlicesRepository } from "../../db/repositories/conversation-slices";
 import { createConversationRepository } from "../../db/repositories/conversations";
+import { createSlackChannelParticipantsRepository } from "../../db/repositories/slack-channel-participants";
 import { createUserRepository } from "../../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-groups";
 import type { DB } from "../../db/schema";
@@ -435,6 +436,22 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(0);
+    });
+
+    it("revokes passive Slack history access when disconnect clears the roster", async () => {
+      await seedSlackChannel(db, {
+        channelId: "C2-DISCONNECT",
+        text: "disconnect revocation marker",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const before = await handleAllChatsSearch({ query: "disconnect revocation marker" }, depsFor(db));
+      expect(before.ok && before.body.messages).toHaveLength(1);
+
+      await createSlackChannelParticipantsRepository(db).clearAll();
+
+      const after = await handleAllChatsSearch({ query: "disconnect revocation marker" }, depsFor(db));
+      expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
     it("searches raw Slack history even when its indexed file is archived", async () => {

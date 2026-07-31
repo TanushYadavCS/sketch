@@ -178,6 +178,7 @@ function makeConversationsRepo() {
   const conversation = makeConversation();
   return {
     getOrCreate: vi.fn().mockResolvedValue(conversation),
+    find: vi.fn().mockResolvedValue(conversation),
     insertMessage: vi.fn().mockImplementation(async (data) => ({
       row: {
         id: data.providerMessageId === "posted-ts" ? 2 : 1,

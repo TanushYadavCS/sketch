@@ -27,6 +27,10 @@ export function createSlackChannelParticipantsRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    async clearAll(): Promise<void> {
+      await db.deleteFrom("slack_channel_participants").execute();
+    },
+
     async replaceChannelRoster(
       channelId: string,
       slackUserIds: string[],

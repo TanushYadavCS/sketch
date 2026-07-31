@@ -68,6 +68,16 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         db.selectFrom("slack_channel_participants").select("slack_user_id").where("channel_id", "=", "C1").execute(),
       ).resolves.toEqual([{ slack_user_id: "U1" }]);
     });
+
+    it("clears every channel roster on Slack disconnect", async () => {
+      const repo = createSlackChannelParticipantsRepository(db);
+      await repo.upsert("C1", "U1");
+      await repo.upsert("C2", "U2");
+
+      await repo.clearAll();
+
+      await expect(db.selectFrom("slack_channel_participants").selectAll().execute()).resolves.toEqual([]);
+    });
   });
 }
 

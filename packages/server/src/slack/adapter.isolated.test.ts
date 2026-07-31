@@ -207,6 +207,7 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
       slackChannelParticipants: {
         upsert: vi.fn().mockResolvedValue(undefined),
         remove: vi.fn().mockResolvedValue(undefined),
+        clearAll: vi.fn().mockResolvedValue(undefined),
         replaceChannelRoster: vi.fn().mockResolvedValue(undefined),
       },
     },
@@ -374,6 +375,7 @@ describe("slack/adapter", () => {
     it("records group DM (mpim) captures under their own conversation kind", async () => {
       const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
       const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      vi.mocked(deps.repos.conversations.find).mockResolvedValue(undefined);
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { channel } = getHandlers();
 
@@ -928,6 +930,32 @@ describe("slack/adapter", () => {
   });
 
   describe("passive channel handler", () => {
+    it("requests an immediate roster repair only when a channel is first persisted", async () => {
+      const conversations = makeConversationsRepo();
+      conversations.find.mockResolvedValueOnce(undefined).mockResolvedValue(makeConversation());
+      const onSlackChannelDiscovered = vi.fn();
+      const deps = makeDeps({
+        onSlackChannelDiscovered,
+        repos: {
+          ...makeDeps().repos,
+          conversations: conversations as unknown as SlackAdapterDeps["repos"]["conversations"],
+        },
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+      const message = {
+        text: "ambient update",
+        userId: "S1",
+        channelId: "C1",
+        type: "channel_message",
+      };
+
+      await channel({ ...message, ts: "1" });
+      await channel({ ...message, ts: "2" });
+
+      expect(onSlackChannelDiscovered).toHaveBeenCalledOnce();
+    });
+
     it("handles a top-level follow-up command without running the agent", async () => {
       const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: "Marked the follow-up done." });
       const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
