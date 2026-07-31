@@ -157,6 +157,8 @@ export interface SlackAdapterDeps {
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
   onSlackChannelDiscovered?: () => void;
+  recordSlackChannelParticipantJoined?: (channelId: string, slackUserId: string) => Promise<void>;
+  recordSlackChannelParticipantLeft?: (channelId: string, slackUserId: string) => Promise<void>;
   sendDm: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
@@ -304,11 +306,19 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     logger,
   });
   const slackChannelParticipants = repos.slackChannelParticipants ?? createSlackChannelParticipantsRepository(db);
+  const recordSlackChannelParticipantJoined =
+    deps.recordSlackChannelParticipantJoined ??
+    ((channelId: string, slackUserId: string) => slackChannelParticipants.upsert(channelId, slackUserId));
+  const recordSlackChannelParticipantLeft =
+    deps.recordSlackChannelParticipantLeft ??
+    ((channelId: string, slackUserId: string) => slackChannelParticipants.remove(channelId, slackUserId));
 
   slackBot.onMemberJoinedChannel(({ channelId, slackUserId }) =>
-    slackChannelParticipants.upsert(channelId, slackUserId),
+    recordSlackChannelParticipantJoined(channelId, slackUserId),
   );
-  slackBot.onMemberLeftChannel(({ channelId, slackUserId }) => slackChannelParticipants.remove(channelId, slackUserId));
+  slackBot.onMemberLeftChannel(({ channelId, slackUserId }) =>
+    recordSlackChannelParticipantLeft(channelId, slackUserId),
+  );
 
   const resolveUser = (slackUserId: string) =>
     resolveSlackUser(slackUserId, {

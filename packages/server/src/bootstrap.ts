@@ -762,6 +762,10 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+    recordSlackChannelParticipantJoined: (channelId: string, slackUserId: string) =>
+      slackMembershipReconciler.recordParticipantJoined(channelId, slackUserId),
+    recordSlackChannelParticipantLeft: (channelId: string, slackUserId: string) =>
+      slackMembershipReconciler.recordParticipantLeft(channelId, slackUserId),
     onSlackChannelDiscovered: () => {
       void slackMembershipReconciler.wake().catch((err) => {
         logger.warn({ err }, "Slack membership reconciliation failed after channel discovery");
@@ -903,7 +907,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
         await slack.stop();
         slack = null;
       }
-      await slackChannelParticipantsRepo.clearAll();
+      await slackMembershipReconciler.clearAllParticipants();
       await settingsRepo.update({ slackBotToken: null, slackAppToken: null });
       /**
        * Revoke indexed-channel access in the same gesture instead of waiting

@@ -420,6 +420,25 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(providerCalls).toBe(0);
     });
 
+    it("rechecks a positive Slack grant after a processed leave event in the same agent run", async () => {
+      await seedSlackChannel(db, {
+        channelId: "C-LEAVE-CACHE",
+        text: "leave cache marker",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const deps = depsFor(db);
+      const access = new ChatHistoryAccessResolver(deps);
+
+      const before = await handleAllChatsSearch({ query: "leave cache marker" }, deps, access);
+      expect(before.ok && before.body.messages).toHaveLength(1);
+
+      await createSlackChannelParticipantsRepository(db).remove("C-LEAVE-CACHE", USER_SLACK_ID);
+
+      const after = await handleAllChatsSearch({ query: "leave cache marker" }, deps, access);
+      expect(after.ok && after.body.messages).toHaveLength(0);
+    });
+
     it("fails closed when passive Slack membership is stale", async () => {
       await seedSlackChannel(db, {
         channelId: "C2-ERROR",

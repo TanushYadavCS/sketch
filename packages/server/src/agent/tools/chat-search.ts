@@ -72,10 +72,6 @@ function lidFromParticipantRow(row: { participant_jid: string; lid: string | nul
 }
 
 export class ChatHistoryAccessResolver {
-  private readonly decisions = new Map<number, boolean>();
-  private identity: Promise<ChatHistoryAccessIdentity> | null = null;
-  private trustedWhatsAppLid: Promise<string | null> | null = null;
-
   constructor(private readonly deps: SketchMcpDeps) {}
 
   async hasUsableIdentity(): Promise<boolean> {
@@ -83,33 +79,28 @@ export class ChatHistoryAccessResolver {
     return Boolean(identity.slackUserId || identity.whatsappPhone);
   }
 
-  async isConversationAuthorized(conversationId: number, refresh = false): Promise<boolean> {
+  async isConversationAuthorized(conversationId: number, _refresh = false): Promise<boolean> {
     if (!this.deps.db || !this.deps.currentUserId) return false;
     if (this.deps.conversationContext?.conversationId === conversationId) return true;
-    if (refresh) this.decisions.delete(conversationId);
     return (await this.authorizedConversationIds([conversationId])).includes(conversationId);
   }
 
   async authorizedConversationIds(conversationIds: number[]): Promise<number[]> {
     if (!this.deps.db || !this.deps.currentUserId || conversationIds.length === 0) return [];
     const uniqueIds = [...new Set(conversationIds)];
-    const uncachedIds = uniqueIds.filter((id) => !this.decisions.has(id));
-    if (uncachedIds.length > 0) {
-      const rows = await this.deps.db
-        .selectFrom("conversations")
-        .select(["id", "platform", "kind", "provider_conversation_id as providerConversationId"])
-        .where("id", "in", uncachedIds)
-        .where((eb) =>
-          eb.or([
-            eb.and([eb("platform", "=", "slack"), eb("kind", "=", "channel")]),
-            eb.and([eb("platform", "=", "whatsapp"), eb("kind", "=", "group")]),
-          ]),
-        )
-        .execute();
-      const resolved = await this.resolveRows(rows);
-      for (const id of uncachedIds) this.decisions.set(id, resolved.has(id));
-    }
-    return uniqueIds.filter((id) => this.decisions.get(id) === true);
+    const rows = await this.deps.db
+      .selectFrom("conversations")
+      .select(["id", "platform", "kind", "provider_conversation_id as providerConversationId"])
+      .where("id", "in", uniqueIds)
+      .where((eb) =>
+        eb.or([
+          eb.and([eb("platform", "=", "slack"), eb("kind", "=", "channel")]),
+          eb.and([eb("platform", "=", "whatsapp"), eb("kind", "=", "group")]),
+        ]),
+      )
+      .execute();
+    const resolved = await this.resolveRows(rows);
+    return uniqueIds.filter((id) => resolved.has(id));
   }
 
   private async resolveRows(rows: ConversationAccessRow[]): Promise<Set<number>> {
@@ -170,15 +161,11 @@ export class ChatHistoryAccessResolver {
   }
 
   private resolveTrustedWhatsAppLid(phone: string): Promise<string | null> {
-    if (this.trustedWhatsAppLid) return this.trustedWhatsAppLid;
-    this.trustedWhatsAppLid = this.loadTrustedWhatsAppLid(phone);
-    return this.trustedWhatsAppLid;
+    return this.loadTrustedWhatsAppLid(phone);
   }
 
   private loadIdentity(): Promise<ChatHistoryAccessIdentity> {
-    if (this.identity) return this.identity;
-    this.identity = resolveChatHistoryAccessIdentity(this.deps);
-    return this.identity;
+    return resolveChatHistoryAccessIdentity(this.deps);
   }
 
   private async loadTrustedWhatsAppLid(phone: string): Promise<string | null> {

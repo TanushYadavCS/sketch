@@ -6,6 +6,14 @@ import type { DB } from "../db/schema";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { SlackMembershipReconciler } from "./membership-reconciler";
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 describe("SlackMembershipReconciler", () => {
   let db: Kysely<DB>;
 
@@ -87,6 +95,79 @@ describe("SlackMembershipReconciler", () => {
     await expect(
       db.selectFrom("slack_channel_participants").select("slack_user_id").where("channel_id", "=", "C1").execute(),
     ).resolves.toEqual([{ slack_user_id: "U-OLD" }]);
+  });
+
+  it("does not restore a leave event from an older provider snapshot", async () => {
+    const conversations = createConversationRepository(db);
+    await conversations.getOrCreate({
+      platform: "slack",
+      kind: "channel",
+      providerConversationId: "C1",
+    });
+    const participants = createSlackChannelParticipantsRepository(db);
+    await participants.upsert("C1", "U1");
+    const snapshotStarted = deferred();
+    const continueSnapshot = deferred();
+    const listChannelMembers = vi
+      .fn<(channelId: string) => Promise<string[]>>()
+      .mockImplementationOnce(async () => {
+        snapshotStarted.resolve();
+        await continueSnapshot.promise;
+        return ["U1"];
+      })
+      .mockResolvedValue([]);
+    const reconciler = new SlackMembershipReconciler({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => ({ listChannelMembers }),
+    });
+
+    const wake = reconciler.wake();
+    await snapshotStarted.promise;
+    await reconciler.recordParticipantLeft("C1", "U1");
+    continueSnapshot.resolve();
+    await wake;
+
+    expect(listChannelMembers).toHaveBeenCalledTimes(2);
+    await expect(
+      db.selectFrom("slack_channel_participants").selectAll().where("channel_id", "=", "C1").execute(),
+    ).resolves.toEqual([]);
+  });
+
+  it("does not restore an in-flight provider snapshot after disconnect clears the roster", async () => {
+    const conversations = createConversationRepository(db);
+    await conversations.getOrCreate({
+      platform: "slack",
+      kind: "channel",
+      providerConversationId: "C1",
+    });
+    const participants = createSlackChannelParticipantsRepository(db);
+    await participants.upsert("C1", "U1");
+    const snapshotStarted = deferred();
+    const continueSnapshot = deferred();
+    const listChannelMembers = vi
+      .fn<(channelId: string) => Promise<string[]>>()
+      .mockImplementationOnce(async () => {
+        snapshotStarted.resolve();
+        await continueSnapshot.promise;
+        return ["U1"];
+      })
+      .mockResolvedValue([]);
+    const reconciler = new SlackMembershipReconciler({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => ({ listChannelMembers }),
+    });
+
+    const wake = reconciler.wake();
+    await snapshotStarted.promise;
+    await reconciler.clearAllParticipants();
+    continueSnapshot.resolve();
+    await wake;
+
+    await expect(
+      db.selectFrom("slack_channel_participants").selectAll().where("channel_id", "=", "C1").execute(),
+    ).resolves.toEqual([]);
   });
 
   it("does no work while Slack is disconnected", async () => {

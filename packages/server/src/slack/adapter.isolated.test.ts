@@ -348,6 +348,30 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.onChannelMention).toHaveBeenCalledOnce();
     });
 
+    it("routes membership events through the serialized roster callbacks", async () => {
+      const recordSlackChannelParticipantJoined = vi.fn().mockResolvedValue(undefined);
+      const recordSlackChannelParticipantLeft = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({
+        recordSlackChannelParticipantJoined,
+        recordSlackChannelParticipantLeft,
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const joined = mockBotInstance.onMemberJoinedChannel.mock.calls[0]?.[0] as (event: {
+        channelId: string;
+        slackUserId: string;
+      }) => Promise<void>;
+      const left = mockBotInstance.onMemberLeftChannel.mock.calls[0]?.[0] as (event: {
+        channelId: string;
+        slackUserId: string;
+      }) => Promise<void>;
+
+      await joined({ channelId: "C1", slackUserId: "U1" });
+      await left({ channelId: "C1", slackUserId: "U1" });
+
+      expect(recordSlackChannelParticipantJoined).toHaveBeenCalledWith("C1", "U1");
+      expect(recordSlackChannelParticipantLeft).toHaveBeenCalledWith("C1", "U1");
+    });
+
     it("refreshes channel and conversation names when a channel is renamed", async () => {
       const deps = makeDeps({
         repos: {
