@@ -942,6 +942,32 @@ describe("handleSendMessage to a channel or group", () => {
     expect(result.content[0].text).toContain("set exactly one of recipientUserId");
   });
 
+  it("rejects a blank message on both addressing modes", async () => {
+    const deps = targetDeps();
+    const dm = await handleSendMessage({ recipientUserId: "user-bob", message: "   " }, deps, accessAllowing());
+    const channel = await handleSendMessage({ target: slackTarget, message: "" }, deps, accessAllowing("slack:C123"));
+
+    expect(dm.content[0].text).toBe("Error: message must not be empty.");
+    expect(channel.content[0].text).toBe("Error: message must not be empty.");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a blank message for bulk DMs", async () => {
+    const sendDm = vi.fn();
+    const result = await handleSendMessageToUsers(
+      { recipientUserIds: ["user-bob"], message: " " },
+      {
+        inboxMessagesRepo: makeInboxMessagesRepoMock(),
+        userRepo: makeUserRepoMock(),
+        sendDm,
+        currentUserId: "user-alice",
+      },
+    );
+
+    expect(result.content[0].text).toBe("Error: message must not be empty.");
+    expect(sendDm).not.toHaveBeenCalled();
+  });
+
   it("treats an empty recipientUserId alongside a target as both being set", async () => {
     const deps = targetDeps();
     const result = await handleSendMessage(

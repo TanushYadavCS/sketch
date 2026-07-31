@@ -194,6 +194,9 @@ export async function handleSendMessage(
   deps: SendMessageDeps,
   access: SendMessageTargetAccess = new ChatHistoryAccessResolver(deps),
 ): Promise<ToolResult> {
+  if (!params.message.trim()) {
+    return toolError("message must not be empty.");
+  }
   if (params.recipientUserId !== undefined && params.target !== undefined) {
     return toolError("set only one of recipientUserId or target, not both.");
   }
@@ -294,6 +297,9 @@ export async function handleSendMessageToUsers(
   params: { recipientUserIds: string[]; message: string; storeInInbox?: boolean },
   deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "userRepo" | "sendDm" | "currentUserId">,
 ): Promise<ToolResult> {
+  if (!params.message.trim()) {
+    return toolError("message must not be empty.");
+  }
   const seen = new Set<string>();
   const results: Array<Record<string, unknown>> = [];
 
