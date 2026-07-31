@@ -264,20 +264,14 @@ async function loadCrossConversationAnchorStream(
   const row = await deps.db
     .selectFrom("conversation_messages")
     .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
-    .select([
-      "conversations.platform",
-      "conversation_messages.provider_thread_id",
-      "conversation_messages.is_thread_reply",
-    ])
+    .select(["conversations.platform", "conversation_messages.provider_thread_id"])
     .where("conversation_messages.conversation_id", "=", conversationId)
     .where("conversation_messages.id", "=", anchorMessageId)
     .executeTakeFirst();
   if (!row) return { ok: false };
   if (row.platform !== "slack") return { ok: true, stream: {} };
   if (row.provider_thread_id === null) return { ok: true, stream: { providerThreadId: null } };
-  return row.is_thread_reply === 1
-    ? { ok: true, stream: { providerThreadId: row.provider_thread_id } }
-    : { ok: true, stream: { isThreadReply: false } };
+  return { ok: true, stream: { providerThreadId: row.provider_thread_id } };
 }
 
 async function boundaryBelongsToCrossReadStream(

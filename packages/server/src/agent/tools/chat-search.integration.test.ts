@@ -1039,6 +1039,21 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       };
       expect(body.messages.map((message) => message.id)).toEqual([firstRoot.row.id, anchor.row.id, finalReply.row.id]);
       expect(body.messages.map((message) => message.text)).not.toContain("unrelated interleaved reply");
+
+      const rootResult = await readTool.handler({
+        conversationRef: `conversation:${channel.id}`,
+        anchorMessageId: firstRoot.row.id,
+        limit: 5,
+      });
+      const rootBody = JSON.parse(rootResult.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number; text: string }>;
+      };
+      expect(rootBody.messages.map((message) => message.id)).toEqual([
+        firstRoot.row.id,
+        anchor.row.id,
+        finalReply.row.id,
+      ]);
+      expect(rootBody.messages.map((message) => message.text)).not.toContain("unrelated thread root");
     });
 
     it("uses the search-hit thread when conversationRef points to the active Slack channel", async () => {
