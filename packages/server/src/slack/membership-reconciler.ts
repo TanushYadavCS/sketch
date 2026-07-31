@@ -122,7 +122,7 @@ export class SlackMembershipReconciler {
           await this.participants.replaceChannelRoster(
             row.provider_conversation_id,
             members,
-            new Date().toISOString(),
+            new Date(Math.max(Date.now(), snapshotStartedAtMs + 1)).toISOString(),
             new Date(snapshotStartedAtMs).toISOString(),
           );
           refreshed += 1;
