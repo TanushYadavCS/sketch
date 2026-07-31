@@ -1,6 +1,7 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { z } from "zod/v4";
+import { AutomationAuthoringValidationError } from "../../automation/authoring/service";
 import type { ChatAutomationAuthoring, ChatAutomationAuthoringResult } from "../../automation/chat-authoring";
 import {
   AutomationValidationError,
@@ -44,7 +45,8 @@ const workflowStepSchema = z.object({
   timeout: z.number().optional().describe("Step timeout in seconds. Default: 1800 (30 min)."),
   triggerConfig: z
     .object({
-      type: z.enum(["webhook", "schedule", "canvas"]),
+      type: z.enum(["webhook", "schedule", "canvas", "slack_channel_message"]),
+      channelId: z.string().trim().min(1).optional(),
       scheduleType: z.enum(["cron", "interval", "once"]).optional(),
       scheduleValue: z.string().optional(),
       timezone: z.string().optional(),
@@ -597,7 +599,10 @@ async function handleConfiguredChatAuthoring(
       ...(params.task_id ? { taskId: params.task_id } : {}),
       taskContext: deps.taskContext,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof AutomationAuthoringValidationError) {
+      return text("Error: automation authoring could not produce a valid definition. No changes were saved.");
+    }
     return text("Error: automation authoring is temporarily unavailable. No changes were saved.");
   }
 
@@ -687,7 +692,15 @@ export async function handleManageScheduledTasks(
         }
         const triggerStep = params.steps.find((step) => step.type === "trigger");
         const isCanvasManagedTrigger = triggerStep?.triggerConfig?.type === "canvas";
-        if (!isCanvasManagedTrigger && (!params.schedule_type || !params.schedule_value)) {
+        const isSlackChannelMessageTrigger = triggerStep?.triggerConfig?.type === "slack_channel_message";
+        if (isSlackChannelMessageTrigger && !triggerStep.triggerConfig?.channelId?.trim()) {
+          return text("Error: Slack channel message trigger requires channelId.");
+        }
+        if (
+          !isCanvasManagedTrigger &&
+          !isSlackChannelMessageTrigger &&
+          (!params.schedule_type || !params.schedule_value)
+        ) {
           return text("Error: schedule_type and schedule_value are required for add action.");
         }
         if (triggerStep?.triggerConfig?.type === "canvas") {
@@ -697,6 +710,10 @@ export async function handleManageScheduledTasks(
             ...triggerStep.triggerConfig,
             status: triggerStep.triggerConfig.status ?? "pending_canvas_setup",
           };
+        }
+        if (triggerStep?.triggerConfig?.type === "slack_channel_message") {
+          params.schedule_type = "external";
+          params.schedule_value = "slack_channel_message";
         }
 
         const brokerError = await ensureBrokerForActionSteps(params.steps);
@@ -960,6 +977,10 @@ export async function handleManageScheduledTasks(
             status: triggerStep.triggerConfig.status ?? "pending_canvas_setup",
           };
         }
+        if (triggerStep?.triggerConfig?.type === "slack_channel_message") {
+          updateFields.scheduleType = "external";
+          updateFields.scheduleValue = "slack_channel_message";
+        }
         let stepsForDb = stripContentFromSteps(params.steps);
         if (triggerStep?.triggerConfig?.type !== "canvas") {
           const scheduleType = updateFields.scheduleType ?? guardedTask?.scheduleType;
@@ -1047,6 +1068,12 @@ export async function handleManageScheduledTasks(
 
       const scheduleChanged =
         params.schedule_type !== undefined || params.schedule_value !== undefined || params.timezone !== undefined;
+      const existingTrigger = parseWorkflowStepsJson(guardedTask?.steps)?.find(
+        (step) => step.type === "trigger",
+      )?.triggerConfig;
+      if (!params.steps && scheduleChanged && existingTrigger?.type === "slack_channel_message") {
+        return text("Error: update the Slack channel message trigger steps to change its trigger metadata.");
+      }
       if (!params.steps && scheduleChanged && guardedTask?.steps) {
         const scheduleType = updateFields.scheduleType ?? guardedTask.scheduleType;
         const scheduleValue = updateFields.scheduleValue ?? guardedTask.scheduleValue;

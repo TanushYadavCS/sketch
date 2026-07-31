@@ -79,6 +79,10 @@ function makeStoredMessage(overrides: Record<string, unknown> = {}) {
     isThreadReply: false,
     providerTimestamp: null,
     receivedAt: "2025-01-01",
+    source: "live" as const,
+    effectiveAt: "2025-01-01",
+    connectionKey: null,
+    backfillRangeId: null,
     createdAt: "2025-01-01",
     ...overrides,
   };
@@ -361,7 +365,8 @@ describe("slack/adapter", () => {
     });
 
     it("records group DM (mpim) captures under their own conversation kind", async () => {
-      const deps = makeDeps();
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { channel } = getHandlers();
 
@@ -378,6 +383,7 @@ describe("slack/adapter", () => {
         { platform: "slack", kind: "mpim", providerConversationId: "G_MPIM" },
         expect.anything(),
       );
+      expect(dispatchSlackChannelMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -421,6 +427,22 @@ describe("slack/adapter", () => {
           text: "hello back",
         }),
       );
+    });
+
+    it("loads durable DM backlog without a Slack thread filter", async () => {
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith({
+        conversationId: 1,
+        afterMessageId: null,
+        beforeMessageId: 1,
+        limit: 10,
+      });
     });
 
     it("appends an integration connection link to DM replies", async () => {
@@ -901,7 +923,11 @@ describe("slack/adapter", () => {
   describe("passive channel handler", () => {
     it("handles a top-level follow-up command without running the agent", async () => {
       const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: "Marked the follow-up done." });
-      const deps = makeDeps({ followupReviewHandler });
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({
+        followupReviewHandler,
+        scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"],
+      });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { channel } = getHandlers();
 
@@ -919,7 +945,100 @@ describe("slack/adapter", () => {
         surface: "slack",
       });
       expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "2", "Marked the follow-up done.");
+      expect(dispatchSlackChannelMessage).not.toHaveBeenCalled();
       expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
+    it("dispatches a newly captured top-level message to Slack triggers", async () => {
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+
+      await channel({
+        text: "ambient update",
+        userId: "S1",
+        channelId: "C1",
+        ts: "2",
+        type: "channel_message",
+        files: [
+          {
+            name: "test.txt",
+            urlPrivate: "https://files.slack.com/files-pri/test.txt",
+            mimetype: "text/plain",
+            size: 100,
+          },
+        ],
+      });
+
+      expect(dispatchSlackChannelMessage).toHaveBeenCalledWith(
+        "C1",
+        expect.objectContaining({
+          type: "slack_channel_message",
+          channelId: "C1",
+          messageTs: "2",
+          text: "ambient update",
+          userId: "S1",
+          files: [
+            expect.objectContaining({
+              name: "test.txt",
+              localPath: "/tmp/test.txt",
+            }),
+          ],
+          capturedMessageId: 1,
+          conversationId: 1,
+        }),
+        { sourceWorkspaceDir: "/tmp/test-data/workspaces/channel-C1" },
+      );
+    });
+
+    it("keeps Slack file descriptors aligned when an earlier same-sized download fails", async () => {
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      vi.mocked(downloadSlackFile).mockRejectedValueOnce(new Error("download failed")).mockResolvedValueOnce({
+        originalName: "second.txt",
+        mimeType: "text/plain; charset=utf-8",
+        localPath: "/tmp/second.txt",
+        sizeBytes: 100,
+      });
+      const { channel } = getHandlers();
+
+      await channel({
+        text: "two files",
+        userId: "S1",
+        channelId: "C1",
+        ts: "2",
+        type: "channel_message",
+        files: [
+          { name: "first.txt", urlPrivate: "https://files.slack.com/first.txt", mimetype: "text/plain", size: 100 },
+          { name: "second.txt", urlPrivate: "https://files.slack.com/second.txt", mimetype: "text/plain", size: 100 },
+        ],
+      });
+
+      const triggerData = dispatchSlackChannelMessage.mock.calls[0]?.[1] as {
+        files: Array<{ name: string; localPath?: string }>;
+      };
+      expect(triggerData.files).toEqual([
+        expect.objectContaining({ name: "first.txt" }),
+        expect.objectContaining({ name: "second.txt", localPath: "/tmp/second.txt" }),
+      ]);
+      expect(triggerData.files[0]?.localPath).toBeUndefined();
+    });
+
+    it("does not dispatch a duplicate passive message", async () => {
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      vi.mocked(deps.repos.conversations.insertMessage).mockResolvedValue({
+        row: makeStoredMessage(),
+        inserted: false,
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+
+      await channel({ text: "duplicate", userId: "S1", channelId: "C1", ts: "2", type: "channel_message" });
+
+      expect(dispatchSlackChannelMessage).not.toHaveBeenCalled();
     });
 
     it("captures passive top-level channel messages without running the agent", async () => {
@@ -971,6 +1090,17 @@ describe("slack/adapter", () => {
       );
       expect(mockBotInstance.postThreadReply).toHaveBeenCalledWith("C1", "1", "Now tracking that follow-up.");
       expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
+    it("never dispatches a passive thread message to Slack triggers", async () => {
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { thread } = getHandlers();
+
+      await thread({ text: "reply", userId: "S1", channelId: "C1", ts: "2", threadTs: "1", type: "thread_message" });
+
+      expect(dispatchSlackChannelMessage).not.toHaveBeenCalled();
     });
 
     it("captures passive thread messages without running the agent", async () => {
@@ -1114,17 +1244,8 @@ describe("slack/adapter", () => {
       expect(deps.repos.channels.create).not.toHaveBeenCalled();
     });
 
-    it("loads channel-wide backlog on top-level mention", async () => {
+    it("loads only top-level backlog on a new top-level mention", async () => {
       const deps = makeDeps();
-      vi.mocked(deps.repos.conversations.getCursor).mockResolvedValueOnce({
-        id: 1,
-        conversation_id: 1,
-        scope_type: "slack_thread",
-        scope_key: "1",
-        last_seen_message_id: 10,
-        created_at: "2025-01-01",
-        updated_at: "2025-01-01",
-      });
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { mention } = getHandlers();
 
@@ -1134,15 +1255,21 @@ describe("slack/adapter", () => {
       expect(deps.repos.conversations.listBacklog).toHaveBeenCalledWith(
         expect.objectContaining({
           conversationId: 1,
-          afterMessageId: 10,
+          afterMessageId: undefined,
           beforeMessageId: 1,
           limit: 10,
           providerThreadId: undefined,
+          isThreadReply: false,
         }),
       );
       expect(deps.runAgent).toHaveBeenCalledWith(
         expect.objectContaining({
-          conversationContext: { conversationId: 1, currentMessageId: 1, providerThreadId: undefined },
+          conversationContext: {
+            conversationId: 1,
+            currentMessageId: 1,
+            providerThreadId: undefined,
+            isThreadReply: false,
+          },
         }),
       );
     });
@@ -1171,6 +1298,7 @@ describe("slack/adapter", () => {
           beforeMessageId: 1,
           limit: 10,
           providerThreadId: "1",
+          isThreadReply: undefined,
         }),
       );
       expect(deps.runAgent).toHaveBeenCalledWith(
@@ -1234,6 +1362,22 @@ describe("slack/adapter", () => {
       expect(deps.buildMcpServers).toHaveBeenCalledWith("alice@test.com");
       const agentCall = vi.mocked(deps.runAgent).mock.calls[0][0];
       expect(agentCall.integrationMcpServers).toEqual(mcpServers);
+    });
+
+    it("dispatches newly captured top-level mentions to channel automations", async () => {
+      const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "help", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(dispatchSlackChannelMessage).toHaveBeenCalledWith(
+        "C1",
+        expect.objectContaining({ channelId: "C1", messageTs: "1", text: "help", userId: "S1" }),
+        { sourceWorkspaceDir: "/tmp/test-data/workspaces/channel-C1" },
+      );
     });
 
     it("passes teammate messaging deps to agent for channel mentions", async () => {

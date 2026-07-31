@@ -36,6 +36,8 @@ function OnboardingRoutePage() {
 
 const defaultSetupStatus: SetupStatus = {
   completed: false,
+  readyToComplete: false,
+  managed: false,
   currentStep: 0,
   adminEmail: null,
   orgName: null,
@@ -49,7 +51,7 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
   const navigate = useNavigate();
   const { logoSrc } = useTheme();
   const setupStatus = initialSetupStatus ?? defaultSetupStatus;
-  const isManaged = Boolean(setupStatus.managedUrl);
+  const isManaged = setupStatus.managed ?? Boolean(setupStatus.managedUrl);
 
   const managedInternalSteps = [2, 4] as const;
   const managedDisplaySteps = [
@@ -89,10 +91,8 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
   const [whatsappConnected, setWhatsappConnected] = useState(false);
   const [whatsappPhone, setWhatsappPhone] = useState<string | undefined>(undefined);
 
-  const [llmProvider, setLlmProvider] = useState<"anthropic" | "bedrock">(
-    setupStatus.llmProvider === "anthropic" || setupStatus.llmProvider === "bedrock"
-      ? setupStatus.llmProvider
-      : "anthropic",
+  const [llmProvider, setLlmProvider] = useState<NonNullable<SetupStatus["llmProvider"]>>(
+    setupStatus.llmProvider ?? "anthropic",
   );
   const [llmConnected, setLlmConnected] = useState(setupStatus.llmConnected);
 
@@ -289,7 +289,7 @@ export function OnboardingPage({ initialSetupStatus }: { initialSetupStatus?: Se
     case 4:
       content = (
         <StepConfigureLLM
-          initialProvider={llmProvider}
+          initialProvider={llmProvider === "bedrock" ? "bedrock" : "anthropic"}
           initialConnected={llmConnected}
           onNext={({ provider, connected }) => {
             setLlmProvider(provider);

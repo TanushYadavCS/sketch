@@ -70,6 +70,7 @@ export interface ListConversationMessagesOptions {
   order?: "asc" | "desc";
   includeBotMessages?: boolean;
   providerThreadId?: string | null;
+  isThreadReply?: boolean;
 }
 
 export interface ListConversationMessagesInWindowOptions {
@@ -631,6 +632,9 @@ export function createConversationRepository(db: ConversationDb) {
           query = query.where("provider_thread_id", "=", options.providerThreadId);
         }
       }
+      if (options.isThreadReply !== undefined) {
+        query = query.where("is_thread_reply", "=", options.isThreadReply ? 1 : 0);
+      }
 
       const order = options.order ?? "asc";
       const rows = await query
@@ -902,15 +906,18 @@ export function createConversationRepository(db: ConversationDb) {
       beforeMessageId: number;
       limit?: number;
       providerThreadId?: string | null;
+      isThreadReply?: boolean;
     }): Promise<{ messages: StoredConversationMessage[]; hasMore: boolean; nextCursor?: number }> {
-      return this.listMessages(params.conversationId, {
+      const result = await this.listMessages(params.conversationId, {
         afterMessageId: params.afterMessageId ?? undefined,
         beforeMessageId: params.beforeMessageId,
         limit: params.limit,
-        order: "asc",
+        order: "desc",
         includeBotMessages: false,
         providerThreadId: params.providerThreadId,
+        isThreadReply: params.isThreadReply,
       });
+      return { ...result, messages: result.messages.reverse() };
     },
 
     async getMaxMessageId(

@@ -1044,6 +1044,107 @@ describe("Auth endpoints", () => {
       expect(body.role).toBe("admin");
     });
 
+    it("routes a passwordless managed admin through setup without requiring a managed URL", async () => {
+      const settings = createSettingsRepository(db);
+      const users = createUserRepository(db);
+      await settings.create();
+      await users.create({
+        name: "Platform Admin",
+        email: "platform-admin@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "admin",
+      });
+      const managedConfig = createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET });
+      const app = createApp(db, managedConfig);
+      const token = await makePlatformToken("platform-admin@test.com", "admin");
+
+      const res = await app.request("/api/setup/complete", {
+        method: "POST",
+        headers: { Cookie: `sketch_platform_session=${token}` },
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        error: { code: "SETUP_INCOMPLETE", missing: ["identity", "llm"] },
+      });
+      expect((await settings.get())?.onboarding_completed_at).toBeNull();
+
+      await settings.update({
+        orgName: "Acme",
+        botName: "Sketch",
+        llmProvider: "anthropic",
+        anthropicApiKey: "sk-ant-test",
+      });
+      const readyRes = await app.request("/api/setup/complete", {
+        method: "POST",
+        headers: { Cookie: `sketch_platform_session=${token}` },
+      });
+
+      expect(readyRes.status).toBe(200);
+      await readyRes.text();
+      expect((await settings.get())?.onboarding_completed_at).not.toBeNull();
+    });
+
+    it("rejects managed members from setup mutations", async () => {
+      const settings = createSettingsRepository(db);
+      const users = createUserRepository(db);
+      await settings.create();
+      await users.create({
+        name: "Platform Admin",
+        email: "platform-admin@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "admin",
+      });
+      await users.create({
+        name: "Platform Member",
+        email: "platform-member@test.com",
+        emailVerified: true,
+        passwordHash: null,
+        authRole: "member",
+      });
+      await settings.completeOnboarding(new Date().toISOString());
+
+      const app = createApp(db, createTestConfig({ MANAGED_AUTH_SECRET: MANAGED_SECRET }));
+      const token = await makePlatformToken("platform-member@test.com", "member");
+      const cookie = `sketch_platform_session=${token}`;
+      const llmSettings = {
+        provider: "bedrock",
+        awsAccessKeyId: "AKIA-test",
+        awsSecretAccessKey: "secret-test",
+        awsRegion: "ap-south-1",
+      };
+      const requests = [
+        app.request("/api/setup/identity", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: cookie },
+          body: JSON.stringify({ orgName: "Hijacked", botName: "Hijacked" }),
+        }),
+        app.request("/api/setup/llm/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: cookie },
+          body: JSON.stringify(llmSettings),
+        }),
+        app.request("/api/setup/llm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: cookie },
+          body: JSON.stringify(llmSettings),
+        }),
+        app.request("/api/setup/complete", {
+          method: "POST",
+          headers: { Cookie: cookie },
+        }),
+      ];
+
+      for (const response of await Promise.all(requests)) {
+        expect(response.status).toBe(403);
+        expect(await response.json()).toEqual({
+          error: { code: "FORBIDDEN", message: "Admin role required" },
+        });
+      }
+    });
+
     it("uses auth_role for managed platform cookie sessions", async () => {
       await seedAdmin(db);
       const users = createUserRepository(db);
@@ -1429,6 +1530,13 @@ describe("Setup endpoints", () => {
 
     it("returns completed true after onboarding completion", async () => {
       await seedAdmin(db);
+      const settings = createSettingsRepository(db);
+      await settings.update({
+        orgName: "Acme",
+        botName: "Sketch",
+        llmProvider: "anthropic",
+        anthropicApiKey: "sk-ant-test",
+      });
       const app = createApp(db, config);
       const cookie = await loginAdmin(app);
       await app.request("/api/setup/complete", { method: "POST", headers: { Cookie: cookie } });
@@ -1873,6 +1981,13 @@ describe("Setup endpoints", () => {
   describe("POST /api/setup/complete", () => {
     it("stores onboarding completion timestamp", async () => {
       await seedAdmin(db);
+      const settings = createSettingsRepository(db);
+      await settings.update({
+        orgName: "Acme",
+        botName: "Sketch",
+        llmProvider: "anthropic",
+        anthropicApiKey: "sk-ant-test",
+      });
       const app = createApp(db, config);
       const cookie = await loginAdmin(app);
 
@@ -1882,7 +1997,6 @@ describe("Setup endpoints", () => {
       });
       expect(res.status).toBe(200);
 
-      const settings = createSettingsRepository(db);
       const row = await settings.get();
       expect(row?.onboarding_completed_at).toBeTruthy();
     });
@@ -2460,6 +2574,31 @@ describe("RBAC", () => {
 
       const body = await res.json();
       expect(body.user.name).toBe("Updated by Peer");
+    });
+
+    it("requires an admin for human contact mutations that can change managed routing", async () => {
+      const app = createApp(db, config);
+      const { jwtSecret } = await setupWithAdmin(app);
+      const { memberId, memberCookie } = await createMemberSession(jwtSecret);
+
+      const createRes = await app.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({
+          name: "Claimed User",
+          type: "human",
+          email: "claimed-user@test.com",
+          whatsappNumber: "+14155550017",
+        }),
+      });
+      expect(createRes.status).toBe(403);
+
+      const updateRes = await app.request(`/api/users/${memberId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: memberCookie },
+        body: JSON.stringify({ whatsappNumber: "+14155550018" }),
+      });
+      expect(updateRes.status).toBe(403);
     });
 
     it("POST /api/users/:id/verification returns 400 NO_EMAIL for user without email", async () => {

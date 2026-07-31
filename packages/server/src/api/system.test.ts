@@ -66,11 +66,37 @@ function createTestSystemApp(
     startWhatsAppPairing?: ReturnType<typeof vi.fn>;
     cancelWhatsAppPairing?: ReturnType<typeof vi.fn>;
     disconnectWhatsApp?: () => Promise<void>;
+    reconcileManagedMembers?: () => Promise<{
+      skipped: boolean;
+      total: number;
+      synced: number;
+      conflictUserIds: string[];
+      failedUserIds: string[];
+    }>;
+    syncManagedMemberMapping?: (input: {
+      tenantUserId: string;
+      email: string;
+      name: string;
+      phoneNumber: string;
+      sendInvite?: boolean;
+    }) => Promise<void>;
+    withManagedMemberSyncLocks?: <T>(tenantUserIds: string[], operation: () => Promise<T>) => Promise<T>;
   },
 ) {
   const app = new Hono();
   app.route("/api/system", systemRoutes(settingsRepo, deps));
   return app;
+}
+
+function createManagedMemberLockRecorder() {
+  const calls: string[][] = [];
+  return {
+    calls,
+    withLocks: async <T>(tenantUserIds: string[], operation: () => Promise<T>): Promise<T> => {
+      calls.push(tenantUserIds);
+      return operation();
+    },
+  };
 }
 
 describe("PUT /api/system/slack/tokens", () => {
@@ -196,6 +222,59 @@ describe("PUT /api/system/slack/tokens", () => {
 
     const decrypted = await settingsRepo.get();
     expect(decrypted?.slack_bot_token).toBe("xoxb-encrypted-token");
+  });
+});
+
+describe("POST /api/system/managed-member-reconciliations", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedAdmin(db);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("runs the configured reconciliation behind system authentication", async () => {
+    const reconcileManagedMembers = vi.fn(async () => ({
+      skipped: false,
+      total: 3,
+      synced: 2,
+      conflictUserIds: [],
+      failedUserIds: ["user-3"],
+    }));
+    const app = createTestSystemApp(createSettingsRepository(db), {
+      systemSecret: SYSTEM_SECRET,
+      reconcileManagedMembers,
+    });
+
+    const res = await app.request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      skipped: false,
+      total: 3,
+      synced: 2,
+      conflictUserIds: [],
+      failedUserIds: ["user-3"],
+    });
+    expect(reconcileManagedMembers).toHaveBeenCalledOnce();
+  });
+
+  it("returns unavailable when reconciliation is not configured", async () => {
+    const app = createTestSystemApp(createSettingsRepository(db), { systemSecret: SYSTEM_SECRET });
+
+    const res = await app.request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(503);
   });
 });
 
@@ -544,7 +623,14 @@ describe("PUT /api/system/identity", () => {
   it("creates admin user row with WhatsApp number", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
-    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+    const lockRecorder = createManagedMemberLockRecorder();
+    const syncManagedMemberMapping = vi.fn(async () => {});
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      withManagedMemberSyncLocks: lockRecorder.withLocks,
+      syncManagedMemberMapping,
+    });
 
     const res = await app.request("/api/system/identity", {
       method: "PUT",
@@ -563,6 +649,14 @@ describe("PUT /api/system/identity", () => {
     const user = await userRepo.findByEmail("wa-admin@acme.com");
     expect(user?.auth_role).toBe("admin");
     expect(user?.whatsapp_number).toBe("+14155552671");
+    expect(lockRecorder.calls).toEqual([[], [user?.id]]);
+    expect(syncManagedMemberMapping).toHaveBeenCalledWith({
+      tenantUserId: user?.id,
+      email: "wa-admin@acme.com",
+      name: "WhatsApp Admin",
+      phoneNumber: "+14155552671",
+      sendInvite: false,
+    });
   });
 
   it("updates existing user row with name and verified email when user already exists", async () => {
@@ -605,8 +699,15 @@ describe("PUT /api/system/identity", () => {
       emailVerified: true,
       authRole: "admin",
     });
+    const lockRecorder = createManagedMemberLockRecorder();
+    const syncManagedMemberMapping = vi.fn(async () => {});
 
-    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      withManagedMemberSyncLocks: lockRecorder.withLocks,
+      syncManagedMemberMapping,
+    });
 
     const res = await app.request("/api/system/identity", {
       method: "PUT",
@@ -626,6 +727,14 @@ describe("PUT /api/system/identity", () => {
     expect(user?.name).toBe("Admin Updated");
     expect(user?.auth_role).toBe("admin");
     expect(user?.whatsapp_number).toBe("+919876543210");
+    expect(lockRecorder.calls).toEqual([[existing.id], [existing.id]]);
+    expect(syncManagedMemberMapping).toHaveBeenCalledWith({
+      tenantUserId: existing.id,
+      email: "admin-wa-update@acme.com",
+      name: "Admin Updated",
+      phoneNumber: "+919876543210",
+      sendInvite: false,
+    });
   });
 
   it("returns 409 when admin WhatsApp number belongs to another user", async () => {
@@ -765,7 +874,12 @@ describe("POST /api/system/users", () => {
   it("creates a verified WhatsApp member user and returns userId", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
-    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+    const syncManagedMemberMapping = vi.fn(async () => {});
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      syncManagedMemberMapping,
+    });
 
     const res = await app.request("/api/system/users", {
       method: "POST",
@@ -789,6 +903,47 @@ describe("POST /api/system/users", () => {
     expect(user?.email).toBe("contractor@gmail.com");
     expect(user?.name).toBe("Contractor");
     expect(user?.email_verified_at).toBeTruthy();
+    expect(syncManagedMemberMapping).toHaveBeenCalledWith({
+      tenantUserId: user?.id,
+      email: "contractor@gmail.com",
+      name: "Contractor",
+      phoneNumber: "+14155550111",
+      sendInvite: false,
+    });
+  });
+
+  it("serializes an existing WhatsApp member update by stable user id", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const existing = await userRepo.create({
+      email: "member@acme.com",
+      name: "Member",
+      whatsappNumber: "+14155550111",
+      type: "human",
+    });
+    const lockRecorder = createManagedMemberLockRecorder();
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      withManagedMemberSyncLocks: lockRecorder.withLocks,
+    });
+
+    const res = await app.request("/api/system/users", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email: "member@acme.com",
+        name: "Member Updated",
+        whatsappNumber: "+14155550111",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await userRepo.findById(existing.id))?.name).toBe("Member Updated");
+    expect(lockRecorder.calls).toEqual([[existing.id]]);
   });
 
   it("returns and verifies the existing user when the email already exists", async () => {
@@ -945,6 +1100,51 @@ describe("PUT /api/system/users", () => {
     expect(syncedAdmin?.password_hash).toBeNull();
   });
 
+  it("locks an existing Slack user when the bulk sync changes their email", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const existing = await userRepo.create({
+      email: "alice-old@acme.com",
+      name: "Alice Old",
+      slackUserId: "U111",
+      whatsappNumber: "+14155552671",
+      emailVerified: true,
+    });
+    const lockRecorder = createManagedMemberLockRecorder();
+    const syncManagedMemberMapping = vi.fn(async () => {});
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      withManagedMemberSyncLocks: lockRecorder.withLocks,
+      syncManagedMemberMapping,
+    });
+
+    const res = await app.request("/api/system/users", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${SYSTEM_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        users: [{ email: "alice-new@acme.com", name: "Alice Updated", slackUserId: "U111" }],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, created: 0, updated: 1 });
+    expect(lockRecorder.calls).toEqual([[existing.id], [existing.id]]);
+    const synced = await userRepo.findById(existing.id);
+    expect(synced?.email).toBe("alice-new@acme.com");
+    expect(synced?.name).toBe("Alice Updated");
+    expect(syncManagedMemberMapping).toHaveBeenCalledWith({
+      tenantUserId: existing.id,
+      email: "alice-new@acme.com",
+      name: "Alice Updated",
+      phoneNumber: "+14155552671",
+      sendInvite: false,
+    });
+  });
+
   it("bulk upserts users by WhatsApp number and email", async () => {
     const settingsRepo = createSettingsRepository(db);
     const userRepo = createUserRepository(db);
@@ -953,7 +1153,14 @@ describe("PUT /api/system/users", () => {
       name: "Alice Old",
       emailVerified: true,
     });
-    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+    const lockRecorder = createManagedMemberLockRecorder();
+    const syncManagedMemberMapping = vi.fn(async () => {});
+    const app = createTestSystemApp(settingsRepo, {
+      systemSecret: SYSTEM_SECRET,
+      userRepo,
+      withManagedMemberSyncLocks: lockRecorder.withLocks,
+      syncManagedMemberMapping,
+    });
 
     const res = await app.request("/api/system/users", {
       method: "PUT",
@@ -980,6 +1187,27 @@ describe("PUT /api/system/users", () => {
     expect(bob?.email).toBe("bob@acme.com");
     expect(bob?.name).toBe("Bob WhatsApp");
     expect(bob?.auth_role).toBe("member");
+    expect(lockRecorder.calls).toEqual([[existing.id], [existing.id], [bob?.id]]);
+    expect(syncManagedMemberMapping.mock.calls).toEqual([
+      [
+        {
+          tenantUserId: existing.id,
+          email: "alice@acme.com",
+          name: "Alice WhatsApp",
+          phoneNumber: "+14155552671",
+          sendInvite: false,
+        },
+      ],
+      [
+        {
+          tenantUserId: bob?.id,
+          email: "bob@acme.com",
+          name: "Bob WhatsApp",
+          phoneNumber: "+919876543210",
+          sendInvite: false,
+        },
+      ],
+    ]);
   });
 
   it("bulk upserts Slack and WhatsApp identities from one row", async () => {
@@ -2180,7 +2408,7 @@ describe("POST /api/system/onboarding-introductions", () => {
   });
 });
 
-describe("POST /api/system/onboarding/complete", () => {
+describe("PUT /api/system/onboarding/completion", () => {
   let db: Kysely<DB>;
 
   beforeEach(async () => {
@@ -2196,8 +2424,8 @@ describe("POST /api/system/onboarding/complete", () => {
     const settingsRepo = createSettingsRepository(db);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
 
-    const res = await app.request("/api/system/onboarding/complete", {
-      method: "POST",
+    const res = await app.request("/api/system/onboarding/completion", {
+      method: "PUT",
     });
 
     expect(res.status).toBe(401);
@@ -2207,20 +2435,160 @@ describe("POST /api/system/onboarding/complete", () => {
     const settingsRepo = createSettingsRepository(db);
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
 
-    const res = await app.request("/api/system/onboarding/complete", {
-      method: "POST",
+    const res = await app.request("/api/system/onboarding/completion", {
+      method: "PUT",
       headers: { Authorization: "Bearer wrong-secret" },
     });
 
     expect(res.status).toBe(401);
   });
 
-  it("sets onboarding_completed_at in settings", async () => {
+  it("returns 409 without changing settings when prerequisites are incomplete", async () => {
     const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/onboarding/completion", {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: {
+        code: "SETUP_INCOMPLETE",
+        message: "Tenant onboarding prerequisites are incomplete",
+        missing: ["identity", "llm"],
+      },
+    });
+
+    expect((await settingsRepo.get())?.onboarding_completed_at).toBeNull();
+  });
+
+  it("does not use legacy admin_email when the user repository has no admin", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const admin = await userRepo.findFirstAdmin();
+    if (!admin) throw new Error("Expected seeded admin");
+    await userRepo.update(admin.id, { authRole: "member" });
+    await settingsRepo.update({
+      adminEmail: admin.email ?? "admin@test.com",
+      orgName: "Acme",
+      botName: "Sketch",
+      llmProvider: "anthropic",
+      anthropicApiKey: "sk-ant-test",
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/onboarding/completion", {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: {
+        code: "SETUP_INCOMPLETE",
+        message: "Tenant onboarding prerequisites are incomplete",
+        missing: ["admin"],
+      },
+    });
+    expect((await settingsRepo.get())?.onboarding_completed_at).toBeNull();
+  });
+
+  it("sets onboarding_completed_at when all prerequisites are ready", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    await settingsRepo.update({
+      orgName: "Acme",
+      botName: "Sketch",
+      llmProvider: "anthropic",
+      anthropicApiKey: "sk-ant-test",
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/onboarding/completion", {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, completed: true, changed: true });
+    expect((await settingsRepo.get())?.onboarding_completed_at).not.toBeNull();
+  });
+
+  it("counts a passwordless managed admin as an onboarding admin", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    const admin = await userRepo.findFirstAdmin();
+    if (!admin) throw new Error("Expected seeded admin");
+    await userRepo.update(admin.id, { passwordHash: null });
+    await settingsRepo.update({
+      orgName: "Acme",
+      botName: "Sketch",
+      llmProvider: "anthropic",
+      anthropicApiKey: "sk-ant-test",
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+
+    const res = await app.request("/api/system/onboarding/completion", {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, completed: true, changed: true });
+  });
+
+  it("keeps the original completion timestamp when called again", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const originalTimestamp = "2026-07-29T09:52:19.000Z";
+    await settingsRepo.update({ onboardingCompletedAt: originalTimestamp });
     const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
 
-    const before = await settingsRepo.get();
-    expect(before?.onboarding_completed_at).toBeNull();
+    const res = await app.request("/api/system/onboarding/completion", {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, completed: true, changed: false });
+    expect((await settingsRepo.get())?.onboarding_completed_at).toBe(originalTimestamp);
+  });
+
+  it("only reports one change when completion requests race", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    await settingsRepo.update({
+      orgName: "Acme",
+      botName: "Sketch",
+      llmProvider: "anthropic",
+      anthropicApiKey: "sk-ant-test",
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
+    const request = () =>
+      app.request("/api/system/onboarding/completion", {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
+      });
+
+    const responses = await Promise.all([request(), request()]);
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(bodies.filter((body) => body.changed)).toHaveLength(1);
+  });
+
+  it("keeps the existing onboarding/complete endpoint as a validated alias", async () => {
+    const settingsRepo = createSettingsRepository(db);
+    const userRepo = createUserRepository(db);
+    await settingsRepo.update({
+      orgName: "Acme",
+      botName: "Sketch",
+      llmProvider: "anthropic",
+      anthropicApiKey: "sk-ant-test",
+    });
+    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET, userRepo });
 
     const res = await app.request("/api/system/onboarding/complete", {
       method: "POST",
@@ -2228,36 +2596,7 @@ describe("POST /api/system/onboarding/complete", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({ ok: true });
-
-    const after = await settingsRepo.get();
-    expect(after?.onboarding_completed_at).toBeDefined();
-    expect(after?.onboarding_completed_at).not.toBeNull();
-  });
-
-  it("is idempotent: calling again when already completed returns 200", async () => {
-    const settingsRepo = createSettingsRepository(db);
-    const app = createTestSystemApp(settingsRepo, { systemSecret: SYSTEM_SECRET });
-
-    const res1 = await app.request("/api/system/onboarding/complete", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
-    });
-    expect(res1.status).toBe(200);
-
-    const afterFirst = await settingsRepo.get();
-    const firstTimestamp = afterFirst?.onboarding_completed_at;
-
-    const res2 = await app.request("/api/system/onboarding/complete", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${SYSTEM_SECRET}` },
-    });
-    expect(res2.status).toBe(200);
-
-    const afterSecond = await settingsRepo.get();
-    expect(afterSecond?.onboarding_completed_at).toBeDefined();
-    expect(afterSecond?.onboarding_completed_at).not.toBeNull();
+    expect(await res.json()).toEqual({ ok: true, completed: true, changed: true });
   });
 });
 

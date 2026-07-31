@@ -161,7 +161,14 @@ function isCanvasManaged(task: ScheduledTaskListItem): boolean {
   return task.triggerConfig?.type === "canvas" || (task.scheduleType === "external" && task.scheduleValue === "canvas");
 }
 
+function isTriggerBased(task: ScheduledTaskListItem): boolean {
+  return isCanvasManaged(task) || task.triggerConfig?.type === "slack_channel_message";
+}
+
 function getTriggerDetail(task: ScheduledTaskListItem): string {
+  if (task.triggerConfig?.type === "slack_channel_message") {
+    return `Slack channel message · ${task.triggerConfig.channelId}`;
+  }
   if (isCanvasManaged(task)) {
     const config = task.triggerConfig;
     const parts = ["Canvas"];
@@ -174,6 +181,9 @@ function getTriggerDetail(task: ScheduledTaskListItem): string {
 }
 
 function getTaskScheduleLabel(task: ScheduledTaskListItem): string {
+  if (task.triggerConfig?.type === "slack_channel_message") {
+    return `Trigger · Slack channel message · ${task.triggerConfig.channelId}`;
+  }
   if (!isCanvasManaged(task)) return task.scheduleLabel;
 
   const config = task.triggerConfig;
@@ -1049,7 +1059,7 @@ function TaskRow({
 
 function TaskExpandedDetail({ task, isAdmin }: { task: ScheduledTaskListItem; isAdmin: boolean }) {
   const targetLabel = task.targetLabel || task.deliveryTarget;
-  const canvasManaged = isCanvasManaged(task);
+  const triggerBased = isTriggerBased(task);
 
   return (
     <div className="border-t border-border bg-muted/20 px-4 py-4 space-y-4">
@@ -1060,11 +1070,11 @@ function TaskExpandedDetail({ task, isAdmin }: { task: ScheduledTaskListItem; is
       <dl className="grid gap-4 text-sm sm:grid-cols-2">
         <DetailItem label="Source" value={`${task.targetKindLabel} \u00b7 ${targetLabel}`} />
         <DetailItem label="Delivery" value={formatDelivery(task)} />
-        <DetailItem label="Type" value={canvasManaged ? "Trigger-based" : "Scheduled"} />
-        <DetailItem label={canvasManaged ? "Trigger" : "Schedule"} value={getTriggerDetail(task)} />
-        {canvasManaged ? null : <DetailItem label="Timezone" value={task.timezone} />}
+        <DetailItem label="Type" value={triggerBased ? "Trigger-based" : "Scheduled"} />
+        <DetailItem label={triggerBased ? "Trigger" : "Schedule"} value={getTriggerDetail(task)} />
+        {triggerBased ? null : <DetailItem label="Timezone" value={task.timezone} />}
         <DetailItem label="Session mode" value={formatSessionMode(task.sessionMode)} />
-        {canvasManaged ? null : <DetailItem label="Next run" value={formatDateTime(task.nextRunAt)} />}
+        {triggerBased ? null : <DetailItem label="Next run" value={formatDateTime(task.nextRunAt)} />}
         <DetailItem label="Last run" value={formatDateTime(task.lastRunAt)} />
         <DetailItem label="Created" value={formatDateTime(task.createdAt)} />
         {isAdmin ? <DetailItem label="Created by" value={task.creatorName ?? task.createdBy ?? "Unknown"} /> : null}

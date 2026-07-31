@@ -212,6 +212,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       }
 
       const providerThreadId = deps.conversationContext?.providerThreadId;
+      const isThreadReply = deps.conversationContext?.isThreadReply;
       const currentMessageId = deps.conversationContext?.currentMessageId;
       const effectiveBeforeMessageId =
         beforeMessageId && currentMessageId
@@ -247,6 +248,9 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
             order,
             includeBotMessages,
             providerThreadId: threadId,
+            ...(!isCrossConversation && effectiveScope === "conversation" && isThreadReply !== undefined
+              ? { isThreadReply }
+              : {}),
           });
       if (anchorMessageId && result.messages.length === 0) return unavailableCrossConversationResult();
 

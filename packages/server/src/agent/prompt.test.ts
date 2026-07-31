@@ -197,6 +197,8 @@ describe("buildSystemContext", () => {
       expect(result).toContain("Never use updateStepContent");
       expect(result).toContain("list, pause, resume, run, delete, and inspect run history");
       expect(result).toContain("include the resolved target ID and label in the natural-language");
+      expect(result).toContain("call SearchDeliveryTargets with platform='slack' and targetType='channel' first");
+      expect(result).toContain("never invent a channel ID");
     });
 
     it("preserves legacy structured authoring guidance when authoring is not configured", () => {
@@ -982,8 +984,31 @@ describe("buildSketchContext", () => {
       expect(result).toContain(
         "If the user asks for a targeted keyword, topic, decision, person, project, or phrase lookup, you must call SearchChatHistory first instead of paging sequentially.",
       );
+      expect(result).toContain("Only the newest 0 missed messages are inlined.");
       expect(result).toContain(
-        "For chronological continuation, use ReadChatHistory with afterMessageId 25, beforeMessageId 50, and includeBotMessages false.",
+        "For the omitted older messages, use ReadChatHistory with beforeMessageId 25, and includeBotMessages false.",
+      );
+      expect(result).not.toContain("ReadChatHistory with afterMessageId 0");
+    });
+
+    it("preserves an existing lower bound when continuing a truncated backlog", () => {
+      const result = buildSketchContext({
+        messages: [],
+        currentUserName: "Alice",
+        currentMessage: "summarize",
+        workspaceDir: "/data/workspaces/u123",
+        orgDir: "/data/.claude",
+        conversationBacklog: {
+          afterMessageId: 10,
+          beforeMessageId: 50,
+          hasMore: true,
+          nextCursor: 25,
+          messages: [],
+        },
+      });
+
+      expect(result).toContain(
+        "For the omitted older messages, use ReadChatHistory with afterMessageId 10, beforeMessageId 25, and includeBotMessages false.",
       );
     });
   });

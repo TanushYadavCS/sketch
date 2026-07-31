@@ -15,6 +15,7 @@ import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
+import * as managedMembers from "../managed-members";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 
 const PASSWORD = "testpassword123";
@@ -213,20 +214,24 @@ describe("Users API — agent fields", () => {
     fetchMock.mockRestore();
   });
 
-  it("registers managed human members with the platform before local create", async () => {
+  it("sends the invite before local create and activates managed routing after local create", async () => {
     const managedApp = createApp(
       db,
       createTestConfig({
         MANAGED_URL: "https://platform.test",
         MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_DM_PROVIDER: "managed",
       }),
       { logger: createTestLogger() },
     );
     const managedCookie = await login(managedApp, ADMIN_EMAIL);
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
+      .mockResolvedValueOnce(
         new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, mappingStatus: "active", emailSent: false }), { status: 200 }),
       );
 
     const res = await managedApp.request("/api/users", {
@@ -242,7 +247,8 @@ describe("Users API — agent fields", () => {
 
     expect(res.status).toBe(201);
     const body = await res.json();
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
       "https://platform.test/api/tenant/members",
       expect.objectContaining({
         method: "PUT",
@@ -257,8 +263,314 @@ describe("Users API — agent fields", () => {
           phoneNumber: "+14155550106",
           sendInvite: true,
         }),
+        signal: expect.any(AbortSignal),
       }),
     );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://platform.test/api/tenant/members",
+      expect.objectContaining({
+        body: JSON.stringify({
+          tenantUserId: body.user.id,
+          email: "managed.person@gmail.com",
+          name: "Managed Person",
+          phoneNumber: "+14155550106",
+          sendInvite: false,
+          managedWhatsappDmEnabled: true,
+        }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(body.managedWhatsappMappingStatus).toBe("active");
+    fetchMock.mockRestore();
+  });
+
+  it("locks and re-reads a new member before post-create routing sync", async () => {
+    const users = createUserRepository(db);
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_DM_PROVIDER: "managed",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    let memberId = "";
+    let releaseLock = () => {};
+    let confirmLockAcquired = () => {};
+    const lockAcquired = new Promise<void>((resolve) => {
+      confirmLockAcquired = resolve;
+    });
+    const holdLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    let blocker = Promise.resolve();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementationOnce(async (_url, init) => {
+        memberId = JSON.parse(String(init?.body)).tenantUserId;
+        blocker = managedMembers.withManagedMemberSyncLock(memberId, async () => {
+          confirmLockAcquired();
+          await holdLock;
+        });
+        await lockAcquired;
+        return new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 });
+      })
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, mappingStatus: "active", emailSent: false }), { status: 200 }),
+      );
+
+    const createRequest = managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Before Create Sync",
+        type: "human",
+        email: "create.sync@gmail.com",
+        whatsappNumber: "+14155550130",
+      }),
+    });
+    await vi.waitFor(async () => {
+      expect(memberId).not.toBe("");
+      expect(await users.findById(memberId)).toBeDefined();
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await users.update(memberId, {
+      name: "After Create Sync",
+      whatsappNumber: "+14155550131",
+    });
+
+    releaseLock();
+    await blocker;
+    const res = await createRequest;
+    expect(res.status).toBe(201);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+      tenantUserId: memberId,
+      name: "After Create Sync",
+      phoneNumber: "+14155550131",
+      sendInvite: false,
+      managedWhatsappDmEnabled: true,
+    });
+    fetchMock.mockRestore();
+  });
+
+  it("preserves membership sync without enabling shared routing for non-managed DMs", async () => {
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_DM_PROVIDER: "baileys",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, mappingStatus: "inactive", emailSent: false }), { status: 200 }),
+      );
+
+    const res = await managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Baileys Person",
+        type: "human",
+        email: "baileys.person@gmail.com",
+        whatsappNumber: "+14155550116",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const request = fetchMock.mock.calls[1]?.[1];
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      email: "baileys.person@gmail.com",
+      sendInvite: false,
+      managedWhatsappDmEnabled: false,
+    });
+    fetchMock.mockRestore();
+  });
+
+  it("reconciles managed routing after a human phone number changes", async () => {
+    const users = createUserRepository(db);
+    const member = await users.create({
+      name: "Changing Number",
+      type: "human",
+      email: "changing.number@gmail.com",
+      whatsappNumber: "+14155550120",
+    });
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_DM_PROVIDER: "managed",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, mappingStatus: "active" }), { status: 200 }));
+
+    const res = await managedApp.request(`/api/users/${member.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({ whatsappNumber: "+14155550121" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).managedWhatsappMappingStatus).toBe("active");
+    const preCommitBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const postCommitBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(preCommitBody).toMatchObject({
+      tenantUserId: member.id,
+      phoneNumber: "+14155550121",
+      sendInvite: false,
+    });
+    expect(preCommitBody).not.toHaveProperty("managedWhatsappDmEnabled");
+    expect(postCommitBody).toMatchObject({
+      tenantUserId: member.id,
+      phoneNumber: "+14155550121",
+      sendInvite: false,
+      managedWhatsappDmEnabled: true,
+    });
+    fetchMock.mockRestore();
+  });
+
+  it("reconciles existing managed human members through the authenticated system endpoint", async () => {
+    const users = createUserRepository(db);
+    const member = await users.create({
+      name: "Existing Managed Person",
+      type: "human",
+      email: "existing.managed@gmail.com",
+      whatsappNumber: "+14155550117",
+    });
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_DM_PROVIDER: "managed",
+        SYSTEM_SECRET: "system-secret",
+      }),
+      { logger: createTestLogger() },
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, mappingStatus: "active", emailSent: false, whatsappSent: false }), {
+        status: 200,
+      }),
+    );
+
+    const res = await managedApp.request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: "Bearer system-secret" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      skipped: false,
+      total: 1,
+      synced: 1,
+      conflictUserIds: [],
+      failedUserIds: [],
+    });
+    const memberRequest = fetchMock.mock.calls
+      .map((call) => JSON.parse(String(call[1]?.body)))
+      .find((body) => body.tenantUserId === member.id);
+    expect(memberRequest).toMatchObject({
+      email: "existing.managed@gmail.com",
+      phoneNumber: "+14155550117",
+      sendInvite: false,
+      managedWhatsappDmEnabled: true,
+    });
+    fetchMock.mockRestore();
+  });
+
+  it("reports inactive mapping conflicts separately from successful reconciliation", async () => {
+    const users = createUserRepository(db);
+    const member = await users.create({
+      name: "Conflicted Member",
+      type: "human",
+      email: "conflicted.member@gmail.com",
+      whatsappNumber: "+14155550122",
+    });
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_DM_PROVIDER: "managed",
+        SYSTEM_SECRET: "system-secret",
+      }),
+      { logger: createTestLogger() },
+    );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ ok: true, mappingStatus: "inactive_conflict" }), { status: 200 }),
+      );
+
+    const res = await managedApp.request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: "Bearer system-secret" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      skipped: false,
+      total: 1,
+      synced: 0,
+      conflictUserIds: [member.id],
+      failedUserIds: [],
+    });
+    fetchMock.mockRestore();
+  });
+
+  it("reconciliation deactivates shared routing when the tenant uses another WhatsApp provider", async () => {
+    const users = createUserRepository(db);
+    const member = await users.create({
+      name: "Baileys Member",
+      type: "human",
+      email: "baileys.reconcile@gmail.com",
+      whatsappNumber: "+14155550119",
+    });
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_DM_PROVIDER: "baileys",
+        SYSTEM_SECRET: "system-secret",
+      }),
+      { logger: createTestLogger() },
+    );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true, mappingStatus: "inactive" }), { status: 200 }));
+
+    const res = await managedApp.request("/api/system/managed-member-reconciliations", {
+      method: "POST",
+      headers: { Authorization: "Bearer system-secret" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ skipped: false, total: 1, synced: 1 });
+    const request = fetchMock.mock.calls
+      .map((call) => JSON.parse(String(call[1]?.body)))
+      .find((body) => body.tenantUserId === member.id);
+    expect(request).toMatchObject({
+      sendInvite: false,
+      managedWhatsappDmEnabled: false,
+    });
     fetchMock.mockRestore();
   });
 
@@ -300,6 +612,46 @@ describe("Users API — agent fields", () => {
     fetchMock.mockRestore();
   });
 
+  it("keeps the local human and reports failure when routing sync is not confirmed", async () => {
+    const managedApp = createApp(
+      db,
+      createTestConfig({
+        MANAGED_URL: "https://platform.test",
+        MANAGED_WHATSAPP_TENANT_TOKEN: "tenant-token",
+        WHATSAPP_DM_PROVIDER: "managed",
+      }),
+      { logger: createTestLogger() },
+    );
+    const managedCookie = await login(managedApp, ADMIN_EMAIL);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, emailSent: false, whatsappSent: false }), { status: 200 }),
+      );
+
+    const res = await managedApp.request("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: managedCookie },
+      body: JSON.stringify({
+        name: "Mapping Retry",
+        type: "human",
+        email: "mapping.retry@gmail.com",
+        whatsappNumber: "+14155550118",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.managedWhatsappMappingStatus).toBe("failed");
+    await expect(createUserRepository(db).findById(body.user.id)).resolves.toMatchObject({
+      email: "mapping.retry@gmail.com",
+    });
+    fetchMock.mockRestore();
+  });
+
   it("removes managed tenant members before deleting local human users", async () => {
     const managedApp = createApp(
       db,
@@ -315,6 +667,7 @@ describe("Users API — agent fields", () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
       )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, mappingStatus: "inactive" }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
     const create = await managedApp.request("/api/users", {
@@ -337,8 +690,8 @@ describe("Users API — agent fields", () => {
 
     expect(res.status).toBe(200);
     expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
-      "https://platform.test/api/tenant/members/managed.delete%40gmail.com",
+      3,
+      `https://platform.test/api/tenant/members/managed.delete%40gmail.com?tenantUserId=${user.id}`,
       expect.objectContaining({
         method: "DELETE",
         headers: expect.objectContaining({
@@ -437,6 +790,7 @@ describe("Users API — agent fields", () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ ok: true, emailSent: true, whatsappSent: false }), { status: 200 }),
       )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, mappingStatus: "inactive" }), { status: 200 }))
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ error: { code: "REMOVE_FAILED", message: "Could not remove managed member" } }), {
           status: 502,
@@ -593,6 +947,46 @@ describe("Users API — agent fields", () => {
     expect(update.status).toBe(400);
     const body = await update.json();
     expect(body.error.message).toContain("allowedTools");
+  });
+
+  it("serializes member mutations with managed member reconciliation", async () => {
+    const users = createUserRepository(db);
+    const agent = await users.create({ name: "Before reconciliation", type: "agent" });
+    let releaseLock = () => {};
+    let confirmLockAcquired = () => {};
+    const lockAcquired = new Promise<void>((resolve) => {
+      confirmLockAcquired = resolve;
+    });
+    const holdLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const blocker = managedMembers.withManagedMemberSyncLock(agent.id, async () => {
+      confirmLockAcquired();
+      await holdLock;
+    });
+    await lockAcquired;
+    const lockSpy = vi.spyOn(managedMembers, "withManagedMemberSyncLock");
+
+    let mutationSettled = false;
+    const mutation = Promise.resolve(
+      app.request(`/api/users/${agent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ name: "After reconciliation" }),
+      }),
+    ).finally(() => {
+      mutationSettled = true;
+    });
+
+    await vi.waitFor(() => expect(lockSpy).toHaveBeenCalledWith(agent.id, expect.any(Function)));
+    expect(mutationSettled).toBe(false);
+    expect((await users.findById(agent.id))?.name).toBe("Before reconciliation");
+
+    releaseLock();
+    await blocker;
+    const response = await mutation;
+    expect(response.status).toBe(200);
+    expect((await users.findById(agent.id))?.name).toBe("After reconciliation");
   });
 
   describe("Slack channel bindings", () => {

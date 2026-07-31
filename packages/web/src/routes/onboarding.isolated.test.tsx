@@ -352,6 +352,7 @@ describe("OnboardingPage navigation and flow", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 2,
           adminEmail: "admin@test.com",
           orgName: null,
@@ -391,6 +392,7 @@ describe("OnboardingPage navigation and flow", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 4,
           adminEmail: "admin@test.com",
           orgName: "Acme",
@@ -410,6 +412,26 @@ describe("OnboardingPage navigation and flow", () => {
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
     expect(screen.getByText("Sketch is ready")).toBeInTheDocument();
+  });
+
+  it("shows the resolved environment LLM provider on the completion step", () => {
+    renderWithProviders(
+      <OnboardingPage
+        initialSetupStatus={{
+          completed: false,
+          readyToComplete: true,
+          currentStep: 5,
+          adminEmail: "admin@test.com",
+          orgName: "Acme",
+          botName: "Sketch",
+          slackConnected: true,
+          llmConnected: true,
+          llmProvider: "vertex",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Google Vertex (Sonnet)")).toBeInTheDocument();
   });
 
   it("allows navigating back to Account step from progress indicator", async () => {
@@ -451,6 +473,7 @@ describe("OnboardingPage navigation and flow", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 4,
           adminEmail: "admin@test.com",
           orgName: "Acme",
@@ -565,6 +588,7 @@ describe("Managed mode onboarding", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 2,
           adminEmail: "admin@managed.com",
           orgName: null,
@@ -583,11 +607,12 @@ describe("Managed mode onboarding", () => {
     expect(screen.queryByRole("button", { name: "Channels" })).not.toBeInTheDocument();
   });
 
-  it("renders bot name input as disabled when managedUrl is set", () => {
+  it("renders bot name input as disabled when managed mode is set", () => {
     renderWithProviders(
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 2,
           adminEmail: "admin@managed.com",
           orgName: null,
@@ -595,7 +620,7 @@ describe("Managed mode onboarding", () => {
           slackConnected: false,
           llmConnected: false,
           llmProvider: null,
-          managedUrl: "https://app.getsketch.ai",
+          managed: true,
         }}
       />,
     );
@@ -617,6 +642,7 @@ describe("Managed mode onboarding", () => {
       <OnboardingPage
         initialSetupStatus={{
           completed: false,
+          readyToComplete: false,
           currentStep: 2,
           adminEmail: "admin@managed.com",
           orgName: null,
@@ -624,7 +650,7 @@ describe("Managed mode onboarding", () => {
           slackConnected: false,
           llmConnected: false,
           llmProvider: null,
-          managedUrl: "https://app.getsketch.ai",
+          managed: true,
         }}
       />,
     );

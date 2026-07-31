@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.4] -- 2026-07-30
+
+- Fixes conversation context retrieval by selecting the newest eligible backlog and correctly scoping Slack mentions to channel roots or active threads, ensuring accurate agent issue creation.
+
+## [1.2.3] -- 2026-07-30
+
+- Adds a `slack_channel_message` automation trigger that dispatches new top-level Slack channel messages to matching active automations.
+- Authenticates Slack file downloads and makes bounded workspace-local attachments available to automation scripts.
+- Executes Canvas-managed integration actions without exposing credentials or file bytes to generated scripts.
+- Fixes managed onboarding completion flow by centralizing readiness checks and adding an idempotent endpoint.
+- Recognizes passwordless managed OAuth admins in onboarding readiness checks.
+- Bases Slack readiness on `SLACK_MODE`, requiring an app token only for Socket Mode.
+- Syncs managed WhatsApp member mappings with a reconciliation loop every five minutes.
+- Covers retries, backfill, phone changes, and released conflicts in WhatsApp member sync.
+- Enforces admin-only mutations for contacts and human membership in both API and UI.
+
 ## [1.2.2] -- 2026-07-29
 
 - Replaces raw technical WhatsApp disconnect alerts with plain-language messages and a direct reconnect link, using the Meta-approved WATI template when outside the service window.

@@ -141,6 +141,7 @@ export interface SketchMcpDeps {
     conversationId: number;
     currentMessageId?: number;
     providerThreadId?: string | null;
+    isThreadReply?: boolean;
   };
   agentInstructions?: string | null;
   agentAllowedTools?: string[] | null;

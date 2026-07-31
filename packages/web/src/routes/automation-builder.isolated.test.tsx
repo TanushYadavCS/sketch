@@ -264,6 +264,31 @@ describe("AutomationBuilderPage", () => {
     mocks.chatMessages = [];
   });
 
+  it("renders a Slack channel message trigger and its channel", async () => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      scheduleType: "external",
+      scheduleValue: "slack_channel_message",
+      steps: [
+        {
+          ...automation.steps[0],
+          label: "Slack channel message",
+          icon: "slack",
+          triggerConfig: { type: "slack_channel_message", channelId: "C123" },
+        },
+        ...automation.steps.slice(1),
+      ],
+    });
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Slack channel message" }));
+
+    await waitFor(() => expect(screen.getByText("Trigger type")).toBeInTheDocument());
+    expect(screen.getAllByDisplayValue("Slack channel message").length).toBeGreaterThan(0);
+    expect(screen.getAllByDisplayValue("C123").length).toBeGreaterThan(0);
+  });
+
   it("opens a fresh builder chat and sends the active automation id", async () => {
     const user = userEvent.setup();
     renderBuilder();

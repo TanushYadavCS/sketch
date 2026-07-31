@@ -33,12 +33,14 @@ export function MemberList({
   onEdit,
   onRemove,
   onLink,
+  canManageHumanMembers = true,
 }: {
   users: User[];
   auth: AuthContext;
   onEdit: (user: User) => void;
   onRemove: (user: User) => void;
   onLink: (user: User) => void;
+  canManageHumanMembers?: boolean;
 }) {
   return (
     <>
@@ -53,6 +55,7 @@ export function MemberList({
               user={user}
               isCurrentUser={isCurrentUser}
               isLast={i === users.length - 1}
+              canRemove={user.type === "agent" || canManageHumanMembers}
               onEdit={() => onEdit(user)}
               onRemove={() => onRemove(user)}
               onLink={() => onLink(user)}
@@ -68,6 +71,7 @@ function MemberRow({
   user,
   isCurrentUser,
   isLast,
+  canRemove,
   onEdit,
   onRemove,
   onLink,
@@ -75,6 +79,7 @@ function MemberRow({
   user: User;
   isCurrentUser: boolean;
   isLast: boolean;
+  canRemove: boolean;
   onEdit: () => void;
   onRemove: () => void;
   onLink: () => void;
@@ -158,7 +163,7 @@ function MemberRow({
             <PencilSimpleIcon size={14} className="mr-2" />
             Edit
           </DropdownMenuItem>
-          {!isCurrentUser && (
+          {canRemove && !isCurrentUser && (
             <>
               <DropdownMenuSeparator />
               <DropdownMenuItem className="text-destructive" onClick={onRemove}>

@@ -20,6 +20,12 @@ export interface BrokerSpec {
   launcherEnvName: string;
 }
 
+export interface IntegrationActionRequest {
+  userEmail: string;
+  componentKey: string;
+  configuredProps: Record<string, unknown>;
+}
+
 export interface IntegrationProvider {
   /** Stable provider type identifier (e.g. "canvas"). */
   readonly type: string;
@@ -50,6 +56,7 @@ export interface IntegrationProvider {
    * or null for HTTP-only providers (no CLI surface).
    */
   getBrokerSpec(params: { userEmail: string | null; claudeConfigDir: string }): BrokerSpec | null;
+  executeAction?(request: IntegrationActionRequest, signal?: AbortSignal): Promise<unknown>;
 }
 
 /**

@@ -14,6 +14,11 @@
  * camelCase ScheduledTask application type.
  */
 import { randomUUID } from "node:crypto";
+import { constants, createWriteStream } from "node:fs";
+import { mkdir, open, realpath, rm, stat } from "node:fs/promises";
+import { basename, join, resolve, sep } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { workflowTriggerConfigSchema } from "@sketch/shared";
 import { Cron } from "croner";
 import type { Kysely } from "kysely";
 import type { McpServerConfig, runAgent } from "../agent/runner";
@@ -38,14 +43,144 @@ import { deliverProactiveDm } from "../whatsapp/proactive-delivery";
 import { whatsappTargetFromDeliveryTarget } from "../whatsapp/provider";
 import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
-import { type AutomationExecutionResult, executeAutomation } from "../workflows/runtime";
-import { testAutomationStep } from "../workflows/runtime";
+import {
+  type AutomationExecutionResult,
+  executeAutomation,
+  resolveAutomationWorkspaceDir,
+  testAutomationStep,
+} from "../workflows/runtime";
 import { createWorkflowDeliveryCapture } from "./delivery-capture";
 import { parseOnceSchedule } from "./parse-once";
 import { getScheduledTaskRowQueueKey } from "./queue-key";
 import type { ScheduledTask } from "./types";
 
 type AgentExecutionQueue = "interactive" | "scheduled";
+
+function parseSlackTriggerSteps(value: string | null): Array<{ type?: string; triggerConfig?: unknown }> {
+  if (!value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? (parsed as Array<{ type?: string; triggerConfig?: unknown }>) : [];
+  } catch {
+    return [];
+  }
+}
+
+interface SlackTriggerFile {
+  name?: unknown;
+  urlPrivate?: unknown;
+  mimetype?: unknown;
+  size?: unknown;
+  localPath?: unknown;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface CopiedSlackTriggerFiles {
+  triggerData: unknown;
+  localFileRoot?: string;
+}
+
+async function copySlackTriggerFilesToIsolatedWorkspace(params: {
+  dataDir: string;
+  task: ScheduledTaskRow;
+  triggerData: unknown;
+  sourceWorkspaceDir: string;
+  logger: Logger;
+}): Promise<CopiedSlackTriggerFiles> {
+  if (!isRecord(params.triggerData) || !Array.isArray(params.triggerData.files)) {
+    return { triggerData: params.triggerData };
+  }
+
+  const workspaceRoot = resolve(params.dataDir, "workspaces");
+  const sourceWorkspace = resolve(params.sourceWorkspaceDir);
+  const stagingRoot = resolve(params.dataDir, "automation-trigger-files");
+  const destinationName = randomUUID();
+  const destinationDir = join(stagingRoot, destinationName);
+  let destinationDirPromise: Promise<string> | null = null;
+  const prepareDestinationDir = () => {
+    destinationDirPromise ??= (async () => {
+      await mkdir(destinationDir, { recursive: true, mode: 0o700 });
+      const [dataDirPath, stagingRootPath, destinationDirPath] = await Promise.all([
+        realpath(params.dataDir),
+        realpath(stagingRoot),
+        realpath(destinationDir),
+      ]);
+      if (
+        stagingRootPath !== join(dataDirPath, "automation-trigger-files") ||
+        destinationDirPath !== join(stagingRootPath, destinationName)
+      ) {
+        throw new Error("Invalid automation trigger staging workspace");
+      }
+      return destinationDirPath;
+    })();
+    return destinationDirPromise;
+  };
+  const files = await Promise.all(
+    params.triggerData.files.map(async (value): Promise<unknown> => {
+      if (!isRecord(value)) return value;
+      const file = value as SlackTriggerFile & Record<string, unknown>;
+      if (typeof file.localPath !== "string") return file;
+
+      try {
+        const [sourcePath, sourceWorkspacePath, workspaceRootPath] = await Promise.all([
+          realpath(resolve(file.localPath)),
+          realpath(sourceWorkspace),
+          realpath(workspaceRoot),
+        ]);
+        const relativeSourceWorkspace = sourceWorkspace.slice(workspaceRoot.length + 1);
+        const expectedSourceWorkspacePath = resolve(workspaceRootPath, relativeSourceWorkspace);
+        const sourceWorkspaceContained =
+          sourceWorkspace.startsWith(`${workspaceRoot}${sep}`) && sourceWorkspacePath === expectedSourceWorkspacePath;
+        const sourceFileContained =
+          sourcePath === sourceWorkspacePath || sourcePath.startsWith(`${sourceWorkspacePath}${sep}`);
+        if (!sourceWorkspaceContained || !sourceFileContained) {
+          params.logger.warn(
+            { taskId: params.task.id, fileName: file.name },
+            "TaskScheduler: ignored Slack trigger file outside the source channel workspace",
+          );
+          const { localPath: _localPath, ...safeFile } = file;
+          return safeFile;
+        }
+
+        const destinationDirPath = await prepareDestinationDir();
+        const destinationPath = join(destinationDirPath, `${randomUUID()}-${basename(sourcePath)}`);
+        const sourceHandle = await open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const [openedStat, currentStat, currentPath] = await Promise.all([
+            sourceHandle.stat(),
+            stat(sourcePath),
+            realpath(sourcePath),
+          ]);
+          if (currentPath !== sourcePath || openedStat.dev !== currentStat.dev || openedStat.ino !== currentStat.ino) {
+            throw new Error("Slack trigger file changed during validation");
+          }
+          await pipeline(
+            sourceHandle.createReadStream({ autoClose: false }),
+            createWriteStream(destinationPath, { flags: "wx" }),
+          );
+        } finally {
+          await sourceHandle.close();
+        }
+        return { ...file, localPath: destinationPath };
+      } catch (err) {
+        params.logger.warn(
+          { err, taskId: params.task.id, fileName: file.name },
+          "TaskScheduler: failed to copy Slack trigger file into the automation workspace",
+        );
+        const { localPath: _localPath, ...safeFile } = file;
+        return safeFile;
+      }
+    }),
+  );
+
+  return {
+    triggerData: { ...params.triggerData, files },
+    ...(destinationDirPromise ? { localFileRoot: await destinationDirPromise } : {}),
+  };
+}
 
 export interface TaskSchedulerDeps {
   db: Kysely<DB>;
@@ -205,6 +340,7 @@ export class TaskScheduler {
   private async executeTaskNow(
     task: ScheduledTaskRow,
     executionQueue: AgentExecutionQueue,
+    trigger?: { provided: boolean; data: unknown; localFileRoot?: string },
   ): Promise<AutomationExecutionResult> {
     const { config, logger, loadIntegrationProvider } = this.deps;
     const delivery = resolveWorkflowDelivery(task);
@@ -216,7 +352,7 @@ export class TaskScheduler {
 
     const result = await executeAutomation({
       task,
-      triggerData: { scheduledAt: new Date().toISOString(), taskId: task.id },
+      triggerData: trigger?.provided ? trigger.data : { scheduledAt: new Date().toISOString(), taskId: task.id },
       db: this.deps.db,
       logger,
       config,
@@ -236,6 +372,7 @@ export class TaskScheduler {
         executionQueue === "scheduled" ? this.deps.limitScheduledAgentExecution : this.deps.limitAgentExecution,
       loadAgentRuntimeProviderConfig: async () =>
         resolveAgentRuntimeProviderConfigFromSettings(await this.deps.settingsRepo.get()),
+      trustedLocalFileRoot: trigger?.localFileRoot,
     });
 
     const now = new Date().toISOString();
@@ -257,6 +394,7 @@ export class TaskScheduler {
     task: ScheduledTaskRow,
     getTask: () => Promise<ScheduledTaskRow | null>,
     executionQueue: AgentExecutionQueue,
+    trigger?: { provided: boolean; data: unknown; localFileRoot?: string },
   ): Promise<AutomationExecutionResult | null> {
     const queueKey = this.getQueueKey(task);
     return new Promise<AutomationExecutionResult | null>((resolve, reject) => {
@@ -267,7 +405,7 @@ export class TaskScheduler {
             resolve(null);
             return;
           }
-          resolve(await this.executeTaskNow(current, executionQueue));
+          resolve(await this.executeTaskNow(current, executionQueue, trigger));
         } catch (err) {
           reject(err);
         }
@@ -458,15 +596,117 @@ export class TaskScheduler {
     return this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive");
   }
 
-  async enqueueTaskById(id: string): Promise<void> {
+  async enqueueTaskById(
+    id: string,
+    ...triggerData: [] | [unknown] | [unknown, { localFileRoot: string }]
+  ): Promise<void> {
     const row = await this.repo.getById(id);
     if (!row) throw new Error(`Task ${id} not found`);
     if (row.status === "completed" && row.schedule_type === "once") return;
     if (row.status !== "active") throw new Error(`Task ${id} is not active`);
 
-    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive").catch((err) => {
-      this.deps.logger.error({ err, taskId: id }, "Automation background execution failed");
-    });
+    const trigger =
+      triggerData.length === 0
+        ? undefined
+        : { provided: true, data: triggerData[0], localFileRoot: triggerData[1]?.localFileRoot };
+    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive", trigger)
+      .catch((err) => {
+        this.deps.logger.error({ err, taskId: id }, "Automation background execution failed");
+      })
+      .finally(async () => {
+        if (trigger?.localFileRoot) await rm(trigger.localFileRoot, { recursive: true, force: true });
+      });
+  }
+
+  private async canDispatchSlackChannelMessage(task: ScheduledTaskRow, channelId: string): Promise<boolean> {
+    if (!task.created_by) {
+      this.deps.logger.warn({ taskId: task.id, channelId }, "TaskScheduler: skipping Slack trigger without a creator");
+      return false;
+    }
+
+    try {
+      const creator = await this.deps.userRepo.findById(task.created_by);
+      if (!creator?.slack_user_id) {
+        this.deps.logger.warn(
+          { taskId: task.id, channelId },
+          "TaskScheduler: skipping Slack trigger without a Slack creator",
+        );
+        return false;
+      }
+
+      const slack = this.deps.getSlack();
+      if (!slack) {
+        this.deps.logger.warn(
+          { taskId: task.id, channelId },
+          "TaskScheduler: skipping Slack trigger while Slack is unavailable",
+        );
+        return false;
+      }
+
+      const isMember = await slack.isUserInChannel(channelId, creator.slack_user_id);
+      if (!isMember) {
+        this.deps.logger.warn(
+          { taskId: task.id, channelId },
+          "TaskScheduler: skipping Slack trigger for a non-member creator",
+        );
+      }
+      return isMember;
+    } catch (err) {
+      this.deps.logger.warn(
+        { err, taskId: task.id, channelId },
+        "TaskScheduler: failed to verify Slack trigger membership",
+      );
+      return false;
+    }
+  }
+
+  async dispatchSlackChannelMessage(
+    channelId: string,
+    triggerData: unknown,
+    options?: { sourceWorkspaceDir?: string },
+  ): Promise<void> {
+    const tasks = await this.repo.listActiveSlackChannelMessageTriggers();
+    const membershipChecks = new Map<string, Promise<boolean>>();
+    for (const task of tasks) {
+      const steps = parseSlackTriggerSteps(task.steps);
+      const trigger = steps.find((step) => step?.type === "trigger")?.triggerConfig;
+      const parsed = workflowTriggerConfigSchema.safeParse(trigger);
+      if (!parsed.success || parsed.data.type !== "slack_channel_message" || parsed.data.channelId !== channelId)
+        continue;
+      const membershipKey = task.created_by ?? `task:${task.id}`;
+      let membershipCheck = membershipChecks.get(membershipKey);
+      if (!membershipCheck) {
+        membershipCheck = this.canDispatchSlackChannelMessage(task, channelId);
+        membershipChecks.set(membershipKey, membershipCheck);
+      }
+      if (!(await membershipCheck)) continue;
+      let localFileRoot: string | undefined;
+      try {
+        const copied = await copySlackTriggerFilesToIsolatedWorkspace({
+          dataDir: this.deps.config.DATA_DIR,
+          task,
+          triggerData,
+          sourceWorkspaceDir:
+            options?.sourceWorkspaceDir ??
+            (/^[A-Za-z0-9_-]+$/.test(channelId)
+              ? resolve(this.deps.config.DATA_DIR, "workspaces", `channel-${channelId}`)
+              : resolve(this.deps.config.DATA_DIR, "workspaces", ".invalid-slack-channel")),
+          logger: this.deps.logger,
+        });
+        localFileRoot = copied.localFileRoot;
+        if (localFileRoot) {
+          await this.enqueueTaskById(task.id, copied.triggerData, { localFileRoot });
+        } else {
+          await this.enqueueTaskById(task.id, copied.triggerData);
+        }
+      } catch (err) {
+        if (localFileRoot) await rm(localFileRoot, { recursive: true, force: true });
+        this.deps.logger.warn(
+          { err, taskId: task.id, channelId },
+          "TaskScheduler: failed to enqueue Slack channel message trigger",
+        );
+      }
+    }
   }
 
   async getTaskById(id: string): Promise<ScheduledTask | null> {

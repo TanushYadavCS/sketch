@@ -65,6 +65,7 @@ export function EditMemberDialog({
   users,
   currentUserId,
   canManageAuthRoles,
+  canEditContact = true,
   onOpenChange,
   onSuccess,
 }: {
@@ -72,6 +73,7 @@ export function EditMemberDialog({
   users: User[];
   currentUserId?: string;
   canManageAuthRoles: boolean;
+  canEditContact?: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess: () => void;
 }) {
@@ -125,14 +127,20 @@ export function EditMemberDialog({
         description: description.trim() || null,
         ...(isAgent
           ? { allowedTools, slackChannelIds, whatsappGroupJids, isWhatsappFallback }
-          : {
-              email: email.trim() || null,
-              whatsappNumber: normalizedPhone,
-              ...(canEditAuthRole ? { authRole } : {}),
-            }),
+          : canEditContact
+            ? {
+                email: email.trim() || null,
+                whatsappNumber: normalizedPhone,
+                ...(canEditAuthRole ? { authRole } : {}),
+              }
+            : {}),
       }),
     onSuccess: (data) => {
-      if (data.verificationSent) {
+      if (data.managedWhatsappMappingStatus === "inactive_conflict") {
+        toast.warning("Member updated, but WhatsApp DMs are inactive because this number is active on another tenant.");
+      } else if (data.managedWhatsappMappingStatus === "failed") {
+        toast.warning("Member updated, but WhatsApp routing is still syncing and will retry automatically.");
+      } else if (data.verificationSent) {
         toast.success("Member updated. Verification email sent.");
       } else {
         toast.success("Member updated");
@@ -198,15 +206,18 @@ export function EditMemberDialog({
       whatsappGroupJidsDirty ||
       isWhatsappFallbackDirty ||
       (!isAgent &&
+        canEditContact &&
         ((email.trim() || null) !== (user.email ?? null) || normalizedPhone !== (user.whatsapp_number ?? null))));
 
   const canSubmit =
     isDirty &&
     (isAgent
       ? name.trim().length > 0
-      : !phoneError &&
-        editMemberSchema.safeParse({ name: name.trim(), email: email.trim(), whatsappNumber: normalizedPhone ?? "" })
-          .success);
+      : !canEditContact
+        ? name.trim().length > 0
+        : !phoneError &&
+          editMemberSchema.safeParse({ name: name.trim(), email: email.trim(), whatsappNumber: normalizedPhone ?? "" })
+            .success);
 
   const otherUsers = users.filter((u) => u.id !== user?.id);
 
@@ -354,7 +365,7 @@ export function EditMemberDialog({
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="name@example.com"
-                  disabled={updateMutation.isPending}
+                  disabled={updateMutation.isPending || !canEditContact}
                 />
                 {user?.email && email === user.email && (
                   <div className="flex items-center gap-1.5">
@@ -401,7 +412,7 @@ export function EditMemberDialog({
                   setPhoneNationalNumber(value);
                   setError("");
                 }}
-                disabled={updateMutation.isPending}
+                disabled={updateMutation.isPending || !canEditContact}
                 error={error || phoneError}
               />
             </>

@@ -883,6 +883,7 @@ type StepVisualKind =
   | "schedule-trigger"
   | "webhook-trigger"
   | "canvas-trigger"
+  | "slack-channel-message-trigger"
   | "agent"
   | "gmail-action"
   | "sheets-action"
@@ -921,6 +922,13 @@ const stepVisuals: Record<StepVisualKind, StepVisual> = {
     shape: "notched",
     toneClass: "border-violet-200/20 bg-[#18161a]",
     glyphClass: "text-violet-100/75",
+  },
+  "slack-channel-message-trigger": {
+    kind: "slack-channel-message-trigger",
+    icon: SlackLogoIcon,
+    shape: "notched",
+    toneClass: "border-fuchsia-200/20 bg-[#181618]",
+    glyphClass: "text-fuchsia-100/75",
   },
   agent: {
     kind: "agent",
@@ -1001,6 +1009,7 @@ function resolveStepVisual(step: WorkflowStep, content: AutomationStepContent | 
   if (step.type === "trigger") {
     if (step.triggerConfig?.type === "webhook") return stepVisuals["webhook-trigger"];
     if (step.triggerConfig?.type === "canvas") return stepVisuals["canvas-trigger"];
+    if (step.triggerConfig?.type === "slack_channel_message") return stepVisuals["slack-channel-message-trigger"];
     return stepVisuals["schedule-trigger"];
   }
 
@@ -1521,11 +1530,17 @@ function NodeInputPanel({
 function TriggerFields({ draft }: { draft: DraftAutomation }) {
   const triggerStep = draft.steps.find((step) => step.type === "trigger");
   const config = triggerStep?.triggerConfig ?? { type: "schedule" as const };
+  const triggerLabel = config.type === "slack_channel_message" ? "Slack channel message" : config.type;
   return (
     <>
       <Field label="Trigger type">
-        <Input value={config.type} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
+        <Input value={triggerLabel} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
       </Field>
+      {config.type === "slack_channel_message" ? (
+        <Field label="Slack channel">
+          <Input value={config.channelId ?? ""} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
+        </Field>
+      ) : null}
       {config.type === "schedule" ? (
         <>
           <Field label="Schedule type">

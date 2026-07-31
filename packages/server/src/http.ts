@@ -76,7 +76,14 @@ import type { IntegrationProvider } from "./integrations/types";
 import { createLocalClaudeEventDispatcher } from "./local-devices/claude-event-dispatcher";
 import type { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import type { LocalDeviceGateway } from "./local-devices/gateway";
-import { registerManagedTenantMember, removeManagedTenantMember } from "./managed-members";
+import {
+  type ManagedMemberReconciliationResult,
+  type ManagedMemberRegistrationInput,
+  reconcileManagedTenantMembers,
+  registerManagedTenantMember,
+  removeManagedTenantMember,
+  withManagedMemberSyncLocks,
+} from "./managed-members";
 import { createManagedLoginUrl } from "./managed-url";
 import { mcpOAuthRoutes } from "./mcp/oauth/routes";
 import { mountPublicMcpServer } from "./mcp/server/transport";
@@ -137,6 +144,7 @@ interface AppDeps {
   onWhatsAppWake?: () => Promise<void> | void;
   onWhatsAppSocketStateChange?: (change: WhatsAppSocketStateChange) => Promise<void> | void;
   getWhatsAppHealth?: () => { missingProviderIdEvents: number };
+  reconcileManagedMembers?: () => Promise<ManagedMemberReconciliationResult>;
 }
 
 /**
@@ -203,6 +211,11 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   const mcpServers = createMcpServerRepository(db);
   const logger = deps?.logger ?? (console as unknown as Logger);
   const identities = createProviderIdentityRepository(db, config.ENCRYPTION_KEY);
+  const syncManagedMemberMapping = (input: ManagedMemberRegistrationInput) =>
+    registerManagedTenantMember(config, {
+      ...input,
+      managedWhatsappDmEnabled: config.WHATSAPP_DM_PROVIDER === "managed",
+    });
   const localClaudeEventDispatcher =
     deps?.localClaudeSessionService && deps.runAgent && deps.queueManager
       ? createLocalClaudeEventDispatcher({
@@ -307,7 +320,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     createAuthMiddleware(settings, {
       managedAuthSecret: config.MANAGED_AUTH_SECRET,
       managedUrl: config.MANAGED_URL,
-      hasLocalAdmin: async () => Boolean(await users.findFirstLocalAdmin()),
+      hasSetupAdmin: async () =>
+        Boolean(await (config.MANAGED_AUTH_SECRET ? users.findFirstAdmin() : users.findFirstLocalAdmin())),
       resolveLocalSessionUser: async (sub) => {
         let user = await users.findById(sub);
         if (!user && sub.includes("@")) {
@@ -414,7 +428,9 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.route(
     "/api/setup",
     setupRoutes(settings, {
+      managedAuthEnabled: Boolean(config.MANAGED_AUTH_SECRET),
       managedUrl: config.MANAGED_URL,
+      slackMode: config.SLACK_MODE,
       onSlackTokensUpdated: deps?.onSlackTokensUpdated,
       onLlmSettingsUpdated: deps?.onLlmSettingsUpdated,
       userRepo: users,
@@ -435,6 +451,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       whatsappGroups,
       getSlack: deps?.getSlack,
       registerManagedMember: (input) => registerManagedTenantMember(config, input),
+      syncManagedMemberMapping,
       removeManagedMember: (input) => removeManagedTenantMember(config, input),
     }),
   );
@@ -619,6 +636,20 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           : undefined,
         sendDm: deps?.sendDm,
         managedWhatsappInbound: deps?.managedWhatsapp,
+        reconcileManagedMembers:
+          deps?.reconcileManagedMembers ?? (async () => reconcileManagedTenantMembers(config, users, logger)),
+        syncManagedMemberMapping: async (input) => {
+          try {
+            await syncManagedMemberMapping(input);
+          } catch (err) {
+            logger.warn({ err, userId: input.tenantUserId }, "Managed WhatsApp member mapping sync failed");
+          }
+        },
+        withManagedMemberSyncLocks,
+        validateManagedWhatsappInboundIdentity: async (tenantUserId, senderPhoneE164) => {
+          const user = await users.findById(tenantUserId);
+          return user?.type === "human" && user.whatsapp_number === senderPhoneE164;
+        },
         whatsappStatus: whatsapp
           ? async () => ({
               ...(await whatsapp.pairing.status()),

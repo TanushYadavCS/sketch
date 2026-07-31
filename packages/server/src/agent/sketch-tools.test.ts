@@ -313,6 +313,42 @@ describe("createSketchMcpServer", () => {
     });
   });
 
+  it("ReadChatHistory keeps top-level Slack history separate from thread replies", async () => {
+    const collector = new UploadCollector();
+    const listMessages = vi.fn().mockResolvedValue({ messages: [], hasMore: false });
+    const server = createSketchMcpServer({
+      uploadCollector: collector,
+      workspaceDir: tmpDir,
+      conversationRepo: { listMessages } as never,
+      conversationContext: { conversationId: 1, currentMessageId: 12, isThreadReply: false },
+    });
+    const tools = (
+      server.instance as unknown as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (input: {
+              beforeMessageId?: number;
+              scope?: "conversation" | "current_thread";
+            }) => Promise<{ content: { text: string }[] }>;
+          }
+        >;
+      }
+    )._registeredTools;
+
+    await tools.ReadChatHistory.handler({});
+
+    expect(listMessages).toHaveBeenCalledWith(1, {
+      afterMessageId: undefined,
+      beforeMessageId: 12,
+      limit: undefined,
+      order: undefined,
+      includeBotMessages: undefined,
+      providerThreadId: undefined,
+      isThreadReply: false,
+    });
+  });
+
   it("does not expose TranscribeAudio when transcription is disabled", () => {
     const collector = new UploadCollector();
     const server = createSketchMcpServer({ uploadCollector: collector, workspaceDir: tmpDir });

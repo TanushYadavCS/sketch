@@ -11,9 +11,10 @@ import { join } from "node:path";
 import type { IntegrationApp, IntegrationConnection, PageInfo } from "@sketch/shared";
 import { z } from "zod";
 import type { CredentialEnvelope } from "../connectors/credential-envelope";
-import type { BrokerSpec, IntegrationProvider, IntegrationUserOrgRole } from "./types";
+import type { BrokerSpec, IntegrationActionRequest, IntegrationProvider, IntegrationUserOrgRole } from "./types";
 
 const REQUEST_TIMEOUT_MS = 30_000;
+const ACTION_REQUEST_TIMEOUT_MS = 120_000;
 
 type CanvasAccountResponse = {
   id: string;
@@ -142,6 +143,31 @@ export class CanvasProvider implements IntegrationProvider {
     return true;
   }
 
+  async executeAction(request: IntegrationActionRequest, signal?: AbortSignal): Promise<unknown> {
+    const url = new URL("/api/direct-executions/action", this.apiUrl);
+    const requestSignal = AbortSignal.timeout(ACTION_REQUEST_TIMEOUT_MS);
+    const combinedSignal = signal ? AbortSignal.any([signal, requestSignal]) : requestSignal;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: this.headers(request.userEmail),
+      body: JSON.stringify({
+        componentKey: request.componentKey,
+        configuredProps: request.configuredProps,
+      }),
+      signal: combinedSignal,
+    });
+    if (!res.ok) throw await this.parseError(res, `Canvas action execution failed: ${res.status} ${res.statusText}`);
+    const body = (await res.json()) as { success?: boolean; data?: unknown; message?: string; error?: string };
+    if (body.success !== true) {
+      throw new CanvasProviderRequestError(
+        502,
+        body.error ?? "UPSTREAM_ERROR",
+        body.message ?? "Canvas action execution returned an invalid response",
+      );
+    }
+    return body.data;
+  }
+
   getBrokerSpec({
     userEmail,
     claudeConfigDir,
@@ -149,7 +175,9 @@ export class CanvasProvider implements IntegrationProvider {
     userEmail: string | null;
     claudeConfigDir: string;
   }): BrokerSpec {
-    const credentialEnv: Record<string, string> = {};
+    const credentialEnv: Record<string, string> = {
+      CANVAS_MCP_URL: this.apiUrl.endsWith("/mcp") ? this.apiUrl : `${this.apiUrl.replace(/\/+$/, "")}/mcp`,
+    };
     if (this.apiKey) credentialEnv.CANVAS_API_KEY_MCP = this.apiKey;
     if (userEmail) credentialEnv.CANVAS_USER_EMAIL = userEmail;
     return {

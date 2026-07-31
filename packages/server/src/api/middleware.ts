@@ -52,7 +52,7 @@ export interface AuthMiddlewareOpts {
   managedUrl?: string;
   findUserByEmail?: (email: string) => Promise<{ id: string; authRole?: string | null; email?: string | null } | null>;
   verifySketchApiKey?: (token: string) => Promise<boolean>;
-  hasLocalAdmin?: () => Promise<boolean>;
+  hasSetupAdmin?: () => Promise<boolean>;
   resolveLocalSessionUser?: (
     sub: string,
   ) => Promise<{ id: string; authRole?: string | null; email?: string | null } | null>;
@@ -109,7 +109,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
     try {
       const row = await settings.get();
       setupComplete = Boolean(row?.onboarding_completed_at);
-      hasAdmin = opts?.hasLocalAdmin ? await opts.hasLocalAdmin() : Boolean(row?.admin_email);
+      hasAdmin = opts?.hasSetupAdmin ? await opts.hasSetupAdmin() : Boolean(row?.admin_email);
       jwtSecret = row?.jwt_secret ?? null;
       if (jwtSecret) cachedSecret = jwtSecret;
       adminCanReadAllFiles = row?.admin_can_read_all_files === 1;

@@ -9,8 +9,8 @@
  * Credentials are resolved at execution time via loadIntegrationProvider (org-level) +
  * creator's email (user scoping).
  */
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { join, sep } from "node:path";
 import type { Kysely } from "kysely";
 import { removeReservedAgentEnv } from "../agent/environment";
 import { buildPlatformFormattingLines, buildSketchContext } from "../agent/prompt";
@@ -60,6 +60,7 @@ export interface ExecuteAutomationParams {
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
+  trustedLocalFileRoot?: string;
 }
 
 export type AutomationExecutionEvent =
@@ -134,7 +135,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
 
   // 4. Create run record
   const runId = await runsRepo.create({ taskId: task.id, triggerData });
-  const workspaceDir = resolveWorkspaceDir(params.config.DATA_DIR, task);
+  const workspaceDir = resolveAutomationWorkspaceDir(params.config.DATA_DIR, task);
   await mkdir(workspaceDir, { recursive: true });
   const emitEvent = async (event: AutomationExecutionEvent) => {
     try {
@@ -336,7 +337,7 @@ export async function testAutomationStep(
 
   const runId = await runsRepo.create({ taskId: task.id, triggerData: { type: "step_test", stepId, triggerData } });
   const stepOutputs: Record<string, StepOutput> = {};
-  const workspaceDir = resolveWorkspaceDir(params.config.DATA_DIR, task);
+  const workspaceDir = resolveAutomationWorkspaceDir(params.config.DATA_DIR, task);
   await mkdir(workspaceDir, { recursive: true });
 
   if (step.type === "trigger") {
@@ -435,6 +436,7 @@ async function executeWorkflowStep(params: {
       workspaceDir,
       loadIntegrationProvider: runtimeParams.loadIntegrationProvider,
       listAgentEnvForRuntime: runtimeParams.listAgentEnvForRuntime,
+      trustedLocalFileRoot: runtimeParams.trustedLocalFileRoot,
     });
   }
 
@@ -604,10 +606,26 @@ function buildTriggerSamplePayload(task: ScheduledTaskRow, step: WorkflowStep): 
       receivedAt: new Date().toISOString(),
     };
   }
+  if (config?.type === "slack_channel_message") {
+    return {
+      type: "slack_channel_message",
+      taskId: task.id,
+      channelId: config.channelId ?? null,
+      messageTs: "1710000000.000000",
+      text: "Example Slack channel message",
+      userId: "U123456",
+      botId: null,
+      appId: null,
+      subtype: null,
+      files: [],
+      capturedMessageId: null,
+      conversationId: config.channelId ?? null,
+    };
+  }
   return { type: "webhook", taskId: task.id, receivedAt: new Date().toISOString() };
 }
 
-function resolveWorkspaceDir(dataDir: string, task: ScheduledTaskRow): string {
+export function resolveAutomationWorkspaceDir(dataDir: string, task: ScheduledTaskRow): string {
   if (task.context_type === "channel") {
     return join(dataDir, "workspaces", `channel-${task.delivery_target}`);
   }
@@ -664,10 +682,24 @@ type AsyncFunctionConstructor = (
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as AsyncFunctionConstructor;
 
+export interface ScriptIntegrationFile {
+  path: string;
+  configuredProp: string;
+}
+
+export interface ScriptIntegrationActionRequest {
+  componentKey: string;
+  configuredProps: Record<string, unknown>;
+  localFiles?: ScriptIntegrationFile[];
+}
+
 export interface ScriptContext {
   log: Logger;
   env: Readonly<Record<string, string>>;
   workspaceDir: string;
+  integrations: {
+    executeAction(request: ScriptIntegrationActionRequest, signal?: AbortSignal): Promise<unknown>;
+  };
 }
 
 interface ActionStepParams {
@@ -684,20 +716,21 @@ interface ActionStepParams {
   workspaceDir: string;
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
+  trustedLocalFileRoot?: string;
 }
 
 async function executeActionStep(params: ActionStepParams): Promise<unknown> {
   const { script, step, input, runId, logger, creatorEmail, workspaceDir, loadIntegrationProvider } = params;
-
+  const integrationProvider = await loadIntegrationProvider();
   const integrationAccess = await startIntegrationAccess({
     userEmail: creatorEmail,
     claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
     workspaceDir,
-    loadIntegrationProvider,
+    loadIntegrationProvider: async () => integrationProvider,
     logger,
   });
 
-  if (!integrationAccess.envVars.CANVAS_CLI) {
+  if (!integrationAccess.envVars.CANVAS_CLI && !integrationProvider?.executeAction) {
     await cleanupIntegrationAccess(integrationAccess);
     throw new Error(
       `Action step ${step.id} requires a broker-capable integration provider; none is currently configured. Reconfigure the integration in Settings → Integrations.`,
@@ -711,15 +744,6 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
       integrationEnv: integrationAccess.envVars,
     });
 
-    const ctx = buildScriptContext({
-      taskId: params.taskId,
-      runId,
-      stepId: step.id,
-      logger,
-      env,
-      workspaceDir,
-    });
-
     const timeoutMs = (step.timeout ?? 1800) * 1000;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -729,6 +753,31 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
         () => reject(new Error(`Action step ${step.id} timed out after ${timeoutMs}ms`)),
         { once: true },
       );
+    });
+
+    const ctx = buildScriptContext({
+      taskId: params.taskId,
+      runId,
+      stepId: step.id,
+      logger,
+      env,
+      workspaceDir,
+      executeIntegrationAction: async (request) => {
+        if (!integrationProvider?.executeAction || !creatorEmail) {
+          throw new Error("The configured integration provider cannot execute server-owned actions");
+        }
+        const configuredProps = await materializeIntegrationActionFiles({
+          request,
+          workspaceDir,
+          trustedLocalFileRoot: params.trustedLocalFileRoot,
+        });
+        const actionRequest = {
+          userEmail: creatorEmail,
+          componentKey: request.componentKey,
+          configuredProps,
+        };
+        return integrationProvider.executeAction(actionRequest, controller.signal);
+      },
     });
 
     try {
@@ -779,6 +828,38 @@ async function buildScriptEnv(params: {
   return Object.freeze(env);
 }
 
+const MAX_INTEGRATION_ACTION_FILES = 5;
+const MAX_INTEGRATION_ACTION_FILE_BYTES = 25 * 1024 * 1024;
+
+async function materializeIntegrationActionFiles(params: {
+  request: ScriptIntegrationActionRequest;
+  workspaceDir: string;
+  trustedLocalFileRoot?: string;
+}): Promise<Record<string, unknown>> {
+  const files = params.request.localFiles ?? [];
+  if (files.length > MAX_INTEGRATION_ACTION_FILES) {
+    throw new Error(`Integration actions support at most ${MAX_INTEGRATION_ACTION_FILES} local files`);
+  }
+  const allowedRoots = [await realpath(params.workspaceDir)];
+  if (params.trustedLocalFileRoot) allowedRoots.push(await realpath(params.trustedLocalFileRoot));
+  const configuredProps = { ...params.request.configuredProps };
+  let totalBytes = 0;
+  for (const file of files) {
+    const fileRealPath = await realpath(file.path);
+    if (!allowedRoots.some((root) => fileRealPath.startsWith(`${root}${sep}`))) {
+      throw new Error("Integration action file is outside the trusted automation file roots");
+    }
+    if (!file.configuredProp.trim()) throw new Error("Integration action file configuredProp is required");
+    const content = await readFile(fileRealPath);
+    totalBytes += content.byteLength;
+    if (totalBytes > MAX_INTEGRATION_ACTION_FILE_BYTES) {
+      throw new Error("Integration action files exceed the 25 MiB limit");
+    }
+    configuredProps[file.configuredProp] = content.toString("base64");
+  }
+  return configuredProps;
+}
+
 function buildScriptContext(params: {
   taskId: string;
   runId: string;
@@ -786,6 +867,7 @@ function buildScriptContext(params: {
   logger: Logger;
   env: Readonly<Record<string, string>>;
   workspaceDir: string;
+  executeIntegrationAction: (request: ScriptIntegrationActionRequest, signal?: AbortSignal) => Promise<unknown>;
 }): ScriptContext {
   const log =
     params.logger.child?.({ taskId: params.taskId, runId: params.runId, stepId: params.stepId }) ?? params.logger;
@@ -793,6 +875,7 @@ function buildScriptContext(params: {
     log,
     env: params.env,
     workspaceDir: params.workspaceDir,
+    integrations: Object.freeze({ executeAction: params.executeIntegrationAction }),
   });
 }
 
