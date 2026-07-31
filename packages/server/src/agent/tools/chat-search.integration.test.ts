@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { reconcileWhatsAppGroupAcls } from "../../connectors/whatsapp-emission";
 import { createConnectorRepository } from "../../db/repositories/connectors";
 import { createConversationSlicesRepository } from "../../db/repositories/conversation-slices";
@@ -16,6 +16,7 @@ import { createTestDb, createTestLogger, createTestPgDb, getSharedPgDb } from ".
 import { stableWhatsAppParticipantJidRef } from "../../whatsapp/identity-resolution";
 import { createReadChatHistoryTool } from "./chat-history";
 import { ChatHistoryAccessResolver, type ProviderTargetRef, handleAllChatsSearch } from "./chat-search";
+import { handleSendMessage } from "./messaging";
 import type { SketchMcpDeps } from "./types";
 
 const USER_ID = "user-roopak";
@@ -1849,6 +1850,31 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         );
 
         expect(granted.size).toBe(0);
+      });
+
+      it("lets handleSendMessage post through the real resolver for a fresh member", async () => {
+        await insertSlackMember("C-SEND-E2E", new Date().toISOString());
+        const sendTargetMessage = vi.fn().mockResolvedValue({ messageRef: "1700000000.0100" });
+
+        const result = await handleSendMessage(
+          { target: { platform: "slack", targetType: "channel", targetId: "C-SEND-E2E" }, message: "hello channel" },
+          depsFor(db, { sendTargetMessage }),
+        );
+
+        expect(sendTargetMessage).toHaveBeenCalledOnce();
+        expect(JSON.parse(result.content[0].text)).toMatchObject({ status: "sent", targetId: "C-SEND-E2E" });
+      });
+
+      it("lets handleSendMessage deny through the real resolver for a non-member", async () => {
+        const sendTargetMessage = vi.fn();
+
+        const result = await handleSendMessage(
+          { target: { platform: "slack", targetType: "channel", targetId: "C-SEND-E2E-DENY" }, message: "hello" },
+          depsFor(db, { sendTargetMessage }),
+        );
+
+        expect(sendTargetMessage).not.toHaveBeenCalled();
+        expect(result.content[0].text).toContain("not a known member of that channel or group");
       });
     });
   });

@@ -778,15 +778,14 @@ export async function createServer(config: Config, options?: CreateServerOptions
     if (target.kind !== "group") throw new Error("A WhatsApp target must be a group");
 
     const sent = await whatsappRuntime.sendText(target, message);
-    const messageRef = sent?.providerMessageId ?? "";
-    if (messageRef) {
-      await targetDeliveryCapture.captureWhatsApp({
-        deliveryTarget: whatsappDeliveryTargetFromTarget(target),
-        messageRef,
-        providerTimestamp: sent?.providerTimestamp ?? null,
-        text: message,
-      });
-    }
+    const messageRef = sent?.providerMessageId;
+    if (!messageRef) throw new Error("WhatsApp did not confirm the group message was sent");
+    await targetDeliveryCapture.captureWhatsApp({
+      deliveryTarget: whatsappDeliveryTargetFromTarget(target),
+      messageRef,
+      providerTimestamp: sent?.providerTimestamp ?? null,
+      text: message,
+    });
     return { messageRef };
   };
 

@@ -942,6 +942,46 @@ describe("handleSendMessage to a channel or group", () => {
     expect(result.content[0].text).toContain("set exactly one of recipientUserId");
   });
 
+  it("treats an empty recipientUserId alongside a target as both being set", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { recipientUserId: "", target: slackTarget, message: "hi" },
+      deps,
+      accessAllowing("slack:C123"),
+    );
+
+    expect(result.content[0].text).toBe("Error: set only one of recipientUserId or target, not both.");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty recipientUserId", async () => {
+    const result = await handleSendMessage({ recipientUserId: "  ", message: "hi" }, targetDeps(), accessAllowing());
+
+    expect(result.content[0].text).toContain("recipientUserId must not be empty");
+  });
+
+  it("rejects an empty threadTs on a Slack channel target", async () => {
+    const deps = targetDeps();
+    const result = await handleSendMessage(
+      { target: slackTarget, threadTs: "", message: "hi" },
+      deps,
+      accessAllowing("slack:C123"),
+    );
+
+    expect(result.content[0].text).toContain("threadTs must not be empty");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not let the current conversation context bypass a membership denial", async () => {
+    const deps = targetDeps({
+      conversationContext: { conversationId: 42, providerThreadId: null, isThreadReply: false },
+    });
+    const result = await handleSendMessage({ target: slackTarget, message: "hi" }, deps, accessAllowing());
+
+    expect(result.content[0].text).toContain("not a known member of that channel or group");
+    expect(deps.sendTargetMessage).not.toHaveBeenCalled();
+  });
+
   it("rejects a Slack target that is not a channel", async () => {
     const deps = targetDeps();
     const result = await handleSendMessage(

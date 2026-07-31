@@ -125,7 +125,10 @@ function validateTarget(target: SendMessageTarget, threadTs: string | undefined)
   if (target.platform === "whatsapp" && target.targetType !== "group") {
     return "A WhatsApp target must use targetType 'group'.";
   }
-  if (threadTs && target.platform !== "slack") return THREAD_TS_SCOPE_ERROR;
+  if (threadTs !== undefined) {
+    if (!threadTs.trim()) return "threadTs must not be empty. Omit it to post a top-level message.";
+    if (target.platform !== "slack") return THREAD_TS_SCOPE_ERROR;
+  }
   return null;
 }
 
@@ -191,16 +194,19 @@ export async function handleSendMessage(
   deps: SendMessageDeps,
   access: SendMessageTargetAccess = new ChatHistoryAccessResolver(deps),
 ): Promise<ToolResult> {
-  if (params.recipientUserId && params.target) {
+  if (params.recipientUserId !== undefined && params.target !== undefined) {
     return toolError("set only one of recipientUserId or target, not both.");
   }
-  if (params.target) {
+  if (params.target !== undefined) {
     return sendToTarget({ ...params, target: params.target }, deps, access);
   }
-  if (!params.recipientUserId) {
+  if (params.recipientUserId === undefined) {
     return toolError("set exactly one of recipientUserId (for a direct message) or target (for a channel or group).");
   }
-  if (params.threadTs) return toolError(THREAD_TS_SCOPE_ERROR);
+  if (!params.recipientUserId.trim()) {
+    return toolError("recipientUserId must not be empty. Use GetTeamDirectory or SearchUsers to find the user ID.");
+  }
+  if (params.threadTs !== undefined) return toolError(THREAD_TS_SCOPE_ERROR);
 
   const result = await deliverMessageToUser(
     { recipientUserId: params.recipientUserId, message: params.message, storeInInbox: true },
