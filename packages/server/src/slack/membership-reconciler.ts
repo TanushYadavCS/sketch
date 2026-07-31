@@ -13,6 +13,7 @@ export class SlackMembershipReconciler {
   private rerunRequested = false;
   private readonly channelMutations = new Map<string, Promise<void>>();
   private readonly channelVersions = new Map<string, number>();
+  private readonly activeSnapshotStartedAt = new Map<string, number>();
   private connectionVersion = 0;
   private readonly participants;
 
@@ -67,7 +68,11 @@ export class SlackMembershipReconciler {
   }
 
   recordParticipantObserved(channelId: string, slackUserId: string): Promise<void> {
-    return this.enqueueChannelMutation(channelId, () => this.participants.upsert(channelId, slackUserId));
+    const snapshotStartedAt = this.activeSnapshotStartedAt.get(channelId);
+    const observedAt = new Date(
+      Math.max(Date.now(), snapshotStartedAt === undefined ? 0 : snapshotStartedAt + 1),
+    ).toISOString();
+    return this.enqueueChannelMutation(channelId, () => this.participants.upsert(channelId, slackUserId, observedAt));
   }
 
   recordParticipantLeft(channelId: string, slackUserId: string): Promise<void> {
@@ -93,6 +98,8 @@ export class SlackMembershipReconciler {
       .execute();
     let refreshed = 0;
     for (const row of rows) {
+      const snapshotStartedAtMs = Date.now();
+      this.activeSnapshotStartedAt.set(row.provider_conversation_id, snapshotStartedAtMs);
       try {
         const connectionVersion = this.connectionVersion;
         const version = this.channelVersions.get(row.provider_conversation_id) ?? 0;
@@ -112,7 +119,12 @@ export class SlackMembershipReconciler {
             this.rerunRequested = true;
             return;
           }
-          await this.participants.replaceChannelRoster(row.provider_conversation_id, members, new Date().toISOString());
+          await this.participants.replaceChannelRoster(
+            row.provider_conversation_id,
+            members,
+            new Date().toISOString(),
+            new Date(snapshotStartedAtMs).toISOString(),
+          );
           refreshed += 1;
         });
       } catch (err) {
@@ -120,6 +132,10 @@ export class SlackMembershipReconciler {
           { err, channelId: row.provider_conversation_id },
           "Slack channel participant refresh failed",
         );
+      } finally {
+        if (this.activeSnapshotStartedAt.get(row.provider_conversation_id) === snapshotStartedAtMs) {
+          this.activeSnapshotStartedAt.delete(row.provider_conversation_id);
+        }
       }
     }
     this.deps.logger.info(

@@ -150,6 +150,43 @@ describe("SlackMembershipReconciler", () => {
     ).resolves.toEqual([]);
   });
 
+  it("preserves a participant observed after the provider snapshot began", async () => {
+    const conversations = createConversationRepository(db);
+    await conversations.getOrCreate({
+      platform: "slack",
+      kind: "channel",
+      providerConversationId: "C1",
+    });
+    const snapshotStarted = deferred();
+    const continueSnapshot = deferred();
+    const listChannelMembers = vi.fn(async () => {
+      snapshotStarted.resolve();
+      await continueSnapshot.promise;
+      return ["U-PROVIDER"];
+    });
+    const reconciler = new SlackMembershipReconciler({
+      db,
+      logger: createTestLogger(),
+      getSlack: () => ({ listChannelMembers }),
+    });
+
+    const wake = reconciler.wake();
+    await snapshotStarted.promise;
+    await reconciler.recordParticipantObserved("C1", "U-OBSERVED");
+    continueSnapshot.resolve();
+    await wake;
+
+    expect(listChannelMembers).toHaveBeenCalledOnce();
+    await expect(
+      db
+        .selectFrom("slack_channel_participants")
+        .select("slack_user_id")
+        .where("channel_id", "=", "C1")
+        .orderBy("slack_user_id", "asc")
+        .execute(),
+    ).resolves.toEqual([{ slack_user_id: "U-OBSERVED" }, { slack_user_id: "U-PROVIDER" }]);
+  });
+
   it("does not restore an in-flight provider snapshot after disconnect clears the roster", async () => {
     const conversations = createConversationRepository(db);
     await conversations.getOrCreate({

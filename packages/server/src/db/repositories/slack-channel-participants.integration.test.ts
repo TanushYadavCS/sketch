@@ -60,6 +60,23 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       ]);
     });
 
+    it("preserves participants observed after the provider snapshot began", async () => {
+      const repo = createSlackChannelParticipantsRepository(db);
+      await repo.upsert("C1", "U-STALE", "2026-07-31T00:00:00.000Z");
+      await repo.upsert("C1", "U-OBSERVED", "2026-07-31T01:00:00.001Z");
+
+      await repo.replaceChannelRoster("C1", ["U-PROVIDER"], "2026-07-31T01:00:01.000Z", "2026-07-31T01:00:00.000Z");
+
+      await expect(
+        db
+          .selectFrom("slack_channel_participants")
+          .select("slack_user_id")
+          .where("channel_id", "=", "C1")
+          .orderBy("slack_user_id", "asc")
+          .execute(),
+      ).resolves.toEqual([{ slack_user_id: "U-OBSERVED" }, { slack_user_id: "U-PROVIDER" }]);
+    });
+
     it("rejects an empty replacement without deleting the prior roster", async () => {
       const repo = createSlackChannelParticipantsRepository(db);
       await repo.replaceChannelRoster("C1", ["U1"], "2026-07-31T00:00:00.000Z");

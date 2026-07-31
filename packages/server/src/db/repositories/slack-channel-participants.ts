@@ -35,12 +35,19 @@ export function createSlackChannelParticipantsRepository(db: Kysely<DB>) {
       channelId: string,
       slackUserIds: string[],
       lastSeenAt = new Date().toISOString(),
+      preserveSeenAfter?: string,
     ): Promise<void> {
       const members = [...new Set(slackUserIds.map((id) => id.trim()).filter((id) => id.length > 0))];
       if (members.length === 0) throw new Error("Slack channel roster must not be empty");
 
       await db.transaction().execute(async (trx) => {
-        await trx.deleteFrom("slack_channel_participants").where("channel_id", "=", channelId).execute();
+        await (preserveSeenAfter
+          ? trx
+              .deleteFrom("slack_channel_participants")
+              .where("channel_id", "=", channelId)
+              .where("last_seen_at", "<=", preserveSeenAfter)
+          : trx.deleteFrom("slack_channel_participants").where("channel_id", "=", channelId)
+        ).execute();
         await trx
           .insertInto("slack_channel_participants")
           .values(
@@ -49,6 +56,11 @@ export function createSlackChannelParticipantsRepository(db: Kysely<DB>) {
               slack_user_id: slackUserId,
               last_seen_at: lastSeenAt,
             })),
+          )
+          .onConflict((oc) =>
+            oc.columns(["channel_id", "slack_user_id"]).doUpdateSet({
+              last_seen_at: sql`excluded.last_seen_at`,
+            }),
           )
           .execute();
       });

@@ -791,6 +791,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       slack = bot;
     },
     createBot: (tokens) => createConfiguredSlackBot(tokens, slackAdapterDeps),
+    beforeExplicitTokenReplacement: () => slackMembershipReconciler.clearAllParticipants(),
   });
 
   const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, {
