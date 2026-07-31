@@ -64,6 +64,58 @@ function unavailableCrossConversationResult(): ToolResult {
   };
 }
 
+type CrossReadDirection = "older" | "newer";
+
+interface CrossReadPageToken {
+  version: 1;
+  conversationId: number;
+  anchorMessageId: number;
+  direction: CrossReadDirection;
+  boundaryMessageId: number;
+  snapshotBeforeMessageId: number | null;
+  includeBotMessages: boolean;
+}
+
+interface CrossReadStream {
+  providerThreadId?: string | null;
+  isThreadReply?: boolean;
+}
+
+interface CrossReadPage {
+  messages: StoredConversationMessage[];
+  hasMore: boolean;
+  olderPageToken?: string;
+  newerPageToken?: string;
+}
+
+function encodeCrossReadPageToken(token: CrossReadPageToken): string {
+  return Buffer.from(JSON.stringify(token), "utf8").toString("base64url");
+}
+
+function parseCrossReadPageToken(value: string): CrossReadPageToken | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<CrossReadPageToken>;
+    if (
+      parsed.version !== 1 ||
+      !Number.isSafeInteger(parsed.conversationId) ||
+      Number(parsed.conversationId) <= 0 ||
+      !Number.isSafeInteger(parsed.anchorMessageId) ||
+      Number(parsed.anchorMessageId) <= 0 ||
+      (parsed.direction !== "older" && parsed.direction !== "newer") ||
+      !Number.isSafeInteger(parsed.boundaryMessageId) ||
+      Number(parsed.boundaryMessageId) <= 0 ||
+      (parsed.snapshotBeforeMessageId !== null &&
+        (!Number.isSafeInteger(parsed.snapshotBeforeMessageId) || Number(parsed.snapshotBeforeMessageId) <= 0)) ||
+      typeof parsed.includeBotMessages !== "boolean"
+    ) {
+      return null;
+    }
+    return parsed as CrossReadPageToken;
+  } catch {
+    return null;
+  }
+}
+
 async function readAroundMessage(
   repo: ReturnType<typeof createConversationRepository>,
   conversationId: number,
@@ -72,36 +124,113 @@ async function readAroundMessage(
     limit?: number;
     includeBotMessages?: boolean;
     beforeMessageId?: number;
-    providerThreadId?: string | null;
+    stream: CrossReadStream;
   },
-): Promise<{ messages: StoredConversationMessage[]; hasMore: boolean }> {
+): Promise<CrossReadPage> {
   const limit = Math.max(1, Math.min(options.limit ?? 50, 100));
   const beforeLimit = Math.floor((limit - 1) / 2);
   const afterLimit = limit - beforeLimit;
-  const before =
-    beforeLimit > 0
-      ? await repo.listMessages(conversationId, {
-          beforeMessageId: anchorMessageId,
-          limit: beforeLimit,
-          order: "desc",
-          includeBotMessages: options.includeBotMessages,
-          providerThreadId: options.providerThreadId,
-        })
-      : { messages: [], hasMore: false };
+  const beforeProbe = await repo.listMessages(conversationId, {
+    beforeMessageId: anchorMessageId,
+    limit: Math.max(1, beforeLimit),
+    order: "desc",
+    includeBotMessages: options.includeBotMessages,
+    ...options.stream,
+  });
+  const beforeMessages = beforeLimit > 0 ? beforeProbe.messages : [];
   const after = await repo.listMessages(conversationId, {
     afterMessageId: anchorMessageId - 1,
     beforeMessageId: options.beforeMessageId,
     limit: afterLimit,
     order: "asc",
     includeBotMessages: options.includeBotMessages,
-    providerThreadId: options.providerThreadId,
+    ...options.stream,
   });
   if (!after.messages.some((message) => message.id === anchorMessageId)) {
     return { messages: [], hasMore: false };
   }
+  const olderAvailable = beforeLimit === 0 ? beforeProbe.messages.length > 0 : beforeProbe.hasMore;
+  const firstMessageId = beforeMessages.at(-1)?.id ?? anchorMessageId;
+  const lastMessageId = after.messages.at(-1)?.id ?? anchorMessageId;
+  const tokenBase = {
+    version: 1 as const,
+    conversationId,
+    anchorMessageId,
+    snapshotBeforeMessageId: options.beforeMessageId ?? null,
+    includeBotMessages: options.includeBotMessages === true,
+  };
   return {
-    messages: [...before.messages.reverse(), ...after.messages],
-    hasMore: before.hasMore || after.hasMore,
+    messages: [...beforeMessages.reverse(), ...after.messages],
+    hasMore: olderAvailable || after.hasMore,
+    ...(olderAvailable
+      ? {
+          olderPageToken: encodeCrossReadPageToken({
+            ...tokenBase,
+            direction: "older",
+            boundaryMessageId: firstMessageId,
+          }),
+        }
+      : {}),
+    ...(after.hasMore
+      ? {
+          newerPageToken: encodeCrossReadPageToken({
+            ...tokenBase,
+            direction: "newer",
+            boundaryMessageId: lastMessageId,
+          }),
+        }
+      : {}),
+  };
+}
+
+async function readCrossConversationPage(
+  repo: ReturnType<typeof createConversationRepository>,
+  token: CrossReadPageToken,
+  stream: CrossReadStream,
+  limit?: number,
+): Promise<CrossReadPage> {
+  const pageLimit = Math.max(1, Math.min(limit ?? 50, 100));
+  if (token.direction === "older") {
+    const result = await repo.listMessages(token.conversationId, {
+      beforeMessageId: token.boundaryMessageId,
+      limit: pageLimit,
+      order: "desc",
+      includeBotMessages: token.includeBotMessages,
+      ...stream,
+    });
+    const messages = result.messages.reverse();
+    return {
+      messages,
+      hasMore: result.hasMore,
+      ...(result.hasMore && messages.length > 0
+        ? {
+            olderPageToken: encodeCrossReadPageToken({
+              ...token,
+              boundaryMessageId: messages[0].id,
+            }),
+          }
+        : {}),
+    };
+  }
+  const result = await repo.listMessages(token.conversationId, {
+    afterMessageId: token.boundaryMessageId,
+    beforeMessageId: token.snapshotBeforeMessageId ?? undefined,
+    limit: pageLimit,
+    order: "asc",
+    includeBotMessages: token.includeBotMessages,
+    ...stream,
+  });
+  return {
+    messages: result.messages,
+    hasMore: result.hasMore,
+    ...(result.hasMore && result.messages.length > 0
+      ? {
+          newerPageToken: encodeCrossReadPageToken({
+            ...token,
+            boundaryMessageId: result.messages.at(-1)?.id ?? token.boundaryMessageId,
+          }),
+        }
+      : {}),
   };
 }
 
@@ -126,28 +255,58 @@ async function renderCrossConversationRead(
   return renderAllChatsSearchResults(deps.db, enriched);
 }
 
-async function loadCrossConversationAnchorThread(
+async function loadCrossConversationAnchorStream(
   deps: SketchMcpDeps,
   conversationId: number,
   anchorMessageId: number,
-): Promise<{ ok: true; providerThreadId?: string | null } | { ok: false }> {
+): Promise<{ ok: true; stream: CrossReadStream } | { ok: false }> {
   if (!deps.db) return { ok: false };
   const row = await deps.db
     .selectFrom("conversation_messages")
     .innerJoin("conversations", "conversations.id", "conversation_messages.conversation_id")
-    .select(["conversations.platform", "conversation_messages.provider_thread_id"])
+    .select([
+      "conversations.platform",
+      "conversation_messages.provider_thread_id",
+      "conversation_messages.is_thread_reply",
+    ])
     .where("conversation_messages.conversation_id", "=", conversationId)
     .where("conversation_messages.id", "=", anchorMessageId)
     .executeTakeFirst();
   if (!row) return { ok: false };
-  if (row.platform !== "slack") return { ok: true };
-  return { ok: true, providerThreadId: row.provider_thread_id };
+  if (row.platform !== "slack") return { ok: true, stream: {} };
+  if (row.provider_thread_id === null) return { ok: true, stream: { providerThreadId: null } };
+  return row.is_thread_reply === 1
+    ? { ok: true, stream: { providerThreadId: row.provider_thread_id } }
+    : { ok: true, stream: { isThreadReply: false } };
+}
+
+async function boundaryBelongsToCrossReadStream(
+  deps: SketchMcpDeps,
+  token: CrossReadPageToken,
+  stream: CrossReadStream,
+): Promise<boolean> {
+  if (!deps.db) return false;
+  let query = deps.db
+    .selectFrom("conversation_messages")
+    .select("id")
+    .where("conversation_id", "=", token.conversationId)
+    .where("id", "=", token.boundaryMessageId);
+  if (stream.providerThreadId !== undefined) {
+    query =
+      stream.providerThreadId === null
+        ? query.where("provider_thread_id", "is", null)
+        : query.where("provider_thread_id", "=", stream.providerThreadId);
+  }
+  if (stream.isThreadReply !== undefined) {
+    query = query.where("is_thread_reply", "=", stream.isThreadReply ? 1 : 0);
+  }
+  return (await query.executeTakeFirst()) !== undefined;
 }
 
 export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new ChatHistoryAccessResolver(deps)) {
   return tool(
     READ_CHAT_HISTORY_TOOL_NAME,
-    "Read persisted messages chronologically from the current chat or from an authorized conversation returned by SearchChatHistory. Use conversationRef and anchorMessageId to read around a cross-chat search hit. Do not use this as the first tool for targeted keyword, topic, decision, person, project, or phrase lookup; use SearchChatHistory first.",
+    "Read persisted messages chronologically from the current chat or from an authorized conversation returned by SearchChatHistory. A cross-chat read must start with both conversationRef and anchorMessageId from the search hit. Continue it only with an olderPageToken or newerPageToken returned by that read, passed as pageToken. Do not restart a cross-chat read without its anchor or use this as the first tool for targeted lookup.",
     {
       conversationRef: z
         .string()
@@ -161,6 +320,10 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
         .positive()
         .optional()
         .describe("Center the read around this message row id returned by SearchChatHistory."),
+      pageToken: z
+        .string()
+        .optional()
+        .describe("Opaque olderPageToken or newerPageToken returned by a prior cross-chat read."),
       scope: z
         .enum(["conversation", "current_thread"])
         .optional()
@@ -176,6 +339,7 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
     async ({
       conversationRef,
       anchorMessageId,
+      pageToken,
       scope,
       afterMessageId,
       beforeMessageId,
@@ -183,9 +347,38 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       order,
       includeBotMessages,
     }) => {
+      if (
+        pageToken &&
+        (conversationRef ||
+          anchorMessageId ||
+          scope ||
+          afterMessageId ||
+          beforeMessageId ||
+          order ||
+          includeBotMessages !== undefined)
+      ) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "pageToken can only be combined with limit.",
+            },
+          ],
+        };
+      }
       if (conversationRef && scope === "current_thread") {
         return {
           content: [{ type: "text" as const, text: "Current-thread scope cannot be used with conversationRef." }],
+        };
+      }
+      if (conversationRef && !anchorMessageId) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "conversationRef must be combined with the anchorMessageId returned by SearchChatHistory.",
+            },
+          ],
         };
       }
       if (anchorMessageId && (afterMessageId || beforeMessageId || order)) {
@@ -199,15 +392,21 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
         };
       }
 
-      const referencedConversationId = conversationRef ? parseConversationRef(conversationRef) : null;
+      const parsedPageToken = pageToken ? parseCrossReadPageToken(pageToken) : null;
+      if (pageToken && !parsedPageToken) return unavailableCrossConversationResult();
+      const referencedConversationId =
+        parsedPageToken?.conversationId ?? (conversationRef ? parseConversationRef(conversationRef) : null);
       if (conversationRef && !referencedConversationId) return unavailableCrossConversationResult();
       const conversationId = referencedConversationId ?? deps.conversationContext?.conversationId;
       const repo = deps.conversationRepo ?? (deps.db ? createConversationRepository(deps.db) : undefined);
       if (!conversationId || !repo) {
         return { content: [{ type: "text" as const, text: "Chat history is not available in this run." }] };
       }
-      const isCrossConversation = conversationId !== deps.conversationContext?.conversationId;
-      if (isCrossConversation && !(await isChatHistoryConversationAuthorized(deps, conversationId, access))) {
+      const isReferencedConversation = Boolean(conversationRef || parsedPageToken);
+      if (
+        isReferencedConversation &&
+        !(await isChatHistoryConversationAuthorized(deps, conversationId, access, true))
+      ) {
         return unavailableCrossConversationResult();
       }
 
@@ -228,33 +427,43 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
       if (anchorMessageId && currentMessageId && anchorMessageId >= currentMessageId) {
         return unavailableCrossConversationResult();
       }
-      let threadId = !isCrossConversation && effectiveScope === "current_thread" ? providerThreadId : undefined;
-      if (isCrossConversation && anchorMessageId) {
-        const anchor = await loadCrossConversationAnchorThread(deps, conversationId, anchorMessageId);
+      let stream: CrossReadStream =
+        !isReferencedConversation && effectiveScope === "current_thread"
+          ? { providerThreadId }
+          : !isReferencedConversation && effectiveScope === "conversation" && isThreadReply !== undefined
+            ? { isThreadReply }
+            : {};
+      const referencedAnchorMessageId = parsedPageToken?.anchorMessageId ?? anchorMessageId;
+      if (isReferencedConversation && referencedAnchorMessageId) {
+        const anchor = await loadCrossConversationAnchorStream(deps, conversationId, referencedAnchorMessageId);
         if (!anchor.ok) return unavailableCrossConversationResult();
-        threadId = anchor.providerThreadId;
+        stream = anchor.stream;
       }
-      const result = anchorMessageId
-        ? await readAroundMessage(repo, conversationId, anchorMessageId, {
-            limit,
-            includeBotMessages,
-            beforeMessageId: currentMessageId,
-            providerThreadId: threadId,
-          })
-        : await repo.listMessages(conversationId, {
-            afterMessageId,
-            beforeMessageId: effectiveBeforeMessageId,
-            limit,
-            order,
-            includeBotMessages,
-            providerThreadId: threadId,
-            ...(!isCrossConversation && effectiveScope === "conversation" && isThreadReply !== undefined
-              ? { isThreadReply }
-              : {}),
-          });
-      if (anchorMessageId && result.messages.length === 0) return unavailableCrossConversationResult();
+      if (parsedPageToken && !(await boundaryBelongsToCrossReadStream(deps, parsedPageToken, stream))) {
+        return unavailableCrossConversationResult();
+      }
+      const result = parsedPageToken
+        ? await readCrossConversationPage(repo, parsedPageToken, stream, limit)
+        : anchorMessageId
+          ? await readAroundMessage(repo, conversationId, anchorMessageId, {
+              limit,
+              includeBotMessages,
+              beforeMessageId: currentMessageId,
+              stream,
+            })
+          : await repo.listMessages(conversationId, {
+              afterMessageId,
+              beforeMessageId: effectiveBeforeMessageId,
+              limit,
+              order,
+              includeBotMessages,
+              ...stream,
+            });
+      if ((anchorMessageId || parsedPageToken) && result.messages.length === 0) {
+        return unavailableCrossConversationResult();
+      }
 
-      const messages = isCrossConversation
+      const messages = isReferencedConversation
         ? await renderCrossConversationRead(deps, conversationId, result.messages)
         : result.messages.map(renderMessage);
       if (!messages) return unavailableCrossConversationResult();
@@ -267,7 +476,18 @@ export function createReadChatHistoryTool(deps: SketchMcpDeps, access = new Chat
               {
                 messages,
                 hasMore: result.hasMore,
-                ...("nextCursor" in result ? { nextCursor: result.nextCursor } : {}),
+                ...(isReferencedConversation && (anchorMessageId || parsedPageToken)
+                  ? {
+                      ...("olderPageToken" in result && result.olderPageToken
+                        ? { olderPageToken: result.olderPageToken }
+                        : {}),
+                      ...("newerPageToken" in result && result.newerPageToken
+                        ? { newerPageToken: result.newerPageToken }
+                        : {}),
+                    }
+                  : "nextCursor" in result
+                    ? { nextCursor: result.nextCursor }
+                    : {}),
               },
               null,
               2,

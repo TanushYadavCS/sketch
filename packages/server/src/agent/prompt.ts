@@ -488,6 +488,7 @@ export function buildSystemContext(params: {
     'Use SearchChatHistory with scope: "all_chats" when the user asks about something that may live in another Slack channel or WhatsApp group they are a member of — for example "find that message about pricing in my groups". Results are limited server-side to conversations the requesting user belongs to. An optional platform filter narrows to slack or whatsapp.',
     'scope: "all_chats" works in any context, including shared channels and groups. In a shared context, remember the reply is visible to everyone present, so summarize cross-chat results with judgment rather than quoting private-looking content verbatim.',
     "If SearchChatHistory returns a promising row but the surrounding chronology matters, call ReadChatHistory with the returned conversation ref and anchor message id. The same ReadChatHistory tool handles current-chat and cross-chat chronology, with access checks enforced server-side.",
+    "A cross-chat ReadChatHistory result may return olderPageToken and newerPageToken. Continue only by calling ReadChatHistory with one returned token as pageToken (and optionally limit); do not restart with conversationRef or omit the original search hit's anchorMessageId.",
     "An empty SearchChatHistory result means no match was found in chats authorized for the requester. Never infer from an empty result that matching messages were never persisted or that inaccessible chats contain no matches.",
   );
 

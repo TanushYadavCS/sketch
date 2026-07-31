@@ -65,32 +65,6 @@ describe("WhatsApp gateway HTTP facade", () => {
     await expect(pairing.json()).resolves.toEqual({ connected: false, phoneNumber: null });
   });
 
-  it("preserves the provider completeness marker in group metadata responses", async () => {
-    const groupMetadata = vi.fn(async () => ({
-      id: "123@g.us",
-      subject: "Product Team",
-      desc: null,
-      participants: [],
-      participantIdentityComplete: true,
-    }));
-    const app = createWhatsAppGatewayHttpApp({
-      token: "secret",
-      facade: facade({ groupMetadata }),
-      logger: createTestLogger(),
-    });
-    const response = await app.request("/group-metadata-queries", {
-      method: "POST",
-      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-      body: JSON.stringify({ jid: "123@g.us", opts: { refresh: true } }),
-    });
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      result: { id: "123@g.us", participantIdentityComplete: true },
-    });
-    expect(groupMetadata).toHaveBeenCalledWith("123@g.us", { refresh: true });
-  });
-
   it("round-trips authenticated history requests and rejects counts above the Baileys cap", async () => {
     const fetchMessageHistory = vi.fn(async () => "request-session-7");
     const app = createWhatsAppGatewayHttpApp({

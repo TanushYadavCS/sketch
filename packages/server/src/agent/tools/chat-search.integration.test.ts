@@ -132,6 +132,16 @@ async function seedSlackChannel(
       .where("id", "=", conversation.id)
       .execute();
   }
+  if (options.memberEmails.includes(USER_EMAIL)) {
+    await db
+      .insertInto("slack_channel_participants")
+      .values({
+        channel_id: options.channelId,
+        slack_user_id: USER_SLACK_ID,
+        last_seen_at: new Date().toISOString(),
+      })
+      .execute();
+  }
   const message = await conversations.insertMessage({
     conversationId: conversation.id,
     providerMessageId: `${options.channelId}-1`,
@@ -245,10 +255,6 @@ function depsFor(db: Kysely<DB>, overrides: Partial<SketchMcpDeps> = {}): Sketch
     db,
     currentUserId: USER_ID,
     userRepo: createUserRepository(db),
-    getSlack: () =>
-      ({
-        isUserInChannel: async () => true,
-      }) as unknown as NonNullable<ReturnType<NonNullable<SketchMcpDeps["getSlack"]>>>,
     ...overrides,
   } as unknown as SketchMcpDeps;
 }
@@ -351,8 +357,44 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       }
     });
 
-    it("uses live Slack membership instead of indexed-file access scopes", async () => {
-      const checks: Array<[string, string]> = [];
+    it("authorizes every matching conversation before applying the result limit", async () => {
+      const matchingIds: number[] = [];
+      for (const channelId of ["C-CANDIDATE-1", "C-CANDIDATE-2", "C-CANDIDATE-3"]) {
+        const seeded = await seedSlackChannel(db, {
+          channelId,
+          text: "candidate-first marker",
+          memberEmails: [USER_EMAIL],
+          connectorConfigId: slackConfigId,
+        });
+        matchingIds.push(seeded.conversationId);
+      }
+      await seedSlackChannel(db, {
+        channelId: "C-NONMATCH",
+        text: "completely unrelated",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: slackConfigId,
+      });
+      const deps = depsFor(db);
+      const access = new ChatHistoryAccessResolver(deps);
+      const authorize = access.authorizedConversationIds.bind(access);
+      const candidateCalls: number[][] = [];
+      access.authorizedConversationIds = async (conversationIds) => {
+        candidateCalls.push(conversationIds);
+        return authorize(conversationIds);
+      };
+
+      const outcome = await handleAllChatsSearch({ query: "candidate-first marker", limit: 1 }, deps, access);
+
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(1);
+      expect(outcome.body.hasMore).toBe(true);
+      expect(candidateCalls).toHaveLength(1);
+      expect([...candidateCalls[0]].sort((a, b) => a - b)).toEqual(matchingIds.sort((a, b) => a - b));
+    });
+
+    it("uses passive Slack membership without calling Slack during search", async () => {
+      let providerCalls = 0;
       await seedSlackChannel(db, {
         channelId: "C2",
         text: "secret finance topic",
@@ -364,37 +406,32 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         depsFor(db, {
           getSlack: () =>
             ({
-              isUserInChannel: async (channelId: string, slackUserId: string) => {
-                checks.push([channelId, slackUserId]);
-                return false;
+              isUserInChannel: async () => {
+                providerCalls += 1;
+                throw new Error("Search must not call Slack");
               },
             }) as unknown as NonNullable<ReturnType<NonNullable<SketchMcpDeps["getSlack"]>>>,
         }),
       );
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      expect(outcome.body.messages).toHaveLength(0);
-      expect(checks).toContainEqual(["C2", USER_SLACK_ID]);
+      expect(outcome.body.messages).toHaveLength(1);
+      expect(providerCalls).toBe(0);
     });
 
-    it("fails closed when live Slack membership cannot be checked", async () => {
+    it("fails closed when passive Slack membership is stale", async () => {
       await seedSlackChannel(db, {
         channelId: "C2-ERROR",
         text: "provider failure secret",
         memberEmails: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
-      const outcome = await handleAllChatsSearch(
-        { query: "provider failure secret" },
-        depsFor(db, {
-          getSlack: () =>
-            ({
-              isUserInChannel: async () => {
-                throw new Error("Slack unavailable");
-              },
-            }) as unknown as NonNullable<ReturnType<NonNullable<SketchMcpDeps["getSlack"]>>>,
-        }),
-      );
+      await db
+        .updateTable("slack_channel_participants")
+        .set({ last_seen_at: new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString() })
+        .where("channel_id", "=", "C2-ERROR")
+        .execute();
+      const outcome = await handleAllChatsSearch({ query: "provider failure secret" }, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(0);
@@ -475,182 +512,231 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
-    it("uses a complete live WhatsApp roster before the persisted fallback", async () => {
+    it("authorizes a WhatsApp group through a stable persisted phone-to-LID mapping", async () => {
       const seeded = await seedWhatsAppGroup(db, {
-        text: "live roster removal marker",
-        memberEmails: [USER_EMAIL],
-        connectorConfigId: whatsappConfigId,
-        indexEnabled: false,
-      });
-      const outcome = await handleAllChatsSearch(
-        { query: "live roster removal" },
-        depsFor(db, {
-          getWhatsApp: () => ({
-            groupMetadata: async () => ({
-              id: seeded.groupJid,
-              subject: "Deal Room",
-              desc: null,
-              participants: [
-                {
-                  jid: "15550009999@s.whatsapp.net",
-                  phoneE164: "+15550009999",
-                  lid: null,
-                  admin: null,
-                },
-              ],
-              participantIdentityComplete: true,
-            }),
-            resolveLid: async () => null,
-          }),
-        }),
-      );
-      expect(outcome.ok).toBe(true);
-      if (!outcome.ok) return;
-      expect(outcome.body.messages).toHaveLength(0);
-    });
-
-    it("allows a live WhatsApp member before the DB roster catches up", async () => {
-      const seeded = await seedWhatsAppGroup(db, {
-        text: "live roster addition marker",
+        text: "stable lid mapping marker",
         memberEmails: ["other@example.com"],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
-      const outcome = await handleAllChatsSearch(
-        { query: "live roster addition" },
-        depsFor(db, {
-          getWhatsApp: () => ({
-            groupMetadata: async () => ({
-              id: seeded.groupJid,
-              subject: "Deal Room",
-              desc: null,
-              participants: [
-                {
-                  jid: "15550001234@s.whatsapp.net",
-                  phoneE164: USER_WHATSAPP_NUMBER,
-                  lid: null,
-                  admin: null,
-                },
-              ],
-            }),
-            resolveLid: async () => null,
-          }),
-        }),
-      );
+      const mappingGroup = `${randomUUID()}@g.us`;
+      await createWhatsAppGroupRepository(db).upsert({
+        jid: mappingGroup,
+        name: "Mapping Source",
+        description: null,
+        updated_at: "2026-07-17T09:00:00.000Z",
+      });
+      await db
+        .insertInto("whatsapp_group_participants")
+        .values([
+          {
+            group_jid: mappingGroup,
+            participant_jid: "86702773280883@lid",
+            phone_e164: USER_WHATSAPP_NUMBER,
+            lid: "86702773280883@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+          {
+            group_jid: seeded.groupJid,
+            participant_jid: "86702773280883@lid",
+            phone_e164: null,
+            lid: "86702773280883@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ])
+        .execute();
+
+      const outcome = await handleAllChatsSearch({ query: "stable lid mapping" }, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
     });
 
-    it.each(["getter-error", "error", "null", "empty", "unresolved", "incomplete", "missing-marker"] as const)(
-      "falls back to persisted WhatsApp membership for %s provider metadata",
-      async (providerResult) => {
-        const seeded = await seedWhatsAppGroup(db, {
-          text: `fallback ${providerResult} marker`,
-          memberEmails: [USER_EMAIL],
-          connectorConfigId: whatsappConfigId,
-          indexEnabled: false,
-        });
-        const outcome = await handleAllChatsSearch(
-          { query: `fallback ${providerResult}` },
-          depsFor(db, {
-            getWhatsApp: () => {
-              if (providerResult === "getter-error") throw new Error("WhatsApp facade unavailable");
-              return {
-                groupMetadata: async () => {
-                  if (providerResult === "error") throw new Error("WhatsApp unavailable");
-                  if (providerResult === "null") return null;
-                  if (providerResult === "empty") {
-                    return { id: seeded.groupJid, subject: "Deal Room", desc: null, participants: [] };
-                  }
-                  if (providerResult === "incomplete") {
-                    return {
-                      id: seeded.groupJid,
-                      subject: "Deal Room",
-                      desc: null,
-                      participants: [
-                        {
-                          jid: "15550009999@s.whatsapp.net",
-                          phoneE164: "+15550009999",
-                          lid: null,
-                          admin: null,
-                        },
-                      ],
-                      participantIdentityComplete: false,
-                    };
-                  }
-                  if (providerResult === "missing-marker") {
-                    return {
-                      id: seeded.groupJid,
-                      subject: "Deal Room",
-                      desc: null,
-                      participants: [
-                        {
-                          jid: "15550009999@s.whatsapp.net",
-                          phoneE164: "+15550009999",
-                          lid: null,
-                          admin: null,
-                        },
-                      ],
-                    };
-                  }
-                  return {
-                    id: seeded.groupJid,
-                    subject: "Deal Room",
-                    desc: null,
-                    participants: [
-                      {
-                        jid: "86702773280883@lid",
-                        phoneE164: null,
-                        lid: "86702773280883@lid",
-                        admin: null,
-                      },
-                    ],
-                  };
-                },
-                resolveLid: async () => null,
-              };
-            },
-          }),
-        );
-        expect(outcome.ok).toBe(true);
-        if (!outcome.ok) return;
-        expect(outcome.body.messages).toHaveLength(1);
-      },
-    );
-
-    it("uses the pre-refresh WhatsApp fallback when an incomplete provider result mutates persistence", async () => {
+    it("authorizes a stable phone-JID-to-LID mapping when phone_e164 is unavailable", async () => {
       const seeded = await seedWhatsAppGroup(db, {
-        text: "pre-refresh fallback marker",
+        text: "phone jid lid mapping marker",
+        memberEmails: ["other@example.com"],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const mappingGroup = `${randomUUID()}@g.us`;
+      await createWhatsAppGroupRepository(db).upsert({
+        jid: mappingGroup,
+        name: "Phone JID Mapping Source",
+        description: null,
+        updated_at: "2026-07-17T09:00:00.000Z",
+      });
+      await db
+        .insertInto("whatsapp_group_participants")
+        .values([
+          {
+            group_jid: mappingGroup,
+            participant_jid: "15550001234@s.whatsapp.net",
+            phone_e164: null,
+            lid: "86702773280883@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+          {
+            group_jid: seeded.groupJid,
+            participant_jid: "86702773280883@lid",
+            phone_e164: null,
+            lid: "86702773280883@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ])
+        .execute();
+
+      const outcome = await handleAllChatsSearch({ query: "phone jid lid mapping" }, depsFor(db));
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(1);
+    });
+
+    it("does not infer WhatsApp membership from an ambiguous phone-to-LID mapping", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "ambiguous lid mapping marker",
+        memberEmails: ["other@example.com"],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const mappingGroup = `${randomUUID()}@g.us`;
+      await createWhatsAppGroupRepository(db).upsert({
+        jid: mappingGroup,
+        name: "Mapping Source",
+        description: null,
+        updated_at: "2026-07-17T09:00:00.000Z",
+      });
+      await db
+        .insertInto("whatsapp_group_participants")
+        .values([
+          {
+            group_jid: mappingGroup,
+            participant_jid: "lid-one@lid",
+            phone_e164: USER_WHATSAPP_NUMBER,
+            lid: "lid-one@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+          {
+            group_jid: mappingGroup,
+            participant_jid: "lid-two@lid",
+            phone_e164: USER_WHATSAPP_NUMBER,
+            lid: "lid-two@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+          {
+            group_jid: seeded.groupJid,
+            participant_jid: "lid-one@lid",
+            phone_e164: null,
+            lid: "lid-one@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ])
+        .execute();
+
+      const outcome = await handleAllChatsSearch({ query: "ambiguous lid mapping" }, depsFor(db));
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(0);
+    });
+
+    it("does not infer WhatsApp membership when one LID maps to multiple phones", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "ambiguous reverse lid marker",
+        memberEmails: ["other@example.com"],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const groups = createWhatsAppGroupRepository(db);
+      const firstMappingGroup = `${randomUUID()}@g.us`;
+      const secondMappingGroup = `${randomUUID()}@g.us`;
+      for (const jid of [firstMappingGroup, secondMappingGroup]) {
+        await groups.upsert({
+          jid,
+          name: "Mapping Source",
+          description: null,
+          updated_at: "2026-07-17T09:00:00.000Z",
+        });
+      }
+      await db
+        .insertInto("whatsapp_group_participants")
+        .values([
+          {
+            group_jid: firstMappingGroup,
+            participant_jid: "shared-lid@lid",
+            phone_e164: USER_WHATSAPP_NUMBER,
+            lid: "shared-lid@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+          {
+            group_jid: secondMappingGroup,
+            participant_jid: "shared-lid@lid",
+            phone_e164: "+15550009999",
+            lid: "shared-lid@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+          {
+            group_jid: seeded.groupJid,
+            participant_jid: "shared-lid@lid",
+            phone_e164: null,
+            lid: "shared-lid@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ])
+        .execute();
+
+      const outcome = await handleAllChatsSearch({ query: "ambiguous reverse lid" }, depsFor(db));
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.body.messages).toHaveLength(0);
+    });
+
+    it("keeps a direct WhatsApp phone match valid when inferred LID mappings are ambiguous", async () => {
+      await seedWhatsAppGroup(db, {
+        text: "direct phone survives ambiguity",
         memberEmails: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
-      const outcome = await handleAllChatsSearch(
-        { query: "pre-refresh fallback" },
-        depsFor(db, {
-          getWhatsApp: () => ({
-            groupMetadata: async () => {
-              await db.deleteFrom("whatsapp_group_participants").where("group_jid", "=", seeded.groupJid).execute();
-              return {
-                id: seeded.groupJid,
-                subject: "Deal Room",
-                desc: null,
-                participants: [
-                  {
-                    jid: "15550009999@s.whatsapp.net",
-                    phoneE164: "+15550009999",
-                    lid: null,
-                    admin: null,
-                  },
-                ],
-                participantIdentityComplete: false,
-              };
-            },
-            resolveLid: async () => null,
-          }),
-        }),
-      );
+      const mappingGroup = `${randomUUID()}@g.us`;
+      await createWhatsAppGroupRepository(db).upsert({
+        jid: mappingGroup,
+        name: "Mapping Source",
+        description: null,
+        updated_at: "2026-07-17T09:00:00.000Z",
+      });
+      await db
+        .insertInto("whatsapp_group_participants")
+        .values([
+          {
+            group_jid: mappingGroup,
+            participant_jid: "ambiguous-one@lid",
+            phone_e164: USER_WHATSAPP_NUMBER,
+            lid: "ambiguous-one@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+          {
+            group_jid: mappingGroup,
+            participant_jid: "ambiguous-two@lid",
+            phone_e164: USER_WHATSAPP_NUMBER,
+            lid: "ambiguous-two@lid",
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          },
+        ])
+        .execute();
+
+      const outcome = await handleAllChatsSearch({ query: "direct phone survives" }, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
@@ -726,36 +812,15 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       ).toBe(true);
     });
 
-    it("reuses the live WhatsApp membership decision for Search then Read in one agent run", async () => {
+    it("reauthorizes Search then Read from passive WhatsApp membership without changing knowledge state", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "cached membership target",
         memberEmails: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
-      let metadataCalls = 0;
       const deps = depsFor(db, {
         conversationRepo: createConversationRepository(db),
-        getWhatsApp: () => ({
-          groupMetadata: async (_jid, options) => {
-            metadataCalls += 1;
-            expect(options).toEqual({ refresh: true });
-            return {
-              id: seeded.groupJid,
-              subject: "Deal Room",
-              desc: null,
-              participants: [
-                {
-                  jid: "15550001234@s.whatsapp.net",
-                  phoneE164: USER_WHATSAPP_NUMBER,
-                  lid: null,
-                  admin: null,
-                },
-              ],
-            };
-          },
-          resolveLid: async () => null,
-        }),
       });
       const access = new ChatHistoryAccessResolver(deps);
       const graphBefore = await snapshotKnowledgeGraphState(db);
@@ -770,8 +835,92 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         anchorMessageId: seeded.messageId,
       });
       expect(JSON.parse(read.content[0]?.text ?? "{}").messages).toHaveLength(1);
-      expect(metadataCalls).toBe(1);
       expect(await snapshotKnowledgeGraphState(db)).toEqual(graphBefore);
+    });
+
+    it("emits both directions at limit one and reauthorizes continuation tokens", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "before the token anchor",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const conversations = createConversationRepository(db);
+      const anchor = await conversations.insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: `${seeded.groupJid}:anchor`,
+        senderJid: "15550001111@s.whatsapp.net",
+        senderName: "Tara",
+        text: "token anchor",
+      });
+      await conversations.insertMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: `${seeded.groupJid}:after`,
+        senderJid: "15550001111@s.whatsapp.net",
+        senderName: "Tara",
+        text: "after the token anchor",
+      });
+      const current = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "dm",
+        providerConversationId: "D-TOKEN-REAUTH",
+      });
+      const trigger = await conversations.insertMessage({
+        conversationId: current.id,
+        providerMessageId: "token-reauth-trigger",
+        senderJid: USER_SLACK_ID,
+        senderName: "Roopak",
+        text: "read the result",
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, {
+          conversationRepo: conversations,
+          conversationContext: { conversationId: current.id, currentMessageId: trigger.row.id },
+        }),
+      ) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+      const first = await readTool.handler({
+        conversationRef: `conversation:${seeded.conversationId}`,
+        anchorMessageId: anchor.row.id,
+        limit: 1,
+      });
+      const body = JSON.parse(first.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number }>;
+        olderPageToken?: string;
+        newerPageToken?: string;
+      };
+      expect(body.messages.map((message) => message.id)).toEqual([anchor.row.id]);
+      expect(body.olderPageToken).toBeTypeOf("string");
+      expect(body.newerPageToken).toBeTypeOf("string");
+
+      await db.deleteFrom("whatsapp_group_participants").where("group_jid", "=", seeded.groupJid).execute();
+      const denied = await readTool.handler({ pageToken: body.olderPageToken });
+      expect(denied.content[0]?.text).toBe(
+        "The requested chat history is unavailable or you no longer have access to it.",
+      );
+    });
+
+    it("requires a search-hit anchor when starting a referenced read", async () => {
+      const seeded = await seedWhatsAppGroup(db, {
+        text: "anchor required marker",
+        memberEmails: [USER_EMAIL],
+        connectorConfigId: whatsappConfigId,
+        indexEnabled: false,
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, { conversationRepo: createConversationRepository(db) }),
+      ) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+
+      const result = await readTool.handler({
+        conversationRef: `conversation:${seeded.conversationId}`,
+      });
+
+      expect(result.content[0]?.text).toBe(
+        "conversationRef must be combined with the anchorMessageId returned by SearchChatHistory.",
+      );
     });
 
     it("keeps cross-chat Slack reads inside the anchor thread", async () => {
@@ -781,6 +930,14 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         kind: "channel",
         providerConversationId: "C-THREADS",
       });
+      await db
+        .insertInto("slack_channel_participants")
+        .values({
+          channel_id: "C-THREADS",
+          slack_user_id: USER_SLACK_ID,
+          last_seen_at: new Date().toISOString(),
+        })
+        .execute();
       const firstRoot = await conversations.insertMessage({
         conversationId: channel.id,
         providerMessageId: "1000.000",
@@ -848,6 +1005,186 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(body.messages.map((message) => message.text)).not.toContain("unrelated interleaved reply");
     });
 
+    it("uses the search-hit thread when conversationRef points to the active Slack channel", async () => {
+      const conversations = createConversationRepository(db);
+      const channel = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C-SAME-CONVERSATION",
+      });
+      const otherRoot = await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "other-root",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "other thread root",
+        providerThreadId: "other-root",
+      });
+      const otherAnchor = await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "other-reply",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "other thread decision",
+        providerThreadId: "other-root",
+        providerParentMessageId: "other-root",
+        isThreadReply: true,
+      });
+      await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "active-root",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "active thread root",
+        providerThreadId: "active-root",
+      });
+      const trigger = await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "active-reply",
+        senderJid: USER_SLACK_ID,
+        senderName: "Roopak",
+        text: "read the other result",
+        providerThreadId: "active-root",
+        providerParentMessageId: "active-root",
+        isThreadReply: true,
+      });
+      const readTool = createReadChatHistoryTool(
+        depsFor(db, {
+          conversationRepo: conversations,
+          conversationContext: {
+            conversationId: channel.id,
+            currentMessageId: trigger.row.id,
+            providerThreadId: "active-root",
+            isThreadReply: true,
+          },
+        }),
+      ) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+
+      const result = await readTool.handler({
+        conversationRef: `conversation:${channel.id}`,
+        anchorMessageId: otherAnchor.row.id,
+        limit: 5,
+      });
+      const body = JSON.parse(result.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number; text: string }>;
+      };
+      expect(body.messages.map((message) => message.id)).toEqual([otherRoot.row.id, otherAnchor.row.id]);
+      expect(body.messages.map((message) => message.text)).not.toContain("active thread root");
+    });
+
+    it("pages both directions through more than 100 Slack thread messages without leakage", async () => {
+      const conversations = createConversationRepository(db);
+      const channel = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C-LONG-THREAD",
+      });
+      await db
+        .insertInto("slack_channel_participants")
+        .values({
+          channel_id: "C-LONG-THREAD",
+          slack_user_id: USER_SLACK_ID,
+          last_seen_at: new Date().toISOString(),
+        })
+        .execute();
+      const target: number[] = [];
+      let anchorMessageId = 0;
+      for (let index = 0; index < 121; index += 1) {
+        const message = await conversations.insertMessage({
+          conversationId: channel.id,
+          providerMessageId: `long-${index}`,
+          senderJid: "U0TEAM",
+          senderName: "Tara",
+          text: `long thread message ${index}`,
+          providerThreadId: "long-0",
+          providerParentMessageId: index === 0 ? null : "long-0",
+          isThreadReply: index > 0,
+          receivedAt: new Date(Date.UTC(2026, 6, 17, 9, 0, index)).toISOString(),
+        });
+        target.push(message.row.id);
+        if (index === 60) anchorMessageId = message.row.id;
+        if (index % 20 === 0) {
+          await conversations.insertMessage({
+            conversationId: channel.id,
+            providerMessageId: `other-${index}`,
+            senderJid: "U0OTHER",
+            senderName: "Other",
+            text: `other thread message ${index}`,
+            providerThreadId: "other-0",
+            providerParentMessageId: "other-0",
+            isThreadReply: true,
+          });
+        }
+      }
+      const current = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "dm",
+        providerConversationId: "D-LONG-THREAD",
+      });
+      const trigger = await conversations.insertMessage({
+        conversationId: current.id,
+        providerMessageId: "long-thread-trigger",
+        senderJid: USER_SLACK_ID,
+        senderName: "Roopak",
+        text: "read the whole thread",
+      });
+      const deps = depsFor(db, {
+        conversationRepo: conversations,
+        conversationContext: { conversationId: current.id, currentMessageId: trigger.row.id },
+      });
+      const readTool = createReadChatHistoryTool(deps) as unknown as {
+        handler: (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      };
+      const first = await readTool.handler({
+        conversationRef: `conversation:${channel.id}`,
+        anchorMessageId,
+        limit: 10,
+      });
+      const firstBody = JSON.parse(first.content[0]?.text ?? "{}") as {
+        messages: Array<{ id: number; text: string }>;
+        olderPageToken?: string;
+        newerPageToken?: string;
+      };
+      const seen = new Map(firstBody.messages.map((message) => [message.id, message.text]));
+      await conversations.insertMessage({
+        conversationId: channel.id,
+        providerMessageId: "long-after-snapshot",
+        senderJid: "U0TEAM",
+        senderName: "Tara",
+        text: "long thread message after snapshot",
+        providerThreadId: "long-0",
+        providerParentMessageId: "long-0",
+        isThreadReply: true,
+      });
+
+      let olderPageToken = firstBody.olderPageToken;
+      while (olderPageToken) {
+        const page = await readTool.handler({ pageToken: olderPageToken, limit: 17 });
+        const body = JSON.parse(page.content[0]?.text ?? "{}") as {
+          messages: Array<{ id: number; text: string }>;
+          olderPageToken?: string;
+        };
+        for (const message of body.messages) seen.set(message.id, message.text);
+        olderPageToken = body.olderPageToken;
+      }
+
+      let newerPageToken = firstBody.newerPageToken;
+      while (newerPageToken) {
+        const page = await readTool.handler({ pageToken: newerPageToken, limit: 19 });
+        const body = JSON.parse(page.content[0]?.text ?? "{}") as {
+          messages: Array<{ id: number; text: string }>;
+          newerPageToken?: string;
+        };
+        for (const message of body.messages) seen.set(message.id, message.text);
+        newerPageToken = body.newerPageToken;
+      }
+
+      expect([...seen.keys()].sort((a, b) => a - b)).toEqual(target);
+      expect([...seen.values()].every((text) => text.startsWith("long thread message"))).toBe(true);
+    });
+
     it("reads legacy Slack anchors without thread metadata while excluding newer thread rows", async () => {
       const conversations = createConversationRepository(db);
       const channel = await conversations.getOrCreate({
@@ -855,6 +1192,14 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         kind: "channel",
         providerConversationId: "C-LEGACY",
       });
+      await db
+        .insertInto("slack_channel_participants")
+        .values({
+          channel_id: "C-LEGACY",
+          slack_user_id: USER_SLACK_ID,
+          last_seen_at: new Date().toISOString(),
+        })
+        .execute();
       const before = await conversations.insertMessage({
         conversationId: channel.id,
         providerMessageId: "legacy-1",
@@ -1020,30 +1365,17 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(whatsappOnly.body.messages).toHaveLength(2);
     });
 
-    it("does not query WhatsApp when search is restricted to Slack", async () => {
+    it("restricts candidate authorization to Slack when the platform filter is Slack", async () => {
       await seedSlackChannel(db, {
         channelId: "C-SLACK-ONLY",
         text: "slack-only provider marker",
         memberEmails: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
-      let whatsappCalls = 0;
-      const outcome = await handleAllChatsSearch(
-        { query: "slack-only provider", platform: "slack" },
-        depsFor(db, {
-          getWhatsApp: () => ({
-            groupMetadata: async () => {
-              whatsappCalls += 1;
-              return null;
-            },
-            resolveLid: async () => null,
-          }),
-        }),
-      );
+      const outcome = await handleAllChatsSearch({ query: "slack-only provider", platform: "slack" }, depsFor(db));
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.body.messages).toHaveLength(1);
-      expect(whatsappCalls).toBe(0);
     });
 
     it("excludes bot messages by default and includes them on request", async () => {

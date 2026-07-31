@@ -204,6 +204,11 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
         }),
       } as unknown as SlackAdapterDeps["repos"]["settings"],
       conversations: makeConversationsRepo() as unknown as SlackAdapterDeps["repos"]["conversations"],
+      slackChannelParticipants: {
+        upsert: vi.fn().mockResolvedValue(undefined),
+        remove: vi.fn().mockResolvedValue(undefined),
+        replaceChannelRoster: vi.fn().mockResolvedValue(undefined),
+      },
     },
     queue: new QueueManager(),
     slack: {
@@ -235,6 +240,8 @@ function freshMockBot() {
     onMessage: vi.fn(),
     onChannelMessage: vi.fn(),
     onChannelRenamed: vi.fn(),
+    onMemberJoinedChannel: vi.fn(),
+    onMemberLeftChannel: vi.fn(),
     onThreadMessage: vi.fn(),
     onChannelMention: vi.fn(),
     onAppHomeOpened: vi.fn(),

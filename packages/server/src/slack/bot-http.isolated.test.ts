@@ -3,7 +3,7 @@
  * verification, url_verification challenge, ssl_check, and regular event dispatch.
  */
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestLogger } from "../test-utils";
 import { SlackBot, parseSlackHttpBody } from "./bot";
 
@@ -152,6 +152,49 @@ describe("SlackBot.processHttpRequest", () => {
       });
       const headers = makeHeaders(body);
       await expect(bot.processHttpRequest(body, headers)).resolves.not.toThrow();
+    });
+
+    it("dispatches channel membership events through the HTTP Bolt path", async () => {
+      const bot = makeBot();
+      const eventHandlers = new Map<string, (args: { event: Record<string, unknown> }) => Promise<void>>();
+      const app = {
+        client: { auth: { test: async () => ({ user_id: "U-BOT", bot_id: "B-BOT" }) } },
+        message: () => undefined,
+        event: (name: string, handler: (args: { event: Record<string, unknown> }) => Promise<void>) => {
+          eventHandlers.set(name, handler);
+        },
+        action: () => undefined,
+        processEvent: async ({ body }: { body: { event?: Record<string, unknown> } }) => {
+          const event = body.event;
+          const type = event?.type;
+          if (event && typeof type === "string") await eventHandlers.get(type)?.({ event });
+        },
+        stop: async () => undefined,
+      };
+      (bot as unknown as { app: typeof app }).app = app;
+      const joined = vi.fn(async () => undefined);
+      const left = vi.fn(async () => undefined);
+      bot.onMemberJoinedChannel(joined);
+      bot.onMemberLeftChannel(left);
+      await bot.start();
+
+      for (const [eventId, eventType] of [
+        ["EvJoin", "member_joined_channel"],
+        ["EvLeave", "member_left_channel"],
+      ]) {
+        const body = JSON.stringify({
+          type: "event_callback",
+          event_id: eventId,
+          event: { type: eventType, channel: "C123", user: "U123" },
+        });
+        await expect(bot.processHttpRequest(body, makeHeaders(body))).resolves.toEqual({});
+      }
+
+      await vi.waitFor(() => {
+        expect(joined).toHaveBeenCalledWith({ channelId: "C123", slackUserId: "U123" });
+        expect(left).toHaveBeenCalledWith({ channelId: "C123", slackUserId: "U123" });
+      });
+      await bot.stop();
     });
   });
 

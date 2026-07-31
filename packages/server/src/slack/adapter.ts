@@ -49,6 +49,7 @@ import type { createChannelRepository } from "../db/repositories/channels";
 import type { createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
+import { createSlackChannelParticipantsRepository } from "../db/repositories/slack-channel-participants";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadSlackFile } from "../files";
@@ -79,6 +80,7 @@ type ChannelRepository = ReturnType<typeof createChannelRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
 type ConversationRepository = ReturnType<typeof createConversationRepository>;
+type SlackChannelParticipantsRepository = ReturnType<typeof createSlackChannelParticipantsRepository>;
 
 const INLINE_BACKLOG_LIMIT = 10;
 const SLACK_THREAD_CURSOR_SCOPE = "slack_thread";
@@ -141,6 +143,7 @@ export interface SlackAdapterDeps {
     channels: ChannelRepository;
     settings: SettingsRepository;
     conversations: ConversationRepository;
+    slackChannelParticipants?: SlackChannelParticipantsRepository;
   };
   queue: QueueManager;
   slack: {
@@ -299,6 +302,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     ...(mode === "socket" ? { appToken: tokens.appToken } : { signingSecret: config.SLACK_SIGNING_SECRET }),
     logger,
   });
+  const slackChannelParticipants = repos.slackChannelParticipants ?? createSlackChannelParticipantsRepository(db);
+
+  slackBot.onMemberJoinedChannel(({ channelId, slackUserId }) =>
+    slackChannelParticipants.upsert(channelId, slackUserId),
+  );
+  slackBot.onMemberLeftChannel(({ channelId, slackUserId }) => slackChannelParticipants.remove(channelId, slackUserId));
 
   const resolveUser = (slackUserId: string) =>
     resolveSlackUser(slackUserId, {
@@ -441,6 +450,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       slackConversationRefForMessage(message),
       params.displayName,
     );
+    if (message.userId && conversation.platform === "slack" && conversation.kind === "channel") {
+      await slackChannelParticipants.upsert(message.channelId, message.userId);
+    }
 
     if (isConversationControlMessage(message.text)) {
       return { conversation, captured: null, inserted: false, omitted: true };

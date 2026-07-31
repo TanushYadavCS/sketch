@@ -86,6 +86,8 @@ describe("generateSlackManifest", () => {
     expect(events).toContain("app_home_opened");
     expect(events).toContain("assistant_thread_started");
     expect(events).toContain("assistant_thread_context_changed");
+    expect(events).toContain("member_joined_channel");
+    expect(events).toContain("member_left_channel");
     expect(events).toContain("message.channels");
     expect(events).toContain("message.groups");
     expect(events).toContain("message.im");

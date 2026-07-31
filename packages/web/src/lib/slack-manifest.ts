@@ -48,6 +48,8 @@ export function generateSlackManifest(botName = "Sketch"): string {
             "app_home_opened",
             "assistant_thread_context_changed",
             "assistant_thread_started",
+            "member_joined_channel",
+            "member_left_channel",
             "message.channels",
             "message.groups",
             "message.im",

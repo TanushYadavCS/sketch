@@ -112,7 +112,6 @@ export interface WhatsAppGroupMetadata {
   subject: string;
   desc?: string | null;
   participants: WhatsAppGroupParticipantMetadata[];
-  participantIdentityComplete?: boolean;
 }
 
 interface WhatsAppProviderBase {

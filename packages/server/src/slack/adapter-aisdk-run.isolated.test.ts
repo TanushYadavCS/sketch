@@ -107,6 +107,8 @@ function freshMockBot() {
     onMessage: vi.fn(),
     onChannelMessage: vi.fn(),
     onChannelRenamed: vi.fn(),
+    onMemberJoinedChannel: vi.fn(),
+    onMemberLeftChannel: vi.fn(),
     onThreadMessage: vi.fn(),
     onChannelMention: vi.fn(),
     onAppHomeOpened: vi.fn(),

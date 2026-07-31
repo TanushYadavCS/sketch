@@ -120,6 +120,14 @@ export interface SearchMessagesAcrossConversationsOptions {
   includeBotMessages?: boolean;
 }
 
+export interface FindMatchingConversationIdsOptions {
+  query: string;
+  platform?: "slack" | "whatsapp";
+  afterMessageId?: number;
+  beforeMessageId?: number;
+  includeBotMessages?: boolean;
+}
+
 export interface CrossConversationSearchMessage extends StoredConversationMessage {
   conversationPlatform: string;
   conversationKind: string;
@@ -898,6 +906,56 @@ export function createConversationRepository(db: ConversationDb) {
         messages: visibleRows.map(crossConversationRowToStored),
         hasMore: rows.rows.length > limit,
       };
+    },
+
+    async findMatchingConversationIds(options: FindMatchingConversationIdsOptions): Promise<number[]> {
+      const afterFilter = options.afterMessageId === undefined ? sql`` : sql`AND m.id > ${options.afterMessageId}`;
+      const beforeFilter = options.beforeMessageId === undefined ? sql`` : sql`AND m.id < ${options.beforeMessageId}`;
+      const botFilter = options.includeBotMessages ? sql`` : sql`AND m.is_bot = 0`;
+      const platformFilter = options.platform === undefined ? sql`` : sql`AND c.platform = ${options.platform}`;
+      const eligibleConversationFilter = sql`
+        AND (
+          (c.platform = 'slack' AND c.kind = 'channel')
+          OR (c.platform = 'whatsapp' AND c.kind = 'group')
+        )
+      `;
+
+      if (isPg(db)) {
+        const pgQuery = sanitizePostgresWebsearchQuery(options.query);
+        if (!pgQuery) return [];
+        const rows = await sql<{ conversation_id: number }>`
+          WITH q AS (
+            SELECT websearch_to_tsquery('simple', ${pgQuery}) AS query
+          )
+          SELECT DISTINCT m.conversation_id
+          FROM conversation_messages m
+          CROSS JOIN q
+          INNER JOIN conversations c ON c.id = m.conversation_id
+          WHERE m.search_vector @@ q.query
+            ${platformFilter}
+            ${eligibleConversationFilter}
+            ${botFilter}
+            ${afterFilter}
+            ${beforeFilter}
+        `.execute(db);
+        return rows.rows.map((row) => row.conversation_id);
+      }
+
+      const ftsQuery = sanitizeSqliteFtsQuery(options.query);
+      if (!ftsQuery) return [];
+      const rows = await sql<{ conversation_id: number }>`
+        SELECT DISTINCT m.conversation_id
+        FROM conversation_messages_fts
+        INNER JOIN conversation_messages m ON m.id = conversation_messages_fts.rowid
+        INNER JOIN conversations c ON c.id = m.conversation_id
+        WHERE conversation_messages_fts MATCH ${ftsQuery}
+          ${platformFilter}
+          ${eligibleConversationFilter}
+          ${botFilter}
+          ${afterFilter}
+          ${beforeFilter}
+      `.execute(db);
+      return rows.rows.map((row) => row.conversation_id);
     },
 
     async listBacklog(params: {
