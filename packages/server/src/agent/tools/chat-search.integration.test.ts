@@ -1876,6 +1876,23 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         expect(sendTargetMessage).not.toHaveBeenCalled();
         expect(result.content[0].text).toContain("not a known member of that channel or group");
       });
+
+      it("denies a non-member send through the real resolver even from inside that conversation", async () => {
+        const conversation = await createConversationRepository(db).getOrCreate({
+          platform: "slack",
+          kind: "channel",
+          providerConversationId: "C-SEND-CTX",
+        });
+        const sendTargetMessage = vi.fn();
+
+        const result = await handleSendMessage(
+          { target: { platform: "slack", targetType: "channel", targetId: "C-SEND-CTX" }, message: "hello" },
+          depsFor(db, { sendTargetMessage, conversationContext: { conversationId: conversation.id } }),
+        );
+
+        expect(sendTargetMessage).not.toHaveBeenCalled();
+        expect(result.content[0].text).toContain("not a known member of that channel or group");
+      });
     });
   });
 }

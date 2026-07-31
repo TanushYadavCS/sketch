@@ -80,6 +80,7 @@ import { createLogger } from "./logger";
 import type { Logger } from "./logger";
 import { reconcileManagedTenantMembers } from "./managed-members";
 import { runManagedSeed } from "./managed-seed";
+import { createSendTargetMessage } from "./messaging/target-delivery";
 import { channelsReconnectUrl, createOperationalAlertDefinitions } from "./operational-alerts/definitions";
 import { createOperationalAlertService } from "./operational-alerts/service";
 import { createWhatsAppOperationalAlertTransport } from "./operational-alerts/whatsapp-transport";
@@ -748,46 +749,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger,
   });
 
-  /**
-   * Posts into a shared destination on behalf of the requesting user. Membership
-   * is authorized by the caller before this runs. The sent text is captured into
-   * the conversation the same way scheduled workflow output is, so the agent can
-   * later read back what it said.
-   */
-  const sendTargetMessage: SendTargetMessage = async ({ platform, targetType, targetId, message, threadTs }) => {
-    if (platform === "slack") {
-      if (targetType !== "channel") throw new Error("A Slack target must be a channel");
-      const currentSlack = slack;
-      if (!currentSlack) throw new Error("Slack bot is not connected");
-
-      const messageRef = threadTs
-        ? await currentSlack.postThreadReply(targetId, threadTs, message)
-        : await currentSlack.postMessage(targetId, message);
-      await targetDeliveryCapture.captureSlack({
-        deliveryTarget: targetId,
-        threadTs: threadTs ?? null,
-        messageRef,
-        text: message,
-      });
-      return { messageRef };
-    }
-
-    if (targetType !== "group") throw new Error("A WhatsApp target must be a group");
-    if (!whatsappRuntime.isConnected) throw new Error("WhatsApp is not connected");
-    const target = whatsappTargetFromDeliveryTarget(targetId);
-    if (target.kind !== "group") throw new Error("A WhatsApp target must be a group");
-
-    const sent = await whatsappRuntime.sendText(target, message);
-    const messageRef = sent?.providerMessageId;
-    if (!messageRef) throw new Error("WhatsApp did not confirm the group message was sent");
-    await targetDeliveryCapture.captureWhatsApp({
-      deliveryTarget: whatsappDeliveryTargetFromTarget(target),
-      messageRef,
-      providerTimestamp: sent?.providerTimestamp ?? null,
-      text: message,
-    });
-    return { messageRef };
-  };
+  const sendTargetMessage: SendTargetMessage = createSendTargetMessage({
+    getSlack: () => slack,
+    whatsapp: whatsappRuntime,
+    capture: targetDeliveryCapture,
+  });
 
   /**
    * Resolves the full status of the active integration provider, including the
