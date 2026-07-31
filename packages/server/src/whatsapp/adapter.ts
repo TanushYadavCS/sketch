@@ -906,6 +906,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             contextType: "dm" as const,
             deliveryTarget: deliveryTargetId,
             createdBy: user.id,
+            canManageAnyTask: user.auth_role === "admin",
             creatorTimezone: user.timezone,
             origin: {
               platform: "whatsapp" as const,
@@ -1225,6 +1226,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             contextType: "group" as const,
             deliveryTarget: groupJid,
             createdBy: user?.id ?? "unknown",
+            canManageAnyTask: user?.auth_role === "admin",
             creatorTimezone: user?.timezone ?? null,
             origin: {
               platform: "whatsapp" as const,

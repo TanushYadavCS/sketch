@@ -150,8 +150,8 @@ export function createChatAutomationAuthoring(deps: {
     const row = await tasks.getById(input.taskId);
     if (
       !row ||
-      (!input.taskContext.canManageAnyTask &&
-        (!input.taskContext.createdBy || row.created_by !== input.taskContext.createdBy))
+      !input.taskContext.createdBy ||
+      (!input.taskContext.canManageAnyTask && row.created_by !== input.taskContext.createdBy)
     ) {
       return { kind: "error", message: "Automation not found." };
     }

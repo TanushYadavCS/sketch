@@ -139,7 +139,7 @@ export async function replaceAutomationDefinition(params: {
       .where("id", "=", params.taskId)
       .executeTakeFirst();
     if (!current) return { kind: "not_found" as const };
-    if (!params.actor.canManageAnyTask && (!params.actor.userId || current.created_by !== params.actor.userId)) {
+    if (!params.actor.userId || (!params.actor.canManageAnyTask && current.created_by !== params.actor.userId)) {
       return { kind: "not_found" as const };
     }
     if (request.expectedRevision !== undefined && current.revision !== request.expectedRevision) {

@@ -280,6 +280,7 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
         contextType: originContextType,
         deliveryTarget: session.origin_delivery_target,
         createdBy: session.user_id,
+        canManageAnyTask: user?.auth_role === "admin",
         creatorTimezone: user?.timezone ?? null,
         threadTs: session.origin_thread_ts ?? undefined,
       },

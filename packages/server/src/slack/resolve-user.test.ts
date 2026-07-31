@@ -10,6 +10,7 @@ const makeUser = (
   id: "u1",
   name: "Alice",
   email: null as string | null,
+  auth_role: "member",
   slack_user_id: null as string | null,
   whatsapp_number: null as string | null,
   created_at: "2026-01-01T00:00:00Z",

@@ -722,6 +722,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             contextType: "dm" as const,
             deliveryTarget: message.channelId,
             createdBy: user.id,
+            canManageAnyTask: user.auth_role === "admin",
             creatorTimezone: user.timezone,
             origin: {
               platform: "slack" as const,
@@ -1154,6 +1155,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             contextType: "channel" as const,
             deliveryTarget: message.channelId,
             createdBy: user.id,
+            canManageAnyTask: user.auth_role === "admin",
             creatorTimezone: user.timezone,
             threadTs: message.threadTs ? threadTs : undefined,
             origin: {
