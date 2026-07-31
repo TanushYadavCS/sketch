@@ -137,9 +137,9 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
-    name: "mcp__sketch__SendMessageToUser",
-    label: "Send message to user",
-    description: "Send a DM to a single team member.",
+    name: "mcp__sketch__SendMessage",
+    label: "Send message",
+    description: "Send a DM to a team member, or post in a Slack channel or WhatsApp group.",
     category: "sketch",
   },
   {
@@ -196,8 +196,21 @@ export const AGENT_BUILT_IN_TOOL_NAMES: readonly string[] = AGENT_TOOL_CATALOG.f
   (entry) => entry.category === "builtin",
 ).map((entry) => entry.name);
 
+/**
+ * Tools that were renamed after admins had already saved allowlists. Stored
+ * names are mapped forward on read so a rename never silently removes a
+ * capability from an existing agent.
+ */
+const RENAMED_AGENT_TOOL_NAMES: Readonly<Record<string, string>> = {
+  mcp__sketch__SendMessageToUser: "mcp__sketch__SendMessage",
+};
+
+export function canonicalAgentToolName(name: string): string {
+  return RENAMED_AGENT_TOOL_NAMES[name] ?? name;
+}
+
 export function isKnownAgentToolName(name: string): boolean {
-  return CATALOG_BY_NAME.has(name);
+  return CATALOG_BY_NAME.has(canonicalAgentToolName(name));
 }
 
 /**
@@ -217,7 +230,9 @@ export function parseAllowedTools(value: string | null): string[] | null {
   try {
     const parsed = JSON.parse(value) as unknown;
     if (!Array.isArray(parsed)) return null;
-    return parsed.filter((entry): entry is string => typeof entry === "string");
+    return [
+      ...new Set(parsed.filter((entry): entry is string => typeof entry === "string").map(canonicalAgentToolName)),
+    ];
   } catch {
     return null;
   }

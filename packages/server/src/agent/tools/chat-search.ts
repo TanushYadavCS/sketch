@@ -38,7 +38,26 @@ export interface ChatHistoryAccessIdentity {
   whatsappLids: string[];
 }
 
-export async function resolveChatHistoryAccessIdentity(deps: SketchMcpDeps): Promise<ChatHistoryAccessIdentity> {
+/**
+ * The resolver only reads identity and membership, so it accepts this narrow
+ * slice instead of the whole tool dependency bag. Callers that hold a full
+ * SketchMcpDeps still satisfy it.
+ */
+export type ChatHistoryAccessDeps = Pick<SketchMcpDeps, "db" | "currentUserId" | "userRepo" | "conversationContext">;
+
+/** A channel or group addressed by its provider ID rather than a conversations row. */
+export interface ProviderTargetRef {
+  platform: ChatSearchPlatform;
+  targetId: string;
+}
+
+export function providerTargetKey(target: ProviderTargetRef): string {
+  return `${target.platform}:${target.targetId}`;
+}
+
+export async function resolveChatHistoryAccessIdentity(
+  deps: ChatHistoryAccessDeps,
+): Promise<ChatHistoryAccessIdentity> {
   if (!deps.currentUserId || !deps.userRepo) {
     return { slackUserId: null, whatsappPhone: null, whatsappLids: [] };
   }
@@ -83,7 +102,7 @@ function lidFromParticipantRow(row: { participant_jid: string; lid: string | nul
 }
 
 export class ChatHistoryAccessResolver {
-  constructor(private readonly deps: SketchMcpDeps) {}
+  constructor(private readonly deps: ChatHistoryAccessDeps) {}
 
   async hasUsableIdentity(): Promise<boolean> {
     const identity = await this.loadIdentity();
@@ -114,65 +133,88 @@ export class ChatHistoryAccessResolver {
     return uniqueIds.filter((id) => resolved.has(id));
   }
 
+  /**
+   * Authorizes channels and groups by their provider ID, so a send target can
+   * be checked before any message from it has been captured. Same membership
+   * rules as the conversation-ID path: fresh Slack roster membership, or a
+   * WhatsApp phone match (direct, or through one of the identity's LID aliases).
+   */
+  async authorizedProviderTargets(targets: ProviderTargetRef[]): Promise<Set<string>> {
+    if (!this.deps.db || !this.deps.currentUserId || targets.length === 0) return new Set();
+    const authorized = await this.resolveProviderIds(
+      targets.filter((target) => target.platform === "slack").map((target) => target.targetId),
+      targets.filter((target) => target.platform === "whatsapp").map((target) => target.targetId),
+    );
+    const granted = new Set<string>();
+    for (const target of targets) {
+      const ids = target.platform === "slack" ? authorized.slack : authorized.whatsapp;
+      if (ids.has(target.targetId)) granted.add(providerTargetKey(target));
+    }
+    return granted;
+  }
+
   private async resolveRows(rows: ConversationAccessRow[]): Promise<Set<number>> {
     if (!this.deps.db) return new Set();
-    const identity = await this.loadIdentity();
-    const authorized = new Set<number>();
     const slackRows = rows.filter((row) => row.platform === "slack");
     const whatsappRows = rows.filter((row) => row.platform === "whatsapp");
+    const authorized = await this.resolveProviderIds(
+      slackRows.map((row) => row.providerConversationId),
+      whatsappRows.map((row) => row.providerConversationId),
+    );
 
-    if (identity.slackUserId && slackRows.length > 0) {
+    const authorizedIds = new Set<number>();
+    for (const row of slackRows) {
+      if (authorized.slack.has(row.providerConversationId)) authorizedIds.add(row.id);
+    }
+    for (const row of whatsappRows) {
+      if (authorized.whatsapp.has(row.providerConversationId)) authorizedIds.add(row.id);
+    }
+    return authorizedIds;
+  }
+
+  private async resolveProviderIds(
+    slackChannelIds: string[],
+    whatsappGroupIds: string[],
+  ): Promise<{ slack: Set<string>; whatsapp: Set<string> }> {
+    const slack = new Set<string>();
+    const whatsapp = new Set<string>();
+    if (!this.deps.db) return { slack, whatsapp };
+    const identity = await this.loadIdentity();
+
+    if (identity.slackUserId && slackChannelIds.length > 0) {
       const freshAfter = new Date(Date.now() - SLACK_MEMBERSHIP_FRESHNESS_MS).toISOString();
       const memberChannels = await this.deps.db
         .selectFrom("slack_channel_participants")
         .select("channel_id")
-        .where(
-          "channel_id",
-          "in",
-          slackRows.map((row) => row.providerConversationId),
-        )
+        .where("channel_id", "in", [...new Set(slackChannelIds)])
         .where("slack_user_id", "=", identity.slackUserId)
         .where("last_seen_at", ">=", freshAfter)
         .execute();
-      const channelIds = new Set(memberChannels.map((row) => row.channel_id));
-      for (const row of slackRows) {
-        if (channelIds.has(row.providerConversationId)) authorized.add(row.id);
-      }
+      for (const row of memberChannels) slack.add(row.channel_id);
     }
 
-    if ((identity.whatsappPhone || identity.whatsappLids.length > 0) && whatsappRows.length > 0) {
-      const groupIds = whatsappRows.map((row) => row.providerConversationId);
+    if ((identity.whatsappPhone || identity.whatsappLids.length > 0) && whatsappGroupIds.length > 0) {
       const participants = await this.deps.db
         .selectFrom("whatsapp_group_participants")
         .select(["group_jid", "participant_jid", "phone_e164", "lid"])
-        .where("group_jid", "in", groupIds)
+        .where("group_jid", "in", [...new Set(whatsappGroupIds)])
         .execute();
-      const directGroups = new Set(
-        participants
-          .filter(
-            (row) =>
-              identity.whatsappPhone !== null &&
-              (normalizeWhatsAppIdentityPhone(row.phone_e164) === identity.whatsappPhone ||
-                phoneFromParticipantJid(row.participant_jid) === identity.whatsappPhone),
-          )
-          .map((row) => row.group_jid),
-      );
       const aliases = new Set(identity.whatsappLids);
-      const lidGroups = new Set(
-        participants
-          .filter((row) => {
-            const lid = lidFromParticipantRow(row);
-            return lid !== null && aliases.has(lid);
-          })
-          .map((row) => row.group_jid),
-      );
-      for (const row of whatsappRows) {
-        if (directGroups.has(row.providerConversationId) || lidGroups.has(row.providerConversationId)) {
-          authorized.add(row.id);
+      for (const row of participants) {
+        const matchesPhone =
+          identity.whatsappPhone !== null &&
+          (normalizeWhatsAppIdentityPhone(row.phone_e164) === identity.whatsappPhone ||
+            phoneFromParticipantJid(row.participant_jid) === identity.whatsappPhone);
+        if (matchesPhone) {
+          whatsapp.add(row.group_jid);
+          continue;
         }
+        const lid = lidFromParticipantRow(row);
+        if (lid !== null && aliases.has(lid)) whatsapp.add(row.group_jid);
       }
     }
-    return authorized;
+
+    return { slack, whatsapp };
   }
 
   private loadIdentity(): Promise<ChatHistoryAccessIdentity> {

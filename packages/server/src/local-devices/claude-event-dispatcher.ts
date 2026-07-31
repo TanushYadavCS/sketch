@@ -45,6 +45,7 @@ export interface LocalClaudeEventDispatcherDeps {
   whatsapp?: WhatsAppSocketFacade;
   whatsappRuntime?: WhatsAppRuntime;
   sendDm?: RunAgentParams["sendDm"];
+  sendTargetMessage?: RunAgentParams["sendTargetMessage"];
 }
 
 function parseJson(value: string): unknown {
@@ -294,6 +295,7 @@ export function createLocalClaudeEventDispatcher(deps: LocalClaudeEventDispatche
       userRepo: deps.users,
       getSlack: deps.getSlack,
       sendDm: deps.sendDm,
+      sendTargetMessage: deps.sendTargetMessage,
       conversationRepo: deps.conversations,
       conversationContext: session.origin_conversation_id
         ? {

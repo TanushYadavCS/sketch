@@ -73,6 +73,7 @@ interface WorkflowRouteDeps {
   cliIntegrations?: ReturnType<typeof createCliIntegrationService>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
+  sendTargetMessage?: RunAgentParams["sendTargetMessage"];
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => boolean } };
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
@@ -321,6 +322,7 @@ async function executeWorkflowRun(params: ExecuteWorkflowRunParams) {
     getSlack: deps.getSlack,
     inboxMessagesRepo: deps.inboxMessagesRepo,
     sendDm: deps.sendDm,
+    sendTargetMessage: deps.sendTargetMessage,
     sendMessage: delivery.sendMessage,
     onEvent,
     limitAgentExecution: deps.limitAgentExecution,

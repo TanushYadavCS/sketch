@@ -15,6 +15,7 @@ import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
 import { resolveAgentRuntimeProviderConfigFromSettings } from "./agent/runtime/provider";
+import type { SendTargetMessage } from "./agent/tools/types";
 import { createAgentOutputDeliveryService } from "./agents/output-delivery";
 import { AgentScheduler } from "./agents/scheduler";
 import { AgentRunService } from "./agents/service";
@@ -84,6 +85,7 @@ import { createOperationalAlertService } from "./operational-alerts/service";
 import { createWhatsAppOperationalAlertTransport } from "./operational-alerts/whatsapp-transport";
 import { OperationalAlertWorker } from "./operational-alerts/worker";
 import { QueueManager } from "./queue";
+import { createWorkflowDeliveryCapture } from "./scheduler/delivery-capture";
 import { TaskScheduler } from "./scheduler/service";
 import { ensureBuiltinManagedSkills } from "./skills/builtin";
 import { syncFeaturedSkills } from "./skills/sync";
@@ -108,7 +110,7 @@ import { InProcessSocketFacade } from "./whatsapp/in-process-socket-facade";
 import { WhatsAppInboundConsumer } from "./whatsapp/inbound-consumer";
 import { safeWhatsAppErrorFields } from "./whatsapp/privacy";
 import { WORKFLOW_OUTPUT_INBOX_KIND, deliverProactiveDm } from "./whatsapp/proactive-delivery";
-import { whatsappDeliveryTargetFromTarget } from "./whatsapp/provider";
+import { whatsappDeliveryTargetFromTarget, whatsappTargetFromDeliveryTarget } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
 import { WHATSAPP_MANAGED_PROVIDER_ID, createManagedWhatsAppProvider } from "./whatsapp/providers/managed";
 import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsapp/providers/wati";
@@ -740,6 +742,54 @@ export async function createServer(config: Config, options?: CreateServerOptions
     throw new Error(`Unsupported platform: ${platform}`);
   };
 
+  const targetDeliveryCapture = createWorkflowDeliveryCapture({
+    conversations: conversationsRepo,
+    settingsRepo,
+    logger,
+  });
+
+  /**
+   * Posts into a shared destination on behalf of the requesting user. Membership
+   * is authorized by the caller before this runs. The sent text is captured into
+   * the conversation the same way scheduled workflow output is, so the agent can
+   * later read back what it said.
+   */
+  const sendTargetMessage: SendTargetMessage = async ({ platform, targetType, targetId, message, threadTs }) => {
+    if (platform === "slack") {
+      if (targetType !== "channel") throw new Error("A Slack target must be a channel");
+      const currentSlack = slack;
+      if (!currentSlack) throw new Error("Slack bot is not connected");
+
+      const messageRef = threadTs
+        ? await currentSlack.postThreadReply(targetId, threadTs, message)
+        : await currentSlack.postMessage(targetId, message);
+      await targetDeliveryCapture.captureSlack({
+        deliveryTarget: targetId,
+        threadTs: threadTs ?? null,
+        messageRef,
+        text: message,
+      });
+      return { messageRef };
+    }
+
+    if (targetType !== "group") throw new Error("A WhatsApp target must be a group");
+    if (!whatsappRuntime.isConnected) throw new Error("WhatsApp is not connected");
+    const target = whatsappTargetFromDeliveryTarget(targetId);
+    if (target.kind !== "group") throw new Error("A WhatsApp target must be a group");
+
+    const sent = await whatsappRuntime.sendText(target, message);
+    const messageRef = sent?.providerMessageId ?? "";
+    if (messageRef) {
+      await targetDeliveryCapture.captureWhatsApp({
+        deliveryTarget: whatsappDeliveryTargetFromTarget(target),
+        messageRef,
+        providerTimestamp: sent?.providerTimestamp ?? null,
+        text: message,
+      });
+    }
+    return { messageRef };
+  };
+
   /**
    * Resolves the full status of the active integration provider, including the
    * load-failure branch. Wraps the row-level finder
@@ -833,6 +883,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     userRepo: users,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+    sendTargetMessage,
     recordWorkflowStep,
     limitAgentExecution,
     limitScheduledAgentExecution,
@@ -993,6 +1044,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
     slackEntitySync,
+    sendTargetMessage,
     recordSlackChannelParticipantJoined: (channelId: string, slackUserId: string) =>
       slackMembershipReconciler.recordParticipantJoined(channelId, slackUserId),
     recordSlackChannelParticipantObserved: (channelId: string, slackUserId: string) =>
@@ -1089,6 +1141,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+    sendTargetMessage,
   };
   const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, whatsappAdapterDeps);
   const whatsappInboundConsumerRef: { current: WhatsAppInboundConsumer | null } = { current: null };
@@ -1251,6 +1304,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       await applyLlmEnvFromDb();
     },
     sendDm: sendDirectMessage,
+    sendTargetMessage,
     onSmtpUpdated: async () => {
       logger.info("SMTP configuration updated");
     },

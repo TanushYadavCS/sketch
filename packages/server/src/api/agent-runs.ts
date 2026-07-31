@@ -102,6 +102,7 @@ interface AgentRunRouteDeps {
     messageRef: string;
     inboxMessageId?: string;
   }>;
+  sendTargetMessage?: RunAgentParams["sendTargetMessage"];
 }
 
 function badRequest(code: string, message: string) {
@@ -202,6 +203,7 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
         userRepo: deps.users,
         currentUserId: requester.id,
         sendDm: deps.sendDm,
+        sendTargetMessage: deps.sendTargetMessage,
       } satisfies Partial<RunAgentParams>;
 
       try {

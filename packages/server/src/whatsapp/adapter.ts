@@ -193,6 +193,7 @@ export interface WhatsAppAdapterDeps {
     messageRef: string;
     inboxMessageId?: string;
   }>;
+  sendTargetMessage?: RunAgentParams["sendTargetMessage"];
   followupReviewHandler?: FollowupReviewCommandHandler;
   questionInteractions?: QuestionInteractionService;
 }
@@ -281,6 +282,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm,
+    sendTargetMessage,
   } = deps;
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
@@ -1304,6 +1306,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             userRepo: repos.users,
             currentUserId: user.id,
             sendDm,
+            sendTargetMessage,
             agentInstructions,
             agentAllowedTools,
             conversationRepo: repos.conversations,
@@ -1662,6 +1665,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           inboxMessagesRepo,
           userRepo: repos.users,
           sendDm,
+          sendTargetMessage,
           agentInstructions,
           agentAllowedTools,
           conversationRepo: repos.conversations,

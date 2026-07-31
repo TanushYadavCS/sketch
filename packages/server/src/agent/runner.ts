@@ -96,6 +96,7 @@ import {
   IntegrationConnectionCollector,
   QuestionCollector,
   UploadCollector,
+  type SendTargetMessage,
 } from "./tools/types";
 
 /**
@@ -394,6 +395,7 @@ export interface RunAgentParams {
     messageRef: string;
     inboxMessageId?: string;
   }>;
+  sendTargetMessage?: SendTargetMessage;
   channelContext?: {
     channelName: string;
   };
@@ -1306,6 +1308,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     workspaceKey: params.workspaceKey,
     originThreadTs: params.threadTs,
     sendDm: params.sendDm,
+    sendTargetMessage: params.sendTargetMessage,
     enqueueMessage: params.enqueueMessage,
     loadTranscriptionSettings: params.loadTranscriptionSettings,
     transcriptionEnabled: Boolean(transcriptionConfig),

@@ -218,6 +218,7 @@ export interface SlackAdapterDeps {
     channelId: string;
     messageRef: string;
   }>;
+  sendTargetMessage?: RunAgentParams["sendTargetMessage"];
   followupReviewHandler?: FollowupReviewCommandHandler;
   questionInteractions?: QuestionInteractionService;
 }
@@ -351,6 +352,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm,
+    sendTargetMessage,
   } = deps;
   const toolConfig = { BASE_URL: config.BASE_URL, PORT: config.PORT };
   const maxFileBytes = config.MAX_FILE_SIZE_MB * 1024 * 1024;
@@ -1329,6 +1331,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               userRepo: repos.users,
               currentUserId: user.id,
               sendDm,
+              sendTargetMessage,
               conversationRepo: repos.conversations,
               conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
             });
@@ -1854,6 +1857,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               inboxMessagesRepo,
               userRepo: repos.users,
               sendDm,
+              sendTargetMessage,
               agentInstructions,
               agentAllowedTools,
               conversationRepo: repos.conversations,

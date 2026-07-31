@@ -15,7 +15,7 @@ import type { DB } from "../../db/schema";
 import { createTestDb, createTestLogger, createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { stableWhatsAppParticipantJidRef } from "../../whatsapp/identity-resolution";
 import { createReadChatHistoryTool } from "./chat-history";
-import { ChatHistoryAccessResolver, handleAllChatsSearch } from "./chat-search";
+import { ChatHistoryAccessResolver, type ProviderTargetRef, handleAllChatsSearch } from "./chat-search";
 import type { SketchMcpDeps } from "./types";
 
 const USER_ID = "user-roopak";
@@ -1664,6 +1664,192 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(outcome.body.messages).toHaveLength(1);
       expect((outcome.body.messages[0]?.conversation as { name: string }).name).toBe("Deal Room");
       expect(JSON.stringify(outcome.body.messages)).not.toContain(seeded.groupJid);
+    });
+
+    describe("authorizedProviderTargets", () => {
+      const upsertGroup = (groupJid: string) =>
+        createWhatsAppGroupRepository(db).upsert({
+          jid: groupJid,
+          name: "Send Target",
+          description: null,
+          updated_at: "2026-07-17T09:00:00.000Z",
+        });
+
+      const insertSlackMember = (channelId: string, lastSeenAt: string) =>
+        db
+          .insertInto("slack_channel_participants")
+          .values({ channel_id: channelId, slack_user_id: USER_SLACK_ID, last_seen_at: lastSeenAt })
+          .execute();
+
+      const authorize = (targets: ProviderTargetRef[], deps = depsFor(db)) =>
+        new ChatHistoryAccessResolver(deps).authorizedProviderTargets(targets);
+
+      it("authorizes a Slack channel with fresh membership and no conversations row", async () => {
+        await insertSlackMember("C-SEND-FRESH", new Date().toISOString());
+
+        const granted = await authorize([{ platform: "slack", targetId: "C-SEND-FRESH" }]);
+
+        expect([...granted]).toEqual(["slack:C-SEND-FRESH"]);
+      });
+
+      it("denies a Slack channel whose membership is older than the freshness window", async () => {
+        await insertSlackMember("C-SEND-STALE", new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString());
+
+        const granted = await authorize([{ platform: "slack", targetId: "C-SEND-STALE" }]);
+
+        expect(granted.size).toBe(0);
+      });
+
+      it("denies a Slack channel the requester is not in", async () => {
+        await db
+          .insertInto("slack_channel_participants")
+          .values({
+            channel_id: "C-SEND-OTHER",
+            slack_user_id: "U-SOMEONE-ELSE",
+            last_seen_at: new Date().toISOString(),
+          })
+          .execute();
+
+        const granted = await authorize([{ platform: "slack", targetId: "C-SEND-OTHER" }]);
+
+        expect(granted.size).toBe(0);
+      });
+
+      it("authorizes a WhatsApp group on a direct phone match and no conversations row", async () => {
+        const groupJid = `${randomUUID()}@g.us`;
+        await upsertGroup(groupJid);
+        await db
+          .insertInto("whatsapp_group_participants")
+          .values({
+            group_jid: groupJid,
+            participant_jid: "15550001234@s.whatsapp.net",
+            phone_e164: USER_WHATSAPP_NUMBER,
+            lid: null,
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          })
+          .execute();
+
+        const granted = await authorize([{ platform: "whatsapp", targetId: groupJid }]);
+
+        expect([...granted]).toEqual([`whatsapp:${groupJid}`]);
+      });
+
+      it("authorizes a WhatsApp group through a trusted one-to-one LID mapping", async () => {
+        const mappingGroup = `${randomUUID()}@g.us`;
+        const targetGroup = `${randomUUID()}@g.us`;
+        await upsertGroup(mappingGroup);
+        await upsertGroup(targetGroup);
+        await db
+          .insertInto("whatsapp_group_participants")
+          .values([
+            {
+              group_jid: mappingGroup,
+              participant_jid: "86702773280883@lid",
+              phone_e164: USER_WHATSAPP_NUMBER,
+              lid: "86702773280883@lid",
+              admin_role: null,
+              last_seen_at: "2026-07-17T09:00:00.000Z",
+            },
+            {
+              group_jid: targetGroup,
+              participant_jid: "86702773280883@lid",
+              phone_e164: null,
+              lid: "86702773280883@lid",
+              admin_role: null,
+              last_seen_at: "2026-07-17T09:00:00.000Z",
+            },
+          ])
+          .execute();
+
+        const granted = await authorize([{ platform: "whatsapp", targetId: targetGroup }]);
+
+        expect([...granted]).toEqual([`whatsapp:${targetGroup}`]);
+      });
+
+      it("denies a WhatsApp group reached only through an ambiguous LID mapping", async () => {
+        const mappingGroup = `${randomUUID()}@g.us`;
+        const targetGroup = `${randomUUID()}@g.us`;
+        await upsertGroup(mappingGroup);
+        await upsertGroup(targetGroup);
+        await db
+          .insertInto("whatsapp_group_participants")
+          .values([
+            {
+              group_jid: mappingGroup,
+              participant_jid: "lid-one@lid",
+              phone_e164: USER_WHATSAPP_NUMBER,
+              lid: "lid-one@lid",
+              admin_role: null,
+              last_seen_at: "2026-07-17T09:00:00.000Z",
+            },
+            {
+              group_jid: mappingGroup,
+              participant_jid: "lid-two@lid",
+              phone_e164: USER_WHATSAPP_NUMBER,
+              lid: "lid-two@lid",
+              admin_role: null,
+              last_seen_at: "2026-07-17T09:00:00.000Z",
+            },
+            {
+              group_jid: targetGroup,
+              participant_jid: "lid-one@lid",
+              phone_e164: null,
+              lid: "lid-one@lid",
+              admin_role: null,
+              last_seen_at: "2026-07-17T09:00:00.000Z",
+            },
+          ])
+          .execute();
+
+        const granted = await authorize([{ platform: "whatsapp", targetId: targetGroup }]);
+
+        expect(granted.size).toBe(0);
+      });
+
+      it("denies every target when the requester has no linked Slack or WhatsApp identity", async () => {
+        const groupJid = `${randomUUID()}@g.us`;
+        await upsertGroup(groupJid);
+        await insertSlackMember("C-SEND-NO-IDENTITY", new Date().toISOString());
+        await db
+          .insertInto("whatsapp_group_participants")
+          .values({
+            group_jid: groupJid,
+            participant_jid: "15550001234@s.whatsapp.net",
+            phone_e164: USER_WHATSAPP_NUMBER,
+            lid: null,
+            admin_role: null,
+            last_seen_at: "2026-07-17T09:00:00.000Z",
+          })
+          .execute();
+        const unlinkedId = `user-unlinked-${randomUUID()}`;
+        await createUserRepository(db).create({
+          id: unlinkedId,
+          name: "Unlinked",
+          email: `${unlinkedId}@example.com`,
+        });
+
+        const granted = await authorize(
+          [
+            { platform: "slack", targetId: "C-SEND-NO-IDENTITY" },
+            { platform: "whatsapp", targetId: groupJid },
+          ],
+          depsFor(db, { currentUserId: unlinkedId }),
+        );
+
+        expect(granted.size).toBe(0);
+      });
+
+      it("denies every target when there is no requesting user", async () => {
+        await insertSlackMember("C-SEND-ANON", new Date().toISOString());
+
+        const granted = await authorize(
+          [{ platform: "slack", targetId: "C-SEND-ANON" }],
+          depsFor(db, { currentUserId: undefined }),
+        );
+
+        expect(granted.size).toBe(0);
+      });
     });
   });
 }

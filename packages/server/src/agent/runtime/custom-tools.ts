@@ -220,6 +220,7 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     workspaceKey: params.workspaceKey,
     originThreadTs: params.threadTs,
     sendDm: params.sendDm,
+    sendTargetMessage: params.sendTargetMessage,
     enqueueMessage: params.enqueueMessage,
     loadTranscriptionSettings: params.loadTranscriptionSettings,
     transcriptionEnabled: deps.transcriptionEnabled,

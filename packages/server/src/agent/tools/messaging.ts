@@ -1,5 +1,6 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod/v4";
+import { ChatHistoryAccessResolver, type ProviderTargetRef, providerTargetKey } from "./chat-search";
 import type { SelectableUser, SketchMcpDeps, ToolResult } from "./types";
 
 function detectPlatform(recipient: SelectableUser): "slack" | "whatsapp" | null {
@@ -85,13 +86,128 @@ async function deliverMessageToUser(
   return { status: "sent", recipient, platform, inboxMessageId };
 }
 
-export async function handleSendMessageToUser(
-  params: { recipientUserId: string; message: string },
-  deps: Pick<SketchMcpDeps, "inboxMessagesRepo" | "userRepo" | "sendDm" | "currentUserId">,
+export interface SendMessageTarget {
+  platform: "slack" | "whatsapp";
+  targetType: "channel" | "group";
+  targetId: string;
+}
+
+export interface SendMessageParams {
+  message: string;
+  recipientUserId?: string;
+  target?: SendMessageTarget;
+  threadTs?: string;
+}
+
+export type SendMessageDeps = Pick<
+  SketchMcpDeps,
+  "inboxMessagesRepo" | "userRepo" | "sendDm" | "sendTargetMessage" | "currentUserId" | "db" | "conversationContext"
+>;
+
+/** Structural slice of ChatHistoryAccessResolver so callers can inject a stub. */
+export interface SendMessageTargetAccess {
+  authorizedProviderTargets: (targets: ProviderTargetRef[]) => Promise<Set<string>>;
+}
+
+function toolError(message: string): ToolResult {
+  return { content: [{ type: "text" as const, text: `Error: ${message}` }] };
+}
+
+const THREAD_TS_SCOPE_ERROR = "threadTs can only be used with a Slack channel target.";
+
+function validateTarget(target: SendMessageTarget, threadTs: string | undefined): string | null {
+  if (!target.targetId.trim()) {
+    return "target.targetId is required. Use SearchDeliveryTargets to find the channel or group first.";
+  }
+  if (target.platform === "slack" && target.targetType !== "channel") {
+    return "A Slack target must use targetType 'channel'.";
+  }
+  if (target.platform === "whatsapp" && target.targetType !== "group") {
+    return "A WhatsApp target must use targetType 'group'.";
+  }
+  if (threadTs && target.platform !== "slack") return THREAD_TS_SCOPE_ERROR;
+  return null;
+}
+
+/**
+ * Posting into a shared destination is allowed only when the person who asked
+ * is a member of it, checked before the send so a denial never leaks content.
+ * Membership comes from the same passive rosters chat history uses, so a very
+ * recent join may not be visible yet.
+ */
+async function sendToTarget(
+  params: SendMessageParams & { target: SendMessageTarget },
+  deps: SendMessageDeps,
+  access: SendMessageTargetAccess,
 ): Promise<ToolResult> {
-  const result = await deliverMessageToUser({ ...params, storeInInbox: true }, deps);
+  const { target, threadTs } = params;
+  const invalid = validateTarget(target, threadTs);
+  if (invalid) return toolError(invalid);
+
+  if (!deps.sendTargetMessage) {
+    return toolError("Sending to a channel or group is not available in this context.");
+  }
+  if (!deps.db || !deps.currentUserId) {
+    return toolError("Sending to a channel or group requires an authenticated requesting user.");
+  }
+
+  const authorized = await access.authorizedProviderTargets([{ platform: target.platform, targetId: target.targetId }]);
+  if (!authorized.has(providerTargetKey({ platform: target.platform, targetId: target.targetId }))) {
+    return toolError(
+      "the person you are working for is not a known member of that channel or group, so Sketch will not post there. Ask them to confirm the target with SearchDeliveryTargets. If they joined very recently, it can take a short while before the membership is seen.",
+    );
+  }
+
+  try {
+    const { messageRef } = await deps.sendTargetMessage({
+      platform: target.platform,
+      targetType: target.targetType,
+      targetId: target.targetId,
+      message: params.message,
+      ...(threadTs ? { threadTs } : {}),
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({
+            status: "sent",
+            platform: target.platform,
+            targetType: target.targetType,
+            targetId: target.targetId,
+            ...(threadTs ? { threadTs } : {}),
+            ...(messageRef ? { messageRef } : {}),
+          }),
+        },
+      ],
+    };
+  } catch (error) {
+    return toolError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
+export async function handleSendMessage(
+  params: SendMessageParams,
+  deps: SendMessageDeps,
+  access: SendMessageTargetAccess = new ChatHistoryAccessResolver(deps),
+): Promise<ToolResult> {
+  if (params.recipientUserId && params.target) {
+    return toolError("set only one of recipientUserId or target, not both.");
+  }
+  if (params.target) {
+    return sendToTarget({ ...params, target: params.target }, deps, access);
+  }
+  if (!params.recipientUserId) {
+    return toolError("set exactly one of recipientUserId (for a direct message) or target (for a channel or group).");
+  }
+  if (params.threadTs) return toolError(THREAD_TS_SCOPE_ERROR);
+
+  const result = await deliverMessageToUser(
+    { recipientUserId: params.recipientUserId, message: params.message, storeInInbox: true },
+    deps,
+  );
   if (result.status !== "sent") {
-    return { content: [{ type: "text" as const, text: `Error: ${result.error}` }] };
+    return toolError(result.error);
   }
 
   return {
@@ -226,13 +342,29 @@ export function createMessagingTools(deps: SketchMcpDeps) {
     ),
 
     tool(
-      "SendMessageToUser",
-      "Send a DM to a team member via their connected channel (Slack or WhatsApp). The exact message is also stored as a one-way inbox item so their agent can see it on their next private chat.",
+      "SendMessage",
+      "Send one message, either as a DM to a team member or into a Slack channel or WhatsApp group. Set exactly one of recipientUserId or target. A DM goes out on the person's connected channel and the same text is also stored as a one-way inbox item, so their agent can see it on their next private chat. For a channel or group, first resolve it with SearchDeliveryTargets and pass the platform, targetType, and targetId it returns; the person you are working for must be a member of it.",
       {
-        recipientUserId: z.string().describe("The user ID from GetTeamDirectory"),
-        message: z.string().describe("The exact message text to send to the recipient."),
+        message: z.string().describe("The exact message text to send."),
+        recipientUserId: z.string().optional().describe("The user ID from GetTeamDirectory. Use this to send a DM."),
+        target: z
+          .object({
+            platform: z.enum(["slack", "whatsapp"]).describe("The platform the target belongs to."),
+            targetType: z
+              .enum(["channel", "group"])
+              .describe("Use 'channel' for Slack and 'group' for WhatsApp. Other combinations are rejected."),
+            targetId: z
+              .string()
+              .describe("The targetId returned by SearchDeliveryTargets. Never guess a channel ID or group JID."),
+          })
+          .optional()
+          .describe("The channel or group to post in, exactly as returned by SearchDeliveryTargets."),
+        threadTs: z
+          .string()
+          .optional()
+          .describe("Slack thread timestamp to reply in. Only valid with a Slack channel target."),
       },
-      async (params) => handleSendMessageToUser(params, deps),
+      async (params) => handleSendMessage(params, deps),
     ),
 
     tool(
