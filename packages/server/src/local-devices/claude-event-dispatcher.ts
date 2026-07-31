@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
+import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams } from "../agent/runner";
@@ -54,13 +55,6 @@ function parseJson(value: string): unknown {
   } catch {
     return {};
   }
-}
-
-function parseAllowedTools(value: string | null): string[] | null {
-  if (!value) return null;
-  const parsed = parseJson(value);
-  if (!Array.isArray(parsed)) return null;
-  return parsed.filter((tool): tool is string => typeof tool === "string");
 }
 
 function platform(value: string | null): "slack" | "whatsapp" | null {

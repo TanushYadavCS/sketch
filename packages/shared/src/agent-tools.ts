@@ -137,6 +137,12 @@ export const AGENT_TOOL_CATALOG: AgentToolCatalogEntry[] = [
     category: "sketch",
   },
   {
+    name: "mcp__sketch__SearchDeliveryTargets",
+    label: "Search delivery targets",
+    description: "Find Slack channels, Slack DMs, and WhatsApp groups that messages can be delivered to.",
+    category: "sketch",
+  },
+  {
     name: "mcp__sketch__SendMessage",
     label: "Send message",
     description: "Send a DM to a team member, or post in a Slack channel or WhatsApp group.",

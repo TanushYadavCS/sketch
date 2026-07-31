@@ -17,6 +17,10 @@ describe("agent tool name canonicalization", () => {
     expect(isKnownAgentToolName("mcp__sketch__DoesNotExist")).toBe(false);
   });
 
+  it("lets admins grant the delivery target lookup that channel sends depend on", () => {
+    expect(isKnownAgentToolName("mcp__sketch__SearchDeliveryTargets")).toBe(true);
+  });
+
   it("canonicalizes and dedupes stored allowlists on read", () => {
     const stored = JSON.stringify([
       "mcp__sketch__SendMessageToUser",
