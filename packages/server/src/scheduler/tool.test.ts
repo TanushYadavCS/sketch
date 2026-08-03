@@ -370,19 +370,31 @@ describe("handleManageScheduledTasks — list", () => {
     expect(scheduler.listTasks).toHaveBeenCalledWith({ createdBy: "U123" });
   });
 
-  it("scopes by createdBy for channel context", async () => {
+  it("scopes by deliveryTarget for channel context", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks({ action: "list" }, { scheduler, stepContentRepo, taskContext: channelContext });
-    expect(scheduler.listTasks).toHaveBeenCalledWith({ createdBy: "U123" });
+    expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: "C456" });
   });
 
-  it("scopes by createdBy for group context", async () => {
+  it("scopes by deliveryTarget for group context", async () => {
     const scheduler = makeMockScheduler();
     await handleManageScheduledTasks(
       { action: "list" },
       { scheduler, stepContentRepo, taskContext: whatsappGroupContext },
     );
-    expect(scheduler.listTasks).toHaveBeenCalledWith({ createdBy: "U123" });
+    expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: "120363000000@g.us" });
+  });
+
+  it.each([
+    ["channel", channelContext],
+    ["group", whatsappGroupContext],
+  ] as const)("scopes admin %s listings by deliveryTarget", async (_contextName, taskContext) => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "list" },
+      { scheduler, stepContentRepo, taskContext: { ...taskContext, canManageAnyTask: true } },
+    );
+    expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: taskContext.deliveryTarget });
   });
 
   it("lists every automation for an admin context", async () => {

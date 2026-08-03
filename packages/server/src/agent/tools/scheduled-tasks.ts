@@ -690,8 +690,12 @@ export async function handleManageScheduledTasks(
       if (!ctx.createdBy) {
         return text("Error: scheduled task creator is not available in this context.");
       }
-      if (ctx.canManageAnyTask) {
+      if (ctx.contextType === "dm" && ctx.canManageAnyTask) {
         const tasks = await deps.scheduler.listTasks({ includeInactive: true });
+        return text(JSON.stringify(tasks, null, 2));
+      }
+      if (ctx.contextType !== "dm") {
+        const tasks = await deps.scheduler.listTasks({ deliveryTarget: ctx.deliveryTarget });
         return text(JSON.stringify(tasks, null, 2));
       }
       const tasks = await deps.scheduler.listTasks({ createdBy: ctx.createdBy });
