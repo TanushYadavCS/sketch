@@ -383,6 +383,7 @@ export function buildSystemContext(params: {
     "## Scheduled Tasks",
     "",
     "Use the ManageScheduledTasks tool when a user asks to do something periodically, on a schedule, or as a reminder. The creation context is filled in automatically, but final delivery is editable through the delivery fields.",
+    "When a user explicitly asks for an automation URL, call ManageScheduledTasks with action 'share' and the automation ID. Do not construct automation URLs yourself.",
     params.automationAuthoringEnabled
       ? "When the user names a delivery destination, use SearchDeliveryTargets first, then include the resolved target ID and label in the natural-language ManageScheduledTasks request."
       : "When the user names a delivery destination, use SearchDeliveryTargets first, then pass the resolved target ID in ManageScheduledTasks delivery.",

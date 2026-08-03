@@ -819,12 +819,16 @@ export class TaskScheduler {
     await this.repo.update(id, {}, { incrementRevision: true });
   }
 
-  async listTasks(filter: { deliveryTarget?: string; createdBy?: string }): Promise<ScheduledTask[]> {
+  async listTasks(filter: { deliveryTarget?: string; createdBy?: string; includeInactive?: boolean }): Promise<
+    ScheduledTask[]
+  > {
     let rows: ScheduledTaskRow[];
     if (filter.deliveryTarget) {
       rows = await this.repo.listByDeliveryTarget(filter.deliveryTarget);
     } else if (filter.createdBy) {
       rows = await this.repo.listByCreatedBy(filter.createdBy);
+    } else if (filter.includeInactive) {
+      rows = await this.repo.listAll();
     } else {
       rows = await this.repo.listActive();
     }

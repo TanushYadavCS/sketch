@@ -261,6 +261,7 @@ describe("agent invoke API", () => {
       contextType: "dm",
       deliveryTarget: "STARGET",
       createdBy: requester.id,
+      canManageAnyTask: false,
       creatorTimezone: null,
     });
   });

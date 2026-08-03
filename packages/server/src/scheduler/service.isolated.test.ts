@@ -479,6 +479,43 @@ describe("listTasks()", () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0].createdBy).toBe("U_OWNER");
   });
+
+  it("returns active, paused, and completed tasks when includeInactive is requested", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+    const active = await scheduler.addTask({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "U_ACTIVE",
+      prompt: "Active",
+      scheduleType: "cron",
+      scheduleValue: "0 9 * * 1",
+      createdBy: "U_ACTIVE",
+    });
+    const paused = await scheduler.addTask({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "U_PAUSED",
+      prompt: "Paused",
+      scheduleType: "cron",
+      scheduleValue: "0 9 * * 1",
+      createdBy: "U_PAUSED",
+    });
+    await scheduler.pauseTask(paused.id);
+    const completed = await scheduler.addTask({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "U_COMPLETED",
+      prompt: "Completed",
+      scheduleType: "cron",
+      scheduleValue: "0 9 * * 1",
+      createdBy: "U_COMPLETED",
+    });
+    await repo.updateStatus(completed.id, "completed");
+
+    const tasks = await scheduler.listTasks({ includeInactive: true });
+    expect(tasks.map((task) => task.id).sort()).toEqual([active.id, paused.id, completed.id].sort());
+  });
 });
 
 describe("executeTask() invokes automation runtime", () => {

@@ -367,11 +367,8 @@ export function scheduledTaskRoutes(
   }
 
   function canAccess(row: ScheduledTaskRow, userId: string | null, role: string | undefined): boolean {
-    // Admin trusted even when sub doesn't resolve (stale JWT, deleted user row).
-    // Admins are internal; acceptable in Phase 1.
-    if (role === "admin") return true;
     if (!userId) return false;
-    return row.created_by === userId;
+    return role === "admin" || row.created_by === userId;
   }
 
   async function loadAccessibleTask(c: Context, id: string) {
@@ -412,7 +409,7 @@ export function scheduledTaskRoutes(
     const userId = await resolveUserId(c.get("sub"));
 
     let rows: ScheduledTaskRow[];
-    if (role === "admin") {
+    if (role === "admin" && userId) {
       rows = await repo.listAll();
     } else if (userId) {
       rows = await repo.listByCreatedBy(userId);

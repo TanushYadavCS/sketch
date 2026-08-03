@@ -383,6 +383,7 @@ describe("buildSystemContext", () => {
     it("uses plain-language automation link guidance", () => {
       const result = buildSystemContext({ platform: "web" });
       expect(result).toContain("automation link");
+      expect(result).toContain("ManageScheduledTasks with action 'share'");
       expect(result).not.toContain("builder URL");
     });
 

@@ -269,6 +269,7 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
               contextType: "dm",
               deliveryTarget: deliveryTarget ?? target.id,
               createdBy: requester.id,
+              canManageAnyTask: requester.auth_role === "admin",
               creatorTimezone: requester.timezone,
             },
           } as RunAgentParams);
@@ -381,6 +382,7 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
               contextType: "channel",
               deliveryTarget: parsed.data.target.channelId,
               createdBy: requester.id,
+              canManageAnyTask: requester.auth_role === "admin",
               ...(threadId ? { threadTs: threadId } : {}),
             },
           } as RunAgentParams);
@@ -469,6 +471,7 @@ export function agentRunRoutes(deps: AgentRunRouteDeps) {
             contextType: "group",
             deliveryTarget: groupJid,
             createdBy: requester.id,
+            canManageAnyTask: requester.auth_role === "admin",
           },
         } as RunAgentParams);
 

@@ -1,4 +1,5 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
+import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
@@ -13,6 +14,7 @@ import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-group
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb } from "../test-utils";
+import { scheduledTaskRoutes } from "./scheduled-tasks";
 
 const config = createTestConfig();
 
@@ -719,6 +721,49 @@ describe("Scheduled Tasks API", () => {
       headers: { Cookie: cookie },
     });
     expect(pauseRes.status).toBe(200);
+  });
+
+  it("fails closed when an admin context has no user in this tenant", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner@test.com" });
+
+    await tasks.add({
+      id: "task-owner",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "owner@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Owner task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("role", "admin");
+      c.set("sub", "admin-from-another-tenant");
+      await next();
+    });
+    app.route("/api/scheduled-tasks", scheduledTaskRoutes(db, scheduler));
+
+    const res = await app.request("/api/scheduled-tasks/task-owner");
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toEqual({
+      error: { code: "NOT_FOUND", message: "Scheduled task not found" },
+    });
   });
 
   it("resolves sub via email for local JWT issued with email subject", async () => {

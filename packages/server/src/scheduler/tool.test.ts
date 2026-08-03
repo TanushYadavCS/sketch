@@ -308,7 +308,7 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
     expect(stepContentRepo.upsert).not.toHaveBeenCalled();
   });
 
-  it.each(["list", "remove", "pause", "resume", "run", "getRun"] as const)(
+  it.each(["list", "remove", "pause", "resume", "run", "getRun", "share"] as const)(
     "keeps %s deterministic without invoking the authorer",
     async (action) => {
       const scheduler = makeMockScheduler();
@@ -383,6 +383,37 @@ describe("handleManageScheduledTasks — list", () => {
       { scheduler, stepContentRepo, taskContext: whatsappGroupContext },
     );
     expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: "120363000000@g.us" });
+  });
+
+  it.each([
+    ["channel", channelContext],
+    ["group", whatsappGroupContext],
+  ] as const)("scopes admin %s listings by deliveryTarget", async (_contextName, taskContext) => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "list" },
+      { scheduler, stepContentRepo, taskContext: { ...taskContext, canManageAnyTask: true } },
+    );
+    expect(scheduler.listTasks).toHaveBeenCalledWith({ deliveryTarget: taskContext.deliveryTarget });
+  });
+
+  it("lists every automation for an admin context", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "list" },
+      { scheduler, stepContentRepo, taskContext: { ...dmContext, canManageAnyTask: true } },
+    );
+    expect(scheduler.listTasks).toHaveBeenCalledWith({ includeInactive: true });
+  });
+
+  it("fails closed when listing without an authenticated creator", async () => {
+    const scheduler = makeMockScheduler();
+    const result = await handleManageScheduledTasks(
+      { action: "list" },
+      { scheduler, stepContentRepo, taskContext: { ...channelContext, createdBy: null, canManageAnyTask: true } },
+    );
+    expect(result.content[0].text).toBe("Error: scheduled task creator is not available in this context.");
+    expect(scheduler.listTasks).not.toHaveBeenCalled();
   });
 
   it("returns JSON of tasks", async () => {
@@ -1466,6 +1497,27 @@ describe("handleManageScheduledTasks — run", () => {
   });
 });
 
+describe("handleManageScheduledTasks — run history", () => {
+  it("does not return a run belonging to another automation", async () => {
+    const scheduler = makeMockScheduler();
+    const automationRunsRepo = {
+      getById: vi.fn().mockResolvedValue({
+        id: "run-other",
+        task_id: "task-other",
+        status: "completed",
+      }),
+      getLatest: vi.fn(),
+    } as unknown as NonNullable<Parameters<typeof handleManageScheduledTasks>[1]["automationRunsRepo"]>;
+
+    const result = await handleManageScheduledTasks(
+      { action: "getRun", task_id: "task-1", run_id: "run-other" },
+      { scheduler, stepContentRepo, automationRunsRepo, taskContext: dmContext },
+    );
+
+    expect(result.content[0].text).toBe("Error: run run-other not found.");
+  });
+});
+
 describe("handleManageScheduledTasks — add with once schedule type", () => {
   it("succeeds with a valid future ISO datetime", async () => {
     const futureDate = new Date(Date.now() + 3_600_000).toISOString();
@@ -1505,7 +1557,16 @@ describe("handleManageScheduledTasks — add with once schedule type", () => {
 });
 
 describe("handleManageScheduledTasks — ownership", () => {
-  const GUARDED_ACTIONS = ["update", "remove", "pause", "resume", "run", "getRun", "updateStepContent"] as const;
+  const GUARDED_ACTIONS = [
+    "update",
+    "remove",
+    "pause",
+    "resume",
+    "run",
+    "getRun",
+    "share",
+    "updateStepContent",
+  ] as const;
 
   function buildParams(action: (typeof GUARDED_ACTIONS)[number]): Parameters<typeof handleManageScheduledTasks>[0] {
     if (action === "updateStepContent") {
@@ -1566,6 +1627,43 @@ describe("handleManageScheduledTasks — ownership", () => {
 
     expect(scheduler.updateTask).toHaveBeenCalledWith("task-1", expect.objectContaining({ prompt: "Admin update" }));
     expect(result.content[0].text).toContain("Automation updated:");
+  });
+
+  it("returns the canonical URL for an automation the member owns", async () => {
+    const scheduler = makeMockScheduler();
+
+    const result = await handleManageScheduledTasks(
+      { action: "share", task_id: "task-1" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: dmContext,
+        config: { BASE_URL: "https://sketch.test/", PORT: 3000 },
+      },
+    );
+
+    expect(result.content[0].text).toBe("- Open your automation - https://sketch.test/scheduled-tasks/task-1/edit");
+    expect(scheduler.getTaskById).toHaveBeenCalledWith("task-1");
+    expect(scheduler.updateTask).not.toHaveBeenCalled();
+    expect(scheduler.executeTaskById).not.toHaveBeenCalled();
+  });
+
+  it("returns the canonical URL for another user's automation to an admin", async () => {
+    const scheduler = makeMockScheduler({
+      getTaskById: vi.fn().mockResolvedValue(makeTask({ createdBy: "U_OTHER" })),
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "share", task_id: "task-1" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: { ...dmContext, canManageAnyTask: true },
+        config: { BASE_URL: "https://sketch.test", PORT: 3000 },
+      },
+    );
+
+    expect(result.content[0].text).toBe("- Open your automation - https://sketch.test/scheduled-tasks/task-1/edit");
   });
 
   it("falls back when the task owner cannot be resolved", async () => {

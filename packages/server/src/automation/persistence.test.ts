@@ -242,6 +242,29 @@ describe("automation persistence", () => {
     });
   });
 
+  it("fails closed when an admin actor has no tenant user identity", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-no-admin-identity"),
+      brokerCapable: true,
+    });
+
+    const result = await replaceAutomationDefinition({
+      db,
+      taskId: "automation-no-admin-identity",
+      request: makeDefinition({ expectedRevision: 0, title: "Unauthorized admin replacement" }),
+      actor: { userId: null, canManageAnyTask: true },
+      brokerCapable: true,
+    });
+
+    expect(result).toEqual({ kind: "not_found" });
+    await expect(createScheduledTaskRepository(db).getById("automation-no-admin-identity")).resolves.toMatchObject({
+      title: "Daily account brief",
+      revision: 0,
+    });
+  });
+
   it("returns the current revision and preserves data after a stale replacement", async () => {
     await createAutomationDefinition({
       db,

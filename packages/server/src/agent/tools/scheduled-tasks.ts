@@ -75,8 +75,10 @@ const deliverySchema = z.object({
 });
 
 const manageScheduledTasksSchema = {
-  action: z.enum(["list", "add", "update", "remove", "pause", "resume", "run", "getRun", "updateStepContent"]).describe(
-    `Action to perform.
+  action: z
+    .enum(["list", "add", "update", "remove", "pause", "resume", "run", "getRun", "share", "updateStepContent"])
+    .describe(
+      `Action to perform.
 - 'add': create an automation (simple: prompt + schedule_type + schedule_value; multi-step: title + steps)
 - 'list': list automations in this context
 - 'update': modify an automation (requires task_id)
@@ -85,8 +87,9 @@ const manageScheduledTasksSchema = {
 - 'resume': resume a paused automation (requires task_id)
 - 'run': manually trigger an automation (requires task_id)
 - 'getRun': inspect run results (requires task_id, optional run_id for specific run)
+- 'share': return the canonical URL for an automation (requires task_id)
 - 'updateStepContent': update a single step's prompt or script (requires task_id, step_id, step_content)`,
-  ),
+    ),
   prompt: z
     .string()
     .optional()
@@ -113,7 +116,7 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
     .enum(["fresh"])
     .optional()
     .describe("Scheduled automations currently support only 'fresh': no memory, each run starts clean."),
-  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun."),
+  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun/share."),
   title: z.string().optional().describe("Human-readable name. Required for multi-step automations."),
   description: z.string().optional().describe("Description of what this automation does."),
   steps: z
@@ -143,7 +146,7 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
 };
 
 const authoredScheduledTasksSchema = {
-  action: z.enum(["list", "add", "update", "remove", "pause", "resume", "run", "getRun"]).describe(
+  action: z.enum(["list", "add", "update", "remove", "pause", "resume", "run", "getRun", "share"]).describe(
     `Action to perform.
 - 'add': create an automation from the user's natural-language request
 - 'update': edit an automation from the user's natural-language request (requires task_id)
@@ -152,7 +155,8 @@ const authoredScheduledTasksSchema = {
 - 'pause': pause an automation (requires task_id)
 - 'resume': resume a paused automation (requires task_id)
 - 'run': manually trigger an automation (requires task_id)
-- 'getRun': inspect run results (requires task_id, optional run_id for specific run)`,
+- 'getRun': inspect run results (requires task_id, optional run_id for specific run)
+- 'share': return the canonical URL for an automation (requires task_id)`,
   ),
   request: z
     .string()
@@ -160,14 +164,14 @@ const authoredScheduledTasksSchema = {
     .describe(
       "The user's natural-language automation request. Required for add and update; preserve their intent verbatim.",
     ),
-  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun."),
+  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun/share."),
   run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),
 };
 
 export type WorkflowStepInput = z.infer<typeof workflowStepSchema>;
 
 type ManageScheduledTasksParams = {
-  action: "list" | "add" | "update" | "remove" | "pause" | "resume" | "run" | "getRun" | "updateStepContent";
+  action: "list" | "add" | "update" | "remove" | "pause" | "resume" | "run" | "getRun" | "share" | "updateStepContent";
   request?: string;
   prompt?: string;
   schedule_type?: "cron" | "interval" | "once" | "external";
@@ -400,6 +404,7 @@ function guardedActionLabel(action: ManageScheduledTasksParams["action"]): strin
   if (action === "pause") return "pause";
   if (action === "run") return "run";
   if (action === "getRun") return "inspect";
+  if (action === "share") return "share";
   return "update";
 }
 
@@ -654,7 +659,16 @@ export async function handleManageScheduledTasks(
     return null;
   };
 
-  const OWNERSHIP_GUARDED_ACTIONS = ["update", "remove", "pause", "resume", "run", "getRun", "updateStepContent"];
+  const OWNERSHIP_GUARDED_ACTIONS = [
+    "update",
+    "remove",
+    "pause",
+    "resume",
+    "run",
+    "getRun",
+    "share",
+    "updateStepContent",
+  ];
   let guardedTask: ScheduledTask | null = null;
   if (task_id && OWNERSHIP_GUARDED_ACTIONS.includes(action)) {
     const task = await deps.scheduler.getTaskById(task_id);
@@ -673,14 +687,18 @@ export async function handleManageScheduledTasks(
 
   switch (action) {
     case "list": {
-      if (ctx.contextType === "dm") {
-        if (!ctx.createdBy) {
-          return text("Error: scheduled task creator is not available in this context.");
-        }
-        const tasks = await deps.scheduler.listTasks({ createdBy: ctx.createdBy });
+      if (!ctx.createdBy) {
+        return text("Error: scheduled task creator is not available in this context.");
+      }
+      if (ctx.contextType === "dm" && ctx.canManageAnyTask) {
+        const tasks = await deps.scheduler.listTasks({ includeInactive: true });
         return text(JSON.stringify(tasks, null, 2));
       }
-      const tasks = await deps.scheduler.listTasks({ deliveryTarget: ctx.deliveryTarget });
+      if (ctx.contextType !== "dm") {
+        const tasks = await deps.scheduler.listTasks({ deliveryTarget: ctx.deliveryTarget });
+        return text(JSON.stringify(tasks, null, 2));
+      }
+      const tasks = await deps.scheduler.listTasks({ createdBy: ctx.createdBy });
       return text(JSON.stringify(tasks, null, 2));
     }
 
@@ -1094,6 +1112,16 @@ export async function handleManageScheduledTasks(
       return text(`Automation updated:\n${JSON.stringify(updated, null, 2)}`);
     }
 
+    case "share": {
+      if (!task_id) {
+        return text("Error: task_id is required for share action.");
+      }
+      if (!guardedTask) {
+        return text("Error: task not found.");
+      }
+      return text(`- Open your automation - ${buildBuilderUrl(guardedTask.id, deps.config)}`);
+    }
+
     case "remove": {
       if (!task_id) {
         return text("Error: task_id is required for remove action.");
@@ -1166,7 +1194,7 @@ export async function handleManageScheduledTasks(
       const run = params.run_id
         ? await deps.automationRunsRepo.getById(params.run_id)
         : await deps.automationRunsRepo.getLatest(task_id);
-      if (!run) {
+      if (!run || run.task_id !== task_id) {
         return text(params.run_id ? `Error: run ${params.run_id} not found.` : "No runs found for this automation.");
       }
       return text(JSON.stringify(run, null, 2));
