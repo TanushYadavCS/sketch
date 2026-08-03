@@ -1119,7 +1119,7 @@ export async function handleManageScheduledTasks(
       if (!guardedTask) {
         return text("Error: task not found.");
       }
-      return text(`Automation URL: ${buildBuilderUrl(guardedTask.id, deps.config)}`);
+      return text(`- Open your automation - ${buildBuilderUrl(guardedTask.id, deps.config)}`);
     }
 
     case "remove": {

@@ -1,9 +1,9 @@
 import type { AutomationArtifact } from "@sketch/shared";
 
-function artifactLinkLine(artifact: AutomationArtifact): string | null {
+function artifactLinkLine(artifact: AutomationArtifact, label: string): string | null {
   const url = artifact.builderUrl.trim();
   if (!url) return null;
-  return `- ${artifact.title}: ${url}`;
+  return `- ${label} - ${url}`;
 }
 
 function builderUrlReferences(value: string): string[] {
@@ -28,18 +28,18 @@ export function appendAutomationBuilderLinks(
     if (url && !artifactsByUrl.has(url)) artifactsByUrl.set(url, artifact);
   }
   const distinctArtifacts = Array.from(artifactsByUrl.values());
+  const linkLabel = distinctArtifacts.length === 1 ? "Open your automation" : "Open your automations";
   const missingLinks = distinctArtifacts
     .filter((artifact) => {
       const references = builderUrlReferences(artifact.builderUrl);
       return references.length > 0 && references.every((reference) => !text.includes(reference));
     })
-    .map(artifactLinkLine)
+    .map((artifact) => artifactLinkLine(artifact, linkLabel))
     .filter((line): line is string => Boolean(line));
 
   if (missingLinks.length === 0) return text || null;
 
-  const linkHeading = distinctArtifacts.length === 1 ? "Open your automation:" : "Open your automations:";
-  const linkBlock = `${linkHeading}\n${missingLinks.join("\n")}`;
+  const linkBlock = missingLinks.join("\n");
   const fallback = "Your automation is ready.";
   return text ? `${text}\n\n${linkBlock}` : `${fallback}\n\n${linkBlock}`;
 }

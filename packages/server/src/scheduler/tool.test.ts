@@ -1642,7 +1642,7 @@ describe("handleManageScheduledTasks — ownership", () => {
       },
     );
 
-    expect(result.content[0].text).toBe("Automation URL: https://sketch.test/scheduled-tasks/task-1/edit");
+    expect(result.content[0].text).toBe("- Open your automation - https://sketch.test/scheduled-tasks/task-1/edit");
     expect(scheduler.getTaskById).toHaveBeenCalledWith("task-1");
     expect(scheduler.updateTask).not.toHaveBeenCalled();
     expect(scheduler.executeTaskById).not.toHaveBeenCalled();
@@ -1663,7 +1663,7 @@ describe("handleManageScheduledTasks — ownership", () => {
       },
     );
 
-    expect(result.content[0].text).toBe("Automation URL: https://sketch.test/scheduled-tasks/task-1/edit");
+    expect(result.content[0].text).toBe("- Open your automation - https://sketch.test/scheduled-tasks/task-1/edit");
   });
 
   it("falls back when the task owner cannot be resolved", async () => {

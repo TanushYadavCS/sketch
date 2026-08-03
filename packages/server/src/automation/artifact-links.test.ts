@@ -17,7 +17,7 @@ const artifact: AutomationArtifact = {
 describe("appendAutomationBuilderLinks", () => {
   it("appends a missing automation link to final text", () => {
     expect(appendAutomationBuilderLinks("Done.", [artifact])).toBe(
-      "Done.\n\nOpen your automation:\n- Daily account brief: https://sketch.test/scheduled-tasks/task-123/edit",
+      "Done.\n\n- Open your automation - https://sketch.test/scheduled-tasks/task-123/edit",
     );
   });
 
@@ -30,7 +30,7 @@ describe("appendAutomationBuilderLinks", () => {
     };
 
     expect(appendAutomationBuilderLinks("Done.", [artifact, secondArtifact])).toBe(
-      "Done.\n\nOpen your automations:\n- Daily account brief: https://sketch.test/scheduled-tasks/task-123/edit\n- Weekly pipeline review: https://sketch.test/scheduled-tasks/task-456/edit",
+      "Done.\n\n- Open your automations - https://sketch.test/scheduled-tasks/task-123/edit\n- Open your automations - https://sketch.test/scheduled-tasks/task-456/edit",
     );
   });
 
@@ -44,13 +44,13 @@ describe("appendAutomationBuilderLinks", () => {
     const text = `First automation: ${artifact.builderUrl}`;
 
     expect(appendAutomationBuilderLinks(text, [artifact, secondArtifact])).toBe(
-      `${text}\n\nOpen your automations:\n- Weekly pipeline review: https://sketch.test/scheduled-tasks/task-456/edit`,
+      `${text}\n\n- Open your automations - https://sketch.test/scheduled-tasks/task-456/edit`,
     );
   });
 
   it("creates fallback text for artifact-only responses", () => {
     expect(appendAutomationBuilderLinks(null, [artifact])).toBe(
-      "Your automation is ready.\n\nOpen your automation:\n- Daily account brief: https://sketch.test/scheduled-tasks/task-123/edit",
+      "Your automation is ready.\n\n- Open your automation - https://sketch.test/scheduled-tasks/task-123/edit",
     );
   });
 
