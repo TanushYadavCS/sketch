@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { createWriteAgentOutputTool } from "./tools/agent-output";
 import { createReadChatHistoryTool, createSearchChatHistoryTool } from "./tools/chat-history";
+import { ChatHistoryAccessResolver } from "./tools/chat-search";
 import { createSearchDeliveryTargetsTool } from "./tools/delivery-targets";
 import { createInboxWorkflowTools } from "./tools/inbox-workflows";
 import { createListFollowupsTool } from "./tools/list-followups";
@@ -12,7 +13,6 @@ import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
 import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
 import { createSearchTools } from "./tools/search";
-import { createSlackChannelHistoryTool } from "./tools/slack-channel-history";
 import { createTeamTools } from "./tools/team";
 import { createTranscribeAudioTool } from "./tools/transcribe-audio";
 import {
@@ -23,7 +23,6 @@ import {
 } from "./tools/types";
 import { createSendFileToChatTool } from "./tools/upload";
 import { createVisualAnalysisTool } from "./tools/visual-analysis";
-import { createWhatsAppGroupHistoryTool } from "./tools/whatsapp-group-history";
 
 export { handleResolveInboxWorkflow, handleUpdateInboxWorkflow } from "./tools/inbox-workflows";
 export { handleSearchUsers, handleSendMessageToUser, handleSendMessageToUsers } from "./tools/messaging";
@@ -36,12 +35,11 @@ export type { SketchMcpDeps };
 
 export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
   const absWorkspace = resolve(deps.workspaceDir);
+  const chatHistoryAccess = new ChatHistoryAccessResolver(deps);
   return [
     createSendFileToChatTool(deps, absWorkspace),
-    createReadChatHistoryTool(deps),
-    createSearchChatHistoryTool(deps),
-    createWhatsAppGroupHistoryTool(deps),
-    createSlackChannelHistoryTool(deps),
+    createReadChatHistoryTool(deps, chatHistoryAccess),
+    createSearchChatHistoryTool(deps, chatHistoryAccess),
     createProviderConfigTool(deps),
     createSearchDeliveryTargetsTool(deps),
     createLocalRunCommandTool(deps),

@@ -24,6 +24,7 @@ interface SlackStartupDeps<TBot extends SlackRuntimeBot> {
   getCurrentBot: () => TBot | null;
   setCurrentBot: (bot: TBot | null) => void;
   createBot: (tokens: StartupTokens) => TBot;
+  beforeExplicitTokenReplacement?: () => Promise<void>;
 }
 
 export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: SlackStartupDeps<TBot>) {
@@ -63,6 +64,10 @@ export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: Sl
         if (existingBot) {
           await existingBot.stop().catch((err) => deps.logger.warn({ err }, "Failed to stop existing Slack bot"));
           deps.setCurrentBot(null);
+        }
+
+        if (tokens) {
+          await deps.beforeExplicitTokenReplacement?.();
         }
 
         const nextBot = deps.createBot({

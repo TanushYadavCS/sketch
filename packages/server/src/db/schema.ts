@@ -658,6 +658,12 @@ export interface WhatsAppGroupParticipantsTable {
   last_seen_at: Generated<string>;
 }
 
+export interface SlackChannelParticipantsTable {
+  channel_id: string;
+  slack_user_id: string;
+  last_seen_at: Generated<string>;
+}
+
 export interface WhatsAppBackfillCheckpointsTable {
   group_jid: string;
   last_fetched_key: string | null;
@@ -1430,6 +1436,7 @@ export interface DB {
   whatsapp_identity_candidates: WhatsAppIdentityCandidatesTable;
   whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
   whatsapp_group_participants: WhatsAppGroupParticipantsTable;
+  slack_channel_participants: SlackChannelParticipantsTable;
   whatsapp_backfill_checkpoints: WhatsAppBackfillCheckpointsTable;
   whatsapp_backfill_ranges: WhatsAppBackfillRangesTable;
   whatsapp_window_keepalives: WhatsAppWindowKeepAlivesTable;

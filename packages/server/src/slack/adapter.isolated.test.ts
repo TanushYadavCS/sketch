@@ -204,6 +204,12 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
         }),
       } as unknown as SlackAdapterDeps["repos"]["settings"],
       conversations: makeConversationsRepo() as unknown as SlackAdapterDeps["repos"]["conversations"],
+      slackChannelParticipants: {
+        upsert: vi.fn().mockResolvedValue(undefined),
+        remove: vi.fn().mockResolvedValue(undefined),
+        clearAll: vi.fn().mockResolvedValue(undefined),
+        replaceChannelRoster: vi.fn().mockResolvedValue(undefined),
+      },
     },
     queue: new QueueManager(),
     slack: {
@@ -235,6 +241,8 @@ function freshMockBot() {
     onMessage: vi.fn(),
     onChannelMessage: vi.fn(),
     onChannelRenamed: vi.fn(),
+    onMemberJoinedChannel: vi.fn(),
+    onMemberLeftChannel: vi.fn(),
     onThreadMessage: vi.fn(),
     onChannelMention: vi.fn(),
     onAppHomeOpened: vi.fn(),
@@ -340,6 +348,30 @@ describe("slack/adapter", () => {
       expect(mockBotInstance.onChannelMention).toHaveBeenCalledOnce();
     });
 
+    it("routes membership events through the serialized roster callbacks", async () => {
+      const recordSlackChannelParticipantJoined = vi.fn().mockResolvedValue(undefined);
+      const recordSlackChannelParticipantLeft = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({
+        recordSlackChannelParticipantJoined,
+        recordSlackChannelParticipantLeft,
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const joined = mockBotInstance.onMemberJoinedChannel.mock.calls[0]?.[0] as (event: {
+        channelId: string;
+        slackUserId: string;
+      }) => Promise<void>;
+      const left = mockBotInstance.onMemberLeftChannel.mock.calls[0]?.[0] as (event: {
+        channelId: string;
+        slackUserId: string;
+      }) => Promise<void>;
+
+      await joined({ channelId: "C1", slackUserId: "U1" });
+      await left({ channelId: "C1", slackUserId: "U1" });
+
+      expect(recordSlackChannelParticipantJoined).toHaveBeenCalledWith("C1", "U1");
+      expect(recordSlackChannelParticipantLeft).toHaveBeenCalledWith("C1", "U1");
+    });
+
     it("refreshes channel and conversation names when a channel is renamed", async () => {
       const deps = makeDeps({
         repos: {
@@ -367,6 +399,7 @@ describe("slack/adapter", () => {
     it("records group DM (mpim) captures under their own conversation kind", async () => {
       const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);
       const deps = makeDeps({ scheduler: { dispatchSlackChannelMessage } as unknown as SlackAdapterDeps["scheduler"] });
+      vi.mocked(deps.repos.conversations.find).mockResolvedValue(undefined);
       createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
       const { channel } = getHandlers();
 
@@ -921,6 +954,36 @@ describe("slack/adapter", () => {
   });
 
   describe("passive channel handler", () => {
+    it("requests an immediate roster repair only when a channel is first persisted", async () => {
+      const conversations = makeConversationsRepo();
+      conversations.find.mockResolvedValueOnce(undefined).mockResolvedValue(makeConversation());
+      const onSlackChannelDiscovered = vi.fn();
+      const recordSlackChannelParticipantObserved = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({
+        onSlackChannelDiscovered,
+        recordSlackChannelParticipantObserved,
+        repos: {
+          ...makeDeps().repos,
+          conversations: conversations as unknown as SlackAdapterDeps["repos"]["conversations"],
+        },
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+      const message = {
+        text: "ambient update",
+        userId: "S1",
+        channelId: "C1",
+        type: "channel_message",
+      };
+
+      await channel({ ...message, ts: "1" });
+      await channel({ ...message, ts: "2" });
+
+      expect(onSlackChannelDiscovered).toHaveBeenCalledOnce();
+      expect(recordSlackChannelParticipantObserved).toHaveBeenNthCalledWith(1, "C1", "S1");
+      expect(recordSlackChannelParticipantObserved).toHaveBeenNthCalledWith(2, "C1", "S1");
+    });
+
     it("handles a top-level follow-up command without running the agent", async () => {
       const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: "Marked the follow-up done." });
       const dispatchSlackChannelMessage = vi.fn().mockResolvedValue(undefined);

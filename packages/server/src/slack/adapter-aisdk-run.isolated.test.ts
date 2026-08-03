@@ -107,6 +107,8 @@ function freshMockBot() {
     onMessage: vi.fn(),
     onChannelMessage: vi.fn(),
     onChannelRenamed: vi.fn(),
+    onMemberJoinedChannel: vi.fn(),
+    onMemberLeftChannel: vi.fn(),
     onThreadMessage: vi.fn(),
     onChannelMention: vi.fn(),
     onAppHomeOpened: vi.fn(),
@@ -176,6 +178,7 @@ function makeConversationsRepo() {
   const conversation = makeConversation();
   return {
     getOrCreate: vi.fn().mockResolvedValue(conversation),
+    find: vi.fn().mockResolvedValue(conversation),
     insertMessage: vi.fn().mockImplementation(async (data) => ({
       row: {
         id: data.providerMessageId === "posted-ts" ? 2 : 1,

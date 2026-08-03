@@ -95,6 +95,13 @@ export interface HomeActionEvent {
 
 export type HomeActionHandler = (event: HomeActionEvent) => Promise<void>;
 
+export interface SlackChannelMembershipEvent {
+  channelId: string;
+  slackUserId: string;
+}
+
+export type SlackChannelMembershipHandler = (event: SlackChannelMembershipEvent) => Promise<void>;
+
 export interface SlackBotConfig {
   mode: "socket" | "http";
   botToken: string;
@@ -130,6 +137,8 @@ export class SlackBot {
   private mentionHandler: SlackMessageHandler | null = null;
   private threadMessageHandler: SlackMessageHandler | null = null;
   private channelRenamedHandler: ((channelId: string) => Promise<void>) | null = null;
+  private memberJoinedChannelHandler: SlackChannelMembershipHandler | null = null;
+  private memberLeftChannelHandler: SlackChannelMembershipHandler | null = null;
   private appHomeOpenedHandler: AppHomeOpenedHandler | null = null;
   private homeActionHandler: HomeActionHandler | null = null;
   private botUserId: string | null = null;
@@ -196,6 +205,14 @@ export class SlackBot {
 
   onChannelRenamed(handler: (channelId: string) => Promise<void>): void {
     this.channelRenamedHandler = handler;
+  }
+
+  onMemberJoinedChannel(handler: SlackChannelMembershipHandler): void {
+    this.memberJoinedChannelHandler = handler;
+  }
+
+  onMemberLeftChannel(handler: SlackChannelMembershipHandler): void {
+    this.memberLeftChannelHandler = handler;
   }
 
   onAppHomeOpened(handler: AppHomeOpenedHandler): void {
@@ -372,6 +389,40 @@ export class SlackBot {
         await this.appHomeOpenedHandler({ slackUserId: userId });
       } catch (err) {
         this.logger.warn({ err, slackUserId: userId }, "app_home_opened handler failed");
+      }
+    });
+
+    this.app.event("member_joined_channel", async ({ event }) => {
+      if (!this.memberJoinedChannelHandler) return;
+      const membership = event as { channel?: string; user?: string };
+      if (!membership.channel || !membership.user) return;
+      try {
+        await this.memberJoinedChannelHandler({
+          channelId: membership.channel,
+          slackUserId: membership.user,
+        });
+      } catch (err) {
+        this.logger.warn(
+          { err, channelId: membership.channel, slackUserId: membership.user },
+          "Slack member join persistence failed",
+        );
+      }
+    });
+
+    this.app.event("member_left_channel", async ({ event }) => {
+      if (!this.memberLeftChannelHandler) return;
+      const membership = event as { channel?: string; user?: string };
+      if (!membership.channel || !membership.user) return;
+      try {
+        await this.memberLeftChannelHandler({
+          channelId: membership.channel,
+          slackUserId: membership.user,
+        });
+      } catch (err) {
+        this.logger.warn(
+          { err, channelId: membership.channel, slackUserId: membership.user },
+          "Slack member leave persistence failed",
+        );
       }
     });
 
@@ -581,6 +632,21 @@ export class SlackBot {
       cursor = result.response_metadata?.next_cursor || undefined;
     } while (cursor);
     return false;
+  }
+
+  async listChannelMembers(channelId: string): Promise<string[]> {
+    const members: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const result = await this.app.client.conversations.members({
+        channel: channelId,
+        limit: 1000,
+        ...(cursor ? { cursor } : {}),
+      });
+      members.push(...(result.members ?? []));
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+    return [...new Set(members)];
   }
 
   async getChannelHistory(channelId: string, limit = 5): Promise<Array<{ userId: string; text: string; ts: string }>> {

@@ -41,6 +41,7 @@ describe("createSlackStartupManager", () => {
     };
 
     const createBot = vi.fn(() => ({ start: startBot, stop: stopBot }));
+    const beforeExplicitTokenReplacement = vi.fn(async () => {});
     const setCurrentBot = vi.fn((bot) => {
       currentBot = bot;
     });
@@ -52,13 +53,21 @@ describe("createSlackStartupManager", () => {
       getCurrentBot: () => currentBot,
       setCurrentBot,
       createBot,
+      beforeExplicitTokenReplacement,
     });
 
     await start({ botToken: "xoxb-provided", appToken: "xapp-provided" });
 
     expect(getSettingsTokens).not.toHaveBeenCalled();
     expect(validateTokens).toHaveBeenCalledWith("xoxb-provided", "xapp-provided");
+    expect(beforeExplicitTokenReplacement).toHaveBeenCalledOnce();
     expect(stopBot).toHaveBeenCalledTimes(1);
+    expect(stopBot.mock.invocationCallOrder[0]).toBeLessThan(
+      beforeExplicitTokenReplacement.mock.invocationCallOrder[0],
+    );
+    expect(beforeExplicitTokenReplacement.mock.invocationCallOrder[0]).toBeLessThan(
+      createBot.mock.invocationCallOrder[0],
+    );
     expect(createBot).toHaveBeenCalledWith({ botToken: "xoxb-provided", appToken: "xapp-provided" });
     expect(startBot).toHaveBeenCalledTimes(1);
     expect(logger.info).toHaveBeenCalledWith("Slack bot connected");
@@ -94,6 +103,7 @@ describe("createSlackStartupManager", () => {
 
   it("throws for explicit token startup when token validation fails", async () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const beforeExplicitTokenReplacement = vi.fn(async () => {});
     const start = createSlackStartupManager({
       logger,
       getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db" }),
@@ -103,12 +113,14 @@ describe("createSlackStartupManager", () => {
       getCurrentBot: () => null,
       setCurrentBot: vi.fn(),
       createBot: vi.fn(),
+      beforeExplicitTokenReplacement,
     });
 
     await expect(start({ botToken: "xoxb-provided", appToken: "xapp-provided" })).rejects.toThrow(
       "Invalid Slack tokens",
     );
     expect(logger.warn).toHaveBeenCalledWith(expect.any(Object), "Slack tokens failed validation");
+    expect(beforeExplicitTokenReplacement).not.toHaveBeenCalled();
   });
 
   it("swallows startup errors for boot-time DB startup", async () => {

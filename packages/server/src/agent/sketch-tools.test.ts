@@ -109,7 +109,8 @@ describe("createSketchMcpServer", () => {
     const tools = (server.instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
     expect(tools.ReadChatHistory).toBeDefined();
     expect(tools.SearchChatHistory).toBeDefined();
-    expect(tools.WhatsAppGroupHistory).toBeDefined();
+    expect(tools.WhatsAppGroupHistory).toBeUndefined();
+    expect(tools.SlackChannelHistory).toBeUndefined();
   });
 
   it("does not expose integration card rendering tools", () => {
@@ -310,6 +311,8 @@ describe("createSketchMcpServer", () => {
       messages: [{ id: 7, text: "launch budget approved", providerThreadId: "thread-1" }],
       hasMore: false,
     });
+    expect(JSON.parse(result.content[0].text)).not.toHaveProperty("olderPageToken");
+    expect(JSON.parse(result.content[0].text)).not.toHaveProperty("newerPageToken");
   });
 
   it("ReadChatHistory keeps top-level Slack history separate from thread replies", async () => {

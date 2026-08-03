@@ -43,6 +43,7 @@ import { createLocalDeviceRepository } from "./db/repositories/local-devices";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createOperationalAlertsRepository } from "./db/repositories/operational-alerts";
 import { createSettingsRepository } from "./db/repositories/settings";
+import { createSlackChannelParticipantsRepository } from "./db/repositories/slack-channel-participants";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
 import { createWhatsAppInboundEventsRepository } from "./db/repositories/whatsapp-inbound-events";
@@ -70,6 +71,7 @@ import { syncFeaturedSkills } from "./skills/sync";
 import { createConfiguredSlackBot, validateSlackTokens } from "./slack/adapter";
 import type { SlackBot } from "./slack/bot";
 import { createSettingsBackedSlackIndexingFacade } from "./slack/indexing-facade";
+import { SlackMembershipReconciler } from "./slack/membership-reconciler";
 import { createSlackStartupManager } from "./slack/startup";
 import { UserCache } from "./slack/user-cache";
 import { type ProviderContext, createWorkflowStepRecorder, instrumentAgentRun } from "./telemetry/agent-run-telemetry";
@@ -176,6 +178,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
   const conversationsRepo = createConversationRepository(db);
+  const slackChannelParticipantsRepo = createSlackChannelParticipantsRepository(db);
   const whatsappProviderEventsRepo = createWhatsAppProviderEventRepository(db);
   const whatsappTemplateMappingsRepo = createWhatsAppTemplateMappingRepository(db);
   const automationRunsRepo = createAutomationRunsRepository(db);
@@ -308,6 +311,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 7. Slack infrastructure
   const userCache = new UserCache();
   let slack: SlackBot | null = null;
+  const slackMembershipReconciler = new SlackMembershipReconciler({
+    db,
+    logger,
+    getSlack: () => slack,
+  });
 
   // 8. WhatsApp
   const usesBaileys = config.WHATSAPP_DM_PROVIDER === "baileys" || config.WHATSAPP_GROUP_PROVIDER === "baileys";
@@ -737,7 +745,13 @@ export async function createServer(config: Config, options?: CreateServerOptions
     db,
     config,
     logger,
-    repos: { users, channels, settings: settingsRepo, conversations: conversationsRepo },
+    repos: {
+      users,
+      channels,
+      settings: settingsRepo,
+      conversations: conversationsRepo,
+      slackChannelParticipants: slackChannelParticipantsRepo,
+    },
     queue: queueManager,
     slack: { userCache },
     runAgent: trackedRunAgent,
@@ -748,6 +762,17 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+    recordSlackChannelParticipantJoined: (channelId: string, slackUserId: string) =>
+      slackMembershipReconciler.recordParticipantJoined(channelId, slackUserId),
+    recordSlackChannelParticipantObserved: (channelId: string, slackUserId: string) =>
+      slackMembershipReconciler.recordParticipantObserved(channelId, slackUserId),
+    recordSlackChannelParticipantLeft: (channelId: string, slackUserId: string) =>
+      slackMembershipReconciler.recordParticipantLeft(channelId, slackUserId),
+    onSlackChannelDiscovered: () => {
+      void slackMembershipReconciler.wake().catch((err) => {
+        logger.warn({ err }, "Slack membership reconciliation failed after channel discovery");
+      });
+    },
   };
 
   const startSlackBotIfConfigured = createSlackStartupManager({
@@ -766,6 +791,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       slack = bot;
     },
     createBot: (tokens) => createConfiguredSlackBot(tokens, slackAdapterDeps),
+    beforeExplicitTokenReplacement: () => slackMembershipReconciler.clearAllParticipants(),
   });
 
   const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, {
@@ -872,6 +898,9 @@ export async function createServer(config: Config, options?: CreateServerOptions
     queueManager,
     onSlackTokensUpdated: async (tokens) => {
       await startSlackBotIfConfigured(tokens);
+      void slackMembershipReconciler.wake().catch((err) => {
+        logger.warn({ err }, "Slack membership reconciliation failed after token update");
+      });
       if (tokens?.botToken) {
         await ensureSlackConnectorConfig({ db, encryptionKey: config.ENCRYPTION_KEY, logger });
       }
@@ -881,6 +910,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
         await slack.stop();
         slack = null;
       }
+      await slackMembershipReconciler.clearAllParticipants();
       await settingsRepo.update({ slackBotToken: null, slackAppToken: null });
       /**
        * Revoke indexed-channel access in the same gesture instead of waiting
@@ -950,6 +980,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   // 10. Start platforms
   if (connect) {
     await startSlackBotIfConfigured().catch(() => {});
+    if (backgroundWork && externalStartup) slackMembershipReconciler.start();
 
     const whatsappConnected = whatsappBot ? await whatsappBot.start() : (await whatsapp.pairing.status()).connected;
     if (whatsappConnected) {
@@ -983,6 +1014,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       agentScheduler.stop();
       scheduler.stop();
     }
+    await slackMembershipReconciler.stop();
     if (slack) await slack.stop();
     if (whatsappSupervisor) {
       await whatsappSupervisor.shutdown();

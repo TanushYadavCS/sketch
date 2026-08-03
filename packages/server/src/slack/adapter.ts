@@ -49,6 +49,7 @@ import type { createChannelRepository } from "../db/repositories/channels";
 import type { createConversationRepository } from "../db/repositories/conversations";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
+import { createSlackChannelParticipantsRepository } from "../db/repositories/slack-channel-participants";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadSlackFile } from "../files";
@@ -68,7 +69,7 @@ import type { TaskScheduler } from "../scheduler/service";
 import { transcribeEagerAttachments } from "../transcription/service";
 import { resolveVisionConfigFromAppConfig } from "../vision/service";
 import { slackApiCall } from "./api";
-import { SlackBot, type SlackFile, type SlackMessageHandler } from "./bot";
+import { SlackBot, type SlackFile, type SlackMessage, type SlackMessageHandler } from "./bot";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
 import { SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
@@ -79,6 +80,7 @@ type ChannelRepository = ReturnType<typeof createChannelRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 type InboxMessagesRepository = ReturnType<typeof createInboxMessagesRepository>;
 type ConversationRepository = ReturnType<typeof createConversationRepository>;
+type SlackChannelParticipantsRepository = ReturnType<typeof createSlackChannelParticipantsRepository>;
 
 const INLINE_BACKLOG_LIMIT = 10;
 const SLACK_THREAD_CURSOR_SCOPE = "slack_thread";
@@ -141,6 +143,7 @@ export interface SlackAdapterDeps {
     channels: ChannelRepository;
     settings: SettingsRepository;
     conversations: ConversationRepository;
+    slackChannelParticipants?: SlackChannelParticipantsRepository;
   };
   queue: QueueManager;
   slack: {
@@ -153,6 +156,10 @@ export interface SlackAdapterDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
+  onSlackChannelDiscovered?: () => void;
+  recordSlackChannelParticipantJoined?: (channelId: string, slackUserId: string) => Promise<void>;
+  recordSlackChannelParticipantObserved?: (channelId: string, slackUserId: string) => Promise<void>;
+  recordSlackChannelParticipantLeft?: (channelId: string, slackUserId: string) => Promise<void>;
   sendDm: (params: { userId: string; platform: string; message: string }) => Promise<{
     channelId: string;
     messageRef: string;
@@ -299,6 +306,28 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     ...(mode === "socket" ? { appToken: tokens.appToken } : { signingSecret: config.SLACK_SIGNING_SECRET }),
     logger,
   });
+  const slackChannelParticipants = repos.slackChannelParticipants ?? createSlackChannelParticipantsRepository(db);
+  const recordSlackChannelParticipantJoined =
+    deps.recordSlackChannelParticipantJoined ??
+    ((channelId: string, slackUserId: string) => slackChannelParticipants.upsert(channelId, slackUserId));
+  const recordSlackChannelParticipantObserved =
+    deps.recordSlackChannelParticipantObserved ??
+    ((channelId: string, slackUserId: string) => slackChannelParticipants.upsert(channelId, slackUserId));
+  const recordSlackChannelParticipantLeft =
+    deps.recordSlackChannelParticipantLeft ??
+    ((channelId: string, slackUserId: string) => slackChannelParticipants.remove(channelId, slackUserId));
+
+  slackBot.onMemberJoinedChannel(({ channelId, slackUserId }) =>
+    recordSlackChannelParticipantJoined(channelId, slackUserId),
+  );
+  slackBot.onMemberLeftChannel(({ channelId, slackUserId }) =>
+    recordSlackChannelParticipantLeft(channelId, slackUserId),
+  );
+  const recordObservedChannelParticipant = async (message: SlackMessage) => {
+    if (message.userId && message.channelType !== "mpim") {
+      await recordSlackChannelParticipantObserved(message.channelId, message.userId);
+    }
+  };
 
   const resolveUser = (slackUserId: string) =>
     resolveSlackUser(slackUserId, {
@@ -437,10 +466,16 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     displayName?: string | null;
   }) => {
     const { message } = params;
-    const conversation = await repos.conversations.getOrCreate(
-      slackConversationRefForMessage(message),
-      params.displayName,
-    );
+    const conversationRef = slackConversationRefForMessage(message);
+    const existingConversation = await repos.conversations.find(conversationRef);
+    const conversation =
+      existingConversation &&
+      (params.displayName === undefined || params.displayName === existingConversation.display_name)
+        ? existingConversation
+        : await repos.conversations.getOrCreate(conversationRef, params.displayName);
+    if (!existingConversation && conversation.platform === "slack" && conversation.kind === "channel") {
+      deps.onSlackChannelDiscovered?.();
+    }
 
     if (isConversationControlMessage(message.text)) {
       return { conversation, captured: null, inserted: false, omitted: true };
@@ -807,6 +842,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
   // Passive top-level channel message handler
   slackBot.onChannelMessage(async (message) => {
     try {
+      await recordObservedChannelParticipant(message);
       const channel = await ensureChannelRow(message.channelId);
       const workspaceDir = await workspaceDirForChannel(message.channelId);
       const settingsRow = await repos.settings.get();
@@ -866,6 +902,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
   slackBot.onThreadMessage(async (message) => {
     if (!message.threadTs) return;
     try {
+      await recordObservedChannelParticipant(message);
       const channel = await ensureChannelRow(message.channelId);
       const workspaceDir = await workspaceDirForChannel(message.channelId);
       const settingsRow = await repos.settings.get();
@@ -913,6 +950,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
   slackBot.onChannelMention(async (message) => {
     const userId = message.userId;
     if (!userId) return;
+    const participantObservation = recordObservedChannelParticipant(message);
+    void participantObservation.catch(() => undefined);
     const threadTs = message.threadTs ?? message.ts;
     const activeQueueKey = `${message.channelId}:${threadTs}`;
     const mentionQueue = queue.getQueue(activeQueueKey);
@@ -924,6 +963,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       let clearAssistantStatus: (() => Promise<void>) | null = null;
 
       try {
+        await participantObservation;
         user = await resolveUser(userId);
 
         let channel = await ensureChannelRow(message.channelId);
