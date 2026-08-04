@@ -10,6 +10,7 @@ import { AutomationBuilderPage } from "./automation-builder";
 const mocks = vi.hoisted(() => ({
   getAutomation: vi.fn(),
   listConversations: vi.fn(),
+  webChatConversations: vi.fn(),
   loadMessages: vi.fn(),
   navigate: vi.fn(),
   originChatMessages: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
       },
       webChat: {
         messages: mocks.loadMessages,
+        conversations: mocks.webChatConversations,
         interrupt: mocks.interruptChat,
         uploadAttachment: vi.fn(),
         transcribe: vi.fn(),
@@ -273,6 +275,17 @@ describe("AutomationBuilderPage", () => {
       ],
       transcriptAccess: "viewer",
     });
+    mocks.webChatConversations.mockClear();
+    mocks.webChatConversations.mockResolvedValue({
+      conversations: [
+        {
+          id: "chat-alpha",
+          title: "Create an automation",
+          channel: "web",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+    });
     mocks.loadMessages.mockClear();
     mocks.loadMessages.mockResolvedValue({ messages: [], updatedAt: null });
     mocks.originChatMessages.mockResolvedValue({ messages: [] });
@@ -438,6 +451,8 @@ describe("AutomationBuilderPage", () => {
     renderBuilder();
 
     await screen.findByLabelText("Message Sketch");
+    expect(screen.getByText("Create an automation")).toBeInTheDocument();
+    expect(screen.queryByText("chat-alpha")).not.toBeInTheDocument();
     expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha");
     expect(mocks.loadMessages).not.toHaveBeenCalledWith(expect.stringMatching(/^builder-task-123-/));
   });
@@ -476,6 +491,87 @@ describe("AutomationBuilderPage", () => {
         search: { conversationId: "builder-new" },
       }),
     );
+  });
+
+  it("uses viewer-scoped transcript summaries for source and builder chat labels", async () => {
+    mocks.search = {};
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-source",
+          kinds: ["web_chat"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+        {
+          conversationId: "chat-builder",
+          kinds: ["builder"],
+          createdAt: "2026-06-02T00:00:00.000Z",
+          updatedAt: "2026-06-02T00:00:00.000Z",
+          lastActiveAt: "2026-06-02T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
+    mocks.webChatConversations.mockResolvedValue({
+      conversations: [
+        {
+          id: "chat-source",
+          title: "Review the source thread",
+          channel: "web",
+          updatedAt: "2026-06-03T00:00:00.000Z",
+        },
+        {
+          id: "chat-builder",
+          title: "Continue the builder plan",
+          channel: "web",
+          updatedAt: "2026-06-04T00:00:00.000Z",
+        },
+      ],
+    });
+
+    renderBuilder();
+
+    expect(await screen.findByText("Review the source thread")).toBeInTheDocument();
+    expect(screen.getByText("Continue the builder plan")).toBeInTheDocument();
+    expect(screen.queryByText("chat-source")).not.toBeInTheDocument();
+    expect(screen.queryByText("chat-builder")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Source chat").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Builder chat").length).toBeGreaterThan(0);
+    expect(screen.getByText("Jun 3")).toBeInTheDocument();
+    expect(screen.getByText("Jun 4")).toBeInTheDocument();
+  });
+
+  it("uses a generic title and subdued diagnostic ID when a transcript summary is missing", async () => {
+    mocks.search = {};
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-missing-summary",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
+    mocks.webChatConversations.mockResolvedValue({ conversations: [] });
+
+    renderBuilder();
+
+    expect((await screen.findAllByText("Builder chat")).length).toBeGreaterThan(0);
+    const diagnostic = screen.getByText("Conversation chat-missing-summary");
+    expect(diagnostic).toHaveClass("font-mono", "text-muted-foreground/60");
   });
 
   it("selects an older task-scoped chat from the sidechat list", async () => {

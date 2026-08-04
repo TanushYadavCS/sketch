@@ -9,11 +9,13 @@ import {
   type ScheduledTaskConversationSummary,
   type ScheduledTaskConversationsResponse,
   type StepOutput,
+  type WebChatConversationSummary,
   type WebChatUploadedAttachment,
   type WorkflowEdge,
   type WorkflowStep,
   api,
 } from "@/lib/api";
+import { WEB_CHAT_CONVERSATIONS_QUERY_KEY } from "@/lib/web-chat-conversations";
 import { useChat } from "@ai-sdk/react";
 import {
   ArchiveIcon,
@@ -669,6 +671,22 @@ function conversationDateLabel(value: string): string {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
 }
 
+function conversationDisplayTitle(
+  conversation: ScheduledTaskConversationSummary,
+  summary?: WebChatConversationSummary,
+): string {
+  const title = summary?.title.trim();
+  if (title) return title;
+  return conversation.kinds.includes("web_chat") ? "Source chat" : "Builder chat";
+}
+
+function conversationDisplayUpdatedAt(
+  conversation: ScheduledTaskConversationSummary,
+  summary?: WebChatConversationSummary,
+): string {
+  return summary?.updatedAt ?? conversation.lastActiveAt;
+}
+
 function BuilderChatSidecar({
   requestedConversationId,
   taskId,
@@ -689,6 +707,15 @@ function BuilderChatSidecar({
     queryKey: conversationsQueryKey,
     queryFn: () => api.scheduledTasks.conversations(taskId, { includeArchived: true }),
   });
+  const webChatConversationsQuery = useQuery({
+    queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY,
+    queryFn: () => api.webChat.conversations(),
+    staleTime: 30_000,
+  });
+  const webChatSummaryById = useMemo(
+    () => new Map((webChatConversationsQuery.data?.conversations ?? []).map((summary) => [summary.id, summary])),
+    [webChatConversationsQuery.data],
+  );
   const selectedConversation = conversationsQuery.data?.conversations.find(
     (conversation) => conversation.conversationId === requestedConversationId,
   );
@@ -758,6 +785,7 @@ function BuilderChatSidecar({
     >
       <BuilderChatHeader
         conversation={selectedConversation}
+        summary={selectedConversation ? webChatSummaryById.get(selectedConversation.conversationId) : undefined}
         title={title}
         onBack={selectedConversation ? openChatList : undefined}
         onNew={() => createMutation.mutate()}
@@ -777,6 +805,7 @@ function BuilderChatSidecar({
         ) : !requestedConversationId ? (
           <BuilderChatListView
             conversations={conversationsQuery.data.conversations}
+            summaryById={webChatSummaryById}
             onSelect={(conversation) => {
               if (conversation.state === "archived") openConversation(conversation.conversationId);
               else selectMutation.mutate(conversation);
@@ -808,6 +837,7 @@ function BuilderChatSidecar({
 
 function BuilderChatHeader({
   conversation,
+  summary,
   title,
   onBack,
   onNew,
@@ -816,6 +846,7 @@ function BuilderChatHeader({
   archivePending,
 }: {
   conversation?: ScheduledTaskConversationSummary;
+  summary?: WebChatConversationSummary;
   title: string;
   onBack?: () => void;
   onNew: () => void;
@@ -851,8 +882,18 @@ function BuilderChatHeader({
             </Badge>
           </div>
           <p className="truncate text-[12px] text-muted-foreground">
-            {conversation ? `${title} · ${conversation.conversationId}` : title}
+            {conversation ? conversationDisplayTitle(conversation, summary) : title}
           </p>
+          {conversation ? (
+            <p className="truncate text-[11px] text-muted-foreground/75">
+              {title} · {conversationDateLabel(conversationDisplayUpdatedAt(conversation, summary))}
+              {!summary ? (
+                <span className="font-mono text-[10px] text-muted-foreground/60">
+                  {` · Conversation ${conversation.conversationId}`}
+                </span>
+              ) : null}
+            </p>
+          ) : null}
         </div>
         {conversation ? (
           <Button
@@ -884,42 +925,54 @@ function BuilderChatHeader({
 
 function BuilderChatListView({
   conversations,
+  summaryById,
   onSelect,
   selectingConversationId,
 }: {
   conversations: ScheduledTaskConversationSummary[];
+  summaryById: ReadonlyMap<string, WebChatConversationSummary>;
   onSelect: (conversation: ScheduledTaskConversationSummary) => void;
   selectingConversationId: string | null;
 }) {
   const active = conversations.filter((conversation) => conversation.state === "active");
   const archived = conversations.filter((conversation) => conversation.state === "archived");
-  const renderConversation = (conversation: ScheduledTaskConversationSummary) => (
-    <button
-      key={conversation.conversationId}
-      type="button"
-      data-testid={`automation-builder-conversation-${conversation.conversationId}`}
-      className="flex w-full items-start gap-3 rounded-[8px] border border-border bg-card px-3 py-2.5 text-left transition hover:border-brand-accent/40 hover:bg-brand-accent/5 disabled:cursor-wait disabled:opacity-60"
-      onClick={() => onSelect(conversation)}
-      disabled={selectingConversationId !== null}
-    >
-      <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-[7px] border border-border bg-background text-brand-accent">
-        <RobotIcon size={15} weight="fill" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[12px] font-medium text-foreground">{conversation.conversationId}</span>
-          {selectingConversationId === conversation.conversationId ? (
-            <SpinnerGapIcon size={13} className="shrink-0 animate-spin text-muted-foreground" />
+  const renderConversation = (conversation: ScheduledTaskConversationSummary) => {
+    const summary = summaryById.get(conversation.conversationId);
+    return (
+      <button
+        key={conversation.conversationId}
+        type="button"
+        data-testid={`automation-builder-conversation-${conversation.conversationId}`}
+        className="flex w-full items-start gap-3 rounded-[8px] border border-border bg-card px-3 py-2.5 text-left transition hover:border-brand-accent/40 hover:bg-brand-accent/5 disabled:cursor-wait disabled:opacity-60"
+        onClick={() => onSelect(conversation)}
+        disabled={selectingConversationId !== null}
+      >
+        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-[7px] border border-border bg-background text-brand-accent">
+          <RobotIcon size={15} weight="fill" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-[12px] font-medium text-foreground">
+              {conversationDisplayTitle(conversation, summary)}
+            </span>
+            {selectingConversationId === conversation.conversationId ? (
+              <SpinnerGapIcon size={13} className="shrink-0 animate-spin text-muted-foreground" />
+            ) : null}
+          </span>
+          {!summary ? (
+            <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground/60">
+              Conversation {conversation.conversationId}
+            </span>
           ) : null}
+          <span className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span>{conversationSourceLabel(conversation)}</span>
+            <span aria-hidden>·</span>
+            <span>{conversationDateLabel(conversationDisplayUpdatedAt(conversation, summary))}</span>
+          </span>
         </span>
-        <span className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
-          <span>{conversationSourceLabel(conversation)}</span>
-          <span aria-hidden>·</span>
-          <span>{conversationDateLabel(conversation.lastActiveAt)}</span>
-        </span>
-      </span>
-    </button>
-  );
+      </button>
+    );
+  };
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
