@@ -147,8 +147,13 @@ Self-hosted installs can route one-to-one WhatsApp DMs through Wati while keepin
 5. If the Wati account has multiple connected numbers, set `WATI_CHANNEL_PHONE_NUMBER` to the Wati channel number.
 6. In Wati, create one enabled webhook row for `${BASE_URL}/whatsapp/wati/events?token=<WATI_WEBHOOK_TOKEN>`.
 7. Select only the supported Sketch DM events on that row: `Message Received`, `Session Message Sent v2`, `Sent Message is DELIVERED v2`, `Sent Message is READ v2`, and `Session message FAILED`.
+8. In Wati, go to Settings → Team Inbox → General Settings and enable `Show typing indicator to customers`.
 
 Wati allows multiple events on one webhook row, and live testing rejected a second row with the same callback URL. Prefer the v2 status events to avoid duplicate callbacks from the legacy delivery/read event family. Query-token auth is supported because Wati webhook setup may not allow custom Authorization headers; `Authorization: Bearer <token>` and `x-wati-webhook-token` are also accepted when headers are available.
+
+Managed tenants get the same behavior without any Wati configuration: the tenant posts the typing signal to the platform, which forwards it on the shared number.
+
+Wati DM typing is best-effort and one-shot: Sketch sends one indicator request at run start, and Wati auto-dismisses the indicator after about 25 seconds or when the reply arrives, so it may expire before a long run finishes. The request also marks the customer's last incoming message as read (blue ticks). It requires the dashboard setting above plus Wati's tenant-level typing feature gate (contact Wati support if typing requests fail with the setting enabled), and works only for conversations with at least one incoming message. Typing failures never block replies. Baileys group behavior is unchanged.
 
 ##### Wati template mappings
 
