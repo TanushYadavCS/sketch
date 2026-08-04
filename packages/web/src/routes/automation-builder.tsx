@@ -1,6 +1,7 @@
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatThread, type ChatThreadInterruption, type ChatThreadMessage } from "@/components/sketch/chat-thread";
 import {
+  ApiRequestError,
   type AutomationArtifact,
   type AutomationBuilderSaveRequest,
   type AutomationDefinition,
@@ -211,6 +212,81 @@ function saveRequestFromDraft(draft: DraftAutomation): AutomationBuilderSaveRequ
   };
 }
 
+function builderLoadErrorKind(error: unknown): "access" | "server" {
+  if (error instanceof ApiRequestError) {
+    if (error.status === 403 || error.status === 404 || error.code === "FORBIDDEN" || error.code === "NOT_FOUND") {
+      return "access";
+    }
+  }
+  return "server";
+}
+
+function BuilderLoadError({
+  error,
+  onRetry,
+  onClose,
+}: {
+  error: unknown;
+  onRetry: () => void;
+  onClose: () => void;
+}) {
+  const kind = builderLoadErrorKind(error);
+  const isAccessError = kind === "access";
+  return (
+    <main
+      data-testid={`automation-builder-${kind}-error`}
+      role="alert"
+      className="flex min-h-[calc(100vh-3rem)] items-center justify-center bg-background px-6 text-foreground md:min-h-screen"
+    >
+      <div className="w-full max-w-md rounded-[10px] border border-border bg-card p-6 shadow-sm">
+        <div className="flex items-start gap-3">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+            <XCircleIcon size={20} weight="fill" />
+          </span>
+          <div>
+            <h1 className="text-sm font-semibold">
+              {isAccessError ? "Automation unavailable" : "Unable to load automation"}
+            </h1>
+            <p className="mt-1 text-sm leading-5 text-muted-foreground">
+              {isAccessError
+                ? "This automation may have been deleted or you may not have access to it."
+                : "Sketch could not load this automation. Try again or return to the automations list."}
+            </p>
+          </div>
+        </div>
+        <div className="mt-5 flex flex-wrap gap-2">
+          <Button variant="outline" className={canvasToolbarButtonClass} onClick={onRetry}>
+            Try again
+          </Button>
+          <Button variant="ghost" className="h-8 rounded-[7px] text-muted-foreground" onClick={onClose}>
+            Back to automations
+          </Button>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function BuilderOwnership({ automation }: { automation: AutomationDefinition }) {
+  const owner = automation.createdByName?.trim() || automation.createdBy || "Unknown";
+  const editor = automation.lastEditedByName?.trim() || automation.lastEditedBy || "Unknown";
+  return (
+    <div
+      data-testid="automation-builder-ownership"
+      className="pointer-events-auto flex max-w-full flex-wrap items-center gap-x-3 gap-y-0.5 rounded-[8px] border border-border/70 bg-card/90 px-3 py-1.5 text-[11px] shadow-md backdrop-blur"
+    >
+      <span className="truncate text-muted-foreground">
+        Owner <span className="font-medium text-foreground">{owner}</span>
+      </span>
+      {automation.lastEditedBy ? (
+        <span className="truncate text-muted-foreground">
+          Last edited by <span className="font-medium text-foreground">{editor}</span>
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function AutomationBuilderPage() {
   const { taskId } = useParams({ from: automationBuilderRoute.id });
   const navigate = useNavigate();
@@ -338,16 +414,22 @@ export function AutomationBuilderPage() {
     [saveDraftPatch],
   );
 
+  if (automationQuery.isError) {
+    return (
+      <BuilderLoadError
+        error={automationQuery.error}
+        onRetry={() => void automationQuery.refetch()}
+        onClose={() => navigate({ to: "/scheduled-tasks" })}
+      />
+    );
+  }
+
   if (automationQuery.isLoading || !draft || !automationQuery.data) {
     return (
       <div className="flex min-h-[calc(100vh-3rem)] items-center justify-center text-sm text-muted-foreground md:min-h-screen">
         Loading builder...
       </div>
     );
-  }
-
-  if (automationQuery.isError) {
-    return <div className="p-10 text-sm text-destructive">Failed to load automation.</div>;
   }
 
   const automation = automationQuery.data;
@@ -388,6 +470,7 @@ export function AutomationBuilderPage() {
           </div>
 
           <div className="pointer-events-auto ml-auto flex flex-wrap justify-end gap-2">
+            <BuilderOwnership automation={automation} />
             <Button
               size="sm"
               variant="outline"

@@ -661,6 +661,8 @@ describe("Scheduled Tasks API", () => {
       { method: "POST", path: "/api/scheduled-tasks/task-bob/resume" },
       { method: "DELETE", path: "/api/scheduled-tasks/task-bob" },
       { method: "POST", path: "/api/scheduled-tasks/task-bob/run" },
+      { method: "GET", path: "/api/scheduled-tasks/task-bob" },
+      { method: "PUT", path: "/api/scheduled-tasks/task-bob" },
       { method: "GET", path: "/api/scheduled-tasks/task-bob/runs" },
       { method: "GET", path: "/api/scheduled-tasks/task-bob/runs/some-run-id" },
       { method: "GET", path: "/api/scheduled-tasks/task-bob/step-content" },
@@ -974,6 +976,10 @@ describe("Scheduled Tasks API", () => {
     const body = await res.json();
     expect(body.automation).toMatchObject({
       id: "task-builder",
+      createdBy: alice.id,
+      createdByName: "Alice",
+      lastEditedBy: admin.id,
+      lastEditedByName: "admin",
       title: "Daily account brief",
       revision: 1,
       scheduleType: "interval",

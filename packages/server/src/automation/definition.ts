@@ -157,6 +157,8 @@ export function buildAutomationDefinition(params: {
   stepContentRows: StepContentRow[];
   runRows: AutomationRunRow[];
   normalizeScheduleTriggers?: boolean;
+  createdByName?: string | null;
+  lastEditedByName?: string | null;
 }): AutomationDefinition {
   const steps = safeSteps(params.row, params.normalizeScheduleTriggers);
   const edges = safeEdges(params.row, steps);
@@ -186,9 +188,12 @@ export function buildAutomationDefinition(params: {
         ? params.row.status
         : "paused",
     createdBy: params.row.created_by,
+    createdByName: params.createdByName ?? null,
     createdAt: params.row.created_at,
     updatedAt: params.row.updated_at,
     revision: params.row.revision,
+    lastEditedBy: params.row.last_edited_by,
+    lastEditedByName: params.lastEditedByName ?? null,
     title: params.row.title,
     description: params.row.description,
     originChat:

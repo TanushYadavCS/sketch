@@ -1,5 +1,5 @@
 import type { AutomationDefinition } from "@/lib/api";
-import { api } from "@/lib/api";
+import { ApiRequestError, api } from "@/lib/api";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -166,9 +166,12 @@ const automation: AutomationDefinition = {
   lastRunAt: null,
   status: "active",
   createdBy: "user-1",
+  createdByName: "Owner Member",
   createdAt: "2026-06-01T00:00:00.000Z",
   updatedAt: "2026-06-01T00:00:00.000Z",
   revision: 1,
+  lastEditedBy: null,
+  lastEditedByName: null,
   title: "Daily account brief",
   description: "Summarizes account activity every morning.",
   originChat: { platform: "web", conversationId: "chat-alpha", providerThreadId: null, currentMessageId: null },
@@ -324,6 +327,48 @@ describe("AutomationBuilderPage", () => {
     );
   });
 
+  it.each([403, 404])("shows an actionable access state for a %s builder response", async (status) => {
+    mocks.getAutomation.mockRejectedValue(new ApiRequestError("Scheduled task not found", status, "NOT_FOUND"));
+
+    renderBuilder();
+
+    expect(await screen.findByTestId("automation-builder-access-error")).toBeInTheDocument();
+    expect(screen.getByText("Automation unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Loading builder...")).not.toBeInTheDocument();
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Back to automations" }));
+    expect(mocks.navigate).toHaveBeenCalledWith({ to: "/scheduled-tasks" });
+  });
+
+  it("shows a retryable server error instead of an indefinite loading builder", async () => {
+    mocks.getAutomation
+      .mockRejectedValueOnce(new ApiRequestError("Service unavailable", 500, "INTERNAL_SERVER_ERROR"))
+      .mockResolvedValueOnce(automation);
+
+    renderBuilder();
+
+    expect(await screen.findByTestId("automation-builder-server-error")).toBeInTheDocument();
+    expect(screen.getByText("Unable to load automation")).toBeInTheDocument();
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByTestId("automation-builder-canvas")).toBeInTheDocument();
+  });
+
+  it("identifies the foreign owner and acting editor in the builder", async () => {
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      createdBy: "owner-1",
+      createdByName: "Alice Member",
+      lastEditedBy: "admin-1",
+      lastEditedByName: "Karan Admin",
+    });
+
+    renderBuilder();
+
+    const ownership = await screen.findByTestId("automation-builder-ownership");
+    expect(ownership).toHaveTextContent("Owner Alice Member");
+    expect(ownership).toHaveTextContent("Last edited by Karan Admin");
+  });
   it("ignores origin web chat search params when choosing the builder chat", async () => {
     mocks.search = { conversationId: "chat-alpha" };
     renderBuilder();

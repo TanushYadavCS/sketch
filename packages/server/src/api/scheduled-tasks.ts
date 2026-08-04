@@ -395,8 +395,19 @@ export function scheduledTaskRoutes(
   async function loadFullDefinition(row: ScheduledTaskRow) {
     const stepContentRepo = createAutomationStepContentRepository(db);
     const runsRepo = createAutomationRunsRepository(db);
-    const [stepContentRows, runRows] = await Promise.all([stepContentRepo.getByTask(row.id), runsRepo.list(row.id)]);
-    return buildAutomationDefinition({ row, stepContentRows, runRows });
+    const [stepContentRows, runRows, owner, editor] = await Promise.all([
+      stepContentRepo.getByTask(row.id),
+      runsRepo.list(row.id),
+      row.created_by ? users.findById(row.created_by) : Promise.resolve(undefined),
+      row.last_edited_by ? users.findById(row.last_edited_by) : Promise.resolve(undefined),
+    ]);
+    return buildAutomationDefinition({
+      row,
+      stepContentRows,
+      runRows,
+      createdByName: owner?.name ?? null,
+      lastEditedByName: editor?.name ?? null,
+    });
   }
 
   async function hasBrokerCapableProvider(): Promise<boolean> {
