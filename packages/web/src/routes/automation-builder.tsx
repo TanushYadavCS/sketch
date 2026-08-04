@@ -449,7 +449,7 @@ export function AutomationBuilderPage() {
         className="hidden lg:flex"
       />
 
-      <div className="relative min-h-0 min-w-0 flex-1 bg-[#050505] text-white">
+      <div data-testid="automation-builder-canvas" className="relative min-h-0 min-w-0 flex-1 bg-[#050505] text-white">
         <div className="pointer-events-none absolute top-4 left-4 right-4 z-10 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 rounded-[8px] border border-white/10 bg-[#0b0b0b]/88 p-1.5 shadow-[0_10px_34px_rgba(0,0,0,0.34)] backdrop-blur">
             <RunsMenu
