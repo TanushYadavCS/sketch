@@ -116,5 +116,9 @@ export function createScheduledTaskConversationRepository(db: Kysely<DB>) {
 
       return (result.numUpdatedRows ?? 0n) > 0n;
     },
+
+    async deleteByTaskId(taskId: string): Promise<void> {
+      await db.deleteFrom("scheduled_task_conversations").where("task_id", "=", taskId).execute();
+    },
   };
 }

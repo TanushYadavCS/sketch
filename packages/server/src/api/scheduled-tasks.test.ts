@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
 import * as automationRunsModule from "../db/repositories/automation-runs";
+import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createConversationRepository } from "../db/repositories/conversations";
+import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
@@ -1201,11 +1203,19 @@ describe("Scheduled Tasks API", () => {
       status: "active",
       next_run_at: null,
     });
+    await createAutomationRunsRepository(db).create({ taskId: "task-delete" });
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "task-delete",
+      conversationId: "builder-delete",
+      transcriptUserId: alice.id,
+      kind: "builder",
+    });
 
     const scheduler = {
       pauseTask: vi.fn(),
       resumeTask: vi.fn(),
-      removeTask: vi.fn(async (id: string) => tasks.remove(id)),
+      removeTask: vi.fn(),
+      removeTaskRuntime: vi.fn().mockResolvedValue(true),
       executeTaskById: vi.fn(),
     };
     const app = createApp(db, config, { scheduler });
@@ -1218,5 +1228,64 @@ describe("Scheduled Tasks API", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true });
     await expect(tasks.getById("task-delete")).resolves.toBeUndefined();
+    await expect(createAutomationRunsRepository(db).list("task-delete")).resolves.toEqual([]);
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskConversation("task-delete", "builder-delete"),
+    ).resolves.toEqual([]);
+    expect(scheduler.removeTaskRuntime).toHaveBeenCalledWith("task-delete");
+  });
+
+  it("surfaces runtime cleanup failure after committing API deletion", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice@test.com" });
+    for (const id of ["task-delete-false", "task-delete-throw"]) {
+      await tasks.add({
+        id,
+        platform: "whatsapp",
+        context_type: "dm",
+        delivery_target: "alice@s.whatsapp.net",
+        thread_ts: null,
+        prompt: "Delete me",
+        schedule_type: "interval",
+        schedule_value: "3600",
+        timezone: "UTC",
+        session_mode: "fresh",
+        created_by: alice.id,
+        status: "active",
+        next_run_at: null,
+      });
+    }
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      removeTaskRuntime: vi.fn().mockResolvedValueOnce(false).mockRejectedValueOnce(new Error("runtime unavailable")),
+      executeTaskById: vi.fn(),
+    };
+    const app = createApp(db, config, { scheduler });
+    const cookie = await loginAdmin(app);
+
+    const falseResponse = await app.request("/api/scheduled-tasks/task-delete-false", {
+      method: "DELETE",
+      headers: { Cookie: cookie },
+    });
+    expect(falseResponse.status).toBe(503);
+    await expect(falseResponse.json()).resolves.toMatchObject({
+      error: { code: "SCHEDULER_INCONSISTENT" },
+    });
+    await expect(tasks.getById("task-delete-false")).resolves.toBeUndefined();
+
+    const thrownResponse = await app.request("/api/scheduled-tasks/task-delete-throw", {
+      method: "DELETE",
+      headers: { Cookie: cookie },
+    });
+    expect(thrownResponse.status).toBe(503);
+    await expect(thrownResponse.json()).resolves.toMatchObject({
+      error: { code: "SCHEDULER_INCONSISTENT" },
+    });
+    await expect(tasks.getById("task-delete-throw")).resolves.toBeUndefined();
   });
 });

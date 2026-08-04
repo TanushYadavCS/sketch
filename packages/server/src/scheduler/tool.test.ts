@@ -84,6 +84,7 @@ function makeMockScheduler(overrides: Partial<TaskScheduler> = {}): TaskSchedule
     addTask: vi.fn().mockResolvedValue(makeTask()),
     updateTask: vi.fn().mockResolvedValue(makeTask()),
     removeTask: vi.fn().mockResolvedValue(true),
+    removeTaskRuntime: vi.fn().mockResolvedValue(true),
     pauseTask: vi.fn().mockResolvedValue(undefined),
     resumeTask: vi.fn().mockResolvedValue(undefined),
     executeTaskById: vi.fn().mockResolvedValue(undefined),
@@ -667,15 +668,15 @@ describe("handleManageScheduledTasks — remove", () => {
     expect(result.content[0].text).toContain("Error:");
   });
 
-  it("calls scheduler.removeTask and confirms removal", async () => {
+  it("requires canonical persistence before runtime cleanup", async () => {
     const scheduler = makeMockScheduler({ removeTask: vi.fn().mockResolvedValue(true) });
     const result = await handleManageScheduledTasks(
       { action: "remove", task_id: "task-1" },
       { scheduler, stepContentRepo, taskContext: dmContext },
     );
-    expect(scheduler.removeTask).toHaveBeenCalledWith("task-1");
-    expect(result.content[0].text).toContain("task-1");
-    expect(result.content[0].text).toContain("removed");
+    expect(scheduler.removeTask).not.toHaveBeenCalled();
+    expect(scheduler.removeTaskRuntime).not.toHaveBeenCalled();
+    expect(result.content[0].text).toContain("canonical automation persistence is not available");
   });
 });
 

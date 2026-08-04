@@ -802,6 +802,11 @@ export class TaskScheduler {
     return this.repo.remove(id);
   }
 
+  async removeTaskRuntime(id: string): Promise<boolean> {
+    this.unscheduleTask(id);
+    return !this.cronInstances.has(id);
+  }
+
   async pauseTask(id: string): Promise<void> {
     this.unscheduleTask(id);
     await this.repo.updateStatus(id, "paused", { incrementRevision: true });

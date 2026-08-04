@@ -6,7 +6,7 @@ import {
   buildAutomationDefinition,
   parseAutomationBuilderSaveRequest,
 } from "../automation/definition";
-import { replaceAutomationDefinition } from "../automation/persistence";
+import { deleteAutomation, replaceAutomationDefinition } from "../automation/persistence";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
@@ -28,6 +28,7 @@ interface ScheduledTaskMutationDeps {
   pauseTask: (id: string) => Promise<void>;
   resumeTask: (id: string) => Promise<void>;
   removeTask: (id: string) => Promise<boolean>;
+  removeTaskRuntime?: (id: string) => Promise<boolean>;
   executeTaskById: (id: string) => Promise<unknown>;
   refreshTaskSchedule?: (id: string) => Promise<unknown>;
   executeStepById?: (
@@ -595,16 +596,39 @@ export function scheduledTaskRoutes(
 
   routes.delete("/:id", async (c) => {
     const id = c.req.param("id");
-    const result = await loadAccessibleTask(c, id);
-    if ("response" in result) return result.response;
-
-    // Cascade delete runs and step content
-    const runsRepo2 = createAutomationRunsRepository(db);
-    const stepContentRepo = createAutomationStepContentRepository(db);
-    await runsRepo2.deleteByTaskId(id);
-    await stepContentRepo.deleteByTaskId(id);
-
-    await scheduler.removeTask(id);
+    const access = await loadAccessibleTask(c, id);
+    if ("response" in access) return access.response;
+    if (!scheduler.removeTaskRuntime) {
+      return c.json(
+        { error: { code: "SCHEDULER_UNAVAILABLE", message: "Scheduler runtime cleanup is unavailable" } },
+        503,
+      );
+    }
+    const userId = await resolveUserId(c.get("sub"));
+    const deletion = await deleteAutomation({
+      db,
+      taskId: id,
+      actor: { userId, canManageAnyTask: c.get("role") === "admin" },
+      scheduler: { removeTaskRuntime: scheduler.removeTaskRuntime },
+    });
+    if (deletion.kind === "not_found" || deletion.kind === "access_denied") {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    if (deletion.kind === "scheduler_failure") {
+      logger?.error(
+        { err: deletion.error, taskId: id },
+        "scheduled-tasks: database deletion committed before scheduler failure",
+      );
+      return c.json(
+        {
+          error: {
+            code: "SCHEDULER_INCONSISTENT",
+            message: "Automation was deleted from the database, but scheduler cleanup failed.",
+          },
+        },
+        503,
+      );
+    }
     return c.json({ success: true });
   });
 

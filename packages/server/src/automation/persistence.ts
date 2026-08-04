@@ -10,6 +10,7 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import {
   type NewScheduledTask,
   type ScheduledTaskRow,
@@ -79,6 +80,22 @@ export type AutomationMutationResult =
   | { kind: "not_found" }
   | { kind: "access_denied" }
   | { kind: "revision_conflict"; currentRevision: number };
+
+export interface AutomationDeletionScheduler {
+  removeTaskRuntime(taskId: string): Promise<boolean>;
+}
+
+export type AutomationDeletionResult =
+  | { kind: "deleted" }
+  | { kind: "not_found" }
+  | { kind: "access_denied" }
+  | { kind: "scheduler_failure"; error: unknown };
+
+class AutomationDeletionRaceError extends Error {
+  constructor() {
+    super("Automation was deleted concurrently");
+  }
+}
 
 function validatedRequest(request: AutomationBuilderSaveRequest, brokerCapable: boolean): AutomationBuilderSaveRequest {
   const parsed = parseAutomationBuilderSaveRequest(request);
@@ -297,6 +314,62 @@ export async function getAutomationDefinition(params: {
     createAutomationRunsRepository(params.db).list(params.taskId),
   ]);
   return buildAutomationDefinition({ row, stepContentRows, runRows });
+}
+
+/**
+ * Deletes an automation and every persisted task-owned row in one transaction.
+ * The legacy automation tables do not declare task foreign keys, so the dependent
+ * rows are removed explicitly before the task row. Scheduler cleanup is deliberately
+ * post-commit: a scheduler failure is returned as inconsistent runtime state because
+ * the committed database deletion cannot be rolled back. Transcript files are not
+ * part of this operation. A missing task is a deterministic not-found result, so a
+ * retry after a successful delete does not perform another scheduler mutation.
+ */
+export async function deleteAutomation(params: {
+  db: Kysely<DB>;
+  taskId: string;
+  actor: AutomationEditActor;
+  scheduler: AutomationDeletionScheduler;
+}): Promise<AutomationDeletionResult> {
+  let databaseResult: Extract<AutomationDeletionResult, { kind: "deleted" | "not_found" | "access_denied" }>;
+  try {
+    databaseResult = await params.db.transaction().execute(async (trx) => {
+      const current = await trx
+        .selectFrom("scheduled_tasks")
+        .select(["id", "created_by"])
+        .where("id", "=", params.taskId)
+        .executeTakeFirst();
+
+      if (!current) return { kind: "not_found" as const };
+      if (!params.actor.userId || (!params.actor.canManageAnyTask && current.created_by !== params.actor.userId)) {
+        return { kind: "access_denied" as const };
+      }
+
+      await createScheduledTaskConversationRepository(trx).deleteByTaskId(params.taskId);
+      await createAutomationStepContentRepository(trx).deleteByTaskId(params.taskId);
+      await createAutomationRunsRepository(trx).deleteByTaskId(params.taskId);
+
+      const deleted = await trx.deleteFrom("scheduled_tasks").where("id", "=", params.taskId).executeTakeFirst();
+      if (Number(deleted.numDeletedRows ?? 0) === 0) throw new AutomationDeletionRaceError();
+
+      return { kind: "deleted" as const };
+    });
+  } catch (error) {
+    if (error instanceof AutomationDeletionRaceError) return { kind: "not_found" };
+    throw error;
+  }
+
+  if (databaseResult.kind !== "deleted") return databaseResult;
+
+  try {
+    if (!(await params.scheduler.removeTaskRuntime(params.taskId))) {
+      return { kind: "scheduler_failure", error: new Error("Scheduler removal returned false") };
+    }
+  } catch (error) {
+    return { kind: "scheduler_failure", error };
+  }
+
+  return databaseResult;
 }
 
 export async function updateAutomationDefinition(params: {
