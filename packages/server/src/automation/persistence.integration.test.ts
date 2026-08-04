@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createTestPgDb } from "../test-utils";
-import { createAutomationDefinition, replaceAutomationDefinition } from "./persistence";
+import { createAutomationDefinition, replaceAutomationDefinition, updateAutomationDefinition } from "./persistence";
 
 function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
   return {
@@ -189,6 +189,43 @@ describe("automation persistence on Postgres", () => {
       await sql`DROP TRIGGER reject_replacement_content ON automation_step_content`.execute(db);
       await sql`DROP FUNCTION reject_replacement_content()`.execute(db);
     }
+  });
+
+  it("updates full definitions with portable Postgres CAS and content persistence", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("pg-direct-update"),
+      brokerCapable: true,
+    });
+
+    const saved = await updateAutomationDefinition({
+      db,
+      taskId: "pg-direct-update",
+      patch: {
+        expectedRevision: 0,
+        prompt: "Postgres direct update",
+        stepContent: {
+          agent: { contentType: "prompt", content: "Updated portable content", apps: ["linear"] },
+        },
+      },
+      actor: { userId: "pg-owner", canManageAnyTask: false },
+      brokerCapable: true,
+    });
+
+    expect(saved).toMatchObject({ kind: "saved", row: { revision: 1, prompt: "Postgres direct update" } });
+    await expect(createAutomationStepContentRepository(db).getByTask("pg-direct-update")).resolves.toEqual([
+      expect.objectContaining({ content: "Updated portable content", apps: JSON.stringify(["linear"]) }),
+    ]);
+    await expect(
+      updateAutomationDefinition({
+        db,
+        taskId: "pg-direct-update",
+        patch: { expectedRevision: 0, prompt: "Stale Postgres update" },
+        actor: { userId: "pg-owner", canManageAnyTask: false },
+        brokerCapable: true,
+      }),
+    ).resolves.toEqual({ kind: "revision_conflict", currentRevision: 1 });
   });
 
   it("rolls back the task row when Postgres rejects step content", async () => {

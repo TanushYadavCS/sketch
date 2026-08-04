@@ -41,12 +41,12 @@ function parseJson<T>(value: string | null, fallback: T): T {
   }
 }
 
-function safeSteps(row: ScheduledTaskRow): WorkflowStep[] {
+function safeSteps(row: ScheduledTaskRow, normalizeScheduleTriggers = true): WorkflowStep[] {
   const parsed = parseJson<unknown>(row.steps, null);
   if (Array.isArray(parsed)) {
     const result = workflowStepSchema.array().safeParse(parsed);
     if (result.success && result.data.length > 0) {
-      return normalizeTaskTriggerStep(row, result.data);
+      return normalizeScheduleTriggers ? normalizeTaskTriggerStep(row, result.data) : result.data;
     }
   }
   return [
@@ -156,8 +156,9 @@ export function buildAutomationDefinition(params: {
   row: ScheduledTaskRow;
   stepContentRows: StepContentRow[];
   runRows: AutomationRunRow[];
+  normalizeScheduleTriggers?: boolean;
 }): AutomationDefinition {
-  const steps = safeSteps(params.row);
+  const steps = safeSteps(params.row, params.normalizeScheduleTriggers);
   const edges = safeEdges(params.row, steps);
   const delivery = resolveWorkflowDelivery(params.row);
   const recentRuns = params.runRows.map(parseRun);

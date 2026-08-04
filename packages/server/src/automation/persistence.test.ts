@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createTestDb } from "../test-utils";
-import { createAutomationDefinition, replaceAutomationDefinition } from "./persistence";
+import { createAutomationDefinition, replaceAutomationDefinition, updateAutomationDefinition } from "./persistence";
 
 function makeDefinition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
   return {
@@ -332,5 +332,103 @@ describe("automation persistence", () => {
     await expect(createAutomationStepContentRepository(db).getByTask("automation-edit-rollback")).resolves.toEqual([
       expect.objectContaining({ content: "Check activity and summarize changes." }),
     ]);
+  });
+
+  it("updates the complete definition atomically with revision CAS", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-direct-update"),
+      brokerCapable: true,
+    });
+
+    const saved = await updateAutomationDefinition({
+      db,
+      taskId: "automation-direct-update",
+      patch: {
+        expectedRevision: 0,
+        prompt: "Updated prompt",
+        stepContent: {
+          agent: {
+            contentType: "prompt",
+            content: "Updated content",
+            apps: ["linear"],
+          },
+        },
+      },
+      actor: { userId: "user-1", canManageAnyTask: false },
+      brokerCapable: true,
+    });
+
+    expect(saved).toMatchObject({ kind: "saved", row: { revision: 1, prompt: "Updated prompt" } });
+    await expect(createAutomationStepContentRepository(db).getByTask("automation-direct-update")).resolves.toEqual([
+      expect.objectContaining({ content: "Updated content", apps: JSON.stringify(["linear"]) }),
+    ]);
+
+    const conflict = await updateAutomationDefinition({
+      db,
+      taskId: "automation-direct-update",
+      patch: {
+        expectedRevision: 0,
+        prompt: "Stale prompt",
+        stepContent: {
+          agent: { contentType: "prompt", content: "Stale content", apps: null },
+        },
+      },
+      actor: { userId: "user-1", canManageAnyTask: false },
+      brokerCapable: true,
+    });
+
+    expect(conflict).toEqual({ kind: "revision_conflict", currentRevision: 1 });
+    await expect(createScheduledTaskRepository(db).getById("automation-direct-update")).resolves.toMatchObject({
+      prompt: "Updated prompt",
+      revision: 1,
+    });
+    await expect(createAutomationStepContentRepository(db).getByTask("automation-direct-update")).resolves.toEqual([
+      expect.objectContaining({ content: "Updated content" }),
+    ]);
+  });
+
+  it("rolls back direct metadata and content updates together", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-direct-rollback"),
+      brokerCapable: true,
+    });
+    await sql`
+      CREATE TRIGGER reject_direct_update_content
+      BEFORE UPDATE ON automation_step_content
+      BEGIN
+        SELECT RAISE(FAIL, 'direct update rejected');
+      END
+    `.execute(db);
+
+    try {
+      await expect(
+        updateAutomationDefinition({
+          db,
+          taskId: "automation-direct-rollback",
+          patch: {
+            expectedRevision: 0,
+            title: "Must roll back",
+            stepContent: {
+              agent: { contentType: "prompt", content: "Rejected content", apps: null },
+            },
+          },
+          actor: { userId: "user-1", canManageAnyTask: false },
+          brokerCapable: true,
+        }),
+      ).rejects.toThrow("direct update rejected");
+      await expect(createScheduledTaskRepository(db).getById("automation-direct-rollback")).resolves.toMatchObject({
+        title: "Daily account brief",
+        revision: 0,
+      });
+      await expect(createAutomationStepContentRepository(db).getByTask("automation-direct-rollback")).resolves.toEqual([
+        expect.objectContaining({ content: "Check activity and summarize changes." }),
+      ]);
+    } finally {
+      await sql`DROP TRIGGER reject_direct_update_content`.execute(db);
+    }
   });
 });
