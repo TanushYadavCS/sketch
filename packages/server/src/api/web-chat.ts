@@ -19,6 +19,7 @@ import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } f
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
+import { upsertAutomationTaskConversationAssociation } from "../automation/task-conversations";
 import { TOOL_PROGRESS_OPTIONS, type ToolProgressCommand } from "../commands";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -1657,6 +1658,19 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       builderConversationId: conversationId,
       logger: deps.logger,
     });
+    if (automationBuilderContext) {
+      await upsertAutomationTaskConversationAssociation(deps.db, {
+        taskId: automationBuilderContext.task.id,
+        conversationId,
+        transcriptUserId: currentUser.id,
+        kind: "builder",
+      }).catch((err: unknown) => {
+        deps.logger.warn(
+          { err, taskId: automationBuilderContext.task.id, conversationId },
+          "Failed to associate builder chat",
+        );
+      });
+    }
     const taskContext = automationBuilderContext
       ? automationBuilderTaskContext({
           context: automationBuilderContext,

@@ -29,6 +29,7 @@ import { createAuthMiddleware } from "./api/middleware";
 import { productRoutes } from "./api/products";
 import { createProjectRoutes } from "./api/projects";
 import { providerIdentityRoutes } from "./api/provider-identities";
+import { scheduledTaskConversationRoutes } from "./api/scheduled-task-conversations";
 import { scheduledTaskRoutes } from "./api/scheduled-tasks";
 import { settingsRoutes } from "./api/settings";
 import { setupRoutes } from "./api/setup";
@@ -544,6 +545,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       }),
     );
   }
+  app.route("/api/scheduled-tasks", scheduledTaskConversationRoutes(db, { logger }));
   app.route(
     "/api/channels",
     channelRoutes({
