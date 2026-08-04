@@ -72,7 +72,7 @@ import {
   Position,
   ReactFlow,
   ReactFlowProvider,
-  useEdgesState,
+  useNodesInitialized,
   useNodesState,
   useReactFlow,
 } from "@xyflow/react";
@@ -135,26 +135,26 @@ type BuilderWebChatMessage = UIMessage<BuilderWebChatMetadata, BuilderWebChatDat
 };
 
 const canvasToolbarButtonClass =
-  "h-8 rounded-[7px] border-white/10 bg-[#101010]/90 text-white/82 shadow-none backdrop-blur hover:bg-[#1b1b1b] hover:text-white";
+  "h-8 rounded-[7px] border-border/70 bg-card/90 text-foreground/80 shadow-none backdrop-blur hover:bg-muted hover:text-foreground";
 const builderInputClass =
-  "h-10 rounded-[8px] border-white/10 bg-[#101010] text-[13px] text-white shadow-none placeholder:text-white/35 focus-visible:border-brand-accent/55 focus-visible:ring-brand-accent/20";
+  "h-10 rounded-[8px] border-input bg-background text-[13px] text-foreground shadow-none placeholder:text-muted-foreground focus-visible:border-brand-accent/55 focus-visible:ring-brand-accent/20";
 const builderTextareaClass =
-  "rounded-[8px] border-white/10 bg-[#1d1d1b] text-[13px] leading-5 text-white shadow-none placeholder:text-white/35 focus-visible:border-brand-accent/55 focus-visible:ring-brand-accent/20";
+  "rounded-[8px] border-input bg-card text-[13px] leading-5 text-foreground shadow-none placeholder:text-muted-foreground focus-visible:border-brand-accent/55 focus-visible:ring-brand-accent/20";
 const builderReadOnlyInputClass = cn(
   builderInputClass,
-  "cursor-default focus-visible:border-white/10 focus-visible:ring-0",
+  "cursor-default bg-muted/35 focus-visible:border-border focus-visible:ring-0",
 );
 const builderReadOnlyTextareaClass = cn(
   builderTextareaClass,
-  "cursor-default focus-visible:border-white/10 focus-visible:ring-0",
+  "cursor-default bg-muted/35 focus-visible:border-border focus-visible:ring-0",
 );
 const flowEdgeStyle = {
-  stroke: "#5A6587",
+  stroke: "var(--automation-builder-edge)",
   strokeWidth: 1.2,
   opacity: 0.84,
 } satisfies CSSProperties;
 const connectionLineStyle = {
-  stroke: "#6B7DFA",
+  stroke: "var(--automation-builder-edge-active)",
   strokeWidth: 2,
   strokeDasharray: "5 5",
 } satisfies CSSProperties;
@@ -324,19 +324,19 @@ export function AutomationBuilderPage() {
   const runMutation = useMutation({
     mutationFn: () => api.scheduledTasks.run(taskId),
     onSuccess: async () => {
-      toast.success("Automation run started");
+      toast.success("Run requested");
       await queryClient.invalidateQueries({ queryKey });
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Failed to run automation"),
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Could not start the run"),
   });
 
   const testMutation = useMutation({
     mutationFn: (stepId: string) => api.scheduledTasks.testStep(taskId, stepId, { useLatestUpstreamOutput: true }),
     onSuccess: async () => {
-      toast.success("Node test finished");
+      toast.success("Test complete");
       await queryClient.invalidateQueries({ queryKey });
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Node test failed"),
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Test failed"),
   });
 
   const saveDraftPatch = useCallback(
@@ -435,7 +435,7 @@ export function AutomationBuilderPage() {
   if (automationQuery.isLoading || !draft || !automationQuery.data) {
     return (
       <div className="flex min-h-[calc(100vh-3rem)] items-center justify-center text-sm text-muted-foreground md:min-h-screen">
-        Loading builder...
+        Loading automation…
       </div>
     );
   }
@@ -446,20 +446,42 @@ export function AutomationBuilderPage() {
     : automation.latestRun;
   const selectedStep = draft.steps.find((step) => step.id === selectedStepId) ?? null;
   const selectedOutput = selectedStep ? selectedRun?.stepOutputs[selectedStep.id] : undefined;
-  const builderTitle = draft.title?.trim() || draft.prompt;
+  const testingStepId = testMutation.isPending ? (testMutation.variables ?? null) : null;
+  const inferredRunStepId = inferredRunningStepId(
+    draft.steps,
+    draft.edges,
+    selectedRun?.stepOutputs ?? {},
+    selectedRun?.status,
+  );
+  const executingStepId = testingStepId ?? inferredRunStepId;
+  const executionActivity: ExecutionActivity = testingStepId ? "test" : inferredRunStepId ? "run" : null;
+  const selectedStepStatus = selectedStep ? outputStatus(selectedOutput, selectedStep.id === executingStepId) : "idle";
+  const automationTitle = draft.title?.trim() || draft.prompt;
+  const runStateMessage = runMutation.isPending
+    ? "Starting run"
+    : selectedRun?.status === "running"
+      ? "Run in progress"
+      : null;
   return (
     <div className="relative flex h-[calc(100vh-3rem)] min-h-0 overflow-hidden bg-background md:h-screen">
       <BuilderChatSidecar
         requestedConversationId={requestedConversationId ?? null}
         taskId={taskId}
-        title={builderTitle}
+        title={automationTitle}
         queryKey={queryKey}
         className="hidden lg:flex"
       />
 
-      <div data-testid="automation-builder-canvas" className="relative min-h-0 min-w-0 flex-1 bg-[#050505] text-white">
+      <div
+        data-testid="automation-builder-canvas"
+        className="relative min-h-0 min-w-0 flex-1 bg-background text-foreground"
+        aria-busy={runMutation.isPending || selectedRun?.status === "running"}
+      >
         <div className="pointer-events-none absolute top-4 left-4 right-4 z-10 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 rounded-[8px] border border-white/10 bg-[#0b0b0b]/88 p-1.5 shadow-[0_10px_34px_rgba(0,0,0,0.34)] backdrop-blur">
+          <div
+            data-testid="automation-builder-toolbar"
+            className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 rounded-[8px] border border-border/70 bg-card/90 p-1.5 shadow-md backdrop-blur"
+          >
             <RunsMenu
               runs={automation.recentRuns}
               activeRunId={selectedRun?.id ?? null}
@@ -479,6 +501,16 @@ export function AutomationBuilderPage() {
 
           <div className="pointer-events-auto ml-auto flex flex-wrap justify-end gap-2">
             <BuilderOwnership automation={automation} />
+            {runStateMessage ? (
+              <output
+                data-testid="automation-run-state"
+                aria-live="polite"
+                className="inline-flex h-8 items-center rounded-[7px] border border-border/70 bg-card/90 px-2.5 text-[11px] font-medium text-muted-foreground backdrop-blur"
+              >
+                {runMutation.isPending ? <SpinnerGapIcon size={13} className="mr-1.5 animate-spin" /> : null}
+                {runStateMessage}
+              </output>
+            ) : null}
             <Button
               size="sm"
               variant="outline"
@@ -498,7 +530,7 @@ export function AutomationBuilderPage() {
               ) : (
                 <PlayIcon size={14} weight="fill" />
               )}
-              Run
+              {runMutation.isPending ? "Starting…" : "Run"}
             </Button>
           </div>
         </div>
@@ -508,6 +540,7 @@ export function AutomationBuilderPage() {
           selectedStepId={selectedStepId}
           stepOutputs={selectedRun?.stepOutputs ?? {}}
           runStatus={selectedRun?.status}
+          testingStepId={testingStepId}
           onSelectStep={setSelectedStepId}
           onUpdateStepPositions={updateStepPositions}
         />
@@ -518,9 +551,12 @@ export function AutomationBuilderPage() {
         draft={draft}
         step={selectedStep}
         output={selectedOutput}
+        run={selectedRun ?? null}
+        status={selectedStepStatus}
+        executionActivity={selectedStep?.id === executingStepId ? executionActivity : null}
         onClose={() => setSelectedStepId(null)}
         onTest={(stepId) => testMutation.mutate(stepId)}
-        testingStepId={testMutation.variables ?? null}
+        testingStepId={testingStepId}
         onUpdateAgentPrompt={updateAgentPrompt}
         savingPromptStepId={savingPromptStepId}
       />
@@ -660,9 +696,9 @@ function replaceBuilderConversationCache(
 function conversationSourceLabel(conversation: ScheduledTaskConversationSummary): string {
   const hasBuilder = conversation.kinds.includes("builder");
   const hasWebChat = conversation.kinds.includes("web_chat");
-  if (hasBuilder && hasWebChat) return "Builder + source";
-  if (hasWebChat) return "Source chat";
-  return "Builder chat";
+  if (hasBuilder && hasWebChat) return "Source + automation";
+  if (hasWebChat) return "Source";
+  return "Automation";
 }
 
 function conversationDateLabel(value: string): string {
@@ -677,7 +713,7 @@ function conversationDisplayTitle(
 ): string {
   const title = summary?.title.trim();
   if (title) return title;
-  return conversation.kinds.includes("web_chat") ? "Source chat" : "Builder chat";
+  return conversation.kinds.includes("web_chat") ? "Source chat" : "Automation chat";
 }
 
 function conversationDisplayUpdatedAt(
@@ -746,7 +782,7 @@ function BuilderChatSidecar({
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openConversation(conversation.conversationId);
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Failed to start a builder chat"),
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Could not start a chat"),
   });
   const selectMutation = useMutation({
     mutationFn: (conversation: ScheduledTaskConversationSummary) =>
@@ -755,7 +791,7 @@ function BuilderChatSidecar({
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openConversation(conversation.conversationId);
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "This builder chat is unavailable"),
+    onError: (error) => toast.error(error instanceof Error ? error.message : "This chat is unavailable"),
   });
   const archiveMutation = useMutation({
     mutationFn: (conversationId: string) => api.scheduledTasks.archiveConversation(taskId, conversationId, true),
@@ -763,7 +799,7 @@ function BuilderChatSidecar({
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openChatList();
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Failed to archive this builder chat"),
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Could not archive this chat"),
   });
   const restoreMutation = useMutation({
     mutationFn: (conversationId: string) => api.scheduledTasks.archiveConversation(taskId, conversationId, false),
@@ -771,15 +807,16 @@ function BuilderChatSidecar({
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openConversation(conversation.conversationId);
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Failed to restore this builder chat"),
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Could not restore this chat"),
   });
 
   const selectedIsArchived = selectedConversation?.state === "archived";
   return (
     <aside
       data-testid="automation-builder-chat-sidecar"
+      aria-label="Automation chats"
       className={cn(
-        "w-[400px] min-w-[320px] max-w-[600px] shrink-0 resize-x flex-col overflow-hidden border-r border-border bg-background text-foreground",
+        "box-border w-[360px] min-w-[320px] max-w-[440px] shrink-0 resize-x flex-col overflow-hidden border-r border-border/80 bg-background text-foreground",
         className,
       )}
     >
@@ -854,15 +891,16 @@ function BuilderChatHeader({
   onArchive?: () => void;
   archivePending: boolean;
 }) {
+  const conversationTitle = conversation ? conversationDisplayTitle(conversation, summary) : null;
   return (
-    <div className="shrink-0 border-b border-border bg-card px-4 py-3">
-      <div className="flex min-w-0 items-center gap-3">
+    <div className="shrink-0 border-b border-border/80 bg-background/95 px-3 py-3 backdrop-blur">
+      <div className="flex min-w-0 items-center gap-2.5">
         {onBack ? (
           <Button
             size="icon"
             variant="ghost"
-            className="size-8 shrink-0 rounded-[7px] text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="Back to builder chats"
+            className="size-8 shrink-0 rounded-[8px] text-muted-foreground hover:bg-muted/80 hover:text-foreground focus-visible:ring-brand-accent/50"
+            aria-label="Back to chats"
             onClick={onBack}
           >
             <ArrowLeftIcon size={16} />
@@ -873,34 +911,43 @@ function BuilderChatHeader({
           </span>
         )}
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <p className="truncate text-[13px] font-semibold">
-              {conversation ? "Current builder chat" : "Builder chats"}
-            </p>
-            <Badge className="rounded-[5px] border border-border bg-muted px-1.5 py-0 font-mono text-[10px] text-muted-foreground">
-              {conversation ? conversationSourceLabel(conversation) : "Task history"}
-            </Badge>
-          </div>
-          <p className="truncate text-[12px] text-muted-foreground">
-            {conversation ? conversationDisplayTitle(conversation, summary) : title}
-          </p>
           {conversation ? (
-            <p className="truncate text-[11px] text-muted-foreground/75">
-              {title} · {conversationDateLabel(conversationDisplayUpdatedAt(conversation, summary))}
+            <>
+              <div className="flex min-w-0 items-center gap-2">
+                <p
+                  title={conversationTitle ?? undefined}
+                  className="truncate text-[13px] font-semibold leading-5 text-foreground"
+                >
+                  {conversationTitle}
+                </p>
+                <Badge className="shrink-0 rounded-[5px] border border-border/80 bg-muted/60 px-1.5 py-0 font-mono text-[9px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                  {conversationSourceLabel(conversation)}
+                </Badge>
+              </div>
+              <p title={title} className="truncate text-[11px] leading-4 text-muted-foreground">
+                {title} · {conversationDateLabel(conversationDisplayUpdatedAt(conversation, summary))}
+              </p>
               {!summary ? (
-                <span className="font-mono text-[10px] text-muted-foreground/60">
-                  {` · Conversation ${conversation.conversationId}`}
-                </span>
+                <p className="truncate font-mono text-[10px] leading-4 text-muted-foreground/60">
+                  Chat {conversation.conversationId}
+                </p>
               ) : null}
-            </p>
-          ) : null}
+            </>
+          ) : (
+            <>
+              <p className="text-[13px] font-semibold leading-5 text-foreground">Chats</p>
+              <p title={title} className="truncate text-[11px] leading-4 text-muted-foreground">
+                {title}
+              </p>
+            </>
+          )}
         </div>
         {conversation ? (
           <Button
             size="icon"
             variant="ghost"
-            className="size-8 shrink-0 rounded-[7px] text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="Archive builder chat"
+            className="size-8 shrink-0 rounded-[8px] text-muted-foreground hover:bg-muted/80 hover:text-foreground focus-visible:ring-brand-accent/50"
+            aria-label="Archive chat"
             disabled={!onArchive || archivePending}
             onClick={onArchive}
           >
@@ -910,7 +957,7 @@ function BuilderChatHeader({
           <Button
             size="sm"
             variant="outline"
-            className="h-8 shrink-0 gap-1.5 rounded-[7px] border-border/70 bg-card text-[12px] shadow-none"
+            className="h-8 shrink-0 gap-1.5 rounded-[8px] border-border/80 bg-background px-2.5 text-[12px] shadow-none hover:bg-muted/70 focus-visible:ring-brand-accent/50"
             onClick={onNew}
             disabled={newPending}
           >
@@ -938,22 +985,24 @@ function BuilderChatListView({
   const archived = conversations.filter((conversation) => conversation.state === "archived");
   const renderConversation = (conversation: ScheduledTaskConversationSummary) => {
     const summary = summaryById.get(conversation.conversationId);
+    const conversationTitle = conversationDisplayTitle(conversation, summary);
     return (
       <button
         key={conversation.conversationId}
         type="button"
         data-testid={`automation-builder-conversation-${conversation.conversationId}`}
-        className="flex w-full items-start gap-3 rounded-[8px] border border-border bg-card px-3 py-2.5 text-left transition hover:border-brand-accent/40 hover:bg-brand-accent/5 disabled:cursor-wait disabled:opacity-60"
+        aria-label={`Open ${conversation.state === "archived" ? "archived " : ""}chat: ${conversationTitle}`}
+        className="group flex w-full min-w-0 items-start gap-2.5 rounded-[9px] px-2.5 py-2.5 text-left outline-none transition-[background-color,color] hover:bg-muted/70 focus-visible:bg-muted/80 focus-visible:ring-2 focus-visible:ring-brand-accent/55 disabled:cursor-wait disabled:opacity-60"
         onClick={() => onSelect(conversation)}
         disabled={selectingConversationId !== null}
       >
-        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-[7px] border border-border bg-background text-brand-accent">
+        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-[7px] bg-muted/80 text-brand-accent transition-colors group-hover:bg-brand-accent/12">
           <RobotIcon size={15} weight="fill" />
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-[12px] font-medium text-foreground">
-              {conversationDisplayTitle(conversation, summary)}
+            <span title={conversationTitle} className="truncate text-[12px] font-medium leading-5 text-foreground">
+              {conversationTitle}
             </span>
             {selectingConversationId === conversation.conversationId ? (
               <SpinnerGapIcon size={13} className="shrink-0 animate-spin text-muted-foreground" />
@@ -961,13 +1010,15 @@ function BuilderChatListView({
           </span>
           {!summary ? (
             <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground/60">
-              Conversation {conversation.conversationId}
+              Chat {conversation.conversationId}
             </span>
           ) : null}
-          <span className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
-            <span>{conversationSourceLabel(conversation)}</span>
+          <span className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+            <span className="truncate">{conversationSourceLabel(conversation)}</span>
             <span aria-hidden>·</span>
-            <span>{conversationDateLabel(conversationDisplayUpdatedAt(conversation, summary))}</span>
+            <span className="shrink-0">
+              {conversationDateLabel(conversationDisplayUpdatedAt(conversation, summary))}
+            </span>
           </span>
         </span>
       </button>
@@ -975,24 +1026,24 @@ function BuilderChatListView({
   };
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
+    <div className="chat-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-3">
       <div className="flex min-h-full flex-col gap-5">
         <div>
-          <p className="text-[12px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Active chats</p>
+          <p className="px-2.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">Recent</p>
           {active.length > 0 ? (
-            <div className="mt-2 grid gap-2">{active.map(renderConversation)}</div>
+            <div className="mt-1 grid gap-0.5">{active.map(renderConversation)}</div>
           ) : (
-            <div className="mt-2 rounded-[8px] border border-dashed border-border px-3 py-4 text-[12px] leading-5 text-muted-foreground">
-              No active builder chats yet. Start one when you are ready.
+            <div className="mx-2.5 mt-3 border-l border-border pl-3 text-[12px] leading-5 text-muted-foreground">
+              No chats yet. Start one when you are ready.
             </div>
           )}
         </div>
         {archived.length > 0 ? (
           <div>
-            <p className="text-[12px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-              Archived history
+            <p className="px-2.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+              Archived
             </p>
-            <div className="mt-2 grid gap-2">{archived.map(renderConversation)}</div>
+            <div className="mt-1 grid gap-0.5">{archived.map(renderConversation)}</div>
           </div>
         ) : null}
       </div>
@@ -1003,15 +1054,15 @@ function BuilderChatListView({
 function BuilderChatNavigationError({ onRetry }: { onRetry: () => void }) {
   return (
     <div data-testid="automation-builder-chat-error" className="flex min-h-full items-center justify-center px-5 py-6">
-      <div className="w-full rounded-[8px] border border-destructive/30 bg-card p-4">
-        <p className="text-[13px] font-semibold text-foreground">Builder chats unavailable</p>
+      <div className="w-full border-l-2 border-destructive/70 pl-4">
+        <p className="text-[13px] font-semibold text-foreground">Chats unavailable</p>
         <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
           Sketch could not load the task chat history. Your automation is still available.
         </p>
         <Button
           size="sm"
           variant="outline"
-          className="mt-3 h-8 rounded-[7px] border-border/70 bg-card text-[12px] shadow-none"
+          className="mt-3 h-8 rounded-[7px] border-border/70 bg-background text-[12px] shadow-none"
           onClick={onRetry}
         >
           Try again
@@ -1027,7 +1078,7 @@ function BuilderChatUnavailableState({ onBack }: { onBack: () => void }) {
       data-testid="automation-builder-chat-unavailable"
       className="flex min-h-full items-center justify-center px-5 py-6"
     >
-      <div className="w-full rounded-[8px] border border-border bg-card p-4">
+      <div className="w-full border-l border-border pl-4">
         <p className="text-[13px] font-semibold text-foreground">Chat unavailable</p>
         <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
           This chat is not associated with this automation for your account, so its transcript was not opened.
@@ -1035,7 +1086,7 @@ function BuilderChatUnavailableState({ onBack }: { onBack: () => void }) {
         <Button
           size="sm"
           variant="outline"
-          className="mt-3 h-8 rounded-[7px] border-border/70 bg-card text-[12px] shadow-none"
+          className="mt-3 h-8 rounded-[7px] border-border/70 bg-background text-[12px] shadow-none"
           onClick={onBack}
         >
           Back to chats
@@ -1059,7 +1110,7 @@ function BuilderChatArchivedState({
       data-testid="automation-builder-chat-archived"
       className="flex min-h-full items-center justify-center px-5 py-6"
     >
-      <div className="w-full rounded-[8px] border border-border bg-card p-4">
+      <div className="w-full border-l border-border pl-4">
         <p className="text-[13px] font-semibold text-foreground">Chat archived</p>
         <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
           This chat is kept for history but is not active. Restore it explicitly to continue the transcript.
@@ -1077,7 +1128,7 @@ function BuilderChatArchivedState({
           <Button
             size="sm"
             variant="outline"
-            className="h-8 rounded-[7px] border-border/70 bg-card text-[12px] shadow-none"
+            className="h-8 rounded-[7px] border-border/70 bg-background text-[12px] shadow-none"
             onClick={onBack}
           >
             Back to chats
@@ -1219,7 +1270,7 @@ function BuilderChatTranscript({
 
   return (
     <>
-      <div ref={threadScrollRef} className="chat-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5">
+      <div ref={threadScrollRef} className="chat-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-4">
         {!historyReady ? (
           <BuilderChatLoadingState />
         ) : historyLoadError ? (
@@ -1227,7 +1278,7 @@ function BuilderChatTranscript({
             data-testid="automation-builder-transcript-error"
             className="flex min-h-full items-center justify-center"
           >
-            <div className="w-full rounded-[8px] border border-border bg-card p-4">
+            <div className="w-full border-l border-border pl-4">
               <p className="text-[13px] font-semibold text-foreground">Transcript unavailable</p>
               <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
                 This chat is associated with the task, but its transcript could not be loaded.
@@ -1235,7 +1286,7 @@ function BuilderChatTranscript({
               <Button
                 size="sm"
                 variant="outline"
-                className="mt-3 h-8 rounded-[7px] border-border/70 bg-card text-[12px] shadow-none"
+                className="mt-3 h-8 rounded-[7px] border-border/70 bg-background text-[12px] shadow-none"
                 onClick={() => setHistoryLoadAttempt((attempt) => attempt + 1)}
               >
                 Try again
@@ -1254,7 +1305,7 @@ function BuilderChatTranscript({
           />
         )}
       </div>
-      <div className="shrink-0 border-t border-white/10 bg-[#050505] px-3 py-3">
+      <div className="shrink-0 border-t border-border/80 bg-background px-3 py-3">
         <ChatInput
           key={conversationId}
           disabled={!historyReady || Boolean(historyLoadError) || chatBusy}
@@ -1273,10 +1324,10 @@ function BuilderChatTranscript({
 
 function BuilderChatLoadingState() {
   return (
-    <div className="flex min-h-full items-center justify-center px-3 text-[13px] text-white/46">
+    <div className="flex min-h-full items-center justify-center px-3 text-[13px] text-muted-foreground">
       <div className="flex items-center gap-2">
         <SpinnerGapIcon size={15} className="animate-spin" />
-        Loading builder chat
+        Loading chat…
       </div>
     </div>
   );
@@ -1285,14 +1336,14 @@ function BuilderChatLoadingState() {
 function BuilderChatEmptyState({ title, onPrompt }: { title: string; onPrompt: (prompt: string) => void }) {
   return (
     <div className="flex min-h-full items-center justify-center px-1">
-      <div className="w-full max-w-[340px] rounded-[8px] border border-white/10 bg-white/[0.035] p-4">
+      <div className="w-full max-w-[340px] border-l border-brand-accent pl-4">
         <div className="flex items-start gap-3">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-[8px] border border-brand-accent/30 bg-brand-accent/12 text-brand-accent">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-[8px] bg-brand-accent/12 text-brand-accent">
             <RobotIcon size={18} weight="fill" />
           </span>
           <div className="min-w-0">
-            <p className="text-[14px] font-semibold text-white">What should change?</p>
-            <p className="mt-1 line-clamp-2 text-[12px] leading-5 text-white/50">{title}</p>
+            <p className="text-[14px] font-semibold text-foreground">What should change?</p>
+            <p className="mt-1 line-clamp-2 text-[12px] leading-5 text-muted-foreground">{title}</p>
           </div>
         </div>
         <div className="mt-4 grid gap-2">
@@ -1302,7 +1353,7 @@ function BuilderChatEmptyState({ title, onPrompt }: { title: string; onPrompt: (
               <button
                 key={suggestion.label}
                 type="button"
-                className="flex min-h-9 items-center gap-2 rounded-[7px] border border-white/10 bg-[#101010] px-3 text-left text-[12px] font-medium text-white/76 transition hover:border-brand-accent/35 hover:bg-brand-accent/10 hover:text-white"
+                className="flex min-h-9 items-center gap-2 rounded-[7px] px-2 text-left text-[12px] font-medium text-foreground/80 transition hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-accent/55"
                 onClick={() => onPrompt(suggestion.prompt)}
               >
                 <Icon size={14} className="shrink-0 text-brand-accent" />
@@ -1398,20 +1449,63 @@ function flowPosition(
   return shouldUseLayout ? (layoutPositions[step.id] ?? step.position) : step.position;
 }
 
-function outputStatus(
-  output: StepOutput | undefined,
-  runStatus: "running" | "completed" | "failed" | undefined,
-): UiStatus {
-  if (!output) return runStatus === "running" ? "running" : "idle";
+type ExecutionActivity = "run" | "test" | null;
+
+function outputStatus(output: StepOutput | undefined, isExecuting: boolean): UiStatus {
+  if (isExecuting) return "running";
+  if (!output) return "idle";
   if (output.status === "completed") return "success";
   if (output.status === "failed") return "failed";
   return "skipped";
+}
+
+function executionOrder(steps: WorkflowStep[], edges: WorkflowEdge[]): WorkflowStep[] {
+  const executionSteps = steps.filter((step) => step.type !== "trigger");
+  if (edges.length === 0) return executionSteps;
+
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  const indegree = new Map(steps.map((step) => [step.id, 0]));
+  const outgoing = new Map<string, string[]>();
+  for (const edge of edges) {
+    if (!byId.has(edge.from) || !byId.has(edge.to)) continue;
+    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to]);
+    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
+  }
+
+  const queue = steps.filter((step) => (indegree.get(step.id) ?? 0) === 0);
+  const ordered: WorkflowStep[] = [];
+  while (queue.length > 0) {
+    const step = queue.shift();
+    if (!step) continue;
+    ordered.push(step);
+    for (const nextId of outgoing.get(step.id) ?? []) {
+      const nextCount = (indegree.get(nextId) ?? 0) - 1;
+      indegree.set(nextId, nextCount);
+      if (nextCount === 0) {
+        const nextStep = byId.get(nextId);
+        if (nextStep) queue.push(nextStep);
+      }
+    }
+  }
+
+  return ordered.length === steps.length ? ordered.filter((step) => step.type !== "trigger") : executionSteps;
+}
+
+function inferredRunningStepId(
+  steps: WorkflowStep[],
+  edges: WorkflowEdge[],
+  stepOutputs: Record<string, StepOutput>,
+  runStatus: "running" | "completed" | "failed" | undefined,
+): string | null {
+  if (runStatus !== "running") return null;
+  return executionOrder(steps, edges).find((step) => !stepOutputs[step.id])?.id ?? null;
 }
 
 type BuilderNodeData = {
   step: WorkflowStep;
   selected: boolean;
   status: UiStatus;
+  executionActivity: ExecutionActivity;
   visual: StepVisual;
 };
 type BuilderNode = Node<BuilderNodeData>;
@@ -1443,85 +1537,85 @@ const stepVisuals: Record<StepVisualKind, StepVisual> = {
     kind: "schedule-trigger",
     icon: CalendarDotsIcon,
     shape: "notched",
-    toneClass: "border-white/[0.15] bg-[#171717]",
-    glyphClass: "text-white/70",
+    toneClass: "border-border/80 bg-muted/80",
+    glyphClass: "text-muted-foreground",
   },
   "webhook-trigger": {
     kind: "webhook-trigger",
     icon: WebhooksLogoIcon,
     shape: "notched",
-    toneClass: "border-cyan-200/20 bg-[#161818]",
-    glyphClass: "text-cyan-100/75",
+    toneClass: "border-cyan-300/70 bg-cyan-50 dark:border-cyan-300/30 dark:bg-cyan-950/50",
+    glyphClass: "text-cyan-700 dark:text-cyan-200",
   },
   "canvas-trigger": {
     kind: "canvas-trigger",
     icon: GitBranchIcon,
     shape: "notched",
-    toneClass: "border-violet-200/20 bg-[#18161a]",
-    glyphClass: "text-violet-100/75",
+    toneClass: "border-violet-300/70 bg-violet-50 dark:border-violet-300/30 dark:bg-violet-950/50",
+    glyphClass: "text-violet-700 dark:text-violet-200",
   },
   "slack-channel-message-trigger": {
     kind: "slack-channel-message-trigger",
     icon: SlackLogoIcon,
     shape: "notched",
-    toneClass: "border-fuchsia-200/20 bg-[#181618]",
-    glyphClass: "text-fuchsia-100/75",
+    toneClass: "border-fuchsia-300/70 bg-fuchsia-50 dark:border-fuchsia-300/30 dark:bg-fuchsia-950/50",
+    glyphClass: "text-fuchsia-700 dark:text-fuchsia-200",
   },
   agent: {
     kind: "agent",
     icon: RobotIcon,
     shape: "rounded",
-    toneClass: "border-white/[0.15] bg-[#171717]",
-    glyphClass: "text-white/72",
+    toneClass: "border-border/80 bg-card",
+    glyphClass: "text-foreground/80",
   },
   "gmail-action": {
     kind: "gmail-action",
     icon: EnvelopeSimpleIcon,
     shape: "circle",
-    toneClass: "border-red-200/20 bg-[#181515]",
-    glyphClass: "text-red-100/75",
+    toneClass: "border-red-300/70 bg-red-50 dark:border-red-300/30 dark:bg-red-950/50",
+    glyphClass: "text-red-700 dark:text-red-200",
   },
   "sheets-action": {
     kind: "sheets-action",
     icon: TableIcon,
     shape: "circle",
-    toneClass: "border-emerald-200/20 bg-[#141815]",
-    glyphClass: "text-emerald-100/75",
+    toneClass: "border-emerald-300/70 bg-emerald-50 dark:border-emerald-300/30 dark:bg-emerald-950/50",
+    glyphClass: "text-emerald-700 dark:text-emerald-200",
   },
   "slack-action": {
     kind: "slack-action",
     icon: SlackLogoIcon,
     shape: "circle",
-    toneClass: "border-fuchsia-200/20 bg-[#181618]",
-    glyphClass: "text-fuchsia-100/75",
+    toneClass: "border-fuchsia-300/70 bg-fuchsia-50 dark:border-fuchsia-300/30 dark:bg-fuchsia-950/50",
+    glyphClass: "text-fuchsia-700 dark:text-fuchsia-200",
   },
   "whatsapp-action": {
     kind: "whatsapp-action",
     icon: WhatsappLogoIcon,
     shape: "circle",
-    toneClass: "border-green-200/20 bg-[#141815]",
-    glyphClass: "text-green-100/75",
+    toneClass: "border-green-300/70 bg-green-50 dark:border-green-300/30 dark:bg-green-950/50",
+    glyphClass: "text-green-700 dark:text-green-200",
   },
   "google-action": {
     kind: "google-action",
     icon: GoogleLogoIcon,
     shape: "circle",
-    toneClass: "border-blue-200/20 bg-[#15171a]",
-    glyphClass: "text-blue-100/75",
+    toneClass: "border-blue-300/70 bg-blue-50 dark:border-blue-300/30 dark:bg-blue-950/50",
+    glyphClass: "text-blue-700 dark:text-blue-200",
   },
   "web-action": {
     kind: "web-action",
     icon: GlobeHemisphereWestIcon,
     shape: "circle",
-    toneClass: "border-sky-200/20 bg-[#141719]",
-    glyphClass: "text-sky-100/75",
+    toneClass: "border-sky-300/70 bg-sky-50 dark:border-sky-300/30 dark:bg-sky-950/50",
+    glyphClass: "text-sky-700 dark:text-sky-200",
   },
   "code-action": {
     kind: "code-action",
     icon: CodeIcon,
     shape: "circle",
-    toneClass: "border-white/[0.14] bg-[#151515]",
-    glyphClass: "text-white/72",
+    toneClass: "border-border/70 bg-muted/70",
+    glyphClass: "text-foreground/80",
   },
 };
 
@@ -1567,6 +1661,7 @@ function AutomationCanvas({
   selectedStepId,
   stepOutputs,
   runStatus,
+  testingStepId,
   onSelectStep,
   onUpdateStepPositions,
 }: {
@@ -1574,6 +1669,7 @@ function AutomationCanvas({
   selectedStepId: string | null;
   stepOutputs: Record<string, StepOutput>;
   runStatus?: "running" | "completed" | "failed";
+  testingStepId: string | null;
   onSelectStep: (stepId: string | null) => void;
   onUpdateStepPositions: (positions: Record<string, { x: number; y: number }>) => void;
 }) {
@@ -1584,6 +1680,7 @@ function AutomationCanvas({
         selectedStepId={selectedStepId}
         stepOutputs={stepOutputs}
         runStatus={runStatus}
+        testingStepId={testingStepId}
         onSelectStep={onSelectStep}
         onUpdateStepPositions={onUpdateStepPositions}
       />
@@ -1596,6 +1693,7 @@ function AutomationCanvasFlow({
   selectedStepId,
   stepOutputs,
   runStatus,
+  testingStepId,
   onSelectStep,
   onUpdateStepPositions,
 }: {
@@ -1603,12 +1701,31 @@ function AutomationCanvasFlow({
   selectedStepId: string | null;
   stepOutputs: Record<string, StepOutput>;
   runStatus?: "running" | "completed" | "failed";
+  testingStepId: string | null;
   onSelectStep: (stepId: string | null) => void;
   onUpdateStepPositions: (positions: Record<string, { x: number; y: number }>) => void;
 }) {
   const { fitView } = useReactFlow<BuilderNode>();
+  const nodesInitialized = useNodesInitialized();
+  const isDrawerOpen = selectedStepId !== null;
+  const lastFitViewRequestKey = useRef<string | null>(null);
   const layoutPositions = useMemo(() => layoutWorkflowPositions(draft.steps, draft.edges), [draft.edges, draft.steps]);
   const shouldUseLayout = useMemo(() => shouldAutoLayoutWorkflow(draft.steps), [draft.steps]);
+  const inferredRunStepId = useMemo(
+    () => inferredRunningStepId(draft.steps, draft.edges, stepOutputs, runStatus),
+    [draft.edges, draft.steps, runStatus, stepOutputs],
+  );
+  const executingStepId = testingStepId ?? inferredRunStepId;
+  const executionActivity: ExecutionActivity = testingStepId ? "test" : inferredRunStepId ? "run" : null;
+  const topologyKey = useMemo(
+    () =>
+      [
+        draft.steps.map((step) => step.id).join(","),
+        draft.edges.map((edge) => `${edge.from}:${edge.to}`).join(","),
+      ].join("|"),
+    [draft.edges, draft.steps],
+  );
+  const fitViewRequestKey = `${topologyKey}:${isDrawerOpen ? "drawer" : "canvas"}`;
   const initialNodes = useMemo<BuilderNode[]>(
     () =>
       draft.steps.map((step) => ({
@@ -1618,11 +1735,21 @@ function AutomationCanvasFlow({
         data: {
           step,
           selected: step.id === selectedStepId,
-          status: outputStatus(stepOutputs[step.id], runStatus),
+          status: outputStatus(stepOutputs[step.id], step.id === executingStepId),
+          executionActivity: step.id === executingStepId ? executionActivity : null,
           visual: resolveStepVisual(step, draft.stepContent[step.id]),
         },
       })),
-    [draft.stepContent, draft.steps, layoutPositions, runStatus, selectedStepId, shouldUseLayout, stepOutputs],
+    [
+      draft.stepContent,
+      draft.steps,
+      executingStepId,
+      executionActivity,
+      layoutPositions,
+      selectedStepId,
+      shouldUseLayout,
+      stepOutputs,
+    ],
   );
   const initialEdges = useMemo<Edge[]>(
     () =>
@@ -1630,21 +1757,23 @@ function AutomationCanvasFlow({
         id: edge.id,
         source: edge.from,
         target: edge.to,
-        animated: runStatus === "running",
-        className: "automation-builder-edge",
+        animated: edge.to === executingStepId,
+        className: cn("automation-builder-edge", edge.to === executingStepId && "automation-builder-edge-active"),
         interactionWidth: 22,
-        style: flowEdgeStyle,
+        style:
+          edge.to === executingStepId
+            ? { ...flowEdgeStyle, stroke: connectionLineStyle.stroke, strokeWidth: 1.8, opacity: 1 }
+            : flowEdgeStyle,
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          color: flowEdgeStyle.stroke,
+          color: edge.to === executingStepId ? connectionLineStyle.stroke : flowEdgeStyle.stroke,
           width: 16,
           height: 16,
         },
       })),
-    [draft.edges, runStatus],
+    [draft.edges, executingStepId],
   );
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<BuilderNode>(initialNodes);
-  const [edges, setEdges] = useEdgesState(initialEdges);
   const onNodesChange = useCallback(
     (changes: NodeChange<BuilderNode>[]) => {
       onNodesChangeBase(changes.filter((change) => change.type !== "remove" && change.type !== "add"));
@@ -1653,18 +1782,36 @@ function AutomationCanvasFlow({
   );
 
   useEffect(() => setNodes(initialNodes), [initialNodes, setNodes]);
-  useEffect(() => setEdges(initialEdges), [initialEdges, setEdges]);
   useEffect(() => {
+    if (!nodesInitialized || lastFitViewRequestKey.current === fitViewRequestKey) return;
+    lastFitViewRequestKey.current = fitViewRequestKey;
     const frame = window.requestAnimationFrame(() => {
-      void fitView({ padding: selectedStepId ? 0.46 : 0.35, maxZoom: 1.05, duration: 180 });
+      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
+      void fitView({ padding: 0.12, maxZoom: 1.1, duration: reducedMotion ? 0 : 180 });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [fitView, selectedStepId]);
+  }, [fitView, fitViewRequestKey, nodesInitialized]);
+
+  if (draft.steps.length === 0) {
+    return (
+      <div
+        data-testid="automation-builder-empty-canvas"
+        className="flex size-full items-center justify-center bg-background px-6 text-center"
+      >
+        <div className="max-w-sm border-l border-brand-accent pl-4 text-left">
+          <p className="text-sm font-semibold text-foreground">Nothing to run yet</p>
+          <p className="mt-1 text-sm leading-5 text-muted-foreground">
+            Use chat to describe the automation you want to create.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <ReactFlow
       nodes={nodes}
-      edges={edges}
+      edges={initialEdges}
       nodeTypes={nodeTypes}
       onNodesChange={onNodesChange}
       onNodeClick={(_, node) => onSelectStep(node.id)}
@@ -1682,15 +1829,15 @@ function AutomationCanvasFlow({
       nodesDraggable
       nodesConnectable={false}
       edgesReconnectable={false}
-      nodesFocusable={false}
+      nodesFocusable
       edgesFocusable={false}
       deleteKeyCode={null}
       multiSelectionKeyCode={null}
       selectionKeyCode={null}
       fitView
-      fitViewOptions={{ padding: 0.35, maxZoom: 1.05 }}
-      minZoom={0.35}
-      maxZoom={1.6}
+      fitViewOptions={{ padding: 0.12, maxZoom: 1.1 }}
+      minZoom={0.3}
+      maxZoom={1.8}
       snapToGrid
       snapGrid={[18, 18]}
       connectionLineStyle={connectionLineStyle}
@@ -1698,27 +1845,90 @@ function AutomationCanvasFlow({
       proOptions={{ hideAttribution: true }}
       className="automation-builder-flow"
     >
-      <Background variant={BackgroundVariant.Dots} gap={18} size={1.1} color="rgba(255,255,255,0.12)" />
+      <Background variant={BackgroundVariant.Dots} gap={18} size={1.1} color="var(--automation-builder-grid)" />
       <Controls showInteractive={false} position="bottom-left" className="automation-builder-controls" />
     </ReactFlow>
   );
 }
 
-const statusClasses: Record<UiStatus, string> = {
-  idle: "bg-white/42",
-  running: "animate-pulse bg-brand-accent shadow-[0_0_14px_rgba(254,237,1,0.55)]",
-  success: "bg-emerald-400 shadow-[0_0_14px_rgba(52,211,153,0.42)]",
-  failed: "bg-red-400 shadow-[0_0_14px_rgba(248,113,113,0.42)]",
-  skipped: "bg-white/24",
+const statusMarkerClasses: Record<UiStatus, string> = {
+  idle: "border-muted-foreground/70",
+  running: "text-amber-700 dark:text-amber-300",
+  success: "text-emerald-700 dark:text-emerald-300",
+  failed: "text-destructive",
+  skipped: "border-muted-foreground/45",
 };
 
 const nodeAccentClasses: Record<UiStatus, string> = {
-  idle: "from-white/[0.08] to-transparent",
+  idle: "from-muted-foreground/[0.1] to-transparent",
   running: "from-brand-accent/[0.18] to-transparent",
-  success: "from-emerald-400/[0.16] to-transparent",
-  failed: "from-red-400/[0.16] to-transparent",
-  skipped: "from-white/[0.05] to-transparent",
+  success: "from-emerald-500/[0.16] to-transparent",
+  failed: "from-destructive/[0.16] to-transparent",
+  skipped: "from-muted-foreground/[0.06] to-transparent",
 };
+
+function nodeStatusLabel(status: UiStatus, activity: ExecutionActivity): string {
+  if (status === "running") return activity === "test" ? "Testing" : "Running";
+  if (status === "success") return "Succeeded";
+  if (status === "failed") return "Failed";
+  if (status === "skipped") return "Skipped";
+  return "No result";
+}
+
+function StepStatusMarker({ status }: { status: UiStatus }) {
+  if (status === "failed") {
+    return (
+      <span
+        aria-hidden
+        data-testid="automation-node-status-marker"
+        className={cn(
+          "absolute -top-2 -right-2 z-20 flex size-[18px] items-center justify-center bg-transparent drop-shadow-sm",
+          statusMarkerClasses.failed,
+        )}
+      >
+        <XCircleIcon size={18} weight="fill" />
+      </span>
+    );
+  }
+  if (status === "success") {
+    return (
+      <span
+        aria-hidden
+        data-testid="automation-node-status-marker"
+        className={cn(
+          "absolute -top-2 -right-2 z-20 flex size-[18px] items-center justify-center bg-transparent drop-shadow-sm",
+          statusMarkerClasses.success,
+        )}
+      >
+        <CheckCircleIcon size={18} weight="fill" />
+      </span>
+    );
+  }
+  if (status === "running") {
+    return (
+      <span
+        aria-hidden
+        data-testid="automation-node-status-marker"
+        className={cn(
+          "absolute -top-2 -right-2 z-20 flex size-[18px] items-center justify-center bg-transparent drop-shadow-sm",
+          statusMarkerClasses.running,
+        )}
+      >
+        <SpinnerGapIcon size={17} className="animate-spin" />
+      </span>
+    );
+  }
+  return (
+    <span
+      aria-hidden
+      data-testid="automation-node-status-marker"
+      className={cn(
+        "absolute -top-[5px] left-1/2 z-20 size-[8px] -translate-x-1/2 rounded-full border-2 bg-transparent ring-[2px] ring-background",
+        statusMarkerClasses[status],
+      )}
+    />
+  );
+}
 
 function StepShape({ visual, selected, status }: { visual: StepVisual; selected: boolean; status: UiStatus }) {
   const Icon = visual.icon;
@@ -1729,15 +1939,18 @@ function StepShape({ visual, selected, status }: { visual: StepVisual; selected:
   return (
     <div className="relative size-[46px]">
       <div
+        data-testid="automation-node-shell"
         className={cn(
-          "automation-node-shell relative flex size-full items-center justify-center overflow-hidden border text-white/70 shadow-[0_10px_22px_rgba(0,0,0,0.34)] transition-[border-color,background-color,box-shadow,transform]",
-          "before:absolute before:inset-0 before:bg-linear-to-br before:from-white/[0.045] before:to-transparent before:content-['']",
+          "automation-node-shell relative flex size-full items-center justify-center overflow-hidden border text-foreground/75 shadow-lg transition-[border-color,background-color,box-shadow,transform]",
+          "before:absolute before:inset-0 before:bg-linear-to-br before:from-foreground/[0.045] before:to-transparent before:content-['']",
           visual.toneClass,
           nodeAccentClasses[status],
+          status === "running" && "automation-node-running",
+          status === "failed" && "automation-node-failed",
           visual.shape === "notched" ? "rounded-[9px]" : visual.shape === "circle" ? "rounded-full" : "rounded-[11px]",
           selected
-            ? "border-white/46 bg-[#1c1c1c] text-white shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_14px_30px_rgba(0,0,0,0.46)]"
-            : "hover:border-white/24 hover:bg-[#1b1b1b] hover:text-white/86",
+            ? "border-brand-accent/70 bg-accent text-foreground shadow-md ring-2 ring-brand-accent/20"
+            : "hover:border-foreground/30 hover:bg-muted/80 hover:text-foreground",
         )}
         style={triggerShape}
       >
@@ -1747,19 +1960,21 @@ function StepShape({ visual, selected, status }: { visual: StepVisual; selected:
           className={cn("relative z-10", visual.glyphClass)}
         />
       </div>
-      <span
-        className={cn(
-          "absolute -top-[4px] left-1/2 z-20 size-[6px] -translate-x-1/2 rounded-full ring-[2px] ring-[#050505]",
-          statusClasses[status],
-        )}
-      />
+      <StepStatusMarker status={status} />
     </div>
   );
 }
 
 function BuilderStepNode({ data, isConnectable }: NodeProps<BuilderNode>) {
+  const statusLabel = nodeStatusLabel(data.status, data.executionActivity);
   return (
-    <div className="group/node flex w-[150px] select-none flex-col items-center gap-2">
+    <div
+      data-testid={`automation-node-${data.step.id}`}
+      data-state={data.status}
+      data-execution-activity={data.executionActivity ?? undefined}
+      aria-label={`${data.step.label}: ${statusLabel}`}
+      className="group/node flex w-[164px] select-none flex-col items-center gap-2"
+    >
       <div className="relative">
         {data.step.type !== "trigger" ? (
           <Handle
@@ -1777,9 +1992,13 @@ function BuilderStepNode({ data, isConnectable }: NodeProps<BuilderNode>) {
           className="automation-builder-handle !right-[-4px]"
         />
       </div>
-      <span className="line-clamp-1 max-w-[150px] text-center text-[11px] font-semibold leading-4 text-white/74 transition-colors group-hover/node:text-white/88">
+      <span
+        title={data.step.label}
+        className="line-clamp-2 max-w-[164px] text-center text-[11px] font-semibold leading-4 text-foreground/80 transition-colors group-hover/node:text-foreground"
+      >
         {data.step.label}
       </span>
+      <span className="sr-only">{statusLabel}</span>
     </div>
   );
 }
@@ -1803,7 +2022,7 @@ function RunsMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button size="sm" variant="outline" className={cn(canvasToolbarButtonClass, "gap-1.5 text-white/68")}>
+        <Button size="sm" variant="outline" className={cn(canvasToolbarButtonClass, "gap-1.5 text-foreground/75")}>
           {activeRunId ? <EyeIcon size={14} weight="fill" /> : <CaretDownIcon size={13} />}
           {activeRunId && active ? `Viewing · ${formatRunDate(active.startedAt)}` : `Runs · ${runs.length}`}
         </Button>
@@ -1834,7 +2053,7 @@ function RunsMenu({
 function RunIcon({ status }: { status: string }) {
   if (status === "running") return <SpinnerGapIcon size={15} className="animate-spin text-muted-foreground" />;
   if (status === "failed") return <XCircleIcon size={15} weight="fill" className="text-destructive" />;
-  return <CheckCircleIcon size={15} weight="fill" className="text-emerald-500" />;
+  return <CheckCircleIcon size={15} weight="fill" className="text-emerald-700 dark:text-emerald-300" />;
 }
 
 function formatRunDate(value: string): string {
@@ -1852,6 +2071,9 @@ function NodeDrawer({
   draft,
   step,
   output,
+  run,
+  status,
+  executionActivity,
   onClose,
   onTest,
   testingStepId,
@@ -1861,6 +2083,9 @@ function NodeDrawer({
   draft: DraftAutomation;
   step: WorkflowStep | null;
   output?: StepOutput;
+  run: AutomationDefinition["latestRun"];
+  status: UiStatus;
+  executionActivity: ExecutionActivity;
   onClose: () => void;
   onTest: (stepId: string) => void;
   testingStepId: string | null;
@@ -1872,32 +2097,38 @@ function NodeDrawer({
 
   if (!step) return null;
   const content = draft.stepContent[step.id];
+  const isTesting = testingStepId === step.id;
 
   return (
-    <aside className="absolute inset-y-0 right-0 z-30 flex h-full max-h-full w-full max-w-[392px] min-w-0 flex-col overflow-hidden border-l border-white/10 bg-[#050505] text-white shadow-xl xl:relative xl:inset-auto xl:z-auto xl:w-[392px] xl:min-w-[350px] xl:max-w-[540px] xl:resize-x xl:shadow-none">
-      <div className="shrink-0 border-b border-white/10 px-4 pt-4 pb-3">
+    <aside
+      data-testid="automation-builder-drawer"
+      aria-label={`${step.label} details`}
+      className="absolute inset-y-0 right-0 z-30 flex h-full max-h-full w-full max-w-[392px] min-w-0 flex-col overflow-hidden border-l border-border/80 bg-background text-foreground shadow-xl xl:relative xl:inset-auto xl:z-auto xl:w-[392px] xl:min-w-[350px] xl:max-w-[540px] xl:resize-x xl:shadow-none"
+    >
+      <div className="shrink-0 border-b border-border/80 px-4 pt-4 pb-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate text-[17px] font-semibold leading-6 text-white">{step.label}</h2>
+            <h2 className="truncate text-[17px] font-semibold leading-6 text-foreground">{step.label}</h2>
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <Badge className="rounded-[5px] border border-white/10 bg-white/[0.06] font-mono text-[10px] uppercase tracking-[0.08em] text-white/62">
+              <Badge className="rounded-[5px] border border-border bg-muted font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
                 {step.type}
               </Badge>
-              <StatusBadge output={output} />
+              <StatusBadge output={output} status={status} executionActivity={executionActivity} />
             </div>
           </div>
           <Button
             variant="ghost"
             size="icon"
-            className="size-7 rounded-[6px] text-white/55 hover:bg-white/[0.08] hover:text-white"
+            className="size-7 rounded-[6px] text-muted-foreground hover:bg-muted hover:text-foreground"
             onClick={onClose}
             aria-label="Close drawer"
           >
             <XIcon size={14} />
           </Button>
         </div>
-        <div className="mt-4 flex items-center justify-between border-t border-white/10 pt-3">
-          <div className="flex gap-5">
+        <NodeRunSummary run={run} output={output} status={status} executionActivity={executionActivity} />
+        <div className="mt-4 flex items-center justify-between border-t border-border/80 pt-3">
+          <div role="tablist" aria-label="Node details" className="flex gap-5">
             <TabButton active={tab === "input"} onClick={() => setTab("input")}>
               Input
             </TabButton>
@@ -1908,16 +2139,13 @@ function NodeDrawer({
           <Button
             size="sm"
             variant="secondary"
-            className="h-7 gap-1.5 rounded-[6px] bg-white/[0.08] font-mono text-[11px] uppercase tracking-[0.08em] text-white/72 shadow-none hover:bg-white/[0.12] hover:text-white"
-            disabled={testingStepId === step.id}
+            className="h-7 gap-1.5 rounded-[6px] bg-muted font-mono text-[11px] uppercase tracking-[0.08em] text-foreground/75 shadow-none hover:bg-accent hover:text-accent-foreground"
+            disabled={isTesting}
+            aria-busy={isTesting}
             onClick={() => onTest(step.id)}
           >
-            {testingStepId === step.id ? (
-              <SpinnerGapIcon size={13} className="animate-spin" />
-            ) : (
-              <PlayIcon size={13} weight="fill" />
-            )}
-            Test
+            {isTesting ? <SpinnerGapIcon size={13} className="animate-spin" /> : <PlayIcon size={13} weight="fill" />}
+            {isTesting ? "Testing…" : "Test"}
           </Button>
         </div>
       </div>
@@ -1932,7 +2160,7 @@ function NodeDrawer({
             savingPrompt={savingPromptStepId === step.id}
           />
         ) : (
-          <OutputPanel output={output} />
+          <OutputPanel output={output} status={status} executionActivity={executionActivity} />
         )}
       </div>
     </aside>
@@ -1944,9 +2172,11 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
     <button
       type="button"
       onClick={onClick}
+      role="tab"
+      aria-selected={active}
       className={cn(
-        "font-mono text-[12px] font-semibold uppercase tracking-[0.1em] transition-colors",
-        active ? "text-white" : "text-white/42 hover:text-white/70",
+        "font-mono text-[12px] font-semibold uppercase tracking-[0.1em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-accent/55",
+        active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
       )}
     >
       {children}
@@ -1954,23 +2184,76 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
   );
 }
 
-function StatusBadge({ output }: { output?: StepOutput }) {
+function StatusBadge({
+  output,
+  status,
+  executionActivity,
+}: {
+  output?: StepOutput;
+  status: UiStatus;
+  executionActivity: ExecutionActivity;
+}) {
+  if (status === "running") {
+    return (
+      <Badge className="gap-1 rounded-[5px] border border-brand-accent/35 bg-brand-accent/10 text-foreground">
+        <SpinnerGapIcon size={12} className="animate-spin" />
+        {executionActivity === "test" ? "Testing" : "Running"}
+      </Badge>
+    );
+  }
   if (!output) {
-    return <Badge className="rounded-[5px] border border-white/10 bg-white/[0.04] text-white/52">Idle</Badge>;
+    return <Badge className="rounded-[5px] border border-border bg-muted/60 text-muted-foreground">No result</Badge>;
   }
   if (output.status === "completed")
     return (
-      <Badge className="rounded-[5px] border border-emerald-400/15 bg-emerald-400/12 text-emerald-300">
+      <Badge className="rounded-[5px] border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
         Succeeded · {formatDuration(output.duration_ms)}
       </Badge>
     );
   if (output.status === "failed")
     return (
-      <Badge className="rounded-[5px] border border-red-400/15 bg-red-400/12 text-red-300">
+      <Badge className="rounded-[5px] border border-destructive/30 bg-destructive/10 text-destructive">
         Failed · {formatDuration(output.duration_ms)}
       </Badge>
     );
-  return <Badge className="rounded-[5px] border border-white/10 bg-white/[0.04] text-white/52">Skipped</Badge>;
+  return <Badge className="rounded-[5px] border border-border bg-muted text-muted-foreground">Skipped</Badge>;
+}
+
+function NodeRunSummary({
+  run,
+  output,
+  status,
+  executionActivity,
+}: {
+  run: AutomationDefinition["latestRun"];
+  output?: StepOutput;
+  status: UiStatus;
+  executionActivity: ExecutionActivity;
+}) {
+  if (status === "running") {
+    const copy =
+      executionActivity === "test"
+        ? "Testing this node. The result will update when the test finishes."
+        : run
+          ? `Run started ${formatRunDate(run.startedAt)}. Results will appear when this node finishes.`
+          : "This node is running. Results will appear when it finishes.";
+    return (
+      <output
+        data-testid="automation-node-execution-summary"
+        aria-live="polite"
+        className="mt-3 block text-[11px] leading-4 text-muted-foreground"
+      >
+        {copy}
+      </output>
+    );
+  }
+  if (!output || !run) return null;
+  const timestamp = run.completedAt ?? run.startedAt;
+  return (
+    <p className="mt-3 text-[11px] leading-4 text-muted-foreground">
+      Latest result · {formatRunDate(timestamp)} · {formatDuration(output.duration_ms)}
+    </p>
+  );
 }
 
 function formatDuration(ms: number): string {
@@ -2103,35 +2386,59 @@ function TriggerFields({ draft }: { draft: DraftAutomation }) {
 function Field({ label, children, grow = false }: { label: string; children: ReactNode; grow?: boolean }) {
   return (
     <div className={cn("space-y-2", grow && "flex min-h-0 flex-1 flex-col")}>
-      <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-white/42">{label}</span>
+      <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+        {label}
+      </span>
       {children}
     </div>
   );
 }
 
-function OutputPanel({ output }: { output?: StepOutput }) {
+function OutputPanel({
+  output,
+  status,
+  executionActivity,
+}: {
+  output?: StepOutput;
+  status: UiStatus;
+  executionActivity: ExecutionActivity;
+}) {
+  const activeNotice =
+    status === "running"
+      ? executionActivity === "test"
+        ? "Testing this node. The latest saved result remains below until the test finishes."
+        : "This node is running. Results will appear here when it finishes."
+      : null;
   if (!output) {
     return (
-      <div className="rounded-[8px] border border-dashed border-white/14 bg-white/[0.03] p-4 text-sm text-white/52">
-        No output yet. Run the automation or test this node.
-      </div>
+      <output
+        aria-live={activeNotice ? "polite" : undefined}
+        className="block rounded-[8px] border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground"
+      >
+        {activeNotice ?? "No output yet. Run the automation or test this node."}
+      </output>
     );
   }
-  if (output.error) {
-    return (
-      <pre className="max-w-full overflow-x-hidden whitespace-pre-wrap break-words rounded-[8px] border border-red-400/25 bg-red-400/8 p-3 font-mono text-xs text-red-200 [overflow-wrap:anywhere]">
-        {output.error.message}
-      </pre>
-    );
-  }
-  if (output.output == null || output.output === "") {
-    return (
-      <div className="rounded-[8px] border border-white/10 bg-white/[0.04] p-4 text-sm text-white/52">
-        No output returned.
-      </div>
-    );
-  }
-  return <JsonOutput value={output.output} />;
+  return (
+    <div className="space-y-3">
+      {activeNotice ? (
+        <output className="block rounded-[8px] border border-brand-accent/25 bg-brand-accent/8 p-3 text-[12px] leading-5 text-muted-foreground">
+          {activeNotice}
+        </output>
+      ) : null}
+      {output.error ? (
+        <pre className="max-w-full overflow-x-hidden whitespace-pre-wrap break-words rounded-[8px] border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive [overflow-wrap:anywhere]">
+          {output.error.message}
+        </pre>
+      ) : output.output == null || output.output === "" ? (
+        <div className="rounded-[8px] border border-border bg-muted/20 p-4 text-sm text-muted-foreground">
+          No output returned.
+        </div>
+      ) : (
+        <JsonOutput value={output.output} />
+      )}
+    </div>
+  );
 }
 
 function JsonOutput({ value }: { value: unknown }) {
@@ -2147,15 +2454,20 @@ function JsonOutput({ value }: { value: unknown }) {
   }
   const canTree = parsed !== null && typeof parsed === "object";
   return (
-    <div className="flex min-h-[320px] flex-col overflow-hidden rounded-[8px] border border-white/10 bg-[#101010]">
-      <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
-        <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-white/42">Output</span>
+    <div
+      data-testid="automation-builder-output"
+      className="flex min-h-[320px] flex-col overflow-hidden rounded-[8px] border border-border bg-card"
+    >
+      <div className="flex items-center justify-between border-b border-border px-3 py-2">
+        <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+          Output
+        </span>
         <div className="flex items-center gap-1">
           {canTree ? (
             <Button
               variant="ghost"
               size="icon"
-              className="size-7 rounded-[6px] text-white/55 hover:bg-white/[0.08] hover:text-white"
+              className="size-7 rounded-[6px] text-muted-foreground hover:bg-muted hover:text-foreground"
               onClick={() => setRaw((current) => !current)}
               aria-label="Toggle output view"
             >
@@ -2165,7 +2477,7 @@ function JsonOutput({ value }: { value: unknown }) {
           <Button
             variant="ghost"
             size="icon"
-            className="size-7 rounded-[6px] text-white/55 hover:bg-white/[0.08] hover:text-white"
+            className="size-7 rounded-[6px] text-muted-foreground hover:bg-muted hover:text-foreground"
             onClick={() => void navigator.clipboard.writeText(text)}
             aria-label="Copy output"
           >
@@ -2173,7 +2485,7 @@ function JsonOutput({ value }: { value: unknown }) {
           </Button>
         </div>
       </div>
-      <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-xs text-white/78 [overflow-wrap:anywhere]">
+      <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-xs text-foreground/80 [overflow-wrap:anywhere]">
         {canTree && !raw ? JSON.stringify(parsed, null, 2) : text}
       </pre>
     </div>

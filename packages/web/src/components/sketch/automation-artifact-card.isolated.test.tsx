@@ -36,9 +36,9 @@ describe("AutomationArtifactCard", () => {
 
     expect(screen.getByText("Daily account brief")).toBeInTheDocument();
     expect(screen.getByText("ClickUp")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Continue in builder" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Continue in builder" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(mocks.navigate).toHaveBeenCalledWith({
       to: "/scheduled-tasks/$taskId/edit",
       params: { taskId: "task-123" },
@@ -57,7 +57,7 @@ describe("AutomationArtifactCard", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Continue in builder" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
 
     expect(mocks.navigate).toHaveBeenCalledWith({
       to: "/scheduled-tasks/$taskId/edit",

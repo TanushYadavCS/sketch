@@ -92,27 +92,38 @@ vi.mock("sonner", () => ({
 vi.mock("@xyflow/react", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
   return {
-    Background: () => null,
+    Background: ({ color }: { color?: string }) => <div data-testid="automation-background" data-color={color} />,
     BackgroundVariant: { Dots: "dots" },
-    Controls: () => null,
+    Controls: ({ className }: { className?: string }) => (
+      <div data-testid="automation-controls" className={className} />
+    ),
     Handle: () => null,
     Position: { Left: "left", Right: "right" },
     ReactFlowProvider: ({ children }: { children: ReactNode }) => <div>{children}</div>,
     ReactFlow: ({
       nodes,
+      nodeTypes,
       edges,
       nodesDraggable,
       nodesConnectable,
+      nodesFocusable,
       edgesReconnectable,
       deleteKeyCode,
       onNodeClick,
       onNodeDragStop,
       children,
     }: {
-      nodes: Array<{ id: string; position: { x: number; y: number }; data: { step: { label: string } } }>;
-      edges?: Array<{ type?: string }>;
+      nodes: Array<{
+        id: string;
+        type?: string;
+        position: { x: number; y: number };
+        data: { step: { label: string }; [key: string]: unknown };
+      }>;
+      nodeTypes?: Record<string, React.ComponentType<{ data: { step: { label: string } }; isConnectable?: boolean }>>;
+      edges?: Array<{ id?: string; type?: string; animated?: boolean }>;
       nodesDraggable?: boolean;
       nodesConnectable?: boolean;
+      nodesFocusable?: boolean;
       edgesReconnectable?: boolean;
       deleteKeyCode?: string | string[] | null;
       onNodeClick?: (event: unknown, node: { id: string; data: { step: { label: string } } }) => void;
@@ -126,13 +137,18 @@ vi.mock("@xyflow/react", async () => {
         data-testid="automation-flow"
         data-nodes-draggable={String(nodesDraggable)}
         data-nodes-connectable={String(nodesConnectable)}
+        data-nodes-focusable={String(nodesFocusable)}
         data-edges-reconnectable={String(edgesReconnectable)}
         data-delete-key-code={String(deleteKeyCode)}
         data-edge-types={(edges ?? []).map((edge) => edge.type ?? "default").join(",")}
+        data-edge-animations={(edges ?? []).map((edge) => `${edge.id ?? ""}:${Boolean(edge.animated)}`).join("|")}
         data-node-positions={nodes.map((node) => `${node.id}:${node.position.x},${node.position.y}`).join("|")}
       >
         {nodes.map((node) => (
           <div key={node.id}>
+            {node.type && nodeTypes?.[node.type]
+              ? React.createElement(nodeTypes[node.type], { data: node.data, isConnectable: false })
+              : null}
             <button type="button" onClick={(event) => onNodeClick?.(event, node)}>
               {node.data.step.label}
             </button>
@@ -157,6 +173,7 @@ vi.mock("@xyflow/react", async () => {
       const [nodes, setNodes] = React.useState(initialNodes);
       return [nodes, setNodes, vi.fn()];
     },
+    useNodesInitialized: () => true,
     useReactFlow: () => ({ fitView: vi.fn() }),
   };
 });
@@ -240,6 +257,29 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+function automationWithStepOutput(output: string): AutomationDefinition {
+  const run: NonNullable<AutomationDefinition["latestRun"]> = {
+    id: `run-${output}`,
+    taskId: automation.id,
+    triggerData: null,
+    status: "completed",
+    stepOutputs: {
+      check: { output, status: "completed", duration_ms: 10 },
+    },
+    errorMessage: null,
+    startedAt: "2026-06-01T00:00:00.000Z",
+    completedAt: "2026-06-01T00:00:01.000Z",
+  };
+  return { ...automation, latestRun: run, recentRuns: [run] };
+}
+
+const stepTestFailures = [
+  ["ordinary failure", () => new Error("Node test failed")],
+  ["timeout", () => Object.assign(new Error("Node test timed out"), { name: "TimeoutError" })],
+  ["interruption", () => Object.assign(new Error("Node test interrupted"), { name: "AbortError" })],
+  ["malformed response", () => new TypeError("Malformed step-test response")],
+] as const;
 
 function renderBuilder() {
   const queryClient = new QueryClient({
@@ -390,8 +430,8 @@ describe("AutomationBuilderPage", () => {
     renderBuilder();
 
     await screen.findByLabelText("Message Sketch");
-    expect(screen.getByText("Current builder chat")).toBeInTheDocument();
-    expect(screen.getByText("Source chat")).toBeInTheDocument();
+    expect(screen.getByText("Create an automation")).toBeInTheDocument();
+    expect(screen.getByText("Source")).toBeInTheDocument();
     expect(await screen.findByText("What should change?")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Add a step" }));
@@ -411,7 +451,7 @@ describe("AutomationBuilderPage", () => {
 
     expect(await screen.findByTestId("automation-builder-access-error")).toBeInTheDocument();
     expect(screen.getByText("Automation unavailable")).toBeInTheDocument();
-    expect(screen.queryByText("Loading builder...")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading automation…")).not.toBeInTheDocument();
 
     await userEvent.setup().click(screen.getByRole("button", { name: "Back to automations" }));
     expect(mocks.navigate).toHaveBeenCalledWith({ to: "/scheduled-tasks" });
@@ -446,6 +486,171 @@ describe("AutomationBuilderPage", () => {
     expect(ownership).toHaveTextContent("Owner Alice Member");
     expect(ownership).toHaveTextContent("Last edited by Karan Admin");
   });
+
+  it("uses theme tokens and paired theme classes across builder surfaces", async () => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      steps: [
+        automation.steps[0],
+        automation.steps[1],
+        {
+          id: "post",
+          type: "action",
+          label: "Post to Slack",
+          icon: "slack",
+          position: { x: 460, y: 0 },
+        },
+      ],
+      edges: [...automation.edges, { id: "check-post", from: "check", to: "post" }],
+      stepContent: {
+        ...automation.stepContent,
+        post: {
+          taskId: "task-123",
+          stepId: "post",
+          contentType: "script",
+          content: "return input;",
+          apps: ["Slack"],
+          updatedAt: null,
+        },
+      },
+      latestRun: {
+        id: "run-theme",
+        taskId: "task-123",
+        triggerData: null,
+        status: "completed",
+        stepOutputs: {
+          check: { output: "theme output", status: "completed", duration_ms: 10 },
+        },
+        errorMessage: null,
+        startedAt: "2026-06-01T00:00:00.000Z",
+        completedAt: "2026-06-01T00:00:01.000Z",
+      },
+      recentRuns: [
+        {
+          id: "run-theme",
+          taskId: "task-123",
+          triggerData: null,
+          status: "completed",
+          stepOutputs: {
+            check: { output: "theme output", status: "completed", duration_ms: 10 },
+          },
+          errorMessage: null,
+          startedAt: "2026-06-01T00:00:00.000Z",
+          completedAt: "2026-06-01T00:00:01.000Z",
+        },
+      ],
+    });
+    renderBuilder();
+
+    const canvas = await screen.findByTestId("automation-builder-canvas");
+    const toolbar = screen.getByTestId("automation-builder-toolbar");
+    const sidecar = screen.getByTestId("automation-builder-chat-sidecar");
+    expect(canvas).toHaveClass("bg-background", "text-foreground");
+    expect(toolbar).toHaveClass("border-border/70", "bg-card/90");
+    expect(sidecar).toHaveClass("border-border/80", "bg-background", "text-foreground");
+    expect(screen.getByTestId("automation-background")).toHaveAttribute("data-color", "var(--automation-builder-grid)");
+    expect(screen.getByTestId("automation-controls")).toHaveClass("automation-builder-controls");
+
+    const nodeShells = screen.getAllByTestId("automation-node-shell");
+    expect(nodeShells.some((node) => node.className.includes("dark:bg-"))).toBe(true);
+    for (const surface of [canvas, toolbar, sidecar, ...nodeShells]) {
+      expect(surface.className).not.toMatch(/(?:bg|text|border)-(?:\[#|white)/);
+    }
+
+    await user.click(screen.getByRole("button", { name: "Check rating" }));
+    const drawer = screen.getByTestId("automation-builder-drawer");
+    expect(drawer).toHaveClass("border-border/80", "bg-background", "text-foreground");
+    expect(screen.getByDisplayValue("Summarize accounts")).toHaveClass("border-input", "bg-card");
+
+    await user.click(screen.getByRole("tab", { name: "Output" }));
+    const output = screen.getByTestId("automation-builder-output");
+    expect(output).toHaveClass("border-border", "bg-card");
+    expect(output.className).not.toMatch(/(?:bg|text|border)-(?:\[#|white)/);
+  });
+
+  it("only marks the next unresolved non-trigger node as running for a persisted run", async () => {
+    const runningRun: NonNullable<AutomationDefinition["latestRun"]> = {
+      id: "run-running",
+      taskId: "task-123",
+      triggerData: null,
+      status: "running",
+      stepOutputs: {
+        check: { output: "checked", status: "completed", duration_ms: 18 },
+      },
+      errorMessage: null,
+      startedAt: "2026-06-01T00:00:00.000Z",
+      completedAt: null,
+    };
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      steps: [
+        ...automation.steps,
+        {
+          id: "post",
+          type: "action",
+          label: "Post summary",
+          icon: "slack",
+          position: { x: 460, y: 0 },
+        },
+      ],
+      edges: [...automation.edges, { id: "check-post", from: "check", to: "post" }],
+      latestRun: runningRun,
+      recentRuns: [runningRun],
+    });
+
+    renderBuilder();
+
+    const flow = await screen.findByTestId("automation-flow");
+    await waitFor(() => {
+      expect(flow).toHaveAttribute("data-nodes-focusable", "true");
+      expect(screen.getByTestId("automation-node-trigger")).toHaveAttribute("data-state", "idle");
+      expect(screen.getByTestId("automation-node-check")).toHaveAttribute("data-state", "success");
+      expect(
+        screen.getByTestId("automation-node-check").querySelector('[data-testid="automation-node-status-marker"]'),
+      ).toHaveClass("bg-transparent", "text-emerald-700", "dark:text-emerald-300");
+      expect(screen.getByTestId("automation-node-post")).toHaveAttribute("data-state", "running");
+      expect(screen.getByTestId("automation-node-post")).toHaveAttribute("data-execution-activity", "run");
+      expect(flow).toHaveAttribute("data-edge-animations", "trigger-check:false|check-post:true");
+    });
+  });
+
+  it("marks persisted step failures in the graph and drawer", async () => {
+    const failedRun: NonNullable<AutomationDefinition["latestRun"]> = {
+      id: "run-failed",
+      taskId: "task-123",
+      triggerData: null,
+      status: "failed",
+      stepOutputs: {
+        check: {
+          output: null,
+          status: "failed",
+          duration_ms: 42,
+          error: { message: "Slack is unavailable" },
+        },
+      },
+      errorMessage: "Step failed",
+      startedAt: "2026-06-01T00:00:00.000Z",
+      completedAt: "2026-06-01T00:00:01.000Z",
+    };
+    mocks.getAutomation.mockResolvedValue({ ...automation, latestRun: failedRun, recentRuns: [failedRun] });
+    const user = userEvent.setup();
+
+    renderBuilder();
+
+    const failedNode = await screen.findByTestId("automation-node-check");
+    expect(failedNode).toHaveAttribute("data-state", "failed");
+    expect(failedNode.querySelector('[data-testid="automation-node-shell"]')).toHaveClass("automation-node-failed");
+    expect(failedNode.querySelector('[data-testid="automation-node-status-marker"]')).toHaveClass(
+      "bg-transparent",
+      "text-destructive",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Check rating" }));
+    expect(screen.getByText("Failed · 42ms")).toBeInTheDocument();
+    expect(screen.getByText(/Latest result/)).toBeInTheDocument();
+  });
+
   it("honors an associated source chat search param", async () => {
     mocks.search = { conversationId: "chat-alpha" };
     renderBuilder();
@@ -477,7 +682,7 @@ describe("AutomationBuilderPage", () => {
     });
     renderBuilder();
 
-    expect(await screen.findByText("Builder chats")).toBeInTheDocument();
+    expect(await screen.findByText("Chats")).toBeInTheDocument();
     expect(screen.queryByLabelText("Message Sketch")).not.toBeInTheDocument();
     expect(mocks.loadMessages).not.toHaveBeenCalled();
     expect(mocks.originChatMessages).not.toHaveBeenCalled();
@@ -542,8 +747,8 @@ describe("AutomationBuilderPage", () => {
     expect(screen.getByText("Continue the builder plan")).toBeInTheDocument();
     expect(screen.queryByText("chat-source")).not.toBeInTheDocument();
     expect(screen.queryByText("chat-builder")).not.toBeInTheDocument();
-    expect(screen.getAllByText("Source chat").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Builder chat").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Source").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Automation").length).toBeGreaterThan(0);
     expect(screen.getByText("Jun 3")).toBeInTheDocument();
     expect(screen.getByText("Jun 4")).toBeInTheDocument();
   });
@@ -569,9 +774,47 @@ describe("AutomationBuilderPage", () => {
 
     renderBuilder();
 
-    expect((await screen.findAllByText("Builder chat")).length).toBeGreaterThan(0);
-    const diagnostic = screen.getByText("Conversation chat-missing-summary");
+    expect((await screen.findAllByText("Automation chat")).length).toBeGreaterThan(0);
+    const diagnostic = screen.getByText("Chat chat-missing-summary");
     expect(diagnostic).toHaveClass("font-mono", "text-muted-foreground/60");
+  });
+
+  it("keeps a long chat title in the folded rail without exposing its identifier", async () => {
+    const title = "Review account health, incident follow-ups, and customer commitments before the Friday handoff";
+    mocks.search = {};
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-with-a-diagnostic-only-id",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
+    mocks.webChatConversations.mockResolvedValue({
+      conversations: [
+        {
+          id: "chat-with-a-diagnostic-only-id",
+          title,
+          channel: "web",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+    });
+
+    renderBuilder();
+
+    const row = await screen.findByTestId("automation-builder-conversation-chat-with-a-diagnostic-only-id");
+    expect(row).toHaveAttribute("aria-label", `Open chat: ${title}`);
+    expect(row).toHaveClass("min-w-0");
+    expect(row.querySelector(`[title="${title}"]`)).toHaveClass("truncate");
+    expect(row).not.toHaveTextContent("chat-with-a-diagnostic-only-id");
   });
 
   it("selects an older task-scoped chat from the sidechat list", async () => {
@@ -614,7 +857,7 @@ describe("AutomationBuilderPage", () => {
     const user = userEvent.setup();
     renderBuilder();
 
-    await user.click(await screen.findByRole("button", { name: "Archive builder chat" }));
+    await user.click(await screen.findByRole("button", { name: "Archive chat" }));
 
     await waitFor(() => expect(mocks.archiveConversation).toHaveBeenCalledWith("task-123", "chat-alpha", true));
     expect(mocks.navigate).toHaveBeenCalledWith(
@@ -705,6 +948,84 @@ describe("AutomationBuilderPage", () => {
 
     expect(await screen.findByText("Sketch paused.")).toBeInTheDocument();
     expect(screen.getByText("Tell Sketch what to do differently.")).toBeInTheDocument();
+  });
+
+  it("returns the step-test button to idle and renders the latest output after success", async () => {
+    const user = userEvent.setup();
+    const testResult = deferred<{ run: unknown }>();
+    const updatedAutomation = automationWithStepOutput("latest step output");
+    mocks.getAutomation.mockReset().mockResolvedValueOnce(automation).mockResolvedValue(updatedAutomation);
+    mocks.testStep.mockReset().mockReturnValueOnce(testResult.promise);
+
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Check rating" }));
+    const testButton = screen.getByRole("button", { name: "Test" });
+    await user.click(testButton);
+    expect(testButton).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Testing…" })).toBeDisabled();
+    await waitFor(() => {
+      expect(screen.getByTestId("automation-node-check")).toHaveAttribute("data-state", "running");
+      expect(screen.getByTestId("automation-node-check")).toHaveAttribute("data-execution-activity", "test");
+      expect(screen.getByTestId("automation-node-execution-summary")).toHaveTextContent("Testing this node");
+    });
+
+    testResult.resolve({ run: updatedAutomation.latestRun });
+
+    await waitFor(() => expect(testButton).not.toBeDisabled());
+    await user.click(screen.getByRole("tab", { name: "Output" }));
+    expect(await screen.findByText(/latest step output/)).toBeInTheDocument();
+    expect(mocks.getAutomation).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(stepTestFailures)("returns the step-test button to idle after %s", async (_label, createError) => {
+    const user = userEvent.setup();
+    const testResult = deferred<{ run: unknown }>();
+    mocks.testStep.mockReset().mockReturnValueOnce(testResult.promise);
+
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Check rating" }));
+    const testButton = screen.getByRole("button", { name: "Test" });
+    await user.click(testButton);
+    expect(testButton).toBeDisabled();
+
+    testResult.reject(createError());
+    await waitFor(() => expect(testButton).not.toBeDisabled());
+  });
+
+  it("starts a fresh pending state and renders the latest result on repeated tests", async () => {
+    const user = userEvent.setup();
+    const firstTest = deferred<{ run: unknown }>();
+    const secondTest = deferred<{ run: unknown }>();
+    const firstAutomation = automationWithStepOutput("first step output");
+    const secondAutomation = automationWithStepOutput("second step output");
+    mocks.getAutomation
+      .mockReset()
+      .mockResolvedValueOnce(automation)
+      .mockResolvedValueOnce(firstAutomation)
+      .mockResolvedValue(secondAutomation);
+    mocks.testStep.mockReset().mockReturnValueOnce(firstTest.promise).mockReturnValueOnce(secondTest.promise);
+
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Check rating" }));
+    const testButton = screen.getByRole("button", { name: "Test" });
+    await user.click(testButton);
+    expect(testButton).toBeDisabled();
+
+    firstTest.resolve({ run: firstAutomation.latestRun });
+    await waitFor(() => expect(testButton).not.toBeDisabled());
+    await user.click(screen.getByRole("tab", { name: "Output" }));
+    expect(await screen.findByText(/first step output/)).toBeInTheDocument();
+
+    await user.click(testButton);
+    expect(testButton).toBeDisabled();
+
+    secondTest.resolve({ run: secondAutomation.latestRun });
+    await waitFor(() => expect(testButton).not.toBeDisabled());
+    expect(await screen.findByText(/second step output/)).toBeInTheDocument();
+    expect(mocks.getAutomation).toHaveBeenCalledTimes(3);
   });
 
   it("keeps structural fields read-only while allowing agent prompt saves", async () => {
