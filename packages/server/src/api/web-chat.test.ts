@@ -2,12 +2,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Kysely } from "kysely";
+import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunAgentParams } from "../agent/runner";
 import { getSessionId, saveSessionId } from "../agent/sessions";
 import { signJwt } from "../auth/jwt";
 import { hashPassword } from "../auth/password";
 import { createConversationRepository } from "../db/repositories/conversations";
+import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -89,6 +91,43 @@ async function getMemberCookie(db: Kysely<DB>, userId: string): Promise<string> 
 
 function webChatTranscriptPath(dataDir: string, userId: string, conversationId = "default") {
   return join(dataDir, "web-chat", userId, `${conversationId}.json`);
+}
+
+function makeBuilderScheduler(taskId: string, createdBy: string) {
+  return {
+    pauseTask: vi.fn(),
+    resumeTask: vi.fn(),
+    removeTask: vi.fn(),
+    executeTaskById: vi.fn(),
+    getTaskById: vi.fn().mockResolvedValue({
+      id: taskId,
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "D_BUILDER",
+      threadTs: null,
+      prompt: "Send a builder brief",
+      scheduleType: "cron",
+      scheduleValue: "0 9 * * 1",
+      timezone: "UTC",
+      sessionMode: "fresh",
+      nextRunAt: null,
+      lastRunAt: null,
+      status: "active",
+      createdBy,
+      createdAt: "2026-06-01T00:00:00.000Z",
+      revision: 0,
+      title: "Builder brief",
+      description: null,
+      originChat: null,
+      steps: null,
+      edges: null,
+      outputTarget: null,
+      outputPlatform: null,
+      outputThreadTs: null,
+      outputMode: "deliver",
+      delivery: { platform: "slack", targetType: "dm", targetId: "D_BUILDER", threadTs: null, mode: "deliver" },
+    }),
+  } as never;
 }
 
 function webChatStreamChunks(text: string): Array<{ type?: string; data?: unknown }> {
@@ -364,6 +403,12 @@ describe("web chat API", () => {
 
   it("streams automation cards and includes builder context when a builder reply updates an automation", async () => {
     const admin = await seedAdmin(db);
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "task-123",
+      conversationId: "chat-automation",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
     const artifact = {
       taskId: "task-123",
       kind: "New automation",
@@ -518,8 +563,271 @@ describe("web chat API", () => {
     });
   });
 
+  it("rejects a guessed builder conversation before agent or transcript execution", async () => {
+    const admin = await seedAdmin(db);
+    const legacyTranscriptPath = join(dataDir, "workspaces", admin.id, "web-chat", "guessed-builder.json");
+    await mkdir(join(dataDir, "workspaces", admin.id, "web-chat"), { recursive: true });
+    await writeFile(
+      legacyTranscriptPath,
+      JSON.stringify({ messages: [{ id: "legacy", role: "user", parts: [{ type: "text", text: "Keep me" }] }] }),
+    );
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Should not run."));
+    const scheduler = makeBuilderScheduler("task-guessed", admin.id);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=guessed-builder", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Run this guessed conversation", automationTaskId: "task-guessed" }),
+    });
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: { code: "CONVERSATION_NOT_FOUND" } });
+    expect(runAgent).not.toHaveBeenCalled();
+    await expect(readFile(webChatTranscriptPath(dataDir, admin.id, "guessed-builder"), "utf-8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(readFile(legacyTranscriptPath, "utf-8")).resolves.toContain("Keep me");
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskConversationForTranscriptUser(
+        "task-guessed",
+        "guessed-builder",
+        admin.id,
+        { includeArchived: true },
+      ),
+    ).resolves.toHaveLength(0);
+  });
+
+  it("rejects an archived builder conversation without reviving it", async () => {
+    const admin = await seedAdmin(db);
+    const conversations = createScheduledTaskConversationRepository(db);
+    await conversations.upsert({
+      taskId: "task-archived",
+      conversationId: "archived-builder",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    await conversations.setArchivedForTaskConversation("task-archived", "archived-builder", admin.id, true);
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Should not run."));
+    const scheduler = makeBuilderScheduler("task-archived", admin.id);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=archived-builder", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Run this archived conversation", automationTaskId: "task-archived" }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: { code: "CONVERSATION_ARCHIVED" } });
+    expect(runAgent).not.toHaveBeenCalled();
+    await expect(readFile(webChatTranscriptPath(dataDir, admin.id, "archived-builder"), "utf-8")).rejects.toMatchObject(
+      { code: "ENOENT" },
+    );
+    await expect(
+      conversations.listByTaskConversationForTranscriptUser("task-archived", "archived-builder", admin.id, {
+        includeArchived: true,
+      }),
+    ).resolves.toEqual([expect.objectContaining({ kind: "builder", archived_at: expect.any(String) })]);
+  });
+
+  it("allows an active source-chat association without manufacturing a builder association", async () => {
+    const admin = await seedAdmin(db);
+    const conversations = createScheduledTaskConversationRepository(db);
+    await conversations.upsert({
+      taskId: "task-source",
+      conversationId: "source-chat",
+      transcriptUserId: admin.id,
+      kind: "web_chat",
+    });
+    await db
+      .updateTable("scheduled_task_conversations")
+      .set({ updated_at: "2000-01-01 00:00:00", last_active_at: "2000-01-01 00:00:00" })
+      .where("task_id", "=", "task-source")
+      .where("conversation_id", "=", "source-chat")
+      .where("transcript_user_id", "=", admin.id)
+      .where("kind", "=", "web_chat")
+      .execute();
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated from the source chat."));
+    const scheduler = makeBuilderScheduler("task-source", admin.id);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=source-chat", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Continue from the source chat", automationTaskId: "task-source" }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(runAgent).toHaveBeenCalledOnce();
+    const sourceAssociation = await conversations.listByTaskConversationForTranscriptUser(
+      "task-source",
+      "source-chat",
+      admin.id,
+      { includeArchived: true },
+    );
+    expect(sourceAssociation).toEqual([expect.objectContaining({ kind: "web_chat", archived_at: null })]);
+    expect(sourceAssociation[0]?.updated_at).not.toBe("2000-01-01 00:00:00");
+    expect(sourceAssociation[0]?.last_active_at).not.toBe("2000-01-01 00:00:00");
+  });
+
+  it("does not revive an archived builder kind when an active source-chat association opens the task", async () => {
+    const admin = await seedAdmin(db);
+    const conversations = createScheduledTaskConversationRepository(db);
+    await conversations.upsert({
+      taskId: "task-archived-builder",
+      conversationId: "source-with-archived-builder",
+      transcriptUserId: admin.id,
+      kind: "web_chat",
+    });
+    await conversations.upsert({
+      taskId: "task-archived-builder",
+      conversationId: "source-with-archived-builder",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    await conversations.setArchivedForTaskConversation(
+      "task-archived-builder",
+      "source-with-archived-builder",
+      admin.id,
+      true,
+    );
+    await conversations.upsert({
+      taskId: "task-archived-builder",
+      conversationId: "source-with-archived-builder",
+      transcriptUserId: admin.id,
+      kind: "web_chat",
+    });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated from the source chat."));
+    const scheduler = makeBuilderScheduler("task-archived-builder", admin.id);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=source-with-archived-builder", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Continue from the source chat", automationTaskId: "task-archived-builder" }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(runAgent).toHaveBeenCalledOnce();
+    await expect(
+      conversations.listByTaskConversationForTranscriptUser(
+        "task-archived-builder",
+        "source-with-archived-builder",
+        admin.id,
+        { includeArchived: true },
+      ),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "builder", archived_at: expect.any(String) }),
+        expect.objectContaining({ kind: "web_chat", archived_at: null }),
+      ]),
+    );
+  });
+
+  it("does not run or append a transcript when an existing builder touch fails", async () => {
+    const admin = await seedAdmin(db);
+    const conversations = createScheduledTaskConversationRepository(db);
+    await conversations.upsert({
+      taskId: "task-builder-association-failure",
+      conversationId: "source-chat-association-failure",
+      transcriptUserId: admin.id,
+      kind: "web_chat",
+    });
+    await conversations.upsert({
+      taskId: "task-builder-association-failure",
+      conversationId: "source-chat-association-failure",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    await sql`
+      CREATE TRIGGER reject_builder_touch
+      BEFORE UPDATE OF last_active_at ON scheduled_task_conversations
+      WHEN OLD.kind = 'builder'
+      BEGIN
+        SELECT RAISE(FAIL, 'builder touch rejected');
+      END
+    `.execute(db);
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Should not run."));
+    const scheduler = makeBuilderScheduler("task-builder-association-failure", admin.id);
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=source-chat-association-failure", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "Continue from the source chat",
+        automationTaskId: "task-builder-association-failure",
+      }),
+    });
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: { code: "CONVERSATION_UNAVAILABLE" } });
+    expect(runAgent).not.toHaveBeenCalled();
+    await expect(
+      readFile(webChatTranscriptPath(dataDir, admin.id, "source-chat-association-failure"), "utf-8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      conversations.listByTaskConversationForTranscriptUser(
+        "task-builder-association-failure",
+        "source-chat-association-failure",
+        admin.id,
+        { includeArchived: true },
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({ kind: "builder", archived_at: null }),
+      expect.objectContaining({ kind: "web_chat", archived_at: null }),
+    ]);
+  });
+
   it("starts builder replies without originating Slack conversation context", async () => {
     const admin = await seedAdmin(db);
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "task-123",
+      conversationId: "builder-task-123",
+      transcriptUserId: admin.id,
+      kind: "builder",
+    });
+    await db
+      .updateTable("scheduled_task_conversations")
+      .set({ updated_at: "2000-01-01 00:00:00", last_active_at: "2000-01-01 00:00:00" })
+      .where("task_id", "=", "task-123")
+      .where("conversation_id", "=", "builder-task-123")
+      .where("transcript_user_id", "=", admin.id)
+      .where("kind", "=", "builder")
+      .execute();
     const conversations = createConversationRepository(db);
     const conversation = await conversations.getOrCreate(
       { platform: "slack", kind: "channel", providerConversationId: "C123" },
@@ -621,11 +929,24 @@ describe("web chat API", () => {
     });
     expect(call.conversationRepo).toBeUndefined();
     expect(call.conversationContext).toBeUndefined();
+    const builderAssociation = await createScheduledTaskConversationRepository(
+      db,
+    ).listByTaskConversationForTranscriptUser("task-123", "builder-task-123", admin.id);
+    expect(builderAssociation).toEqual([expect.objectContaining({ kind: "builder", archived_at: null })]);
+    expect(builderAssociation[0]?.updated_at).not.toBe("2000-01-01 00:00:00");
+    expect(builderAssociation[0]?.last_active_at).not.toBe("2000-01-01 00:00:00");
   });
 
-  it("binds an accessible foreign task for an admin", async () => {
+  it("does not grant an admin access to the owner transcript", async () => {
     const admin = await seedAdmin(db);
     const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-builder@test.com" });
+    const conversations = createScheduledTaskConversationRepository(db);
+    await conversations.upsert({
+      taskId: "task-foreign",
+      conversationId: "owner-builder",
+      transcriptUserId: owner.id,
+      kind: "builder",
+    });
     const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated."));
     const scheduler = {
       pauseTask: vi.fn(),
@@ -669,25 +990,28 @@ describe("web chat API", () => {
     });
     const cookie = await login(app);
 
-    const res = await app.request("/api/web-chat?conversationId=admin-builder", {
+    const res = await app.request("/api/web-chat?conversationId=owner-builder", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
       body: JSON.stringify({ message: "Make this stricter", automationTaskId: "task-foreign" }),
     });
 
-    expect(res.status).toBe(200);
-    await res.text();
-    const call = runAgent.mock.calls[0][0] as RunAgentParams;
-    expect(call.currentAutomation).toMatchObject({
-      taskId: "task-foreign",
-      revision: 3,
-      builderConversationId: "admin-builder",
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: { code: "CONVERSATION_NOT_FOUND" } });
+    expect(runAgent).not.toHaveBeenCalled();
+    await expect(readFile(webChatTranscriptPath(dataDir, admin.id, "owner-builder"), "utf-8")).rejects.toMatchObject({
+      code: "ENOENT",
     });
-    expect(call.taskContext).toMatchObject({ createdBy: admin.id, canManageAnyTask: true });
+    await expect(
+      conversations.listByTaskConversationForTranscriptUser("task-foreign", "owner-builder", owner.id),
+    ).resolves.toHaveLength(1);
+    await expect(
+      conversations.listByTaskConversationForTranscriptUser("task-foreign", "owner-builder", admin.id),
+    ).resolves.toHaveLength(0);
     expect(scheduler.getTaskById).toHaveBeenCalledWith("task-foreign");
   });
 
-  it("does not inject builder context for inaccessible automation ids", async () => {
+  it("rejects inaccessible automation ids before running or mutating the transcript", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);
     const owner = await users.create({ name: "Owner", email: "owner@test.com" });
@@ -742,14 +1066,12 @@ describe("web chat API", () => {
       body: JSON.stringify({ message: "Update it", automationTaskId: "task-private" }),
     });
 
-    expect(res.status).toBe(200);
-    await res.text();
-    const call = runAgent.mock.calls[0][0] as RunAgentParams;
-    expect(call.userMessage).not.toContain("<automation_builder>");
-    expect(call.userMessage).not.toContain("task_id: task-private");
-    expect(call.taskContext).toMatchObject({ createdBy: member.id, deliveryTarget: "D_MEMBER" });
-    expect(call.currentAutomation).toBeUndefined();
-    expect(call.taskContext?.currentAutomation).toBeUndefined();
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: { code: "AUTOMATION_NOT_FOUND" } });
+    expect(runAgent).not.toHaveBeenCalled();
+    await expect(readFile(webChatTranscriptPath(dataDir, member.id, "chat-private"), "utf-8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("streams connected account cards from provider state for account enquiries", async () => {

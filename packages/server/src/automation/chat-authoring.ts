@@ -11,6 +11,7 @@ import type { CurrentAutomation, ScheduledTask, TaskContext } from "../scheduler
 import type { AutomationAuthoringService } from "./authoring/service";
 import { buildAutomationDefinition } from "./definition";
 import { createAutomationDefinition, replaceAutomationDefinition } from "./persistence";
+import { webChatTaskConversationAssociation } from "./task-conversations";
 
 type AuthoringScheduler = Pick<TaskScheduler, "getTaskById" | "refreshTaskSchedule">;
 
@@ -103,6 +104,7 @@ export function createChatAutomationAuthoring(deps: {
       return { kind: "error", message: "Automation creator is not available in this context." };
     }
     const taskId = createId();
+    const taskConversationAssociation = webChatTaskConversationAssociation(input.taskContext);
     const canUseBroker = await brokerCapable(deps.loadIntegrationProvider);
     const result = await deps.authoring.create({
       request: input.request,
@@ -142,6 +144,7 @@ export function createChatAutomationAuthoring(deps: {
         originMessageId: input.taskContext.origin?.currentMessageId ?? null,
       },
       brokerCapable: canUseBroker,
+      ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
     });
     return refreshOrError(taskId, artifactFromDefinition(result.definition));
   }
@@ -149,6 +152,7 @@ export function createChatAutomationAuthoring(deps: {
   async function edit(input: ChatAutomationAuthoringInput): Promise<ChatAutomationAuthoringResult> {
     if (!input.taskId) return { kind: "error", message: "Automation not found." };
     const currentAutomation = input.currentAutomation ?? input.taskContext.currentAutomation;
+    const taskConversationAssociation = webChatTaskConversationAssociation(input.taskContext);
     const row = await tasks.getById(input.taskId);
     const accessibleRow = resolveScheduledTaskAccess(row, row?.created_by, {
       userId: input.taskContext.createdBy,
@@ -187,6 +191,7 @@ export function createChatAutomationAuthoring(deps: {
         canManageAnyTask: input.taskContext.canManageAnyTask ?? false,
       },
       brokerCapable: canUseBroker,
+      ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
     });
     if (saved.kind === "not_found") return { kind: "error", message: "Automation not found." };
     if (saved.kind === "revision_conflict") {

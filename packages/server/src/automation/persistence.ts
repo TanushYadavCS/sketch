@@ -23,6 +23,10 @@ import {
   scheduledTaskFieldsFromSaveRequest,
   validateAutomationBuilderSaveRequest,
 } from "./definition";
+import {
+  type AutomationTaskConversationAssociation,
+  upsertAutomationTaskConversationAssociation,
+} from "./task-conversations";
 
 export interface AutomationCreateContext {
   id?: string;
@@ -301,6 +305,7 @@ export async function updateAutomationDefinition(params: {
   patch: AutomationDefinitionPatch;
   actor: AutomationEditActor;
   brokerCapable: boolean;
+  taskConversationAssociation?: AutomationTaskConversationAssociation;
 }): Promise<AutomationMutationResult> {
   return params.db.transaction().execute(async (trx) => {
     const current = await trx
@@ -351,6 +356,12 @@ export async function updateAutomationDefinition(params: {
     }
 
     await replaceStepContent(trx, params.taskId, request);
+    if (params.taskConversationAssociation) {
+      await upsertAutomationTaskConversationAssociation(trx, {
+        taskId: params.taskId,
+        ...params.taskConversationAssociation,
+      });
+    }
     const row = await trx
       .selectFrom("scheduled_tasks")
       .selectAll()
@@ -365,6 +376,7 @@ export async function createAutomationDefinition(params: {
   request: AutomationBuilderSaveRequest;
   context: AutomationCreateContext;
   brokerCapable: boolean;
+  taskConversationAssociation?: AutomationTaskConversationAssociation;
 }): Promise<AutomationCreateResult> {
   const request = validatedRequest(params.request, params.brokerCapable);
   const id = params.context.id ?? randomUUID();
@@ -401,6 +413,12 @@ export async function createAutomationDefinition(params: {
     };
     const created = await createScheduledTaskRepository(trx).add(task);
     await replaceStepContent(trx, id, request);
+    if (params.taskConversationAssociation) {
+      await upsertAutomationTaskConversationAssociation(trx, {
+        taskId: id,
+        ...params.taskConversationAssociation,
+      });
+    }
     return created;
   });
 
@@ -413,6 +431,7 @@ export async function replaceAutomationDefinition(params: {
   request: AutomationBuilderSaveRequest;
   actor: AutomationEditActor;
   brokerCapable: boolean;
+  taskConversationAssociation?: AutomationTaskConversationAssociation;
 }): Promise<AutomationReplaceResult> {
   const request = validatedRequest(params.request, params.brokerCapable);
 
@@ -453,6 +472,12 @@ export async function replaceAutomationDefinition(params: {
     }
 
     await replaceStepContent(trx, params.taskId, request);
+    if (params.taskConversationAssociation) {
+      await upsertAutomationTaskConversationAssociation(trx, {
+        taskId: params.taskId,
+        ...params.taskConversationAssociation,
+      });
+    }
     const row = await trx
       .selectFrom("scheduled_tasks")
       .selectAll()

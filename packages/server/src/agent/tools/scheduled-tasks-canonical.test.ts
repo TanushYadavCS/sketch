@@ -1,10 +1,15 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
+import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAutomationDefinition, getAutomationDefinition } from "../../automation/persistence";
+import { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
+import { createScheduledTaskConversationRepository } from "../../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../../db/repositories/scheduled-tasks";
+import type { TaskScheduler } from "../../scheduler/service";
 import { createTestDb } from "../../test-utils";
 import { handleManageScheduledTasks } from "./scheduled-tasks";
+import { AutomationArtifactCollector } from "./types";
 
 function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
   return {
@@ -142,6 +147,19 @@ function taskContextFor(
   };
 }
 
+function normalWebChatContext(conversationId: string, createdBy = "owner-1") {
+  return {
+    ...taskContextFor("web-chat-task", createdBy),
+    conversationKind: "web_chat" as const,
+    origin: {
+      platform: "web" as const,
+      conversationId,
+      providerThreadId: null,
+      currentMessageId: null,
+    },
+  };
+}
+
 function currentAutomationFor(taskId: string, revision: number) {
   const current = definition();
   return {
@@ -215,6 +233,8 @@ function schedulerFor(taskId: string, createdBy = "owner-1") {
   return {
     getTaskById: vi.fn().mockResolvedValue(task),
     refreshTaskSchedule: vi.fn().mockImplementation(async (id: string) => ({ ...task, id })),
+    removeTask: vi.fn(),
+    removeTaskRuntime: vi.fn().mockResolvedValue(true),
     addTask: vi.fn(),
     updateTask: vi.fn(),
   } as never;
@@ -1071,6 +1091,180 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     expect(stale.content[0].text).toContain("revision conflict");
   });
 
+  it("records normal web-chat create provenance and embeds the source conversation in the artifact URL", async () => {
+    const automationArtifactCollector = new AutomationArtifactCollector();
+    const collectArtifact = vi.spyOn(automationArtifactCollector, "collect");
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        prompt: "Send a daily account brief",
+        schedule_type: "interval",
+        schedule_value: "120",
+      },
+      {
+        db,
+        scheduler: schedulerFor("created-task"),
+        taskContext: normalWebChatContext("normal-chat-1"),
+        config: { BASE_URL: "https://sketch.example", PORT: 3000 },
+        automationArtifactCollector,
+      },
+    );
+
+    expect(result.content[0].text).toContain("Automation created:");
+    const task = (await createScheduledTaskRepository(db).listAll())[0];
+    expect(task).toBeDefined();
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskAndTranscriptUser(task.id, "owner-1", {
+        kind: "web_chat",
+      }),
+    ).resolves.toEqual([expect.objectContaining({ conversation_id: "normal-chat-1", kind: "web_chat" })]);
+    expect(collectArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: task.id,
+        builderUrl: `https://sketch.example/scheduled-tasks/${task.id}/edit?conversationId=normal-chat-1`,
+      }),
+    );
+  });
+
+  it("retains many-to-many task/chat provenance across direct updates and step-content updates", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: { ...context("many-task-a"), originConversationId: "creation-chat" },
+      brokerCapable: true,
+    });
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: { ...context("many-task-b"), originConversationId: "creation-chat" },
+      brokerCapable: true,
+    });
+
+    await handleManageScheduledTasks(
+      { action: "update", task_id: "many-task-a", prompt: "First chat edit", expected_revision: 0 },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-one") },
+    );
+    await handleManageScheduledTasks(
+      { action: "update", task_id: "many-task-b", prompt: "First chat edit", expected_revision: 0 },
+      { db, scheduler: schedulerFor("many-task-b"), taskContext: normalWebChatContext("chat-one") },
+    );
+    await handleManageScheduledTasks(
+      { action: "update", task_id: "many-task-a", prompt: "Second chat edit", expected_revision: 1 },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-two") },
+    );
+    await handleManageScheduledTasks(
+      { action: "update", task_id: "many-task-a", prompt: "Repeat first chat edit", expected_revision: 2 },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-one") },
+    );
+    await handleManageScheduledTasks(
+      {
+        action: "updateStepContent",
+        task_id: "many-task-a",
+        step_id: "agent",
+        step_content: "Apply the third chat's wording.",
+        expected_revision: 3,
+      },
+      { db, scheduler: schedulerFor("many-task-a"), taskContext: normalWebChatContext("chat-three") },
+    );
+
+    const conversations = createScheduledTaskConversationRepository(db);
+    await expect(
+      conversations.listByTaskAndTranscriptUser("many-task-a", "owner-1", { kind: "web_chat" }),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ conversation_id: "chat-one" }),
+        expect.objectContaining({ conversation_id: "chat-two" }),
+        expect.objectContaining({ conversation_id: "chat-three" }),
+      ]),
+    );
+    await expect(
+      conversations.listByTaskAndTranscriptUser("many-task-a", "owner-1", { kind: "web_chat" }),
+    ).resolves.toHaveLength(3);
+    await expect(
+      conversations.listByTaskAndTranscriptUser("many-task-b", "owner-1", { kind: "web_chat" }),
+    ).resolves.toEqual([expect.objectContaining({ conversation_id: "chat-one" })]);
+    await expect(createScheduledTaskRepository(db).getById("many-task-a")).resolves.toMatchObject({
+      origin_conversation_id: "creation-chat",
+      revision: 4,
+    });
+  });
+
+  it("does not associate validation, access, or revision failures", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("failure-task"),
+      brokerCapable: true,
+    });
+
+    const invalid = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "failure-task",
+        schedule_type: "interval",
+        schedule_value: "30",
+        expected_revision: 0,
+      },
+      { db, scheduler: schedulerFor("failure-task"), taskContext: normalWebChatContext("invalid-chat") },
+    );
+    expect(invalid.content[0].text).toContain("automation definition is invalid");
+
+    const denied = await handleManageScheduledTasks(
+      { action: "update", task_id: "failure-task", prompt: "Denied", expected_revision: 0 },
+      {
+        db,
+        scheduler: schedulerFor("failure-task"),
+        taskContext: normalWebChatContext("denied-chat", "member-1"),
+      },
+    );
+    expect(denied.content[0].text).toContain("created by");
+
+    const saved = await handleManageScheduledTasks(
+      { action: "update", task_id: "failure-task", prompt: "First edit", expected_revision: 0 },
+      { db, scheduler: schedulerFor("failure-task"), taskContext: normalWebChatContext("successful-chat") },
+    );
+    expect(saved.content[0].text).toContain("Automation updated:");
+    const conflict = await handleManageScheduledTasks(
+      { action: "update", task_id: "failure-task", prompt: "Stale edit", expected_revision: 0 },
+      { db, scheduler: schedulerFor("failure-task"), taskContext: normalWebChatContext("stale-chat") },
+    );
+    expect(conflict.content[0].text).toContain("revision conflict");
+
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskAndTranscriptUser("failure-task", "owner-1", {
+        kind: "web_chat",
+      }),
+    ).resolves.toEqual([expect.objectContaining({ conversation_id: "successful-chat" })]);
+  });
+
+  it("rolls back the canonical mutation and emits no artifact when provenance persistence fails", async () => {
+    await sql`
+      CREATE TRIGGER reject_web_chat_provenance
+      BEFORE INSERT ON scheduled_task_conversations
+      WHEN NEW.conversation_id = 'failing-chat'
+      BEGIN
+        SELECT RAISE(FAIL, 'provenance rejected');
+      END
+    `.execute(db);
+
+    const automationArtifactCollector = new AutomationArtifactCollector();
+    const collectArtifact = vi.spyOn(automationArtifactCollector, "collect");
+    await expect(
+      handleManageScheduledTasks(
+        { action: "add", prompt: "This must not partially save", schedule_type: "interval", schedule_value: "120" },
+        {
+          db,
+          scheduler: schedulerFor("failed-provenance-task"),
+          taskContext: normalWebChatContext("failing-chat"),
+          automationArtifactCollector,
+        },
+      ),
+    ).rejects.toThrow("provenance rejected");
+
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+    expect(collectArtifact).not.toHaveBeenCalled();
+  });
+
   it("uses the ambient revision for an explicit same-task update and rejects a stale race", async () => {
     await createAutomationDefinition({
       db,
@@ -1238,5 +1432,60 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       prompt: "Second explicit edit",
       revision: 2,
     });
+  });
+
+  it("deletes task data through the canonical service and only removes runtime state after commit", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("remove-task"),
+      brokerCapable: true,
+    });
+    const runId = await createAutomationRunsRepository(db).create({ taskId: "remove-task" });
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "remove-task",
+      conversationId: "builder-remove",
+      transcriptUserId: "owner-1",
+      kind: "builder",
+    });
+    const scheduler = schedulerFor("remove-task");
+
+    const result = await handleManageScheduledTasks(
+      { action: "remove", task_id: "remove-task" },
+      { db, scheduler, taskContext: taskContextFor("remove-task") },
+    );
+
+    expect(result.content[0].text).toBe("Automation remove-task removed.");
+    await expect(createScheduledTaskRepository(db).getById("remove-task")).resolves.toBeUndefined();
+    await expect(createAutomationStepContentRepository(db).getByTask("remove-task")).resolves.toEqual([]);
+    await expect(createAutomationRunsRepository(db).getById(runId)).resolves.toBeUndefined();
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskConversation("remove-task", "builder-remove"),
+    ).resolves.toEqual([]);
+    expect((scheduler as { removeTask: ReturnType<typeof vi.fn> }).removeTask).not.toHaveBeenCalled();
+    expect((scheduler as { removeTaskRuntime: ReturnType<typeof vi.fn> }).removeTaskRuntime).toHaveBeenCalledWith(
+      "remove-task",
+    );
+  });
+
+  it("reports runtime cleanup failure after structured deletion commits", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("remove-runtime-failure"),
+      brokerCapable: true,
+    });
+    const removeTaskRuntime = vi.fn().mockResolvedValue(false);
+    const scheduler = schedulerFor("remove-runtime-failure") as unknown as TaskScheduler;
+    (scheduler as unknown as { removeTaskRuntime: ReturnType<typeof vi.fn> }).removeTaskRuntime = removeTaskRuntime;
+
+    const result = await handleManageScheduledTasks(
+      { action: "remove", task_id: "remove-runtime-failure" },
+      { db, scheduler, taskContext: taskContextFor("remove-runtime-failure") },
+    );
+
+    expect(result.content[0].text).toContain("Runtime state is inconsistent");
+    await expect(createScheduledTaskRepository(db).getById("remove-runtime-failure")).resolves.toBeUndefined();
+    expect(removeTaskRuntime).toHaveBeenCalledWith("remove-runtime-failure");
   });
 });

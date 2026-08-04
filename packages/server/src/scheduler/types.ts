@@ -84,6 +84,7 @@ export interface TaskContext {
   contextType: "dm" | "channel" | "group";
   deliveryTarget: string;
   createdBy: string | null;
+  conversationKind?: "web_chat" | "builder";
   /**
    * Creator's IANA timezone, used as the default for new scheduled tasks when
    * the agent doesn't pass `timezone` explicitly. Null means "fall through to UTC".

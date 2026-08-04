@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import {
   type ScheduledTaskConversationKind,
   type ScheduledTaskConversationRow,
@@ -7,6 +7,7 @@ import {
   createScheduledTaskConversationRepository,
 } from "../db/repositories/scheduled-task-conversations";
 import type { DB } from "../db/schema";
+import type { TaskContext } from "../scheduler/types";
 
 export type { ScheduledTaskConversationKind } from "../db/repositories/scheduled-task-conversations";
 
@@ -25,6 +26,20 @@ export interface UpsertAutomationTaskConversationAssociationInput {
   conversationId: string;
   transcriptUserId: string;
   kind: ScheduledTaskConversationKind;
+}
+
+export type AutomationTaskConversationAssociation = Omit<UpsertAutomationTaskConversationAssociationInput, "taskId">;
+
+export function webChatTaskConversationAssociation(
+  context: Pick<TaskContext, "conversationKind" | "createdBy" | "currentAutomation" | "origin">,
+): AutomationTaskConversationAssociation | undefined {
+  const conversationKind =
+    context.conversationKind ??
+    (context.origin?.platform === "web" && !context.currentAutomation ? ("web_chat" as const) : undefined);
+  const conversationId = context.origin?.platform === "web" ? context.origin.conversationId.trim() : "";
+  const transcriptUserId = context.createdBy?.trim() ?? "";
+  if (conversationKind !== "web_chat" || !conversationId || !transcriptUserId) return undefined;
+  return { conversationId, transcriptUserId, kind: "web_chat" };
 }
 
 function earlier(left: string, right: string): string {
@@ -183,4 +198,23 @@ export async function upsertAutomationTaskConversationAssociation(
   input: UpsertAutomationTaskConversationAssociationInput,
 ): Promise<ScheduledTaskConversationRow> {
   return createAutomationTaskConversationService(db).associate(input);
+}
+
+export async function touchActiveAutomationTaskConversationAssociations(
+  db: Kysely<DB>,
+  input: Pick<UpsertAutomationTaskConversationAssociationInput, "taskId" | "conversationId" | "transcriptUserId">,
+): Promise<number> {
+  const result = await db
+    .updateTable("scheduled_task_conversations")
+    .set({
+      updated_at: sql<string>`CURRENT_TIMESTAMP`,
+      last_active_at: sql<string>`CURRENT_TIMESTAMP`,
+    })
+    .where("task_id", "=", input.taskId)
+    .where("conversation_id", "=", input.conversationId)
+    .where("transcript_user_id", "=", input.transcriptUserId)
+    .where("archived_at", "is", null)
+    .executeTakeFirst();
+
+  return Number(result.numUpdatedRows ?? 0);
 }

@@ -8,9 +8,11 @@ import { AutomationValidationError } from "../../automation/definition";
 import {
   type AutomationDefinitionPatch,
   createAutomationDefinition,
+  deleteAutomation,
   getAutomationDefinition,
   updateAutomationDefinition,
 } from "../../automation/persistence";
+import { webChatTaskConversationAssociation } from "../../automation/task-conversations";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import type { DB } from "../../db/schema";
@@ -503,10 +505,13 @@ function displayPlatform(value: string): string {
   return value === "whatsapp" ? "WhatsApp" : "Slack";
 }
 
-function buildBuilderUrl(taskId: string, config: ManageScheduledTasksDeps["config"]): string {
+function buildBuilderUrl(taskId: string, config: ManageScheduledTasksDeps["config"], conversationId?: string): string {
   const path = `/scheduled-tasks/${encodeURIComponent(taskId)}/edit`;
   const base = config?.BASE_URL?.replace(/\/$/, "") ?? `http://localhost:${config?.PORT ?? 3000}`;
-  return `${base}${path}`;
+  const conversationQuery = conversationId?.trim()
+    ? `?conversationId=${encodeURIComponent(conversationId.trim())}`
+    : "";
+  return `${base}${path}${conversationQuery}`;
 }
 
 /**
@@ -568,7 +573,9 @@ function collectAutomationArtifact(params: {
   scheduleValue: string;
   timezone: string;
 }): string {
-  const builderUrl = buildBuilderUrl(params.task.id, params.deps.config);
+  const sourceConversationId =
+    params.deps.taskContext.origin?.platform === "web" ? params.deps.taskContext.origin.conversationId : undefined;
+  const builderUrl = buildBuilderUrl(params.task.id, params.deps.config, sourceConversationId);
   const delivery = params.task.delivery;
   const deliveryLabel =
     delivery.mode === "silent"
@@ -693,6 +700,7 @@ export async function handleManageScheduledTasks(
   const { action } = params;
   const ctx = deps.taskContext;
   const currentAutomation = deps.currentAutomation ?? ctx.currentAutomation;
+  const taskConversationAssociation = webChatTaskConversationAssociation(ctx);
   const explicitTaskId = params.task_id?.trim() || undefined;
   const task_id =
     explicitTaskId ?? (action === "update" || action === "updateStepContent" ? currentAutomation?.taskId : undefined);
@@ -965,6 +973,7 @@ export async function handleManageScheduledTasks(
             originMessageId: ctx.origin?.currentMessageId ?? null,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
+          ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
         });
       } catch (error) {
         if (error instanceof AutomationValidationError) {
@@ -1043,6 +1052,7 @@ export async function handleManageScheduledTasks(
             canManageAnyTask: ctx.canManageAnyTask ?? false,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
+          ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
         });
       } catch (error) {
         if (error instanceof AutomationValidationError) {
@@ -1090,13 +1100,25 @@ export async function handleManageScheduledTasks(
       if (!task_id) {
         return text("Error: task_id is required for remove action.");
       }
-      // Cascade delete step content and runs
-      if (deps.stepContentRepo) await deps.stepContentRepo.deleteByTaskId(task_id);
-      if (deps.automationRunsRepo) await deps.automationRunsRepo.deleteByTaskId(task_id);
-
-      const removed = await deps.scheduler.removeTask(task_id);
-      if (!removed) {
-        return text(`Error: task ${task_id} not found.`);
+      if (!deps.db) {
+        return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
+      }
+      const deletion = await deleteAutomation({
+        db: deps.db,
+        taskId: task_id,
+        actor: {
+          userId: ctx.createdBy,
+          canManageAnyTask: ctx.canManageAnyTask ?? false,
+        },
+        scheduler: { removeTaskRuntime: (id) => deps.scheduler.removeTaskRuntime(id) },
+      });
+      if (deletion.kind === "not_found") return text(`Error: task ${task_id} not found.`);
+      if (deletion.kind === "access_denied")
+        return text(`Error: you do not have permission to delete task ${task_id}.`);
+      if (deletion.kind === "scheduler_failure") {
+        return text(
+          `Error: automation ${task_id} was deleted, but scheduler cleanup failed. Runtime state is inconsistent.`,
+        );
       }
       return text(`Automation ${task_id} removed.`);
     }
@@ -1206,6 +1228,7 @@ export async function handleManageScheduledTasks(
             canManageAnyTask: ctx.canManageAnyTask ?? false,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
+          ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
         });
       } catch (error) {
         if (error instanceof AutomationValidationError) {

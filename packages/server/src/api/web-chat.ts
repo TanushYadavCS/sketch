@@ -19,7 +19,10 @@ import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } f
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
-import { upsertAutomationTaskConversationAssociation } from "../automation/task-conversations";
+import {
+  createAutomationTaskConversationService,
+  touchActiveAutomationTaskConversationAssociations,
+} from "../automation/task-conversations";
 import { TOOL_PROGRESS_OPTIONS, type ToolProgressCommand } from "../commands";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -316,6 +319,74 @@ async function resolveAutomationBuilderContext(params: {
       builderConversationId: params.builderConversationId,
     }),
   };
+}
+
+type AutomationBuilderConversationAccess =
+  | { kind: "active" }
+  | { kind: "not_found" }
+  | { kind: "archived" }
+  | { kind: "error" };
+
+async function resolveAutomationBuilderConversationAccess(params: {
+  deps: WebChatRouteDeps;
+  taskId: string;
+  conversationId: string;
+  transcriptUserId: string;
+  logger: Logger;
+}): Promise<AutomationBuilderConversationAccess> {
+  try {
+    return await params.deps.db.transaction().execute(async (trx) => {
+      const conversationService = createAutomationTaskConversationService(trx);
+      const existing = await conversationService.getForTranscriptUser(
+        params.taskId,
+        params.conversationId,
+        params.transcriptUserId,
+        { includeArchived: true },
+      );
+      if (!existing) return { kind: "not_found" as const };
+
+      const active = await conversationService.getForTranscriptUser(
+        params.taskId,
+        params.conversationId,
+        params.transcriptUserId,
+      );
+      if (!active) return { kind: "archived" as const };
+
+      const touchedRows = await touchActiveAutomationTaskConversationAssociations(trx, {
+        taskId: params.taskId,
+        conversationId: params.conversationId,
+        transcriptUserId: params.transcriptUserId,
+      });
+      if (touchedRows === 0) {
+        const latest = await conversationService.getForTranscriptUser(
+          params.taskId,
+          params.conversationId,
+          params.transcriptUserId,
+          { includeArchived: true },
+        );
+        if (!latest) return { kind: "not_found" as const };
+        const latestActive = await conversationService.getForTranscriptUser(
+          params.taskId,
+          params.conversationId,
+          params.transcriptUserId,
+        );
+        if (!latestActive) return { kind: "archived" as const };
+        return { kind: "error" as const };
+      }
+      return { kind: "active" as const };
+    });
+  } catch (err) {
+    params.logger.warn(
+      {
+        errorType: err instanceof Error ? err.name : "unknown",
+        taskId: params.taskId,
+        conversationId: params.conversationId,
+        transcriptUserId: params.transcriptUserId,
+      },
+      "Failed to resolve automation builder conversation access",
+    );
+    return { kind: "error" };
+  }
 }
 
 function parseBuilderSteps(value: string | null): WorkflowStep[] {
@@ -1335,6 +1406,7 @@ function automationBuilderTaskContext(params: {
     contextType: task.contextType,
     deliveryTarget: task.deliveryTarget,
     createdBy: params.currentUser.id,
+    conversationKind: "builder" as const,
     creatorTimezone: params.currentUser.timezone,
     threadTs: task.threadTs ?? undefined,
     canManageAnyTask: params.role === "admin",
@@ -1648,8 +1720,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       id: `attachment-${index}`,
       data: item.file,
     }));
-    await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
-    const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
     const automationBuilderContext = await resolveAutomationBuilderContext({
       deps,
       currentUserId: currentUser.id,
@@ -1658,19 +1728,33 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       builderConversationId: conversationId,
       logger: deps.logger,
     });
+    if (automationTaskId && !automationBuilderContext) {
+      return c.json(badRequest("AUTOMATION_NOT_FOUND", "Automation not found"), 404);
+    }
+
     if (automationBuilderContext) {
-      await upsertAutomationTaskConversationAssociation(deps.db, {
+      const conversationAccess = await resolveAutomationBuilderConversationAccess({
+        deps,
         taskId: automationBuilderContext.task.id,
         conversationId,
         transcriptUserId: currentUser.id,
-        kind: "builder",
-      }).catch((err: unknown) => {
-        deps.logger.warn(
-          { err, taskId: automationBuilderContext.task.id, conversationId },
-          "Failed to associate builder chat",
-        );
+        logger: deps.logger,
       });
+      if (conversationAccess.kind === "not_found") {
+        return c.json(badRequest("CONVERSATION_NOT_FOUND", "Conversation is not associated with this task"), 404);
+      }
+      if (conversationAccess.kind === "archived") {
+        return c.json(
+          badRequest("CONVERSATION_ARCHIVED", "Conversation is archived; restore it before selecting"),
+          409,
+        );
+      }
+      if (conversationAccess.kind === "error") {
+        return c.json(badRequest("CONVERSATION_UNAVAILABLE", "Conversation is temporarily unavailable"), 503);
+      }
     }
+    await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
+    const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
     const taskContext = automationBuilderContext
       ? automationBuilderTaskContext({
           context: automationBuilderContext,
@@ -1684,6 +1768,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             contextType: "dm" as const,
             deliveryTarget: dmContext.deliveryTarget,
             createdBy: currentUser.id,
+            conversationKind: "web_chat" as const,
             creatorTimezone: currentUser.timezone,
             canManageAnyTask: c.get("role") === "admin",
             currentAutomation: undefined,
