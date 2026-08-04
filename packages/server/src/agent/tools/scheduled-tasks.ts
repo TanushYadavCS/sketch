@@ -690,6 +690,14 @@ export async function handleManageScheduledTasks(
     return handleConfiguredChatAuthoring(params, deps);
   }
 
+  let brokerCapabilitySnapshot: boolean | undefined;
+  const getBrokerCapabilitySnapshot = async (): Promise<boolean> => {
+    if (brokerCapabilitySnapshot !== undefined) return brokerCapabilitySnapshot;
+    const provider = deps.loadIntegrationProvider ? await deps.loadIntegrationProvider() : null;
+    brokerCapabilitySnapshot = Boolean(provider?.isBrokerCapable());
+    return brokerCapabilitySnapshot;
+  };
+
   /** Returns an error response if any action step is present but no broker-capable
    *  provider is configured. Returns null when validation passes (no action steps,
    *  or a broker-capable provider exists). */
@@ -697,9 +705,7 @@ export async function handleManageScheduledTasks(
     candidateSteps: WorkflowStepInput[] | undefined,
   ): Promise<ReturnType<typeof text> | null> => {
     if (!candidateSteps?.some((s) => s.type === "action")) return null;
-    if (!deps.loadIntegrationProvider) return text(BROKER_REQUIRED_MSG);
-    const provider = await deps.loadIntegrationProvider();
-    if (!provider || !provider.isBrokerCapable()) return text(BROKER_REQUIRED_MSG);
+    if (!(await getBrokerCapabilitySnapshot())) return text(BROKER_REQUIRED_MSG);
     return null;
   };
 
@@ -940,7 +946,7 @@ export async function handleManageScheduledTasks(
             originProviderThreadId: ctx.origin?.providerThreadId ?? null,
             originMessageId: ctx.origin?.currentMessageId ?? null,
           },
-          brokerCapable: true,
+          brokerCapable: await getBrokerCapabilitySnapshot(),
         });
       } catch (error) {
         if (error instanceof AutomationValidationError) {
@@ -1005,7 +1011,7 @@ export async function handleManageScheduledTasks(
       const expectedRevision =
         params.expected_revision ??
         params.expectedRevision ??
-        (!explicitTaskId && currentAutomation?.taskId === task_id ? currentAutomation.revision : undefined);
+        (currentAutomation?.taskId === task_id ? currentAutomation.revision : undefined);
       const patch = definitionPatchFromParams(params, ctx);
       if (expectedRevision !== undefined) patch.expectedRevision = expectedRevision;
 
@@ -1019,7 +1025,7 @@ export async function handleManageScheduledTasks(
             userId: ctx.createdBy,
             canManageAnyTask: ctx.canManageAnyTask ?? false,
           },
-          brokerCapable: true,
+          brokerCapable: await getBrokerCapabilitySnapshot(),
         });
       } catch (error) {
         if (error instanceof AutomationValidationError) {
@@ -1165,7 +1171,7 @@ export async function handleManageScheduledTasks(
       const expectedRevision =
         params.expected_revision ??
         params.expectedRevision ??
-        (!explicitTaskId && currentAutomation?.taskId === task_id ? currentAutomation.revision : undefined);
+        (currentAutomation?.taskId === task_id ? currentAutomation.revision : undefined);
       let saved: Awaited<ReturnType<typeof updateAutomationDefinition>>;
       try {
         saved = await updateAutomationDefinition({
@@ -1185,7 +1191,7 @@ export async function handleManageScheduledTasks(
             userId: ctx.createdBy,
             canManageAnyTask: ctx.canManageAnyTask ?? false,
           },
-          brokerCapable: true,
+          brokerCapable: await getBrokerCapabilitySnapshot(),
         });
       } catch (error) {
         if (error instanceof AutomationValidationError) {

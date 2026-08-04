@@ -63,6 +63,58 @@ function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): Auto
   };
 }
 
+function actionDefinition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
+  return {
+    ...definition(),
+    title: "Broker action",
+    prompt: "Run a broker action.",
+    steps: [
+      definition().steps[0],
+      {
+        id: "action",
+        type: "action",
+        label: "Run broker action",
+        icon: "zap",
+        position: { x: 260, y: 0 },
+      },
+    ],
+    edges: [{ id: "trigger-action", from: "trigger", to: "action" }],
+    stepContent: {
+      action: {
+        taskId: "client-task-id",
+        stepId: "action",
+        contentType: "script",
+        content: "return input;",
+        apps: ["clickup"],
+      },
+    },
+    ...overrides,
+  };
+}
+
+function actionStepInputs() {
+  return [
+    definition().steps[0],
+    {
+      id: "action",
+      type: "action" as const,
+      label: "Run broker action",
+      icon: "zap",
+      position: { x: 260, y: 0 },
+      script: "return input;",
+      apps: ["clickup"],
+    },
+  ];
+}
+
+const brokerUnavailableLoaders = [
+  { label: "unavailable", loadIntegrationProvider: async () => null },
+  {
+    label: "not broker-capable",
+    loadIntegrationProvider: async () => ({ isBrokerCapable: () => false }) as never,
+  },
+] as const;
+
 function context(id: string, createdBy = "owner-1") {
   return {
     id,
@@ -310,6 +362,66 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       session_mode: "fresh",
     });
   });
+
+  it.each(brokerUnavailableLoaders)(
+    "rejects broker-requiring direct creates when the provider is $label",
+    async ({ loadIntegrationProvider }) => {
+      const scheduler = schedulerFor("broker-create-task");
+      const result = await handleManageScheduledTasks(
+        {
+          action: "add",
+          title: "Broker action",
+          schedule_type: "interval",
+          schedule_value: "120",
+          steps: actionStepInputs(),
+          edges: [{ id: "trigger-action", from: "trigger", to: "action" }],
+        },
+        {
+          db,
+          scheduler,
+          loadIntegrationProvider,
+          taskContext: taskContextFor("broker-create-task"),
+        },
+      );
+
+      expect(result.content[0].text).toContain("broker-capable integration provider");
+      await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([]);
+    },
+  );
+
+  it.each(brokerUnavailableLoaders)(
+    "rejects broker-requiring direct updates when the provider is $label",
+    async ({ loadIntegrationProvider }) => {
+      await createAutomationDefinition({
+        db,
+        request: actionDefinition(),
+        context: context("broker-update-task"),
+        brokerCapable: true,
+      });
+      const scheduler = schedulerFor("broker-update-task");
+
+      const update = await handleManageScheduledTasks(
+        { action: "update", task_id: "broker-update-task", prompt: "Update the action" },
+        { db, scheduler, loadIntegrationProvider, taskContext: taskContextFor("broker-update-task") },
+      );
+      expect(update.content[0].text).toContain("BROKER_REQUIRED");
+
+      const stepContentUpdate = await handleManageScheduledTasks(
+        {
+          action: "updateStepContent",
+          task_id: "broker-update-task",
+          step_id: "action",
+          step_content: "return updatedInput;",
+        },
+        { db, scheduler, loadIntegrationProvider, taskContext: taskContextFor("broker-update-task") },
+      );
+      expect(stepContentUpdate.content[0].text).toContain("BROKER_REQUIRED");
+
+      await expect(createScheduledTaskRepository(db).getById("broker-update-task")).resolves.toMatchObject({
+        revision: 0,
+      });
+    },
+  );
 
   it("preserves unspecified fields during a partial update and records the acting editor", async () => {
     await createAutomationDefinition({
@@ -680,5 +792,174 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       { db, scheduler, taskContext },
     );
     expect(stale.content[0].text).toContain("revision conflict");
+  });
+
+  it("uses the ambient revision for an explicit same-task update and rejects a stale race", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("explicit-same-task"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerFor("explicit-same-task");
+    const taskContext = taskContextFor("explicit-same-task", "owner-1", currentAutomationFor("explicit-same-task", 0));
+
+    const results = await Promise.all([
+      handleManageScheduledTasks(
+        { action: "update", task_id: "explicit-same-task", prompt: "First explicit edit" },
+        { db, scheduler, taskContext },
+      ),
+      handleManageScheduledTasks(
+        { action: "update", task_id: "explicit-same-task", prompt: "Second explicit edit" },
+        { db, scheduler, taskContext },
+      ),
+    ]);
+
+    const messages = results.map((result) => result.content[0].text);
+    expect(messages.filter((message) => message.includes("Automation updated:"))).toHaveLength(1);
+    expect(messages.filter((message) => message.includes("revision conflict"))).toHaveLength(1);
+    await expect(createScheduledTaskRepository(db).getById("explicit-same-task")).resolves.toMatchObject({
+      revision: 1,
+    });
+  });
+
+  it("uses the ambient revision for an explicit same-task step-content race", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("explicit-same-content-task"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerFor("explicit-same-content-task");
+    const taskContext = taskContextFor(
+      "explicit-same-content-task",
+      "owner-1",
+      currentAutomationFor("explicit-same-content-task", 0),
+    );
+
+    const results = await Promise.all([
+      handleManageScheduledTasks(
+        {
+          action: "updateStepContent",
+          task_id: "explicit-same-content-task",
+          step_id: "agent",
+          step_content: "First explicit content edit",
+        },
+        { db, scheduler, taskContext },
+      ),
+      handleManageScheduledTasks(
+        {
+          action: "updateStepContent",
+          task_id: "explicit-same-content-task",
+          step_id: "agent",
+          step_content: "Second explicit content edit",
+        },
+        { db, scheduler, taskContext },
+      ),
+    ]);
+
+    const messages = results.map((result) => result.content[0].text);
+    expect(messages.filter((message) => message.includes("content updated at revision 1"))).toHaveLength(1);
+    expect(messages.filter((message) => message.includes("revision conflict"))).toHaveLength(1);
+    await expect(createScheduledTaskRepository(db).getById("explicit-same-content-task")).resolves.toMatchObject({
+      revision: 1,
+    });
+  });
+
+  it("honors a supplied revision for an explicit same-task update", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("explicit-supplied-revision"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerFor("explicit-supplied-revision");
+    const taskContext = taskContextFor(
+      "explicit-supplied-revision",
+      "owner-1",
+      currentAutomationFor("explicit-supplied-revision", 0),
+    );
+
+    const first = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "explicit-supplied-revision",
+        prompt: "First edit",
+        expected_revision: 0,
+      },
+      { db, scheduler, taskContext },
+    );
+    expect(first.content[0].text).toContain("Automation updated:");
+
+    const second = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "explicit-supplied-revision",
+        prompt: "Second edit",
+        expected_revision: 1,
+      },
+      { db, scheduler, taskContext },
+    );
+    expect(second.content[0].text).toContain("Automation updated:");
+    await expect(createScheduledTaskRepository(db).getById("explicit-supplied-revision")).resolves.toMatchObject({
+      prompt: "Second edit",
+      revision: 2,
+    });
+  });
+
+  it("does not inherit the ambient revision for an explicit different accessible task", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("ambient-task-for-explicit-target"),
+      brokerCapable: true,
+    });
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("explicit-different-task"),
+      brokerCapable: true,
+    });
+
+    const taskForId = (id: string) => taskFor(id);
+    const scheduler = {
+      getTaskById: vi.fn().mockImplementation(async (id: string) => taskForId(id)),
+      refreshTaskSchedule: vi.fn().mockImplementation(async (id: string) => ({ ...taskForId(id), id })),
+      addTask: vi.fn(),
+      updateTask: vi.fn(),
+    } as never;
+    const initial = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "explicit-different-task",
+        prompt: "Initial explicit edit",
+        expected_revision: 0,
+      },
+      { db, scheduler, taskContext: taskContextFor("explicit-different-task") },
+    );
+    expect(initial.content[0].text).toContain("Automation updated:");
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "explicit-different-task",
+        prompt: "Second explicit edit",
+      },
+      {
+        db,
+        scheduler,
+        taskContext: taskContextFor(
+          "ambient-task-for-explicit-target",
+          "owner-1",
+          currentAutomationFor("ambient-task-for-explicit-target", 99),
+        ),
+      },
+    );
+
+    expect(result.content[0].text).toContain("Automation updated:");
+    await expect(createScheduledTaskRepository(db).getById("explicit-different-task")).resolves.toMatchObject({
+      prompt: "Second explicit edit",
+      revision: 2,
+    });
   });
 });
