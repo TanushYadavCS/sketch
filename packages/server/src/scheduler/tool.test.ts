@@ -12,8 +12,7 @@ import {
   AutomationAuthoringValidationError,
 } from "../automation/authoring/service";
 import type { TaskScheduler } from "./service";
-import type { ScheduledTask } from "./types";
-import type { TaskContext } from "./types";
+import type { CurrentAutomation, ScheduledTask, TaskContext } from "./types";
 
 function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
   return {
@@ -32,6 +31,7 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     status: "active",
     createdBy: "U123",
     createdAt: "2025-01-01T00:00:00.000Z",
+    revision: 0,
     title: null,
     description: null,
     originChat: null,
@@ -49,6 +49,29 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
       mode: "deliver",
     },
     ...overrides,
+  };
+}
+
+function makeCurrentAutomation(
+  overrides: Partial<Pick<CurrentAutomation, "taskId" | "revision">> = {},
+): CurrentAutomation {
+  return {
+    taskId: overrides.taskId ?? "task-1",
+    revision: overrides.revision ?? 4,
+    builderConversationId: "builder-1",
+    builderState: {
+      title: "Do a thing",
+      description: null,
+      prompt: "Do a thing",
+      scheduleType: "cron",
+      scheduleValue: "0 9 * * 1-5",
+      timezone: "UTC",
+      status: "active",
+      delivery: makeTask().delivery,
+      steps: [],
+      edges: [],
+      stepContent: {},
+    },
   };
 }
 
@@ -216,6 +239,48 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
       taskContext: dmContext,
     });
     expect(scheduler.updateTask).not.toHaveBeenCalled();
+  });
+
+  it("uses the ambient current automation for an implicit natural-language edit", async () => {
+    const scheduler = makeMockScheduler();
+    const chatAuthoring = {
+      author: vi.fn().mockResolvedValue({ kind: "clarification", message: "Which filter?" }),
+    };
+    const currentAutomation = makeCurrentAutomation();
+
+    await handleManageScheduledTasks(
+      { action: "update", request: "Make this stricter" },
+      { scheduler, stepContentRepo, taskContext: dmContext, chatAuthoring, currentAutomation },
+    );
+
+    expect(scheduler.getTaskById).not.toHaveBeenCalled();
+    expect(chatAuthoring.author).toHaveBeenCalledWith({
+      action: "edit",
+      request: "Make this stricter",
+      taskId: "task-1",
+      taskContext: dmContext,
+      currentAutomation,
+    });
+  });
+
+  it("lets an explicit accessible task override ambient builder context", async () => {
+    const scheduler = makeMockScheduler();
+    const chatAuthoring = {
+      author: vi.fn().mockResolvedValue({ kind: "clarification", message: "Which filter?" }),
+    };
+    const currentAutomation = makeCurrentAutomation();
+
+    await handleManageScheduledTasks(
+      { action: "update", task_id: "task-2", request: "Make the other one stricter" },
+      { scheduler, stepContentRepo, taskContext: dmContext, chatAuthoring, currentAutomation },
+    );
+
+    expect(chatAuthoring.author).toHaveBeenCalledWith({
+      action: "edit",
+      request: "Make the other one stricter",
+      taskId: "task-2",
+      taskContext: dmContext,
+    });
   });
 
   it("reports invalid generated output separately from provider unavailability", async () => {
@@ -404,6 +469,20 @@ describe("handleManageScheduledTasks — list", () => {
       { scheduler, stepContentRepo, taskContext: { ...dmContext, canManageAnyTask: true } },
     );
     expect(scheduler.listTasks).toHaveBeenCalledWith({ includeInactive: true });
+  });
+
+  it("keeps explicit list behavior when ambient builder context exists", async () => {
+    const scheduler = makeMockScheduler();
+    await handleManageScheduledTasks(
+      { action: "list" },
+      {
+        scheduler,
+        stepContentRepo,
+        taskContext: dmContext,
+        currentAutomation: makeCurrentAutomation(),
+      },
+    );
+    expect(scheduler.listTasks).toHaveBeenCalledWith({ createdBy: "U123" });
   });
 
   it("fails closed when listing without an authenticated creator", async () => {

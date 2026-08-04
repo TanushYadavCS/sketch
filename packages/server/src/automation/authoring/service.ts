@@ -1,6 +1,7 @@
 import type { AutomationBuilderSaveRequest, AutomationDefinition, WorkflowStep } from "@sketch/shared";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
+import type { CurrentAutomation } from "../../scheduler/types";
 import { AutomationValidationError, validateAutomationBuilderSaveRequest } from "../definition";
 import {
   type AutomationAuthoringOutput,
@@ -102,6 +103,10 @@ export interface AutomationAuthoringService {
     request: string;
     existing: AutomationDefinition;
     brokerCapable: boolean;
+    currentAutomation?: CurrentAutomation;
+    expectedRevision?: number;
+    timezone?: string;
+    currentTime?: string;
   }): Promise<AutomationAuthoringResult>;
 }
 
@@ -145,7 +150,7 @@ function isRetryableProviderFailure(error: unknown): boolean {
 }
 
 function authoringInstructions(operation: AutomationAuthoringOperation): string {
-  return `You design Sketch automations. Return a complete ${operation === "create" ? "new" : "replacement"} definition or one concise clarification question only when essential information is missing. Preserve every unspecified property and every stable step ID during edits. Never choose or emit an execution model or operational status. Keep the returned top-level schedule fields identical to the returned trigger step configuration. Every non-trigger step needs matching step content, and the graph must be connected and acyclic. For requests to run when a message is posted in a Slack channel, use the native Slack channel message trigger: set the trigger config type to "slack_channel_message", include the stable Slack channel ID in channelId, set scheduleType to "external" and scheduleValue to "slack_channel_message", and pass the message text and attachments through trigger data to the workflow. Trigger files can include a server-authenticated localPath inside the automation workspace. When an integration action needs those bytes, call ctx.integrations.executeAction with localFiles entries containing path and configuredProp; do not read or base64-encode the file in the script, put file bytes in CLI arguments, or fetch Slack urlPrivate without authentication. Do not implement this as polling or a scheduled Slack history check. Use the automation's native delivery configuration for the reply rather than adding a Slack send-message action solely for delivery.`;
+  return `You design Sketch automations. Return a complete ${operation === "create" ? "new" : "replacement"} definition or one concise clarification question only when essential information is missing. Preserve every unspecified property and every stable step ID during edits. Never choose or emit an execution model or operational status. Keep the returned top-level schedule fields identical to the returned trigger step configuration. Every non-trigger step needs matching step content, and the graph must be connected and acyclic. For edits, the existingDefinition and its persisted revision are authoritative; currentAutomation is alignment metadata only, and neither prompt history nor an older builder snapshot may override the reloaded definition. For requests to run when a message is posted in a Slack channel, use the native Slack channel message trigger: set the trigger config type to "slack_channel_message", include the stable Slack channel ID in channelId, set scheduleType to "external" and scheduleValue to "slack_channel_message", and pass the message text and attachments through trigger data to the workflow. Trigger files can include a server-authenticated localPath inside the automation workspace. When an integration action needs those bytes, call ctx.integrations.executeAction with localFiles entries containing path and configuredProp; do not read or base64-encode the file in the script, put file bytes in CLI arguments, or fetch Slack urlPrivate without authentication. Do not implement this as polling or a scheduled Slack history check. Use the automation's native delivery configuration for the reply rather than adding a Slack send-message action solely for delivery.`;
 }
 
 function createPrompt(input: {
@@ -169,6 +174,9 @@ function editPrompt(input: {
   request: string;
   existing: AutomationDefinition;
   brokerCapable: boolean;
+  currentAutomation?: CurrentAutomation;
+  timezone?: string;
+  currentTime?: string;
   repair?: string;
   priorDraft?: unknown;
 }): string {
@@ -177,6 +185,13 @@ function editPrompt(input: {
     requestedChange: input.request,
     existingDefinition: input.existing,
     brokerCapable: input.brokerCapable,
+    ...(input.currentAutomation ? { currentAutomation: input.currentAutomation } : {}),
+    serverContext: {
+      taskId: input.existing.id,
+      persistedRevision: input.existing.revision,
+      ...(input.timezone ? { timezone: input.timezone } : {}),
+      ...(input.currentTime ? { currentTime: input.currentTime } : {}),
+    },
     ...(input.priorDraft !== undefined ? { priorDraft: input.priorDraft } : {}),
     ...(input.repair ? { priorValidationFailure: input.repair } : {}),
   });
@@ -232,6 +247,9 @@ export function createAutomationAuthoringService(deps: {
     expectedRevision?: number;
     existing?: AutomationDefinition;
     serverContext?: AutomationAuthoringServerContext;
+    currentAutomation?: CurrentAutomation;
+    timezone?: string;
+    currentTime?: string;
     brokerCapable: boolean;
   }): Promise<AutomationAuthoringResult> {
     const operationStartedAt = now();
@@ -302,6 +320,9 @@ export function createAutomationAuthoringService(deps: {
                   request: params.request,
                   existing: params.existing as AutomationDefinition,
                   brokerCapable: params.brokerCapable,
+                  currentAutomation: params.currentAutomation,
+                  timezone: params.timezone,
+                  currentTime: params.currentTime,
                   repair,
                   priorDraft,
                 }),
@@ -390,8 +411,11 @@ export function createAutomationAuthoringService(deps: {
         operation: "edit",
         request: input.request,
         taskId: input.existing.id,
-        expectedRevision: input.existing.revision,
+        expectedRevision: input.expectedRevision ?? input.existing.revision,
         existing: input.existing,
+        currentAutomation: input.currentAutomation,
+        timezone: input.timezone,
+        currentTime: input.currentTime,
         brokerCapable: input.brokerCapable,
       });
     },

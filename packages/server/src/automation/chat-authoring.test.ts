@@ -2,6 +2,7 @@ import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
+import type { CurrentAutomation } from "../scheduler/types";
 import { createTestDb } from "../test-utils";
 import { createChatAutomationAuthoring } from "./chat-authoring";
 import type { buildAutomationDefinition } from "./definition";
@@ -77,6 +78,33 @@ function taskContext() {
   };
 }
 
+function currentAutomation(taskId: string, revision: number): CurrentAutomation {
+  return {
+    taskId,
+    revision,
+    builderConversationId: "builder-conversation-1",
+    builderState: {
+      title: "Daily brief",
+      description: "Summarize updates",
+      prompt: "Summarize updates",
+      scheduleType: "interval",
+      scheduleValue: "120",
+      timezone: "Asia/Kolkata",
+      status: "active",
+      delivery: {
+        platform: "slack",
+        targetType: "dm",
+        targetId: "D123",
+        threadTs: null,
+        mode: "deliver",
+      },
+      steps: [],
+      edges: [],
+      stepContent: {},
+    },
+  };
+}
+
 describe("chat automation authoring orchestration", () => {
   let db: Awaited<ReturnType<typeof createTestDb>>;
 
@@ -118,6 +146,7 @@ describe("chat automation authoring orchestration", () => {
             status: "active" as const,
             createdBy: row.created_by,
             createdAt: row.created_at,
+            revision: row.revision,
             title: row.title,
             description: row.description,
             originChat: null,
@@ -237,12 +266,21 @@ describe("chat automation authoring orchestration", () => {
         request: "Rename it",
         taskId: "automation-edit",
         taskContext: taskContext(),
+        currentAutomation: currentAutomation("automation-edit", 0),
       }),
     ).resolves.toEqual({
       kind: "error",
       message: "Automation was changed by another editor. Refresh it and try again.",
     });
     expect(refreshTaskSchedule).not.toHaveBeenCalled();
+    expect(edit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentAutomation: currentAutomation("automation-edit", 0),
+        expectedRevision: 0,
+        timezone: "Asia/Kolkata",
+        currentTime: expect.any(String),
+      }),
+    );
     await expect(createScheduledTaskRepository(db).getById("automation-edit")).resolves.toMatchObject({
       title: "Daily brief",
       revision: 1,

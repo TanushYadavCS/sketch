@@ -48,6 +48,7 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
       scheduler: deps.scheduler,
       chatAuthoring: deps.chatAuthoring,
       taskContext: deps.taskContext,
+      currentAutomation: deps.currentAutomation ?? deps.taskContext?.currentAutomation,
       stepContentRepo: deps.stepContentRepo,
       automationRunsRepo: deps.automationRunsRepo,
       userRepo: deps.userRepo,

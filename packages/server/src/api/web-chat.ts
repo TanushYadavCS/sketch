@@ -44,8 +44,9 @@ import {
   resolveWebChatProgressRendererMode,
 } from "../progress-settings";
 import type { QueueManager } from "../queue";
+import { resolveScheduledTaskAccess } from "../scheduler/access";
 import type { TaskScheduler } from "../scheduler/service";
-import type { ScheduledTask } from "../scheduler/types";
+import type { CurrentAutomation, ScheduledTask } from "../scheduler/types";
 import type { SlackBot } from "../slack/bot";
 import { transcribeAudioFile } from "../transcription/service";
 import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
@@ -177,7 +178,11 @@ interface ParsedWebChatAttachment {
   file: WebChatFile;
 }
 
-type AutomationBuilderContext = { task: ScheduledTask; stepContentRows: StepContentRow[] } | null;
+type AutomationBuilderContext = {
+  task: ScheduledTask;
+  stepContentRows: StepContentRow[];
+  currentAutomation: CurrentAutomation;
+} | null;
 
 type WebChatUiChunk =
   | { type: "start"; messageMetadata?: { createdAt: string } }
@@ -276,6 +281,7 @@ async function resolveAutomationBuilderContext(params: {
   currentUserId: string;
   role: string | undefined;
   automationTaskId: string | null;
+  builderConversationId: string;
   logger: Logger;
 }): Promise<AutomationBuilderContext> {
   if (!params.automationTaskId || !params.deps.scheduler?.getTaskById) {
@@ -286,17 +292,29 @@ async function resolveAutomationBuilderContext(params: {
     params.logger.warn({ err, taskId: params.automationTaskId }, "Failed to resolve automation builder context");
     return null;
   });
-  if (!task || (params.role !== "admin" && task.createdBy !== params.currentUserId)) {
+  const accessibleTask = resolveScheduledTaskAccess(task, task?.createdBy, {
+    userId: params.currentUserId,
+    role: params.role,
+  });
+  if (!accessibleTask) {
     return null;
   }
 
   const stepContentRows = params.deps.stepContentRepo
-    ? await params.deps.stepContentRepo.getByTask(task.id).catch((err) => {
-        params.logger.warn({ err, taskId: task.id }, "Failed to load automation builder step content");
+    ? await params.deps.stepContentRepo.getByTask(accessibleTask.id).catch((err) => {
+        params.logger.warn({ err, taskId: accessibleTask.id }, "Failed to load automation builder step content");
         return [] as StepContentRow[];
       })
     : [];
-  return { task, stepContentRows };
+  return {
+    task: accessibleTask,
+    stepContentRows,
+    currentAutomation: buildCurrentAutomation({
+      task: accessibleTask,
+      stepContentRows,
+      builderConversationId: params.builderConversationId,
+    }),
+  };
 }
 
 function parseBuilderSteps(value: string | null): WorkflowStep[] {
@@ -328,6 +346,114 @@ function parseBuilderApps(value: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+const MAX_CURRENT_AUTOMATION_STEPS = 12;
+const MAX_CURRENT_AUTOMATION_EDGES = 24;
+const MAX_CURRENT_AUTOMATION_CONTENT = 800;
+const MAX_CURRENT_AUTOMATION_LIST_ITEMS = 12;
+
+function boundedOptionalBuilderText(value: string | undefined, maxLength: number): string | undefined {
+  return value === undefined ? undefined : builderContextText(value, maxLength);
+}
+
+function boundedBuilderStep(step: WorkflowStep): WorkflowStep {
+  const triggerConfig = step.triggerConfig
+    ? (() => {
+        const { configuredProps: _configuredProps, ...rest } = step.triggerConfig;
+        return {
+          ...rest,
+          channelId: boundedOptionalBuilderText(rest.channelId, 160),
+          scheduleValue: boundedOptionalBuilderText(rest.scheduleValue, 160),
+          timezone: boundedOptionalBuilderText(rest.timezone, 120),
+          app: boundedOptionalBuilderText(rest.app, 120),
+          eventDescription: boundedOptionalBuilderText(rest.eventDescription, 240),
+          componentKey: boundedOptionalBuilderText(rest.componentKey, 160),
+          canvasWorkflowId: boundedOptionalBuilderText(rest.canvasWorkflowId, 160),
+          canvasTriggerNodeId: boundedOptionalBuilderText(rest.canvasTriggerNodeId, 160),
+          canvasActionNodeId: boundedOptionalBuilderText(rest.canvasActionNodeId, 160),
+          errorMessage: boundedOptionalBuilderText(rest.errorMessage, 400),
+        };
+      })()
+    : undefined;
+  return {
+    ...step,
+    label: builderContextText(step.label, 160),
+    icon: builderContextText(step.icon, 80),
+    ...(step.agentModel ? { agentModel: builderContextText(step.agentModel, 160) } : {}),
+    ...(step.agentSkills
+      ? {
+          agentSkills: step.agentSkills
+            .slice(0, MAX_CURRENT_AUTOMATION_LIST_ITEMS)
+            .map((item) => builderContextText(item, 120)),
+        }
+      : {}),
+    ...(step.agentMcpServers
+      ? {
+          agentMcpServers: step.agentMcpServers
+            .slice(0, MAX_CURRENT_AUTOMATION_LIST_ITEMS)
+            .map((item) => builderContextText(item, 120)),
+        }
+      : {}),
+    ...(triggerConfig ? { triggerConfig } : {}),
+  };
+}
+
+function boundedBuilderEdge(edge: WorkflowEdge): WorkflowEdge {
+  return {
+    ...edge,
+    ...(edge.condition ? { condition: builderContextText(edge.condition, 240) } : {}),
+    ...(edge.label ? { label: builderContextText(edge.label, 160) } : {}),
+  };
+}
+
+function buildCurrentAutomation(params: {
+  task: ScheduledTask;
+  stepContentRows: StepContentRow[];
+  builderConversationId: string;
+}): CurrentAutomation {
+  const steps = parseBuilderSteps(params.task.steps).slice(0, MAX_CURRENT_AUTOMATION_STEPS).map(boundedBuilderStep);
+  const stepIds = new Set(steps.map((step) => step.id));
+  const edges = parseBuilderEdges(params.task.edges)
+    .filter((edge) => stepIds.has(edge.from) && stepIds.has(edge.to))
+    .slice(0, MAX_CURRENT_AUTOMATION_EDGES)
+    .map(boundedBuilderEdge);
+  const stepContent = Object.fromEntries(
+    params.stepContentRows
+      .filter((row) => stepIds.has(row.step_id))
+      .slice(0, MAX_CURRENT_AUTOMATION_STEPS)
+      .map((row) => [
+        row.step_id,
+        {
+          contentType: row.content_type === "script" ? ("script" as const) : ("prompt" as const),
+          content: builderContextText(row.content, MAX_CURRENT_AUTOMATION_CONTENT),
+          apps: parseBuilderApps(row.apps).slice(0, MAX_CURRENT_AUTOMATION_STEPS),
+        },
+      ]),
+  );
+
+  return {
+    taskId: params.task.id,
+    revision: params.task.revision,
+    builderConversationId: params.builderConversationId,
+    builderState: {
+      title: builderContextText(params.task.title, 240) || null,
+      description: builderContextText(params.task.description, 500) || null,
+      prompt: builderContextText(params.task.prompt, MAX_CURRENT_AUTOMATION_CONTENT),
+      scheduleType: params.task.scheduleType,
+      scheduleValue: builderContextText(params.task.scheduleValue, 160),
+      timezone: builderContextText(params.task.timezone, 120),
+      status: params.task.status,
+      delivery: {
+        ...params.task.delivery,
+        targetId: builderContextText(params.task.delivery.targetId, 160),
+        threadTs: params.task.delivery.threadTs ? builderContextText(params.task.delivery.threadTs, 80) : null,
+      },
+      steps,
+      edges,
+      stepContent,
+    },
+  };
 }
 
 function builderContextText(value: string | null | undefined, maxLength = 500): string {
@@ -1211,6 +1337,7 @@ function automationBuilderTaskContext(params: {
     creatorTimezone: params.currentUser.timezone,
     threadTs: task.threadTs ?? undefined,
     canManageAnyTask: params.role === "admin",
+    currentAutomation: params.context.currentAutomation,
     origin: {
       platform: "web" as const,
       conversationId: params.conversationId,
@@ -1527,6 +1654,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       currentUserId: currentUser.id,
       role: c.get("role"),
       automationTaskId,
+      builderConversationId: conversationId,
       logger: deps.logger,
     });
     const taskContext = automationBuilderContext
@@ -1544,6 +1672,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             createdBy: currentUser.id,
             creatorTimezone: currentUser.timezone,
             canManageAnyTask: c.get("role") === "admin",
+            currentAutomation: undefined,
             origin: {
               platform: "web" as const,
               conversationId,
@@ -1733,6 +1862,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               sendDm: deps.sendDm,
               ...(attachments.length > 0 ? { attachments } : {}),
               ...(taskContext ? { taskContext } : {}),
+              ...(taskContext?.currentAutomation ? { currentAutomation: taskContext.currentAutomation } : {}),
             }),
           ),
         );

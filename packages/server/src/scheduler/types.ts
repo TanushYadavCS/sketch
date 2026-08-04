@@ -7,6 +7,7 @@
  * delivery metadata without requiring the agent to supply it explicitly.
  */
 
+import type { WorkflowEdge, WorkflowStep } from "@sketch/shared";
 import type { WorkflowDelivery } from "../workflows/delivery";
 
 export interface ScheduledTask {
@@ -25,6 +26,7 @@ export interface ScheduledTask {
   status: "active" | "paused" | "completed";
   createdBy: string | null;
   createdAt: string;
+  revision: number;
   title: string | null;
   description: string | null;
   originChat: TaskOriginChat | null;
@@ -35,6 +37,39 @@ export interface ScheduledTask {
   outputThreadTs: string | null;
   outputMode: "deliver" | "silent";
   delivery: WorkflowDelivery;
+}
+
+export interface CurrentAutomationBuilderState {
+  title: string | null;
+  description: string | null;
+  prompt: string;
+  scheduleType: ScheduledTask["scheduleType"];
+  scheduleValue: string;
+  timezone: string;
+  status: ScheduledTask["status"];
+  delivery: WorkflowDelivery;
+  steps: WorkflowStep[];
+  edges: WorkflowEdge[];
+  stepContent: Record<
+    string,
+    {
+      contentType: "prompt" | "script";
+      content: string;
+      apps: string[] | null;
+    }
+  >;
+}
+
+/**
+ * Request-scoped builder alignment created only after the current task passed
+ * the normal owner/admin access check. The builder state is deliberately
+ * bounded; persisted task data remains authoritative for edits.
+ */
+export interface CurrentAutomation {
+  taskId: string;
+  revision: number;
+  builderConversationId: string;
+  builderState: CurrentAutomationBuilderState;
 }
 
 export interface TaskOriginChat {
@@ -57,4 +92,5 @@ export interface TaskContext {
   threadTs?: string;
   origin?: TaskOriginChat;
   canManageAnyTask?: boolean;
+  currentAutomation?: CurrentAutomation;
 }

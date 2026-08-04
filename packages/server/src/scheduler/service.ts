@@ -852,6 +852,7 @@ export class TaskScheduler {
       status: row.status as "active" | "paused" | "completed",
       createdBy: row.created_by,
       createdAt: row.created_at,
+      revision: row.revision,
       title: row.title,
       description: row.description,
       originChat:

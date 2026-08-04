@@ -16,6 +16,7 @@ import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB, ScheduledTasksTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
+import { resolveScheduledTaskAccess } from "../scheduler/access";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
@@ -366,11 +367,6 @@ export function scheduledTaskRoutes(
     return user?.id ?? null;
   }
 
-  function canAccess(row: ScheduledTaskRow, userId: string | null, role: string | undefined): boolean {
-    if (!userId) return false;
-    return role === "admin" || row.created_by === userId;
-  }
-
   async function loadAccessibleTask(c: Context, id: string) {
     const row = await repo.getById(id);
     if (!row) {
@@ -379,7 +375,11 @@ export function scheduledTaskRoutes(
       };
     }
     const userId = await resolveUserId(c.get("sub"));
-    if (!canAccess(row, userId, c.get("role"))) {
+    const accessibleRow = resolveScheduledTaskAccess(row, row.created_by, {
+      userId,
+      role: c.get("role"),
+    });
+    if (!accessibleRow) {
       logger?.warn(
         { userId, taskId: id, ownerUserId: row.created_by },
         "scheduled-tasks: member denied access to task",
@@ -388,7 +388,7 @@ export function scheduledTaskRoutes(
         response: c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404),
       };
     }
-    return { row };
+    return { row: accessibleRow };
   }
 
   async function loadFullDefinition(row: ScheduledTaskRow) {

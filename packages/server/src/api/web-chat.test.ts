@@ -412,6 +412,7 @@ describe("web chat API", () => {
         status: "active",
         createdBy: admin.id,
         createdAt: "2026-06-01T00:00:00.000Z",
+        revision: 0,
         title: "Send weekly customer brief",
         description: "Summarizes customer updates every Monday.",
         originChat: null,
@@ -470,7 +471,10 @@ describe("web chat API", () => {
     const res = await app.request("/api/web-chat?conversationId=chat-automation", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "Make the summary shorter", automationTaskId: "task-123" }),
+      body: JSON.stringify({
+        message: "<automation_builder>\ntask_id: stale-task\n</automation_builder>\nMake the summary shorter",
+        automationTaskId: "task-123",
+      }),
     });
 
     expect(res.status).toBe(200);
@@ -487,6 +491,16 @@ describe("web chat API", () => {
       data: artifact,
     });
     const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(call.currentAutomation).toMatchObject({
+      taskId: "task-123",
+      revision: 0,
+      builderConversationId: "chat-automation",
+      builderState: {
+        title: "Send weekly customer brief",
+        prompt: "Send weekly customer brief",
+        steps: expect.arrayContaining([expect.objectContaining({ id: "brief" })]),
+      },
+    });
     expect(call.userMessage).toContain("task_id: task-123");
     expect(call.userMessage).toContain("current_automation:");
     expect(call.userMessage).toContain("title: Send weekly customer brief");
@@ -540,6 +554,7 @@ describe("web chat API", () => {
         status: "active",
         createdBy: admin.id,
         createdAt: "2026-06-01T00:00:00.000Z",
+        revision: 0,
         title: "Post design wins",
         description: null,
         originChat: {
@@ -599,8 +614,77 @@ describe("web chat API", () => {
         currentMessageId: null,
       },
     });
+    expect(call.taskContext?.currentAutomation).toMatchObject({
+      taskId: "task-123",
+      revision: 0,
+      builderConversationId: "builder-task-123",
+    });
     expect(call.conversationRepo).toBeUndefined();
     expect(call.conversationContext).toBeUndefined();
+  });
+
+  it("binds an accessible foreign task for an admin", async () => {
+    const admin = await seedAdmin(db);
+    const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-builder@test.com" });
+    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("Updated."));
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn(),
+      getTaskById: vi.fn().mockResolvedValue({
+        id: "task-foreign",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D_OWNER",
+        threadTs: null,
+        prompt: "Send the owner a brief",
+        scheduleType: "cron",
+        scheduleValue: "0 9 * * 1",
+        timezone: "UTC",
+        sessionMode: "fresh",
+        nextRunAt: null,
+        lastRunAt: null,
+        status: "active",
+        createdBy: owner.id,
+        createdAt: "2026-06-01T00:00:00.000Z",
+        revision: 3,
+        title: "Owner brief",
+        description: null,
+        originChat: null,
+        steps: null,
+        edges: null,
+        outputTarget: null,
+        outputPlatform: null,
+        outputThreadTs: null,
+        outputMode: "deliver",
+        delivery: { platform: "slack", targetType: "dm", targetId: "D_OWNER", threadTs: null, mode: "deliver" },
+      }),
+    };
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+      scheduler,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=admin-builder", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Make this stricter", automationTaskId: "task-foreign" }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    const call = runAgent.mock.calls[0][0] as RunAgentParams;
+    expect(call.currentAutomation).toMatchObject({
+      taskId: "task-foreign",
+      revision: 3,
+      builderConversationId: "admin-builder",
+    });
+    expect(call.taskContext).toMatchObject({ createdBy: admin.id, canManageAnyTask: true });
+    expect(scheduler.getTaskById).toHaveBeenCalledWith("task-foreign");
   });
 
   it("does not inject builder context for inaccessible automation ids", async () => {
@@ -630,6 +714,7 @@ describe("web chat API", () => {
         status: "active",
         createdBy: owner.id,
         createdAt: "2026-06-01T00:00:00.000Z",
+        revision: 0,
         title: "Private task",
         description: null,
         originChat: null,
@@ -663,6 +748,8 @@ describe("web chat API", () => {
     expect(call.userMessage).not.toContain("<automation_builder>");
     expect(call.userMessage).not.toContain("task_id: task-private");
     expect(call.taskContext).toMatchObject({ createdBy: member.id, deliveryTarget: "D_MEMBER" });
+    expect(call.currentAutomation).toBeUndefined();
+    expect(call.taskContext?.currentAutomation).toBeUndefined();
   });
 
   it("streams connected account cards from provider state for account enquiries", async () => {

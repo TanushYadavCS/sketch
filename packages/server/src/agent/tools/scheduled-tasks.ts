@@ -19,7 +19,7 @@ import {
   normalizeScheduleTriggerSteps,
   normalizeScheduleTriggerStepsJson,
 } from "../../scheduler/trigger-metadata";
-import type { ScheduledTask, TaskContext } from "../../scheduler/types";
+import type { CurrentAutomation, ScheduledTask, TaskContext } from "../../scheduler/types";
 import type { WorkflowEdge, WorkflowStep } from "../../workflows/types";
 import type { AutomationArtifactCollector, SearchableUserRepo } from "./types";
 
@@ -116,7 +116,12 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
     .enum(["fresh"])
     .optional()
     .describe("Scheduled automations currently support only 'fresh': no memory, each run starts clean."),
-  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun/share."),
+  task_id: z
+    .string()
+    .optional()
+    .describe(
+      "ID of the task. Required for update unless the current builder automation is implicit; required for remove/pause/resume/run/getRun/share.",
+    ),
   title: z.string().optional().describe("Human-readable name. Required for multi-step automations."),
   description: z.string().optional().describe("Description of what this automation does."),
   steps: z
@@ -164,7 +169,12 @@ const authoredScheduledTasksSchema = {
     .describe(
       "The user's natural-language automation request. Required for add and update; preserve their intent verbatim.",
     ),
-  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun/share."),
+  task_id: z
+    .string()
+    .optional()
+    .describe(
+      "ID of the task. Required for update unless the current builder automation is implicit; required for remove/pause/resume/run/getRun/share.",
+    ),
   run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),
 };
 
@@ -212,6 +222,7 @@ export interface ManageScheduledTasksDeps {
   config?: { BASE_URL?: string; PORT: number };
   automationArtifactCollector?: AutomationArtifactCollector;
   chatAuthoring?: ChatAutomationAuthoring;
+  currentAutomation?: CurrentAutomation;
 }
 
 function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
@@ -592,7 +603,10 @@ async function handleConfiguredChatAuthoring(
   if (!request) {
     return text(`Error: request is required for ${params.action} action.`);
   }
-  if (params.action === "update" && !params.task_id) {
+  const currentAutomation = deps.currentAutomation ?? deps.taskContext.currentAutomation;
+  const explicitTaskId = params.task_id?.trim() || undefined;
+  const targetTaskId = explicitTaskId ?? (params.action === "update" ? currentAutomation?.taskId : undefined);
+  if (params.action === "update" && !targetTaskId) {
     return text("Error: task_id is required for update action.");
   }
 
@@ -601,8 +615,9 @@ async function handleConfiguredChatAuthoring(
     result = await chatAuthoring.author({
       action: params.action === "add" ? "create" : "edit",
       request,
-      ...(params.task_id ? { taskId: params.task_id } : {}),
+      ...(targetTaskId ? { taskId: targetTaskId } : {}),
       taskContext: deps.taskContext,
+      ...(targetTaskId && currentAutomation?.taskId === targetTaskId ? { currentAutomation } : {}),
     });
   } catch (error) {
     if (error instanceof AutomationAuthoringValidationError) {
@@ -632,8 +647,11 @@ export async function handleManageScheduledTasks(
   params: ManageScheduledTasksParams,
   deps: ManageScheduledTasksDeps,
 ): Promise<{ content: { type: "text"; text: string }[] }> {
-  const { action, task_id } = params;
+  const { action } = params;
   const ctx = deps.taskContext;
+  const currentAutomation = deps.currentAutomation ?? ctx.currentAutomation;
+  const explicitTaskId = params.task_id?.trim() || undefined;
+  const task_id = explicitTaskId ?? (action === "update" ? currentAutomation?.taskId : undefined);
 
   const text = (msg: string) => ({ content: [{ type: "text" as const, text: msg }] });
 
@@ -1251,6 +1269,7 @@ export function createManageScheduledTasksTool(deps: Partial<ManageScheduledTask
         config: deps.config,
         automationArtifactCollector: deps.automationArtifactCollector,
         chatAuthoring: deps.chatAuthoring,
+        currentAutomation: deps.currentAutomation ?? deps.taskContext?.currentAutomation,
       });
     },
   );
