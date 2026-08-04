@@ -89,7 +89,8 @@ describe("scheduled task conversation API", () => {
 
     const first = await app.request("/api/scheduled-tasks/task-conversations/conversations", {
       method: "POST",
-      headers: { Cookie: cookie },
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ createNew: true }),
     });
     expect(first.status).toBe(201);
     const firstBody = await first.json();
@@ -133,6 +134,26 @@ describe("scheduled task conversation API", () => {
       conversationId: firstConversationId,
       state: "archived",
     });
+
+    const selectArchived = await app.request(
+      `/api/scheduled-tasks/task-conversations/conversations/${firstConversationId}`,
+      {
+        method: "PUT",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(selectArchived.status).toBe(409);
+    await expect(selectArchived.json()).resolves.toMatchObject({
+      error: { code: "CONVERSATION_ARCHIVED" },
+    });
+    const archivedRows = await db
+      .selectFrom("scheduled_task_conversations")
+      .select(["archived_at"])
+      .where("task_id", "=", "task-conversations")
+      .where("conversation_id", "=", firstConversationId)
+      .execute();
+    expect(archivedRows.every((row) => row.archived_at !== null)).toBe(true);
 
     const activeList = await app.request("/api/scheduled-tasks/task-conversations/conversations", {
       headers: { Cookie: cookie },
@@ -219,6 +240,26 @@ describe("scheduled task conversation API", () => {
       headers: { Cookie: cookie },
     });
     expect(unrelated.status).toBe(404);
+
+    const putUnrelated = await app.request("/api/scheduled-tasks/safe-task/conversations/not-associated", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(putUnrelated.status).toBe(404);
+    await expect(putUnrelated.json()).resolves.toMatchObject({
+      error: { code: "CONVERSATION_NOT_FOUND" },
+    });
+
+    const postGuessed = await app.request("/api/scheduled-tasks/safe-task/conversations", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ conversationId: "guessed-builder", createNew: true }),
+    });
+    expect(postGuessed.status).toBe(404);
+    await expect(postGuessed.json()).resolves.toMatchObject({
+      error: { code: "CONVERSATION_NOT_FOUND" },
+    });
 
     await expect(
       db.selectFrom("scheduled_task_conversations").selectAll().where("task_id", "=", "safe-task").execute(),

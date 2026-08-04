@@ -106,33 +106,52 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     }
 
     let result: { association: Awaited<ReturnType<typeof conversations.associate>>; created: boolean };
-    if (kind === "builder" && !requestedConversationId && body.createNew !== true) {
-      result = await conversations.getOrCreateBuilderConversation(taskId, access.userId);
-    } else if (kind === "builder") {
-      const existing = requestedConversationId
-        ? await conversations.getForTranscriptUser(taskId, requestedConversationId, access.userId, {
-            includeArchived: true,
-          })
-        : undefined;
-      result = await conversations.createBuilderConversation(taskId, access.userId, requestedConversationId);
-      result.created = !existing;
-    } else {
-      const existing = await conversations.getForTranscriptUser(
-        taskId,
-        requestedConversationId as string,
-        access.userId,
-        {
-          includeArchived: true,
-        },
-      );
+    if (kind === "builder" && !requestedConversationId && body.createNew === true) {
+      result = await conversations.createBuilderConversation(taskId, access.userId);
+    } else if (!requestedConversationId) {
+      const activeBuilder = await conversations.listForTranscriptUser(taskId, access.userId, { kind: "builder" });
+      const existingConversationId = activeBuilder[0]?.conversationId;
+      if (!existingConversationId) {
+        return errorResponse(
+          c,
+          "CONVERSATION_NOT_FOUND",
+          "No active builder conversation exists; start a new chat explicitly",
+          404,
+        );
+      }
       result = {
         association: await conversations.associate({
           taskId,
-          conversationId: requestedConversationId as string,
+          conversationId: existingConversationId,
+          transcriptUserId: access.userId,
+          kind: "builder",
+        }),
+        created: false,
+      };
+    } else {
+      const existing = await conversations.getForTranscriptUser(taskId, requestedConversationId, access.userId, {
+        includeArchived: true,
+      });
+      if (!existing) {
+        return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation is not associated with this task", 404);
+      }
+
+      const active = await conversations.getForTranscriptUser(taskId, requestedConversationId, access.userId);
+      if (!active) {
+        return errorResponse(c, "CONVERSATION_ARCHIVED", "Conversation is archived; restore it before selecting", 409);
+      }
+      if (!active.kinds.includes(kind)) {
+        return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation kind is not associated with this task", 404);
+      }
+
+      result = {
+        association: await conversations.associate({
+          taskId,
+          conversationId: requestedConversationId,
           transcriptUserId: access.userId,
           kind,
         }),
-        created: !existing,
+        created: false,
       };
     }
 
@@ -183,19 +202,33 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     const existing = await conversations.getForTranscriptUser(taskId, conversationId, access.userId, {
       includeArchived: true,
     });
+    if (!existing) {
+      return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation is not associated with this task", 404);
+    }
+    const active = await conversations.getForTranscriptUser(taskId, conversationId, access.userId);
+    if (!active) {
+      return errorResponse(c, "CONVERSATION_ARCHIVED", "Conversation is archived; restore it before selecting", 409);
+    }
+    if (body.kind !== undefined && !active.kinds.includes(kind)) {
+      return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation kind is not associated with this task", 404);
+    }
+    const selectedKind = body.kind === undefined ? active.kinds[0] : kind;
+    if (!selectedKind) {
+      return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation association is unavailable", 404);
+    }
     await conversations.associate({
       taskId,
       conversationId,
       transcriptUserId: access.userId,
-      kind,
+      kind: selectedKind,
     });
     const summary = await conversations.getForTranscriptUser(taskId, conversationId, access.userId, {
       includeArchived: true,
     });
     if (!summary) return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation association was not persisted", 409);
 
-    const response = { conversation: summary, created: !existing };
-    return existing ? c.json(response) : c.json(response, 201);
+    const response = { conversation: summary, created: false };
+    return c.json(response);
   });
 
   routes.patch("/:id/conversations/:conversationId", async (c) => {

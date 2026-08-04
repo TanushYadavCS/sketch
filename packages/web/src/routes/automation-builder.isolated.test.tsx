@@ -1,5 +1,5 @@
 import type { AutomationDefinition } from "@/lib/api";
-import { ApiRequestError, api } from "@/lib/api";
+import { ApiRequestError } from "@/lib/api";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -9,9 +9,13 @@ import { AutomationBuilderPage } from "./automation-builder";
 
 const mocks = vi.hoisted(() => ({
   getAutomation: vi.fn(),
+  listConversations: vi.fn(),
   loadMessages: vi.fn(),
   navigate: vi.fn(),
   originChatMessages: vi.fn(),
+  createConversation: vi.fn(),
+  selectConversation: vi.fn(),
+  archiveConversation: vi.fn(),
   interruptChat: vi.fn(),
   runTask: vi.fn(),
   saveAutomation: vi.fn(),
@@ -33,6 +37,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
     api: {
       scheduledTasks: {
         get: mocks.getAutomation,
+        conversations: mocks.listConversations,
+        createConversation: mocks.createConversation,
+        selectConversation: mocks.selectConversation,
+        archiveConversation: mocks.archiveConversation,
         originChatMessages: mocks.originChatMessages,
         run: mocks.runTask,
         save: mocks.saveAutomation,
@@ -249,9 +257,65 @@ describe("AutomationBuilderPage", () => {
   beforeEach(() => {
     mocks.getAutomation.mockClear();
     mocks.getAutomation.mockResolvedValue(automation);
+    mocks.listConversations.mockClear();
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-alpha",
+          kinds: ["web_chat"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
     mocks.loadMessages.mockClear();
     mocks.loadMessages.mockResolvedValue({ messages: [], updatedAt: null });
     mocks.originChatMessages.mockResolvedValue({ messages: [] });
+    mocks.createConversation.mockClear();
+    mocks.createConversation.mockResolvedValue({
+      conversation: {
+        conversationId: "builder-new",
+        kinds: ["builder"],
+        createdAt: "2026-06-02T00:00:00.000Z",
+        updatedAt: "2026-06-02T00:00:00.000Z",
+        lastActiveAt: "2026-06-02T00:00:00.000Z",
+        archivedAt: null,
+        state: "active",
+      },
+      created: true,
+    });
+    mocks.selectConversation.mockClear();
+    mocks.selectConversation.mockImplementation(async (_taskId: string, conversationId: string) => ({
+      conversation: {
+        conversationId,
+        kinds: ["builder"],
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-03T00:00:00.000Z",
+        lastActiveAt: "2026-06-03T00:00:00.000Z",
+        archivedAt: null,
+        state: "active",
+      },
+      created: false,
+    }));
+    mocks.archiveConversation.mockClear();
+    mocks.archiveConversation.mockImplementation(
+      async (_taskId: string, conversationId: string, archived: boolean) => ({
+        conversation: {
+          conversationId,
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-04T00:00:00.000Z",
+          lastActiveAt: "2026-06-03T00:00:00.000Z",
+          archivedAt: archived ? "2026-06-04T00:00:00.000Z" : null,
+          state: archived ? "archived" : "active",
+        },
+      }),
+    );
     mocks.interruptChat.mockClear();
     mocks.interruptChat.mockResolvedValue({ success: true, interrupted: true });
     mocks.navigate.mockClear();
@@ -292,13 +356,13 @@ describe("AutomationBuilderPage", () => {
     expect(screen.getAllByDisplayValue("C123").length).toBeGreaterThan(0);
   });
 
-  it("opens a fresh builder chat and sends the active automation id", async () => {
+  it("opens the selected associated chat and sends the active automation id", async () => {
     const user = userEvent.setup();
     renderBuilder();
 
     const input = await screen.findByLabelText("Message Sketch");
     await waitFor(() => expect(input).not.toBeDisabled());
-    expect(mocks.loadMessages).toHaveBeenCalledWith(expect.stringMatching(/^builder-task-123-/));
+    expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha");
 
     await user.type(input, "Make it daily");
     await user.click(screen.getByLabelText("Send message"));
@@ -308,13 +372,13 @@ describe("AutomationBuilderPage", () => {
     });
   });
 
-  it("shows an automation-aware empty state for a fresh builder chat", async () => {
+  it("shows an automation-aware empty state for an associated empty chat", async () => {
     const user = userEvent.setup();
     renderBuilder();
 
     await screen.findByLabelText("Message Sketch");
-    expect(screen.getByText("Builder chat")).toBeInTheDocument();
-    expect(screen.getByText("Fresh")).toBeInTheDocument();
+    expect(screen.getByText("Current builder chat")).toBeInTheDocument();
+    expect(screen.getByText("Source chat")).toBeInTheDocument();
     expect(await screen.findByText("What should change?")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Add a step" }));
@@ -369,13 +433,13 @@ describe("AutomationBuilderPage", () => {
     expect(ownership).toHaveTextContent("Owner Alice Member");
     expect(ownership).toHaveTextContent("Last edited by Karan Admin");
   });
-  it("ignores origin web chat search params when choosing the builder chat", async () => {
+  it("honors an associated source chat search param", async () => {
     mocks.search = { conversationId: "chat-alpha" };
     renderBuilder();
 
     await screen.findByLabelText("Message Sketch");
-    expect(mocks.loadMessages).toHaveBeenCalledWith(expect.stringMatching(/^builder-task-123-/));
-    expect(mocks.loadMessages).not.toHaveBeenCalledWith("chat-alpha");
+    expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha");
+    expect(mocks.loadMessages).not.toHaveBeenCalledWith(expect.stringMatching(/^builder-task-123-/));
   });
 
   it("auto-arranges generated vertical workflow positions", async () => {
@@ -389,46 +453,119 @@ describe("AutomationBuilderPage", () => {
     expect(flow).toHaveAttribute("data-node-positions", "trigger:0,0|check:245,0");
   });
 
-  it("starts a fresh builder chat for a Slack-origin automation", async () => {
+  it("opens the task chat list without a conversation search param", async () => {
     const user = userEvent.setup();
     mocks.search = {};
     mocks.getAutomation.mockResolvedValue({
       ...automation,
       originChat: { platform: "slack", conversationId: "42", providerThreadId: "1700.1", currentMessageId: 12 },
     });
-    mocks.originChatMessages.mockResolvedValue({
-      messages: [
-        {
-          id: "1",
-          role: "user",
-          senderName: "Alice",
-          text: "Alice: Create a Trustpilot review automation",
-          createdAt: "2026-06-01T00:00:00.000Z",
-        },
-      ],
-    });
-
     renderBuilder();
 
-    const input = await screen.findByLabelText("Message Sketch");
-    expect(screen.queryByText("Alice: Create a Trustpilot review automation")).not.toBeInTheDocument();
-    expect(mocks.loadMessages).toHaveBeenCalledWith(expect.stringMatching(/^builder-task-123-/));
+    expect(await screen.findByText("Builder chats")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Message Sketch")).not.toBeInTheDocument();
+    expect(mocks.loadMessages).not.toHaveBeenCalled();
     expect(mocks.originChatMessages).not.toHaveBeenCalled();
 
-    await waitFor(() => expect(input).not.toBeDisabled());
-    await user.type(input, "Tighten the filter");
-    await user.click(screen.getByLabelText("Send message"));
-
-    await waitFor(() =>
-      expect(mocks.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Tighten the filter" }), {
-        body: { automationTaskId: "task-123" },
+    await user.click(screen.getByRole("button", { name: "New chat" }));
+    await waitFor(() => expect(mocks.createConversation).toHaveBeenCalledWith("task-123", { createNew: true }));
+    expect(mocks.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "/scheduled-tasks/$taskId/edit",
+        params: { taskId: "task-123" },
+        search: { conversationId: "builder-new" },
       }),
     );
   });
 
-  it("can stop a stuck builder chat run", async () => {
+  it("selects an older task-scoped chat from the sidechat list", async () => {
     const user = userEvent.setup();
     mocks.search = {};
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-alpha",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+        {
+          conversationId: "chat-beta",
+          kinds: ["builder"],
+          createdAt: "2026-06-02T00:00:00.000Z",
+          updatedAt: "2026-06-02T00:00:00.000Z",
+          lastActiveAt: "2026-06-02T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
+
+    renderBuilder();
+    await user.click(await screen.findByTestId("automation-builder-conversation-chat-beta"));
+
+    await waitFor(() => expect(mocks.selectConversation).toHaveBeenCalledWith("task-123", "chat-beta", "builder"));
+    expect(mocks.navigate).toHaveBeenCalledWith(expect.objectContaining({ search: { conversationId: "chat-beta" } }));
+    expect(mocks.loadMessages).not.toHaveBeenCalled();
+  });
+
+  it("archives the current chat from the sidechat and returns to history", async () => {
+    const user = userEvent.setup();
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Archive builder chat" }));
+
+    await waitFor(() => expect(mocks.archiveConversation).toHaveBeenCalledWith("task-123", "chat-alpha", true));
+    expect(mocks.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: {}, params: { taskId: "task-123" } }),
+    );
+  });
+
+  it("shows archived and unrelated route states without loading transcript content", async () => {
+    mocks.search = { conversationId: "chat-archived" };
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [
+        {
+          conversationId: "chat-archived",
+          kinds: ["builder"],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-01T00:00:00.000Z",
+          lastActiveAt: "2026-06-01T00:00:00.000Z",
+          archivedAt: "2026-06-03T00:00:00.000Z",
+          state: "archived",
+        },
+      ],
+      transcriptAccess: "viewer",
+    });
+
+    const user = userEvent.setup();
+    renderBuilder();
+
+    expect(await screen.findByTestId("automation-builder-chat-archived")).toBeInTheDocument();
+    expect(mocks.loadMessages).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Restore chat" }));
+    await waitFor(() => expect(mocks.archiveConversation).toHaveBeenCalledWith("task-123", "chat-archived", false));
+
+    mocks.search = { conversationId: "not-associated" };
+    mocks.listConversations.mockResolvedValue({
+      taskId: "task-123",
+      conversations: [],
+      transcriptAccess: "viewer",
+    });
+    renderBuilder();
+    expect(await screen.findByTestId("automation-builder-chat-unavailable")).toBeInTheDocument();
+    expect(mocks.loadMessages).not.toHaveBeenCalledWith("not-associated");
+  });
+
+  it("can stop a stuck builder chat run", async () => {
+    const user = userEvent.setup();
+    mocks.search = { conversationId: "chat-alpha" };
     mocks.getAutomation.mockResolvedValue({
       ...automation,
       originChat: { platform: "slack", conversationId: "42", providerThreadId: "1700.1", currentMessageId: 12 },
@@ -445,13 +582,12 @@ describe("AutomationBuilderPage", () => {
 
     await user.click(await screen.findByLabelText("Pause Sketch"));
 
-    expect(mocks.interruptChat).toHaveBeenCalledWith(expect.stringMatching(/^builder-task-123-/));
-    expect(mocks.interruptChat).not.toHaveBeenCalledWith("chat-alpha");
+    expect(mocks.interruptChat).toHaveBeenCalledWith("chat-alpha");
     expect(mocks.interruptChat).not.toHaveBeenCalledWith("42");
   });
 
   it("shows a stopped builder chat notice after reload", async () => {
-    mocks.search = {};
+    mocks.search = { conversationId: "chat-alpha" };
     mocks.getAutomation.mockResolvedValue({
       ...automation,
       originChat: { platform: "slack", conversationId: "42", providerThreadId: "1700.1", currentMessageId: 12 },

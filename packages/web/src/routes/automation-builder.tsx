@@ -6,6 +6,8 @@ import {
   type AutomationBuilderSaveRequest,
   type AutomationDefinition,
   type AutomationStepContent,
+  type ScheduledTaskConversationSummary,
+  type ScheduledTaskConversationsResponse,
   type StepOutput,
   type WebChatUploadedAttachment,
   type WorkflowEdge,
@@ -14,6 +16,9 @@ import {
 } from "@/lib/api";
 import { useChat } from "@ai-sdk/react";
 import {
+  ArchiveIcon,
+  ArrowClockwiseIcon,
+  ArrowLeftIcon,
   BracketsCurlyIcon,
   CalendarDotsIcon,
   CaretDownIcon,
@@ -28,6 +33,7 @@ import {
   type IconProps,
   LightningIcon,
   PlayIcon,
+  PlusIcon,
   RobotIcon,
   SlackLogoIcon,
   SpinnerGapIcon,
@@ -50,7 +56,7 @@ import { Input } from "@sketch/ui/components/input";
 import { Textarea } from "@sketch/ui/components/textarea";
 import { cn } from "@sketch/ui/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createRoute, useNavigate, useParams } from "@tanstack/react-router";
+import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   Background,
   BackgroundVariant,
@@ -289,10 +295,10 @@ function BuilderOwnership({ automation }: { automation: AutomationDefinition }) 
 
 export function AutomationBuilderPage() {
   const { taskId } = useParams({ from: automationBuilderRoute.id });
+  const { conversationId: requestedConversationId } = useSearch({ from: automationBuilderRoute.id });
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const queryKey = useMemo(() => ["scheduled-tasks", taskId, "builder"] as const, [taskId]);
-  const builderConversationId = useMemo(() => freshBuilderConversationId(taskId), [taskId]);
   const [draft, setDraft] = useState<DraftAutomation | null>(null);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -442,7 +448,7 @@ export function AutomationBuilderPage() {
   return (
     <div className="relative flex h-[calc(100vh-3rem)] min-h-0 overflow-hidden bg-background md:h-screen">
       <BuilderChatSidecar
-        conversationId={builderConversationId}
+        requestedConversationId={requestedConversationId ?? null}
         taskId={taskId}
         title={builderTitle}
         queryKey={queryKey}
@@ -630,28 +636,422 @@ function outgoingBuilderRequestOptions(taskId: string, attachments: WebChatUploa
   };
 }
 
-function freshBuilderConversationId(taskId: string): string {
-  const safeTaskId = taskId.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40) || "task";
-  const rawSuffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const suffix = rawSuffix.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 24) || String(Date.now());
-  return `builder-${safeTaskId}-${suffix}`;
+const builderConversationQueryKey = (taskId: string) => ["scheduled-tasks", taskId, "conversations"] as const;
+
+function replaceBuilderConversationCache(
+  queryClient: ReturnType<typeof useQueryClient>,
+  queryKey: readonly unknown[],
+  conversation: ScheduledTaskConversationSummary,
+) {
+  queryClient.setQueryData<ScheduledTaskConversationsResponse>(queryKey, (current) => {
+    if (!current) return current;
+    return {
+      ...current,
+      conversations: [
+        conversation,
+        ...current.conversations.filter((item) => item.conversationId !== conversation.conversationId),
+      ],
+    };
+  });
+}
+
+function conversationSourceLabel(conversation: ScheduledTaskConversationSummary): string {
+  const hasBuilder = conversation.kinds.includes("builder");
+  const hasWebChat = conversation.kinds.includes("web_chat");
+  if (hasBuilder && hasWebChat) return "Builder + source";
+  if (hasWebChat) return "Source chat";
+  return "Builder chat";
+}
+
+function conversationDateLabel(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Recently";
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
 }
 
 function BuilderChatSidecar({
-  conversationId,
+  requestedConversationId,
   taskId,
   title,
   queryKey,
   className,
 }: {
-  conversationId: string;
+  requestedConversationId: string | null;
   taskId: string;
   title: string;
   queryKey: readonly unknown[];
   className?: string;
 }) {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
+  const conversationsQueryKey = useMemo(() => builderConversationQueryKey(taskId), [taskId]);
+  const conversationsQuery = useQuery({
+    queryKey: conversationsQueryKey,
+    queryFn: () => api.scheduledTasks.conversations(taskId, { includeArchived: true }),
+  });
+  const selectedConversation = conversationsQuery.data?.conversations.find(
+    (conversation) => conversation.conversationId === requestedConversationId,
+  );
+
+  const openConversation = useCallback(
+    (conversationId: string) => {
+      void navigate({
+        to: "/scheduled-tasks/$taskId/edit",
+        params: { taskId },
+        search: { conversationId },
+        replace: true,
+      });
+    },
+    [navigate, taskId],
+  );
+  const openChatList = useCallback(() => {
+    void navigate({
+      to: "/scheduled-tasks/$taskId/edit",
+      params: { taskId },
+      search: {},
+      replace: true,
+    });
+  }, [navigate, taskId]);
+
+  const createMutation = useMutation({
+    mutationFn: () => api.scheduledTasks.createConversation(taskId, { createNew: true }),
+    onSuccess: ({ conversation }) => {
+      replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
+      openConversation(conversation.conversationId);
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Failed to start a builder chat"),
+  });
+  const selectMutation = useMutation({
+    mutationFn: (conversation: ScheduledTaskConversationSummary) =>
+      api.scheduledTasks.selectConversation(taskId, conversation.conversationId, conversation.kinds[0]),
+    onSuccess: ({ conversation }) => {
+      replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
+      openConversation(conversation.conversationId);
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "This builder chat is unavailable"),
+  });
+  const archiveMutation = useMutation({
+    mutationFn: (conversationId: string) => api.scheduledTasks.archiveConversation(taskId, conversationId, true),
+    onSuccess: ({ conversation }) => {
+      replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
+      openChatList();
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Failed to archive this builder chat"),
+  });
+  const restoreMutation = useMutation({
+    mutationFn: (conversationId: string) => api.scheduledTasks.archiveConversation(taskId, conversationId, false),
+    onSuccess: ({ conversation }) => {
+      replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
+      openConversation(conversation.conversationId);
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Failed to restore this builder chat"),
+  });
+
+  const selectedIsArchived = selectedConversation?.state === "archived";
+  return (
+    <aside
+      data-testid="automation-builder-chat-sidecar"
+      className={cn(
+        "w-[400px] min-w-[320px] max-w-[600px] shrink-0 resize-x flex-col overflow-hidden border-r border-border bg-background text-foreground",
+        className,
+      )}
+    >
+      <BuilderChatHeader
+        conversation={selectedConversation}
+        title={title}
+        onBack={selectedConversation ? openChatList : undefined}
+        onNew={() => createMutation.mutate()}
+        newPending={createMutation.isPending}
+        onArchive={
+          selectedConversation && !selectedIsArchived
+            ? () => archiveMutation.mutate(selectedConversation.conversationId)
+            : undefined
+        }
+        archivePending={archiveMutation.isPending}
+      />
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {conversationsQuery.isError ? (
+          <BuilderChatNavigationError onRetry={() => void conversationsQuery.refetch()} />
+        ) : conversationsQuery.isLoading || !conversationsQuery.data ? (
+          <BuilderChatLoadingState />
+        ) : !requestedConversationId ? (
+          <BuilderChatListView
+            conversations={conversationsQuery.data.conversations}
+            onSelect={(conversation) => {
+              if (conversation.state === "archived") openConversation(conversation.conversationId);
+              else selectMutation.mutate(conversation);
+            }}
+            selectingConversationId={selectMutation.isPending ? selectMutation.variables?.conversationId : null}
+          />
+        ) : !selectedConversation ? (
+          <BuilderChatUnavailableState onBack={openChatList} />
+        ) : selectedIsArchived ? (
+          <BuilderChatArchivedState
+            onBack={openChatList}
+            onRestore={() => restoreMutation.mutate(selectedConversation.conversationId)}
+            restoring={restoreMutation.isPending}
+          />
+        ) : (
+          <BuilderChatTranscript
+            key={selectedConversation.conversationId}
+            conversationId={selectedConversation.conversationId}
+            taskId={taskId}
+            title={title}
+            queryKey={queryKey}
+            conversationsQueryKey={conversationsQueryKey}
+          />
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function BuilderChatHeader({
+  conversation,
+  title,
+  onBack,
+  onNew,
+  newPending,
+  onArchive,
+  archivePending,
+}: {
+  conversation?: ScheduledTaskConversationSummary;
+  title: string;
+  onBack?: () => void;
+  onNew: () => void;
+  newPending: boolean;
+  onArchive?: () => void;
+  archivePending: boolean;
+}) {
+  return (
+    <div className="shrink-0 border-b border-border bg-card px-4 py-3">
+      <div className="flex min-w-0 items-center gap-3">
+        {onBack ? (
+          <Button
+            size="icon"
+            variant="ghost"
+            className="size-8 shrink-0 rounded-[7px] text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="Back to builder chats"
+            onClick={onBack}
+          >
+            <ArrowLeftIcon size={16} />
+          </Button>
+        ) : (
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-[8px] bg-brand-accent text-[#141100]">
+            <RobotIcon size={17} weight="fill" />
+          </span>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <p className="truncate text-[13px] font-semibold">
+              {conversation ? "Current builder chat" : "Builder chats"}
+            </p>
+            <Badge className="rounded-[5px] border border-border bg-muted px-1.5 py-0 font-mono text-[10px] text-muted-foreground">
+              {conversation ? conversationSourceLabel(conversation) : "Task history"}
+            </Badge>
+          </div>
+          <p className="truncate text-[12px] text-muted-foreground">
+            {conversation ? `${title} · ${conversation.conversationId}` : title}
+          </p>
+        </div>
+        {conversation ? (
+          <Button
+            size="icon"
+            variant="ghost"
+            className="size-8 shrink-0 rounded-[7px] text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="Archive builder chat"
+            disabled={!onArchive || archivePending}
+            onClick={onArchive}
+          >
+            {archivePending ? <SpinnerGapIcon size={15} className="animate-spin" /> : <ArchiveIcon size={16} />}
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 shrink-0 gap-1.5 rounded-[7px] border-border/70 bg-card text-[12px] shadow-none"
+            onClick={onNew}
+            disabled={newPending}
+          >
+            {newPending ? <SpinnerGapIcon size={14} className="animate-spin" /> : <PlusIcon size={14} />}
+            New chat
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BuilderChatListView({
+  conversations,
+  onSelect,
+  selectingConversationId,
+}: {
+  conversations: ScheduledTaskConversationSummary[];
+  onSelect: (conversation: ScheduledTaskConversationSummary) => void;
+  selectingConversationId: string | null;
+}) {
+  const active = conversations.filter((conversation) => conversation.state === "active");
+  const archived = conversations.filter((conversation) => conversation.state === "archived");
+  const renderConversation = (conversation: ScheduledTaskConversationSummary) => (
+    <button
+      key={conversation.conversationId}
+      type="button"
+      data-testid={`automation-builder-conversation-${conversation.conversationId}`}
+      className="flex w-full items-start gap-3 rounded-[8px] border border-border bg-card px-3 py-2.5 text-left transition hover:border-brand-accent/40 hover:bg-brand-accent/5 disabled:cursor-wait disabled:opacity-60"
+      onClick={() => onSelect(conversation)}
+      disabled={selectingConversationId !== null}
+    >
+      <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-[7px] border border-border bg-background text-brand-accent">
+        <RobotIcon size={15} weight="fill" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[12px] font-medium text-foreground">{conversation.conversationId}</span>
+          {selectingConversationId === conversation.conversationId ? (
+            <SpinnerGapIcon size={13} className="shrink-0 animate-spin text-muted-foreground" />
+          ) : null}
+        </span>
+        <span className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+          <span>{conversationSourceLabel(conversation)}</span>
+          <span aria-hidden>·</span>
+          <span>{conversationDateLabel(conversation.lastActiveAt)}</span>
+        </span>
+      </span>
+    </button>
+  );
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
+      <div className="flex min-h-full flex-col gap-5">
+        <div>
+          <p className="text-[12px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Active chats</p>
+          {active.length > 0 ? (
+            <div className="mt-2 grid gap-2">{active.map(renderConversation)}</div>
+          ) : (
+            <div className="mt-2 rounded-[8px] border border-dashed border-border px-3 py-4 text-[12px] leading-5 text-muted-foreground">
+              No active builder chats yet. Start one when you are ready.
+            </div>
+          )}
+        </div>
+        {archived.length > 0 ? (
+          <div>
+            <p className="text-[12px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+              Archived history
+            </p>
+            <div className="mt-2 grid gap-2">{archived.map(renderConversation)}</div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function BuilderChatNavigationError({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div data-testid="automation-builder-chat-error" className="flex min-h-full items-center justify-center px-5 py-6">
+      <div className="w-full rounded-[8px] border border-destructive/30 bg-card p-4">
+        <p className="text-[13px] font-semibold text-foreground">Builder chats unavailable</p>
+        <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+          Sketch could not load the task chat history. Your automation is still available.
+        </p>
+        <Button
+          size="sm"
+          variant="outline"
+          className="mt-3 h-8 rounded-[7px] border-border/70 bg-card text-[12px] shadow-none"
+          onClick={onRetry}
+        >
+          Try again
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function BuilderChatUnavailableState({ onBack }: { onBack: () => void }) {
+  return (
+    <div
+      data-testid="automation-builder-chat-unavailable"
+      className="flex min-h-full items-center justify-center px-5 py-6"
+    >
+      <div className="w-full rounded-[8px] border border-border bg-card p-4">
+        <p className="text-[13px] font-semibold text-foreground">Chat unavailable</p>
+        <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+          This chat is not associated with this automation for your account, so its transcript was not opened.
+        </p>
+        <Button
+          size="sm"
+          variant="outline"
+          className="mt-3 h-8 rounded-[7px] border-border/70 bg-card text-[12px] shadow-none"
+          onClick={onBack}
+        >
+          Back to chats
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function BuilderChatArchivedState({
+  onBack,
+  onRestore,
+  restoring,
+}: {
+  onBack: () => void;
+  onRestore: () => void;
+  restoring: boolean;
+}) {
+  return (
+    <div
+      data-testid="automation-builder-chat-archived"
+      className="flex min-h-full items-center justify-center px-5 py-6"
+    >
+      <div className="w-full rounded-[8px] border border-border bg-card p-4">
+        <p className="text-[13px] font-semibold text-foreground">Chat archived</p>
+        <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+          This chat is kept for history but is not active. Restore it explicitly to continue the transcript.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            className="h-8 gap-1.5 rounded-[7px] bg-brand-accent text-[#161300] shadow-none hover:bg-brand-accent/90"
+            onClick={onRestore}
+            disabled={restoring}
+          >
+            {restoring ? <SpinnerGapIcon size={14} className="animate-spin" /> : <ArrowClockwiseIcon size={14} />}
+            Restore chat
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 rounded-[7px] border-border/70 bg-card text-[12px] shadow-none"
+            onClick={onBack}
+          >
+            Back to chats
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BuilderChatTranscript({
+  conversationId,
+  taskId,
+  title,
+  queryKey,
+  conversationsQueryKey,
+}: {
+  conversationId: string;
+  taskId: string;
+  title: string;
+  queryKey: readonly unknown[];
+  conversationsQueryKey: readonly unknown[];
+}) {
+  const queryClient = useQueryClient();
+  const [loadedHistoryKey, setLoadedHistoryKey] = useState<string | null>(null);
+  const [historyLoadError, setHistoryLoadError] = useState<string | null>(null);
+  const [historyLoadAttempt, setHistoryLoadAttempt] = useState(0);
   const [stoppingRun, setStoppingRun] = useState(false);
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
   const wasBusyRef = useRef(false);
@@ -666,7 +1066,8 @@ function BuilderChatSidecar({
     id: conversationId,
     transport,
   });
-  const historyReady = loadedConversationId === conversationId;
+  const historyKey = `${conversationId}:${historyLoadAttempt}`;
+  const historyReady = loadedHistoryKey === historyKey;
   const latestMessage = chat.messages.at(-1);
   const threadScrollKey = latestMessage
     ? [
@@ -682,7 +1083,7 @@ function BuilderChatSidecar({
   const hasBackgroundRun = hasPendingBuilderAssistantProgress(chat.messages);
   const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun || stoppingRun;
   const threadMessages = builderChatThreadMessages(chat.messages);
-  const showEmptyState = historyReady && threadMessages.length === 0 && !chatBusy && !chat.error;
+  const showEmptyState = historyReady && !historyLoadError && threadMessages.length === 0 && !chatBusy && !chat.error;
   const sendBuilderMessage = useCallback(
     (value: string, attachments: WebChatUploadedAttachment[] = []) => {
       void chat.sendMessage(
@@ -695,33 +1096,32 @@ function BuilderChatSidecar({
 
   useEffect(() => {
     let cancelled = false;
-    setLoadedConversationId(null);
+    setLoadedHistoryKey(null);
+    setHistoryLoadError(null);
     chat.setMessages([]);
     void api.webChat
       .messages(conversationId)
       .then(({ messages }) => {
-        if (!cancelled) {
-          chat.setMessages(messages as BuilderWebChatMessage[]);
-        }
+        if (!cancelled) chat.setMessages(messages as BuilderWebChatMessage[]);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setHistoryLoadError(error instanceof Error ? error.message : "Transcript unavailable");
       })
       .finally(() => {
-        if (!cancelled) setLoadedConversationId(conversationId);
+        if (!cancelled) setLoadedHistoryKey(historyKey);
       });
     return () => {
       cancelled = true;
     };
-  }, [chat.setMessages, conversationId]);
+  }, [chat.setMessages, conversationId, historyKey]);
 
   useEffect(() => {
     if (!historyReady || !threadScrollKey) return;
     const frameId = window.requestAnimationFrame(() => {
       const el = threadScrollRef.current;
       if (!el) return;
-      if (typeof el.scrollTo === "function") {
-        el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
-      } else {
-        el.scrollTop = el.scrollHeight;
-      }
+      if (typeof el.scrollTo === "function") el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+      else el.scrollTop = el.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frameId);
   }, [historyReady, threadScrollKey]);
@@ -730,11 +1130,12 @@ function BuilderChatSidecar({
     if (!historyReady || !hasBackgroundRun || chat.status !== "ready") return;
     let cancelled = false;
     const intervalId = window.setInterval(() => {
-      void api.webChat.messages(conversationId).then(({ messages }) => {
-        if (!cancelled) {
-          chat.setMessages(messages as BuilderWebChatMessage[]);
-        }
-      });
+      void api.webChat
+        .messages(conversationId)
+        .then(({ messages }) => {
+          if (!cancelled) chat.setMessages(messages as BuilderWebChatMessage[]);
+        })
+        .catch(() => undefined);
     }, 1500);
     return () => {
       cancelled = true;
@@ -751,7 +1152,8 @@ function BuilderChatSidecar({
     if (!historyReady || !wasBusyRef.current) return;
     wasBusyRef.current = false;
     void queryClient.invalidateQueries({ queryKey });
-  }, [chat.status, historyReady, queryClient, queryKey]);
+    void queryClient.invalidateQueries({ queryKey: conversationsQueryKey });
+  }, [chat.status, conversationsQueryKey, historyReady, queryClient, queryKey]);
 
   const handleStop = useCallback(() => {
     if (stoppingRun) return;
@@ -763,31 +1165,30 @@ function BuilderChatSidecar({
   }, [conversationId, stoppingRun]);
 
   return (
-    <aside
-      className={cn(
-        "w-[400px] min-w-[320px] max-w-[600px] shrink-0 resize-x flex-col overflow-hidden border-r border-white/10 bg-[#050505] text-white",
-        className,
-      )}
-    >
-      <div className="border-b border-white/10 bg-[#080808] px-4 py-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-[8px] bg-brand-accent text-[#141100]">
-            <RobotIcon size={17} weight="fill" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-center gap-2">
-              <p className="truncate text-[13px] font-semibold">Builder chat</p>
-              <Badge className="rounded-[5px] border border-white/10 bg-white/[0.06] px-1.5 py-0 font-mono text-[10px] text-white/58">
-                Fresh
-              </Badge>
-            </div>
-            <p className="truncate text-[12px] text-white/46">{title}</p>
-          </div>
-        </div>
-      </div>
+    <>
       <div ref={threadScrollRef} className="chat-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5">
         {!historyReady ? (
           <BuilderChatLoadingState />
+        ) : historyLoadError ? (
+          <div
+            data-testid="automation-builder-transcript-error"
+            className="flex min-h-full items-center justify-center"
+          >
+            <div className="w-full rounded-[8px] border border-border bg-card p-4">
+              <p className="text-[13px] font-semibold text-foreground">Transcript unavailable</p>
+              <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+                This chat is associated with the task, but its transcript could not be loaded.
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-3 h-8 rounded-[7px] border-border/70 bg-card text-[12px] shadow-none"
+                onClick={() => setHistoryLoadAttempt((attempt) => attempt + 1)}
+              >
+                Try again
+              </Button>
+            </div>
+          </div>
         ) : showEmptyState ? (
           <BuilderChatEmptyState title={title} onPrompt={sendBuilderMessage} />
         ) : (
@@ -803,8 +1204,8 @@ function BuilderChatSidecar({
       <div className="shrink-0 border-t border-white/10 bg-[#050505] px-3 py-3">
         <ChatInput
           key={conversationId}
-          disabled={!historyReady || chatBusy}
-          disabledPlaceholder={historyReady ? "Sketch is thinking..." : "Loading conversation..."}
+          disabled={!historyReady || Boolean(historyLoadError) || chatBusy}
+          disabledPlaceholder={historyReady ? "Transcript unavailable" : "Loading conversation..."}
           running={chatBusy}
           runningPlaceholder="Sketch is thinking..."
           stopping={stoppingRun}
@@ -813,7 +1214,7 @@ function BuilderChatSidecar({
           onSubmit={sendBuilderMessage}
         />
       </div>
-    </aside>
+    </>
   );
 }
 
