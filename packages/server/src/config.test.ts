@@ -4,6 +4,14 @@ import { configSchema, loadConfig, validateConfig } from "./config";
 import type { Config } from "./config";
 
 describe("configSchema", () => {
+  it("keeps Slack entity sync disabled by default", () => {
+    const result = configSchema.parse({});
+
+    expect(result.SLACK_ENTITY_SYNC).toBe(false);
+    expect(result.SLACK_ENTITY_SYNC_PUBLIC_CHANNELS).toBe(true);
+    expect(result.SLACK_ENTITY_SYNC_USER_INFO_CAP).toBe(1000);
+  });
+
   describe("valid configs", () => {
     it("parses minimal config with all defaults", () => {
       const result = configSchema.safeParse({});

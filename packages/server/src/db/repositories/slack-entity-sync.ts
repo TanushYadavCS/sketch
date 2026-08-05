@@ -276,335 +276,346 @@ async function writeReviewRow(
   });
 }
 
-async function runUpsert(
-  db: Kysely<DB>,
+async function runUpsertBody(
+  trx: Kysely<DB>,
   profile: SlackUserProfile,
   options: SlackEntitySyncOptions,
 ): Promise<SlackEntitySyncResult> {
-  return db.transaction().execute(async (trx) => {
-    const now = profile.fetchedAt;
-    const sourceId = `${profile.teamId}:${profile.slackUserId}`;
-    const email = normalizeEmail(profile.email);
-    const domains = await trx.selectFrom("organization_domains").select("domain").execute();
-    const baseClassification = classifyProfile(profile, new Set(domains.map((row) => row.domain.toLowerCase())));
+  const now = profile.fetchedAt;
+  const sourceId = `${profile.teamId}:${profile.slackUserId}`;
+  const email = normalizeEmail(profile.email);
+  const domains = await trx.selectFrom("organization_domains").select("domain").execute();
+  const baseClassification = classifyProfile(profile, new Set(domains.map((row) => row.domain.toLowerCase())));
 
-    await trx
-      .insertInto("slack_user_sync_state")
-      .values({
-        team_id: profile.teamId,
-        slack_user_id: profile.slackUserId,
-        name: profile.name || null,
-        real_name: profile.realName || null,
-        display_name: profile.displayName ?? null,
-        email,
-        profile_team_id: profile.profileTeamId,
-        profile_json: profile.profile ? JSON.stringify(profile.profile) : null,
-        is_bot: profile.isBot ? 1 : 0,
-        is_guest: profile.isGuest ? 1 : 0,
-        is_stranger: profile.isStranger ? 1 : 0,
-        is_restricted: profile.isRestricted ? 1 : 0,
-        is_ultra_restricted: profile.isUltraRestricted ? 1 : 0,
-        deleted: profile.deleted ? 1 : 0,
-        classification: baseClassification.classification,
-        classification_source: baseClassification.source,
-        provider_updated_at: profile.providerUpdatedAt,
-        fetched_at: profile.fetchedAt,
-        entity_id: null,
-        entity_created_by_sync: 0,
-        inactive_at: profile.deleted ? profile.fetchedAt : null,
-        created_at: now,
-        updated_at: now,
-      })
-      .onConflict((oc) => oc.columns(["team_id", "slack_user_id"]).doNothing())
-      .execute();
+  await trx
+    .insertInto("slack_user_sync_state")
+    .values({
+      team_id: profile.teamId,
+      slack_user_id: profile.slackUserId,
+      name: profile.name || null,
+      real_name: profile.realName || null,
+      display_name: profile.displayName ?? null,
+      email,
+      profile_team_id: profile.profileTeamId,
+      profile_json: profile.profile ? JSON.stringify(profile.profile) : null,
+      is_bot: profile.isBot ? 1 : 0,
+      is_guest: profile.isGuest ? 1 : 0,
+      is_stranger: profile.isStranger ? 1 : 0,
+      is_restricted: profile.isRestricted ? 1 : 0,
+      is_ultra_restricted: profile.isUltraRestricted ? 1 : 0,
+      deleted: profile.deleted ? 1 : 0,
+      classification: baseClassification.classification,
+      classification_source: baseClassification.source,
+      provider_updated_at: profile.providerUpdatedAt,
+      fetched_at: profile.fetchedAt,
+      entity_id: null,
+      entity_created_by_sync: 0,
+      inactive_at: profile.deleted ? profile.fetchedAt : null,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflict((oc) => oc.columns(["team_id", "slack_user_id"]).doNothing())
+    .execute();
 
-    const beforeState = await trx
+  const beforeState = await trx
+    .selectFrom("slack_user_sync_state")
+    .selectAll()
+    .where("team_id", "=", profile.teamId)
+    .where("slack_user_id", "=", profile.slackUserId)
+    .executeTakeFirstOrThrow();
+  const existingStateEntity = beforeState.entity_id
+    ? await trx.selectFrom("entities").selectAll().where("id", "=", beforeState.entity_id).executeTakeFirst()
+    : null;
+  const preserveInternalClassification =
+    !email &&
+    baseClassification.classification === "external" &&
+    (beforeState.classification === "internal" ||
+      beforeState.classification_source === "organization_domain" ||
+      existingStateEntity?.subtype === "internal");
+  const classification = preserveInternalClassification
+    ? { classification: "internal" as const, source: "stale" }
+    : baseClassification;
+  const applied = tupleIsAtLeast(
+    { providerUpdatedAt: profile.providerUpdatedAt, fetchedAt: profile.fetchedAt },
+    beforeState,
+  );
+
+  if (!applied) {
+    const staleEntity = beforeState.entity_id
+      ? await trx.selectFrom("entities").selectAll().where("id", "=", beforeState.entity_id).executeTakeFirst()
+      : null;
+    return { entity: staleEntity ?? null, state: beforeState, applied: false };
+  }
+
+  const updatedState = await trx
+    .updateTable("slack_user_sync_state")
+    .set({
+      name: profile.name || null,
+      real_name: profile.realName || null,
+      display_name: profile.displayName ?? null,
+      email,
+      profile_team_id: profile.profileTeamId,
+      profile_json: profile.profile ? JSON.stringify(profile.profile) : null,
+      is_bot: profile.isBot ? 1 : 0,
+      is_guest: profile.isGuest ? 1 : 0,
+      is_stranger: profile.isStranger ? 1 : 0,
+      is_restricted: profile.isRestricted ? 1 : 0,
+      is_ultra_restricted: profile.isUltraRestricted ? 1 : 0,
+      deleted: profile.deleted ? 1 : 0,
+      classification: classification.classification,
+      classification_source: classification.source,
+      provider_updated_at: profile.providerUpdatedAt,
+      fetched_at: profile.fetchedAt,
+      inactive_at: profile.deleted ? profile.fetchedAt : null,
+      updated_at: now,
+    })
+    .where("team_id", "=", profile.teamId)
+    .where("slack_user_id", "=", profile.slackUserId)
+    .where((eb) => versionPredicate(eb, { providerUpdatedAt: profile.providerUpdatedAt, fetchedAt: profile.fetchedAt }))
+    .executeTakeFirst();
+
+  if (updatedState.numUpdatedRows === 0n) {
+    const current = await trx
       .selectFrom("slack_user_sync_state")
       .selectAll()
       .where("team_id", "=", profile.teamId)
       .where("slack_user_id", "=", profile.slackUserId)
       .executeTakeFirstOrThrow();
-    const existingStateEntity = beforeState.entity_id
-      ? await trx.selectFrom("entities").selectAll().where("id", "=", beforeState.entity_id).executeTakeFirst()
+    const currentEntity = current.entity_id
+      ? await trx.selectFrom("entities").selectAll().where("id", "=", current.entity_id).executeTakeFirst()
       : null;
-    const preserveInternalClassification =
-      !email &&
-      baseClassification.classification === "external" &&
-      (beforeState.classification === "internal" ||
-        beforeState.classification_source === "organization_domain" ||
-        existingStateEntity?.subtype === "internal");
-    const classification = preserveInternalClassification
-      ? { classification: "internal" as const, source: "stale" }
-      : baseClassification;
-    const applied = tupleIsAtLeast(
-      { providerUpdatedAt: profile.providerUpdatedAt, fetchedAt: profile.fetchedAt },
-      beforeState,
-    );
+    return { entity: currentEntity ?? null, state: current, applied: false };
+  }
 
-    if (!applied) {
-      const staleEntity = beforeState.entity_id
-        ? await trx.selectFrom("entities").selectAll().where("id", "=", beforeState.entity_id).executeTakeFirst()
-        : null;
-      return { entity: staleEntity ?? null, state: beforeState, applied: false };
-    }
-
-    const updatedState = await trx
-      .updateTable("slack_user_sync_state")
-      .set({
-        name: profile.name || null,
-        real_name: profile.realName || null,
-        display_name: profile.displayName ?? null,
-        email,
-        profile_team_id: profile.profileTeamId,
-        profile_json: profile.profile ? JSON.stringify(profile.profile) : null,
-        is_bot: profile.isBot ? 1 : 0,
-        is_guest: profile.isGuest ? 1 : 0,
-        is_stranger: profile.isStranger ? 1 : 0,
-        is_restricted: profile.isRestricted ? 1 : 0,
-        is_ultra_restricted: profile.isUltraRestricted ? 1 : 0,
-        deleted: profile.deleted ? 1 : 0,
-        classification: classification.classification,
-        classification_source: classification.source,
-        provider_updated_at: profile.providerUpdatedAt,
-        fetched_at: profile.fetchedAt,
-        inactive_at: profile.deleted ? profile.fetchedAt : null,
-        updated_at: now,
-      })
-      .where("team_id", "=", profile.teamId)
-      .where("slack_user_id", "=", profile.slackUserId)
-      .where((eb) =>
-        versionPredicate(eb, { providerUpdatedAt: profile.providerUpdatedAt, fetchedAt: profile.fetchedAt }),
-      )
-      .executeTakeFirst();
-
-    if (updatedState.numUpdatedRows === 0n) {
-      const current = await trx
-        .selectFrom("slack_user_sync_state")
-        .selectAll()
-        .where("team_id", "=", profile.teamId)
-        .where("slack_user_id", "=", profile.slackUserId)
-        .executeTakeFirstOrThrow();
-      const currentEntity = current.entity_id
-        ? await trx.selectFrom("entities").selectAll().where("id", "=", current.entity_id).executeTakeFirst()
-        : null;
-      return { entity: currentEntity ?? null, state: current, applied: false };
-    }
-
-    if (profile.isBot || profile.deleted) {
-      const state = await trx
-        .selectFrom("slack_user_sync_state")
-        .selectAll()
-        .where("team_id", "=", profile.teamId)
-        .where("slack_user_id", "=", profile.slackUserId)
-        .executeTakeFirstOrThrow();
-      return { entity: null, state, applied: true };
-    }
-
-    const existingRef = await trx
-      .selectFrom("entity_source_refs")
-      .select(["id", "entity_id"])
-      .where("source", "=", "slack_user")
-      .where("source_id", "=", sourceId)
-      .executeTakeFirst();
-    let entity: Selectable<EntitiesTable> | null = null;
-    let slackOwned = beforeState.entity_created_by_sync === 1;
-    const sourceRefBlocksCreation = Boolean(existingRef);
-    let reviewReason: { candidateEntityId: string | null; candidateEntityIds: string[] | null; reason: string } | null =
-      null;
-
-    if (existingRef) {
-      const resolvedRef = await resolveSlackSourceRefEntity(trx, existingRef.entity_id);
-      entity = resolvedRef.entity;
-      if (entity && resolvedRef.redirected) {
-        await trx
-          .updateTable("entity_source_refs")
-          .set({ entity_id: entity.id })
-          .where("id", "=", existingRef.id)
-          .execute();
-        slackOwned = false;
-      }
-      if (!entity) slackOwned = false;
-    } else if (email) {
-      const matches = await createEntityRepository(trx).getPersonEntitiesByEmail(email);
-      if (matches.length === 1) {
-        entity = matches[0];
-      } else if (matches.length > 1) {
-        reviewReason = {
-          candidateEntityId: null,
-          candidateEntityIds: matches.map((match) => match.id),
-          reason: "ambiguous-email",
-        };
-      }
-    }
-
-    const name = profileName(profile);
-    let suppressed = false;
-    if (!entity && name) {
-      suppressed = Boolean(
-        await trx
-          .selectFrom("entity_creation_suppressions")
-          .select("id")
-          .where("normalized_name", "=", normalizeName(name))
-          .where("entity_type", "=", "person")
-          .executeTakeFirst(),
-      );
-      if (suppressed) reviewReason = null;
-    }
-    const existingSourceReview =
-      name && !suppressed
-        ? await trx
-            .selectFrom("entity_review_queue")
-            .selectAll()
-            .where("source", "=", "slack_user")
-            .where("source_id", "=", sourceId)
-            .executeTakeFirst()
-        : undefined;
-    const hasSourceReview = !entity && !reviewReason && Boolean(existingSourceReview);
-    if (!entity && !reviewReason && name && !suppressed && !hasSourceReview && !sourceRefBlocksCreation) {
-      const candidates = await trx
-        .selectFrom("entities")
-        .select(["id", "name", "aliases"])
-        .where("source_type", "=", "person")
-        .where("deleted_at", "is", null)
-        .where("merged_into_entity_id", "is", null)
-        .where((eb) =>
-          eb.or([
-            eb(sql<string>`lower(name)`, "=", name.toLowerCase()),
-            eb(sql<string>`lower(aliases)`, "like", `%${name.toLowerCase()}%`),
-          ]),
-        )
-        .execute();
-      const normalizedProfileName = normalizeName(name);
-      const exactCandidates = candidates.filter(
-        (candidate) =>
-          normalizeName(candidate.name) === normalizedProfileName ||
-          parseAliases(candidate.aliases).some((alias) => normalizeName(alias) === normalizedProfileName),
-      );
-      if (exactCandidates.length > 0) {
-        reviewReason = {
-          candidateEntityId: exactCandidates.length === 1 ? exactCandidates[0].id : null,
-          candidateEntityIds: exactCandidates.map((candidate) => candidate.id),
-          reason: "exact-name-match",
-        };
-      }
-    }
-
-    let createdInThisTransaction = false;
-    if (!entity && name && !suppressed && !sourceRefBlocksCreation) {
-      const candidateId = randomUUID();
-      await trx
-        .insertInto("entities")
-        .values({
-          id: candidateId,
-          name,
-          source_type: "person",
-          subtype: classification.classification,
-          aliases: email ? JSON.stringify([email]) : null,
-          metadata: JSON.stringify(email ? { email } : {}),
-          source_ref_id: null,
-          status: "confirmed",
-          provenance_tier: "structural",
-          hotness: 0,
-          created_at: now,
-          updated_at: now,
-        })
-        .execute();
-      entity = await trx.selectFrom("entities").selectAll().where("id", "=", candidateId).executeTakeFirstOrThrow();
-      slackOwned = true;
-      createdInThisTransaction = true;
-    }
-
-    if (entity) {
-      const connector = await findSlackConnectorAdmin(trx);
-      entity = await updateEntityFromSlackProfile(
-        trx,
-        entity,
-        profile,
-        classification.classification,
-        email,
-        connector?.id ?? null,
-        slackOwned,
-        now,
-      );
-      await trx
-        .insertInto("entity_source_refs")
-        .values({
-          id: randomUUID(),
-          entity_id: entity.id,
-          source: "slack_user",
-          source_id: sourceId,
-          source_url: null,
-          last_seen_at: now,
-        })
-        .onConflict((oc) => oc.columns(["source", "source_id"]).doNothing())
-        .execute();
-      const winner = await trx
-        .selectFrom("entity_source_refs")
-        .select("entity_id")
-        .where("source", "=", "slack_user")
-        .where("source_id", "=", sourceId)
-        .executeTakeFirstOrThrow();
-      if (winner.entity_id !== entity.id && createdInThisTransaction) {
-        await trx.deleteFrom("entities").where("id", "=", entity.id).execute();
-      }
-      if (winner.entity_id !== entity.id) {
-        const winnerResolution = await resolveSlackSourceRefEntity(trx, winner.entity_id);
-        entity = winnerResolution.entity;
-        if (winnerResolution.redirected && entity) {
-          await trx
-            .updateTable("entity_source_refs")
-            .set({ entity_id: entity.id })
-            .where("source", "=", "slack_user")
-            .where("source_id", "=", sourceId)
-            .execute();
-        }
-        slackOwned = false;
-      }
-      if (entity) {
-        await trx
-          .updateTable("entity_source_refs")
-          .set({ last_seen_at: now })
-          .where("source", "=", "slack_user")
-          .where("source_id", "=", sourceId)
-          .execute();
-      }
-      if (reviewReason) {
-        await writeReviewRow(
-          trx,
-          profile,
-          reviewReason.candidateEntityId,
-          reviewReason.candidateEntityIds,
-          reviewReason.reason,
-          connector,
-          options.logger,
-        );
-      }
-    }
-    if (existingSourceReview && !reviewReason) {
-      await trx
-        .updateTable("entity_review_queue")
-        .set({ last_seen_at: new Date().toISOString(), occurrence_count: sql<number>`occurrence_count + 1` })
-        .where("id", "=", existingSourceReview.id)
-        .where("status", "not in", ["confirmed", "rejected", "confirming", "dismissed"])
-        .execute();
-    }
-
-    await trx
-      .updateTable("slack_user_sync_state")
-      .set({ entity_id: entity?.id ?? null, entity_created_by_sync: entity && slackOwned ? 1 : 0 })
-      .where("team_id", "=", profile.teamId)
-      .where("slack_user_id", "=", profile.slackUserId)
-      .execute();
+  if (profile.isBot || profile.deleted) {
     const state = await trx
       .selectFrom("slack_user_sync_state")
       .selectAll()
       .where("team_id", "=", profile.teamId)
       .where("slack_user_id", "=", profile.slackUserId)
       .executeTakeFirstOrThrow();
-    return { entity, state, applied: true };
-  });
+    return { entity: null, state, applied: true };
+  }
+
+  const existingRef = await trx
+    .selectFrom("entity_source_refs")
+    .select(["id", "entity_id"])
+    .where("source", "=", "slack_user")
+    .where("source_id", "=", sourceId)
+    .executeTakeFirst();
+  let entity: Selectable<EntitiesTable> | null = null;
+  let slackOwned = beforeState.entity_created_by_sync === 1;
+  const sourceRefBlocksCreation = Boolean(existingRef);
+  let reviewReason: { candidateEntityId: string | null; candidateEntityIds: string[] | null; reason: string } | null =
+    null;
+
+  if (existingRef) {
+    const resolvedRef = await resolveSlackSourceRefEntity(trx, existingRef.entity_id);
+    entity = resolvedRef.entity;
+    if (entity && resolvedRef.redirected) {
+      await trx
+        .updateTable("entity_source_refs")
+        .set({ entity_id: entity.id })
+        .where("id", "=", existingRef.id)
+        .execute();
+      slackOwned = false;
+    }
+    if (!entity) slackOwned = false;
+  } else if (email) {
+    const matches = await createEntityRepository(trx).getPersonEntitiesByEmail(email);
+    if (matches.length === 1) {
+      entity = matches[0];
+    } else if (matches.length > 1) {
+      reviewReason = {
+        candidateEntityId: null,
+        candidateEntityIds: matches.map((match) => match.id),
+        reason: "ambiguous-email",
+      };
+    }
+  }
+
+  const name = profileName(profile);
+  let suppressed = false;
+  if (!entity && name) {
+    suppressed = Boolean(
+      await trx
+        .selectFrom("entity_creation_suppressions")
+        .select("id")
+        .where("normalized_name", "=", normalizeName(name))
+        .where("entity_type", "=", "person")
+        .executeTakeFirst(),
+    );
+    if (suppressed) reviewReason = null;
+  }
+  const existingSourceReview =
+    name && !suppressed
+      ? await trx
+          .selectFrom("entity_review_queue")
+          .selectAll()
+          .where("source", "=", "slack_user")
+          .where("source_id", "=", sourceId)
+          .executeTakeFirst()
+      : undefined;
+  const hasSourceReview = !entity && !reviewReason && Boolean(existingSourceReview);
+  if (!entity && !reviewReason && name && !suppressed && !hasSourceReview && !sourceRefBlocksCreation) {
+    const candidates = await trx
+      .selectFrom("entities")
+      .select(["id", "name", "aliases"])
+      .where("source_type", "=", "person")
+      .where("deleted_at", "is", null)
+      .where("merged_into_entity_id", "is", null)
+      .where((eb) =>
+        eb.or([
+          eb(sql<string>`lower(name)`, "=", name.toLowerCase()),
+          eb(sql<string>`lower(aliases)`, "like", `%${name.toLowerCase()}%`),
+        ]),
+      )
+      .execute();
+    const normalizedProfileName = normalizeName(name);
+    const exactCandidates = candidates.filter(
+      (candidate) =>
+        normalizeName(candidate.name) === normalizedProfileName ||
+        parseAliases(candidate.aliases).some((alias) => normalizeName(alias) === normalizedProfileName),
+    );
+    if (exactCandidates.length > 0) {
+      reviewReason = {
+        candidateEntityId: exactCandidates.length === 1 ? exactCandidates[0].id : null,
+        candidateEntityIds: exactCandidates.map((candidate) => candidate.id),
+        reason: "exact-name-match",
+      };
+    }
+  }
+
+  let createdInThisTransaction = false;
+  if (!entity && name && !suppressed && !sourceRefBlocksCreation) {
+    const candidateId = randomUUID();
+    await trx
+      .insertInto("entities")
+      .values({
+        id: candidateId,
+        name,
+        source_type: "person",
+        subtype: classification.classification,
+        aliases: email ? JSON.stringify([email]) : null,
+        metadata: JSON.stringify(email ? { email } : {}),
+        source_ref_id: null,
+        status: "confirmed",
+        provenance_tier: "structural",
+        hotness: 0,
+        created_at: now,
+        updated_at: now,
+      })
+      .execute();
+    entity = await trx.selectFrom("entities").selectAll().where("id", "=", candidateId).executeTakeFirstOrThrow();
+    slackOwned = true;
+    createdInThisTransaction = true;
+  }
+
+  if (entity) {
+    const connector = await findSlackConnectorAdmin(trx);
+    entity = await updateEntityFromSlackProfile(
+      trx,
+      entity,
+      profile,
+      classification.classification,
+      email,
+      connector?.id ?? null,
+      slackOwned,
+      now,
+    );
+    await trx
+      .insertInto("entity_source_refs")
+      .values({
+        id: randomUUID(),
+        entity_id: entity.id,
+        source: "slack_user",
+        source_id: sourceId,
+        source_url: null,
+        last_seen_at: now,
+      })
+      .onConflict((oc) => oc.columns(["source", "source_id"]).doNothing())
+      .execute();
+    const winner = await trx
+      .selectFrom("entity_source_refs")
+      .select("entity_id")
+      .where("source", "=", "slack_user")
+      .where("source_id", "=", sourceId)
+      .executeTakeFirstOrThrow();
+    if (winner.entity_id !== entity.id && createdInThisTransaction) {
+      await trx.deleteFrom("entities").where("id", "=", entity.id).execute();
+    }
+    if (winner.entity_id !== entity.id) {
+      const winnerResolution = await resolveSlackSourceRefEntity(trx, winner.entity_id);
+      entity = winnerResolution.entity;
+      if (winnerResolution.redirected && entity) {
+        await trx
+          .updateTable("entity_source_refs")
+          .set({ entity_id: entity.id })
+          .where("source", "=", "slack_user")
+          .where("source_id", "=", sourceId)
+          .execute();
+      }
+      slackOwned = false;
+    }
+    if (entity) {
+      await trx
+        .updateTable("entity_source_refs")
+        .set({ last_seen_at: now })
+        .where("source", "=", "slack_user")
+        .where("source_id", "=", sourceId)
+        .execute();
+    }
+    if (reviewReason) {
+      await writeReviewRow(
+        trx,
+        profile,
+        reviewReason.candidateEntityId,
+        reviewReason.candidateEntityIds,
+        reviewReason.reason,
+        connector,
+        options.logger,
+      );
+    }
+  }
+  if (existingSourceReview && !reviewReason) {
+    await trx
+      .updateTable("entity_review_queue")
+      .set({ last_seen_at: new Date().toISOString(), occurrence_count: sql<number>`occurrence_count + 1` })
+      .where("id", "=", existingSourceReview.id)
+      .where("status", "not in", ["confirmed", "rejected", "confirming", "dismissed"])
+      .execute();
+  }
+
+  await trx
+    .updateTable("slack_user_sync_state")
+    .set({ entity_id: entity?.id ?? null, entity_created_by_sync: entity && slackOwned ? 1 : 0 })
+    .where("team_id", "=", profile.teamId)
+    .where("slack_user_id", "=", profile.slackUserId)
+    .execute();
+  const state = await trx
+    .selectFrom("slack_user_sync_state")
+    .selectAll()
+    .where("team_id", "=", profile.teamId)
+    .where("slack_user_id", "=", profile.slackUserId)
+    .executeTakeFirstOrThrow();
+  return { entity, state, applied: true };
 }
 
+async function runUpsert(
+  db: Kysely<DB>,
+  profile: SlackUserProfile,
+  options: SlackEntitySyncOptions,
+): Promise<SlackEntitySyncResult> {
+  return db.transaction().execute((trx) => runUpsertBody(trx, profile, options));
+}
+
+export function upsertSlackPersonEntityInTransaction(
+  trx: Kysely<DB>,
+  profile: SlackUserProfile,
+  options: SlackEntitySyncOptions = {},
+): Promise<SlackEntitySyncResult> {
+  return runUpsertBody(trx, profile, options);
+}
 export function upsertSlackPersonEntity(
   db: Kysely<DB>,
   profile: SlackUserProfile,

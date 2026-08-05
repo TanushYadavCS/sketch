@@ -31,6 +31,11 @@ export interface SlackIndexingUser {
   providerUpdatedAt?: string | null;
 }
 
+export interface SlackIndexingPage<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
 type SlackIndexingClient = Pick<WebClient, "users" | "conversations">;
 
 interface SlackApiLimiter {
@@ -178,6 +183,10 @@ function fromCachedUser(user: CachedUser, fallbackId: string): SlackIndexingUser
 
 export interface SlackIndexingFacade {
   isConfigured(): Promise<boolean>;
+  withToken?: (token: string) => SlackIndexingFacade;
+  listUsersPage?: (cursor?: string) => Promise<SlackIndexingPage<SlackIndexingUser>>;
+  listChannelsPage?: (cursor?: string) => Promise<SlackIndexingPage<SlackIndexingChannel>>;
+  listChannelMembersPage?: (channelId: string, cursor?: string) => Promise<SlackIndexingPage<string>>;
   iterateUsers(): AsyncIterable<SlackIndexingUser>;
   iterateChannels(): AsyncIterable<SlackIndexingChannel>;
   iterateChannelMembers(channelId: string): AsyncIterable<string>;
@@ -217,32 +226,48 @@ export function createSettingsBackedSlackIndexingFacade(options: {
 }
 
 export function createSlackIndexingFacade(options: CreateSlackIndexingFacadeOptions): SlackIndexingFacade {
-  const userCache = options.userCache ?? new SlackUserCache(options.userInfoCacheTtlMs);
-  const clientFactory = options.clientFactory ?? defaultClientFactory;
-  let connection: { token: string; client: SlackIndexingClient; limiter: SlackApiLimiter } | null = null;
+  return createSlackIndexingFacadeWithState(options, {
+    userCache: options.userCache ?? new SlackUserCache(options.userInfoCacheTtlMs),
+    clientFactory: options.clientFactory ?? defaultClientFactory,
+    limiter: options.limiter,
+    connections: new Map(),
+  });
+}
+
+type SlackIndexingFacadeState = {
+  userCache: UserCache;
+  clientFactory: (token: string) => SlackIndexingClient;
+  limiter?: SlackApiLimiter;
+  connections: Map<string, SlackIndexingClient>;
+};
+
+function createSlackIndexingFacadeWithState(
+  options: CreateSlackIndexingFacadeOptions,
+  state: SlackIndexingFacadeState,
+): SlackIndexingFacade {
+  const { userCache } = state;
 
   async function getConnection(): Promise<{ client: SlackIndexingClient; limiter: SlackApiLimiter }> {
     const token = await options.getBotToken();
     if (!token) throw new Error("Slack indexing facade has no bot token configured");
-    if (!connection || connection.token !== token) {
-      if (options.limiter) {
-        connection = { token, client: clientFactory(token), limiter: options.limiter };
-      } else {
-        const shared = sharedConnectionsByToken.get(token);
-        if (shared && shared.clientFactory === clientFactory) {
-          connection = { token, client: shared.client, limiter: shared.limiter };
-        } else {
-          const next = {
-            client: clientFactory(token),
-            limiter: new SerializedSlackApiLimiter(),
-            clientFactory,
-          };
-          sharedConnectionsByToken.set(token, next);
-          connection = { token, client: next.client, limiter: next.limiter };
-        }
-      }
+    if (state.limiter) {
+      const existing = state.connections.get(token);
+      if (existing) return { client: existing, limiter: state.limiter };
+      const next = state.clientFactory(token);
+      state.connections.set(token, next);
+      return { client: next, limiter: state.limiter };
     }
-    return { client: connection.client, limiter: connection.limiter };
+    const shared = sharedConnectionsByToken.get(token);
+    if (shared && shared.clientFactory === state.clientFactory) {
+      return { client: shared.client, limiter: shared.limiter };
+    }
+    const next = {
+      client: state.clientFactory(token),
+      limiter: new SerializedSlackApiLimiter(),
+      clientFactory: state.clientFactory,
+    };
+    sharedConnectionsByToken.set(token, next);
+    return { client: next.client, limiter: next.limiter };
   }
 
   async function request<T>(operation: (api: SlackIndexingClient) => Promise<T>): Promise<T> {
@@ -254,52 +279,73 @@ export function createSlackIndexingFacade(options: CreateSlackIndexingFacadeOpti
     return mapUser((await request((api) => api.users.info({ user: userId }))).user, userId);
   }
 
+  async function listUsersPage(cursor?: string): Promise<SlackIndexingPage<SlackIndexingUser>> {
+    const result = await request((api) => api.users.list({ limit: SLACK_PAGE_LIMIT, ...(cursor ? { cursor } : {}) }));
+    return {
+      items: (result.members ?? []).map((member) => mapUser(member)),
+      nextCursor: result.response_metadata?.next_cursor || null,
+    };
+  }
+
+  async function listChannelsPage(cursor?: string): Promise<SlackIndexingPage<SlackIndexingChannel>> {
+    const result = await request((api) =>
+      api.conversations.list({
+        exclude_archived: true,
+        limit: SLACK_PAGE_LIMIT,
+        types: "public_channel,private_channel",
+        ...(cursor ? { cursor } : {}),
+      }),
+    );
+    const items: SlackIndexingChannel[] = [];
+    for (const channel of result.channels ?? []) {
+      const raw = readRecord(channel);
+      const id = readString(raw, "id");
+      if (!id) continue;
+      items.push({
+        id,
+        name: readString(raw, "name") ?? "unknown",
+        isMember: readBoolean(raw, "is_member"),
+        isPrivate: readBoolean(raw, "is_private"),
+        isArchived: readBoolean(raw, "is_archived"),
+      });
+    }
+    return { items, nextCursor: result.response_metadata?.next_cursor || null };
+  }
+
+  async function listChannelMembersPage(channelId: string, cursor?: string): Promise<SlackIndexingPage<string>> {
+    const result = await request((api) =>
+      api.conversations.members({ channel: channelId, limit: SLACK_PAGE_LIMIT, ...(cursor ? { cursor } : {}) }),
+    );
+    return {
+      items: (result.members ?? []).filter((member): member is string => typeof member === "string"),
+      nextCursor: result.response_metadata?.next_cursor || null,
+    };
+  }
+
   async function* iterateUsers(): AsyncIterable<SlackIndexingUser> {
     let cursor: string | undefined;
     do {
-      const result = await request((api) => api.users.list({ limit: SLACK_PAGE_LIMIT, ...(cursor ? { cursor } : {}) }));
-      for (const member of result.members ?? []) yield mapUser(member);
-      cursor = result.response_metadata?.next_cursor || undefined;
+      const page = await listUsersPage(cursor);
+      for (const member of page.items) yield member;
+      cursor = page.nextCursor ?? undefined;
     } while (cursor);
   }
 
   async function* iterateChannels(): AsyncIterable<SlackIndexingChannel> {
     let cursor: string | undefined;
     do {
-      const result = await request((api) =>
-        api.conversations.list({
-          exclude_archived: true,
-          limit: SLACK_PAGE_LIMIT,
-          types: "public_channel,private_channel",
-          ...(cursor ? { cursor } : {}),
-        }),
-      );
-      for (const channel of result.channels ?? []) {
-        const raw = readRecord(channel);
-        const id = readString(raw, "id");
-        if (!id) continue;
-        yield {
-          id,
-          name: readString(raw, "name") ?? "unknown",
-          isMember: readBoolean(raw, "is_member"),
-          isPrivate: readBoolean(raw, "is_private"),
-          isArchived: readBoolean(raw, "is_archived"),
-        };
-      }
-      cursor = result.response_metadata?.next_cursor || undefined;
+      const page = await listChannelsPage(cursor);
+      for (const channel of page.items) yield channel;
+      cursor = page.nextCursor ?? undefined;
     } while (cursor);
   }
 
   async function* iterateChannelMembers(channelId: string): AsyncIterable<string> {
     let cursor: string | undefined;
     do {
-      const result = await request((api) =>
-        api.conversations.members({ channel: channelId, limit: SLACK_PAGE_LIMIT, ...(cursor ? { cursor } : {}) }),
-      );
-      for (const member of result.members ?? []) {
-        if (typeof member === "string") yield member;
-      }
-      cursor = result.response_metadata?.next_cursor || undefined;
+      const page = await listChannelMembersPage(channelId, cursor);
+      for (const member of page.items) yield member;
+      cursor = page.nextCursor ?? undefined;
     } while (cursor);
   }
 
@@ -308,6 +354,13 @@ export function createSlackIndexingFacade(options: CreateSlackIndexingFacadeOpti
       return Boolean(await options.getBotToken());
     },
 
+    withToken(token) {
+      return createSlackIndexingFacadeWithState({ getBotToken: async () => token }, state);
+    },
+
+    listUsersPage,
+    listChannelsPage,
+    listChannelMembersPage,
     iterateUsers,
     iterateChannels,
     iterateChannelMembers,

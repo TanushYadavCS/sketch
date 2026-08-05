@@ -73,6 +73,23 @@ describe("createSlackStartupManager", () => {
     expect(logger.info).toHaveBeenCalledWith("Slack bot connected");
   });
 
+  it("notifies entity sync after a validated connection starts", async () => {
+    const onConnectionActivated = vi.fn();
+    const start = createSlackStartupManager({
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db" }),
+      validateTokens: vi.fn(async () => ({ teamId: "T123" })),
+      getCurrentBot: () => null,
+      setCurrentBot: vi.fn(),
+      createBot: vi.fn(() => ({ start: async () => {}, stop: async () => {} })),
+      onConnectionActivated,
+    });
+
+    await start();
+
+    expect(onConnectionActivated).toHaveBeenCalledWith({ botToken: "xoxb-db", teamId: "T123" });
+  });
+
   it("does not reset identity state when an explicit token rotation stays on the same team", async () => {
     const beforeExplicitTokenReplacement = vi.fn(async () => {});
     const start = createSlackStartupManager({

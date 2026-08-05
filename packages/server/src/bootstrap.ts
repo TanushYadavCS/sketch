@@ -72,6 +72,7 @@ import { TaskScheduler } from "./scheduler/service";
 import { syncFeaturedSkills } from "./skills/sync";
 import { createConfiguredSlackBot, validateSlackTokens } from "./slack/adapter";
 import type { SlackBot } from "./slack/bot";
+import { createSlackEntitySync } from "./slack/entity-sync";
 import { createSettingsBackedSlackIndexingFacade } from "./slack/indexing-facade";
 import { SlackMembershipReconciler } from "./slack/membership-reconciler";
 import { createSlackStartupManager } from "./slack/startup";
@@ -726,6 +727,31 @@ export async function createServer(config: Config, options?: CreateServerOptions
     encryptionKey: config.ENCRYPTION_KEY,
     userCache,
   });
+  const slackEntitySync = createSlackEntitySync({
+    db,
+    logger,
+    enabled: config.SLACK_ENTITY_SYNC && backgroundWork && externalStartup,
+    publicChannelsEnabled: config.SLACK_ENTITY_SYNC_PUBLIC_CHANNELS,
+    userInfoCap: config.SLACK_ENTITY_SYNC_USER_INFO_CAP,
+    getActiveConnection: async () => {
+      const settings = await settingsRepo.get();
+      if (!settings?.slack_bot_token || !settings.slack_team_id) return null;
+      return { botToken: settings.slack_bot_token, teamId: settings.slack_team_id };
+    },
+    createFacade: (botToken) => {
+      const pinned = slackIndexingFacade.withToken?.(botToken);
+      if (!pinned || !pinned.listUsersPage || !pinned.listChannelsPage || !pinned.listChannelMembersPage) {
+        throw new Error("Slack indexing facade cannot pin a connection token");
+      }
+      return {
+        listUsersPage: pinned.listUsersPage,
+        listChannelsPage: pinned.listChannelsPage,
+        listChannelMembersPage: pinned.listChannelMembersPage,
+        getUserInfo: pinned.getUserInfo,
+      };
+    },
+  });
+  if (backgroundWork && externalStartup) slackEntitySync.start();
   const syncScheduler = backgroundWork
     ? startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config, slackIndexingFacade })
     : null;
@@ -817,6 +843,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       };
     },
     validateTokens: validateSlackTokens,
+    onConnectionActivated: (connection) => slackEntitySync.onConnectionActivated(connection),
     getCurrentTeamId: async () => (await settingsRepo.get())?.slack_team_id ?? null,
     getCurrentBot: () => slack,
     setCurrentBot: (bot) => {
@@ -1081,6 +1108,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     await managedMemberReconciliationPromise?.catch(() => undefined);
     await telemetry.shutdown();
     await syncScheduler?.stop();
+    await slackEntitySync.stop();
     whatsappWindowKeepAliveJob?.stop();
     if (backgroundWork) {
       agentScheduler.stop();

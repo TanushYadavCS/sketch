@@ -33,6 +33,7 @@ interface SlackStartupDeps<TBot extends SlackRuntimeBot> {
   getCurrentBot: () => TBot | null;
   setCurrentBot: (bot: TBot | null) => void;
   createBot: (tokens: StartupTokens) => TBot;
+  onConnectionActivated?: (connection: { botToken: string; teamId: string }) => void;
   beforeExplicitTokenReplacement?: (replacement?: TeamReplacement) => Promise<void>;
 }
 
@@ -101,6 +102,7 @@ export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: Sl
         try {
           await nextBot.start();
           deps.logger.info("Slack bot connected");
+          if (nextTeamId) deps.onConnectionActivated?.({ botToken, teamId: nextTeamId });
         } catch (err) {
           deps.logger.error({ err }, "Failed to start Slack bot, disabling Slack integration");
           deps.setCurrentBot(null);
