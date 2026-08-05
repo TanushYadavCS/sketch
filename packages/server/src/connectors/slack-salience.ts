@@ -106,11 +106,12 @@ export async function backfillSlackFileAccess(options: {
       .where((eb) => eb.or([eb("claimed_at", "is", null), eb("claimed_at", "<", staleBefore)]))
       .executeTakeFirst();
     if (result.numUpdatedRows === 0n) return null;
-    return { lastIndexedFileId: marker.last_indexed_file_id };
+    return { claimedAt: timestamp, lastIndexedFileId: marker.last_indexed_file_id };
   });
   if (claim === null) return 0;
 
   let lastIndexedFileId = claim.lastIndexedFileId;
+  let claimedAt = claim.claimedAt;
   let insertedGrants = 0;
   while (true) {
     const page = await options.db.transaction().execute(async (trx) => {
@@ -134,6 +135,7 @@ export async function backfillSlackFileAccess(options: {
           .updateTable("slack_file_access_backfill")
           .set({ claimed_at: null, completed_at: timestamp })
           .where("id", "=", "default")
+          .where("claimed_at", "=", claimedAt)
           .execute();
         return { done: true, lastIndexedFileId, inserted: 0 };
       }
@@ -177,12 +179,17 @@ export async function backfillSlackFileAccess(options: {
       }
 
       const nextCursor = files[files.length - 1]?.indexedFileId ?? lastIndexedFileId;
-      await trx
+      const checkpoint = await trx
         .updateTable("slack_file_access_backfill")
         .set({ claimed_at: timestamp, last_indexed_file_id: nextCursor })
         .where("id", "=", "default")
         .where("completed_at", "is", null)
-        .execute();
+        .where("claimed_at", "=", claimedAt)
+        .executeTakeFirst();
+      if (checkpoint.numUpdatedRows === 0n) {
+        return { done: true, lastIndexedFileId, inserted };
+      }
+      claimedAt = timestamp;
       return { done: false, lastIndexedFileId: nextCursor, inserted };
     });
     insertedGrants += page.inserted;

@@ -185,7 +185,7 @@ describe("SlackBot.processHttpRequest", () => {
         const body = JSON.stringify({
           type: "event_callback",
           event_id: eventId,
-          event: { type: eventType, channel: "C123", user: "U123", team: "T-BOT", team_id: "T-WRONG" },
+          event: { type: eventType, channel: "C123", user: "U123", team: "T-WRONG", team_id: "T-BOT" },
         });
         await expect(bot.processHttpRequest(body, makeHeaders(body))).resolves.toEqual({});
       }
@@ -197,7 +197,7 @@ describe("SlackBot.processHttpRequest", () => {
       await bot.stop();
     });
 
-    it("dispatches a foreign-team member join using the active workspace", async () => {
+    it("drops a foreign-team member join using team_id", async () => {
       const bot = makeBot();
       const eventHandlers = new Map<string, (args: { event: Record<string, unknown> }) => Promise<void>>();
       const app = {
@@ -229,11 +229,7 @@ describe("SlackBot.processHttpRequest", () => {
         },
       });
 
-      expect(joined).toHaveBeenCalledWith({
-        channelId: "C123",
-        slackUserId: "U-FOREIGN",
-        teamId: "T-BOT",
-      });
+      expect(joined).not.toHaveBeenCalled();
       await bot.stop();
     });
   });

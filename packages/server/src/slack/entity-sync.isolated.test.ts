@@ -205,6 +205,47 @@ describe("Slack entity sync", () => {
     });
   });
 
+  it("resumes scheduling after an aborted team becomes active again", async () => {
+    await createDb();
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+    const stale = "2026-08-01T00:00:00.000Z";
+    await getDb()
+      .insertInto("slack_sync_runs")
+      .values({
+        id: "aborted-sweep",
+        team_id: "T1",
+        run_type: "sweep",
+        trigger_key: "sweep",
+        pinned_team_id: "T1",
+        status: "aborted",
+        stage: "users",
+        heartbeat_at: null,
+        users_cursor: null,
+        conversations_cursor: null,
+        members_cursor: null,
+        current_channel_id: null,
+        started_at: stale,
+        completed_at: null,
+        error: JSON.stringify({ kind: "team_changed" }),
+        created_at: stale,
+        updated_at: stale,
+      })
+      .execute();
+    const facade = emptyFacade();
+    const { sync } = makeSync(facade, active);
+
+    await sync.enqueueScheduledSweep(active);
+
+    expect(facade.listUsersPage).toHaveBeenCalledOnce();
+    await expect(
+      getDb()
+        .selectFrom("slack_sync_runs")
+        .select("status")
+        .where("id", "=", "aborted-sweep")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ status: "completed" });
+  });
+
   it("syncs a public non-member channel and roster-only Slack Connect users", async () => {
     await createDb();
     const facade: SlackEntitySyncFacade = {
@@ -331,6 +372,54 @@ describe("Slack entity sync", () => {
     expect(facade.getUserInfo).toHaveBeenCalledTimes(2);
   });
 
+  it("evicts facades for rotated bot tokens", async () => {
+    await createDb();
+    let active: SlackEntitySyncConnection = { botToken: "xoxb-t1", teamId: "T1" };
+    const createFacade = vi.fn(() => {
+      const facade = emptyFacade();
+      facade.getUserInfo = vi.fn(async (slackUserId: string) => user({ slackUserId, name: slackUserId }));
+      return facade;
+    });
+    const { sync } = makeSync(emptyFacade(), active, {
+      getActiveConnection: async () => active,
+      createFacade,
+    });
+
+    await sync.observeMessage({ channelId: "D-1", slackUserId: "U-1" });
+    active = { botToken: "xoxb-t2", teamId: "T2" };
+    await sync.observeMessage({ channelId: "D-2", slackUserId: "U-2" });
+    active = { botToken: "xoxb-t1", teamId: "T1" };
+    sync.onConnectionActivated(active);
+    await sync.observeMessage({ channelId: "D-3", slackUserId: "U-3" });
+
+    expect(createFacade).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not tombstone a DM-only sender during a complete sweep", async () => {
+    await createDb();
+    const facade: SlackEntitySyncFacade = {
+      listUsersPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listChannelsPage: vi.fn(async () => ({ items: [channel({ id: "C1" })], nextCursor: null })),
+      listChannelMembersPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+      getUserInfo: vi.fn(async () =>
+        user({ slackUserId: "U-DM", name: "dm-only", isStranger: true, profileTeamId: "T2" }),
+      ),
+    };
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+    const { sync } = makeSync(facade, active);
+
+    await sync.observeMessage({ channelId: "D-DM", slackUserId: "U-DM" });
+    await sync.enqueueSweep(active);
+
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select(["inactive_at", "last_roster_seen_at"])
+        .where("slack_user_id", "=", "U-DM")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ inactive_at: null, last_roster_seen_at: null });
+  });
+
   it("reactivates an inactive observed sender with a fresh profile lookup", async () => {
     await createDb();
     const facade = emptyFacade();
@@ -384,6 +473,7 @@ describe("Slack entity sync", () => {
         provider_updated_at: null,
         fetched_at: "2026-08-01T00:00:00.000Z",
         entity_id: null,
+        last_roster_seen_at: null,
         inactive_at: null,
         created_at: "2026-08-01T00:00:00.000Z",
         updated_at: "2026-08-01T00:00:00.000Z",
@@ -421,7 +511,9 @@ describe("Slack entity sync", () => {
     await sync.enqueueBackfill({ botToken: "xoxb-t1", teamId: "T1" });
 
     const run = await getDb().selectFrom("slack_sync_runs").select("error").executeTakeFirstOrThrow();
-    expect(run.error).toBeNull();
+    expect(JSON.parse(run.error ?? "{}")).toMatchObject({
+      skipReasons: [{ channelId: "C-FAILED", reason: "channel_not_found" }],
+    });
     expect(facade.getUserInfo).not.toHaveBeenCalled();
   });
 
@@ -440,7 +532,12 @@ describe("Slack entity sync", () => {
     await sync.enqueueBackfill({ botToken: "xoxb-t1", teamId: "T1" });
 
     const run = await getDb().selectFrom("slack_sync_runs").select("error").executeTakeFirstOrThrow();
-    expect(run.error).toBeNull();
+    expect(JSON.parse(run.error ?? "{}")).toMatchObject({
+      skipReasons: [
+        { channelId: "C-PUBLIC", reason: "public_channels_disabled" },
+        { channelId: "C-PRIVATE", reason: "private_channel_not_member" },
+      ],
+    });
     expect(facade.listChannelMembersPage).not.toHaveBeenCalled();
   });
 
@@ -739,7 +836,68 @@ describe("Slack entity sync", () => {
     ).resolves.toMatchObject({ inactive_at: expect.any(String) });
   });
 
-  it("does not tombstone an external when one of its participant channels was not crawled", async () => {
+  it("waits for the latest completed sweep before scheduling another sweep", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-05T00:00:00.000Z"));
+    await createDb();
+    const oldCompletion = "2026-08-01T00:00:00.000Z";
+    const newerCreation = "2026-08-04T00:00:00.000Z";
+    await getDb()
+      .insertInto("slack_sync_runs")
+      .values([
+        {
+          id: "completed-sweep",
+          team_id: "T1",
+          run_type: "sweep",
+          trigger_key: "sweep",
+          pinned_team_id: "T1",
+          status: "completed",
+          stage: "completed",
+          heartbeat_at: oldCompletion,
+          users_cursor: null,
+          conversations_cursor: null,
+          members_cursor: null,
+          current_channel_id: null,
+          started_at: oldCompletion,
+          completed_at: oldCompletion,
+          error: null,
+          created_at: oldCompletion,
+          updated_at: oldCompletion,
+        },
+        {
+          id: "repair-sweep",
+          team_id: "T1",
+          run_type: "sweep",
+          trigger_key: "repair-after-backfill:backfill-1",
+          pinned_team_id: "T1",
+          status: "completed",
+          stage: "completed",
+          heartbeat_at: newerCreation,
+          users_cursor: null,
+          conversations_cursor: null,
+          members_cursor: null,
+          current_channel_id: null,
+          started_at: newerCreation,
+          completed_at: null,
+          error: null,
+          created_at: newerCreation,
+          updated_at: newerCreation,
+        },
+      ])
+      .execute();
+    const facade = emptyFacade();
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+    const { sync } = makeSync(facade, active);
+
+    await sync.enqueueScheduledSweep(active);
+    expect(facade.listUsersPage).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(3 * 24 * 60 * 60 * 1000 + 1);
+    await sync.enqueueScheduledSweep(active);
+    expect(facade.listUsersPage).toHaveBeenCalledOnce();
+  });
+
+  it("preserves an external when one of its participant channel roster reads fails", async () => {
     await createDb();
     let failChannel = false;
     const facade: SlackEntitySyncFacade = {
@@ -822,7 +980,9 @@ describe("Slack entity sync", () => {
         .orderBy("created_at", "desc")
         .executeTakeFirstOrThrow();
       expect(sweep.status).toBe("completed");
-      expect(sweep.error).toBeNull();
+      expect(JSON.parse(sweep.error ?? "{}")).toMatchObject({
+        skipReasons: [{ channelId: "C1", reason: "channel_not_found" }],
+      });
     });
     await expect(
       getDb()

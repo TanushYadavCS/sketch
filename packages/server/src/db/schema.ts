@@ -696,6 +696,7 @@ export interface SlackUserSyncStateTable {
   entity_id: string | null;
   entity_created_by_sync: Generated<number>;
   inactive_at: string | null;
+  last_roster_seen_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

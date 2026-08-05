@@ -1,4 +1,4 @@
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createConversationRepository } from "../db/repositories/conversations";
@@ -203,7 +203,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       ).resolves.toEqual([{ email: "captured@example.com" }, { email: "grandfathered@example.com" }]);
     });
 
-    it("chunks a large current-membership fallback below database bind limits", async () => {
+    it("uses a bind-free INSERT...SELECT fallback for large current membership", async () => {
       const largeMembers = Array.from({ length: 33_000 }, (_, index) => ({
         access_scope_id: "slack-scope",
         email: `large-${String(index).padStart(5, "0")}@example.com`,
@@ -262,6 +262,64 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
           .orderBy("email", "asc")
           .execute(),
       ).resolves.toEqual([{ email: "current@example.com" }, { email: "new@example.com" }]);
+    });
+
+    it("does not checkpoint or complete a page after its claim is replaced", async () => {
+      const extraFiles = Array.from({ length: 101 }, (_, index) => ({
+        id: `slack-extra-${String(index).padStart(3, "0")}`,
+        connector_config_id: "slack-config",
+        provider_file_id: `slice-extra-${index}`,
+        file_name: `Slack: #extra-${index}`,
+        file_type: "slack_conversation_slice",
+        content_category: "document",
+        source: "slack",
+        synced_at: "2026-08-05T10:00:00.000Z",
+        access_scope_id: "slack-scope",
+      }));
+      await db.insertInto("indexed_files").values(extraFiles).execute();
+      const firstPage = await db
+        .selectFrom("indexed_files")
+        .select("id")
+        .where("source", "=", "slack")
+        .where("access_scope_id", "is not", null)
+        .orderBy("id", "asc")
+        .limit(100)
+        .execute();
+
+      if (label.includes("SQLite")) {
+        await sql`
+          CREATE TRIGGER slack_backfill_test_takeover
+          AFTER UPDATE OF last_indexed_file_id ON slack_file_access_backfill
+          WHEN NEW.last_indexed_file_id IS NOT NULL
+          BEGIN
+            UPDATE slack_file_access_backfill SET claimed_at = 'new-owner' WHERE id = 'default';
+          END
+        `.execute(db);
+      } else {
+        await sql`
+          CREATE FUNCTION slack_backfill_test_takeover_fn() RETURNS trigger
+          LANGUAGE plpgsql AS $$
+          BEGIN
+            UPDATE slack_file_access_backfill SET claimed_at = 'new-owner' WHERE id = 'default';
+            RETURN NEW;
+          END;
+          $$
+        `.execute(db);
+        await sql`
+          CREATE TRIGGER slack_backfill_test_takeover
+          AFTER UPDATE OF last_indexed_file_id ON slack_file_access_backfill
+          FOR EACH ROW WHEN (NEW.last_indexed_file_id IS NOT NULL)
+          EXECUTE FUNCTION slack_backfill_test_takeover_fn()
+        `.execute(db);
+      }
+
+      await expect(backfillSlackFileAccess({ db, grandfatheringEnabled: true })).resolves.toBeGreaterThan(0);
+      await expect(
+        db
+          .selectFrom("slack_file_access_backfill")
+          .select(["claimed_at", "last_indexed_file_id", "completed_at"])
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ claimed_at: "new-owner", last_indexed_file_id: firstPage.at(-1)?.id, completed_at: null });
     });
   });
 }

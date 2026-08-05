@@ -319,7 +319,7 @@ function createSlackIndexingFacadeWithState(
       current.client.users.list({ limit: SLACK_PAGE_LIMIT, ...(cursor ? { cursor } : {}) }),
     );
     const scopes = readOAuthScopes(result.response_metadata);
-    if (!current.oauthScopeCapture.observed) {
+    if (!current.oauthScopeCapture.observed && scopes !== null) {
       current.oauthScopeCapture.observed = true;
       current.oauthScopeCapture.scopes = scopes;
       options.onOAuthScopes?.(scopes);

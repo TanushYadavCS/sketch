@@ -315,6 +315,7 @@ async function runUpsertBody(
       entity_id: null,
       entity_created_by_sync: 0,
       inactive_at: profile.deleted ? profile.fetchedAt : null,
+      last_roster_seen_at: null,
       created_at: now,
       updated_at: now,
     })
