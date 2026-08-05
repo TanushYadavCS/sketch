@@ -101,6 +101,25 @@ describe("Slack indexing facade", () => {
     expect(onOAuthScopes).toHaveBeenCalledWith(["users:read"]);
   });
 
+  it("reports indeterminate OAuth scopes once when Slack omits response metadata", async () => {
+    const onOAuthScopes = vi.fn();
+    const client = {
+      users: { list: vi.fn().mockResolvedValue({ members: [], response_metadata: undefined }), info: vi.fn() },
+      conversations: { list: vi.fn(), members: vi.fn() },
+    };
+    const facade = createSlackIndexingFacade({
+      getBotToken: async () => "xoxb-missing-scopes",
+      clientFactory: () => client as never,
+      onOAuthScopes,
+    });
+
+    await facade.listUsersPage?.();
+    await facade.listUsersPage?.();
+
+    expect(onOAuthScopes).toHaveBeenCalledOnce();
+    expect(onOAuthScopes).toHaveBeenCalledWith(null);
+  });
+
   it("deduplicates concurrent users.info calls and serves them from the TTL cache", async () => {
     const info = vi.fn().mockResolvedValue({
       user: {

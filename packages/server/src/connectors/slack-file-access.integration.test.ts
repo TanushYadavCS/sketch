@@ -202,6 +202,67 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
           .execute(),
       ).resolves.toEqual([{ email: "captured@example.com" }, { email: "grandfathered@example.com" }]);
     });
+
+    it("chunks a large current-membership fallback below database bind limits", async () => {
+      const largeMembers = Array.from({ length: 33_000 }, (_, index) => ({
+        access_scope_id: "slack-scope",
+        email: `large-${String(index).padStart(5, "0")}@example.com`,
+      }));
+      for (let offset = 0; offset < largeMembers.length; offset += 500) {
+        await db
+          .insertInto("access_scope_members")
+          .values(largeMembers.slice(offset, offset + 500))
+          .execute();
+      }
+
+      await expect(backfillSlackFileAccess({ db, grandfatheringEnabled: true })).resolves.toBe(33_002);
+      await expect(
+        db
+          .selectFrom("file_access")
+          .select(({ fn }) => fn.countAll<number>().as("count"))
+          .where("indexed_file_id", "=", "slack-history")
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ count: 33_003 });
+    });
+
+    it("resumes an incomplete backfill from its persisted file cursor", async () => {
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: "slack-resume-2",
+          connector_config_id: "slack-config",
+          provider_file_id: "slice-2",
+          file_name: "Slack: #resume",
+          file_type: "slack_conversation_slice",
+          content_category: "document",
+          source: "slack",
+          synced_at: "2026-08-05T10:00:00.000Z",
+          access_scope_id: "slack-scope",
+        })
+        .execute();
+      await db
+        .insertInto("slack_file_access_backfill")
+        .values({
+          id: "default",
+          claimed_at: "2026-08-01T00:00:00.000Z",
+          last_indexed_file_id: "slack-history",
+          completed_at: null,
+        })
+        .execute();
+
+      await expect(backfillSlackFileAccess({ db, grandfatheringEnabled: true })).resolves.toBe(2);
+      await expect(
+        db.selectFrom("file_access").select("indexed_file_id").where("indexed_file_id", "=", "slack-history").execute(),
+      ).resolves.toEqual([{ indexed_file_id: "slack-history" }]);
+      await expect(
+        db
+          .selectFrom("file_access")
+          .select("email")
+          .where("indexed_file_id", "=", "slack-resume-2")
+          .orderBy("email", "asc")
+          .execute(),
+      ).resolves.toEqual([{ email: "current@example.com" }, { email: "new@example.com" }]);
+    });
   });
 }
 

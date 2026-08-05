@@ -20,6 +20,9 @@ export const SLACK_EMISSION_REFRESH_DAYS = 7;
 export const SLACK_SALIENCE_PROMPT_VERSION = "slack-salience-v1";
 
 const SALIENCE_CLAIM_STALE_MS = 15 * 60_000;
+const SLACK_FILE_ACCESS_PAGE_SIZE = 100;
+const SLACK_FILE_ACCESS_INSERT_CHUNK_SIZE = 500;
+const SLACK_FILE_ACCESS_CLAIM_STALE_MS = 15 * 60_000;
 const MENTION_TOKEN_PATTERN = /<@(U[A-Z0-9]+)(?:\|[^>]*)?>/g;
 
 export interface SlackSalienceRunSummary {
@@ -81,62 +84,111 @@ export async function backfillSlackFileAccess(options: {
   entitySyncEnabled?: boolean;
 }): Promise<number> {
   if (!isSlackGrandfatheringEnabled(options)) return 0;
-  return options.db.transaction().execute(async (trx) => {
+  const claim = await options.db.transaction().execute(async (trx) => {
+    const timestamp = new Date().toISOString();
     await trx
       .insertInto("slack_file_access_backfill")
-      .values({ id: "default", completed_at: null })
+      .values({ id: "default", claimed_at: null, last_indexed_file_id: null, completed_at: null })
       .onConflict((oc) => oc.column("id").doNothing())
       .execute();
-    const claim = await trx
+    const marker = await trx
+      .selectFrom("slack_file_access_backfill")
+      .select(["completed_at", "claimed_at", "last_indexed_file_id"])
+      .where("id", "=", "default")
+      .executeTakeFirstOrThrow();
+    if (marker.completed_at) return null;
+    const staleBefore = new Date(Date.now() - SLACK_FILE_ACCESS_CLAIM_STALE_MS).toISOString();
+    const result = await trx
       .updateTable("slack_file_access_backfill")
-      .set({ completed_at: new Date().toISOString() })
+      .set({ claimed_at: timestamp })
       .where("id", "=", "default")
       .where("completed_at", "is", null)
+      .where((eb) => eb.or([eb("claimed_at", "is", null), eb("claimed_at", "<", staleBefore)]))
       .executeTakeFirst();
-    if (claim.numUpdatedRows === 0n) return 0;
-    const files = await trx
-      .selectFrom("indexed_files")
-      .leftJoin("conversation_slices", "conversation_slices.id", "indexed_files.provider_file_id")
-      .select([
-        "indexed_files.id as indexedFileId",
-        "indexed_files.access_scope_id as accessScopeId",
-        "conversation_slices.roster_snapshot as rosterSnapshot",
-      ])
-      .where("indexed_files.source", "=", "slack")
-      .where("indexed_files.access_scope_id", "is not", null)
-      .execute();
-    const scopeIds = [...new Set(files.flatMap((file) => (file.accessScopeId ? [file.accessScopeId] : [])))];
-    const currentMembers =
-      scopeIds.length === 0
-        ? []
-        : await trx
-            .selectFrom("access_scope_members")
-            .select(["access_scope_id", "email"])
-            .where("access_scope_id", "in", scopeIds)
-            .execute();
-    const emailsByScope = new Map<string, string[]>();
-    for (const member of currentMembers) {
-      const emails = emailsByScope.get(member.access_scope_id) ?? [];
-      emails.push(member.email);
-      emailsByScope.set(member.access_scope_id, emails);
-    }
-    const grants = files.flatMap((file) => {
-      const snapshot = parseSlackRosterSnapshot(file.rosterSnapshot);
-      const emails = snapshot
-        ? teammateEmailsFromRoster(snapshot)
-        : file.accessScopeId
-          ? [...new Set(emailsByScope.get(file.accessScopeId) ?? [])]
-          : [];
-      return emails.map((email) => ({ indexed_file_id: file.indexedFileId, email }));
-    });
-    if (grants.length === 0) return 0;
-    const result = await trx
-      .insertInto("file_access")
-      .values(grants)
-      .onConflict((oc) => oc.columns(["indexed_file_id", "email"]).doNothing())
-      .executeTakeFirst();
-    return Number(result.numInsertedOrUpdatedRows ?? 0);
+    if (result.numUpdatedRows === 0n) return null;
+    return { lastIndexedFileId: marker.last_indexed_file_id };
   });
+  if (claim === null) return 0;
+
+  let lastIndexedFileId = claim.lastIndexedFileId;
+  let insertedGrants = 0;
+  while (true) {
+    const page = await options.db.transaction().execute(async (trx) => {
+      let query = trx
+        .selectFrom("indexed_files")
+        .leftJoin("conversation_slices", "conversation_slices.id", "indexed_files.provider_file_id")
+        .select([
+          "indexed_files.id as indexedFileId",
+          "indexed_files.access_scope_id as accessScopeId",
+          "conversation_slices.roster_snapshot as rosterSnapshot",
+        ])
+        .where("indexed_files.source", "=", "slack")
+        .where("indexed_files.access_scope_id", "is not", null)
+        .orderBy("indexed_files.id", "asc")
+        .limit(SLACK_FILE_ACCESS_PAGE_SIZE);
+      if (lastIndexedFileId) query = query.where("indexed_files.id", ">", lastIndexedFileId);
+      const files = await query.execute();
+      const timestamp = new Date().toISOString();
+      if (files.length === 0) {
+        await trx
+          .updateTable("slack_file_access_backfill")
+          .set({ claimed_at: null, completed_at: timestamp })
+          .where("id", "=", "default")
+          .execute();
+        return { done: true, lastIndexedFileId, inserted: 0 };
+      }
+
+      const fallbackFileIds: string[] = [];
+      const snapshotGrants: Array<{ indexed_file_id: string; email: string }> = [];
+      for (const file of files) {
+        const snapshot = parseSlackRosterSnapshot(file.rosterSnapshot);
+        if (!snapshot && file.accessScopeId) {
+          fallbackFileIds.push(file.indexedFileId);
+          continue;
+        }
+        for (const email of snapshot ? [...new Set(teammateEmailsFromRoster(snapshot))] : []) {
+          snapshotGrants.push({ indexed_file_id: file.indexedFileId, email });
+        }
+      }
+
+      let inserted = 0;
+      for (let offset = 0; offset < snapshotGrants.length; offset += SLACK_FILE_ACCESS_INSERT_CHUNK_SIZE) {
+        const grants = snapshotGrants.slice(offset, offset + SLACK_FILE_ACCESS_INSERT_CHUNK_SIZE);
+        const result = await trx
+          .insertInto("file_access")
+          .values(grants)
+          .onConflict((oc) => oc.columns(["indexed_file_id", "email"]).doNothing())
+          .executeTakeFirst();
+        inserted += Number(result.numInsertedOrUpdatedRows ?? 0);
+      }
+      if (fallbackFileIds.length > 0) {
+        const fallbackQuery = trx
+          .selectFrom("indexed_files")
+          .innerJoin("access_scope_members", "access_scope_members.access_scope_id", "indexed_files.access_scope_id")
+          .select(["indexed_files.id as indexed_file_id", "access_scope_members.email"])
+          .where("indexed_files.id", "in", fallbackFileIds);
+        const result = await trx
+          .insertInto("file_access")
+          .columns(["indexed_file_id", "email"])
+          .expression(fallbackQuery)
+          .onConflict((oc) => oc.columns(["indexed_file_id", "email"]).doNothing())
+          .executeTakeFirst();
+        inserted += Number(result.numInsertedOrUpdatedRows ?? 0);
+      }
+
+      const nextCursor = files[files.length - 1]?.indexedFileId ?? lastIndexedFileId;
+      await trx
+        .updateTable("slack_file_access_backfill")
+        .set({ claimed_at: timestamp, last_indexed_file_id: nextCursor })
+        .where("id", "=", "default")
+        .where("completed_at", "is", null)
+        .execute();
+      return { done: false, lastIndexedFileId: nextCursor, inserted };
+    });
+    insertedGrants += page.inserted;
+    if (page.done) return insertedGrants;
+    lastIndexedFileId = page.lastIndexedFileId;
+  }
 }
 
 /**

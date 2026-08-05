@@ -159,6 +159,7 @@ import * as m156 from "./migrations/156-operational-alerts";
 import * as m157 from "./migrations/157-task-activity-events";
 import * as m158 from "./migrations/158-slack-channel-participants";
 import * as m159 from "./migrations/159-slack-entity-lifecycle-sync";
+import * as m160 from "./migrations/160-slack-file-access-backfill-progress";
 import type { DB } from "./schema";
 
 /**
@@ -327,6 +328,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "157-task-activity-events": m157,
           "158-slack-channel-participants": m158,
           "159-slack-entity-lifecycle-sync": m159,
+          "160-slack-file-access-backfill-progress": m160,
         };
       },
     },

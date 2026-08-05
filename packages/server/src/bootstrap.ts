@@ -753,6 +753,13 @@ export async function createServer(config: Config, options?: CreateServerOptions
     encryptionKey: config.ENCRYPTION_KEY,
     userCache,
     onOAuthScopes: (scopes) => {
+      if (!scopes) {
+        logger.warn(
+          { requiredScope: "users:read.email" },
+          "Slack OAuth scopes were not returned; users:read.email status is indeterminate",
+        );
+        return;
+      }
       if (!scopes.includes("users:read.email")) {
         logger.warn(
           { requiredScope: "users:read.email", grantedScopes: scopes },

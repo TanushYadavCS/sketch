@@ -722,6 +722,8 @@ export interface SlackSyncRunsTable {
 
 export interface SlackFileAccessBackfillTable {
   id: string;
+  claimed_at: string | null;
+  last_indexed_file_id: string | null;
   completed_at: string | null;
 }
 

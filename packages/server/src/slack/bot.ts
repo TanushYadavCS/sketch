@@ -453,8 +453,7 @@ export class SlackBot {
       if (!this.memberJoinedChannelHandler) return;
       const membership = event as { channel?: string; user?: string; team?: string; team_id?: string };
       if (!membership.channel || !membership.user) return;
-      const teamId = membership.team ?? this.teamId ?? undefined;
-      if (!this.isEventForActiveTeam(teamId)) return;
+      const teamId = this.teamId ?? undefined;
       try {
         await this.memberJoinedChannelHandler({
           channelId: membership.channel,
@@ -474,8 +473,7 @@ export class SlackBot {
       if (!this.memberLeftChannelHandler) return;
       const membership = event as { channel?: string; user?: string; team?: string; team_id?: string };
       if (!membership.channel || !membership.user) return;
-      const teamId = membership.team ?? this.teamId ?? undefined;
-      if (!this.isEventForActiveTeam(teamId)) return;
+      const teamId = this.teamId ?? undefined;
       try {
         await this.memberLeftChannelHandler({
           channelId: membership.channel,

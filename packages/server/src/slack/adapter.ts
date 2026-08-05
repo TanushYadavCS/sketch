@@ -346,9 +346,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       });
     }
   });
-  slackBot.onMemberLeftChannel(({ channelId, slackUserId }) =>
-    recordSlackChannelParticipantLeft(channelId, slackUserId),
-  );
+  slackBot.onMemberLeftChannel(async ({ channelId, slackUserId, teamId }) => {
+    await recordSlackChannelParticipantLeft(channelId, slackUserId);
+    await deps.slackEntitySync?.handleMemberLeftChannel({
+      channelId,
+      slackUserId,
+      ...(teamId ? { teamId } : {}),
+    });
+  });
   slackBot.onTeamJoin?.(async ({ teamId, slackUserId }) => {
     await deps.slackEntitySync?.handleUserEvent({
       eventType: "team_join",

@@ -290,26 +290,45 @@ describe("Slack entity sync", () => {
     ).resolves.toMatchObject({ inactive_at: null });
   });
 
-  it("observes foreign-team Slack Connect senders only on served channels", async () => {
+  it("observes foreign-team Slack Connect senders without crawling channels", async () => {
     await createDb();
     const facade = emptyFacade();
-    facade.listChannelsPage = vi.fn(async () => ({ items: [channel({ id: "C-SERVED" })], nextCursor: null }));
     facade.getUserInfo = vi.fn(async () =>
       user({ slackUserId: "U-FOREIGN", name: "foreign", profileTeamId: "T2", isStranger: true }),
     );
     const { sync, logger } = makeSync(facade);
 
-    await sync.observeMessage({ teamId: "T2", channelId: "C-SERVED", slackUserId: "U-FOREIGN" });
+    await sync.observeMessage({ teamId: "T2", channelId: "D-FOREIGN", slackUserId: "U-FOREIGN" });
 
     expect(facade.getUserInfo).toHaveBeenCalledWith("U-FOREIGN", { fresh: true });
+    expect(facade.listChannelsPage).not.toHaveBeenCalled();
     expect(logger.warn).not.toHaveBeenCalledWith(
       expect.objectContaining({ eventTeamId: "T2" }),
       "Dropped Slack entity event from another team",
     );
 
-    facade.listChannelsPage = vi.fn(async () => ({ items: [], nextCursor: null }));
-    await sync.observeMessage({ teamId: "T2", channelId: "C-NOT-SERVED", slackUserId: "U-NOT-SERVED" });
+    await sync.observeMessage({ teamId: "T2", channelId: "mpdm-foreign", slackUserId: "U-FOREIGN" });
     expect(facade.getUserInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses the pinned facade for inactive observed senders", async () => {
+    await createDb();
+    const facade = emptyFacade();
+    facade.getUserInfo = vi.fn(async () => user({ slackUserId: "U-OBSERVED", name: "observed" }));
+    const createFacade = vi.fn(() => facade);
+    const { sync } = makeSync(facade, undefined, { createFacade });
+
+    await sync.observeMessage({ channelId: "D-OBSERVED", slackUserId: "U-OBSERVED" });
+    await getDb()
+      .updateTable("slack_user_sync_state")
+      .set({ inactive_at: "2026-08-01T00:00:00.000Z" })
+      .where("team_id", "=", "T1")
+      .where("slack_user_id", "=", "U-OBSERVED")
+      .execute();
+    await sync.observeMessage({ channelId: "mpdm-OBSERVED", slackUserId: "U-OBSERVED" });
+
+    expect(createFacade).toHaveBeenCalledOnce();
+    expect(facade.getUserInfo).toHaveBeenCalledTimes(2);
   });
 
   it("reactivates an inactive observed sender with a fresh profile lookup", async () => {
@@ -402,7 +421,7 @@ describe("Slack entity sync", () => {
     await sync.enqueueBackfill({ botToken: "xoxb-t1", teamId: "T1" });
 
     const run = await getDb().selectFrom("slack_sync_runs").select("error").executeTakeFirstOrThrow();
-    expect(JSON.parse(run.error ?? "{}").skipReasons).toEqual([{ channelId: "C-FAILED", reason: "channel_not_found" }]);
+    expect(run.error).toBeNull();
     expect(facade.getUserInfo).not.toHaveBeenCalled();
   });
 
@@ -421,10 +440,7 @@ describe("Slack entity sync", () => {
     await sync.enqueueBackfill({ botToken: "xoxb-t1", teamId: "T1" });
 
     const run = await getDb().selectFrom("slack_sync_runs").select("error").executeTakeFirstOrThrow();
-    expect(JSON.parse(run.error ?? "{}").skipReasons).toEqual([
-      { channelId: "C-PUBLIC", reason: "public_channels_disabled" },
-      { channelId: "C-PRIVATE", reason: "private_channel_not_member" },
-    ]);
+    expect(run.error).toBeNull();
     expect(facade.listChannelMembersPage).not.toHaveBeenCalled();
   });
 
@@ -711,47 +727,6 @@ describe("Slack entity sync", () => {
     const { sync } = makeSync(facade, active, { sweepIntervalMs: 1 });
 
     await sync.enqueueBackfill(active);
-    await getDb()
-      .insertInto("slack_channel_participants")
-      .values({ channel_id: "C1", slack_user_id: "U-EXTERNAL" })
-      .execute();
-    mode = "absent";
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    sync.start();
-
-    await vi.waitFor(async () => {
-      const state = await getDb()
-        .selectFrom("slack_user_sync_state")
-        .select("inactive_at")
-        .where("slack_user_id", "=", "U-EXTERNAL")
-        .executeTakeFirstOrThrow();
-      expect(state.inactive_at).not.toBeNull();
-    });
-    await sync.stop();
-  });
-
-  it("does not tombstone an external when one of its participant channels was not crawled", async () => {
-    await createDb();
-    let mode: "present" | "absent" = "present";
-    const facade: SlackEntitySyncFacade = {
-      listUsersPage: vi.fn(async () => ({ items: [], nextCursor: null })),
-      listChannelsPage: vi.fn(async () => ({ items: [channel({ id: "C1" })], nextCursor: null })),
-      listChannelMembersPage: vi.fn(async () => ({
-        items: mode === "present" ? ["U-EXTERNAL"] : [],
-        nextCursor: null,
-      })),
-      getUserInfo: vi.fn(async () =>
-        user({ slackUserId: "U-EXTERNAL", name: "external", isStranger: true, profileTeamId: "T2" }),
-      ),
-    };
-    const active = { botToken: "xoxb-t1", teamId: "T1" };
-    const { sync } = makeSync(facade, active);
-
-    await sync.enqueueBackfill(active);
-    await getDb()
-      .insertInto("slack_channel_participants")
-      .values({ channel_id: "C2", slack_user_id: "U-EXTERNAL" })
-      .execute();
     mode = "absent";
     await sync.enqueueSweep(active);
 
@@ -761,7 +736,60 @@ describe("Slack entity sync", () => {
         .select("inactive_at")
         .where("slack_user_id", "=", "U-EXTERNAL")
         .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ inactive_at: expect.any(String) });
+  });
+
+  it("does not tombstone an external when one of its participant channels was not crawled", async () => {
+    await createDb();
+    let failChannel = false;
+    const facade: SlackEntitySyncFacade = {
+      listUsersPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listChannelsPage: vi.fn(async () => ({
+        items: [channel({ id: "C1" }), channel({ id: "C2" })],
+        nextCursor: null,
+      })),
+      listChannelMembersPage: vi.fn(async (channelId: string) => {
+        if (failChannel && channelId === "C2") throw providerError("channel_not_found");
+        return { items: ["U-EXTERNAL"], nextCursor: null };
+      }),
+      getUserInfo: vi.fn(async () =>
+        user({ slackUserId: "U-EXTERNAL", name: "external", isStranger: true, profileTeamId: "T2" }),
+      ),
+    };
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+    const { sync } = makeSync(facade, active);
+
+    await sync.enqueueBackfill(active);
+    failChannel = true;
+    await sync.enqueueSweep(active);
+
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("inactive_at")
+        .where("slack_user_id", "=", "U-EXTERNAL")
+        .executeTakeFirstOrThrow(),
     ).resolves.toMatchObject({ inactive_at: null });
+  });
+
+  it("tombstones an external after a clean member leave without fixture rows", async () => {
+    await createDb();
+    const facade = emptyFacade();
+    facade.getUserInfo = vi.fn(async () =>
+      user({ slackUserId: "U-LEAVER", name: "leaver", isStranger: true, profileTeamId: "T2" }),
+    );
+    const { sync } = makeSync(facade);
+
+    await sync.handleMemberJoinedChannel({ teamId: "T1", channelId: "C1", slackUserId: "U-LEAVER" });
+    await sync.handleMemberLeftChannel({ teamId: "T1", channelId: "C1", slackUserId: "U-LEAVER" });
+
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("inactive_at")
+        .where("slack_user_id", "=", "U-LEAVER")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ inactive_at: expect.any(String) });
   });
 
   it("preserves an external when a channel roster page fails during a sweep", async () => {
@@ -794,7 +822,7 @@ describe("Slack entity sync", () => {
         .orderBy("created_at", "desc")
         .executeTakeFirstOrThrow();
       expect(sweep.status).toBe("completed");
-      expect(sweep.error).toContain("channel_not_found");
+      expect(sweep.error).toBeNull();
     });
     await expect(
       getDb()

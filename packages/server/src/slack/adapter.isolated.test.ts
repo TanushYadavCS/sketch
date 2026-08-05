@@ -379,6 +379,7 @@ describe("slack/adapter", () => {
         handleUserEvent: vi.fn().mockResolvedValue(undefined),
         handleBotJoinedChannel: vi.fn().mockResolvedValue(undefined),
         handleMemberJoinedChannel: vi.fn().mockResolvedValue(undefined),
+        handleMemberLeftChannel: vi.fn().mockResolvedValue(undefined),
         observeMessage: vi.fn().mockResolvedValue(undefined),
       };
       const deps = { ...makeDeps(), slackEntitySync: entitySync } as unknown as SlackAdapterDeps;
@@ -392,11 +393,17 @@ describe("slack/adapter", () => {
         isBot?: boolean;
         teamId?: string;
       }) => Promise<void>;
+      const left = mockBotInstance.onMemberLeftChannel.mock.calls[0]?.[0] as (event: {
+        channelId: string;
+        slackUserId: string;
+        teamId?: string;
+      }) => Promise<void>;
 
       await teamJoin({ teamId: "T1", slackUserId: "U1" });
       await userChange({ teamId: "T1", slackUserId: "U1" });
       await joined({ teamId: "T1", channelId: "C1", slackUserId: "UBOT", isBot: true });
       await joined({ teamId: "T1", channelId: "C1", slackUserId: "U1", isBot: false });
+      await left({ teamId: "T1", channelId: "C1", slackUserId: "U1" });
 
       expect(entitySync.handleUserEvent).toHaveBeenNthCalledWith(1, {
         eventType: "team_join",
@@ -415,6 +422,11 @@ describe("slack/adapter", () => {
         channelId: "C1",
         slackUserId: "U1",
       });
+      expect(entitySync.handleMemberLeftChannel).toHaveBeenCalledWith({
+        teamId: "T1",
+        channelId: "C1",
+        slackUserId: "U1",
+      });
     });
 
     it("does not hold the Slack event handler open for a full bot-join crawl", async () => {
@@ -426,6 +438,7 @@ describe("slack/adapter", () => {
         handleUserEvent: vi.fn().mockResolvedValue(undefined),
         handleBotJoinedChannel: vi.fn().mockReturnValue(crawl),
         handleMemberJoinedChannel: vi.fn().mockResolvedValue(undefined),
+        handleMemberLeftChannel: vi.fn().mockResolvedValue(undefined),
         observeMessage: vi.fn().mockResolvedValue(undefined),
       };
       const deps = { ...makeDeps(), slackEntitySync: entitySync } as unknown as SlackAdapterDeps;
@@ -453,6 +466,7 @@ describe("slack/adapter", () => {
         handleUserEvent: vi.fn().mockResolvedValue(undefined),
         handleBotJoinedChannel: vi.fn().mockResolvedValue(undefined),
         handleMemberJoinedChannel: vi.fn().mockResolvedValue(undefined),
+        handleMemberLeftChannel: vi.fn().mockResolvedValue(undefined),
         observeMessage: vi.fn().mockResolvedValue(undefined),
       };
       const deps = { ...makeDeps(), slackEntitySync: entitySync } as unknown as SlackAdapterDeps;
