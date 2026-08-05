@@ -620,6 +620,22 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
     },
 
     /**
+     * Add per-file email grants without revoking existing grants. Slack uses
+     * this for grandfathered channel history: a later emission may add a new
+     * teammate while preserving access for people who were present earlier.
+     */
+    async grantFileAccessEmails(indexedFileId: string, emails: string[]) {
+      const unique = [...new Set(emails)];
+      if (unique.length === 0) return;
+
+      await sql`
+        INSERT INTO file_access (indexed_file_id, email)
+        VALUES ${sql.join(unique.map((email) => sql`(${indexedFileId}, ${email})`))}
+        ON CONFLICT DO NOTHING
+      `.execute(db);
+    },
+
+    /**
      * Get access info for a batch of file IDs.
      * Returns a map of fileId → { type, count }.
      * Files not in the map are unrestricted.

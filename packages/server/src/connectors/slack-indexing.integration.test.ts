@@ -14,6 +14,7 @@ import {
   processSlackSalience,
   reconcileSlackChannelAcls,
 } from "./slack-salience";
+import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
 
 const logger = pino({ level: "silent" });
 
@@ -698,7 +699,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(items[0]?.content).not.toContain("(teammate)");
     });
 
-    it("emission with no teammate member archives the linked file and emits nothing", async () => {
+    it("flag-off emission with no teammate member archives the linked file and emits nothing", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const config = await db
         .selectFrom("connector_configs")
@@ -759,6 +760,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         db,
         logger,
         facade,
+        grandfatheringEnabled: false,
         now: new Date("2026-07-18T10:00:00.000Z"),
         onSkippedNoScope: () => {
           skipped += 1;
@@ -783,7 +785,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(unlinked.indexed_file_id).toBeNull();
     });
 
-    it("emission with no teammate archives the file of a requeued unlinked slice", async () => {
+    it("flag-off emission with no teammate archives the file of a requeued unlinked slice", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const config = await db
         .selectFrom("connector_configs")
@@ -837,6 +839,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         db,
         logger,
         facade,
+        grandfatheringEnabled: false,
         onSkippedNoScope: () => {
           skipped += 1;
         },
@@ -853,6 +856,264 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .executeTakeFirstOrThrow();
       expect(file.is_archived).toBe(1);
       expect(file.access_scope_id).toBeNull();
+    });
+
+    it("grandfathered emission keeps a linked file when no teammate remains", async () => {
+      await ensureSlackConnectorConfig({ db, logger });
+      const config = await db
+        .selectFrom("connector_configs")
+        .select("id")
+        .where("connector_type", "=", "slack")
+        .executeTakeFirstOrThrow();
+
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C1",
+      });
+      const message = await conversations.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1800.2",
+        senderJid: "U0EXT",
+        senderName: "Guest",
+        text: "external-only chatter",
+        providerTimestamp: "2026-07-17T10:00:00.000Z",
+        receivedAt: "2026-07-17T10:00:00.000Z",
+      });
+      const slice = await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: message.row.id,
+        lastMessageId: message.row.id,
+        startedAt: "2026-07-17T10:00:00.000Z",
+        endedAt: "2026-07-17T10:00:00.000Z",
+        messageCount: 1,
+        denoisedMessageIds: [message.row.id],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+        salienceVerdict: "kept",
+      });
+      await db
+        .insertInto("indexed_files")
+        .values({
+          id: "file-grandfathered",
+          connector_config_id: config.id,
+          provider_file_id: slice.row.id,
+          file_name: "Slack: #general",
+          file_type: "slack_conversation_slice",
+          content_category: "document",
+          source: "slack",
+          synced_at: "2026-07-17T10:05:00.000Z",
+        })
+        .execute();
+      await db
+        .updateTable("conversation_slices")
+        .set({ indexed_file_id: "file-grandfathered" })
+        .where("id", "=", slice.row.id)
+        .execute();
+
+      const items = [];
+      for await (const item of emitSlackSyncedItems({
+        db,
+        logger,
+        facade: fakeFacade({ listChannelMembers: async () => ["U0EXT"] }),
+        grandfatheringEnabled: true,
+      })) {
+        items.push(item);
+      }
+
+      expect(items).toHaveLength(0);
+      const file = await db
+        .selectFrom("indexed_files")
+        .select(["is_archived", "access_scope_id"])
+        .where("id", "=", "file-grandfathered")
+        .executeTakeFirstOrThrow();
+      expect(file.is_archived).toBe(0);
+      expect(file.access_scope_id).toBeNull();
+      const linkedSlice = await db
+        .selectFrom("conversation_slices")
+        .select("indexed_file_id")
+        .where("id", "=", slice.row.id)
+        .executeTakeFirstOrThrow();
+      expect(linkedSlice.indexed_file_id).toBe("file-grandfathered");
+    });
+
+    it("grandfathered Slack emissions union teammate email grants across re-emissions", async () => {
+      await ensureSlackConnectorConfig({ db, logger });
+      const config = await db
+        .selectFrom("connector_configs")
+        .select("id")
+        .where("connector_type", "=", "slack")
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("users")
+        .values({
+          id: "user-new",
+          name: "New Teammate",
+          email: "new@example.com",
+          auth_role: "member",
+          slack_user_id: "U1TEAM",
+        })
+        .execute();
+
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate({
+        platform: "slack",
+        kind: "channel",
+        providerConversationId: "C1",
+      });
+      const message = await conversations.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1800.3",
+        senderJid: "U0TEAM",
+        senderName: "Roopak",
+        text: "Decision: keep the channel history",
+        providerTimestamp: "2026-07-17T10:00:00.000Z",
+        receivedAt: "2026-07-17T10:00:00.000Z",
+      });
+      const slice = await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: message.row.id,
+        lastMessageId: message.row.id,
+        startedAt: "2026-07-17T10:00:00.000Z",
+        endedAt: "2026-07-17T10:00:00.000Z",
+        messageCount: 1,
+        denoisedMessageIds: [message.row.id],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+        salienceVerdict: "kept",
+      });
+      const facade = fakeFacade({
+        listChannelMembers: async () => ["U0TEAM"],
+        getUserInfo: async (slackUserId: string) =>
+          slackUserId === "U0TEAM"
+            ? { name: "roopak", realName: "Roopak", email: "roopak@example.com", isBot: false }
+            : { name: "new", realName: "New Teammate", email: "new@example.com", isBot: false },
+      });
+      const firstItems = [];
+      for await (const item of emitSlackSyncedItems({ db, logger, facade, grandfatheringEnabled: true })) {
+        firstItems.push(item);
+      }
+      expect(firstItems).toHaveLength(1);
+      const firstItem = firstItems[0];
+      if (!firstItem) throw new Error("Expected a Slack item for the first emission");
+      const repo = createConnectorRepository(db);
+      await processSyncedItem({
+        db,
+        repo,
+        connectorConfigId: config.id,
+        connectorType: "slack",
+        item: firstItem,
+        existingHashes: await loadExistingContentHashes(db, "slack", config.id),
+      });
+
+      facade.listChannelMembers = async () => ["U1TEAM"];
+      const secondItems = [];
+      for await (const item of emitSlackSyncedItems({ db, logger, facade, grandfatheringEnabled: true })) {
+        secondItems.push(item);
+      }
+      expect(secondItems).toHaveLength(1);
+      const secondItem = secondItems[0];
+      if (!secondItem) throw new Error("Expected a Slack item for the second emission");
+      expect(secondItem.accessEmails).toEqual(["new@example.com"]);
+      await processSyncedItem({
+        db,
+        repo,
+        connectorConfigId: config.id,
+        connectorType: "slack",
+        item: secondItem,
+        existingHashes: await loadExistingContentHashes(db, "slack", config.id),
+      });
+
+      const indexedFile = await db
+        .selectFrom("indexed_files")
+        .select("id")
+        .where("source", "=", "slack")
+        .where("provider_file_id", "=", slice.row.id)
+        .executeTakeFirstOrThrow();
+      const grants = await db
+        .selectFrom("file_access")
+        .select("email")
+        .where("indexed_file_id", "=", indexedFile.id)
+        .orderBy("email", "asc")
+        .execute();
+      expect(grants.map((row) => row.email)).toEqual(["new@example.com", "roopak@example.com"]);
+
+      const laterMessage = await conversations.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1800.4",
+        senderJid: "U1TEAM",
+        senderName: "New Teammate",
+        text: "Decision: the new joiner can read the existing channel history",
+        providerTimestamp: "2026-07-18T10:00:00.000Z",
+        receivedAt: "2026-07-18T10:00:00.000Z",
+      });
+      const laterSlice = await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: laterMessage.row.id,
+        lastMessageId: laterMessage.row.id,
+        startedAt: "2026-07-18T10:00:00.000Z",
+        endedAt: "2026-07-18T10:00:00.000Z",
+        messageCount: 1,
+        denoisedMessageIds: [laterMessage.row.id],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+        salienceVerdict: "kept",
+      });
+      const laterItems = [];
+      for await (const item of emitSlackSyncedItems({ db, logger, facade, grandfatheringEnabled: true })) {
+        laterItems.push(item);
+      }
+      const laterItem = laterItems.find((item) => item.providerFileId === String(laterSlice.row.id));
+      if (!laterItem) throw new Error("Expected a Slack item for the later slice");
+      expect(laterItem.accessEmails).toEqual(["new@example.com"]);
+      await processSyncedItem({
+        db,
+        repo,
+        connectorConfigId: config.id,
+        connectorType: "slack",
+        item: laterItem,
+        existingHashes: await loadExistingContentHashes(db, "slack", config.id),
+      });
+
+      const laterIndexedFile = await db
+        .selectFrom("indexed_files")
+        .select(["id", "access_scope_id"])
+        .where("source", "=", "slack")
+        .where("provider_file_id", "=", laterSlice.row.id)
+        .executeTakeFirstOrThrow();
+      if (!laterIndexedFile.access_scope_id) throw new Error("Expected the later Slack item to have an access scope");
+      const laterGrants = await db
+        .selectFrom("file_access")
+        .select("email")
+        .where("indexed_file_id", "=", laterIndexedFile.id)
+        .execute();
+      expect(laterGrants.map((row) => row.email)).toEqual(["new@example.com"]);
+      const currentScopeMembers = await db
+        .selectFrom("access_scope_members")
+        .select("email")
+        .where("access_scope_id", "=", laterIndexedFile.access_scope_id)
+        .execute();
+      expect(currentScopeMembers.map((row) => row.email)).toEqual(["new@example.com"]);
+
+      await db.deleteFrom("users").where("id", "=", "user-admin").execute();
+      const grantsAfterAccountOffboarding = await db
+        .selectFrom("file_access")
+        .select("email")
+        .where("indexed_file_id", "=", indexedFile.id)
+        .execute();
+      expect(grantsAfterAccountOffboarding.map((row) => row.email)).toContain("roopak@example.com");
+      await db
+        .insertInto("users")
+        .values({
+          id: "user-reused-email",
+          name: "Reused Account",
+          email: "roopak@example.com",
+          auth_role: "member",
+          slack_user_id: "U2TEAM",
+        })
+        .execute();
+      expect(grantsAfterAccountOffboarding.map((row) => row.email)).toContain("roopak@example.com");
     });
 
     it("reconciles ACLs: refreshes visible-channel membership, archives invisible channels", async () => {
@@ -915,11 +1176,31 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .where("id", "=", slice.row.id)
         .execute();
 
+      const grandfatheredSummary = await reconcileSlackChannelAcls({
+        db,
+        logger,
+        facade: fakeFacade(),
+        connectorConfigId: config.id,
+        grandfatheringEnabled: true,
+      });
+      expect(grandfatheredSummary.scopesRefreshed).toBe(1);
+      expect(grandfatheredSummary.scopesArchived).toBe(0);
+      expect(grandfatheredSummary.filesArchived).toBe(0);
+
+      const grandfatheredGoneFile = await db
+        .selectFrom("indexed_files")
+        .select(["is_archived", "access_scope_id"])
+        .where("id", "=", "file-gone")
+        .executeTakeFirstOrThrow();
+      expect(grandfatheredGoneFile.is_archived).toBe(0);
+      expect(grandfatheredGoneFile.access_scope_id).toBe(goneScope);
+
       const summary = await reconcileSlackChannelAcls({
         db,
         logger,
         facade: fakeFacade(),
         connectorConfigId: config.id,
+        grandfatheringEnabled: false,
       });
       expect(summary.scopesRefreshed).toBe(1);
       expect(summary.scopesArchived).toBe(1);
@@ -1001,7 +1282,29 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .where("id", "=", slice.row.id)
         .execute();
 
-      const archived = await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: config.id });
+      expect(
+        await archiveAllSlackChannelFiles({
+          db,
+          logger,
+          connectorConfigId: config.id,
+          grandfatheringEnabled: true,
+        }),
+      ).toBe(0);
+
+      const grandfatheredFile = await db
+        .selectFrom("indexed_files")
+        .select(["is_archived", "access_scope_id"])
+        .where("id", "=", "file-live")
+        .executeTakeFirstOrThrow();
+      expect(grandfatheredFile.is_archived).toBe(0);
+      expect(grandfatheredFile.access_scope_id).toBe(scopeId);
+
+      const archived = await archiveAllSlackChannelFiles({
+        db,
+        logger,
+        connectorConfigId: config.id,
+        grandfatheringEnabled: false,
+      });
       expect(archived).toBe(1);
 
       const file = await db
@@ -1019,7 +1322,14 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .executeTakeFirstOrThrow();
       expect(clearedSlice.indexed_file_id).toBeNull();
 
-      expect(await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: config.id })).toBe(0);
+      expect(
+        await archiveAllSlackChannelFiles({
+          db,
+          logger,
+          connectorConfigId: config.id,
+          grandfatheringEnabled: false,
+        }),
+      ).toBe(0);
     });
   });
 }

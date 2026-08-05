@@ -410,7 +410,12 @@ async function archiveLinkedSliceFileIfPresent(db: Kysely<DB>, context: SlackSli
 /**
  * Emits kept Slack slices as SyncedItems. The roster is re-resolved at
  * emission so the access scope reflects current channel membership, not
- * membership at judgment time.
+ * membership at judgment time. With access grandfathering enabled, the
+ * emission-time teammate emails are also additive file grants. Those grants
+ * intentionally outlive channel departure; account offboarding is the
+ * practical revocation lever, with an explicit admin revocation path still
+ * required for exceptional cases. Email reuse can therefore re-grant old
+ * files to a newly created account using the same address.
  */
 export async function* emitSlackSyncedItems(options: {
   db: Kysely<DB>;
@@ -419,8 +424,10 @@ export async function* emitSlackSyncedItems(options: {
   emissionRefreshDays?: number;
   now?: Date;
   onSkippedNoScope?: () => void;
+  grandfatheringEnabled?: boolean;
 }): AsyncGenerator<SyncedItem> {
   const refreshDays = options.emissionRefreshDays ?? SLACK_EMISSION_REFRESH_DAYS;
+  const grandfatheringEnabled = options.grandfatheringEnabled ?? true;
   const now = options.now ?? new Date();
   const refreshedAfter = new Date(now.getTime() - refreshDays * 24 * 60 * 60_000).toISOString();
   const kept = await listSliceContexts(options.db, "kept", null, refreshedAfter);
@@ -456,7 +463,9 @@ export async function* emitSlackSyncedItems(options: {
 
     const teammateEmails = teammateEmailsFromRoster(roster);
     if (teammateEmails.length === 0) {
-      await archiveLinkedSliceFileIfPresent(options.db, context);
+      if (!grandfatheringEnabled) {
+        await archiveLinkedSliceFileIfPresent(options.db, context);
+      }
       options.onSkippedNoScope?.();
       options.logger.warn(
         { sliceId: context.slice.id, channelId: context.channelId },
@@ -491,6 +500,7 @@ export async function* emitSlackSyncedItems(options: {
         label: `#${context.channelName}`,
         memberEmails: teammateEmails,
       },
+      accessEmails: grandfatheringEnabled ? teammateEmails : [],
     };
   }
 }
@@ -502,17 +512,20 @@ export async function* emitSlackSyncedItems(options: {
  * would keep serving its indexed slices forever.
  */
 /**
- * Disconnect handling: with no bot token the sync cannot verify channel
- * membership, so previously emitted slices must not stay readable under the
- * last-known ACLs. Archival is reversible — kept slices keep their salience
- * verdicts and re-emit on reconnect because archiving clears their
- * indexed_file_id link.
+ * Disconnect handling: with access grandfathering enabled, previously emitted
+ * slices remain readable because their emission-time grants are durable. The
+ * practical revocation lever is account offboarding; an administrator can
+ * still explicitly revoke files when required. Turning grandfathering off
+ * restores archival because a disconnected bot cannot verify membership.
  */
 export async function archiveAllSlackChannelFiles(options: {
   db: Kysely<DB>;
   logger: Logger;
   connectorConfigId: string;
+  grandfatheringEnabled?: boolean;
 }): Promise<number> {
+  if (options.grandfatheringEnabled ?? true) return 0;
+
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
   if (scopes.length === 0) return 0;
@@ -565,6 +578,7 @@ export async function reconcileSlackChannelAcls(options: {
   logger: Logger;
   facade: SlackIndexingFacade;
   connectorConfigId: string;
+  grandfatheringEnabled?: boolean;
 }): Promise<{ scopesRefreshed: number; scopesArchived: number; filesArchived: number }> {
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
@@ -574,16 +588,19 @@ export async function reconcileSlackChannelAcls(options: {
   let scopesRefreshed = 0;
   let scopesArchived = 0;
   let filesArchived = 0;
+  const grandfatheringEnabled = options.grandfatheringEnabled ?? true;
 
   for (const scope of scopes) {
     const channelName = visible.get(scope.providerScopeId);
     if (channelName === undefined) {
-      filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
-      scopesArchived += 1;
-      options.logger.info(
-        { channelId: scope.providerScopeId },
-        "Archived Slack slices for channel no longer visible to the bot",
-      );
+      if (!grandfatheringEnabled) {
+        filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
+        scopesArchived += 1;
+        options.logger.info(
+          { channelId: scope.providerScopeId },
+          "Archived Slack slices for channel no longer visible to the bot",
+        );
+      }
       continue;
     }
 
@@ -603,8 +620,10 @@ export async function reconcileSlackChannelAcls(options: {
 
     const teammateEmails = teammateEmailsFromRoster(roster);
     if (teammateEmails.length === 0) {
-      filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
-      scopesArchived += 1;
+      if (!grandfatheringEnabled) {
+        filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
+        scopesArchived += 1;
+      }
       continue;
     }
 

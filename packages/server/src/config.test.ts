@@ -9,6 +9,7 @@ describe("configSchema", () => {
 
     expect(result.SLACK_ENTITY_SYNC).toBe(false);
     expect(result.SLACK_ENTITY_SYNC_PUBLIC_CHANNELS).toBe(true);
+    expect(result.SLACK_ACCESS_GRANDFATHERING).toBe(true);
     expect(result.SLACK_ENTITY_SYNC_USER_INFO_CAP).toBe(1000);
   });
 

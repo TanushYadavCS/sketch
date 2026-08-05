@@ -872,7 +872,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
         .executeTakeFirst();
       let filesArchived = 0;
       if (slackConnector) {
-        filesArchived = await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: slackConnector.id });
+        filesArchived = await archiveAllSlackChannelFiles({
+          db,
+          logger,
+          connectorConfigId: slackConnector.id,
+          grandfatheringEnabled: config.SLACK_ACCESS_GRANDFATHERING,
+        });
       }
       let syncRowsFenced = 0;
       if (previousTeamId) {
@@ -1027,7 +1032,12 @@ export async function createServer(config: Config, options?: CreateServerOptions
           .orderBy("id", "asc")
           .executeTakeFirst();
         if (slackConnector) {
-          await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: slackConnector.id });
+          await archiveAllSlackChannelFiles({
+            db,
+            logger,
+            connectorConfigId: slackConnector.id,
+            grandfatheringEnabled: config.SLACK_ACCESS_GRANDFATHERING,
+          });
         }
       } catch (err) {
         logger.warn({ err }, "Failed to archive Slack files on disconnect; next sync will archive");

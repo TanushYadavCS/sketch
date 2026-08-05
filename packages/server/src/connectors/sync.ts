@@ -143,6 +143,7 @@ export async function runConnectorSync(
       | "WHATSAPP_SLICE_GAP_MINUTES"
       | "WHATSAPP_SLICE_MAX_AGE_MINUTES"
       | "WHATSAPP_SLICE_MAX_MESSAGES"
+      | "SLACK_ACCESS_GRANDFATHERING"
       | "WHATSAPP_SALIENCE_BATCH_LIMIT"
       | "WHATSAPP_EMISSION_REFRESH_DAYS"
       | "WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES"
@@ -322,6 +323,7 @@ export async function runConnectorSync(
       resolveNameToEmail,
       salienceGenerator,
       slackIndexing: options.slackIndexingFacade ?? null,
+      appConfig: { SLACK_ACCESS_GRANDFATHERING: appConfig?.SLACK_ACCESS_GRANDFATHERING },
       onEntitySeed: async (seed) => {
         await factRepo.upsertFact({
           ...factContext,
@@ -627,6 +629,7 @@ export interface SyncSchedulerDeps {
       | "MICROSOFT_TENANT"
       | "ENCRYPTION_KEY"
       | "OPENROUTER_API_KEY"
+      | "SLACK_ACCESS_GRANDFATHERING"
     >
   >;
 }
