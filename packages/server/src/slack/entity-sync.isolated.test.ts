@@ -111,6 +111,45 @@ describe("Slack entity sync", () => {
     expect(facade.listChannelsPage).toHaveBeenCalledWith(undefined);
   });
 
+  it("loads roster proof once per durable sync run", async () => {
+    await createDb();
+    const rosterQueries: string[] = [];
+    const instrumentedDb = getDb().withPlugin({
+      transformQuery({ node }) {
+        const serialized = JSON.stringify(node);
+        if (serialized.includes('"name":"users"') && serialized.includes('"name":"slack_user_id"')) {
+          rosterQueries.push(serialized);
+        }
+        return node;
+      },
+      async transformResult(args) {
+        return args.result;
+      },
+    });
+    const facade: SlackEntitySyncFacade = {
+      listUsersPage: vi.fn(async (cursor?: string) =>
+        cursor
+          ? { items: [], nextCursor: null }
+          : { items: [user({ slackUserId: "U1" }), user({ slackUserId: "U2" })], nextCursor: null },
+      ),
+      listChannelsPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listChannelMembersPage: vi.fn(),
+      getUserInfo: vi.fn(),
+    };
+    const sync = createSlackEntitySync({
+      db: instrumentedDb,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      enabled: true,
+      publicChannelsEnabled: true,
+      getActiveConnection: async () => ({ botToken: "xoxb-t1", teamId: "T1" }),
+      createFacade: () => facade,
+    });
+
+    await sync.enqueueBackfill({ botToken: "xoxb-t1", teamId: "T1" });
+
+    expect(rosterQueries).toHaveLength(2);
+  });
+
   it("excludes bots and records deleted humans as inactive without tombstoning by absence", async () => {
     await createDb();
     const facade: SlackEntitySyncFacade = {

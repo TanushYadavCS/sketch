@@ -244,6 +244,84 @@ async function runResetAndWait(
   return { status: res.status, jobId: json.job.id, phase };
 }
 
+describe("person subtype API", () => {
+  let db: Kysely<DB>;
+  let app: ReturnType<typeof createApp>;
+  let adminCookie: string;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seedAdmin(db);
+    app = createApp(db, config, { logger });
+    adminCookie = await login(app);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("defaults a manually created person to external", async () => {
+    const response = await app.request("/api/entities", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Manual Person", sourceType: "person" }),
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { entity: { subtype: string | null } };
+    expect(body.entity.subtype).toBe("external");
+    await expect(
+      db.selectFrom("entities").select("subtype").where("name", "=", "Manual Person").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ subtype: "external" });
+  });
+
+  it("validates the binary person subtype and honors explicit admin overrides", async () => {
+    const invalid = await app.request("/api/entities", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Invalid Person", sourceType: "person", subtype: "unknown" }),
+    });
+    expect(invalid.status).toBe(400);
+
+    const create = await app.request("/api/entities", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Override Person", sourceType: "person", subtype: "internal" }),
+    });
+    expect(create.status).toBe(200);
+    const created = (await create.json()) as { entity: { id: string; subtype: string } };
+    expect(created.entity.subtype).toBe("internal");
+
+    const demote = await app.request("/api/entities", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Override Person", sourceType: "person", subtype: "external" }),
+    });
+    expect(demote.status).toBe(200);
+    await expect(
+      db
+        .selectFrom("entities")
+        .select(["subtype", "provenance_tier"])
+        .where("id", "=", created.entity.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ subtype: "external", provenance_tier: "declared" });
+
+    const promote = await app.request("/api/entities", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Override Person", sourceType: "person", subtype: "internal" }),
+    });
+    expect(promote.status).toBe(200);
+    await expect(
+      db
+        .selectFrom("entities")
+        .select(["subtype", "provenance_tier"])
+        .where("id", "=", created.entity.id)
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ subtype: "internal", provenance_tier: "declared" });
+  });
+});
+
 describe("POST /api/entities/resets", () => {
   let db: Kysely<DB>;
   let app: ReturnType<typeof createApp>;

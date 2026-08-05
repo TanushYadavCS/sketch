@@ -463,6 +463,32 @@ describe("upsertSlackPersonEntity", () => {
     ).resolves.toMatchObject({ subtype: "external" });
   });
 
+  it("lets a positive provider signal override an organization-domain email", async () => {
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-DOMAIN-GUEST",
+        email: "guest@example.com",
+        isGuest: true,
+      }),
+    );
+
+    const state = await db
+      .selectFrom("slack_user_sync_state")
+      .select(["classification", "classification_source"])
+      .where("slack_user_id", "=", "U-DOMAIN-GUEST")
+      .executeTakeFirstOrThrow();
+    expect(state).toEqual({ classification: "external", classification_source: "provider_flag" });
+    await expect(
+      db
+        .selectFrom("entities")
+        .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")
+        .select("entities.subtype")
+        .where("entity_source_refs.source_id", "=", "T123:U-DOMAIN-GUEST")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ subtype: "external" });
+  });
+
   it("does not recreate an identity whose source ref points to a deleted entity", async () => {
     await db
       .insertInto("entities")
@@ -565,5 +591,66 @@ describe("upsertSlackPersonEntity", () => {
       .executeTakeFirstOrThrow();
     expect(state.classification).toBe("internal");
     expect(state.classification_source).toBe("organization_domain");
+  });
+
+  it("preserves an internal linked entity when legacy sync classification is absent", async () => {
+    await db
+      .insertInto("entities")
+      .values({
+        id: "legacy-internal-person",
+        name: "Legacy Internal Person",
+        source_type: "person",
+        subtype: "internal",
+        aliases: null,
+        metadata: JSON.stringify({ email: "legacy@example.com" }),
+        source_ref_id: null,
+        status: "confirmed",
+        provenance_tier: "structural",
+        hotness: 0,
+        created_at: "2026-08-05T00:00:00.000Z",
+        updated_at: "2026-08-05T00:00:00.000Z",
+      })
+      .execute();
+
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-LEGACY-INTERNAL",
+        name: "Legacy Internal Person",
+        email: "legacy@example.com",
+      }),
+    );
+    await db
+      .updateTable("slack_user_sync_state")
+      .set({ classification: null, classification_source: null })
+      .where("slack_user_id", "=", "U-LEGACY-INTERNAL")
+      .execute();
+
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-LEGACY-INTERNAL",
+        name: "Legacy Internal Person",
+        email: null,
+        providerUpdatedAt: "00000000001785927600",
+        fetchedAt: "2026-08-05T11:02:00.000Z",
+      }),
+    );
+
+    await expect(
+      db
+        .selectFrom("entities")
+        .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")
+        .select("entities.subtype")
+        .where("entity_source_refs.source_id", "=", "T123:U-LEGACY-INTERNAL")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ subtype: "internal" });
+    await expect(
+      db
+        .selectFrom("slack_user_sync_state")
+        .select(["classification", "classification_source"])
+        .where("slack_user_id", "=", "U-LEGACY-INTERNAL")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ classification: "internal", classification_source: null });
   });
 });

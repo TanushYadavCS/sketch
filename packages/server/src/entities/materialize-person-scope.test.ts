@@ -149,6 +149,46 @@ describe("materializePersonSeed company-scoped dedup", () => {
     await expect(people(db)).resolves.toMatchObject([{ name: "No Email Attendee", subtype: "external" }]);
   });
 
+  it("promotes an existing external or legacy person for an internal seed", async () => {
+    for (const [suffix, subtype] of [
+      ["external", "external"],
+      ["legacy", null],
+    ] as const) {
+      await db
+        .insertInto("entities")
+        .values({
+          id: `existing-${suffix}`,
+          name: `Existing ${suffix}`,
+          source_type: "person",
+          subtype,
+          aliases: JSON.stringify([`${suffix}@example.com`]),
+          metadata: JSON.stringify({ email: `${suffix}@example.com` }),
+          source_ref_id: null,
+          status: "confirmed",
+          provenance_tier: "inferred",
+          hotness: 0,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .execute();
+      await upsertPersonSeed(db, {
+        name: `Existing ${suffix}`,
+        email: `${suffix}@example.com`,
+        sourceId: `internal-${suffix}`,
+        subtype: "internal",
+      });
+    }
+
+    await materializeUnmaterializedFacts(db, createTestLogger());
+
+    await expect(people(db)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Existing external", subtype: "internal" }),
+        expect.objectContaining({ name: "Existing legacy", subtype: "internal" }),
+      ]),
+    );
+  });
+
   it("links same-name seeds at the same mapped company even when the incoming email is new", async () => {
     await createCompanyWithDomain(db, "company-acme", "Acme", "acme.com");
     await upsertPersonSeed(db, { name: "Ashish Banka", email: "ashish@acme.com", sourceId: "person-1" });

@@ -325,16 +325,17 @@ async function persistEntity(
 ): Promise<{ entity: IndexEntityRow; created: boolean }> {
   if (input.entityType === "person") {
     if (matched) {
+      const reconciled = await deps.entityRepo.reconcilePersonSubtype(matched.id, input.subtype, input.provenanceTier);
       await deps.entityRepo.upsertSourceRef({
-        entityId: matched.id,
+        entityId: reconciled.id,
         source: input.source,
         sourceId: input.sourceId,
       });
       if (input.email) {
-        await deps.entityRepo.attachEmailIfAbsent(matched.id, input.email);
-        await deps.entityRepo.appendAlias(matched.id, input.email);
+        await deps.entityRepo.attachEmailIfAbsent(reconciled.id, input.email);
+        await deps.entityRepo.appendAlias(reconciled.id, input.email);
       }
-      const entity = (await deps.entityRepo.getEntity(matched.id)) ?? matched;
+      const entity = (await deps.entityRepo.getEntity(reconciled.id)) ?? reconciled;
       return { entity, created: false };
     }
     const personData: UpsertPersonEntityData = {
@@ -653,15 +654,19 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
   if (input.source && input.sourceId) {
     const found = await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId);
     if (found && isEligibleMatchTarget(input, found)) {
+      const reconciled =
+        input.entityType === "person"
+          ? await deps.entityRepo.reconcilePersonSubtype(found.id, input.subtype, input.provenanceTier)
+          : found;
       await deps.entityRepo.upsertSourceRef({
-        entityId: found.id,
+        entityId: reconciled.id,
         source: input.source,
         sourceId: input.sourceId,
       });
-      if (found.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
-        await deps.entityRepo.appendAlias(found.id, input.name);
+      if (reconciled.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
+        await deps.entityRepo.appendAlias(reconciled.id, input.name);
       }
-      const entity = (await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId)) ?? found;
+      const entity = (await deps.entityRepo.getEntityBySourceRef(input.source, input.sourceId)) ?? reconciled;
       await deps.onEntityResolved?.(entity);
       return { kind: "linked", entity };
     }
@@ -678,10 +683,11 @@ export async function proposeEntity(deps: ProposeDeps, input: ProposeInput): Pro
         if (!existingSourceRef || existingSourceRef.id === c.id) {
           await deps.entityRepo.upsertSourceRef({ entityId: c.id, source: input.source, sourceId: input.sourceId });
         }
+        const reconciled = await deps.entityRepo.reconcilePersonSubtype(c.id, input.subtype, input.provenanceTier);
         if (c.name.trim().toLowerCase() !== input.name.trim().toLowerCase()) {
-          await deps.entityRepo.appendAlias(c.id, input.name);
+          await deps.entityRepo.appendAlias(reconciled.id, input.name);
         }
-        const entity = (await deps.entityRepo.getEntity(c.id)) ?? c;
+        const entity = (await deps.entityRepo.getEntity(reconciled.id)) ?? reconciled;
         await deps.onEntityResolved?.(entity);
         return { kind: "linked", entity };
       }

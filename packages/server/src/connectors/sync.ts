@@ -74,7 +74,7 @@ export async function seedTeamDirectoryEntities(db: Kysely<DB>, logger: Logger):
   try {
     const entityRepo = createEntityRepository(db);
     const domainsRepo = createEntityDomainsRepository(db);
-    const users = await db.selectFrom("users").selectAll().execute();
+    const users = await db.selectFrom("users").selectAll().where("type", "!=", "external").execute();
     for (const user of users) {
       const entity = await entityRepo.upsertPersonEntity({
         name: user.name,

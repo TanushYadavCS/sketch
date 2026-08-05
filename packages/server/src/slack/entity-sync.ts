@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, sql } from "kysely";
-import { type SlackUserProfile, upsertSlackPersonEntity } from "../db/repositories/slack-entity-sync";
+import {
+  type SlackRosterProof,
+  type SlackUserProfile,
+  loadSlackRosterProof,
+  upsertSlackPersonEntity,
+} from "../db/repositories/slack-entity-sync";
 import type { DB, SlackSyncRunsTable, SlackUserSyncStateTable } from "../db/schema";
 import type { Logger } from "../logger";
 import type { SlackIndexingChannel, SlackIndexingPage, SlackIndexingUser } from "./indexing-facade";
@@ -585,6 +590,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     channelId: string,
     facade: SlackEntitySyncFacade,
   ): Promise<void> {
+    const teamRoster = await loadSlackRosterProof(deps.db);
     let cursor: string | undefined;
     let restarted = false;
     const infoFetchedIds = new Set<string>();
@@ -616,7 +622,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
       );
       await assertActiveConnection(connection);
       for (const profile of resolved.profiles) {
-        await upsertSlackPersonEntity(deps.db, profile, { logger: deps.logger });
+        await upsertSlackPersonEntity(deps.db, profile, { logger: deps.logger, teamRoster });
       }
       await deps.db.transaction().execute(async (trx) => {
         for (const pending of resolved.pending) {
@@ -761,7 +767,11 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     }
   }
 
-  async function upsertProfileWithCounters(profile: SlackUserProfile, counters?: SyncCounters): Promise<void> {
+  async function upsertProfileWithCounters(
+    profile: SlackUserProfile,
+    counters?: SyncCounters,
+    teamRoster?: SlackRosterProof,
+  ): Promise<void> {
     const before = counters
       ? await deps.db
           .selectFrom("slack_user_sync_state")
@@ -770,7 +780,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
           .where("slack_user_id", "=", profile.slackUserId)
           .executeTakeFirst()
       : undefined;
-    const result = await upsertSlackPersonEntity(deps.db, profile, { logger: deps.logger });
+    const result = await upsertSlackPersonEntity(deps.db, profile, { logger: deps.logger, teamRoster });
     if (!counters) return;
     counters.scanned += 1;
     if (!result.applied) {
@@ -789,6 +799,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     connection: SlackEntitySyncConnection,
     facade: SlackEntitySyncFacade,
     counters: SyncCounters,
+    teamRoster: SlackRosterProof,
   ) {
     let cursor = run.users_cursor ?? undefined;
     let restarted = false;
@@ -825,7 +836,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
         if (user.isBot) continue;
         const profile = profileFromUser(user, connection.teamId, fetchedAt);
         if (!profile) continue;
-        await upsertProfileWithCounters(profile, counters);
+        await upsertProfileWithCounters(profile, counters, teamRoster);
       }
       await updateRun(run, patch);
       cursor = nextCursor ?? undefined;
@@ -842,6 +853,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     infoLookups: { count: number },
     rosterUserIds: Set<string> | undefined,
     counters: SyncCounters,
+    teamRoster: SlackRosterProof,
   ): Promise<boolean> {
     if (run.current_channel_id !== channel.id) {
       await updateRun(run, { current_channel_id: channel.id, members_cursor: null, heartbeat_at: now() });
@@ -883,7 +895,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
       await assertActiveTeam(run);
       const nextCursor = page.nextCursor;
       for (const profile of resolved.profiles) {
-        await upsertProfileWithCounters(profile, counters);
+        await upsertProfileWithCounters(profile, counters, teamRoster);
       }
       const patch = await deps.db.transaction().execute(async (trx) => {
         for (const pending of resolved.pending) {
@@ -909,6 +921,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     connection: SlackEntitySyncConnection,
     facade: SlackEntitySyncFacade,
     counters: SyncCounters,
+    teamRoster: SlackRosterProof,
   ): Promise<{ rosterUserIds: Set<string>; crawledChannelIds: Set<string>; enabledChannelIds: Set<string> }> {
     let cursor = run.conversations_cursor ?? undefined;
     let restarted = false;
@@ -964,7 +977,19 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
           continue;
         }
         enabledChannelIds.add(channel.id);
-        if (await syncChannel(run, connection, facade, channel, infoFetchedIds, infoLookups, rosterUserIds, counters)) {
+        if (
+          await syncChannel(
+            run,
+            connection,
+            facade,
+            channel,
+            infoFetchedIds,
+            infoLookups,
+            rosterUserIds,
+            counters,
+            teamRoster,
+          )
+        ) {
           crawledChannelIds.add(channel.id);
         }
         resumeChannel = null;
@@ -1122,14 +1147,15 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     const heartbeat = setInterval(() => void touchHeartbeat(run), heartbeatMs);
     heartbeat.unref?.();
     const counters = emptySyncCounters();
+    const teamRoster = await loadSlackRosterProof(deps.db);
     const startedStage = run.stage;
     let rosterUserIds = new Set<string>();
     let crawledChannelIds = new Set<string>();
     let enabledChannelIds = new Set<string>();
     try {
-      if (run.stage === INITIAL_STAGE) await runUsersStage(run, connection, facade, counters);
+      if (run.stage === INITIAL_STAGE) await runUsersStage(run, connection, facade, counters, teamRoster);
       if (run.stage === CONVERSATIONS_STAGE) {
-        const result = await runConversationsStage(run, connection, facade, counters);
+        const result = await runConversationsStage(run, connection, facade, counters, teamRoster);
         rosterUserIds = result.rosterUserIds;
         crawledChannelIds = result.crawledChannelIds;
         enabledChannelIds = result.enabledChannelIds;

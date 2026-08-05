@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { type ExpressionBuilder, type Kysely, type Selectable, type SqlBool, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import type { DB, EntitiesTable, SlackUserSyncStateTable } from "../schema";
-import { createEntityRepository, normalizeContactPointValue } from "./entities";
+import { createEntityRepository, isHumanSubtypeOverride, normalizeContactPointValue } from "./entities";
 import { createEntityReviewRepo } from "./entity-review";
 
 export interface SlackUserProfile {
@@ -30,6 +30,12 @@ export interface SlackEntitySyncLogger {
 
 export interface SlackEntitySyncOptions {
   logger?: SlackEntitySyncLogger;
+  teamRoster?: SlackRosterProof;
+}
+
+export interface SlackRosterProof {
+  slackUserIds: ReadonlySet<string>;
+  emails: ReadonlySet<string>;
 }
 
 export type SlackEntitySyncResult = {
@@ -92,13 +98,12 @@ function classifyProfile(
 ): SlackClassification {
   const email = normalizeEmail(profile.email);
   const emailDomain = email?.split("@").pop() ?? null;
-  if (emailDomain && organizationDomains.has(emailDomain)) {
-    return { classification: "internal", source: "organization_domain" };
-  }
-
   const foreignTeam = Boolean(profile.profileTeamId && profile.profileTeamId !== profile.teamId);
   if (profile.isGuest || profile.isStranger || foreignTeam || profile.isRestricted || profile.isUltraRestricted) {
     return { classification: "external", source: "provider_flag" };
+  }
+  if (emailDomain && organizationDomains.has(emailDomain)) {
+    return { classification: "internal", source: "organization_domain" };
   }
   if (emailDomain && organizationDomains.size > 0) {
     return { classification: "external", source: "email_domain" };
@@ -231,9 +236,9 @@ async function updateEntityFromSlackProfile(
   const metadata = parseMetadata(entity.metadata);
   if (slackOwned && email) metadata.email = email;
   const updates: Record<string, unknown> = {
-    subtype: classification,
     updated_at: now,
   };
+  if (!isHumanSubtypeOverride(entity.provenance_tier)) updates.subtype = classification;
   if (slackOwned) updates.name = profileName(profile) ?? entity.name;
   if (slackOwned && email) updates.metadata = JSON.stringify(metadata);
 
@@ -242,6 +247,18 @@ async function updateEntityFromSlackProfile(
     await updateSlackEmailContactPoint(trx, entity.id, email, connectorConfigId, slackOwned, now);
   }
   return trx.selectFrom("entities").selectAll().where("id", "=", entity.id).executeTakeFirstOrThrow();
+}
+
+export async function loadSlackRosterProof(db: Kysely<DB>): Promise<SlackRosterProof> {
+  const users = await db
+    .selectFrom("users")
+    .select(["slack_user_id", "email"])
+    .where("type", "!=", "external")
+    .execute();
+  return {
+    slackUserIds: new Set(users.map((user) => user.slack_user_id).filter((id): id is string => Boolean(id))),
+    emails: new Set(users.map((user) => normalizeEmail(user.email)).filter((email): email is string => Boolean(email))),
+  };
 }
 
 async function findSlackConnectorAdmin(trx: Kysely<DB>): Promise<{ id: string; createdBy: string } | null> {
@@ -298,9 +315,9 @@ async function runUpsertBody(
   const sourceId = `${profile.teamId}:${profile.slackUserId}`;
   const email = normalizeEmail(profile.email);
   const domains = await trx.selectFrom("organization_domains").select("domain").execute();
-  const teamRosterMatch = Boolean(
-    await trx.selectFrom("users").select("id").where("slack_user_id", "=", profile.slackUserId).executeTakeFirst(),
-  );
+  const teamRoster = options.teamRoster ?? (await loadSlackRosterProof(trx));
+  const teamRosterMatch =
+    teamRoster.slackUserIds.has(profile.slackUserId) || Boolean(email && teamRoster.emails.has(email));
   const baseClassification = classifyProfile(
     profile,
     new Set(domains.map((row) => row.domain.toLowerCase())),
@@ -344,10 +361,15 @@ async function runUpsertBody(
     .where("team_id", "=", profile.teamId)
     .where("slack_user_id", "=", profile.slackUserId)
     .executeTakeFirstOrThrow();
+  const existingStateEntity = beforeState.entity_id
+    ? (await resolveSlackSourceRefEntity(trx, beforeState.entity_id)).entity
+    : null;
   const classification: SlackClassification =
-    beforeState.classification === "internal" &&
     baseClassification.classification === "external" &&
-    baseClassification.source === "default_no_evidence"
+    baseClassification.source === "default_no_evidence" &&
+    (beforeState.classification === "internal" ||
+      ((beforeState.classification === null || beforeState.classification_source === "default_no_evidence") &&
+        existingStateEntity?.subtype === "internal"))
       ? { classification: "internal", source: beforeState.classification_source }
       : baseClassification;
   const applied = tupleIsAtLeast(
