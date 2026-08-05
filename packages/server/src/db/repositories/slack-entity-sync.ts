@@ -80,10 +80,16 @@ function versionPredicate(
   ]);
 }
 
+type SlackClassification = {
+  classification: "internal" | "external";
+  source: string | null;
+};
+
 function classifyProfile(
   profile: SlackUserProfile,
   organizationDomains: Set<string>,
-): { classification: "internal" | "external" | null; source: string } {
+  teamRosterMatch: boolean,
+): SlackClassification {
   const email = normalizeEmail(profile.email);
   const emailDomain = email?.split("@").pop() ?? null;
   if (emailDomain && organizationDomains.has(emailDomain)) {
@@ -97,7 +103,10 @@ function classifyProfile(
   if (emailDomain && organizationDomains.size > 0) {
     return { classification: "external", source: "email_domain" };
   }
-  return { classification: null, source: "unknown" };
+  if (teamRosterMatch) {
+    return { classification: "internal", source: "team_roster" };
+  }
+  return { classification: "external", source: "default_no_evidence" };
 }
 
 function profileName(profile: SlackUserProfile): string | null {
@@ -213,7 +222,7 @@ async function updateEntityFromSlackProfile(
   trx: Kysely<DB>,
   entity: Selectable<EntitiesTable>,
   profile: SlackUserProfile,
-  classification: "internal" | "external" | null,
+  classification: "internal" | "external",
   email: string | null,
   connectorConfigId: string | null,
   slackOwned: boolean,
@@ -222,7 +231,7 @@ async function updateEntityFromSlackProfile(
   const metadata = parseMetadata(entity.metadata);
   if (slackOwned && email) metadata.email = email;
   const updates: Record<string, unknown> = {
-    subtype: classification ?? entity.subtype,
+    subtype: classification,
     updated_at: now,
   };
   if (slackOwned) updates.name = profileName(profile) ?? entity.name;
@@ -289,7 +298,14 @@ async function runUpsertBody(
   const sourceId = `${profile.teamId}:${profile.slackUserId}`;
   const email = normalizeEmail(profile.email);
   const domains = await trx.selectFrom("organization_domains").select("domain").execute();
-  const baseClassification = classifyProfile(profile, new Set(domains.map((row) => row.domain.toLowerCase())));
+  const teamRosterMatch = Boolean(
+    await trx.selectFrom("users").select("id").where("slack_user_id", "=", profile.slackUserId).executeTakeFirst(),
+  );
+  const baseClassification = classifyProfile(
+    profile,
+    new Set(domains.map((row) => row.domain.toLowerCase())),
+    teamRosterMatch,
+  );
 
   await trx
     .insertInto("slack_user_sync_state")
@@ -328,18 +344,12 @@ async function runUpsertBody(
     .where("team_id", "=", profile.teamId)
     .where("slack_user_id", "=", profile.slackUserId)
     .executeTakeFirstOrThrow();
-  const existingStateEntity = beforeState.entity_id
-    ? await trx.selectFrom("entities").selectAll().where("id", "=", beforeState.entity_id).executeTakeFirst()
-    : null;
-  const preserveInternalClassification =
-    !email &&
+  const classification: SlackClassification =
+    beforeState.classification === "internal" &&
     baseClassification.classification === "external" &&
-    (beforeState.classification === "internal" ||
-      beforeState.classification_source === "organization_domain" ||
-      existingStateEntity?.subtype === "internal");
-  const classification = preserveInternalClassification
-    ? { classification: "internal" as const, source: "stale" }
-    : baseClassification;
+    baseClassification.source === "default_no_evidence"
+      ? { classification: "internal", source: beforeState.classification_source }
+      : baseClassification;
   const applied = tupleIsAtLeast(
     { providerUpdatedAt: profile.providerUpdatedAt, fetchedAt: profile.fetchedAt },
     beforeState,

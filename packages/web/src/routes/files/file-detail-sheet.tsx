@@ -219,13 +219,7 @@ function FileDetailContent({
               <Badge key={entity.id} variant="outline" className="gap-1 text-[10px]">
                 {entity.name}
                 <span className="text-muted-foreground">
-                  {entity.sourceType === "person"
-                    ? entity.subtype === "internal"
-                      ? "(int)"
-                      : entity.subtype === "external"
-                        ? "(ext)"
-                        : ""
-                    : ""}
+                  {entity.sourceType === "person" ? (entity.subtype === "internal" ? "(int)" : "(ext)") : ""}
                 </span>
               </Badge>
             ))}

@@ -399,14 +399,21 @@ describe("EntityExplorer rebuild dialog", () => {
     );
   }
 
-  it("shows unknown person subtypes distinctly", async () => {
+  it("renders nullable person subtypes as External with exactly two states", async () => {
     server.use(
       http.get("/api/setup/status", () => statusResponse()),
-      http.get("/api/entities", () => entityListResponse([{ id: "person-unknown", name: "Mystery Person" }])),
+      http.get("/api/entities", () =>
+        entityListResponse([
+          { id: "person-internal", name: "Internal Person", subtype: "internal" },
+          { id: "person-legacy", name: "Legacy Person" },
+        ]),
+      ),
     );
     renderWithProviders(<EntityExplorer />);
 
-    expect(await screen.findByText("Unknown")).toBeInTheDocument();
+    expect(await screen.findByText("Internal")).toBeInTheDocument();
+    expect(await screen.findByText("External")).toBeInTheDocument();
+    expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
   });
 
   it("admin menu shows a single 'Rebuild entities…' item (no separate reset/recreate items)", async () => {

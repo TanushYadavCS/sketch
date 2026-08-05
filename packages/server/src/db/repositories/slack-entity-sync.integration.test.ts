@@ -158,6 +158,96 @@ describe("upsertSlackPersonEntity", () => {
     expect(rows.find((row) => row.source_id === "T123:U-NAME-1")?.occurrence_count).toBe(2);
   });
 
+  it("classifies an unflagged profile without email as external by default", async () => {
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-DEFAULT-EXTERNAL",
+        name: "Default External Person",
+        realName: "Default External Person",
+        email: null,
+      }),
+    );
+
+    const state = await db
+      .selectFrom("slack_user_sync_state")
+      .select(["classification", "classification_source"])
+      .where("slack_user_id", "=", "U-DEFAULT-EXTERNAL")
+      .executeTakeFirstOrThrow();
+    expect(state).toEqual({ classification: "external", classification_source: "default_no_evidence" });
+
+    const entity = await db
+      .selectFrom("entities")
+      .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")
+      .select("entities.subtype")
+      .where("entity_source_refs.source_id", "=", "T123:U-DEFAULT-EXTERNAL")
+      .executeTakeFirstOrThrow();
+    expect(entity.subtype).toBe("external");
+  });
+
+  it("uses an existing Sketch roster user as internal evidence", async () => {
+    await db
+      .insertInto("users")
+      .values({ id: "roster-user", name: "Roster User", slack_user_id: "U-TEAM-ROSTER", auth_role: "member" })
+      .execute();
+
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-TEAM-ROSTER",
+        name: "Roster User",
+        realName: "Roster User",
+        email: null,
+      }),
+    );
+
+    await expect(
+      db
+        .selectFrom("slack_user_sync_state")
+        .select(["classification", "classification_source"])
+        .where("slack_user_id", "=", "U-TEAM-ROSTER")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ classification: "internal", classification_source: "team_roster" });
+  });
+
+  it("promotes default external to internal when an organization email arrives", async () => {
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-PROMOTE",
+        name: "Promoted Person",
+        realName: "Promoted Person",
+        email: null,
+      }),
+    );
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-PROMOTE",
+        name: "Promoted Person",
+        realName: "Promoted Person",
+        email: "promoted@example.com",
+        providerUpdatedAt: "00000000001785927600",
+        fetchedAt: "2026-08-05T11:01:00.000Z",
+      }),
+    );
+
+    const state = await db
+      .selectFrom("slack_user_sync_state")
+      .select(["classification", "classification_source"])
+      .where("slack_user_id", "=", "U-PROMOTE")
+      .executeTakeFirstOrThrow();
+    expect(state).toEqual({ classification: "internal", classification_source: "organization_domain" });
+    await expect(
+      db
+        .selectFrom("entities")
+        .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")
+        .select("entities.subtype")
+        .where("entity_source_refs.source_id", "=", "T123:U-PROMOTE")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ subtype: "internal" });
+  });
+
   it("does not mint a suppressed person name", async () => {
     await db
       .insertInto("entity_creation_suppressions")
@@ -335,7 +425,7 @@ describe("upsertSlackPersonEntity", () => {
     ).resolves.toMatchObject({ entity_created_by_sync: 0 });
   });
 
-  it("preserves internal classification when a later profile has no email and external flags", async () => {
+  it("demotes internal classification when a positive guest signal arrives", async () => {
     await upsertSlackPersonEntity(
       db,
       profile({
@@ -361,8 +451,16 @@ describe("upsertSlackPersonEntity", () => {
       .select(["classification", "classification_source"])
       .where("slack_user_id", "=", "U-STALE-CLASSIFICATION")
       .executeTakeFirstOrThrow();
-    expect(state.classification).toBe("internal");
-    expect(state.classification_source).toBe("stale");
+    expect(state.classification).toBe("external");
+    expect(state.classification_source).toBe("provider_flag");
+    await expect(
+      db
+        .selectFrom("entities")
+        .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")
+        .select("entities.subtype")
+        .where("entity_source_refs.source_id", "=", "T123:U-STALE-CLASSIFICATION")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ subtype: "external" });
   });
 
   it("does not recreate an identity whose source ref points to a deleted entity", async () => {
@@ -414,7 +512,7 @@ describe("upsertSlackPersonEntity", () => {
     ).resolves.toMatchObject({ entity_id: null });
   });
 
-  it("preserves an existing subtype when a linked Slack profile becomes unclassified", async () => {
+  it("preserves internal classification and source when email evidence disappears", async () => {
     await db
       .insertInto("entities")
       .values({
@@ -465,7 +563,7 @@ describe("upsertSlackPersonEntity", () => {
       .select(["classification", "classification_source"])
       .where("slack_user_id", "=", "U-SUBTYPE")
       .executeTakeFirstOrThrow();
-    expect(state.classification).toBeNull();
-    expect(state.classification_source).toBe("unknown");
+    expect(state.classification).toBe("internal");
+    expect(state.classification_source).toBe("organization_domain");
   });
 });

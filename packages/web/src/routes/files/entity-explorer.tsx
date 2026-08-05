@@ -74,8 +74,7 @@ function sourceFromType(sourceType: string): string | null {
 function entityContext(entity: EntityListItem): string | null {
   if (entity.sourceType === "person") {
     if (entity.subtype === "internal") return "Internal";
-    if (entity.subtype === "external") return "External";
-    return "Unknown";
+    return "External";
   }
   const m = entity.metadata;
   if (!m) return null;

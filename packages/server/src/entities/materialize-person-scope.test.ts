@@ -52,7 +52,7 @@ async function seedFile(db: Kysely<DB>): Promise<void> {
 
 async function upsertPersonSeed(
   db: Kysely<DB>,
-  input: { name: string; email?: string | null; sourceId: string },
+  input: { name: string; email?: string | null; sourceId: string; subtype?: "internal" | "external" },
 ): Promise<void> {
   await createIndexedFileFactRepository(db).upsertFact({
     indexedFileId: "file-1",
@@ -66,11 +66,16 @@ async function upsertPersonSeed(
     subjectEmail: input.email ?? null,
     subjectSource: "connector",
     subjectSourceId: input.sourceId,
-    raw: { subtype: "external" },
+    raw: input.subtype
+      ? { subtype: input.subtype }
+      : { name: input.name, sourceType: "person", source: "connector", sourceId: input.sourceId },
   });
 }
 
-async function upsertAttendee(db: Kysely<DB>, input: { name: string; email: string; sourceId: string }): Promise<void> {
+async function upsertAttendee(
+  db: Kysely<DB>,
+  input: { name: string; email?: string | null; sourceId: string },
+): Promise<void> {
   await createIndexedFileFactRepository(db).upsertFact({
     indexedFileId: "file-1",
     connectorConfigId: CONNECTOR_ID,
@@ -83,7 +88,7 @@ async function upsertAttendee(db: Kysely<DB>, input: { name: string; email: stri
     subjectEmail: input.email,
     subjectSource: "google_drive",
     subjectSourceId: input.sourceId,
-    raw: { providerFileId: "file-1", attendee: { name: input.name, email: input.email } },
+    raw: { providerFileId: "file-1", attendee: { name: input.name, email: input.email ?? undefined } },
   });
 }
 
@@ -126,6 +131,22 @@ describe("materializePersonSeed company-scoped dedup", () => {
 
   afterEach(async () => {
     await db.destroy();
+  });
+
+  it("defaults a person seed without subtype evidence to external", async () => {
+    await upsertPersonSeed(db, { name: "No Evidence Person", sourceId: "no-evidence" });
+
+    await materializeUnmaterializedFacts(db, createTestLogger());
+
+    await expect(people(db)).resolves.toMatchObject([{ name: "No Evidence Person", subtype: "external" }]);
+  });
+
+  it("defaults a person fact without an email to external", async () => {
+    await upsertAttendee(db, { name: "No Email Attendee", sourceId: "no-email" });
+
+    await materializeUnmaterializedFacts(db, createTestLogger());
+
+    await expect(people(db)).resolves.toMatchObject([{ name: "No Email Attendee", subtype: "external" }]);
   });
 
   it("links same-name seeds at the same mapped company even when the incoming email is new", async () => {
