@@ -13,10 +13,13 @@ import { createSession } from "./auth";
 import { denyIfNotAdmin } from "./auth-helpers";
 import { getOnboardingReadiness } from "./onboarding-readiness";
 
-async function verifySlackTokens(botToken: string, appToken: string): Promise<{ workspaceName?: string }> {
+async function verifySlackTokens(
+  botToken: string,
+  appToken: string,
+): Promise<{ workspaceName?: string; teamId?: string }> {
   const auth = await slackApiCall(botToken, "auth.test");
   await slackApiCall(appToken, "apps.connections.open");
-  return { workspaceName: auth.team };
+  return { workspaceName: auth.team, teamId: auth.team_id };
 }
 
 const createAccountSchema = z.object({
@@ -220,8 +223,11 @@ export function setupRoutes(settings: SettingsRepo, deps: SetupDeps = {}) {
     }
 
     try {
-      const { workspaceName } = await verifySlackTokens(parsed.data.botToken.trim(), parsed.data.appToken.trim());
-      return c.json({ success: true, workspaceName });
+      const { workspaceName, teamId } = await verifySlackTokens(
+        parsed.data.botToken.trim(),
+        parsed.data.appToken.trim(),
+      );
+      return c.json({ success: true, workspaceName, teamId });
     } catch {
       return c.json(
         {

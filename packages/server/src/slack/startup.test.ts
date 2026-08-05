@@ -32,7 +32,7 @@ describe("createSlackStartupManager", () => {
   it("uses provided tokens and bypasses DB lookup", async () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const getSettingsTokens = vi.fn(async () => ({ botToken: "xoxb-db", appToken: "xapp-db" }));
-    const validateTokens = vi.fn(async () => {});
+    const validateTokens = vi.fn(async () => undefined);
     const startBot = vi.fn(async () => {});
     const stopBot = vi.fn(async () => {});
     let currentBot: { start: () => Promise<void>; stop: () => Promise<void> } | null = {
@@ -73,11 +73,48 @@ describe("createSlackStartupManager", () => {
     expect(logger.info).toHaveBeenCalledWith("Slack bot connected");
   });
 
+  it("does not reset identity state when an explicit token rotation stays on the same team", async () => {
+    const beforeExplicitTokenReplacement = vi.fn(async () => {});
+    const start = createSlackStartupManager({
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db", teamId: "T123" }),
+      validateTokens: vi.fn(async () => ({ teamId: "T123" })),
+      getCurrentTeamId: async () => "T123",
+      beforeExplicitTokenReplacement,
+      getCurrentBot: () => null,
+      setCurrentBot: vi.fn(),
+      createBot: vi.fn(() => ({ start: async () => {}, stop: async () => {} })),
+    });
+
+    await start({ botToken: "xoxb-new", appToken: "xapp-new" });
+
+    expect(beforeExplicitTokenReplacement).not.toHaveBeenCalled();
+  });
+
+  it("passes the team change to the explicit replacement reset hook", async () => {
+    const beforeExplicitTokenReplacement = vi.fn(async () => {});
+    const start = createSlackStartupManager({
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db", teamId: "T123" }),
+      validateTokens: vi.fn(async () => ({ teamId: "T456" })),
+      getCurrentTeamId: async () => "T123",
+      beforeExplicitTokenReplacement,
+      getCurrentBot: () => null,
+      setCurrentBot: vi.fn(),
+      createBot: vi.fn(() => ({ start: async () => {}, stop: async () => {} })),
+    });
+
+    await start({ botToken: "xoxb-new", appToken: "xapp-new" });
+
+    expect(beforeExplicitTokenReplacement).toHaveBeenCalledWith({ previousTeamId: "T123", nextTeamId: "T456" });
+  });
+
   it("enforces single-flight concurrency while startup is in progress", async () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const gate = deferred<void>();
     const validateTokens = vi.fn(async () => {
       await gate.promise;
+      return undefined;
     });
     const startBot = vi.fn(async () => {});
     const createBot = vi.fn(() => ({ start: startBot, stop: vi.fn(async () => {}) }));
@@ -150,7 +187,7 @@ describe("createSlackStartupManager", () => {
     const start = createSlackStartupManager({
       logger,
       getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db" }),
-      validateTokens: vi.fn(async () => {}),
+      validateTokens: vi.fn(async () => undefined),
       getCurrentBot: () => currentBot,
       setCurrentBot,
       createBot: () => ({
@@ -200,7 +237,7 @@ describe("createSlackStartupManager", () => {
         logger,
         slackMode: "http",
         getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: null }),
-        validateTokens: vi.fn(async () => {}),
+        validateTokens: vi.fn(async () => undefined),
         getCurrentBot: () => null,
         setCurrentBot: vi.fn(),
         createBot,
@@ -221,7 +258,7 @@ describe("createSlackStartupManager", () => {
         logger,
         slackMode: "http",
         getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: null }),
-        validateTokens: vi.fn(async () => {}),
+        validateTokens: vi.fn(async () => undefined),
         getCurrentBot: () => null,
         setCurrentBot: vi.fn(),
         createBot,
@@ -240,7 +277,7 @@ describe("createSlackStartupManager", () => {
         logger,
         slackMode: "socket",
         getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db" }),
-        validateTokens: vi.fn(async () => {}),
+        validateTokens: vi.fn(async () => undefined),
         getCurrentBot: () => null,
         setCurrentBot: vi.fn(),
         createBot,

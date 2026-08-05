@@ -313,7 +313,7 @@ vi.mock("../agent/sessions", () => ({
 
 // Stub slack API for validateSlackTokens
 vi.mock("./api", () => ({
-  slackApiCall: vi.fn().mockResolvedValue({}),
+  slackApiCall: vi.fn().mockResolvedValue({ team_id: "T123" }),
 }));
 
 vi.mock("../connectors/slack-salience", () => ({
@@ -1883,7 +1883,7 @@ describe("slack/adapter", () => {
     it("calls auth.test with bot token", async () => {
       const { slackApiCall } = await import("./api");
 
-      await validateSlackTokens("xoxb-test", "xapp-test");
+      await expect(validateSlackTokens("xoxb-test", "xapp-test")).resolves.toEqual({ teamId: "T123" });
 
       expect(slackApiCall).toHaveBeenCalledWith("xoxb-test", "auth.test");
     });

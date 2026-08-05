@@ -23,6 +23,11 @@ function fakeFacade(overrides: Partial<SlackIndexingFacade> = {}): SlackIndexing
     listMemberChannels: async () => [{ id: "C1", name: "general" }],
     listChannelMembers: async () => ["U0TEAM"],
     getUserInfo: async () => ({ name: "priya", realName: "Priya", email: "priya@example.com", isBot: false }),
+    iterateUsers: async function* () {},
+    iterateChannels: async function* () {},
+    iterateChannelMembers: async function* () {},
+    listUsers: async () => [],
+    listChannels: async () => [],
     ...overrides,
   };
 }

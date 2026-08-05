@@ -173,7 +173,7 @@ export interface UpsertEntityFromToolData {
 export interface UpsertPersonEntityData {
   name: string;
   email?: string;
-  subtype: "internal" | "external";
+  subtype: "internal" | "external" | null;
   source: string;
   sourceId: string;
   provenanceTier?: ProvenanceTier;

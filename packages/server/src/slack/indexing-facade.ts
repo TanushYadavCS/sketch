@@ -2,125 +2,295 @@ import { WebClient } from "@slack/web-api";
 import type { Kysely } from "kysely";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
-import type { UserCache } from "./user-cache";
+import type { CachedUser, UserCache } from "./user-cache";
+import { UserCache as SlackUserCache } from "./user-cache";
+
+const SLACK_PAGE_LIMIT = 200;
 
 export interface SlackIndexingChannel {
   id: string;
   name: string;
+  isMember?: boolean;
+  isPrivate?: boolean;
+  isArchived?: boolean;
 }
 
 export interface SlackIndexingUser {
+  slackUserId?: string;
   name: string;
   realName: string;
+  displayName?: string;
   email: string | null;
+  profileTeamId?: string | null;
   isBot: boolean;
+  isGuest?: boolean;
+  isStranger?: boolean;
+  isRestricted?: boolean;
+  isUltraRestricted?: boolean;
+  deleted?: boolean;
+  providerUpdatedAt?: string | null;
 }
 
-/**
- * Narrow Slack API surface for the indexing connector. The connector must not
- * read encrypted settings or hold the live Bolt instance, so bootstrap injects
- * this facade instead. It is lazy: the token is resolved per call, so live
- * token rotation never leaves a stale client behind.
- */
+type SlackIndexingClient = Pick<WebClient, "users" | "conversations">;
+
+interface SlackApiLimiter {
+  run<T>(operation: () => Promise<T>): Promise<T>;
+}
+
+class SerializedSlackApiLimiter implements SlackApiLimiter {
+  private tail = Promise.resolve();
+  private nextAllowedAt = 0;
+
+  constructor(private readonly minimumIntervalMs = 50) {}
+
+  run<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(async () => {
+      const delayMs = Math.max(0, this.nextAllowedAt - Date.now());
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      try {
+        const value = await operation();
+        this.nextAllowedAt = Date.now() + this.minimumIntervalMs;
+        return value;
+      } catch (error) {
+        const retryAfterMs = readRetryAfterMs(error);
+        this.nextAllowedAt = Math.max(this.nextAllowedAt, Date.now() + retryAfterMs);
+        throw error;
+      }
+    });
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
+
+function readRetryAfterMs(error: unknown): number {
+  if (!error || typeof error !== "object") return 0;
+  const record = error as Record<string, unknown>;
+  const data = record.data && typeof record.data === "object" ? (record.data as Record<string, unknown>) : null;
+  const retryAfter = data?.retryAfter ?? data?.retry_after ?? record.retryAfter ?? record.retry_after;
+  const seconds = typeof retryAfter === "number" ? retryAfter : Number(retryAfter);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function readBoolean(record: Record<string, unknown>, key: string): boolean {
+  return record[key] === true;
+}
+
+function readString(record: Record<string, unknown>, key: string): string | null {
+  return typeof record[key] === "string" ? record[key] : null;
+}
+
+function mapUser(user: unknown, fallbackId?: string): SlackIndexingUser {
+  const raw = readRecord(user);
+  const profile = readRecord(raw.profile);
+  const id = readString(raw, "id") ?? fallbackId;
+  const name = readString(raw, "name") ?? "unknown";
+  const realName = readString(raw, "real_name") ?? name;
+  const displayName = readString(profile, "display_name") ?? readString(profile, "display_name_normalized") ?? realName;
+  const updated = raw.updated;
+  return {
+    ...(id ? { slackUserId: id } : {}),
+    name,
+    realName,
+    displayName,
+    email: readString(profile, "email"),
+    profileTeamId: readString(raw, "team_id"),
+    isBot: readBoolean(raw, "is_bot") || id === "USLACKBOT",
+    isGuest: readBoolean(raw, "is_guest"),
+    isStranger: readBoolean(raw, "is_stranger"),
+    isRestricted: readBoolean(raw, "is_restricted"),
+    isUltraRestricted: readBoolean(raw, "is_ultra_restricted"),
+    deleted: readBoolean(raw, "deleted"),
+    providerUpdatedAt: typeof updated === "number" || typeof updated === "string" ? String(updated) : null,
+  };
+}
+
+function toCachedUser(user: SlackIndexingUser): CachedUser {
+  return {
+    name: user.name,
+    realName: user.realName,
+    email: user.email,
+    tz: null,
+    isBot: user.isBot,
+    slackUserId: user.slackUserId,
+    displayName: user.displayName,
+    profileTeamId: user.profileTeamId,
+    isGuest: user.isGuest,
+    isStranger: user.isStranger,
+    isRestricted: user.isRestricted,
+    isUltraRestricted: user.isUltraRestricted,
+    deleted: user.deleted,
+    providerUpdatedAt: user.providerUpdatedAt,
+  };
+}
+
+function fromCachedUser(user: CachedUser, fallbackId: string): SlackIndexingUser {
+  return {
+    slackUserId: user.slackUserId ?? fallbackId,
+    name: user.name,
+    realName: user.realName,
+    displayName: user.displayName ?? user.realName,
+    email: user.email,
+    profileTeamId: user.profileTeamId ?? null,
+    isBot: user.isBot,
+    isGuest: user.isGuest ?? false,
+    isStranger: user.isStranger ?? false,
+    isRestricted: user.isRestricted ?? false,
+    isUltraRestricted: user.isUltraRestricted ?? false,
+    deleted: user.deleted ?? false,
+    providerUpdatedAt: user.providerUpdatedAt ?? null,
+  };
+}
+
 export interface SlackIndexingFacade {
-  /** False while no bot token is configured (Slack disconnected) — callers no-op instead of erroring. */
   isConfigured(): Promise<boolean>;
+  iterateUsers(): AsyncIterable<SlackIndexingUser>;
+  iterateChannels(): AsyncIterable<SlackIndexingChannel>;
+  iterateChannelMembers(channelId: string): AsyncIterable<string>;
+  listUsers(): Promise<SlackIndexingUser[]>;
+  listChannels(): Promise<SlackIndexingChannel[]>;
   listMemberChannels(): Promise<SlackIndexingChannel[]>;
   listChannelMembers(channelId: string): Promise<string[]>;
   getUserInfo(userId: string): Promise<SlackIndexingUser>;
 }
 
+async function collectAsync<T>(items: AsyncIterable<T>): Promise<T[]> {
+  const values: T[] = [];
+  for await (const item of items) values.push(item);
+  return values;
+}
+
 export interface CreateSlackIndexingFacadeOptions {
   getBotToken: () => Promise<string | null>;
   userCache?: UserCache;
+  userInfoCacheTtlMs?: number;
+  clientFactory?: (token: string) => SlackIndexingClient;
+  limiter?: SlackApiLimiter;
 }
 
-/**
- * Standard facade construction: token resolved from decrypted settings per
- * call, so live token rotation never leaves a stale client. Used by bootstrap
- * (with the shared UserCache) and by the manual-sync API path (uncached).
- */
 export function createSettingsBackedSlackIndexingFacade(options: {
   db: Kysely<DB>;
   encryptionKey?: string;
   userCache?: UserCache;
+  userInfoCacheTtlMs?: number;
 }): SlackIndexingFacade {
   const settingsRepo = createSettingsRepository(options.db, options.encryptionKey);
   return createSlackIndexingFacade({
     getBotToken: async () => (await settingsRepo.get())?.slack_bot_token ?? null,
     userCache: options.userCache,
+    userInfoCacheTtlMs: options.userInfoCacheTtlMs,
   });
 }
 
 export function createSlackIndexingFacade(options: CreateSlackIndexingFacadeOptions): SlackIndexingFacade {
-  async function client(): Promise<WebClient> {
+  const userCache = options.userCache ?? new SlackUserCache(options.userInfoCacheTtlMs);
+  const clientFactory = options.clientFactory ?? ((token: string) => new WebClient(token));
+  const limiter = options.limiter ?? new SerializedSlackApiLimiter();
+  let connection: { token: string; client: SlackIndexingClient } | null = null;
+
+  async function client(): Promise<SlackIndexingClient> {
     const token = await options.getBotToken();
     if (!token) throw new Error("Slack indexing facade has no bot token configured");
-    return new WebClient(token);
+    if (!connection || connection.token !== token) connection = { token, client: clientFactory(token) };
+    return connection.client;
+  }
+
+  async function request<T>(operation: (api: SlackIndexingClient) => Promise<T>): Promise<T> {
+    const api = await client();
+    return limiter.run(() => operation(api));
   }
 
   async function fetchUserInfo(userId: string): Promise<SlackIndexingUser> {
-    const api = await client();
-    const result = await api.users.info({ user: userId });
-    return {
-      name: result.user?.name ?? "unknown",
-      realName: result.user?.real_name ?? result.user?.name ?? "unknown",
-      email: result.user?.profile?.email ?? null,
-      isBot: result.user?.is_bot === true || userId === "USLACKBOT",
-    };
+    return mapUser((await request((api) => api.users.info({ user: userId }))).user, userId);
+  }
+
+  async function* iterateUsers(): AsyncIterable<SlackIndexingUser> {
+    let cursor: string | undefined;
+    do {
+      const result = await request((api) => api.users.list({ limit: SLACK_PAGE_LIMIT, ...(cursor ? { cursor } : {}) }));
+      for (const member of result.members ?? []) yield mapUser(member);
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+  }
+
+  async function* iterateChannels(): AsyncIterable<SlackIndexingChannel> {
+    let cursor: string | undefined;
+    do {
+      const result = await request((api) =>
+        api.conversations.list({
+          exclude_archived: true,
+          limit: SLACK_PAGE_LIMIT,
+          types: "public_channel,private_channel",
+          ...(cursor ? { cursor } : {}),
+        }),
+      );
+      for (const channel of result.channels ?? []) {
+        const raw = readRecord(channel);
+        const id = readString(raw, "id");
+        if (!id) continue;
+        yield {
+          id,
+          name: readString(raw, "name") ?? "unknown",
+          isMember: readBoolean(raw, "is_member"),
+          isPrivate: readBoolean(raw, "is_private"),
+          isArchived: readBoolean(raw, "is_archived"),
+        };
+      }
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+  }
+
+  async function* iterateChannelMembers(channelId: string): AsyncIterable<string> {
+    let cursor: string | undefined;
+    do {
+      const result = await request((api) =>
+        api.conversations.members({ channel: channelId, limit: SLACK_PAGE_LIMIT, ...(cursor ? { cursor } : {}) }),
+      );
+      for (const member of result.members ?? []) {
+        if (typeof member === "string") yield member;
+      }
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } while (cursor);
   }
 
   return {
     async isConfigured() {
-      return (await options.getBotToken()) !== null;
+      return Boolean(await options.getBotToken());
+    },
+
+    iterateUsers,
+    iterateChannels,
+    iterateChannelMembers,
+
+    async listUsers() {
+      return collectAsync(iterateUsers());
+    },
+
+    async listChannels() {
+      return collectAsync(iterateChannels());
     },
 
     async listMemberChannels() {
-      const api = await client();
       const channels: SlackIndexingChannel[] = [];
-      let cursor: string | undefined;
-      do {
-        const result = await api.conversations.list({
-          exclude_archived: true,
-          limit: 200,
-          types: "public_channel,private_channel",
-          ...(cursor ? { cursor } : {}),
-        });
-        for (const channel of result.channels ?? []) {
-          if (channel.id && channel.is_member === true) {
-            channels.push({ id: channel.id, name: channel.name ?? "unknown" });
-          }
-        }
-        cursor = result.response_metadata?.next_cursor || undefined;
-      } while (cursor);
+      for await (const channel of iterateChannels()) {
+        if (channel.isMember) channels.push(channel);
+      }
       return channels;
     },
 
     async listChannelMembers(channelId: string) {
-      const api = await client();
-      const members: string[] = [];
-      let cursor: string | undefined;
-      do {
-        const result = await api.conversations.members({
-          channel: channelId,
-          limit: 1000,
-          ...(cursor ? { cursor } : {}),
-        });
-        members.push(...(result.members ?? []));
-        cursor = result.response_metadata?.next_cursor || undefined;
-      } while (cursor);
-      return members;
+      return collectAsync(iterateChannelMembers(channelId));
     },
 
     async getUserInfo(userId: string) {
-      if (options.userCache) {
-        const cached = await options.userCache.resolve(userId, async (id) => {
-          const info = await fetchUserInfo(id);
-          return { name: info.name, realName: info.realName, email: info.email, tz: null, isBot: info.isBot };
-        });
-        return { name: cached.name, realName: cached.realName, email: cached.email, isBot: cached.isBot };
-      }
-      return fetchUserInfo(userId);
+      const cached = await userCache.resolve(userId, async (id) => toCachedUser(await fetchUserInfo(id)));
+      return fromCachedUser(cached, userId);
     },
   };
 }

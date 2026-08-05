@@ -12,16 +12,52 @@ export interface CachedUser {
   email: string | null;
   tz: string | null;
   isBot: boolean;
+  slackUserId?: string;
+  displayName?: string;
+  profileTeamId?: string | null;
+  isGuest?: boolean;
+  isStranger?: boolean;
+  isRestricted?: boolean;
+  isUltraRestricted?: boolean;
+  deleted?: boolean;
+  providerUpdatedAt?: string | null;
+}
+
+interface CachedUserEntry {
+  value: CachedUser;
+  fetchedAt: number;
 }
 
 export class UserCache {
-  private cache = new Map<string, CachedUser>();
+  private cache = new Map<string, CachedUserEntry>();
+  private inflight = new Map<string, Promise<CachedUser>>();
+
+  constructor(
+    private readonly ttlMs = 5 * 60 * 1000,
+    private readonly now = () => Date.now(),
+  ) {}
 
   async resolve(userId: string, fetcher: (id: string) => Promise<CachedUser>): Promise<CachedUser> {
     const cached = this.cache.get(userId);
-    if (cached) return cached;
-    const user = await fetcher(userId);
-    this.cache.set(userId, user);
-    return user;
+    if (cached && (this.ttlMs <= 0 || this.now() - cached.fetchedAt < this.ttlMs)) return cached.value;
+
+    const pending = this.inflight.get(userId);
+    if (pending) return pending;
+
+    const request = fetcher(userId).then((value) => {
+      this.cache.set(userId, { value, fetchedAt: this.now() });
+      return value;
+    });
+    this.inflight.set(userId, request);
+    try {
+      return await request;
+    } finally {
+      if (this.inflight.get(userId) === request) this.inflight.delete(userId);
+    }
+  }
+
+  clear(): void {
+    this.cache.clear();
+    this.inflight.clear();
   }
 }

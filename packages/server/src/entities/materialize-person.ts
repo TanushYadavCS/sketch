@@ -25,7 +25,7 @@ export async function materializePersonSeed(
   const triggeredByUserId = deps.resolveOwner(fact);
   if (!triggeredByUserId) return { kind: "skipped_missing_owner", reason: "missing_fact_owner" };
   const raw = readJsonObject(fact.raw);
-  const subtype = raw.subtype === "internal" ? "internal" : "external";
+  const subtype = raw.subtype === "internal" ? "internal" : raw.subtype === "external" ? "external" : null;
   const result = await proposeEntity(
     {
       entityRepo: deps.entityRepo,
@@ -146,7 +146,7 @@ export async function materializePersonFact(
   const relation = PERSON_FACT_RELATION[factType];
   const confidence = fact.fact_type === "llm_extracted" ? "INFERRED" : "EXTRACTED";
   const mentionSource = fact.fact_type === "llm_extracted" ? "llm_extraction" : `${fact.source}_${fact.fact_type}`;
-  const subtype = fact.subject_email ? "external" : "external";
+  const subtype = fact.subject_email ? "external" : null;
 
   let entity: IndexEntityRow | null = null;
   if (fact.subject_source && fact.subject_source_id) {

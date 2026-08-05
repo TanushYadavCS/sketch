@@ -58,7 +58,7 @@ export interface ProposeInput {
    */
   sourceId: string;
   /** Free-form subtype for the entity row (e.g. "internal" / "external"). */
-  subtype: "internal" | "external";
+  subtype: "internal" | "external" | null;
   /** Files this proposal is observed in. Becomes evidence rows on queue. */
   evidence: Array<{ indexedFileId: string; note?: string }>;
   /** Owner of the sync / call that proposed this entity. Required. */

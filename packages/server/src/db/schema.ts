@@ -65,6 +65,7 @@ export interface SettingsTable {
   bot_name: Generated<string>;
   slack_bot_token: string | null;
   slack_app_token: string | null;
+  slack_team_id: Generated<string | null>;
   llm_provider: string | null;
   anthropic_api_key: string | null;
   aws_access_key_id: string | null;
@@ -664,6 +665,60 @@ export interface SlackChannelParticipantsTable {
   last_seen_at: Generated<string>;
 }
 
+export interface OrganizationDomainsTable {
+  id: string;
+  domain: string;
+  source: string;
+  verified_at: string;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface SlackUserSyncStateTable {
+  team_id: string;
+  slack_user_id: string;
+  name: string | null;
+  real_name: string | null;
+  display_name: string | null;
+  email: string | null;
+  profile_team_id: string | null;
+  profile_json: string | null;
+  is_bot: Generated<number>;
+  is_guest: Generated<number>;
+  is_stranger: Generated<number>;
+  is_restricted: Generated<number>;
+  is_ultra_restricted: Generated<number>;
+  deleted: Generated<number>;
+  classification: string | null;
+  classification_source: string | null;
+  provider_updated_at: string | null;
+  fetched_at: string | null;
+  entity_id: string | null;
+  inactive_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface SlackSyncRunsTable {
+  id: string;
+  team_id: string;
+  run_type: string;
+  trigger_key: string;
+  pinned_team_id: string;
+  status: string;
+  stage: string | null;
+  heartbeat_at: string | null;
+  users_cursor: string | null;
+  conversations_cursor: string | null;
+  members_cursor: string | null;
+  current_channel_id: string | null;
+  started_at: Generated<string>;
+  completed_at: string | null;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface WhatsAppBackfillCheckpointsTable {
   group_jid: string;
   last_fetched_key: string | null;
@@ -1097,6 +1152,7 @@ export interface EntityReviewQueueTable {
   source_id: string | null;
   proposed_email: string | null;
   candidate_entity_id: string | null;
+  candidate_entity_ids: Generated<string | null>;
   candidate_score: number | null;
   candidate_reason: string | null;
   candidate_generated_at: string | null;
@@ -1394,6 +1450,9 @@ export interface DB {
   whatsapp_connection_transitions: WhatsAppConnectionTransitionsTable;
   whatsapp_groups: WhatsAppGroupsTable;
   settings: SettingsTable;
+  organization_domains: OrganizationDomainsTable;
+  slack_user_sync_state: SlackUserSyncStateTable;
+  slack_sync_runs: SlackSyncRunsTable;
   connector_configs: ConnectorConfigsTable;
   indexed_files: IndexedFilesTable;
   email_message_envelopes: EmailMessageEnvelopesTable;

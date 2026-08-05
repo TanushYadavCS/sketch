@@ -25,7 +25,7 @@ import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 
-const EXPECTED_MIGRATION_COUNT = 154;
+const EXPECTED_MIGRATION_COUNT = 155;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -223,6 +223,60 @@ describe("runMigrations — full sequence", () => {
     expect(names[151]).toBe("156-operational-alerts");
     expect(names[152]).toBe("157-task-activity-events");
     expect(names[153]).toBe("158-slack-channel-participants");
+    expect(names[154]).toBe("159-slack-entity-lifecycle-sync");
+  });
+
+  it("creates the Slack entity lifecycle schema and allows source-scoped review rows", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const tables = await sql<{ name: string }>`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table'
+        AND name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
+      ORDER BY name
+    `.execute(db);
+    expect(tables.rows.map((row) => row.name)).toEqual([
+      "organization_domains",
+      "slack_sync_runs",
+      "slack_user_sync_state",
+    ]);
+
+    const columns = await sql<{ name: string }>`
+      SELECT name FROM pragma_table_info('entity_review_queue')
+      WHERE name = 'candidate_entity_ids'
+    `.execute(db);
+    expect(columns.rows).toEqual([{ name: "candidate_entity_ids" }]);
+
+    const index = await sql<{ name: string; sql: string }>`
+      SELECT name, sql FROM sqlite_master
+      WHERE type = 'index' AND name = 'entity_review_queue_normalized_partial_unique'
+    `.execute(db);
+    expect(index.rows).toHaveLength(1);
+    expect(index.rows[0]?.sql).toContain("WHERE source IS NULL");
+
+    const queueRow = {
+      id: "review-source-a",
+      proposed_name: "Same Name",
+      normalized_name: "same name",
+      entity_type: "person",
+      source: "slack_user",
+      source_id: "T123:U1",
+      proposed_email: null,
+      candidate_entity_id: null,
+      candidate_entity_ids: null,
+      candidate_score: null,
+      candidate_reason: "exact-name-match",
+      candidate_generated_at: null,
+      triggered_by_user_id: "admin",
+    };
+    await db.insertInto("entity_review_queue").values(queueRow).execute();
+    await db
+      .insertInto("entity_review_queue")
+      .values({ ...queueRow, id: "review-source-b", source_id: "T123:U2" })
+      .execute();
+    await expect(
+      db.selectFrom("entity_review_queue").select("id").where("normalized_name", "=", "same name").execute(),
+    ).resolves.toHaveLength(2);
   });
 
   it("resets reviewed combined durability routes for member-source reseeding", async () => {

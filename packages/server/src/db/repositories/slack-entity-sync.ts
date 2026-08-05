@@ -1,0 +1,544 @@
+import { randomUUID } from "node:crypto";
+import { type ExpressionBuilder, type Kysely, type Selectable, sql } from "kysely";
+import { normalizeName } from "../../connectors/name-normalize";
+import type { DB, EntitiesTable, SlackUserSyncStateTable } from "../schema";
+import { createEntityRepository, normalizeContactPointValue } from "./entities";
+import { createEntityReviewRepo } from "./entity-review";
+
+export interface SlackUserProfile {
+  teamId: string;
+  slackUserId: string;
+  name: string;
+  realName: string;
+  displayName?: string | null;
+  email: string | null;
+  profileTeamId: string | null;
+  isBot: boolean;
+  isGuest: boolean;
+  isStranger: boolean;
+  isRestricted: boolean;
+  isUltraRestricted: boolean;
+  deleted: boolean;
+  providerUpdatedAt: string | null;
+  fetchedAt: string;
+  profile?: Record<string, unknown> | null;
+}
+
+export interface SlackEntitySyncLogger {
+  warn: (bindings: Record<string, unknown>, message: string) => void;
+}
+
+export interface SlackEntitySyncOptions {
+  logger?: SlackEntitySyncLogger;
+}
+
+export type SlackEntitySyncResult = {
+  entity: Selectable<EntitiesTable> | null;
+  state: Selectable<SlackUserSyncStateTable>;
+  applied: boolean;
+};
+
+const inflightByDb = new WeakMap<object, Map<string, Promise<SlackEntitySyncResult>>>();
+
+function normalizeEmail(email: string | null): string | null {
+  if (!email?.trim() || !email.includes("@")) return null;
+  return normalizeContactPointValue("email", email);
+}
+
+function tupleIsAtLeast(
+  incoming: { providerUpdatedAt: string | null; fetchedAt: string },
+  stored: { provider_updated_at: string | null; fetched_at: string | null },
+): boolean {
+  if (incoming.providerUpdatedAt === null) {
+    if (stored.provider_updated_at !== null) return false;
+    return stored.fetched_at === null || incoming.fetchedAt >= stored.fetched_at;
+  }
+  if (stored.provider_updated_at === null) return true;
+  if (incoming.providerUpdatedAt !== stored.provider_updated_at) {
+    return incoming.providerUpdatedAt > stored.provider_updated_at;
+  }
+  return stored.fetched_at === null || incoming.fetchedAt >= stored.fetched_at;
+}
+
+function versionPredicate(
+  eb: ExpressionBuilder<DB, "slack_user_sync_state">,
+  incoming: { providerUpdatedAt: string | null; fetchedAt: string },
+) {
+  if (incoming.providerUpdatedAt === null) {
+    return eb.and([
+      eb("provider_updated_at", "is", null),
+      eb.or([eb("fetched_at", "is", null), eb("fetched_at", "<=", incoming.fetchedAt)]),
+    ]);
+  }
+  return eb.or([
+    eb("provider_updated_at", "is", null),
+    eb("provider_updated_at", "<", incoming.providerUpdatedAt),
+    eb.and([
+      eb("provider_updated_at", "=", incoming.providerUpdatedAt),
+      eb.or([eb("fetched_at", "is", null), eb("fetched_at", "<=", incoming.fetchedAt)]),
+    ]),
+  ]);
+}
+
+function classifyProfile(
+  profile: SlackUserProfile,
+  organizationDomains: Set<string>,
+): { classification: "internal" | "external" | null; source: string } {
+  const email = normalizeEmail(profile.email);
+  const emailDomain = email?.split("@").pop() ?? null;
+  if (emailDomain && organizationDomains.has(emailDomain)) {
+    return { classification: "internal", source: "organization_domain" };
+  }
+
+  const foreignTeam = Boolean(profile.profileTeamId && profile.profileTeamId !== profile.teamId);
+  if (profile.isGuest || profile.isStranger || foreignTeam || profile.isRestricted || profile.isUltraRestricted) {
+    return { classification: "external", source: "provider_flag" };
+  }
+  if (emailDomain && organizationDomains.size > 0) {
+    return { classification: "external", source: "email_domain" };
+  }
+  return { classification: null, source: "unknown" };
+}
+
+function profileName(profile: SlackUserProfile): string | null {
+  const name = profile.name.trim() || profile.realName.trim() || profile.displayName?.trim() || "";
+  return name.length > 0 ? name : null;
+}
+
+function parseMetadata(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const value = JSON.parse(raw) as unknown;
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function updateSlackEmailContactPoint(
+  trx: Kysely<DB>,
+  entityId: string,
+  email: string,
+  connectorConfigId: string | null,
+  overwriteSlackOwnedEmail: boolean,
+  now: string,
+): Promise<void> {
+  if (overwriteSlackOwnedEmail) {
+    await trx
+      .deleteFrom("entity_contact_points")
+      .where("entity_id", "=", entityId)
+      .where("kind", "=", "email")
+      .where("source", "=", "slack_user")
+      .where("value", "!=", email)
+      .execute();
+  }
+
+  await trx
+    .insertInto("entity_contact_points")
+    .values({
+      id: randomUUID(),
+      entity_id: entityId,
+      kind: "email",
+      value: email,
+      display_value: email,
+      label: null,
+      is_primary: 1,
+      source: "slack_user",
+      connector_config_id: connectorConfigId,
+      created_by_user_id: null,
+      verified_at: null,
+      last_contacted_at: null,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflict((oc) =>
+      oc.columns(["entity_id", "kind", "value"]).doUpdateSet({
+        display_value: email,
+        is_primary: 1,
+        source: "slack_user",
+        connector_config_id: sql`COALESCE(excluded.connector_config_id, entity_contact_points.connector_config_id)`,
+        updated_at: now,
+      }),
+    )
+    .execute();
+}
+
+async function updateEntityFromSlackProfile(
+  trx: Kysely<DB>,
+  entity: Selectable<EntitiesTable>,
+  profile: SlackUserProfile,
+  classification: "internal" | "external" | null,
+  email: string | null,
+  connectorConfigId: string | null,
+  slackOwned: boolean,
+  now: string,
+): Promise<Selectable<EntitiesTable>> {
+  const name = profileName(profile) ?? entity.name;
+  const metadata = parseMetadata(entity.metadata);
+  if (slackOwned && email) metadata.email = email;
+  const updates: Record<string, unknown> = {
+    name,
+    subtype: classification ?? entity.subtype,
+    updated_at: now,
+  };
+  if (slackOwned && email) updates.metadata = JSON.stringify(metadata);
+
+  await trx.updateTable("entities").set(updates).where("id", "=", entity.id).execute();
+  if (email) {
+    await updateSlackEmailContactPoint(trx, entity.id, email, connectorConfigId, slackOwned, now);
+  }
+  return trx.selectFrom("entities").selectAll().where("id", "=", entity.id).executeTakeFirstOrThrow();
+}
+
+async function findSlackConnectorAdmin(trx: Kysely<DB>): Promise<{ id: string; createdBy: string } | null> {
+  const row = await trx
+    .selectFrom("connector_configs")
+    .innerJoin("users", "users.id", "connector_configs.created_by")
+    .select(["connector_configs.id", "connector_configs.created_by"])
+    .where("connector_configs.connector_type", "=", "slack")
+    .where("users.auth_role", "=", "admin")
+    .orderBy("connector_configs.created_at", "asc")
+    .executeTakeFirst();
+  return row ? { id: row.id, createdBy: row.created_by } : null;
+}
+
+async function writeReviewRow(
+  trx: Kysely<DB>,
+  profile: SlackUserProfile,
+  candidateEntityId: string | null,
+  candidateEntityIds: string[] | null,
+  candidateReason: string,
+  connector: { id: string; createdBy: string } | null,
+  logger: SlackEntitySyncLogger | undefined,
+): Promise<void> {
+  if (!connector) {
+    logger?.warn(
+      { slackUserId: profile.slackUserId },
+      "Skipping Slack entity review row because no admin connector owner exists",
+    );
+    return;
+  }
+  const name = profileName(profile);
+  if (!name) return;
+  await createEntityReviewRepo(trx).upsertQueueRow({
+    proposedName: name,
+    normalizedName: normalizeName(name),
+    entityType: "person",
+    source: "slack_user",
+    sourceId: `${profile.teamId}:${profile.slackUserId}`,
+    sourceScoped: true,
+    proposedEmail: normalizeEmail(profile.email),
+    candidateEntityId,
+    candidateEntityIds,
+    candidateScore: candidateEntityId ? 1 : null,
+    candidateReason,
+    triggeredByUserId: connector.createdBy,
+  });
+}
+
+async function runUpsert(
+  db: Kysely<DB>,
+  profile: SlackUserProfile,
+  options: SlackEntitySyncOptions,
+): Promise<SlackEntitySyncResult> {
+  return db.transaction().execute(async (trx) => {
+    const now = profile.fetchedAt;
+    const sourceId = `${profile.teamId}:${profile.slackUserId}`;
+    const email = normalizeEmail(profile.email);
+    const domains = await trx.selectFrom("organization_domains").select("domain").execute();
+    const classification = classifyProfile(profile, new Set(domains.map((row) => row.domain.toLowerCase())));
+
+    await trx
+      .insertInto("slack_user_sync_state")
+      .values({
+        team_id: profile.teamId,
+        slack_user_id: profile.slackUserId,
+        name: profile.name || null,
+        real_name: profile.realName || null,
+        display_name: profile.displayName ?? null,
+        email,
+        profile_team_id: profile.profileTeamId,
+        profile_json: profile.profile ? JSON.stringify(profile.profile) : null,
+        is_bot: profile.isBot ? 1 : 0,
+        is_guest: profile.isGuest ? 1 : 0,
+        is_stranger: profile.isStranger ? 1 : 0,
+        is_restricted: profile.isRestricted ? 1 : 0,
+        is_ultra_restricted: profile.isUltraRestricted ? 1 : 0,
+        deleted: profile.deleted ? 1 : 0,
+        classification: classification.classification,
+        classification_source: classification.source,
+        provider_updated_at: profile.providerUpdatedAt,
+        fetched_at: profile.fetchedAt,
+        entity_id: null,
+        inactive_at: profile.deleted ? profile.fetchedAt : null,
+        created_at: now,
+        updated_at: now,
+      })
+      .onConflict((oc) => oc.columns(["team_id", "slack_user_id"]).doNothing())
+      .execute();
+
+    const beforeState = await trx
+      .selectFrom("slack_user_sync_state")
+      .selectAll()
+      .where("team_id", "=", profile.teamId)
+      .where("slack_user_id", "=", profile.slackUserId)
+      .executeTakeFirstOrThrow();
+    const applied = tupleIsAtLeast(
+      { providerUpdatedAt: profile.providerUpdatedAt, fetchedAt: profile.fetchedAt },
+      beforeState,
+    );
+
+    if (!applied) {
+      const staleEntity = beforeState.entity_id
+        ? await trx.selectFrom("entities").selectAll().where("id", "=", beforeState.entity_id).executeTakeFirst()
+        : null;
+      return { entity: staleEntity ?? null, state: beforeState, applied: false };
+    }
+
+    const updatedState = await trx
+      .updateTable("slack_user_sync_state")
+      .set({
+        name: profile.name || null,
+        real_name: profile.realName || null,
+        display_name: profile.displayName ?? null,
+        email,
+        profile_team_id: profile.profileTeamId,
+        profile_json: profile.profile ? JSON.stringify(profile.profile) : null,
+        is_bot: profile.isBot ? 1 : 0,
+        is_guest: profile.isGuest ? 1 : 0,
+        is_stranger: profile.isStranger ? 1 : 0,
+        is_restricted: profile.isRestricted ? 1 : 0,
+        is_ultra_restricted: profile.isUltraRestricted ? 1 : 0,
+        deleted: profile.deleted ? 1 : 0,
+        classification: classification.classification,
+        classification_source: classification.source,
+        provider_updated_at: profile.providerUpdatedAt,
+        fetched_at: profile.fetchedAt,
+        inactive_at: profile.deleted ? profile.fetchedAt : null,
+        updated_at: now,
+      })
+      .where("team_id", "=", profile.teamId)
+      .where("slack_user_id", "=", profile.slackUserId)
+      .where((eb) =>
+        versionPredicate(eb, { providerUpdatedAt: profile.providerUpdatedAt, fetchedAt: profile.fetchedAt }),
+      )
+      .executeTakeFirst();
+
+    if (updatedState.numUpdatedRows === 0n) {
+      const current = await trx
+        .selectFrom("slack_user_sync_state")
+        .selectAll()
+        .where("team_id", "=", profile.teamId)
+        .where("slack_user_id", "=", profile.slackUserId)
+        .executeTakeFirstOrThrow();
+      const currentEntity = current.entity_id
+        ? await trx.selectFrom("entities").selectAll().where("id", "=", current.entity_id).executeTakeFirst()
+        : null;
+      return { entity: currentEntity ?? null, state: current, applied: false };
+    }
+
+    if (profile.isBot || profile.deleted) {
+      const state = await trx
+        .selectFrom("slack_user_sync_state")
+        .selectAll()
+        .where("team_id", "=", profile.teamId)
+        .where("slack_user_id", "=", profile.slackUserId)
+        .executeTakeFirstOrThrow();
+      return { entity: null, state, applied: true };
+    }
+
+    const existingRef = await trx
+      .selectFrom("entity_source_refs")
+      .select(["id", "entity_id"])
+      .where("source", "=", "slack_user")
+      .where("source_id", "=", sourceId)
+      .executeTakeFirst();
+    let entity: Selectable<EntitiesTable> | null = null;
+    let slackOwned = Boolean(existingRef);
+    let reviewReason: { candidateEntityId: string | null; candidateEntityIds: string[] | null; reason: string } | null =
+      null;
+
+    if (existingRef) {
+      entity =
+        (await trx
+          .selectFrom("entities")
+          .selectAll()
+          .where("id", "=", existingRef.entity_id)
+          .where("source_type", "=", "person")
+          .where("deleted_at", "is", null)
+          .where("merged_into_entity_id", "is", null)
+          .executeTakeFirst()) ?? null;
+    } else if (email) {
+      const matches = await createEntityRepository(trx).getPersonEntitiesByEmail(email);
+      if (matches.length === 1) {
+        entity = matches[0];
+      } else if (matches.length > 1) {
+        reviewReason = {
+          candidateEntityId: null,
+          candidateEntityIds: matches.map((match) => match.id),
+          reason: "ambiguous-email",
+        };
+      }
+    }
+
+    const name = profileName(profile);
+    let suppressed = false;
+    if (!entity && name) {
+      suppressed = Boolean(
+        await trx
+          .selectFrom("entity_creation_suppressions")
+          .select("id")
+          .where("normalized_name", "=", normalizeName(name))
+          .where("entity_type", "=", "person")
+          .executeTakeFirst(),
+      );
+      if (suppressed) reviewReason = null;
+    }
+    const hasSourceReview =
+      !entity &&
+      !reviewReason &&
+      name &&
+      !suppressed &&
+      Boolean(
+        await trx
+          .selectFrom("entity_review_queue")
+          .select("id")
+          .where("source", "=", "slack_user")
+          .where("source_id", "=", sourceId)
+          .executeTakeFirst(),
+      );
+    if (!entity && !reviewReason && name && !suppressed && !hasSourceReview) {
+      const candidates = await trx
+        .selectFrom("entities")
+        .select(["id", "name"])
+        .where("source_type", "=", "person")
+        .where("deleted_at", "is", null)
+        .where("merged_into_entity_id", "is", null)
+        .execute();
+      const exactCandidates = candidates.filter((candidate) => normalizeName(candidate.name) === normalizeName(name));
+      if (exactCandidates.length > 0) {
+        reviewReason = {
+          candidateEntityId: exactCandidates.length === 1 ? exactCandidates[0].id : null,
+          candidateEntityIds: exactCandidates.map((candidate) => candidate.id),
+          reason: "exact-name-match",
+        };
+      }
+    }
+
+    if (!entity && name && !suppressed) {
+      const candidateId = randomUUID();
+      await trx
+        .insertInto("entities")
+        .values({
+          id: candidateId,
+          name,
+          source_type: "person",
+          subtype: classification.classification,
+          aliases: email ? JSON.stringify([email]) : null,
+          metadata: JSON.stringify(email ? { email } : {}),
+          source_ref_id: null,
+          status: "confirmed",
+          provenance_tier: "structural",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+        })
+        .execute();
+      entity = await trx.selectFrom("entities").selectAll().where("id", "=", candidateId).executeTakeFirstOrThrow();
+      slackOwned = true;
+    }
+
+    if (entity) {
+      const connector = await findSlackConnectorAdmin(trx);
+      entity = await updateEntityFromSlackProfile(
+        trx,
+        entity,
+        profile,
+        classification.classification,
+        email,
+        connector?.id ?? null,
+        slackOwned,
+        now,
+      );
+      await trx
+        .insertInto("entity_source_refs")
+        .values({
+          id: randomUUID(),
+          entity_id: entity.id,
+          source: "slack_user",
+          source_id: sourceId,
+          source_url: null,
+          last_seen_at: now,
+        })
+        .onConflict((oc) => oc.columns(["source", "source_id"]).doNothing())
+        .execute();
+      const winner = await trx
+        .selectFrom("entity_source_refs")
+        .select("entity_id")
+        .where("source", "=", "slack_user")
+        .where("source_id", "=", sourceId)
+        .executeTakeFirstOrThrow();
+      if (winner.entity_id !== entity.id && slackOwned) {
+        await trx.deleteFrom("entities").where("id", "=", entity.id).execute();
+        entity =
+          (await trx.selectFrom("entities").selectAll().where("id", "=", winner.entity_id).executeTakeFirst()) ?? null;
+      } else if (winner.entity_id !== entity.id) {
+        entity =
+          (await trx.selectFrom("entities").selectAll().where("id", "=", winner.entity_id).executeTakeFirst()) ?? null;
+      }
+      if (entity) {
+        await trx
+          .updateTable("entity_source_refs")
+          .set({ last_seen_at: now })
+          .where("source", "=", "slack_user")
+          .where("source_id", "=", sourceId)
+          .execute();
+      }
+      if (reviewReason) {
+        await writeReviewRow(
+          trx,
+          profile,
+          reviewReason.candidateEntityId,
+          reviewReason.candidateEntityIds,
+          reviewReason.reason,
+          connector,
+          options.logger,
+        );
+      }
+    }
+
+    await trx
+      .updateTable("slack_user_sync_state")
+      .set({ entity_id: entity?.id ?? null })
+      .where("team_id", "=", profile.teamId)
+      .where("slack_user_id", "=", profile.slackUserId)
+      .execute();
+    const state = await trx
+      .selectFrom("slack_user_sync_state")
+      .selectAll()
+      .where("team_id", "=", profile.teamId)
+      .where("slack_user_id", "=", profile.slackUserId)
+      .executeTakeFirstOrThrow();
+    return { entity, state, applied: true };
+  });
+}
+
+export function upsertSlackPersonEntity(
+  db: Kysely<DB>,
+  profile: SlackUserProfile,
+  options: SlackEntitySyncOptions = {},
+): Promise<SlackEntitySyncResult> {
+  const key = `${profile.teamId}:${profile.slackUserId}`;
+  let dbInflight = inflightByDb.get(db);
+  if (!dbInflight) {
+    dbInflight = new Map();
+    inflightByDb.set(db, dbInflight);
+  }
+  const existing = dbInflight.get(key);
+  if (existing) return existing;
+  const pending = runUpsert(db, profile, options);
+  dbInflight.set(key, pending);
+  return pending.finally(() => {
+    if (dbInflight?.get(key) === pending) dbInflight.delete(key);
+  });
+}

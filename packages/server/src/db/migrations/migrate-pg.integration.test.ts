@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 154;
+const EXPECTED_MIGRATION_COUNT = 155;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -189,6 +189,40 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[151]).toBe("156-operational-alerts");
     expect(names[152]).toBe("157-task-activity-events");
     expect(names[153]).toBe("158-slack-channel-participants");
+    expect(names[154]).toBe("159-slack-entity-lifecycle-sync");
+  });
+
+  it("creates the Slack entity lifecycle schema and partial review uniqueness", async () => {
+    const tables = await sql<{ table_name: string }>`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
+      ORDER BY table_name
+    `.execute(db);
+    expect(tables.rows.map((row) => row.table_name)).toEqual([
+      "organization_domains",
+      "slack_sync_runs",
+      "slack_user_sync_state",
+    ]);
+
+    const columns = await sql<{ column_name: string }>`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'entity_review_queue'
+        AND column_name = 'candidate_entity_ids'
+    `.execute(db);
+    expect(columns.rows).toEqual([{ column_name: "candidate_entity_ids" }]);
+
+    const index = await sql<{ indexdef: string }>`
+      SELECT indexdef FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'entity_review_queue'
+        AND indexname = 'entity_review_queue_normalized_partial_unique'
+    `.execute(db);
+    expect(index.rows).toHaveLength(1);
+    expect(index.rows[0]?.indexdef).toContain("WHERE (source IS NULL)");
   });
 
   it("creates the bounded open-materializable partial index", async () => {

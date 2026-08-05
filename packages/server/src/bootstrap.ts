@@ -783,15 +783,39 @@ export async function createServer(config: Config, options?: CreateServerOptions
       return {
         botToken: settingsRow?.slack_bot_token,
         appToken: settingsRow?.slack_app_token,
+        teamId: settingsRow?.slack_team_id,
       };
     },
     validateTokens: validateSlackTokens,
+    getCurrentTeamId: async () => (await settingsRepo.get())?.slack_team_id ?? null,
     getCurrentBot: () => slack,
     setCurrentBot: (bot) => {
       slack = bot;
     },
     createBot: (tokens) => createConfiguredSlackBot(tokens, slackAdapterDeps),
-    beforeExplicitTokenReplacement: () => slackMembershipReconciler.clearAllParticipants(),
+    beforeExplicitTokenReplacement: async (replacement) => {
+      await slackMembershipReconciler.clearAllParticipants();
+      if (
+        !replacement?.previousTeamId ||
+        !replacement.nextTeamId ||
+        replacement.previousTeamId === replacement.nextTeamId
+      ) {
+        return;
+      }
+
+      const slackConnector = await db
+        .selectFrom("connector_configs")
+        .select("id")
+        .where("connector_type", "=", "slack")
+        .executeTakeFirst();
+      if (slackConnector) {
+        await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: slackConnector.id });
+      }
+      logger.warn(
+        { previousTeamId: replacement.previousTeamId, nextTeamId: replacement.nextTeamId },
+        "Slack team changed; old-team participants and indexed files were fenced",
+      );
+    },
   });
 
   const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, {

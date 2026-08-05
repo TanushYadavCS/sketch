@@ -167,9 +167,10 @@ export interface SlackAdapterDeps {
   followupReviewHandler?: FollowupReviewCommandHandler;
 }
 
-export async function validateSlackTokens(botToken: string, appToken?: string) {
+export async function validateSlackTokens(botToken: string, appToken?: string): Promise<{ teamId: string | null }> {
   void appToken;
-  await slackApiCall(botToken, "auth.test");
+  const auth = await slackApiCall(botToken, "auth.test");
+  return { teamId: auth.team_id ?? null };
 }
 
 interface DownloadedSlackAttachment extends Attachment {
@@ -305,6 +306,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     botToken: tokens.botToken,
     ...(mode === "socket" ? { appToken: tokens.appToken } : { signingSecret: config.SLACK_SIGNING_SECRET }),
     logger,
+    onTeamIdResolved: async (teamId) => {
+      await deps.repos.settings.update({ slackTeamId: teamId });
+    },
   });
   const slackChannelParticipants = repos.slackChannelParticipants ?? createSlackChannelParticipantsRepository(db);
   const recordSlackChannelParticipantJoined =

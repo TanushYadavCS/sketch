@@ -108,6 +108,7 @@ export interface SlackBotConfig {
   logger: Logger;
   appToken?: string; // Required for socket mode
   signingSecret?: string; // Required for http mode
+  onTeamIdResolved?: (teamId: string) => Promise<void>;
 }
 
 /**
@@ -132,6 +133,7 @@ export class SlackBot {
   private logger: Logger;
   private mode: "socket" | "http";
   private signingSecret: string | undefined;
+  private onTeamIdResolved: ((teamId: string) => Promise<void>) | undefined;
   private handler: SlackMessageHandler | null = null;
   private channelMessageHandler: SlackMessageHandler | null = null;
   private mentionHandler: SlackMessageHandler | null = null;
@@ -150,6 +152,7 @@ export class SlackBot {
     this.logger = config.logger;
     this.mode = config.mode;
     this.signingSecret = config.signingSecret;
+    this.onTeamIdResolved = config.onTeamIdResolved;
 
     if (config.mode === "socket") {
       if (!config.appToken) {
@@ -225,6 +228,7 @@ export class SlackBot {
 
   async start(): Promise<void> {
     const auth = await this.app.client.auth.test();
+    if (auth.team_id) await this.onTeamIdResolved?.(auth.team_id);
     this.botUserId = auth.user_id ?? null;
     this.botId = "bot_id" in auth && typeof auth.bot_id === "string" ? auth.bot_id : null;
     this.logger.info({ botUserId: this.botUserId, botId: this.botId }, "Resolved bot IDs");

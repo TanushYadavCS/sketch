@@ -10,7 +10,7 @@ describe("slackApiCall", () => {
 
   it("returns parsed body when Slack auth.test succeeds", async () => {
     const token = "xoxb-valid";
-    const responseBody = { ok: true, team: "Test Workspace" };
+    const responseBody = { ok: true, team: "Test Workspace", team_id: "T123" };
 
     const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(JSON.stringify(responseBody), {
@@ -31,6 +31,7 @@ describe("slackApiCall", () => {
     });
     expect(options.signal).toBeInstanceOf(AbortSignal);
     expect(result).toEqual(responseBody);
+    expect(result.team_id).toBe("T123");
   });
 
   it("throws when Slack responds with ok: false", async () => {
