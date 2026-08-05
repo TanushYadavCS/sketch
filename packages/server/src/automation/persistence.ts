@@ -146,6 +146,43 @@ function mergeSteps(current: WorkflowStep[], requested: WorkflowStep[] | undefin
   });
 }
 
+/**
+ * Reconciles scheduler-authoritative fields onto inherited trigger JSON before an unrelated canonical edit.
+ * This intentional hidden write repairs drift while preserving a custom label; explicit trigger configs are merged afterward and remain caller-owned through validation.
+ */
+function reconcileInheritedScheduleTriggerSteps(
+  steps: WorkflowStep[],
+  params: {
+    scheduleType: "cron" | "interval" | "once";
+    scheduleValue: string;
+    timezone: string;
+  },
+): WorkflowStep[] {
+  let updated = false;
+  const next = steps.map((step) => {
+    if (step.type !== "trigger" || step.triggerConfig?.type !== "schedule") return step;
+    if (
+      step.triggerConfig.scheduleType === params.scheduleType &&
+      step.triggerConfig.scheduleValue === params.scheduleValue &&
+      step.triggerConfig.timezone === params.timezone
+    ) {
+      return step;
+    }
+    updated = true;
+    return {
+      ...step,
+      triggerConfig: {
+        ...step.triggerConfig,
+        scheduleType: params.scheduleType,
+        scheduleValue: params.scheduleValue,
+        timezone: params.timezone,
+      },
+    };
+  });
+
+  return updated ? next : steps;
+}
+
 function contentTypeForStep(step: WorkflowStep | undefined): "prompt" | "script" {
   return step?.type === "action" ? "script" : "prompt";
 }
@@ -187,7 +224,17 @@ function applyDefinitionPatch(
   let scheduleType = patch.scheduleType ?? definition.scheduleType;
   let scheduleValue = patch.scheduleValue ?? definition.scheduleValue;
   const timezone = patch.timezone ?? definition.timezone;
-  let steps = mergeSteps(definition.steps, patch.steps);
+  let inheritedSteps = definition.steps;
+  if (definition.scheduleType !== "external") {
+    inheritedSteps = reconcileInheritedScheduleTriggerSteps(inheritedSteps, {
+      scheduleType: definition.scheduleType,
+      scheduleValue: definition.scheduleValue,
+      timezone: definition.timezone,
+    });
+  }
+  const hasExplicitTriggerConfig =
+    patch.steps?.some((step) => step.type === "trigger" && step.triggerConfig !== undefined) ?? false;
+  let steps = mergeSteps(inheritedSteps, patch.steps);
   const trigger = steps.find((step) => step.type === "trigger")?.triggerConfig;
 
   if (trigger?.type === "slack_channel_message") {
@@ -199,7 +246,8 @@ function applyDefinitionPatch(
   } else if (
     (patch.scheduleType !== undefined || patch.scheduleValue !== undefined || patch.timezone !== undefined) &&
     scheduleType !== "external" &&
-    trigger?.type === "schedule"
+    trigger?.type === "schedule" &&
+    !hasExplicitTriggerConfig
   ) {
     steps = normalizeScheduleTriggerSteps(steps, { scheduleType, scheduleValue, timezone });
   }

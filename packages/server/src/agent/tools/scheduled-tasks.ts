@@ -509,6 +509,24 @@ function buildBuilderUrl(taskId: string, config: ManageScheduledTasksDeps["confi
   return `${base}${path}`;
 }
 
+/**
+ * Uses the scheduler refresh result when available and keeps the row-read fallback only for older scheduler implementations without that method.
+ */
+async function refreshTaskAfterMutation(
+  scheduler: TaskScheduler,
+  taskId: string,
+): Promise<{ task: ScheduledTask | null; failed: boolean }> {
+  if (typeof scheduler.refreshTaskSchedule !== "function") {
+    return { task: await scheduler.getTaskById(taskId), failed: false };
+  }
+
+  try {
+    return { task: await scheduler.refreshTaskSchedule(taskId), failed: false };
+  } catch {
+    return { task: null, failed: true };
+  }
+}
+
 function buildArtifactTags(params: {
   steps: Array<WorkflowStep & { apps?: string[] }>;
   scheduleType: string;
@@ -957,12 +975,11 @@ export async function handleManageScheduledTasks(
         throw error;
       }
 
-      const task =
-        typeof deps.scheduler.refreshTaskSchedule === "function"
-          ? await deps.scheduler.refreshTaskSchedule(saved.row.id).catch(() => null)
-          : null;
-      const refreshedTask = task ?? (await deps.scheduler.getTaskById(saved.row.id));
-      if (!refreshedTask) {
+      const { task: refreshedTask, failed: refreshFailed } = await refreshTaskAfterMutation(
+        deps.scheduler,
+        saved.row.id,
+      );
+      if (refreshFailed || !refreshedTask) {
         return text("Error: automation was saved, but its scheduler state could not be refreshed.");
       }
 
@@ -1043,12 +1060,9 @@ export async function handleManageScheduledTasks(
         );
       }
 
-      const refreshed =
-        typeof deps.scheduler.refreshTaskSchedule === "function"
-          ? await deps.scheduler.refreshTaskSchedule(saved.row.id).catch(() => null)
-          : null;
-      const updated = refreshed ?? (await deps.scheduler.getTaskById(saved.row.id));
-      if (!updated) return text("Error: automation was saved, but its scheduler state could not be refreshed.");
+      const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
+      if (refreshFailed || !updated)
+        return text("Error: automation was saved, but its scheduler state could not be refreshed.");
       return text(`Automation updated:\n${JSON.stringify(updated, null, 2)}`);
     }
 
@@ -1208,12 +1222,9 @@ export async function handleManageScheduledTasks(
           `Error: automation revision conflict. Task ${task_id} is now at revision ${saved.currentRevision}; refresh before retrying.`,
         );
       }
-      const refreshed =
-        typeof deps.scheduler.refreshTaskSchedule === "function"
-          ? await deps.scheduler.refreshTaskSchedule(saved.row.id).catch(() => null)
-          : null;
-      const updated = refreshed ?? (await deps.scheduler.getTaskById(saved.row.id));
-      if (!updated) return text("Error: automation was saved, but its scheduler state could not be refreshed.");
+      const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
+      if (refreshFailed || !updated)
+        return text("Error: automation was saved, but its scheduler state could not be refreshed.");
       return text(`Step ${params.step_id} content updated at revision ${saved.row.revision}.`);
     }
   }

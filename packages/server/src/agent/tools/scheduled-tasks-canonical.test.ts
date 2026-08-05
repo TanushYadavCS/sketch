@@ -220,6 +220,15 @@ function schedulerFor(taskId: string, createdBy = "owner-1") {
   } as never;
 }
 
+function schedulerWithoutRefresh(taskId: string, createdBy = "owner-1") {
+  const task = taskFor(taskId, createdBy);
+  return {
+    getTaskById: vi.fn().mockResolvedValue(task),
+    addTask: vi.fn(),
+    updateTask: vi.fn(),
+  } as never;
+}
+
 describe("ManageScheduledTasks canonical structured mutations", () => {
   let db: Awaited<ReturnType<typeof createTestDb>>;
 
@@ -296,6 +305,157 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
         apps: JSON.stringify(["clickup", "slack"]),
       }),
     ]);
+  });
+
+  it("reports a thrown scheduler refresh after add instead of reading the saved row", async () => {
+    const scheduler = schedulerFor("thrown-refresh-add");
+    const refreshTaskSchedule = (scheduler as { refreshTaskSchedule: ReturnType<typeof vi.fn> }).refreshTaskSchedule;
+    refreshTaskSchedule.mockRejectedValue(new Error("refresh failed"));
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "add",
+        title: "Daily account brief",
+        prompt: "Summarize account activity.",
+        schedule_type: "interval",
+        schedule_value: "120",
+        steps: [
+          definition().steps[0],
+          {
+            ...definition().steps[1],
+            agentPrompt: "Check activity and summarize changes.",
+            apps: ["clickup", "slack"],
+          },
+        ],
+        edges: definition().edges,
+      },
+      { db, scheduler, taskContext: taskContextFor("thrown-refresh-add") },
+    );
+
+    expect(result.content[0].text).toContain("saved, but its scheduler state could not be refreshed");
+    expect((scheduler as { getTaskById: ReturnType<typeof vi.fn> }).getTaskById).not.toHaveBeenCalled();
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([
+      expect.objectContaining({ revision: 0 }),
+    ]);
+  });
+
+  it("reports a thrown scheduler refresh after update instead of reading the saved row", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("thrown-refresh-update"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerFor("thrown-refresh-update");
+    const refreshTaskSchedule = (scheduler as { refreshTaskSchedule: ReturnType<typeof vi.fn> }).refreshTaskSchedule;
+    refreshTaskSchedule.mockRejectedValue(new Error("refresh failed"));
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "thrown-refresh-update", title: "Renamed brief", expected_revision: 0 },
+      { db, scheduler, taskContext: taskContextFor("thrown-refresh-update") },
+    );
+
+    expect(result.content[0].text).toContain("saved, but its scheduler state could not be refreshed");
+    expect((scheduler as { getTaskById: ReturnType<typeof vi.fn> }).getTaskById).toHaveBeenCalledOnce();
+    await expect(createScheduledTaskRepository(db).getById("thrown-refresh-update")).resolves.toMatchObject({
+      title: "Renamed brief",
+      revision: 1,
+    });
+  });
+
+  it("reports a thrown scheduler refresh after step-content update instead of reading the saved row", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("thrown-refresh-content"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerFor("thrown-refresh-content");
+    const refreshTaskSchedule = (scheduler as { refreshTaskSchedule: ReturnType<typeof vi.fn> }).refreshTaskSchedule;
+    refreshTaskSchedule.mockRejectedValue(new Error("refresh failed"));
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "updateStepContent",
+        task_id: "thrown-refresh-content",
+        step_id: "agent",
+        step_content: "Use the activity report and call out blockers.",
+        expected_revision: 0,
+      },
+      { db, scheduler, taskContext: taskContextFor("thrown-refresh-content") },
+    );
+
+    expect(result.content[0].text).toContain("saved, but its scheduler state could not be refreshed");
+    expect((scheduler as { getTaskById: ReturnType<typeof vi.fn> }).getTaskById).toHaveBeenCalledOnce();
+    await expect(createAutomationStepContentRepository(db).getByTask("thrown-refresh-content")).resolves.toEqual([
+      expect.objectContaining({ content: "Use the activity report and call out blockers." }),
+    ]);
+  });
+
+  it("falls back to a row read when the scheduler refresh method is unavailable", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("missing-refresh-method"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerWithoutRefresh("missing-refresh-method");
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "missing-refresh-method", title: "Renamed brief", expected_revision: 0 },
+      { db, scheduler, taskContext: taskContextFor("missing-refresh-method") },
+    );
+
+    expect(result.content[0].text).toContain("Automation updated:");
+    expect((scheduler as { getTaskById: ReturnType<typeof vi.fn> }).getTaskById).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a synchronous scheduler refresh throw instead of reading the saved row", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("sync-refresh-throw"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerFor("sync-refresh-throw");
+    const refreshTaskSchedule = (scheduler as { refreshTaskSchedule: ReturnType<typeof vi.fn> }).refreshTaskSchedule;
+    refreshTaskSchedule.mockImplementation(() => {
+      throw new Error("synchronous refresh failed");
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "sync-refresh-throw", title: "Renamed brief", expected_revision: 0 },
+      { db, scheduler, taskContext: taskContextFor("sync-refresh-throw") },
+    );
+
+    expect(result.content[0].text).toContain("saved, but its scheduler state could not be refreshed");
+    expect((scheduler as { getTaskById: ReturnType<typeof vi.fn> }).getTaskById).toHaveBeenCalledOnce();
+  });
+
+  it("does not fall back to a row read when a present scheduler refresh returns null", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("null-refresh-result"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerFor("null-refresh-result");
+    const refreshTaskSchedule = (scheduler as { refreshTaskSchedule: ReturnType<typeof vi.fn> }).refreshTaskSchedule;
+    refreshTaskSchedule.mockResolvedValue(null);
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "updateStepContent",
+        task_id: "null-refresh-result",
+        step_id: "agent",
+        step_content: "Use the activity report and call out blockers.",
+        expected_revision: 0,
+      },
+      { db, scheduler, taskContext: taskContextFor("null-refresh-result") },
+    );
+
+    expect(result.content[0].text).toContain("saved, but its scheduler state could not be refreshed");
+    expect((scheduler as { getTaskById: ReturnType<typeof vi.fn> }).getTaskById).toHaveBeenCalledOnce();
   });
 
   it("rejects unsupported fan-out graphs through canonical validation before persistence", async () => {
@@ -467,6 +627,123 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       created_by: "owner-1",
       last_edited_by: "owner-1",
       revision: 1,
+    });
+  });
+
+  it("reconciles inherited schedule metadata on a title-only edit while preserving a custom trigger label", async () => {
+    const initial = definition({
+      steps: [{ ...definition().steps[0], label: "Custom trigger label" }, definition().steps[1]],
+    });
+    await createAutomationDefinition({
+      db,
+      request: initial,
+      context: context("drifted-schedule-task"),
+      brokerCapable: true,
+    });
+
+    await createScheduledTaskRepository(db).update("drifted-schedule-task", {
+      steps: JSON.stringify([
+        {
+          ...initial.steps[0],
+          triggerConfig: {
+            type: "schedule",
+            scheduleType: "cron",
+            scheduleValue: "0 9 * * 1",
+            timezone: "Asia/Kolkata",
+          },
+        },
+        initial.steps[1],
+      ]),
+    });
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "drifted-schedule-task", title: "Renamed brief", expected_revision: 0 },
+      { db, scheduler: schedulerFor("drifted-schedule-task"), taskContext: taskContextFor("drifted-schedule-task") },
+    );
+
+    expect(result.content[0].text).toContain("Automation updated:");
+    const row = await createScheduledTaskRepository(db).getById("drifted-schedule-task");
+    const steps = JSON.parse(row?.steps ?? "[]");
+    expect(row).toMatchObject({ title: "Renamed brief", revision: 1 });
+    expect(steps[0]).toMatchObject({
+      label: "Custom trigger label",
+      triggerConfig: {
+        type: "schedule",
+        scheduleType: "interval",
+        scheduleValue: "120",
+        timezone: "UTC",
+      },
+    });
+  });
+
+  it("rejects a schedule change that conflicts with an explicitly supplied trigger config", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("explicit-trigger-conflict"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerFor("explicit-trigger-conflict");
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "explicit-trigger-conflict",
+        schedule_value: "300",
+        steps: [
+          {
+            ...definition().steps[0],
+            triggerConfig: {
+              type: "schedule",
+              scheduleType: "interval",
+              scheduleValue: "120",
+              timezone: "UTC",
+            },
+          },
+          definition().steps[1],
+        ],
+        expected_revision: 0,
+      },
+      { db, scheduler, taskContext: taskContextFor("explicit-trigger-conflict") },
+    );
+
+    expect(result.content[0].text).toContain("SCHEDULE_TRIGGER_MISMATCH");
+    await expect(createScheduledTaskRepository(db).getById("explicit-trigger-conflict")).resolves.toMatchObject({
+      schedule_value: "120",
+      revision: 0,
+    });
+  });
+
+  it("rejects a partial explicitly supplied schedule config instead of repairing it", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("partial-explicit-trigger"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerFor("partial-explicit-trigger");
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "partial-explicit-trigger",
+        schedule_value: "300",
+        steps: [
+          {
+            ...definition().steps[0],
+            triggerConfig: { type: "schedule", scheduleType: "interval" },
+          },
+          definition().steps[1],
+        ],
+        expected_revision: 0,
+      },
+      { db, scheduler, taskContext: taskContextFor("partial-explicit-trigger") },
+    );
+
+    expect(result.content[0].text).toContain("SCHEDULE_TRIGGER_MISMATCH");
+    await expect(createScheduledTaskRepository(db).getById("partial-explicit-trigger")).resolves.toMatchObject({
+      schedule_value: "120",
+      revision: 0,
     });
   });
 
