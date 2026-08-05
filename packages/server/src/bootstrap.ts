@@ -740,7 +740,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       return { botToken: settings.slack_bot_token, teamId: settings.slack_team_id };
     },
     createFacade: (botToken) => {
-      const pinned = slackIndexingFacade.withToken?.(botToken);
+      const pinned = slackIndexingFacade.withToken?.(botToken, { isolatedLimiter: true });
       if (!pinned || !pinned.listUsersPage || !pinned.listChannelsPage || !pinned.listChannelMembersPage) {
         throw new Error("Slack indexing facade cannot pin a connection token");
       }

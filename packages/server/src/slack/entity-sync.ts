@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely, Selectable } from "kysely";
-import { type SlackUserProfile, upsertSlackPersonEntityInTransaction } from "../db/repositories/slack-entity-sync";
+import { type SlackUserProfile, upsertSlackPersonEntity } from "../db/repositories/slack-entity-sync";
 import type { DB, SlackSyncRunsTable, SlackUserSyncStateTable } from "../db/schema";
 import type { Logger } from "../logger";
 import type { SlackIndexingChannel, SlackIndexingPage, SlackIndexingUser } from "./indexing-facade";
@@ -48,7 +48,7 @@ export interface SlackEntitySyncFacade {
   listUsersPage: (cursor?: string) => Promise<SlackIndexingPage<SlackIndexingUser>>;
   listChannelsPage: (cursor?: string) => Promise<SlackIndexingPage<SlackIndexingChannel>>;
   listChannelMembersPage: (channelId: string, cursor?: string) => Promise<SlackIndexingPage<string>>;
-  getUserInfo: (userId: string) => Promise<SlackIndexingUser>;
+  getUserInfo: (userId: string, options?: { fresh?: boolean }) => Promise<SlackIndexingUser>;
 }
 
 export interface SlackEntitySyncLogger {
@@ -191,8 +191,8 @@ function profileFromUser(user: SlackIndexingUser, teamId: string, fetchedAt: str
   };
 }
 
-function isPendingState(state: PendingState): boolean {
-  if (!state.profile_json) return false;
+function isPendingState(state: PendingState | undefined): boolean {
+  if (!state?.profile_json) return false;
   try {
     const value = JSON.parse(state.profile_json) as unknown;
     return Boolean(value && typeof value === "object" && (value as Record<string, unknown>).status === "pending");
@@ -258,9 +258,16 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
         error: JSON.stringify({ kind: "stale_run_reclaimed" }),
         updated_at: now(),
       })
-      .where("status", "=", RUN_STATUS_RUNNING)
-      .where("heartbeat_at", "is not", null)
-      .where("heartbeat_at", "<", cutoff)
+      .where((eb) =>
+        eb.or([
+          eb.and([
+            eb("status", "=", RUN_STATUS_RUNNING),
+            eb("heartbeat_at", "is not", null),
+            eb("heartbeat_at", "<", cutoff),
+          ]),
+          eb.and([eb("status", "=", RUN_STATUS_QUEUED), eb("updated_at", "<", cutoff)]),
+        ]),
+      )
       .execute();
   }
 
@@ -347,33 +354,46 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     };
   }
 
-  async function claimRun(run: SyncRun): Promise<SyncRun | null> {
+  async function claimNextRun(teamId: string): Promise<SyncRun | null> {
+    const staleCutoff = new Date(Date.now() - staleRunMs).toISOString();
+    await deps.db
+      .updateTable("slack_sync_runs")
+      .set({
+        status: RUN_STATUS_QUEUED,
+        heartbeat_at: null,
+        updated_at: now(),
+        error: JSON.stringify({ kind: "stale_run_reclaimed" }),
+      })
+      .where("team_id", "=", teamId)
+      .where("status", "=", RUN_STATUS_RUNNING)
+      .where("heartbeat_at", "is not", null)
+      .where("heartbeat_at", "<", staleCutoff)
+      .execute();
+
     const activeRun = await deps.db
       .selectFrom("slack_sync_runs")
       .select("id")
-      .where("team_id", "=", run.team_id)
-      .where("id", "!=", run.id)
-      .where("status", "in", [RUN_STATUS_QUEUED, RUN_STATUS_RUNNING])
+      .where("team_id", "=", teamId)
+      .where("status", "=", RUN_STATUS_RUNNING)
+      .where((eb) => eb.or([eb("heartbeat_at", "is", null), eb("heartbeat_at", ">=", staleCutoff)]))
       .executeTakeFirst();
     if (activeRun) return null;
+
+    const run = await deps.db
+      .selectFrom("slack_sync_runs")
+      .selectAll()
+      .where("team_id", "=", teamId)
+      .where("status", "=", RUN_STATUS_QUEUED)
+      .orderBy("created_at", "asc")
+      .orderBy("id", "asc")
+      .executeTakeFirst();
+    if (!run) return null;
     const timestamp = now();
-    const staleCutoff = new Date(Date.now() - staleRunMs).toISOString();
     const result = await deps.db
       .updateTable("slack_sync_runs")
       .set({ status: RUN_STATUS_RUNNING, heartbeat_at: timestamp, updated_at: timestamp })
       .where("id", "=", run.id)
-      .where((eb) =>
-        eb.or([
-          eb("status", "=", RUN_STATUS_QUEUED),
-          eb("status", "=", RUN_STATUS_FAILED),
-          eb("status", "=", RUN_STATUS_ABORTED),
-          eb.and([
-            eb("status", "=", RUN_STATUS_RUNNING),
-            eb("heartbeat_at", "is not", null),
-            eb("heartbeat_at", "<", staleCutoff),
-          ]),
-        ]),
-      )
+      .where("status", "=", RUN_STATUS_QUEUED)
       .executeTakeFirst();
     if (result.numUpdatedRows === 0n) return null;
     return { ...run, status: RUN_STATUS_RUNNING, heartbeat_at: timestamp, updated_at: timestamp };
@@ -438,11 +458,11 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     fetchedAt: string,
     infoFetchedIds: Set<string>,
     infoLookups: { count: number },
-    refreshExisting: boolean,
     counters?: SyncCounters,
   ): Promise<{ profiles: SlackUserProfile[]; pending: Array<{ id: string; reason: string }> }> {
     const profiles: SlackUserProfile[] = [];
     const pending: Array<{ id: string; reason: string }> = [];
+    const candidates: Array<{ slackUserId: string; state: PendingState | undefined }> = [];
     for (const slackUserId of new Set(memberIds)) {
       const state = await deps.db
         .selectFrom("slack_user_sync_state")
@@ -450,7 +470,11 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
         .where("team_id", "=", teamId)
         .where("slack_user_id", "=", slackUserId)
         .executeTakeFirst();
-      if (state && !isPendingState(state) && !refreshExisting) continue;
+      if (state && !isPendingState(state)) continue;
+      candidates.push({ slackUserId, state });
+    }
+    candidates.sort((a, b) => Number(isPendingState(b.state)) - Number(isPendingState(a.state)));
+    for (const { slackUserId } of candidates) {
       if (infoFetchedIds.has(slackUserId)) continue;
       infoFetchedIds.add(slackUserId);
       if (infoLookups.count >= userInfoCap) {
@@ -460,7 +484,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
       }
       infoLookups.count += 1;
       try {
-        const user = await facade.getUserInfo(slackUserId);
+        const user = await facade.getUserInfo(slackUserId, { fresh: true });
         const profile = profileFromUser(user, teamId, fetchedAt);
         if (profile) profiles.push(profile);
         else pending.push({ id: slackUserId, reason: "users.info_unreadable" });
@@ -494,9 +518,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     await assertActiveConnection(connection);
     const profile = profileFromUser(user, connection.teamId, fetchedAt);
     if (!profile || profile.isBot) return;
-    await deps.db.transaction().execute(async (trx) => {
-      await upsertSlackPersonEntityInTransaction(trx, profile);
-    });
+    await upsertSlackPersonEntity(deps.db, profile);
   }
 
   async function assertActiveConnection(connection: SlackEntitySyncConnection): Promise<void> {
@@ -537,13 +559,12 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
         fetchedAt,
         infoFetchedIds,
         infoLookups,
-        false,
       );
       await assertActiveConnection(connection);
+      for (const profile of resolved.profiles) {
+        await upsertSlackPersonEntity(deps.db, profile);
+      }
       await deps.db.transaction().execute(async (trx) => {
-        for (const profile of resolved.profiles) {
-          await upsertSlackPersonEntityInTransaction(trx, profile);
-        }
         for (const pending of resolved.pending) {
           await writePendingState(trx, connection.teamId, pending.id, pending.reason, fetchedAt);
         }
@@ -577,10 +598,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     if (!deps.enabled) return;
     const connection = await resolveEventConnection(event.teamId);
     if (!connection) return;
-    const key = `${connection.teamId}:${event.channelId}`;
-    const existing = inflightByTeam.get(key);
-    if (existing) return existing;
-    const pending = (async () => {
+    await enqueueTeamWork(connection, async () => {
       try {
         await syncImmediateChannelRoster(connection, event.channelId, deps.createFacade(connection.botToken));
         deps.logger.info(
@@ -593,10 +611,6 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
           "Slack channel roster refresh after bot join failed",
         );
       }
-    })();
-    inflightByTeam.set(key, pending);
-    await pending.finally(() => {
-      if (inflightByTeam.get(key) === pending) inflightByTeam.delete(key);
     });
   }
 
@@ -626,20 +640,16 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     }
   }
 
-  async function upsertProfileWithCounters(
-    trx: Kysely<DB>,
-    profile: SlackUserProfile,
-    counters?: SyncCounters,
-  ): Promise<void> {
+  async function upsertProfileWithCounters(profile: SlackUserProfile, counters?: SyncCounters): Promise<void> {
     const before = counters
-      ? await trx
+      ? await deps.db
           .selectFrom("slack_user_sync_state")
           .select(["entity_id", "classification", "inactive_at"])
           .where("team_id", "=", profile.teamId)
           .where("slack_user_id", "=", profile.slackUserId)
           .executeTakeFirst()
       : undefined;
-    const result = await upsertSlackPersonEntityInTransaction(trx, profile);
+    const result = await upsertSlackPersonEntity(deps.db, profile);
     if (!counters) return;
     counters.scanned += 1;
     if (!result.applied) {
@@ -690,16 +700,13 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
             conversations_cursor: run.conversations_cursor,
             heartbeat_at: fetchedAt,
           };
-      const committedPatch = await deps.db.transaction().execute(async (trx) => {
-        for (const user of page.items) {
-          if (user.isBot) continue;
-          const profile = profileFromUser(user, connection.teamId, fetchedAt);
-          if (!profile) continue;
-          await upsertProfileWithCounters(trx, profile, counters);
-        }
-        return updateRunInTransaction(trx, run, patch);
-      });
-      Object.assign(run, committedPatch);
+      for (const user of page.items) {
+        if (user.isBot) continue;
+        const profile = profileFromUser(user, connection.teamId, fetchedAt);
+        if (!profile) continue;
+        await upsertProfileWithCounters(profile, counters);
+      }
+      await updateRun(run, patch);
       cursor = nextCursor ?? undefined;
       if (!cursor) return;
     }
@@ -712,7 +719,6 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     channel: SlackIndexingChannel,
     infoFetchedIds: Set<string>,
     infoLookups: { count: number },
-    refreshExisting: boolean,
     rosterUserIds: Set<string> | undefined,
     counters: SyncCounters,
   ): Promise<void> {
@@ -751,15 +757,14 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
         fetchedAt,
         infoFetchedIds,
         infoLookups,
-        refreshExisting,
         counters,
       );
       await assertActiveTeam(run);
       const nextCursor = page.nextCursor;
+      for (const profile of resolved.profiles) {
+        await upsertProfileWithCounters(profile, counters);
+      }
       const patch = await deps.db.transaction().execute(async (trx) => {
-        for (const profile of resolved.profiles) {
-          await upsertProfileWithCounters(trx, profile, counters);
-        }
         for (const pending of resolved.pending) {
           await writePendingState(trx, connection.teamId, pending.id, pending.reason, fetchedAt);
         }
@@ -821,6 +826,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
         const isPublic = channel.isPrivate !== true;
         const shouldSync = isPublic ? deps.publicChannelsEnabled : channel.isMember === true;
         if (!shouldSync) {
+          complete = false;
           const patch = await deps.db.transaction().execute(async (trx) => {
             return recordSkipReasonInTransaction(
               trx,
@@ -833,17 +839,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
           resumeChannel = null;
           continue;
         }
-        await syncChannel(
-          run,
-          connection,
-          facade,
-          channel,
-          infoFetchedIds,
-          infoLookups,
-          run.run_type === SWEEP_RUN_TYPE,
-          rosterUserIds,
-          counters,
-        );
+        await syncChannel(run, connection, facade, channel, infoFetchedIds, infoLookups, rosterUserIds, counters);
         const details = parseRunError(run.error);
         if (details.skipReasons?.some((reason) => reason.channelId === channel.id)) complete = false;
         resumeChannel = null;
@@ -908,6 +904,73 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     }
   }
 
+  async function completeRun(run: SyncRun): Promise<void> {
+    const timestamp = now();
+    await deps.db.transaction().execute(async (trx) => {
+      await trx
+        .updateTable("slack_sync_runs")
+        .set({
+          status: RUN_STATUS_COMPLETED,
+          stage: COMPLETED_STAGE,
+          heartbeat_at: timestamp,
+          completed_at: timestamp,
+          updated_at: timestamp,
+        })
+        .where("id", "=", run.id)
+        .execute();
+      if (run.run_type === BACKFILL_RUN_TYPE) {
+        await trx
+          .insertInto("slack_sync_runs")
+          .values({
+            id: randomUUID(),
+            team_id: run.team_id,
+            run_type: SWEEP_RUN_TYPE,
+            trigger_key: `repair-after-backfill:${run.id}`,
+            pinned_team_id: run.pinned_team_id,
+            status: RUN_STATUS_QUEUED,
+            stage: INITIAL_STAGE,
+            heartbeat_at: null,
+            users_cursor: null,
+            conversations_cursor: null,
+            members_cursor: null,
+            current_channel_id: null,
+            started_at: timestamp,
+            completed_at: null,
+            error: null,
+            created_at: timestamp,
+            updated_at: timestamp,
+          })
+          .onConflict((oc) => oc.columns(["team_id", "trigger_key"]).doNothing())
+          .execute();
+        await trx
+          .updateTable("slack_sync_runs")
+          .set({
+            status: RUN_STATUS_QUEUED,
+            stage: INITIAL_STAGE,
+            heartbeat_at: null,
+            users_cursor: null,
+            conversations_cursor: null,
+            members_cursor: null,
+            current_channel_id: null,
+            completed_at: null,
+            error: null,
+            updated_at: timestamp,
+          })
+          .where("team_id", "=", run.team_id)
+          .where("trigger_key", "=", `repair-after-backfill:${run.id}`)
+          .where("status", "in", [RUN_STATUS_FAILED, RUN_STATUS_ABORTED])
+          .execute();
+      }
+    });
+    Object.assign(run, {
+      status: RUN_STATUS_COMPLETED,
+      stage: COMPLETED_STAGE,
+      heartbeat_at: timestamp,
+      completed_at: timestamp,
+      updated_at: timestamp,
+    });
+  }
+
   async function executeRun(run: SyncRun, connection: SlackEntitySyncConnection): Promise<void> {
     const facade = deps.createFacade(connection.botToken);
     const heartbeat = setInterval(() => void touchHeartbeat(run), heartbeatMs);
@@ -926,12 +989,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
       if (run.run_type === SWEEP_RUN_TYPE && startedStage === INITIAL_STAGE && channelCrawlComplete) {
         await tombstoneAbsentExternals(connection, run.started_at, rosterUserIds, counters);
       }
-      await updateRun(run, {
-        status: RUN_STATUS_COMPLETED,
-        stage: COMPLETED_STAGE,
-        heartbeat_at: now(),
-        completed_at: now(),
-      });
+      await completeRun(run);
       deps.logger.info(
         {
           runId: run.id,
@@ -970,61 +1028,49 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
 
   async function runTeam(connection: SlackEntitySyncConnection, runType: string, triggerKey: string): Promise<void> {
     if (stopped) return;
-    const run = await ensureRun(connection, runType, triggerKey);
-    if (run.status === RUN_STATUS_COMPLETED) return;
-    const claimed = await claimRun(run);
-    if (!claimed) return;
-    try {
-      await executeRun(claimed, connection);
-      if (claimed.run_type === BACKFILL_RUN_TYPE) {
-        await runTeam(connection, SWEEP_RUN_TYPE, `repair-after-backfill:${claimed.id}`);
+    const requested = await ensureRun(connection, runType, triggerKey);
+    if (requested.status === RUN_STATUS_COMPLETED && runType === SWEEP_RUN_TYPE) await queueCompletedRun(requested);
+    while (!stopped) {
+      const claimed = await claimNextRun(connection.teamId);
+      if (!claimed) return;
+      try {
+        await executeRun(claimed, connection);
+      } catch (error) {
+        if (isTeamChangedError(error)) {
+          await markRunAborted(claimed);
+          deps.logger.warn(
+            { runId: claimed.id, teamId: connection.teamId },
+            "Slack entity sync aborted after team change",
+          );
+        } else {
+          await markRunFailed(claimed, error);
+          deps.logger.warn({ error, runId: claimed.id, teamId: connection.teamId }, "Slack entity sync failed");
+        }
       }
-    } catch (error) {
-      if (isTeamChangedError(error)) {
-        await markRunAborted(claimed);
-        deps.logger.warn(
-          { runId: claimed.id, teamId: connection.teamId },
-          "Slack entity sync aborted after team change",
-        );
-        return;
-      }
-      await markRunFailed(claimed, error);
-      deps.logger.warn({ error, runId: claimed.id, teamId: connection.teamId }, "Slack entity sync failed");
     }
   }
 
-  function enqueueBackfill(connection: SlackEntitySyncConnection): Promise<void> {
+  function enqueueTeamWork(connection: SlackEntitySyncConnection, work: () => Promise<void>): Promise<void> {
     if (!deps.enabled || stopped) return Promise.resolve();
     const existing = inflightByTeam.get(connection.teamId);
     if (existing) return existing;
-    const pending = runTeam(connection, BACKFILL_RUN_TYPE, BACKFILL_TRIGGER_KEY);
+    const pending = Promise.resolve().then(work);
     inflightByTeam.set(connection.teamId, pending);
     return pending.finally(() => {
       if (inflightByTeam.get(connection.teamId) === pending) inflightByTeam.delete(connection.teamId);
     });
   }
 
-  async function enqueueSweep(connection: SlackEntitySyncConnection): Promise<void> {
-    if (!deps.enabled || stopped) return;
-    const existing = inflightByTeam.get(connection.teamId);
-    if (existing) return existing;
-    const pending = runTeam(connection, SWEEP_RUN_TYPE, `${SWEEP_TRIGGER_KEY}:${randomUUID()}`);
-    inflightByTeam.set(connection.teamId, pending);
-    await pending.finally(() => {
-      if (inflightByTeam.get(connection.teamId) === pending) inflightByTeam.delete(connection.teamId);
-    });
+  function enqueueBackfill(connection: SlackEntitySyncConnection): Promise<void> {
+    return enqueueTeamWork(connection, () => runTeam(connection, BACKFILL_RUN_TYPE, BACKFILL_TRIGGER_KEY));
+  }
+
+  function enqueueSweep(connection: SlackEntitySyncConnection): Promise<void> {
+    return enqueueTeamWork(connection, () => runTeam(connection, SWEEP_RUN_TYPE, SWEEP_TRIGGER_KEY));
   }
 
   async function enqueueScheduledSweep(connection: SlackEntitySyncConnection): Promise<void> {
     if (!deps.enabled || stopped) return;
-    const active = await deps.db
-      .selectFrom("slack_sync_runs")
-      .select("id")
-      .where("team_id", "=", connection.teamId)
-      .where("status", "in", [RUN_STATUS_QUEUED, RUN_STATUS_RUNNING])
-      .executeTakeFirst();
-    if (active) return;
-
     const latest = await deps.db
       .selectFrom("slack_sync_runs")
       .select("completed_at")
@@ -1036,9 +1082,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
       .executeTakeFirst();
     if (latest?.completed_at && Date.now() - Date.parse(latest.completed_at) < sweepIntervalMs) return;
 
-    let run = await ensureRun(connection, SWEEP_RUN_TYPE, SWEEP_TRIGGER_KEY);
-    if (run.status === RUN_STATUS_COMPLETED) run = await queueCompletedRun(run);
-    await runTeam(connection, run.run_type, run.trigger_key);
+    await enqueueSweep(connection);
   }
 
   function start(): void {

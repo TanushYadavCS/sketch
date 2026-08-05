@@ -63,6 +63,37 @@ function stableContentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+export async function backfillSlackFileAccess(options: {
+  db: Kysely<DB>;
+  grandfatheringEnabled: boolean;
+}): Promise<number> {
+  if (!options.grandfatheringEnabled) return 0;
+  return options.db.transaction().execute(async (trx) => {
+    await trx
+      .insertInto("slack_file_access_backfill")
+      .values({ id: "default", completed_at: null })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    const claim = await trx
+      .updateTable("slack_file_access_backfill")
+      .set({ completed_at: new Date().toISOString() })
+      .where("id", "=", "default")
+      .where("completed_at", "is", null)
+      .executeTakeFirst();
+    if (claim.numUpdatedRows === 0n) return 0;
+    const result = await sql`
+      INSERT INTO file_access (indexed_file_id, email)
+      SELECT indexed_files.id, access_scope_members.email
+      FROM indexed_files
+      INNER JOIN access_scope_members ON access_scope_members.access_scope_id = indexed_files.access_scope_id
+      WHERE indexed_files.source = 'slack'
+        AND indexed_files.access_scope_id IS NOT NULL
+      ON CONFLICT DO NOTHING
+    `.execute(trx);
+    return Number(result.numAffectedRows ?? 0);
+  });
+}
+
 /**
  * Slack rendering fails closed on membership: a slice's id range interleaves
  * channel and thread rows, so the WhatsApp range fallback would leak text

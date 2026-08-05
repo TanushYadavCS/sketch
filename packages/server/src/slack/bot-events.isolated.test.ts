@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestLogger } from "../test-utils";
 
 const mocks = vi.hoisted(() => ({
@@ -32,6 +32,10 @@ async function deliver(message: Record<string, unknown>) {
 }
 
 describe("SlackBot channel message normalization", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     mocks.messageHandler = undefined;
     mocks.auth = { user_id: "U_SKETCH", bot_id: "B_SKETCH", team_id: "T_SKETCH" };
@@ -94,5 +98,50 @@ describe("SlackBot channel message normalization", () => {
     });
 
     expect(onThreadMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not start lifecycle silence monitoring when lifecycle sync is disabled", async () => {
+    vi.useFakeTimers();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const bot = new SlackBot({
+      mode: "socket",
+      botToken: "xoxb-test",
+      appToken: "xapp-test",
+      logger: logger as never,
+      eventSilenceThresholdMs: 1,
+      lifecycleEventsEnabled: false,
+    });
+
+    await bot.start();
+    vi.advanceTimersByTime(60_000);
+
+    expect(logger.warn).not.toHaveBeenCalled();
+    await bot.stop();
+  });
+
+  it("emits one structured warning per silent lifecycle event when monitoring is enabled", async () => {
+    vi.useFakeTimers();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const bot = new SlackBot({
+      mode: "socket",
+      botToken: "xoxb-test",
+      appToken: "xapp-test",
+      logger: logger as never,
+      eventSilenceThresholdMs: 1,
+    });
+
+    await bot.start();
+    vi.advanceTimersByTime(60_000);
+
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "team_join", thresholdMs: 1 }),
+      expect.stringContaining("manifest"),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "user_change", thresholdMs: 1 }),
+      expect.stringContaining("manifest"),
+    );
+    await bot.stop();
   });
 });

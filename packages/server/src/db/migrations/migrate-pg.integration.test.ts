@@ -197,11 +197,12 @@ describe("runMigrations on Postgres — full sequence", () => {
       SELECT table_name
       FROM information_schema.tables
       WHERE table_schema = 'public'
-        AND table_name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
+        AND table_name IN ('organization_domains', 'slack_file_access_backfill', 'slack_user_sync_state', 'slack_sync_runs')
       ORDER BY table_name
     `.execute(db);
     expect(tables.rows.map((row) => row.table_name)).toEqual([
       "organization_domains",
+      "slack_file_access_backfill",
       "slack_sync_runs",
       "slack_user_sync_state",
     ]);

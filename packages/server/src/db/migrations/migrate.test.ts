@@ -233,11 +233,12 @@ describe("runMigrations — full sequence", () => {
     const tables = await sql<{ name: string }>`
       SELECT name FROM sqlite_master
       WHERE type = 'table'
-        AND name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
+        AND name IN ('organization_domains', 'slack_file_access_backfill', 'slack_user_sync_state', 'slack_sync_runs')
       ORDER BY name
     `.execute(db);
     expect(tables.rows.map((row) => row.name)).toEqual([
       "organization_domains",
+      "slack_file_access_backfill",
       "slack_sync_runs",
       "slack_user_sync_state",
     ]);

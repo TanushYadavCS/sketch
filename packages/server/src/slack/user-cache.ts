@@ -45,7 +45,7 @@ export class UserCache {
     if (pending) return pending;
 
     const request = fetcher(userId).then((value) => {
-      this.cache.set(userId, { value, fetchedAt: this.now() });
+      if (this.inflight.get(userId) === request) this.cache.set(userId, { value, fetchedAt: this.now() });
       return value;
     });
     this.inflight.set(userId, request);
@@ -54,6 +54,12 @@ export class UserCache {
     } finally {
       if (this.inflight.get(userId) === request) this.inflight.delete(userId);
     }
+  }
+
+  async refresh(userId: string, fetcher: (id: string) => Promise<CachedUser>): Promise<CachedUser> {
+    this.cache.delete(userId);
+    this.inflight.delete(userId);
+    return this.resolve(userId, fetcher);
   }
 
   clear(): void {

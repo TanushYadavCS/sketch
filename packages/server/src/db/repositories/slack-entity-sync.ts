@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type ExpressionBuilder, type Kysely, type Selectable, sql } from "kysely";
+import { type ExpressionBuilder, type Kysely, type Selectable, type SqlBool, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import type { DB, EntitiesTable, SlackUserSyncStateTable } from "../schema";
 import { createEntityRepository, normalizeContactPointValue } from "./entities";
@@ -113,6 +113,10 @@ function parseAliases(raw: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, "\\$&");
 }
 
 async function resolveSlackSourceRefEntity(
@@ -458,19 +462,27 @@ async function runUpsertBody(
       : undefined;
   const hasSourceReview = !entity && !reviewReason && Boolean(existingSourceReview);
   if (!entity && !reviewReason && name && !suppressed && !hasSourceReview && !sourceRefBlocksCreation) {
+    const escapedName = escapeLikePattern(name.toLowerCase());
     const candidates = await trx
       .selectFrom("entities")
       .select(["id", "name", "aliases"])
       .where("source_type", "=", "person")
       .where("deleted_at", "is", null)
       .where("merged_into_entity_id", "is", null)
-      .where((eb) =>
-        eb.or([
-          eb(sql<string>`lower(name)`, "=", name.toLowerCase()),
-          eb(sql<string>`lower(aliases)`, "like", `%${name.toLowerCase()}%`),
-        ]),
+      .where(
+        sql<SqlBool>`(
+          lower(${sql.ref("name")}) = ${name.toLowerCase()}
+          OR lower(${sql.ref("aliases")}) LIKE ${`%${escapedName}%`} ESCAPE '\\'
+        )`,
       )
+      .limit(100)
       .execute();
+    if (candidates.length === 100) {
+      options.logger?.warn(
+        { slackUserId: profile.slackUserId, candidateLimit: 100 },
+        "Slack entity name candidate scan reached its safety limit",
+      );
+    }
     const normalizedProfileName = normalizeName(name);
     const exactCandidates = candidates.filter(
       (candidate) =>

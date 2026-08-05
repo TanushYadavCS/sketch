@@ -312,6 +312,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     eventSilenceThresholdMs: config.SLACK_ENTITY_SYNC
       ? config.SLACK_ENTITY_EVENT_SILENCE_THRESHOLD_MS
       : Number.MAX_SAFE_INTEGER,
+    lifecycleEventsEnabled: config.SLACK_ENTITY_SYNC,
     onTeamIdResolved: async (teamId) => {
       await deps.repos.settings.update({ slackTeamId: teamId });
     },
@@ -330,10 +331,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
   slackBot.onMemberJoinedChannel(async ({ channelId, slackUserId, isBot, teamId }) => {
     await recordSlackChannelParticipantJoined(channelId, slackUserId);
     if (isBot && deps.slackEntitySync) {
-      await deps.slackEntitySync.handleBotJoinedChannel({
-        channelId,
-        ...(teamId ? { teamId } : {}),
-      });
+      void deps.slackEntitySync
+        .handleBotJoinedChannel({
+          channelId,
+          ...(teamId ? { teamId } : {}),
+        })
+        .catch((error) => {
+          logger.warn({ error, teamId, channelId }, "Slack bot-join entity sync failed");
+        });
     }
   });
   slackBot.onMemberLeftChannel(({ channelId, slackUserId }) =>

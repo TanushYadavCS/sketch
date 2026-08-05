@@ -72,6 +72,11 @@ function sourceFromType(sourceType: string): string | null {
 }
 
 function entityContext(entity: EntityListItem): string | null {
+  if (entity.sourceType === "person") {
+    if (entity.subtype === "internal") return "Internal";
+    if (entity.subtype === "external") return "External";
+    return "Unknown";
+  }
   const m = entity.metadata;
   if (!m) return null;
   if (m.workspaceName) {
@@ -81,9 +86,6 @@ function entityContext(entity: EntityListItem): string | null {
   if (entity.sourceType === "clickup_workspace") return null;
   if (m.path) return m.path as string;
   if (m.parentPage) return m.parentPage as string;
-  if (entity.sourceType === "person" && entity.subtype) {
-    return entity.subtype === "internal" ? "Internal" : "External";
-  }
   if (entity.sourceType === "company" && entity.subtype) {
     return entity.subtype.charAt(0).toUpperCase() + entity.subtype.slice(1);
   }

@@ -3,6 +3,7 @@ import {
   DEFAULT_SLACK_SALIENCE_BATCH_LIMIT,
   SLACK_EMISSION_REFRESH_DAYS,
   archiveAllSlackChannelFiles,
+  backfillSlackFileAccess,
   emitSlackSyncedItems,
   processSlackSalience,
   reconcileSlackChannelAcls,
@@ -52,6 +53,8 @@ export function createSlackIndexingConnector(): Connector {
       if (!db) throw new Error("Slack indexing connector requires database access");
       if (!connectorConfigId) throw new Error("Slack indexing connector requires its connector config id");
       const grandfatheringEnabled = appConfig?.SLACK_ACCESS_GRANDFATHERING ?? true;
+      const backfilledFileAccess = await backfillSlackFileAccess({ db, grandfatheringEnabled });
+      if (backfilledFileAccess > 0) logger.info({ backfilledFileAccess }, "Backfilled Slack historical file access");
       if (!slackIndexing || !(await slackIndexing.isConfigured())) {
         await archiveAllSlackChannelFiles({ db, logger, connectorConfigId, grandfatheringEnabled });
         logger.warn("Slack indexing skipped: no Slack bot token configured");

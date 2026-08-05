@@ -411,6 +411,36 @@ describe("slack/adapter", () => {
       expect(entitySync.handleBotJoinedChannel).toHaveBeenCalledOnce();
     });
 
+    it("does not hold the Slack event handler open for a full bot-join crawl", async () => {
+      let release!: () => void;
+      const crawl = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const entitySync = {
+        handleUserEvent: vi.fn().mockResolvedValue(undefined),
+        handleBotJoinedChannel: vi.fn().mockReturnValue(crawl),
+        observeMessage: vi.fn().mockResolvedValue(undefined),
+      };
+      const deps = { ...makeDeps(), slackEntitySync: entitySync } as unknown as SlackAdapterDeps;
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+
+      const joined = mockBotInstance.onMemberJoinedChannel.mock.calls[0]?.[0] as (event: {
+        channelId: string;
+        slackUserId: string;
+        isBot?: boolean;
+        teamId?: string;
+      }) => Promise<void>;
+      let returned = false;
+      const result = joined({ teamId: "T1", channelId: "C1", slackUserId: "UBOT", isBot: true }).then(() => {
+        returned = true;
+      });
+
+      await vi.waitFor(() => expect(entitySync.handleBotJoinedChannel).toHaveBeenCalledOnce());
+      expect(returned).toBe(true);
+      release();
+      await result;
+    });
+
     it("uses the observe-on-message entity backstop for channel senders", async () => {
       const entitySync = {
         handleUserEvent: vi.fn().mockResolvedValue(undefined),

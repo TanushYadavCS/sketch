@@ -720,6 +720,11 @@ export interface SlackSyncRunsTable {
   updated_at: Generated<string>;
 }
 
+export interface SlackFileAccessBackfillTable {
+  id: string;
+  completed_at: string | null;
+}
+
 export interface WhatsAppBackfillCheckpointsTable {
   group_jid: string;
   last_fetched_key: string | null;
@@ -1454,6 +1459,7 @@ export interface DB {
   organization_domains: OrganizationDomainsTable;
   slack_user_sync_state: SlackUserSyncStateTable;
   slack_sync_runs: SlackSyncRunsTable;
+  slack_file_access_backfill: SlackFileAccessBackfillTable;
   connector_configs: ConnectorConfigsTable;
   indexed_files: IndexedFilesTable;
   email_message_envelopes: EmailMessageEnvelopesTable;

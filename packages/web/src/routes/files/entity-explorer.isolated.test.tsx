@@ -399,6 +399,16 @@ describe("EntityExplorer rebuild dialog", () => {
     );
   }
 
+  it("shows unknown person subtypes distinctly", async () => {
+    server.use(
+      http.get("/api/setup/status", () => statusResponse()),
+      http.get("/api/entities", () => entityListResponse([{ id: "person-unknown", name: "Mystery Person" }])),
+    );
+    renderWithProviders(<EntityExplorer />);
+
+    expect(await screen.findByText("Unknown")).toBeInTheDocument();
+  });
+
   it("admin menu shows a single 'Rebuild entities…' item (no separate reset/recreate items)", async () => {
     const user = userEvent.setup();
     setupBaseHandlers();

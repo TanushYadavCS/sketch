@@ -281,7 +281,7 @@ describe("Slack entity sync", () => {
     expect(facade.listChannelMembersPage).not.toHaveBeenCalled();
   });
 
-  it("caps users.info lookups and leaves overflow pending for a later run", async () => {
+  it("caps users.info lookups and lets the durable repair sweep consume overflow", async () => {
     await createDb();
     const facade: SlackEntitySyncFacade = {
       listUsersPage: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -305,7 +305,7 @@ describe("Slack entity sync", () => {
         .select("profile_json")
         .where("slack_user_id", "=", "U2")
         .executeTakeFirstOrThrow(),
-    ).resolves.toMatchObject({ profile_json: JSON.stringify({ status: "pending", reason: "users.info_cap" }) });
+    ).resolves.toMatchObject({ profile_json: null });
   });
 
   it("reclaims a stale run at startup and does not rerun a completed backfill", async () => {
@@ -382,6 +382,143 @@ describe("Slack entity sync", () => {
         expect.objectContaining({ run_type: "sweep", status: "completed" }),
       ]),
     );
+  });
+
+  it("drains the oldest queued run when backfill and sweep enqueue concurrently", async () => {
+    await createDb();
+    const stale = new Date(Date.now() - 60_000).toISOString();
+    await getDb()
+      .insertInto("slack_sync_runs")
+      .values({
+        id: "queued-sweep",
+        team_id: "T1",
+        run_type: "sweep",
+        trigger_key: "sweep",
+        pinned_team_id: "T1",
+        status: "queued",
+        stage: "users",
+        heartbeat_at: null,
+        users_cursor: null,
+        conversations_cursor: null,
+        members_cursor: null,
+        current_channel_id: null,
+        started_at: stale,
+        completed_at: null,
+        error: null,
+        created_at: stale,
+        updated_at: stale,
+      })
+      .execute();
+    const { sync } = makeSync(emptyFacade());
+
+    await sync.enqueueBackfill({ botToken: "xoxb-t1", teamId: "T1" });
+
+    const runs = await getDb()
+      .selectFrom("slack_sync_runs")
+      .select(["run_type", "status"])
+      .orderBy("created_at", "asc")
+      .execute();
+    expect(runs).toEqual([
+      { run_type: "sweep", status: "completed" },
+      { run_type: "backfill", status: "completed" },
+      { run_type: "sweep", status: "completed" },
+    ]);
+  });
+
+  it("does not claim a queued run while another team run has a live heartbeat", async () => {
+    await createDb();
+    const live = new Date().toISOString();
+    await getDb()
+      .insertInto("slack_sync_runs")
+      .values({
+        id: "live-run",
+        team_id: "T1",
+        run_type: "sweep",
+        trigger_key: "live-sweep",
+        pinned_team_id: "T1",
+        status: "running",
+        stage: "users",
+        heartbeat_at: live,
+        users_cursor: null,
+        conversations_cursor: null,
+        members_cursor: null,
+        current_channel_id: null,
+        started_at: live,
+        completed_at: null,
+        error: null,
+        created_at: live,
+        updated_at: live,
+      })
+      .execute();
+    const facade = emptyFacade();
+    const { sync } = makeSync(facade);
+
+    await sync.enqueueBackfill({ botToken: "xoxb-t1", teamId: "T1" });
+
+    expect(facade.listUsersPage).not.toHaveBeenCalled();
+    await expect(
+      getDb()
+        .selectFrom("slack_sync_runs")
+        .select(["run_type", "status"])
+        .where("run_type", "=", "backfill")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ run_type: "backfill", status: "queued" });
+  });
+
+  it("prioritizes users.info spillover before known roster members on later sweeps", async () => {
+    await createDb();
+    const facade: SlackEntitySyncFacade = {
+      listUsersPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listChannelsPage: vi.fn(async () => ({
+        items: [channel({ id: "C1" }), channel({ id: "C2" })],
+        nextCursor: null,
+      })),
+      listChannelMembersPage: vi.fn(async (channelId: string) => ({
+        items: [channelId === "C1" ? "U-KNOWN" : "U-SPILLOVER"],
+        nextCursor: null,
+      })),
+      getUserInfo: vi.fn(async (slackUserId: string) => user({ slackUserId, name: slackUserId })),
+    };
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+    const { sync } = makeSync(facade, active, { userInfoCap: 1 });
+
+    await sync.enqueueSweep(active);
+    await sync.enqueueSweep(active);
+
+    expect(facade.getUserInfo).toHaveBeenCalledWith("U-SPILLOVER", { fresh: true });
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("profile_json")
+        .where("slack_user_id", "=", "U-SPILLOVER")
+        .executeTakeFirstOrThrow(),
+    ).resolves.not.toMatchObject({ profile_json: JSON.stringify({ status: "pending", reason: "users.info_cap" }) });
+  });
+
+  it("does not tombstone externals when a configured-disabled channel is skipped", async () => {
+    await createDb();
+    const facade: SlackEntitySyncFacade = {
+      listUsersPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listChannelsPage: vi.fn(async () => ({ items: [channel({ id: "C-PUBLIC" })], nextCursor: null })),
+      listChannelMembersPage: vi.fn(async () => ({ items: ["U-EXTERNAL"], nextCursor: null })),
+      getUserInfo: vi.fn(async () =>
+        user({ slackUserId: "U-EXTERNAL", name: "external", isStranger: true, profileTeamId: "T2" }),
+      ),
+    };
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+    const { sync } = makeSync(facade, active, { publicChannelsEnabled: true });
+    await sync.enqueueBackfill(active);
+
+    const disabledSync = makeSync(facade, active, { publicChannelsEnabled: false }).sync;
+    await disabledSync.enqueueSweep(active);
+
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("inactive_at")
+        .where("slack_user_id", "=", "U-EXTERNAL")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ inactive_at: null });
   });
 
   it("tombstones an external only after a complete sweep sees it in no roster", async () => {

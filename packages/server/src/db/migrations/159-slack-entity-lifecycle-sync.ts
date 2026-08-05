@@ -124,6 +124,14 @@ async function createNewSlackTables(db: Kysely<unknown>): Promise<void> {
       .execute();
   }
 
+  if (!(await hasTable(db, "slack_file_access_backfill"))) {
+    await db.schema
+      .createTable("slack_file_access_backfill")
+      .addColumn("id", "text", (col) => col.primaryKey())
+      .addColumn("completed_at", "text")
+      .execute();
+  }
+
   await createSlackIndexes(db);
 }
 
@@ -331,6 +339,8 @@ export async function down(db: Kysely<unknown>): Promise<void> {
     }
   }
   if (await hasTable(db, "slack_sync_runs")) await db.schema.dropTable("slack_sync_runs").execute();
+  if (await hasTable(db, "slack_file_access_backfill"))
+    await db.schema.dropTable("slack_file_access_backfill").execute();
   if (await hasTable(db, "slack_user_sync_state")) await db.schema.dropTable("slack_user_sync_state").execute();
   if (await hasTable(db, "organization_domains")) await db.schema.dropTable("organization_domains").execute();
   if (await hasColumn(db, "settings", "slack_team_id")) {

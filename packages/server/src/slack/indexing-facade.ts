@@ -74,6 +74,7 @@ type SharedSlackConnection = {
   client: SlackIndexingClient;
   limiter: SlackApiLimiter;
   clientFactory: (token: string) => SlackIndexingClient;
+  owners: Set<object>;
 };
 
 const sharedConnectionsByToken = new Map<string, SharedSlackConnection>();
@@ -183,7 +184,7 @@ function fromCachedUser(user: CachedUser, fallbackId: string): SlackIndexingUser
 
 export interface SlackIndexingFacade {
   isConfigured(): Promise<boolean>;
-  withToken?: (token: string) => SlackIndexingFacade;
+  withToken?: (token: string, options?: { isolatedLimiter?: boolean }) => SlackIndexingFacade;
   listUsersPage?: (cursor?: string) => Promise<SlackIndexingPage<SlackIndexingUser>>;
   listChannelsPage?: (cursor?: string) => Promise<SlackIndexingPage<SlackIndexingChannel>>;
   listChannelMembersPage?: (channelId: string, cursor?: string) => Promise<SlackIndexingPage<string>>;
@@ -194,7 +195,7 @@ export interface SlackIndexingFacade {
   listChannels(): Promise<SlackIndexingChannel[]>;
   listMemberChannels(): Promise<SlackIndexingChannel[]>;
   listChannelMembers(channelId: string): Promise<string[]>;
-  getUserInfo(userId: string): Promise<SlackIndexingUser>;
+  getUserInfo(userId: string, options?: { fresh?: boolean }): Promise<SlackIndexingUser>;
 }
 
 async function collectAsync<T>(items: AsyncIterable<T>): Promise<T[]> {
@@ -231,6 +232,7 @@ export function createSlackIndexingFacade(options: CreateSlackIndexingFacadeOpti
     clientFactory: options.clientFactory ?? defaultClientFactory,
     limiter: options.limiter,
     connections: new Map(),
+    currentToken: null,
   });
 }
 
@@ -239,6 +241,7 @@ type SlackIndexingFacadeState = {
   clientFactory: (token: string) => SlackIndexingClient;
   limiter?: SlackApiLimiter;
   connections: Map<string, SlackIndexingClient>;
+  currentToken: string | null;
 };
 
 function createSlackIndexingFacadeWithState(
@@ -250,6 +253,13 @@ function createSlackIndexingFacadeWithState(
   async function getConnection(): Promise<{ client: SlackIndexingClient; limiter: SlackApiLimiter }> {
     const token = await options.getBotToken();
     if (!token) throw new Error("Slack indexing facade has no bot token configured");
+    if (state.currentToken && state.currentToken !== token) {
+      const previous = sharedConnectionsByToken.get(state.currentToken);
+      previous?.owners.delete(state);
+      if (previous?.owners.size === 0) sharedConnectionsByToken.delete(state.currentToken);
+      state.connections.delete(state.currentToken);
+    }
+    state.currentToken = token;
     if (state.limiter) {
       const existing = state.connections.get(token);
       if (existing) return { client: existing, limiter: state.limiter };
@@ -259,12 +269,14 @@ function createSlackIndexingFacadeWithState(
     }
     const shared = sharedConnectionsByToken.get(token);
     if (shared && shared.clientFactory === state.clientFactory) {
+      shared.owners.add(state);
       return { client: shared.client, limiter: shared.limiter };
     }
     const next = {
       client: state.clientFactory(token),
       limiter: new SerializedSlackApiLimiter(),
       clientFactory: state.clientFactory,
+      owners: new Set([state]),
     };
     sharedConnectionsByToken.set(token, next);
     return { client: next.client, limiter: next.limiter };
@@ -354,7 +366,19 @@ function createSlackIndexingFacadeWithState(
       return Boolean(await options.getBotToken());
     },
 
-    withToken(token) {
+    withToken(token, options) {
+      if (options?.isolatedLimiter) {
+        return createSlackIndexingFacadeWithState(
+          { getBotToken: async () => token },
+          {
+            userCache: state.userCache,
+            clientFactory: state.clientFactory,
+            limiter: new SerializedSlackApiLimiter(),
+            connections: new Map(),
+            currentToken: null,
+          },
+        );
+      }
       return createSlackIndexingFacadeWithState({ getBotToken: async () => token }, state);
     },
 
@@ -385,8 +409,10 @@ function createSlackIndexingFacadeWithState(
       return collectAsync(iterateChannelMembers(channelId));
     },
 
-    async getUserInfo(userId: string) {
-      const cached = await userCache.resolve(userId, async (id) => toCachedUser(await fetchUserInfo(id)));
+    async getUserInfo(userId: string, options?: { fresh?: boolean }) {
+      const cached = options?.fresh
+        ? await userCache.refresh(userId, async (id) => toCachedUser(await fetchUserInfo(id)))
+        : await userCache.resolve(userId, async (id) => toCachedUser(await fetchUserInfo(id)));
       return fromCachedUser(cached, userId);
     },
   };

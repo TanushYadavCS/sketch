@@ -86,6 +86,46 @@ describe("Slack indexing facade", () => {
     expect(info).toHaveBeenCalledOnce();
   });
 
+  it("bypasses the hot-path cache for lifecycle refreshes", async () => {
+    const info = vi
+      .fn()
+      .mockResolvedValueOnce({
+        user: {
+          id: "U1",
+          name: "alice",
+          real_name: "Alice Example",
+          team_id: "T123",
+          profile: { display_name: "Alice", email: "old@example.com" },
+          is_bot: false,
+          updated: "100",
+        },
+      })
+      .mockResolvedValueOnce({
+        user: {
+          id: "U1",
+          name: "alice",
+          real_name: "Alice Example",
+          team_id: "T123",
+          profile: { display_name: "Alice", email: "new@example.com" },
+          is_bot: false,
+          updated: "101",
+        },
+      });
+    const client = {
+      users: { list: vi.fn(), info },
+      conversations: { list: vi.fn(), members: vi.fn() },
+    };
+    const facade = createSlackIndexingFacade({
+      getBotToken: async () => "xoxb-fresh",
+      clientFactory: () => client as never,
+    });
+
+    await expect(facade.getUserInfo("U1")).resolves.toMatchObject({ email: "old@example.com" });
+    await expect(facade.getUserInfo("U1", { fresh: true })).resolves.toMatchObject({ email: "new@example.com" });
+
+    expect(info).toHaveBeenCalledTimes(2);
+  });
+
   it("shares the Slack client across facades for the same token", async () => {
     const client = {
       users: { list: vi.fn().mockResolvedValue({ members: [], response_metadata: {} }), info: vi.fn() },
@@ -100,6 +140,41 @@ describe("Slack indexing facade", () => {
 
     expect(clientFactory).toHaveBeenCalledOnce();
     expect(client.users.list).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts a rotated shared token and gives lifecycle work an isolated lane", async () => {
+    let token = "xoxb-old";
+    const clients = new Map<
+      string,
+      {
+        users: { list: ReturnType<typeof vi.fn> };
+        conversations: { list: ReturnType<typeof vi.fn>; members: ReturnType<typeof vi.fn> };
+      }
+    >();
+    const clientFactory = vi.fn((createdToken: string) => {
+      const client = {
+        users: { list: vi.fn().mockResolvedValue({ members: [], response_metadata: {} }) },
+        conversations: { list: vi.fn(), members: vi.fn() },
+      };
+      clients.set(createdToken, client);
+      return client as never;
+    });
+    const facade = createSlackIndexingFacade({
+      getBotToken: async () => token,
+      clientFactory,
+    });
+
+    await facade.listUsers();
+    token = "xoxb-new";
+    await facade.listUsers();
+    token = "xoxb-old";
+    await facade.listUsers();
+
+    expect(clientFactory).toHaveBeenCalledTimes(3);
+    const isolated = facade.withToken?.("xoxb-lifecycle", { isolatedLimiter: true });
+    await isolated?.listUsers();
+    expect(clientFactory).toHaveBeenCalledTimes(4);
+    expect(clients.get("xoxb-lifecycle")?.users.list).toHaveBeenCalledOnce();
   });
 
   it("prefers a display name when Slack omits real_name", async () => {

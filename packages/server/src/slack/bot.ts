@@ -120,6 +120,7 @@ export interface SlackBotConfig {
   signingSecret?: string; // Required for http mode
   onTeamIdResolved?: (teamId: string) => Promise<void>;
   eventSilenceThresholdMs?: number;
+  lifecycleEventsEnabled?: boolean;
 }
 
 /**
@@ -146,6 +147,7 @@ export class SlackBot {
   private signingSecret: string | undefined;
   private onTeamIdResolved: ((teamId: string) => Promise<void>) | undefined;
   private eventSilenceThresholdMs: number;
+  private lifecycleEventsEnabled: boolean;
   private handler: SlackMessageHandler | null = null;
   private channelMessageHandler: SlackMessageHandler | null = null;
   private mentionHandler: SlackMessageHandler | null = null;
@@ -172,6 +174,7 @@ export class SlackBot {
     this.signingSecret = config.signingSecret;
     this.onTeamIdResolved = config.onTeamIdResolved;
     this.eventSilenceThresholdMs = config.eventSilenceThresholdMs ?? 7 * 24 * 60 * 60 * 1000;
+    this.lifecycleEventsEnabled = config.lifecycleEventsEnabled ?? true;
 
     if (config.mode === "socket") {
       if (!config.appToken) {
@@ -262,16 +265,18 @@ export class SlackBot {
     this.botId = "bot_id" in auth && typeof auth.bot_id === "string" ? auth.bot_id : null;
     this.logger.info({ botUserId: this.botUserId, botId: this.botId }, "Resolved bot IDs");
     const startedAt = Date.now();
-    this.lifecycleEventLastSeen = new Map([
-      ["team_join", startedAt],
-      ["user_change", startedAt],
-    ]);
-    this.lifecycleEventWarnings.clear();
-    this.lifecycleEventTimer = setInterval(
-      () => this.warnOnSilentLifecycleEvents(),
-      Math.min(this.eventSilenceThresholdMs, 60_000),
-    );
-    this.lifecycleEventTimer.unref?.();
+    if (this.lifecycleEventsEnabled) {
+      this.lifecycleEventLastSeen = new Map([
+        ["team_join", startedAt],
+        ["user_change", startedAt],
+      ]);
+      this.lifecycleEventWarnings.clear();
+      this.lifecycleEventTimer = setInterval(
+        () => this.warnOnSilentLifecycleEvents(),
+        Math.min(this.eventSilenceThresholdMs, 60_000),
+      );
+      this.lifecycleEventTimer.unref?.();
+    }
 
     this.app.message(async ({ message }) => {
       const userId = "user" in message && typeof message.user === "string" ? message.user : undefined;
