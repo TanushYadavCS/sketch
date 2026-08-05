@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 /**
  * Server bootstrap — wires config, DB, repos, platform adapters, and HTTP into a
@@ -52,6 +53,7 @@ import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whats
 import type { DB } from "./db/schema";
 import { configureMaterializeDefaults } from "./entities/materialize";
 import { startNormalizationBackfill } from "./entities/normalization-backfill";
+import { isPersonalOrSharedDomain } from "./entities/personal-domains";
 import type { ProposeEntityType } from "./entities/propose";
 import { createApp } from "./http";
 import { buildMcpConfig, createProvider } from "./integrations/factory";
@@ -117,6 +119,33 @@ export interface CreateServerOptions {
   backgroundWork?: boolean;
 }
 
+export async function seedSlackOrganizationDomain(db: Kysely<DB>): Promise<string | null> {
+  const admin = await db
+    .selectFrom("users")
+    .select(["email", "email_verified_at"])
+    .where("auth_role", "=", "admin")
+    .where("email_verified_at", "is not", null)
+    .where("email", "is not", null)
+    .orderBy("created_at", "asc")
+    .orderBy("id", "asc")
+    .executeTakeFirst();
+  const email = admin?.email?.trim().toLowerCase();
+  const domain = email?.split("@").pop()?.trim() ?? null;
+  if (!admin || !domain || !email?.includes("@") || isPersonalOrSharedDomain(domain)) return null;
+
+  await db
+    .insertInto("organization_domains")
+    .values({
+      id: randomUUID(),
+      domain,
+      source: "admin_email_seed",
+      verified_at: admin.email_verified_at as string,
+    })
+    .onConflict((oc) => oc.column("domain").doNothing())
+    .execute();
+  return domain;
+}
+
 export async function createServer(config: Config, options?: CreateServerOptions): Promise<ServerHandle> {
   const connect = options?.connect !== false;
   const externalStartup = options?.externalStartup !== false;
@@ -131,6 +160,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const db = await createDatabase(config);
   await runMigrations(db);
   logger.info("Database ready");
+  await seedSlackOrganizationDomain(db);
 
   configureMaterializeDefaults({
     llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
@@ -794,27 +824,43 @@ export async function createServer(config: Config, options?: CreateServerOptions
     },
     createBot: (tokens) => createConfiguredSlackBot(tokens, slackAdapterDeps),
     beforeExplicitTokenReplacement: async (replacement) => {
+      const previousTeamId = replacement?.previousTeamId ?? null;
+      const nextTeamId = replacement?.nextTeamId ?? null;
+      if (previousTeamId && previousTeamId === nextTeamId) return;
+
+      const participantsBefore = await db
+        .selectFrom("slack_channel_participants")
+        .select(({ fn }) => fn.countAll<number>().as("count"))
+        .executeTakeFirstOrThrow();
       await slackMembershipReconciler.clearAllParticipants();
-      if (
-        !replacement?.previousTeamId ||
-        !replacement.nextTeamId ||
-        replacement.previousTeamId === replacement.nextTeamId
-      ) {
-        return;
-      }
 
       const slackConnector = await db
         .selectFrom("connector_configs")
         .select("id")
         .where("connector_type", "=", "slack")
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
         .executeTakeFirst();
+      let filesArchived = 0;
       if (slackConnector) {
-        await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: slackConnector.id });
+        filesArchived = await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: slackConnector.id });
       }
-      logger.warn(
-        { previousTeamId: replacement.previousTeamId, nextTeamId: replacement.nextTeamId },
-        "Slack team changed; old-team participants and indexed files were fenced",
-      );
+      let syncRowsFenced = 0;
+      if (previousTeamId) {
+        const result = await db
+          .updateTable("slack_user_sync_state")
+          .set({ inactive_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+          .where("team_id", "=", previousTeamId)
+          .where("inactive_at", "is", null)
+          .executeTakeFirst();
+        syncRowsFenced = Number(result.numUpdatedRows ?? 0);
+      }
+      if (Number(participantsBefore.count) > 0 || filesArchived > 0 || syncRowsFenced > 0) {
+        logger.warn(
+          { previousTeamId, nextTeamId, filesArchived, syncRowsFenced },
+          "Slack team changed; old-team participants and indexed files were fenced",
+        );
+      }
     },
   });
 
@@ -948,6 +994,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
           .selectFrom("connector_configs")
           .select("id")
           .where("connector_type", "=", "slack")
+          .orderBy("created_at", "asc")
+          .orderBy("id", "asc")
           .executeTakeFirst();
         if (slackConnector) {
           await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: slackConnector.id });

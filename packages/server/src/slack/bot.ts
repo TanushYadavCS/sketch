@@ -228,7 +228,8 @@ export class SlackBot {
 
   async start(): Promise<void> {
     const auth = await this.app.client.auth.test();
-    if (auth.team_id) await this.onTeamIdResolved?.(auth.team_id);
+    if (!auth.team_id) throw new Error("Slack auth.test did not return a team id");
+    await this.onTeamIdResolved?.(auth.team_id);
     this.botUserId = auth.user_id ?? null;
     this.botId = "bot_id" in auth && typeof auth.bot_id === "string" ? auth.bot_id : null;
     this.logger.info({ botUserId: this.botUserId, botId: this.botId }, "Resolved bot IDs");

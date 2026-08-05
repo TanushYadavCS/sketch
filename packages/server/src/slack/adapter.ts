@@ -167,10 +167,11 @@ export interface SlackAdapterDeps {
   followupReviewHandler?: FollowupReviewCommandHandler;
 }
 
-export async function validateSlackTokens(botToken: string, appToken?: string): Promise<{ teamId: string | null }> {
+export async function validateSlackTokens(botToken: string, appToken?: string): Promise<{ teamId: string }> {
   void appToken;
   const auth = await slackApiCall(botToken, "auth.test");
-  return { teamId: auth.team_id ?? null };
+  if (!auth.team_id) throw new Error("Slack auth.test did not return a team id");
+  return { teamId: auth.team_id };
 }
 
 interface DownloadedSlackAttachment extends Attachment {

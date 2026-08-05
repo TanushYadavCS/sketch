@@ -694,6 +694,7 @@ export interface SlackUserSyncStateTable {
   provider_updated_at: string | null;
   fetched_at: string | null;
   entity_id: string | null;
+  entity_created_by_sync: Generated<number>;
   inactive_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
@@ -1152,7 +1153,7 @@ export interface EntityReviewQueueTable {
   source_id: string | null;
   proposed_email: string | null;
   candidate_entity_id: string | null;
-  candidate_entity_ids: Generated<string | null>;
+  candidate_entity_ids: string | null;
   candidate_score: number | null;
   candidate_reason: string | null;
   candidate_generated_at: string | null;

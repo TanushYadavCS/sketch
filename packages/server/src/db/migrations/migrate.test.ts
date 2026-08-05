@@ -24,6 +24,7 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
+import * as slackEntityLifecycleMigration from "./159-slack-entity-lifecycle-sync";
 
 const EXPECTED_MIGRATION_COUNT = 155;
 
@@ -277,6 +278,121 @@ describe("runMigrations — full sequence", () => {
     await expect(
       db.selectFrom("entity_review_queue").select("id").where("normalized_name", "=", "same name").execute(),
     ).resolves.toHaveLength(2);
+  });
+
+  it("preserves review queue, evidence, and domain candidates across the SQLite rebuild", async () => {
+    const legacyDb = createBlankDb();
+    try {
+      const migrationResult = await createMigrator(legacyDb).migrateTo("158-slack-channel-participants");
+      expect(migrationResult.error).toBeUndefined();
+      await legacyDb
+        .insertInto("connector_configs")
+        .values({
+          id: "migration-connector",
+          connector_type: "slack",
+          auth_type: "system",
+          credentials: "{}",
+          created_by: "migration-owner",
+        })
+        .execute();
+      await legacyDb
+        .insertInto("indexed_files")
+        .values({
+          id: "migration-file",
+          connector_config_id: "migration-connector",
+          provider_file_id: "migration-provider-file",
+          provider_url: null,
+          file_name: "migration-file.txt",
+          file_type: "document",
+          content_category: "document",
+          content: "review evidence",
+          summary: null,
+          source: "slack",
+          source_path: null,
+          content_hash: null,
+          synced_at: "2026-08-05T00:00:00.000Z",
+        })
+        .execute();
+      await legacyDb
+        .insertInto("entity_review_queue")
+        .values({
+          id: "migration-review",
+          proposed_name: "Migration Review",
+          normalized_name: "migration review",
+          entity_type: "person",
+          source: null,
+          source_id: null,
+          proposed_email: null,
+          candidate_entity_id: null,
+          candidate_score: null,
+          candidate_reason: "migration-fixture",
+          candidate_generated_at: null,
+          triggered_by_user_id: "migration-owner",
+        })
+        .execute();
+      await legacyDb
+        .insertInto("entity_review_evidence")
+        .values({
+          id: "migration-evidence",
+          review_id: "migration-review",
+          indexed_file_id: "migration-file",
+          source: "slack",
+          note: "preserve me",
+        })
+        .execute();
+      await legacyDb
+        .insertInto("entity_candidates")
+        .values({
+          id: "migration-domain-candidate",
+          name: "migration.example.com",
+          type: "domain_observation",
+          variations: null,
+          first_seen_file_id: "migration-file",
+          seen_file_ids: JSON.stringify(["migration-file"]),
+          seen_count: 1,
+          promoted_entity_id: null,
+          created_at: "2026-08-05T00:00:00.000Z",
+          updated_at: "2026-08-05T00:00:00.000Z",
+          domain: "migration.example.com",
+          proposed_company_name: null,
+          first_observed_by_user_id: null,
+          observed_person_entity_ids: null,
+          evidence_file_ids: JSON.stringify(["migration-file"]),
+        })
+        .execute();
+      await legacyDb
+        .insertInto("entity_review_domain_candidates")
+        .values({
+          review_id: "migration-review",
+          domain_candidate_id: "migration-domain-candidate",
+        })
+        .execute();
+
+      await slackEntityLifecycleMigration.up(legacyDb as unknown as Kysely<unknown>);
+      await slackEntityLifecycleMigration.up(legacyDb as unknown as Kysely<unknown>);
+
+      await expect(
+        legacyDb.selectFrom("entity_review_queue").select("id").where("id", "=", "migration-review").execute(),
+      ).resolves.toHaveLength(1);
+      await expect(
+        legacyDb.selectFrom("entity_review_evidence").select("id").where("id", "=", "migration-evidence").execute(),
+      ).resolves.toHaveLength(1);
+      await expect(
+        legacyDb
+          .selectFrom("entity_review_domain_candidates")
+          .selectAll()
+          .where("review_id", "=", "migration-review")
+          .execute(),
+      ).resolves.toEqual([
+        {
+          review_id: "migration-review",
+          domain_candidate_id: "migration-domain-candidate",
+          created_at: expect.any(String),
+        },
+      ]);
+    } finally {
+      await legacyDb.destroy();
+    }
   });
 
   it("resets reviewed combined durability routes for member-source reseeding", async () => {

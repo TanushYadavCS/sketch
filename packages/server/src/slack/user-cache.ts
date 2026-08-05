@@ -33,7 +33,7 @@ export class UserCache {
   private inflight = new Map<string, Promise<CachedUser>>();
 
   constructor(
-    private readonly ttlMs = 5 * 60 * 1000,
+    private readonly ttlMs = 0,
     private readonly now = () => Date.now(),
   ) {}
 

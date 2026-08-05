@@ -16,9 +16,10 @@ import { getOnboardingReadiness } from "./onboarding-readiness";
 async function verifySlackTokens(
   botToken: string,
   appToken: string,
-): Promise<{ workspaceName?: string; teamId?: string }> {
+): Promise<{ workspaceName: string; teamId: string }> {
   const auth = await slackApiCall(botToken, "auth.test");
   await slackApiCall(appToken, "apps.connections.open");
+  if (!auth.team_id || !auth.team) throw new Error("Slack auth.test did not return a team id");
   return { workspaceName: auth.team, teamId: auth.team_id };
 }
 

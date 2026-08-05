@@ -32,7 +32,7 @@ describe("createSlackStartupManager", () => {
   it("uses provided tokens and bypasses DB lookup", async () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const getSettingsTokens = vi.fn(async () => ({ botToken: "xoxb-db", appToken: "xapp-db" }));
-    const validateTokens = vi.fn(async () => undefined);
+    const validateTokens = vi.fn(async () => ({ teamId: "T123" }));
     const startBot = vi.fn(async () => {});
     const stopBot = vi.fn(async () => {});
     let currentBot: { start: () => Promise<void>; stop: () => Promise<void> } | null = {
@@ -91,6 +91,21 @@ describe("createSlackStartupManager", () => {
     expect(beforeExplicitTokenReplacement).not.toHaveBeenCalled();
   });
 
+  it("fails closed when token validation cannot determine a team", async () => {
+    const createBot = vi.fn();
+    const start = createSlackStartupManager({
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db" }),
+      validateTokens: vi.fn(async () => ({ teamId: "" })),
+      getCurrentBot: () => null,
+      setCurrentBot: vi.fn(),
+      createBot,
+    });
+
+    await expect(start({ botToken: "xoxb-new", appToken: "xapp-new" })).rejects.toThrow("team id");
+    expect(createBot).not.toHaveBeenCalled();
+  });
+
   it("passes the team change to the explicit replacement reset hook", async () => {
     const beforeExplicitTokenReplacement = vi.fn(async () => {});
     const start = createSlackStartupManager({
@@ -114,7 +129,7 @@ describe("createSlackStartupManager", () => {
     const gate = deferred<void>();
     const validateTokens = vi.fn(async () => {
       await gate.promise;
-      return undefined;
+      return { teamId: "T123" };
     });
     const startBot = vi.fn(async () => {});
     const createBot = vi.fn(() => ({ start: startBot, stop: vi.fn(async () => {}) }));
@@ -187,7 +202,7 @@ describe("createSlackStartupManager", () => {
     const start = createSlackStartupManager({
       logger,
       getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db" }),
-      validateTokens: vi.fn(async () => undefined),
+      validateTokens: vi.fn(async () => ({ teamId: "T123" })),
       getCurrentBot: () => currentBot,
       setCurrentBot,
       createBot: () => ({
@@ -237,7 +252,7 @@ describe("createSlackStartupManager", () => {
         logger,
         slackMode: "http",
         getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: null }),
-        validateTokens: vi.fn(async () => undefined),
+        validateTokens: vi.fn(async () => ({ teamId: "T123" })),
         getCurrentBot: () => null,
         setCurrentBot: vi.fn(),
         createBot,
@@ -258,7 +273,7 @@ describe("createSlackStartupManager", () => {
         logger,
         slackMode: "http",
         getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: null }),
-        validateTokens: vi.fn(async () => undefined),
+        validateTokens: vi.fn(async () => ({ teamId: "T123" })),
         getCurrentBot: () => null,
         setCurrentBot: vi.fn(),
         createBot,
@@ -277,7 +292,7 @@ describe("createSlackStartupManager", () => {
         logger,
         slackMode: "socket",
         getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db" }),
-        validateTokens: vi.fn(async () => undefined),
+        validateTokens: vi.fn(async () => ({ teamId: "T123" })),
         getCurrentBot: () => null,
         setCurrentBot: vi.fn(),
         createBot,

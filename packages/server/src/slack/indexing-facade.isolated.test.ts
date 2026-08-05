@@ -15,7 +15,7 @@ function user(overrides: Partial<SlackIndexingUser> = {}): SlackIndexingUser {
     isRestricted: false,
     isUltraRestricted: false,
     deleted: false,
-    providerUpdatedAt: "100",
+    providerUpdatedAt: "00000000000000000100",
     ...overrides,
   };
 }
@@ -64,7 +64,7 @@ describe("Slack indexing facade", () => {
         is_ultra_restricted: false,
         is_stranger: false,
         deleted: false,
-        updated: 100,
+        updated: "00000000000000000100",
       },
     });
     const client = {
@@ -77,9 +77,55 @@ describe("Slack indexing facade", () => {
       userInfoCacheTtlMs: 60_000,
     });
 
-    await expect(Promise.all([facade.getUserInfo("U1"), facade.getUserInfo("U1")])).resolves.toHaveLength(2);
+    await expect(Promise.all([facade.getUserInfo("U1"), facade.getUserInfo("U1")])).resolves.toMatchObject([
+      { providerUpdatedAt: "00000000000000000100" },
+      { providerUpdatedAt: "00000000000000000100" },
+    ]);
     await facade.getUserInfo("U1");
 
     expect(info).toHaveBeenCalledOnce();
+  });
+
+  it("shares the Slack client across facades for the same token", async () => {
+    const client = {
+      users: { list: vi.fn().mockResolvedValue({ members: [], response_metadata: {} }), info: vi.fn() },
+      conversations: { list: vi.fn(), members: vi.fn() },
+    };
+    const clientFactory = vi.fn(() => client as never);
+    const first = createSlackIndexingFacade({ getBotToken: async () => "xoxb-shared", clientFactory });
+    const second = createSlackIndexingFacade({ getBotToken: async () => "xoxb-shared", clientFactory });
+
+    await first.listUsers();
+    await second.listUsers();
+
+    expect(clientFactory).toHaveBeenCalledOnce();
+    expect(client.users.list).toHaveBeenCalledTimes(2);
+  });
+
+  it("prefers a display name when Slack omits real_name", async () => {
+    const client = {
+      users: {
+        list: vi.fn(),
+        info: vi.fn().mockResolvedValue({
+          user: {
+            id: "U-DISPLAY",
+            name: "legacy.handle",
+            team_id: "T123",
+            profile: { display_name: "Display Name", email: null },
+          },
+        }),
+      },
+      conversations: { list: vi.fn(), members: vi.fn() },
+    };
+    const facade = createSlackIndexingFacade({
+      getBotToken: async () => "xoxb-display",
+      clientFactory: () => client as never,
+    });
+
+    await expect(facade.getUserInfo("U-DISPLAY")).resolves.toMatchObject({
+      name: "legacy.handle",
+      realName: "Display Name",
+      displayName: "Display Name",
+    });
   });
 });

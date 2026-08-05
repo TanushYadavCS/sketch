@@ -3,7 +3,7 @@ import { createTestLogger } from "../test-utils";
 
 const mocks = vi.hoisted(() => ({
   messageHandler: undefined as undefined | ((event: { message: Record<string, unknown> }) => Promise<void>),
-  auth: { user_id: "U_SKETCH", bot_id: "B_SKETCH" },
+  auth: { user_id: "U_SKETCH", bot_id: "B_SKETCH", team_id: "T_SKETCH" },
 }));
 
 vi.mock("@slack/bolt", () => ({
@@ -34,7 +34,7 @@ async function deliver(message: Record<string, unknown>) {
 describe("SlackBot channel message normalization", () => {
   beforeEach(() => {
     mocks.messageHandler = undefined;
-    mocks.auth = { user_id: "U_SKETCH", bot_id: "B_SKETCH" };
+    mocks.auth = { user_id: "U_SKETCH", bot_id: "B_SKETCH", team_id: "T_SKETCH" };
   });
 
   it("forwards an external userless bot message to the top-level channel handler", async () => {

@@ -65,6 +65,29 @@ class SerializedSlackApiLimiter implements SlackApiLimiter {
   }
 }
 
+type SharedSlackConnection = {
+  client: SlackIndexingClient;
+  limiter: SlackApiLimiter;
+  clientFactory: (token: string) => SlackIndexingClient;
+};
+
+const sharedConnectionsByToken = new Map<string, SharedSlackConnection>();
+
+function defaultClientFactory(token: string): SlackIndexingClient {
+  return new WebClient(token);
+}
+
+export function normalizeSlackProviderUpdatedAt(value: number | string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) return raw.padStart(20, "0");
+  const numeric = Number(raw);
+  const epochSeconds = Number.isFinite(numeric) ? Math.trunc(numeric) : Math.trunc(Date.parse(raw) / 1000);
+  if (!Number.isFinite(epochSeconds) || epochSeconds < 0) return null;
+  return String(epochSeconds).padStart(20, "0");
+}
+
 function readRetryAfterMs(error: unknown): number {
   if (!error || typeof error !== "object") return 0;
   const record = error as Record<string, unknown>;
@@ -91,8 +114,11 @@ function mapUser(user: unknown, fallbackId?: string): SlackIndexingUser {
   const profile = readRecord(raw.profile);
   const id = readString(raw, "id") ?? fallbackId;
   const name = readString(raw, "name") ?? "unknown";
-  const realName = readString(raw, "real_name") ?? name;
-  const displayName = readString(profile, "display_name") ?? readString(profile, "display_name_normalized") ?? realName;
+  const rawRealName = readString(raw, "real_name")?.trim() ?? "";
+  const rawDisplayName =
+    readString(profile, "display_name")?.trim() ?? readString(profile, "display_name_normalized")?.trim() ?? "";
+  const realName = rawRealName || rawDisplayName || name;
+  const displayName = rawDisplayName || realName;
   const updated = raw.updated;
   return {
     ...(id ? { slackUserId: id } : {}),
@@ -107,7 +133,9 @@ function mapUser(user: unknown, fallbackId?: string): SlackIndexingUser {
     isRestricted: readBoolean(raw, "is_restricted"),
     isUltraRestricted: readBoolean(raw, "is_ultra_restricted"),
     deleted: readBoolean(raw, "deleted"),
-    providerUpdatedAt: typeof updated === "number" || typeof updated === "string" ? String(updated) : null,
+    providerUpdatedAt: normalizeSlackProviderUpdatedAt(
+      typeof updated === "number" || typeof updated === "string" ? updated : null,
+    ),
   };
 }
 
@@ -190,20 +218,36 @@ export function createSettingsBackedSlackIndexingFacade(options: {
 
 export function createSlackIndexingFacade(options: CreateSlackIndexingFacadeOptions): SlackIndexingFacade {
   const userCache = options.userCache ?? new SlackUserCache(options.userInfoCacheTtlMs);
-  const clientFactory = options.clientFactory ?? ((token: string) => new WebClient(token));
-  const limiter = options.limiter ?? new SerializedSlackApiLimiter();
-  let connection: { token: string; client: SlackIndexingClient } | null = null;
+  const clientFactory = options.clientFactory ?? defaultClientFactory;
+  let connection: { token: string; client: SlackIndexingClient; limiter: SlackApiLimiter } | null = null;
 
-  async function client(): Promise<SlackIndexingClient> {
+  async function getConnection(): Promise<{ client: SlackIndexingClient; limiter: SlackApiLimiter }> {
     const token = await options.getBotToken();
     if (!token) throw new Error("Slack indexing facade has no bot token configured");
-    if (!connection || connection.token !== token) connection = { token, client: clientFactory(token) };
-    return connection.client;
+    if (!connection || connection.token !== token) {
+      if (options.limiter) {
+        connection = { token, client: clientFactory(token), limiter: options.limiter };
+      } else {
+        const shared = sharedConnectionsByToken.get(token);
+        if (shared && shared.clientFactory === clientFactory) {
+          connection = { token, client: shared.client, limiter: shared.limiter };
+        } else {
+          const next = {
+            client: clientFactory(token),
+            limiter: new SerializedSlackApiLimiter(),
+            clientFactory,
+          };
+          sharedConnectionsByToken.set(token, next);
+          connection = { token, client: next.client, limiter: next.limiter };
+        }
+      }
+    }
+    return { client: connection.client, limiter: connection.limiter };
   }
 
   async function request<T>(operation: (api: SlackIndexingClient) => Promise<T>): Promise<T> {
-    const api = await client();
-    return limiter.run(() => operation(api));
+    const current = await getConnection();
+    return current.limiter.run(() => operation(current.client));
   }
 
   async function fetchUserInfo(userId: string): Promise<SlackIndexingUser> {

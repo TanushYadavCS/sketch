@@ -7,7 +7,7 @@ type SlackTokenSource = {
   teamId?: string | null;
 };
 
-export type SlackTokenValidation = { teamId: string | null };
+export type SlackTokenValidation = { teamId: string };
 
 type StartupTokens = {
   botToken: string;
@@ -71,7 +71,10 @@ export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: Sl
         }
 
         const previousTeamId = await deps.getCurrentTeamId?.();
-        const nextTeamId = validation && "teamId" in validation ? validation.teamId : null;
+        const nextTeamId = validation?.teamId ?? null;
+        if (!nextTeamId) {
+          throw new Error("Slack token validation did not return a team id");
+        }
         if (!tokens && previousTeamId && nextTeamId && previousTeamId !== nextTeamId) {
           throw new Error("Slack token resolves to a different team; explicit admin reset required");
         }
@@ -83,7 +86,7 @@ export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: Sl
         }
 
         if (tokens) {
-          const shouldReset = !deps.getCurrentTeamId || (previousTeamId && nextTeamId && previousTeamId !== nextTeamId);
+          const shouldReset = !previousTeamId || previousTeamId !== nextTeamId;
           if (shouldReset) {
             await deps.beforeExplicitTokenReplacement?.({ previousTeamId: previousTeamId ?? null, nextTeamId });
           }

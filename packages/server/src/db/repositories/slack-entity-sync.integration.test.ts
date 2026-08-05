@@ -21,7 +21,7 @@ function profile(overrides: Partial<SlackProfile> = {}): SlackProfile {
     isRestricted: false,
     isUltraRestricted: false,
     deleted: false,
-    providerUpdatedAt: "2026-08-05T10:00:00.000Z",
+    providerUpdatedAt: "00000000001785924000",
     fetchedAt: "2026-08-05T10:01:00.000Z",
     ...overrides,
   };
@@ -63,7 +63,17 @@ describe("upsertSlackPersonEntity", () => {
 
   it("concurrent same-user upserts create one entity and one source ref", async () => {
     const input = profile();
-    await Promise.all(Array.from({ length: 8 }, () => upsertSlackPersonEntity(db, input)));
+    const dbA = db.withPlugin({
+      transformQuery: ({ node }) => node,
+      transformResult: async ({ result }) => result,
+    });
+    const dbB = db.withPlugin({
+      transformQuery: ({ node }) => node,
+      transformResult: async ({ result }) => result,
+    });
+    await Promise.all(
+      Array.from({ length: 8 }, (_, index) => upsertSlackPersonEntity(index % 2 === 0 ? dbA : dbB, input)),
+    );
 
     await expect(
       db.selectFrom("entities").select("id").where("source_type", "=", "person").execute(),
@@ -126,15 +136,26 @@ describe("upsertSlackPersonEntity", () => {
   it("creates separate source-scoped suggestions for same-name Slack users", async () => {
     await upsertSlackPersonEntity(db, profile({ slackUserId: "U-NAME-1", email: null }));
     await upsertSlackPersonEntity(db, profile({ slackUserId: "U-NAME-2", email: null }));
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-NAME-1",
+        email: null,
+        providerUpdatedAt: "00000000001785945600",
+        fetchedAt: "2026-08-05T11:01:00.000Z",
+      }),
+    );
 
     const rows = await db
       .selectFrom("entity_review_queue")
       .selectAll()
       .where("source", "=", "slack_user")
+      .where("source_id", "in", ["T123:U-NAME-1", "T123:U-NAME-2"])
       .where("proposed_name", "=", "Alice Example")
       .execute();
     expect(rows).toHaveLength(2);
     expect(new Set(rows.map((row) => row.source_id))).toEqual(new Set(["T123:U-NAME-1", "T123:U-NAME-2"]));
+    expect(rows.find((row) => row.source_id === "T123:U-NAME-1")?.occurrence_count).toBe(2);
   });
 
   it("does not mint a suppressed person name", async () => {
@@ -170,7 +191,7 @@ describe("upsertSlackPersonEntity", () => {
   it("keeps same-team rotation idempotent and rejects stale profile writes", async () => {
     await upsertSlackPersonEntity(
       db,
-      profile({ slackUserId: "U-MONO", name: "Fresh Name", email: "fresh@example.com" }),
+      profile({ slackUserId: "U-MONO", name: "fresh.handle", realName: "Fresh Name", email: "fresh@example.com" }),
     );
     await upsertSlackPersonEntity(
       db,
@@ -179,13 +200,13 @@ describe("upsertSlackPersonEntity", () => {
         name: "Stale Name",
         realName: "Stale Name",
         email: "stale@example.com",
-        providerUpdatedAt: "2026-08-05T09:00:00.000Z",
+        providerUpdatedAt: "00000000001785920400",
         fetchedAt: "2026-08-05T09:01:00.000Z",
       }),
     );
     await upsertSlackPersonEntity(
       db,
-      profile({ slackUserId: "U-MONO", name: "Fresh Name", email: "fresh@example.com" }),
+      profile({ slackUserId: "U-MONO", name: "fresh.handle", realName: "Fresh Name", email: "fresh@example.com" }),
     );
 
     const entity = await db
@@ -202,8 +223,195 @@ describe("upsertSlackPersonEntity", () => {
       .select(["provider_updated_at", "fetched_at"])
       .where("slack_user_id", "=", "U-MONO")
       .executeTakeFirstOrThrow();
-    expect(state.provider_updated_at).toBe("2026-08-05T10:00:00.000Z");
+    expect(state.provider_updated_at).toBe("00000000001785924000");
     expect(state.fetched_at).toBe("2026-08-05T10:01:00.000Z");
+  });
+
+  it("queues a newer payload behind an in-flight sync", async () => {
+    const older = profile({
+      slackUserId: "U-CHAIN",
+      name: "Older Handle",
+      realName: "Older Name",
+      email: "chain@example.com",
+      providerUpdatedAt: "00000000001785931200",
+      fetchedAt: "2026-08-05T12:01:00.000Z",
+    });
+    const newer = profile({
+      slackUserId: "U-CHAIN",
+      name: "newer.handle",
+      realName: "Newer Name",
+      email: "chain@example.com",
+      providerUpdatedAt: "00000000001785934800",
+      fetchedAt: "2026-08-05T13:01:00.000Z",
+    });
+
+    await Promise.all([upsertSlackPersonEntity(db, older), upsertSlackPersonEntity(db, newer)]);
+
+    const entity = await db
+      .selectFrom("entities")
+      .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")
+      .select(["entities.name"])
+      .where("entity_source_refs.source_id", "=", "T123:U-CHAIN")
+      .executeTakeFirstOrThrow();
+    expect(entity.name).toBe("Newer Name");
+    await expect(
+      db
+        .selectFrom("slack_user_sync_state")
+        .select("entity_created_by_sync")
+        .where("slack_user_id", "=", "U-CHAIN")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ entity_created_by_sync: 1 });
+  });
+
+  it("uses the real name and preserves a linked entity name and metadata", async () => {
+    await db
+      .insertInto("entities")
+      .values({
+        id: "linked-person",
+        name: "Existing Canonical Name",
+        source_type: "person",
+        subtype: "internal",
+        aliases: null,
+        metadata: JSON.stringify({ email: "linked@example.com", owner: "human" }),
+        source_ref_id: null,
+        status: "confirmed",
+        provenance_tier: "human_confirmed",
+        hotness: 0,
+        created_at: "2026-08-05T00:00:00.000Z",
+        updated_at: "2026-08-05T00:00:00.000Z",
+      })
+      .execute();
+    await db
+      .insertInto("entity_contact_points")
+      .values({
+        id: "linked-primary-email",
+        entity_id: "linked-person",
+        kind: "email",
+        value: "linked@example.com",
+        display_value: "linked@example.com",
+        label: null,
+        is_primary: 1,
+        source: "manual",
+        connector_config_id: null,
+        created_by_user_id: "admin",
+        verified_at: "2026-08-05T00:00:00.000Z",
+        last_contacted_at: null,
+        created_at: "2026-08-05T00:00:00.000Z",
+        updated_at: "2026-08-05T00:00:00.000Z",
+      })
+      .execute();
+
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-LINKED",
+        name: "deprecated.handle",
+        realName: "Slack Real Name",
+        displayName: "Slack Display Name",
+        email: "linked@example.com",
+      }),
+    );
+
+    const entity = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", "linked-person")
+      .executeTakeFirstOrThrow();
+    expect(entity.name).toBe("Existing Canonical Name");
+    expect(JSON.parse(entity.metadata ?? "{}")).toEqual({ email: "linked@example.com", owner: "human" });
+    const contactPoints = await db
+      .selectFrom("entity_contact_points")
+      .select(["value", "is_primary"])
+      .where("entity_id", "=", "linked-person")
+      .where("kind", "=", "email")
+      .execute();
+    expect(contactPoints).toEqual([{ value: "linked@example.com", is_primary: 1 }]);
+    await expect(
+      db
+        .selectFrom("slack_user_sync_state")
+        .select("entity_created_by_sync")
+        .where("slack_user_id", "=", "U-LINKED")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ entity_created_by_sync: 0 });
+  });
+
+  it("preserves internal classification when a later profile has no email and external flags", async () => {
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-STALE-CLASSIFICATION",
+        email: "internal@example.com",
+        providerUpdatedAt: "00000000001785938400",
+        fetchedAt: "2026-08-05T14:01:00.000Z",
+      }),
+    );
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-STALE-CLASSIFICATION",
+        email: null,
+        isGuest: true,
+        providerUpdatedAt: "00000000001785942000",
+        fetchedAt: "2026-08-05T15:01:00.000Z",
+      }),
+    );
+
+    const state = await db
+      .selectFrom("slack_user_sync_state")
+      .select(["classification", "classification_source"])
+      .where("slack_user_id", "=", "U-STALE-CLASSIFICATION")
+      .executeTakeFirstOrThrow();
+    expect(state.classification).toBe("internal");
+    expect(state.classification_source).toBe("stale");
+  });
+
+  it("does not recreate an identity whose source ref points to a deleted entity", async () => {
+    await db
+      .insertInto("entities")
+      .values({
+        id: "deleted-slack-person",
+        name: "Deleted Slack Person",
+        source_type: "person",
+        subtype: null,
+        aliases: null,
+        metadata: null,
+        source_ref_id: null,
+        status: "confirmed",
+        provenance_tier: "structural",
+        hotness: 0,
+        created_at: "2026-08-05T00:00:00.000Z",
+        updated_at: "2026-08-05T00:00:00.000Z",
+        deleted_at: "2026-08-05T00:00:00.000Z",
+        merged_into_entity_id: null,
+      })
+      .execute();
+    await db
+      .insertInto("entity_source_refs")
+      .values({
+        id: "deleted-slack-ref",
+        entity_id: "deleted-slack-person",
+        source: "slack_user",
+        source_id: "T123:U-DELETED",
+        source_url: null,
+        last_seen_at: "2026-08-05T00:00:00.000Z",
+      })
+      .execute();
+
+    await upsertSlackPersonEntity(db, profile({ slackUserId: "U-DELETED", name: "Deleted Person" }));
+
+    await expect(
+      db.selectFrom("entity_source_refs").select("entity_id").where("source_id", "=", "T123:U-DELETED").execute(),
+    ).resolves.toEqual([{ entity_id: "deleted-slack-person" }]);
+    await expect(
+      db.selectFrom("entities").select("id").where("id", "=", "deleted-slack-person").execute(),
+    ).resolves.toHaveLength(1);
+    await expect(
+      db
+        .selectFrom("slack_user_sync_state")
+        .select("entity_id")
+        .where("slack_user_id", "=", "U-DELETED")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ entity_id: null });
   });
 
   it("preserves an existing subtype when a linked Slack profile becomes unclassified", async () => {
@@ -239,7 +447,7 @@ describe("upsertSlackPersonEntity", () => {
         slackUserId: "U-SUBTYPE",
         name: "Internal Person",
         email: null,
-        providerUpdatedAt: "2026-08-05T11:00:00.000Z",
+        providerUpdatedAt: "00000000001785927600",
         fetchedAt: "2026-08-05T11:01:00.000Z",
       }),
     );

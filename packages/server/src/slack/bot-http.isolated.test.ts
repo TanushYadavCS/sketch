@@ -158,7 +158,7 @@ describe("SlackBot.processHttpRequest", () => {
       const bot = makeBot();
       const eventHandlers = new Map<string, (args: { event: Record<string, unknown> }) => Promise<void>>();
       const app = {
-        client: { auth: { test: async () => ({ user_id: "U-BOT", bot_id: "B-BOT" }) } },
+        client: { auth: { test: async () => ({ user_id: "U-BOT", bot_id: "B-BOT", team_id: "T-BOT" }) } },
         message: () => undefined,
         event: (name: string, handler: (args: { event: Record<string, unknown> }) => Promise<void>) => {
           eventHandlers.set(name, handler);
