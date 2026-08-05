@@ -733,6 +733,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     enabled: config.SLACK_ENTITY_SYNC && backgroundWork && externalStartup,
     publicChannelsEnabled: config.SLACK_ENTITY_SYNC_PUBLIC_CHANNELS,
     userInfoCap: config.SLACK_ENTITY_SYNC_USER_INFO_CAP,
+    sweepIntervalMs: config.SLACK_ENTITY_SWEEP_INTERVAL_MS,
     getActiveConnection: async () => {
       const settings = await settingsRepo.get();
       if (!settings?.slack_bot_token || !settings.slack_team_id) return null;
@@ -818,6 +819,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+    slackEntitySync,
     recordSlackChannelParticipantJoined: (channelId: string, slackUserId: string) =>
       slackMembershipReconciler.recordParticipantJoined(channelId, slackUserId),
     recordSlackChannelParticipantObserved: (channelId: string, slackUserId: string) =>

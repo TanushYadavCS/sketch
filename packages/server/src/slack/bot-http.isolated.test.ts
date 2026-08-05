@@ -191,8 +191,8 @@ describe("SlackBot.processHttpRequest", () => {
       }
 
       await vi.waitFor(() => {
-        expect(joined).toHaveBeenCalledWith({ channelId: "C123", slackUserId: "U123" });
-        expect(left).toHaveBeenCalledWith({ channelId: "C123", slackUserId: "U123" });
+        expect(joined).toHaveBeenCalledWith({ channelId: "C123", slackUserId: "U123", teamId: "T-BOT" });
+        expect(left).toHaveBeenCalledWith({ channelId: "C123", slackUserId: "U123", teamId: "T-BOT" });
       });
       await bot.stop();
     });

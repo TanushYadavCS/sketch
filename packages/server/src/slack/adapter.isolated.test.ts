@@ -243,6 +243,8 @@ function freshMockBot() {
     onChannelRenamed: vi.fn(),
     onMemberJoinedChannel: vi.fn(),
     onMemberLeftChannel: vi.fn(),
+    onTeamJoin: vi.fn(),
+    onUserChange: vi.fn(),
     onThreadMessage: vi.fn(),
     onChannelMention: vi.fn(),
     onAppHomeOpened: vi.fn(),
@@ -370,6 +372,65 @@ describe("slack/adapter", () => {
 
       expect(recordSlackChannelParticipantJoined).toHaveBeenCalledWith("C1", "U1");
       expect(recordSlackChannelParticipantLeft).toHaveBeenCalledWith("C1", "U1");
+    });
+
+    it("routes user lifecycle events and bot channel joins to entity sync", async () => {
+      const entitySync = {
+        handleUserEvent: vi.fn().mockResolvedValue(undefined),
+        handleBotJoinedChannel: vi.fn().mockResolvedValue(undefined),
+        observeMessage: vi.fn().mockResolvedValue(undefined),
+      };
+      const deps = { ...makeDeps(), slackEntitySync: entitySync } as unknown as SlackAdapterDeps;
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+
+      const teamJoin = mockBotInstance.onTeamJoin.mock.calls[0]?.[0] as (event: unknown) => Promise<void>;
+      const userChange = mockBotInstance.onUserChange.mock.calls[0]?.[0] as (event: unknown) => Promise<void>;
+      const joined = mockBotInstance.onMemberJoinedChannel.mock.calls[0]?.[0] as (event: {
+        channelId: string;
+        slackUserId: string;
+        isBot?: boolean;
+        teamId?: string;
+      }) => Promise<void>;
+
+      await teamJoin({ teamId: "T1", slackUserId: "U1" });
+      await userChange({ teamId: "T1", slackUserId: "U1" });
+      await joined({ teamId: "T1", channelId: "C1", slackUserId: "UBOT", isBot: true });
+      await joined({ teamId: "T1", channelId: "C1", slackUserId: "U1", isBot: false });
+
+      expect(entitySync.handleUserEvent).toHaveBeenNthCalledWith(1, {
+        eventType: "team_join",
+        teamId: "T1",
+        slackUserId: "U1",
+      });
+      expect(entitySync.handleUserEvent).toHaveBeenNthCalledWith(2, {
+        eventType: "user_change",
+        teamId: "T1",
+        slackUserId: "U1",
+      });
+      expect(entitySync.handleBotJoinedChannel).toHaveBeenCalledWith({ teamId: "T1", channelId: "C1" });
+      expect(entitySync.handleBotJoinedChannel).toHaveBeenCalledOnce();
+    });
+
+    it("uses the observe-on-message entity backstop for channel senders", async () => {
+      const entitySync = {
+        handleUserEvent: vi.fn().mockResolvedValue(undefined),
+        handleBotJoinedChannel: vi.fn().mockResolvedValue(undefined),
+        observeMessage: vi.fn().mockResolvedValue(undefined),
+      };
+      const deps = { ...makeDeps(), slackEntitySync: entitySync } as unknown as SlackAdapterDeps;
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { channel } = getHandlers();
+
+      await channel({
+        type: "channel_message",
+        channelType: "channel",
+        text: "hello",
+        userId: "U1",
+        channelId: "C1",
+        ts: "1111.2222",
+      });
+
+      expect(entitySync.observeMessage).toHaveBeenCalledWith({ slackUserId: "U1" });
     });
 
     it("refreshes channel and conversation names when a channel is renamed", async () => {

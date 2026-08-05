@@ -60,6 +60,7 @@ describe("SlackBot channel message normalization", () => {
       appId: "A_WORKFLOW",
       subtype: "bot_message",
       channelId: "C1",
+      teamId: "T_SKETCH",
       ts: "1.2",
     });
   });

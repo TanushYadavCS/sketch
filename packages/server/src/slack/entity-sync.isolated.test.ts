@@ -298,7 +298,7 @@ describe("Slack entity sync", () => {
     const { sync } = makeSync(facade, undefined, { userInfoCap: 1 });
     await sync.enqueueBackfill({ botToken: "xoxb-t1", teamId: "T1" });
 
-    expect(facade.getUserInfo).toHaveBeenCalledOnce();
+    expect(facade.getUserInfo).toHaveBeenCalledTimes(2);
     await expect(
       db
         ?.selectFrom("slack_user_sync_state")
@@ -340,10 +340,10 @@ describe("Slack entity sync", () => {
       const run = await db?.selectFrom("slack_sync_runs").select(["status", "error"]).executeTakeFirstOrThrow();
       expect(run).toMatchObject({ status: "completed" });
     });
-    expect(facade.listUsersPage).toHaveBeenCalledOnce();
+    expect(facade.listUsersPage).toHaveBeenCalledTimes(2);
 
     await sync.enqueueBackfill({ botToken: "xoxb-t1", teamId: "T1" });
-    expect(facade.listUsersPage).toHaveBeenCalledOnce();
+    expect(facade.listUsersPage).toHaveBeenCalledTimes(2);
   });
 
   it("coalesces same-team work and keeps connection activation fire-and-forget", async () => {
@@ -365,5 +365,97 @@ describe("Slack entity sync", () => {
     expect(sync.onConnectionActivated(active)).toBeUndefined();
     release();
     await Promise.all([first, second]);
+  });
+
+  it("runs one durable repair sweep immediately after a successful backfill", async () => {
+    await createDb();
+    const facade = emptyFacade();
+    const { sync } = makeSync(facade);
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+
+    await sync.enqueueBackfill(active);
+
+    const runs = await getDb().selectFrom("slack_sync_runs").select(["run_type", "status"]).execute();
+    expect(runs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ run_type: "backfill", status: "completed" }),
+        expect.objectContaining({ run_type: "sweep", status: "completed" }),
+      ]),
+    );
+  });
+
+  it("tombstones an external only after a complete sweep sees it in no roster", async () => {
+    await createDb();
+    let mode: "present" | "absent" = "present";
+    const facade: SlackEntitySyncFacade = {
+      listUsersPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listChannelsPage: vi.fn(async () => ({ items: [channel({ id: "C1" })], nextCursor: null })),
+      listChannelMembersPage: vi.fn(async () => ({
+        items: mode === "present" ? ["U-EXTERNAL"] : [],
+        nextCursor: null,
+      })),
+      getUserInfo: vi.fn(async () =>
+        user({ slackUserId: "U-EXTERNAL", name: "external", isStranger: true, profileTeamId: "T2" }),
+      ),
+    };
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+    const { sync } = makeSync(facade, active, { sweepIntervalMs: 1 });
+
+    await sync.enqueueBackfill(active);
+    mode = "absent";
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    sync.start();
+
+    await vi.waitFor(async () => {
+      const state = await getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("inactive_at")
+        .where("slack_user_id", "=", "U-EXTERNAL")
+        .executeTakeFirstOrThrow();
+      expect(state.inactive_at).not.toBeNull();
+    });
+    await sync.stop();
+  });
+
+  it("preserves an external when a channel roster page fails during a sweep", async () => {
+    await createDb();
+    let failRoster = false;
+    const facade: SlackEntitySyncFacade = {
+      listUsersPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listChannelsPage: vi.fn(async () => ({ items: [channel({ id: "C1" })], nextCursor: null })),
+      listChannelMembersPage: vi.fn(async () => {
+        if (failRoster) throw providerError("channel_not_found");
+        return { items: ["U-EXTERNAL"], nextCursor: null };
+      }),
+      getUserInfo: vi.fn(async () =>
+        user({ slackUserId: "U-EXTERNAL", name: "external", isStranger: true, profileTeamId: "T2" }),
+      ),
+    };
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+    const { sync } = makeSync(facade, active, { sweepIntervalMs: 1 });
+
+    await sync.enqueueBackfill(active);
+    failRoster = true;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    sync.start();
+
+    await vi.waitFor(async () => {
+      const sweep = await getDb()
+        .selectFrom("slack_sync_runs")
+        .select(["status", "error"])
+        .where("run_type", "=", "sweep")
+        .orderBy("created_at", "desc")
+        .executeTakeFirstOrThrow();
+      expect(sweep.status).toBe("completed");
+      expect(sweep.error).toContain("channel_not_found");
+    });
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("inactive_at")
+        .where("slack_user_id", "=", "U-EXTERNAL")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ inactive_at: null });
+    await sync.stop();
   });
 });

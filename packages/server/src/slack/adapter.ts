@@ -70,6 +70,7 @@ import { transcribeEagerAttachments } from "../transcription/service";
 import { resolveVisionConfigFromAppConfig } from "../vision/service";
 import { slackApiCall } from "./api";
 import { SlackBot, type SlackFile, type SlackMessage, type SlackMessageHandler } from "./bot";
+import type { SlackEntitySyncService } from "./entity-sync";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
 import { SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
@@ -156,6 +157,7 @@ export interface SlackAdapterDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
+  slackEntitySync?: SlackEntitySyncService;
   onSlackChannelDiscovered?: () => void;
   recordSlackChannelParticipantJoined?: (channelId: string, slackUserId: string) => Promise<void>;
   recordSlackChannelParticipantObserved?: (channelId: string, slackUserId: string) => Promise<void>;
@@ -307,6 +309,9 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     botToken: tokens.botToken,
     ...(mode === "socket" ? { appToken: tokens.appToken } : { signingSecret: config.SLACK_SIGNING_SECRET }),
     logger,
+    eventSilenceThresholdMs: config.SLACK_ENTITY_SYNC
+      ? config.SLACK_ENTITY_EVENT_SILENCE_THRESHOLD_MS
+      : Number.MAX_SAFE_INTEGER,
     onTeamIdResolved: async (teamId) => {
       await deps.repos.settings.update({ slackTeamId: teamId });
     },
@@ -322,15 +327,45 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     deps.recordSlackChannelParticipantLeft ??
     ((channelId: string, slackUserId: string) => slackChannelParticipants.remove(channelId, slackUserId));
 
-  slackBot.onMemberJoinedChannel(({ channelId, slackUserId }) =>
-    recordSlackChannelParticipantJoined(channelId, slackUserId),
-  );
+  slackBot.onMemberJoinedChannel(async ({ channelId, slackUserId, isBot, teamId }) => {
+    await recordSlackChannelParticipantJoined(channelId, slackUserId);
+    if (isBot && deps.slackEntitySync) {
+      await deps.slackEntitySync.handleBotJoinedChannel({
+        channelId,
+        ...(teamId ? { teamId } : {}),
+      });
+    }
+  });
   slackBot.onMemberLeftChannel(({ channelId, slackUserId }) =>
     recordSlackChannelParticipantLeft(channelId, slackUserId),
   );
+  slackBot.onTeamJoin?.(async ({ teamId, slackUserId }) => {
+    await deps.slackEntitySync?.handleUserEvent({
+      eventType: "team_join",
+      slackUserId,
+      ...(teamId ? { teamId } : {}),
+    });
+  });
+  slackBot.onUserChange?.(async ({ teamId, slackUserId }) => {
+    await deps.slackEntitySync?.handleUserEvent({
+      eventType: "user_change",
+      slackUserId,
+      ...(teamId ? { teamId } : {}),
+    });
+  });
   const recordObservedChannelParticipant = async (message: SlackMessage) => {
     if (message.userId && message.channelType !== "mpim") {
       await recordSlackChannelParticipantObserved(message.channelId, message.userId);
+    }
+    if (message.userId && deps.slackEntitySync) {
+      try {
+        await deps.slackEntitySync.observeMessage({
+          slackUserId: message.userId,
+          ...(message.teamId ? { teamId: message.teamId } : {}),
+        });
+      } catch (err) {
+        logger.warn({ err, slackUserId: message.userId }, "Slack observe-on-message entity sync failed");
+      }
     }
   };
 

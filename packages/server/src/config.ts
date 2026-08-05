@@ -35,7 +35,21 @@ export const configSchema = z.object({
     .enum(["true", "false", "1", "0"])
     .default("true")
     .transform((v) => v === "true" || v === "1"),
+  SLACK_ACCESS_GRANDFATHERING: z
+    .enum(["true", "false", "1", "0"])
+    .default("true")
+    .transform((v) => v === "true" || v === "1"),
   SLACK_ENTITY_SYNC_USER_INFO_CAP: z.coerce.number().int().min(1).default(1000),
+  SLACK_ENTITY_SWEEP_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(7 * 24 * 60 * 60 * 1000),
+  SLACK_ENTITY_EVENT_SILENCE_THRESHOLD_MS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(7 * 24 * 60 * 60 * 1000),
   BIRTH_GATE_DRY_RUN: z
     .enum(["true", "false", "1", "0"])
     .default("true")
