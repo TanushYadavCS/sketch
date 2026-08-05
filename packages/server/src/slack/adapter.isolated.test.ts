@@ -378,6 +378,7 @@ describe("slack/adapter", () => {
       const entitySync = {
         handleUserEvent: vi.fn().mockResolvedValue(undefined),
         handleBotJoinedChannel: vi.fn().mockResolvedValue(undefined),
+        handleMemberJoinedChannel: vi.fn().mockResolvedValue(undefined),
         observeMessage: vi.fn().mockResolvedValue(undefined),
       };
       const deps = { ...makeDeps(), slackEntitySync: entitySync } as unknown as SlackAdapterDeps;
@@ -409,6 +410,11 @@ describe("slack/adapter", () => {
       });
       expect(entitySync.handleBotJoinedChannel).toHaveBeenCalledWith({ teamId: "T1", channelId: "C1" });
       expect(entitySync.handleBotJoinedChannel).toHaveBeenCalledOnce();
+      expect(entitySync.handleMemberJoinedChannel).toHaveBeenCalledWith({
+        teamId: "T1",
+        channelId: "C1",
+        slackUserId: "U1",
+      });
     });
 
     it("does not hold the Slack event handler open for a full bot-join crawl", async () => {
@@ -419,6 +425,7 @@ describe("slack/adapter", () => {
       const entitySync = {
         handleUserEvent: vi.fn().mockResolvedValue(undefined),
         handleBotJoinedChannel: vi.fn().mockReturnValue(crawl),
+        handleMemberJoinedChannel: vi.fn().mockResolvedValue(undefined),
         observeMessage: vi.fn().mockResolvedValue(undefined),
       };
       const deps = { ...makeDeps(), slackEntitySync: entitySync } as unknown as SlackAdapterDeps;
@@ -445,6 +452,7 @@ describe("slack/adapter", () => {
       const entitySync = {
         handleUserEvent: vi.fn().mockResolvedValue(undefined),
         handleBotJoinedChannel: vi.fn().mockResolvedValue(undefined),
+        handleMemberJoinedChannel: vi.fn().mockResolvedValue(undefined),
         observeMessage: vi.fn().mockResolvedValue(undefined),
       };
       const deps = { ...makeDeps(), slackEntitySync: entitySync } as unknown as SlackAdapterDeps;
@@ -460,7 +468,7 @@ describe("slack/adapter", () => {
         ts: "1111.2222",
       });
 
-      expect(entitySync.observeMessage).toHaveBeenCalledWith({ slackUserId: "U1" });
+      expect(entitySync.observeMessage).toHaveBeenCalledWith({ slackUserId: "U1", channelId: "C1" });
     });
 
     it("refreshes channel and conversation names when a channel is renamed", async () => {

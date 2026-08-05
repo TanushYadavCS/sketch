@@ -451,9 +451,9 @@ export class SlackBot {
 
     this.app.event("member_joined_channel", async ({ event }) => {
       if (!this.memberJoinedChannelHandler) return;
-      const membership = event as { channel?: string; user?: string; team_id?: string };
+      const membership = event as { channel?: string; user?: string; team?: string; team_id?: string };
       if (!membership.channel || !membership.user) return;
-      const teamId = membership.team_id ?? this.teamId ?? undefined;
+      const teamId = membership.team ?? this.teamId ?? undefined;
       if (!this.isEventForActiveTeam(teamId)) return;
       try {
         await this.memberJoinedChannelHandler({
@@ -472,9 +472,9 @@ export class SlackBot {
 
     this.app.event("member_left_channel", async ({ event }) => {
       if (!this.memberLeftChannelHandler) return;
-      const membership = event as { channel?: string; user?: string; team_id?: string };
+      const membership = event as { channel?: string; user?: string; team?: string; team_id?: string };
       if (!membership.channel || !membership.user) return;
-      const teamId = membership.team_id ?? this.teamId ?? undefined;
+      const teamId = membership.team ?? this.teamId ?? undefined;
       if (!this.isEventForActiveTeam(teamId)) return;
       try {
         await this.memberLeftChannelHandler({

@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createConnectorRepository } from "../db/repositories/connectors";
+import { createConversationRepository } from "../db/repositories/conversations";
 import type { DB } from "../db/schema";
 import { createTestDb, createTestPgDb } from "../test-utils";
 import { backfillSlackFileAccess } from "./slack-salience";
@@ -132,6 +133,74 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         { indexed_file_id: "slack-history", email: "grandfathered@example.com" },
       ]);
       await expect(db.selectFrom("slack_file_access_backfill").selectAll().execute()).resolves.toHaveLength(0);
+    });
+
+    it("does not create grandfathered grants when entity sync is disabled", async () => {
+      await expect(
+        backfillSlackFileAccess({ db, grandfatheringEnabled: true, entitySyncEnabled: false }),
+      ).resolves.toBe(0);
+      await expect(db.selectFrom("slack_file_access_backfill").selectAll().execute()).resolves.toHaveLength(0);
+      await expect(
+        db.selectFrom("file_access").selectAll().where("indexed_file_id", "=", "slack-history").execute(),
+      ).resolves.toEqual([{ indexed_file_id: "slack-history", email: "grandfathered@example.com" }]);
+    });
+
+    it("prefers the capture roster over current scope membership", async () => {
+      const conversation = await createConversationRepository(db).getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "C-HISTORY" },
+        "history",
+      );
+      const message = await createConversationRepository(db).insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1.1",
+        senderJid: "U-CAPTURED",
+        senderName: "Captured",
+        text: "captured",
+        providerTimestamp: "2026-08-01T00:00:00.000Z",
+        receivedAt: "2026-08-01T00:00:00.000Z",
+      });
+      await db
+        .insertInto("conversation_slices")
+        .values({
+          id: "slice-1",
+          conversation_id: conversation.id,
+          first_message_id: message.row.id,
+          last_message_id: message.row.id,
+          started_at: "2026-08-01T00:00:00.000Z",
+          ended_at: "2026-08-01T00:00:00.000Z",
+          message_count: 1,
+          denoised_message_ids: JSON.stringify([message.row.id]),
+          flush_reason: "gap",
+          roster_snapshot: JSON.stringify({
+            channelId: "C-HISTORY",
+            channelName: "history",
+            participants: [
+              {
+                slackUserId: "U-CAPTURED",
+                displayName: "Captured",
+                kind: "teammate",
+                email: "captured@example.com",
+              },
+            ],
+          }),
+          salience_verdict: "kept",
+          salience_signals: null,
+          salience_claim_token: null,
+          salience_claimed_at: null,
+          indexed_file_id: "slack-history",
+          provider_thread_id: null,
+        })
+        .execute();
+
+      await expect(backfillSlackFileAccess({ db, grandfatheringEnabled: true })).resolves.toBe(1);
+      await expect(
+        db
+          .selectFrom("file_access")
+          .select("email")
+          .where("indexed_file_id", "=", "slack-history")
+          .orderBy("email", "asc")
+          .execute(),
+      ).resolves.toEqual([{ email: "captured@example.com" }, { email: "grandfathered@example.com" }]);
     });
   });
 }

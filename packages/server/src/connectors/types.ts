@@ -497,7 +497,7 @@ export interface Connector {
      */
     slackIndexing?: SlackIndexingFacade | null;
     /** Optional application flags used by connectors with platform-specific policy switches. */
-    appConfig?: { SLACK_ACCESS_GRANDFATHERING?: boolean };
+    appConfig?: { SLACK_ACCESS_GRANDFATHERING?: boolean; SLACK_ENTITY_SYNC?: boolean };
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
     onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;

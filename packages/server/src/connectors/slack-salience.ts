@@ -39,6 +39,13 @@ export interface SlackSalienceOptions {
   batchLimit?: number;
 }
 
+function isSlackGrandfatheringEnabled(options: {
+  grandfatheringEnabled?: boolean;
+  entitySyncEnabled?: boolean;
+}): boolean {
+  return (options.grandfatheringEnabled ?? true) && (options.entitySyncEnabled ?? true);
+}
+
 interface SlackSliceContext {
   slice: ConversationSliceRow;
   conversationId: number;
@@ -63,11 +70,17 @@ function stableContentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+/**
+ * Historical files with a valid capture roster use that snapshot as the
+ * source of teammate grants. Files without one fall back to the current
+ * scope membership, which is an explicit approximation for older captures.
+ */
 export async function backfillSlackFileAccess(options: {
   db: Kysely<DB>;
   grandfatheringEnabled: boolean;
+  entitySyncEnabled?: boolean;
 }): Promise<number> {
-  if (!options.grandfatheringEnabled) return 0;
+  if (!isSlackGrandfatheringEnabled(options)) return 0;
   return options.db.transaction().execute(async (trx) => {
     await trx
       .insertInto("slack_file_access_backfill")
@@ -81,16 +94,48 @@ export async function backfillSlackFileAccess(options: {
       .where("completed_at", "is", null)
       .executeTakeFirst();
     if (claim.numUpdatedRows === 0n) return 0;
-    const result = await sql`
-      INSERT INTO file_access (indexed_file_id, email)
-      SELECT indexed_files.id, access_scope_members.email
-      FROM indexed_files
-      INNER JOIN access_scope_members ON access_scope_members.access_scope_id = indexed_files.access_scope_id
-      WHERE indexed_files.source = 'slack'
-        AND indexed_files.access_scope_id IS NOT NULL
-      ON CONFLICT DO NOTHING
-    `.execute(trx);
-    return Number(result.numAffectedRows ?? 0);
+    const files = await trx
+      .selectFrom("indexed_files")
+      .leftJoin("conversation_slices", "conversation_slices.id", "indexed_files.provider_file_id")
+      .select([
+        "indexed_files.id as indexedFileId",
+        "indexed_files.access_scope_id as accessScopeId",
+        "conversation_slices.roster_snapshot as rosterSnapshot",
+      ])
+      .where("indexed_files.source", "=", "slack")
+      .where("indexed_files.access_scope_id", "is not", null)
+      .execute();
+    const scopeIds = [...new Set(files.flatMap((file) => (file.accessScopeId ? [file.accessScopeId] : [])))];
+    const currentMembers =
+      scopeIds.length === 0
+        ? []
+        : await trx
+            .selectFrom("access_scope_members")
+            .select(["access_scope_id", "email"])
+            .where("access_scope_id", "in", scopeIds)
+            .execute();
+    const emailsByScope = new Map<string, string[]>();
+    for (const member of currentMembers) {
+      const emails = emailsByScope.get(member.access_scope_id) ?? [];
+      emails.push(member.email);
+      emailsByScope.set(member.access_scope_id, emails);
+    }
+    const grants = files.flatMap((file) => {
+      const snapshot = parseSlackRosterSnapshot(file.rosterSnapshot);
+      const emails = snapshot
+        ? teammateEmailsFromRoster(snapshot)
+        : file.accessScopeId
+          ? [...new Set(emailsByScope.get(file.accessScopeId) ?? [])]
+          : [];
+      return emails.map((email) => ({ indexed_file_id: file.indexedFileId, email }));
+    });
+    if (grants.length === 0) return 0;
+    const result = await trx
+      .insertInto("file_access")
+      .values(grants)
+      .onConflict((oc) => oc.columns(["indexed_file_id", "email"]).doNothing())
+      .executeTakeFirst();
+    return Number(result.numInsertedOrUpdatedRows ?? 0);
   });
 }
 
@@ -456,9 +501,10 @@ export async function* emitSlackSyncedItems(options: {
   now?: Date;
   onSkippedNoScope?: () => void;
   grandfatheringEnabled?: boolean;
+  entitySyncEnabled?: boolean;
 }): AsyncGenerator<SyncedItem> {
   const refreshDays = options.emissionRefreshDays ?? SLACK_EMISSION_REFRESH_DAYS;
-  const grandfatheringEnabled = options.grandfatheringEnabled ?? true;
+  const grandfatheringEnabled = isSlackGrandfatheringEnabled(options);
   const now = options.now ?? new Date();
   const refreshedAfter = new Date(now.getTime() - refreshDays * 24 * 60 * 60_000).toISOString();
   const kept = await listSliceContexts(options.db, "kept", null, refreshedAfter);
@@ -531,7 +577,7 @@ export async function* emitSlackSyncedItems(options: {
         label: `#${context.channelName}`,
         memberEmails: teammateEmails,
       },
-      accessEmails: grandfatheringEnabled ? teammateEmails : [],
+      accessEmails: grandfatheringEnabled ? teammateEmails : undefined,
     };
   }
 }
@@ -554,8 +600,9 @@ export async function archiveAllSlackChannelFiles(options: {
   logger: Logger;
   connectorConfigId: string;
   grandfatheringEnabled?: boolean;
+  entitySyncEnabled?: boolean;
 }): Promise<number> {
-  if (options.grandfatheringEnabled ?? true) return 0;
+  if (isSlackGrandfatheringEnabled(options)) return 0;
 
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
@@ -610,6 +657,7 @@ export async function reconcileSlackChannelAcls(options: {
   facade: SlackIndexingFacade;
   connectorConfigId: string;
   grandfatheringEnabled?: boolean;
+  entitySyncEnabled?: boolean;
 }): Promise<{ scopesRefreshed: number; scopesArchived: number; filesArchived: number }> {
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
@@ -619,7 +667,7 @@ export async function reconcileSlackChannelAcls(options: {
   let scopesRefreshed = 0;
   let scopesArchived = 0;
   let filesArchived = 0;
-  const grandfatheringEnabled = options.grandfatheringEnabled ?? true;
+  const grandfatheringEnabled = isSlackGrandfatheringEnabled(options);
 
   for (const scope of scopes) {
     const channelName = visible.get(scope.providerScopeId);

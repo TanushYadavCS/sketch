@@ -1,6 +1,6 @@
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
@@ -40,6 +40,32 @@ function birthRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe("ReviewBand birth rows", () => {
+  it("shows every ambiguous candidate in the row and chooser", async () => {
+    const ambiguous = birthRow({
+      candidate: null,
+      candidates: [
+        { id: "candidate-a", name: "Simran Suri", email: "simran.suri@example.com" },
+        { id: "candidate-b", name: "Simran Neeli", email: "simran.neeli@example.com" },
+      ],
+      candidate_entity_ids: JSON.stringify(["candidate-a", "candidate-b"]),
+    });
+    server.use(
+      http.get("/api/entity-review", () => HttpResponse.json({ rows: [ambiguous], total: 1 })),
+      http.get("/api/entity-review/:id", () => HttpResponse.json({ row: ambiguous, evidence: [] })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewBand types={["person"]} />);
+
+    expect(await screen.findByText(/Simran Suri/)).toBeInTheDocument();
+    expect(screen.getByText(/Simran Neeli/)).toBeInTheDocument();
+    await user.click(within(screen.getByTestId("review-row-rev-1")).getByRole("button"));
+
+    expect(await screen.findByText("Possible matches")).toBeInTheDocument();
+    expect(screen.getByTestId("suggested-candidate-candidate-a")).toBeInTheDocument();
+    expect(screen.getByTestId("suggested-candidate-candidate-b")).toBeInTheDocument();
+  });
+
   it("shows a tracker origin chip and dismisses inline without opening the reconcile drawer", async () => {
     const dismiss = vi.fn();
     server.use(

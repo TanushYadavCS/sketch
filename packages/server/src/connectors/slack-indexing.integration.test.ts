@@ -699,6 +699,62 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(items[0]?.content).not.toContain("(teammate)");
     });
 
+    it("omits per-file grants when entity sync is disabled even if grandfathering is enabled", async () => {
+      const conversations = createConversationRepository(db);
+      const conversation = await conversations.getOrCreate(
+        { platform: "slack", kind: "channel", providerConversationId: "C1" },
+        "general",
+      );
+      const message = await conversations.insertMessage({
+        conversationId: conversation.id,
+        providerMessageId: "1900.2",
+        senderJid: "U0TEAM",
+        senderName: "Roopak",
+        text: "Decision: keep the channel history",
+        providerTimestamp: "2026-07-17T11:00:00.000Z",
+        receivedAt: "2026-07-17T11:00:00.000Z",
+      });
+      await createConversationSlicesRepository(db).insertIfAbsent({
+        conversationId: conversation.id,
+        firstMessageId: message.row.id,
+        lastMessageId: message.row.id,
+        startedAt: "2026-07-17T11:00:00.000Z",
+        endedAt: "2026-07-17T11:00:00.000Z",
+        messageCount: 1,
+        denoisedMessageIds: [message.row.id],
+        flushReason: "gap",
+        rosterSnapshot: "[]",
+        salienceVerdict: "kept",
+      });
+
+      const items = [];
+      for await (const item of emitSlackSyncedItems({
+        db,
+        logger,
+        facade: fakeFacade(),
+        grandfatheringEnabled: true,
+        entitySyncEnabled: false,
+      })) {
+        items.push(item);
+      }
+
+      expect(items).toHaveLength(1);
+      expect(items[0]?.accessEmails).toBeUndefined();
+
+      const flagOffItems = [];
+      for await (const item of emitSlackSyncedItems({
+        db,
+        logger,
+        facade: fakeFacade(),
+        grandfatheringEnabled: false,
+        entitySyncEnabled: true,
+      })) {
+        flagOffItems.push(item);
+      }
+      expect(flagOffItems).toHaveLength(1);
+      expect(flagOffItems[0]?.accessEmails).toBeUndefined();
+    });
+
     it("flag-off emission with no teammate member archives the linked file and emits nothing", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const config = await db

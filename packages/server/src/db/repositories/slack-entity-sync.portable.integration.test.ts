@@ -71,6 +71,77 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         db.selectFrom("entity_review_queue").select("id").where("source_id", "=", "T-WILDCARD:U-WILDCARD").execute(),
       ).resolves.toHaveLength(0);
     });
+
+    it("logs when ambiguous email candidates have no usable profile name", async () => {
+      await db
+        .insertInto("entities")
+        .values([
+          {
+            id: "ambiguous-name-missing-a",
+            name: "A",
+            source_type: "person",
+            subtype: null,
+            aliases: null,
+            metadata: JSON.stringify({ email: "ambiguous-name-missing@example.com" }),
+            source_ref_id: null,
+            status: "confirmed",
+            provenance_tier: "inferred",
+            hotness: 0,
+            created_at: "2026-08-05T10:00:00.000Z",
+            updated_at: "2026-08-05T10:00:00.000Z",
+          },
+          {
+            id: "ambiguous-name-missing-b",
+            name: "B",
+            source_type: "person",
+            subtype: null,
+            aliases: null,
+            metadata: JSON.stringify({ email: "ambiguous-name-missing@example.com" }),
+            source_ref_id: null,
+            status: "confirmed",
+            provenance_tier: "inferred",
+            hotness: 0,
+            created_at: "2026-08-05T10:00:00.000Z",
+            updated_at: "2026-08-05T10:00:00.000Z",
+          },
+        ])
+        .execute();
+      const logger = { warn: vi.fn() };
+
+      await upsertSlackPersonEntity(
+        db,
+        {
+          teamId: "T-MISSING-NAME",
+          slackUserId: "U-MISSING-NAME",
+          name: "",
+          realName: "",
+          displayName: "",
+          email: "ambiguous-name-missing@example.com",
+          profileTeamId: "T-MISSING-NAME",
+          isBot: false,
+          isGuest: false,
+          isStranger: false,
+          isRestricted: false,
+          isUltraRestricted: false,
+          deleted: false,
+          providerUpdatedAt: "00000000001785924000",
+          fetchedAt: "2026-08-05T11:00:00.000Z",
+        },
+        { logger },
+      );
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        { candidateEntityIds: ["ambiguous-name-missing-a", "ambiguous-name-missing-b"], slackUserId: "U-MISSING-NAME" },
+        "Skipping Slack entity review row because the profile has no usable name",
+      );
+      await expect(
+        db
+          .selectFrom("entity_review_queue")
+          .select("id")
+          .where("source_id", "=", "T-MISSING-NAME:U-MISSING-NAME")
+          .execute(),
+      ).resolves.toHaveLength(0);
+    });
   });
 }
 

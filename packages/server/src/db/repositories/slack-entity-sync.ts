@@ -439,6 +439,12 @@ async function runUpsertBody(
   }
 
   const name = profileName(profile);
+  if (reviewReason && !name) {
+    options.logger?.warn(
+      { candidateEntityIds: reviewReason.candidateEntityIds ?? [], slackUserId: profile.slackUserId },
+      "Skipping Slack entity review row because the profile has no usable name",
+    );
+  }
   let suppressed = false;
   if (!entity && name) {
     suppressed = Boolean(

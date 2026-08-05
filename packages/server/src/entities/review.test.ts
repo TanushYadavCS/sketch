@@ -161,6 +161,7 @@ async function seedReviewRow(
     seedSourceId?: string | null;
     candidateReason?: string | null;
     candidateEntityId?: string | null;
+    candidateEntityIds?: string[];
     occurrenceCount?: number;
   },
 ): Promise<{ id: string; candidateGeneratedAt: string }> {
@@ -178,6 +179,7 @@ async function seedReviewRow(
       seed_source: opts.seedSource ?? null,
       seed_source_id: opts.seedSourceId ?? null,
       candidate_entity_id: opts.candidateEntityId ?? null,
+      candidate_entity_ids: opts.candidateEntityIds ? JSON.stringify(opts.candidateEntityIds) : null,
       candidate_score: opts.candidateEntityId ? 1 : null,
       candidate_reason: opts.candidateReason ?? null,
       candidate_generated_at: now,
@@ -514,6 +516,41 @@ describe("entity-review routes — list endpoint shape", () => {
       const sum = row.sourceBreakdown.reduce((acc, s) => acc + s.count, 0);
       expect(sum).toBe(row.evidenceCount);
     }
+  });
+
+  it("enriches every persisted ambiguous candidate in list and detail responses", async () => {
+    const firstId = await seedEntity(db, { name: "Simran Suri", sourceType: "person" });
+    const secondId = await seedEntity(db, { name: "Simran Neeli", sourceType: "person" });
+    const review = await seedReviewRow(db, {
+      proposedName: "Simran",
+      entityType: "person",
+      triggeredBy: ownerId,
+      candidateEntityIds: [firstId, secondId],
+    });
+
+    const listRes = await app.request("/api/entity-review", { headers: { Cookie: ownerCookie } });
+    const listBody = (await listRes.json()) as {
+      rows: Array<{ candidate_entity_ids: string | null; candidates: Array<{ id: string; name: string }> }>;
+    };
+    expect(listBody.rows[0]).toMatchObject({
+      candidate_entity_ids: JSON.stringify([firstId, secondId]),
+      candidates: [
+        { id: firstId, name: "Simran Suri" },
+        { id: secondId, name: "Simran Neeli" },
+      ],
+    });
+
+    const detailRes = await app.request(`/api/entity-review/${review.id}`, { headers: { Cookie: ownerCookie } });
+    const detailBody = (await detailRes.json()) as {
+      row: { candidate_entity_ids: string | null; candidates: Array<{ id: string; name: string }> };
+    };
+    expect(detailBody.row).toMatchObject({
+      candidate_entity_ids: JSON.stringify([firstId, secondId]),
+      candidates: [
+        { id: firstId, name: "Simran Suri" },
+        { id: secondId, name: "Simran Neeli" },
+      ],
+    });
   });
 
   it("?limit=0 short-circuits to { rows: [], total }", async () => {

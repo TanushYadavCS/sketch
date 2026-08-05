@@ -185,7 +185,7 @@ describe("SlackBot.processHttpRequest", () => {
         const body = JSON.stringify({
           type: "event_callback",
           event_id: eventId,
-          event: { type: eventType, channel: "C123", user: "U123" },
+          event: { type: eventType, channel: "C123", user: "U123", team: "T-BOT", team_id: "T-WRONG" },
         });
         await expect(bot.processHttpRequest(body, makeHeaders(body))).resolves.toEqual({});
       }

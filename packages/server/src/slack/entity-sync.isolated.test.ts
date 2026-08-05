@@ -237,6 +237,153 @@ describe("Slack entity sync", () => {
     expect(facade.listChannelMembersPage).toHaveBeenCalledWith("C-PUBLIC", undefined);
   });
 
+  it("refreshes a human member join through users.info and clears a tombstone", async () => {
+    await createDb();
+    const facade = emptyFacade();
+    facade.getUserInfo = vi.fn(async () => user({ slackUserId: "U-JOIN", name: "joined" }));
+    const { sync } = makeSync(facade);
+
+    await sync.handleMemberJoinedChannel({ teamId: "T1", channelId: "C1", slackUserId: "U-JOIN" });
+    await getDb()
+      .updateTable("slack_user_sync_state")
+      .set({ inactive_at: "2026-08-01T00:00:00.000Z" })
+      .where("team_id", "=", "T1")
+      .where("slack_user_id", "=", "U-JOIN")
+      .execute();
+    await sync.handleMemberJoinedChannel({ teamId: "T1", channelId: "C1", slackUserId: "U-JOIN" });
+
+    expect(facade.getUserInfo).toHaveBeenNthCalledWith(1, "U-JOIN", { fresh: true });
+    expect(facade.getUserInfo).toHaveBeenNthCalledWith(2, "U-JOIN", { fresh: true });
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("inactive_at")
+        .where("slack_user_id", "=", "U-JOIN")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ inactive_at: null });
+  });
+
+  it("reactivates an inactive roster member with a fresh profile lookup", async () => {
+    await createDb();
+    const facade = emptyFacade();
+    facade.listChannelsPage = vi.fn(async () => ({ items: [channel({ id: "C1" })], nextCursor: null }));
+    facade.listChannelMembersPage = vi.fn(async () => ({ items: ["U-ROSTER"], nextCursor: null }));
+    facade.getUserInfo = vi.fn(async () => user({ slackUserId: "U-ROSTER", name: "roster member" }));
+    const { sync } = makeSync(facade);
+
+    await sync.handleMemberJoinedChannel({ teamId: "T1", channelId: "C1", slackUserId: "U-ROSTER" });
+    await getDb()
+      .updateTable("slack_user_sync_state")
+      .set({ inactive_at: "2026-08-01T00:00:00.000Z" })
+      .where("team_id", "=", "T1")
+      .where("slack_user_id", "=", "U-ROSTER")
+      .execute();
+    await sync.enqueueSweep({ botToken: "xoxb-t1", teamId: "T1" });
+
+    expect(facade.getUserInfo).toHaveBeenLastCalledWith("U-ROSTER", { fresh: true });
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("inactive_at")
+        .where("slack_user_id", "=", "U-ROSTER")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ inactive_at: null });
+  });
+
+  it("observes foreign-team Slack Connect senders only on served channels", async () => {
+    await createDb();
+    const facade = emptyFacade();
+    facade.listChannelsPage = vi.fn(async () => ({ items: [channel({ id: "C-SERVED" })], nextCursor: null }));
+    facade.getUserInfo = vi.fn(async () =>
+      user({ slackUserId: "U-FOREIGN", name: "foreign", profileTeamId: "T2", isStranger: true }),
+    );
+    const { sync, logger } = makeSync(facade);
+
+    await sync.observeMessage({ teamId: "T2", channelId: "C-SERVED", slackUserId: "U-FOREIGN" });
+
+    expect(facade.getUserInfo).toHaveBeenCalledWith("U-FOREIGN", { fresh: true });
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventTeamId: "T2" }),
+      "Dropped Slack entity event from another team",
+    );
+
+    facade.listChannelsPage = vi.fn(async () => ({ items: [], nextCursor: null }));
+    await sync.observeMessage({ teamId: "T2", channelId: "C-NOT-SERVED", slackUserId: "U-NOT-SERVED" });
+    expect(facade.getUserInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it("reactivates an inactive observed sender with a fresh profile lookup", async () => {
+    await createDb();
+    const facade = emptyFacade();
+    facade.listChannelsPage = vi.fn(async () => ({ items: [channel({ id: "C1" })], nextCursor: null }));
+    facade.getUserInfo = vi.fn(async () => user({ slackUserId: "U-OBSERVED", name: "observed" }));
+    const { sync } = makeSync(facade);
+
+    await sync.observeMessage({ channelId: "C1", slackUserId: "U-OBSERVED" });
+    await getDb()
+      .updateTable("slack_user_sync_state")
+      .set({ inactive_at: "2026-08-01T00:00:00.000Z" })
+      .where("team_id", "=", "T1")
+      .where("slack_user_id", "=", "U-OBSERVED")
+      .execute();
+    await sync.observeMessage({ channelId: "C1", slackUserId: "U-OBSERVED" });
+
+    expect(facade.getUserInfo).toHaveBeenLastCalledWith("U-OBSERVED", { fresh: true });
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("inactive_at")
+        .where("slack_user_id", "=", "U-OBSERVED")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ inactive_at: null });
+  });
+
+  it("repairs a pending observed sender with a fresh profile lookup", async () => {
+    await createDb();
+    const facade = emptyFacade();
+    facade.listChannelsPage = vi.fn(async () => ({ items: [channel({ id: "C-PENDING" })], nextCursor: null }));
+    facade.getUserInfo = vi.fn(async () => user({ slackUserId: "U-PENDING", name: "pending repair" }));
+    await getDb()
+      .insertInto("slack_user_sync_state")
+      .values({
+        team_id: "T1",
+        slack_user_id: "U-PENDING",
+        name: null,
+        real_name: null,
+        display_name: null,
+        email: null,
+        profile_team_id: null,
+        profile_json: JSON.stringify({ status: "pending", reason: "users.info_cap" }),
+        is_bot: 0,
+        is_guest: 0,
+        is_stranger: 0,
+        is_restricted: 0,
+        is_ultra_restricted: 0,
+        deleted: 0,
+        classification: null,
+        classification_source: null,
+        provider_updated_at: null,
+        fetched_at: "2026-08-01T00:00:00.000Z",
+        entity_id: null,
+        inactive_at: null,
+        created_at: "2026-08-01T00:00:00.000Z",
+        updated_at: "2026-08-01T00:00:00.000Z",
+      })
+      .execute();
+    const { sync } = makeSync(facade);
+
+    await sync.observeMessage({ channelId: "C-PENDING", slackUserId: "U-PENDING" });
+
+    expect(facade.getUserInfo).toHaveBeenCalledWith("U-PENDING", { fresh: true });
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("profile_json")
+        .where("slack_user_id", "=", "U-PENDING")
+        .executeTakeFirstOrThrow(),
+    ).resolves.not.toMatchObject({ profile_json: JSON.stringify({ status: "pending", reason: "users.info_cap" }) });
+  });
+
   it("persists empty rosters separately from failed roster reads", async () => {
     await createDb();
     const facade: SlackEntitySyncFacade = {
@@ -365,6 +512,31 @@ describe("Slack entity sync", () => {
     expect(sync.onConnectionActivated(active)).toBeUndefined();
     release();
     await Promise.all([first, second]);
+  });
+
+  it("queues a bot-join roster refresh behind an in-flight team run", async () => {
+    await createDb();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const facade = emptyFacade();
+    facade.listUsersPage = vi.fn(async () => {
+      await blocked;
+      return { items: [], nextCursor: null };
+    });
+    facade.listChannelMembersPage = vi.fn(async () => ({ items: [], nextCursor: null }));
+    const { sync } = makeSync(facade);
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+
+    const run = sync.enqueueBackfill(active);
+    const join = sync.handleBotJoinedChannel({ teamId: "T1", channelId: "C1" });
+    await vi.waitFor(() => expect(facade.listUsersPage).toHaveBeenCalledOnce());
+    expect(facade.listChannelMembersPage).not.toHaveBeenCalled();
+    release();
+    await Promise.all([run, join]);
+
+    expect(facade.listChannelMembersPage).toHaveBeenCalledWith("C1", undefined);
   });
 
   it("runs one durable repair sweep immediately after a successful backfill", async () => {
@@ -539,6 +711,10 @@ describe("Slack entity sync", () => {
     const { sync } = makeSync(facade, active, { sweepIntervalMs: 1 });
 
     await sync.enqueueBackfill(active);
+    await getDb()
+      .insertInto("slack_channel_participants")
+      .values({ channel_id: "C1", slack_user_id: "U-EXTERNAL" })
+      .execute();
     mode = "absent";
     await new Promise((resolve) => setTimeout(resolve, 5));
     sync.start();
@@ -552,6 +728,40 @@ describe("Slack entity sync", () => {
       expect(state.inactive_at).not.toBeNull();
     });
     await sync.stop();
+  });
+
+  it("does not tombstone an external when one of its participant channels was not crawled", async () => {
+    await createDb();
+    let mode: "present" | "absent" = "present";
+    const facade: SlackEntitySyncFacade = {
+      listUsersPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listChannelsPage: vi.fn(async () => ({ items: [channel({ id: "C1" })], nextCursor: null })),
+      listChannelMembersPage: vi.fn(async () => ({
+        items: mode === "present" ? ["U-EXTERNAL"] : [],
+        nextCursor: null,
+      })),
+      getUserInfo: vi.fn(async () =>
+        user({ slackUserId: "U-EXTERNAL", name: "external", isStranger: true, profileTeamId: "T2" }),
+      ),
+    };
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+    const { sync } = makeSync(facade, active);
+
+    await sync.enqueueBackfill(active);
+    await getDb()
+      .insertInto("slack_channel_participants")
+      .values({ channel_id: "C2", slack_user_id: "U-EXTERNAL" })
+      .execute();
+    mode = "absent";
+    await sync.enqueueSweep(active);
+
+    await expect(
+      getDb()
+        .selectFrom("slack_user_sync_state")
+        .select("inactive_at")
+        .where("slack_user_id", "=", "U-EXTERNAL")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toMatchObject({ inactive_at: null });
   });
 
   it("preserves an external when a channel roster page fails during a sweep", async () => {
@@ -594,5 +804,38 @@ describe("Slack entity sync", () => {
         .executeTakeFirstOrThrow(),
     ).resolves.toMatchObject({ inactive_at: null });
     await sync.stop();
+  });
+
+  it("backs off scheduled retries for failed runs", async () => {
+    vi.useFakeTimers();
+    await createDb();
+    const facade = emptyFacade();
+    facade.listUsersPage = vi.fn(async () => {
+      throw providerError("unavailable");
+    });
+    const active = { botToken: "xoxb-t1", teamId: "T1" };
+    const { sync } = makeSync(facade, active, { sweepIntervalMs: 1 });
+
+    await sync.enqueueBackfill(active);
+    const failed = await getDb()
+      .selectFrom("slack_sync_runs")
+      .select("error")
+      .where("run_type", "=", "backfill")
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(failed.error ?? "{}")).toMatchObject({ retryCount: 1 });
+    expect(facade.listUsersPage).toHaveBeenCalledOnce();
+
+    await sync.enqueueScheduledSweep(active);
+    expect(facade.listUsersPage).toHaveBeenCalledOnce();
+
+    vi.advanceTimersByTime(60_000);
+    await sync.enqueueScheduledSweep(active);
+    expect(facade.listUsersPage).toHaveBeenCalledTimes(2);
+    const retried = await getDb()
+      .selectFrom("slack_sync_runs")
+      .select("error")
+      .where("run_type", "=", "backfill")
+      .executeTakeFirstOrThrow();
+    expect(JSON.parse(retried.error ?? "{}")).toMatchObject({ retryCount: 2 });
   });
 });

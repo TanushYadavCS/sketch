@@ -51,6 +51,56 @@ describe("Slack indexing facade", () => {
     expect(members).toHaveBeenNthCalledWith(1, { channel: "C1", limit: 200 });
   });
 
+  it("captures OAuth scopes once from the users.list connection", async () => {
+    const onOAuthScopes = vi.fn();
+    const usersList = vi
+      .fn()
+      .mockResolvedValueOnce({
+        members: [user()],
+        response_metadata: { next_cursor: "users-2", scopes: ["users:read"] },
+      })
+      .mockResolvedValueOnce({ members: [], response_metadata: { scopes: ["users:read", "users:read.email"] } });
+    const client = {
+      users: { list: usersList, info: vi.fn() },
+      conversations: { list: vi.fn(), members: vi.fn() },
+    };
+    const facade = createSlackIndexingFacade({
+      getBotToken: async () => "xoxb-scopes",
+      clientFactory: () => client as never,
+      onOAuthScopes,
+    });
+
+    await expect(collect(facade.iterateUsers())).resolves.toHaveLength(1);
+
+    expect(onOAuthScopes).toHaveBeenCalledOnce();
+    expect(onOAuthScopes).toHaveBeenCalledWith(["users:read"]);
+  });
+
+  it("captures OAuth scopes on an isolated lifecycle connection", async () => {
+    const onOAuthScopes = vi.fn();
+    const client = {
+      users: {
+        list: vi.fn().mockResolvedValue({
+          members: [user()],
+          response_metadata: { scopes: ["users:read"] },
+        }),
+        info: vi.fn(),
+      },
+      conversations: { list: vi.fn(), members: vi.fn() },
+    };
+    const facade = createSlackIndexingFacade({
+      getBotToken: async () => "xoxb-root",
+      clientFactory: () => client as never,
+      onOAuthScopes,
+    });
+    const isolated = facade.withToken?.("xoxb-lifecycle", { isolatedLimiter: true });
+
+    await isolated?.listUsersPage?.();
+
+    expect(onOAuthScopes).toHaveBeenCalledOnce();
+    expect(onOAuthScopes).toHaveBeenCalledWith(["users:read"]);
+  });
+
   it("deduplicates concurrent users.info calls and serves them from the TTL cache", async () => {
     const info = vi.fn().mockResolvedValue({
       user: {

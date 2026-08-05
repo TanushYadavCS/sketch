@@ -3,6 +3,7 @@ import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { z } from "zod/v4";
+import { fileAccessFilterSql } from "../../connectors/search";
 import type { ConversationSlicesTable, DB } from "../../db/schema";
 import type { Attachment } from "../../files";
 import { type SlackRosterSnapshot, parseSlackRosterSnapshot } from "../../slack/identity-resolution";
@@ -180,7 +181,8 @@ function toDrillAnchor(row: SliceAnchorRow): DrillAnchor {
 /**
  * Authorization is the load-bearing part of this tool: a slice is readable
  * only when it is linked to a live (unarchived) indexed file whose
- * slack_channel access scope contains one of the caller's verified emails.
+ * slack_channel access scope or per-file grants contain one of the caller's
+ * verified emails.
  * A thread filter or guessed slice id is never a substitute — every query
  * path below goes through this join.
  */
@@ -190,7 +192,6 @@ function authorizedSliceAnchorQuery(db: Kysely<DB>, userEmails: string[]) {
     .innerJoin("conversations", "conversations.id", "conversation_slices.conversation_id")
     .innerJoin("indexed_files", "indexed_files.id", "conversation_slices.indexed_file_id")
     .innerJoin("access_scopes", "access_scopes.id", "indexed_files.access_scope_id")
-    .innerJoin("access_scope_members", "access_scope_members.access_scope_id", "access_scopes.id")
     .select([
       "conversation_slices.id",
       "conversation_slices.conversation_id",
@@ -211,7 +212,7 @@ function authorizedSliceAnchorQuery(db: Kysely<DB>, userEmails: string[]) {
     .whereRef("indexed_files.provider_file_id", "=", "conversation_slices.id")
     .where("access_scopes.scope_type", "=", "slack_channel")
     .whereRef("access_scopes.provider_scope_id", "=", "conversations.provider_conversation_id")
-    .where("access_scope_members.email", "in", userEmails);
+    .where(fileAccessFilterSql(userEmails));
 }
 
 async function loadAuthorizedSliceAnchor(

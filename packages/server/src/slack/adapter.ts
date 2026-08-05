@@ -330,15 +330,20 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
 
   slackBot.onMemberJoinedChannel(async ({ channelId, slackUserId, isBot, teamId }) => {
     await recordSlackChannelParticipantJoined(channelId, slackUserId);
-    if (isBot && deps.slackEntitySync) {
-      void deps.slackEntitySync
-        .handleBotJoinedChannel({
-          channelId,
-          ...(teamId ? { teamId } : {}),
-        })
-        .catch((error) => {
-          logger.warn({ error, teamId, channelId }, "Slack bot-join entity sync failed");
-        });
+    if (deps.slackEntitySync) {
+      const refresh = isBot
+        ? deps.slackEntitySync.handleBotJoinedChannel({
+            channelId,
+            ...(teamId ? { teamId } : {}),
+          })
+        : deps.slackEntitySync.handleMemberJoinedChannel({
+            channelId,
+            slackUserId,
+            ...(teamId ? { teamId } : {}),
+          });
+      void refresh.catch((error) => {
+        logger.warn({ error, teamId, channelId }, "Slack channel member entity sync failed");
+      });
     }
   });
   slackBot.onMemberLeftChannel(({ channelId, slackUserId }) =>
@@ -365,6 +370,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     if (message.userId && deps.slackEntitySync) {
       try {
         await deps.slackEntitySync.observeMessage({
+          channelId: message.channelId,
           slackUserId: message.userId,
           ...(message.teamId ? { teamId: message.teamId } : {}),
         });

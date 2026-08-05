@@ -271,6 +271,7 @@ export interface EntityReviewQueueRow {
   entity_type: string;
   proposed_email: string | null;
   candidate_entity_id: string | null;
+  candidate_entity_ids?: string | null;
   candidate_score: number | null;
   candidate_reason: string | null;
   candidate_generated_at: string | null;
@@ -294,6 +295,7 @@ export interface EntityReviewQueueRow {
   evidenceCount: number;
   sourceBreakdown: Array<{ source: string; count: number }>;
   candidate: { id: string; name: string; email: string | null } | null;
+  candidates?: Array<{ id: string; name: string; email: string | null }>;
 }
 
 export interface EntityReviewEvidenceRow {

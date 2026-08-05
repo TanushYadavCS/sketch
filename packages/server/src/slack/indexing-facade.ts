@@ -75,6 +75,7 @@ type SharedSlackConnection = {
   limiter: SlackApiLimiter;
   clientFactory: (token: string) => SlackIndexingClient;
   owners: Set<object>;
+  oauthScopeCapture: { scopes: string[] | null };
 };
 
 const sharedConnectionsByToken = new Map<string, SharedSlackConnection>();
@@ -113,6 +114,13 @@ function readBoolean(record: Record<string, unknown>, key: string): boolean {
 
 function readString(record: Record<string, unknown>, key: string): string | null {
   return typeof record[key] === "string" ? record[key] : null;
+}
+
+function readOAuthScopes(value: unknown): string[] | null {
+  const scopes = readRecord(value).scopes;
+  if (!Array.isArray(scopes)) return null;
+  const normalized = scopes.filter((scope): scope is string => typeof scope === "string" && scope.length > 0);
+  return normalized.length > 0 ? normalized : [];
 }
 
 function mapUser(user: unknown, fallbackId?: string): SlackIndexingUser {
@@ -184,7 +192,10 @@ function fromCachedUser(user: CachedUser, fallbackId: string): SlackIndexingUser
 
 export interface SlackIndexingFacade {
   isConfigured(): Promise<boolean>;
-  withToken?: (token: string, options?: { isolatedLimiter?: boolean }) => SlackIndexingFacade;
+  withToken?: (
+    token: string,
+    options?: { isolatedLimiter?: boolean; onOAuthScopes?: (scopes: string[]) => void },
+  ) => SlackIndexingFacade;
   listUsersPage?: (cursor?: string) => Promise<SlackIndexingPage<SlackIndexingUser>>;
   listChannelsPage?: (cursor?: string) => Promise<SlackIndexingPage<SlackIndexingChannel>>;
   listChannelMembersPage?: (channelId: string, cursor?: string) => Promise<SlackIndexingPage<string>>;
@@ -210,6 +221,7 @@ export interface CreateSlackIndexingFacadeOptions {
   userInfoCacheTtlMs?: number;
   clientFactory?: (token: string) => SlackIndexingClient;
   limiter?: SlackApiLimiter;
+  onOAuthScopes?: (scopes: string[]) => void;
 }
 
 export function createSettingsBackedSlackIndexingFacade(options: {
@@ -217,12 +229,14 @@ export function createSettingsBackedSlackIndexingFacade(options: {
   encryptionKey?: string;
   userCache?: UserCache;
   userInfoCacheTtlMs?: number;
+  onOAuthScopes?: (scopes: string[]) => void;
 }): SlackIndexingFacade {
   const settingsRepo = createSettingsRepository(options.db, options.encryptionKey);
   return createSlackIndexingFacade({
     getBotToken: async () => (await settingsRepo.get())?.slack_bot_token ?? null,
     userCache: options.userCache,
     userInfoCacheTtlMs: options.userInfoCacheTtlMs,
+    onOAuthScopes: options.onOAuthScopes,
   });
 }
 
@@ -233,6 +247,7 @@ export function createSlackIndexingFacade(options: CreateSlackIndexingFacadeOpti
     limiter: options.limiter,
     connections: new Map(),
     currentToken: null,
+    oauthScopeCapture: { scopes: null },
   });
 }
 
@@ -242,6 +257,7 @@ type SlackIndexingFacadeState = {
   limiter?: SlackApiLimiter;
   connections: Map<string, SlackIndexingClient>;
   currentToken: string | null;
+  oauthScopeCapture: { scopes: string[] | null };
 };
 
 function createSlackIndexingFacadeWithState(
@@ -250,7 +266,11 @@ function createSlackIndexingFacadeWithState(
 ): SlackIndexingFacade {
   const { userCache } = state;
 
-  async function getConnection(): Promise<{ client: SlackIndexingClient; limiter: SlackApiLimiter }> {
+  async function getConnection(): Promise<{
+    client: SlackIndexingClient;
+    limiter: SlackApiLimiter;
+    oauthScopeCapture: { scopes: string[] | null };
+  }> {
     const token = await options.getBotToken();
     if (!token) throw new Error("Slack indexing facade has no bot token configured");
     if (state.currentToken && state.currentToken !== token) {
@@ -258,28 +278,30 @@ function createSlackIndexingFacadeWithState(
       previous?.owners.delete(state);
       if (previous?.owners.size === 0) sharedConnectionsByToken.delete(state.currentToken);
       state.connections.delete(state.currentToken);
+      state.oauthScopeCapture = { scopes: null };
     }
     state.currentToken = token;
     if (state.limiter) {
       const existing = state.connections.get(token);
-      if (existing) return { client: existing, limiter: state.limiter };
+      if (existing) return { client: existing, limiter: state.limiter, oauthScopeCapture: state.oauthScopeCapture };
       const next = state.clientFactory(token);
       state.connections.set(token, next);
-      return { client: next, limiter: state.limiter };
+      return { client: next, limiter: state.limiter, oauthScopeCapture: state.oauthScopeCapture };
     }
     const shared = sharedConnectionsByToken.get(token);
     if (shared && shared.clientFactory === state.clientFactory) {
       shared.owners.add(state);
-      return { client: shared.client, limiter: shared.limiter };
+      return { client: shared.client, limiter: shared.limiter, oauthScopeCapture: shared.oauthScopeCapture };
     }
     const next = {
       client: state.clientFactory(token),
       limiter: new SerializedSlackApiLimiter(),
       clientFactory: state.clientFactory,
       owners: new Set([state]),
+      oauthScopeCapture: { scopes: null },
     };
     sharedConnectionsByToken.set(token, next);
-    return { client: next.client, limiter: next.limiter };
+    return { client: next.client, limiter: next.limiter, oauthScopeCapture: next.oauthScopeCapture };
   }
 
   async function request<T>(operation: (api: SlackIndexingClient) => Promise<T>): Promise<T> {
@@ -292,7 +314,15 @@ function createSlackIndexingFacadeWithState(
   }
 
   async function listUsersPage(cursor?: string): Promise<SlackIndexingPage<SlackIndexingUser>> {
-    const result = await request((api) => api.users.list({ limit: SLACK_PAGE_LIMIT, ...(cursor ? { cursor } : {}) }));
+    const current = await getConnection();
+    const result = await current.limiter.run(() =>
+      current.client.users.list({ limit: SLACK_PAGE_LIMIT, ...(cursor ? { cursor } : {}) }),
+    );
+    const scopes = readOAuthScopes(result.response_metadata);
+    if (current.oauthScopeCapture.scopes === null && scopes) {
+      current.oauthScopeCapture.scopes = scopes;
+      options.onOAuthScopes?.(scopes);
+    }
     return {
       items: (result.members ?? []).map((member) => mapUser(member)),
       nextCursor: result.response_metadata?.next_cursor || null,
@@ -366,20 +396,22 @@ function createSlackIndexingFacadeWithState(
       return Boolean(await options.getBotToken());
     },
 
-    withToken(token, options) {
-      if (options?.isolatedLimiter) {
+    withToken(token, tokenOptions) {
+      const onOAuthScopes = tokenOptions?.onOAuthScopes ?? options.onOAuthScopes;
+      if (tokenOptions?.isolatedLimiter) {
         return createSlackIndexingFacadeWithState(
-          { getBotToken: async () => token },
+          { getBotToken: async () => token, onOAuthScopes },
           {
             userCache: state.userCache,
             clientFactory: state.clientFactory,
             limiter: new SerializedSlackApiLimiter(),
             connections: new Map(),
             currentToken: null,
+            oauthScopeCapture: { scopes: null },
           },
         );
       }
-      return createSlackIndexingFacadeWithState({ getBotToken: async () => token }, state);
+      return createSlackIndexingFacadeWithState({ getBotToken: async () => token, onOAuthScopes }, state);
     },
 
     listUsersPage,

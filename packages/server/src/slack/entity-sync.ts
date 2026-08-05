@@ -22,6 +22,8 @@ const DEFAULT_STALE_RUN_MS = 10 * 60 * 1000;
 const DEFAULT_HEARTBEAT_MS = 30 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 const SWEEP_TIMER_INTERVAL_MS = 60 * 1000;
+const RUN_RETRY_BASE_MS = 60 * 1000;
+const RUN_RETRY_MAX_MS = 60 * 60 * 1000;
 
 export interface SlackEntitySyncConnection {
   botToken: string;
@@ -39,8 +41,13 @@ export type SlackEntityChannelJoinEvent = {
   channelId: string;
 };
 
+export type SlackEntityMemberJoinEvent = SlackEntityChannelJoinEvent & {
+  slackUserId: string;
+};
+
 export type SlackEntityMessageObservation = {
   teamId?: string;
+  channelId: string;
   slackUserId: string;
 };
 
@@ -77,8 +84,10 @@ export interface SlackEntitySyncService {
   onConnectionActivated: (connection: SlackEntitySyncConnection) => void;
   enqueueBackfill: (connection: SlackEntitySyncConnection) => Promise<void>;
   enqueueSweep: (connection: SlackEntitySyncConnection) => Promise<void>;
+  enqueueScheduledSweep: (connection: SlackEntitySyncConnection) => Promise<void>;
   handleUserEvent: (event: SlackEntityUserEvent) => Promise<void>;
   handleBotJoinedChannel: (event: SlackEntityChannelJoinEvent) => Promise<void>;
+  handleMemberJoinedChannel: (event: SlackEntityMemberJoinEvent) => Promise<void>;
   observeMessage: (event: SlackEntityMessageObservation) => Promise<void>;
 }
 
@@ -106,6 +115,8 @@ type RunError = {
   kind?: string;
   code?: string;
   message?: string;
+  retryCount?: number;
+  nextRetryAt?: string;
   skipReasons?: SkipReason[];
 };
 
@@ -118,6 +129,7 @@ type SyncCounters = {
   skipped: number;
   retries: number;
   userInfoSpillover: number;
+  tombstoneSkipped: number;
 };
 
 function emptySyncCounters(): SyncCounters {
@@ -130,6 +142,7 @@ function emptySyncCounters(): SyncCounters {
     skipped: 0,
     retries: 0,
     userInfoSpillover: 0,
+    tombstoneSkipped: 0,
   };
 }
 
@@ -170,6 +183,13 @@ function serializeRunError(value: RunError): string | null {
   return Object.keys(value).length > 0 ? JSON.stringify(value) : null;
 }
 
+function retryAtFromRunError(error: string | null): number | null {
+  const retryAt = parseRunError(error).nextRetryAt;
+  if (typeof retryAt !== "string") return null;
+  const timestamp = Date.parse(retryAt);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
 function profileFromUser(user: SlackIndexingUser, teamId: string, fetchedAt: string): SlackUserProfile | null {
   if (!user.slackUserId) return null;
   return {
@@ -191,7 +211,7 @@ function profileFromUser(user: SlackIndexingUser, teamId: string, fetchedAt: str
   };
 }
 
-function isPendingState(state: PendingState | undefined): boolean {
+function isPendingState(state: Pick<PendingState, "profile_json"> | undefined): boolean {
   if (!state?.profile_json) return false;
   try {
     const value = JSON.parse(state.profile_json) as unknown;
@@ -311,10 +331,10 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     if (run.status === RUN_STATUS_FAILED || run.status === RUN_STATUS_ABORTED) {
       await deps.db
         .updateTable("slack_sync_runs")
-        .set({ status: RUN_STATUS_QUEUED, heartbeat_at: null, error: null, updated_at: timestamp })
+        .set({ status: RUN_STATUS_QUEUED, heartbeat_at: null, updated_at: timestamp })
         .where("id", "=", run.id)
         .execute();
-      return { ...run, status: RUN_STATUS_QUEUED, heartbeat_at: null, error: null, updated_at: timestamp };
+      return { ...run, status: RUN_STATUS_QUEUED, heartbeat_at: null, updated_at: timestamp };
     }
     return run;
   }
@@ -470,7 +490,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
         .where("team_id", "=", teamId)
         .where("slack_user_id", "=", slackUserId)
         .executeTakeFirst();
-      if (state && !isPendingState(state)) continue;
+      if (state && !isPendingState(state) && state.inactive_at === null) continue;
       candidates.push({ slackUserId, state });
     }
     candidates.sort((a, b) => Number(isPendingState(b.state)) - Number(isPendingState(a.state)));
@@ -514,11 +534,11 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     facade: SlackEntitySyncFacade,
   ): Promise<void> {
     const fetchedAt = now();
-    const user = await facade.getUserInfo(slackUserId);
+    const user = await facade.getUserInfo(slackUserId, { fresh: true });
     await assertActiveConnection(connection);
     const profile = profileFromUser(user, connection.teamId, fetchedAt);
     if (!profile || profile.isBot) return;
-    await upsertSlackPersonEntity(deps.db, profile);
+    await upsertSlackPersonEntity(deps.db, profile, { logger: deps.logger });
   }
 
   async function assertActiveConnection(connection: SlackEntitySyncConnection): Promise<void> {
@@ -562,7 +582,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
       );
       await assertActiveConnection(connection);
       for (const profile of resolved.profiles) {
-        await upsertSlackPersonEntity(deps.db, profile);
+        await upsertSlackPersonEntity(deps.db, profile, { logger: deps.logger });
       }
       await deps.db.transaction().execute(async (trx) => {
         for (const pending of resolved.pending) {
@@ -598,35 +618,81 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     if (!deps.enabled) return;
     const connection = await resolveEventConnection(event.teamId);
     if (!connection) return;
-    await enqueueTeamWork(connection, async () => {
-      try {
-        await syncImmediateChannelRoster(connection, event.channelId, deps.createFacade(connection.botToken));
-        deps.logger.info(
-          { teamId: connection.teamId, channelId: event.channelId },
-          "Completed Slack channel roster refresh after bot join",
-        );
-      } catch (error) {
-        deps.logger.warn(
-          { error, teamId: connection.teamId, channelId: event.channelId },
-          "Slack channel roster refresh after bot join failed",
-        );
-      }
-    });
+    await enqueueTeamWork(
+      connection,
+      async () => {
+        try {
+          await syncImmediateChannelRoster(connection, event.channelId, deps.createFacade(connection.botToken));
+          deps.logger.info(
+            { teamId: connection.teamId, channelId: event.channelId },
+            "Completed Slack channel roster refresh after bot join",
+          );
+        } catch (error) {
+          deps.logger.warn(
+            { error, teamId: connection.teamId, channelId: event.channelId },
+            "Slack channel roster refresh after bot join failed",
+          );
+        }
+      },
+      true,
+    );
+  }
+
+  async function handleMemberJoinedChannel(event: SlackEntityMemberJoinEvent): Promise<void> {
+    if (!deps.enabled) return;
+    const connection = await resolveEventConnection(event.teamId);
+    if (!connection) return;
+    try {
+      await upsertFetchedUser(connection, event.slackUserId, deps.createFacade(connection.botToken));
+      deps.logger.info(
+        { teamId: connection.teamId, channelId: event.channelId, slackUserId: event.slackUserId },
+        "Applied Slack member join entity refresh",
+      );
+    } catch (error) {
+      if (isTeamChangedError(error)) throw error;
+      deps.logger.warn(
+        { error, teamId: connection.teamId, channelId: event.channelId, slackUserId: event.slackUserId },
+        "Slack member join entity refresh failed",
+      );
+    }
+  }
+
+  async function isChannelServed(facade: SlackEntitySyncFacade, channelId: string): Promise<boolean> {
+    let cursor: string | undefined;
+    const seenCursors = new Set<string>();
+    while (true) {
+      if (cursor && seenCursors.has(cursor)) throw new Error("Slack conversations.list returned a repeated cursor");
+      if (cursor) seenCursors.add(cursor);
+      const page = await facade.listChannelsPage(cursor);
+      if (page.items.some((channel) => channel.id === channelId)) return true;
+      cursor = page.nextCursor ?? undefined;
+      if (!cursor) return false;
+    }
   }
 
   async function observeMessage(event: SlackEntityMessageObservation): Promise<void> {
     if (!deps.enabled) return;
-    const connection = await resolveEventConnection(event.teamId);
+    const connection = await deps.getActiveConnection();
     if (!connection) return;
+    const facade = deps.createFacade(connection.botToken);
+    try {
+      if (!(await isChannelServed(facade, event.channelId))) return;
+    } catch (error) {
+      deps.logger.warn(
+        { error, channelId: event.channelId, slackUserId: event.slackUserId },
+        "Observe-on-message Slack channel lookup failed",
+      );
+      return;
+    }
     const existing = await deps.db
       .selectFrom("slack_user_sync_state")
-      .select("slack_user_id")
+      .select(["slack_user_id", "inactive_at", "profile_json"])
       .where("team_id", "=", connection.teamId)
       .where("slack_user_id", "=", event.slackUserId)
       .executeTakeFirst();
-    if (existing) return;
+    if (existing && existing.inactive_at === null && !isPendingState(existing)) return;
     try {
-      await upsertFetchedUser(connection, event.slackUserId, deps.createFacade(connection.botToken));
+      await upsertFetchedUser(connection, event.slackUserId, facade);
       deps.logger.info(
         { teamId: connection.teamId, slackUserId: event.slackUserId },
         "Observed Slack message sender in entity sync",
@@ -649,7 +715,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
           .where("slack_user_id", "=", profile.slackUserId)
           .executeTakeFirst()
       : undefined;
-    const result = await upsertSlackPersonEntity(deps.db, profile);
+    const result = await upsertSlackPersonEntity(deps.db, profile, { logger: deps.logger });
     if (!counters) return;
     counters.scanned += 1;
     if (!result.applied) {
@@ -721,7 +787,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     infoLookups: { count: number },
     rosterUserIds: Set<string> | undefined,
     counters: SyncCounters,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (run.current_channel_id !== channel.id) {
       await updateRun(run, { current_channel_id: channel.id, members_cursor: null, heartbeat_at: now() });
     }
@@ -745,7 +811,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
         }
         counters.skipped += 1;
         await recordSkipReason(run, channel.id, errorCode(error) ?? "members_read_failed");
-        return;
+        return false;
       }
       await assertActiveTeam(run);
       for (const memberId of page.items) rosterUserIds?.add(memberId);
@@ -776,7 +842,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
       });
       Object.assign(run, patch);
       cursor = nextCursor ?? undefined;
-      if (!cursor) return;
+      if (!cursor) return true;
     }
   }
 
@@ -785,14 +851,14 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     connection: SlackEntitySyncConnection,
     facade: SlackEntitySyncFacade,
     counters: SyncCounters,
-  ): Promise<{ rosterUserIds: Set<string>; complete: boolean }> {
+  ): Promise<{ rosterUserIds: Set<string>; crawledChannelIds: Set<string> }> {
     let cursor = run.conversations_cursor ?? undefined;
     let restarted = false;
     const seenCursors = new Set<string>();
     const infoFetchedIds = new Set<string>();
     const infoLookups = { count: 0 };
     const rosterUserIds = new Set<string>();
-    let complete = true;
+    const crawledChannelIds = new Set<string>();
     while (true) {
       await assertActiveTeam(run);
       if (cursor && seenCursors.has(cursor)) throw new Error("Slack conversations.list returned a repeated cursor");
@@ -826,7 +892,6 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
         const isPublic = channel.isPrivate !== true;
         const shouldSync = isPublic ? deps.publicChannelsEnabled : channel.isMember === true;
         if (!shouldSync) {
-          complete = false;
           const patch = await deps.db.transaction().execute(async (trx) => {
             return recordSkipReasonInTransaction(
               trx,
@@ -839,9 +904,9 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
           resumeChannel = null;
           continue;
         }
-        await syncChannel(run, connection, facade, channel, infoFetchedIds, infoLookups, rosterUserIds, counters);
-        const details = parseRunError(run.error);
-        if (details.skipReasons?.some((reason) => reason.channelId === channel.id)) complete = false;
+        if (await syncChannel(run, connection, facade, channel, infoFetchedIds, infoLookups, rosterUserIds, counters)) {
+          crawledChannelIds.add(channel.id);
+        }
         resumeChannel = null;
       }
       if (resumeChannel && !resumeFound) {
@@ -858,7 +923,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
       });
       Object.assign(run, patch);
       cursor = nextCursor ?? undefined;
-      if (!cursor) return { rosterUserIds, complete };
+      if (!cursor) return { rosterUserIds, crawledChannelIds };
     }
   }
 
@@ -879,6 +944,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     connection: SlackEntitySyncConnection,
     crawlStartedAt: string,
     rosterUserIds: Set<string>,
+    crawledChannelIds: Set<string>,
     counters: SyncCounters,
   ): Promise<void> {
     const candidates = await deps.db
@@ -890,7 +956,41 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
       .where("updated_at", "<=", crawlStartedAt)
       .execute();
     for (const candidate of candidates) {
-      if (rosterUserIds.has(candidate.slack_user_id)) continue;
+      if (rosterUserIds.has(candidate.slack_user_id)) {
+        counters.tombstoneSkipped += 1;
+        deps.logger.info(
+          { teamId: connection.teamId, slackUserId: candidate.slack_user_id, reason: "present_in_roster" },
+          "Skipped Slack external tombstone",
+        );
+        continue;
+      }
+      const participantChannels = await deps.db
+        .selectFrom("slack_channel_participants")
+        .select("channel_id")
+        .where("slack_user_id", "=", candidate.slack_user_id)
+        .execute();
+      if (participantChannels.length === 0) {
+        counters.tombstoneSkipped += 1;
+        deps.logger.info(
+          { teamId: connection.teamId, slackUserId: candidate.slack_user_id, reason: "no_participant_channels" },
+          "Skipped Slack external tombstone",
+        );
+        continue;
+      }
+      const uncrawledChannels = participantChannels.filter((row) => !crawledChannelIds.has(row.channel_id));
+      if (uncrawledChannels.length > 0) {
+        counters.tombstoneSkipped += 1;
+        deps.logger.info(
+          {
+            teamId: connection.teamId,
+            slackUserId: candidate.slack_user_id,
+            reason: "participant_channel_not_crawled",
+            channelCount: uncrawledChannels.length,
+          },
+          "Skipped Slack external tombstone",
+        );
+        continue;
+      }
       const result = await deps.db
         .updateTable("slack_user_sync_state")
         .set({ inactive_at: now(), updated_at: now() })
@@ -978,16 +1078,16 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     const counters = emptySyncCounters();
     const startedStage = run.stage;
     let rosterUserIds = new Set<string>();
-    let channelCrawlComplete = false;
+    let crawledChannelIds = new Set<string>();
     try {
       if (run.stage === INITIAL_STAGE) await runUsersStage(run, connection, facade, counters);
       if (run.stage === CONVERSATIONS_STAGE) {
         const result = await runConversationsStage(run, connection, facade, counters);
         rosterUserIds = result.rosterUserIds;
-        channelCrawlComplete = result.complete;
+        crawledChannelIds = result.crawledChannelIds;
       }
-      if (run.run_type === SWEEP_RUN_TYPE && startedStage === INITIAL_STAGE && channelCrawlComplete) {
-        await tombstoneAbsentExternals(connection, run.started_at, rosterUserIds, counters);
+      if (run.run_type === SWEEP_RUN_TYPE && startedStage === INITIAL_STAGE) {
+        await tombstoneAbsentExternals(connection, run.started_at, rosterUserIds, crawledChannelIds, counters);
       }
       await completeRun(run);
       deps.logger.info(
@@ -1006,12 +1106,20 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
 
   async function markRunFailed(run: SyncRun, error: unknown): Promise<void> {
     const details = parseRunError(run.error);
+    const retryCount = typeof details.retryCount === "number" ? details.retryCount + 1 : 1;
+    const retryDelayMs = Math.min(RUN_RETRY_BASE_MS * 2 ** (retryCount - 1), RUN_RETRY_MAX_MS);
+    const retryBaseTime = Date.parse(now());
+    const nextRetryAt = new Date(
+      (Number.isFinite(retryBaseTime) ? retryBaseTime : Date.now()) + retryDelayMs,
+    ).toISOString();
     await updateRun(run, {
       status: RUN_STATUS_FAILED,
       heartbeat_at: null,
       error: serializeRunError({
         ...details,
         kind: "run_failed",
+        retryCount,
+        nextRetryAt,
         ...(errorCode(error) ? { code: errorCode(error) ?? undefined } : {}),
       }),
     });
@@ -1050,11 +1158,20 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     }
   }
 
-  function enqueueTeamWork(connection: SlackEntitySyncConnection, work: () => Promise<void>): Promise<void> {
+  function enqueueTeamWork(
+    connection: SlackEntitySyncConnection,
+    work: () => Promise<void>,
+    queueBehind = false,
+  ): Promise<void> {
     if (!deps.enabled || stopped) return Promise.resolve();
     const existing = inflightByTeam.get(connection.teamId);
-    if (existing) return existing;
-    const pending = Promise.resolve().then(work);
+    if (existing && !queueBehind) return existing;
+    const pending = existing
+      ? existing.then(
+          () => work(),
+          () => work(),
+        )
+      : Promise.resolve().then(work);
     inflightByTeam.set(connection.teamId, pending);
     return pending.finally(() => {
       if (inflightByTeam.get(connection.teamId) === pending) inflightByTeam.delete(connection.teamId);
@@ -1073,14 +1190,22 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     if (!deps.enabled || stopped) return;
     const latest = await deps.db
       .selectFrom("slack_sync_runs")
-      .select("completed_at")
+      .select(["run_type", "status", "completed_at", "error"])
       .where("team_id", "=", connection.teamId)
-      .where("run_type", "=", SWEEP_RUN_TYPE)
-      .where("status", "=", RUN_STATUS_COMPLETED)
-      .where("completed_at", "is not", null)
-      .orderBy("completed_at", "desc")
+      .where("run_type", "in", [BACKFILL_RUN_TYPE, SWEEP_RUN_TYPE])
+      .where("status", "in", [RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_ABORTED])
+      .orderBy("created_at", "desc")
       .executeTakeFirst();
-    if (latest?.completed_at && Date.now() - Date.parse(latest.completed_at) < sweepIntervalMs) return;
+    if (latest?.status === RUN_STATUS_COMPLETED) {
+      if (latest.completed_at && Date.now() - Date.parse(latest.completed_at) < sweepIntervalMs) return;
+    } else if (latest) {
+      const retryAt = retryAtFromRunError(latest.error);
+      if (retryAt !== null && Date.now() < retryAt) return;
+      if (latest.run_type === BACKFILL_RUN_TYPE) {
+        await enqueueBackfill(connection);
+        return;
+      }
+    }
 
     await enqueueSweep(connection);
   }
@@ -1128,8 +1253,10 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     onConnectionActivated,
     enqueueBackfill,
     enqueueSweep,
+    enqueueScheduledSweep,
     handleUserEvent,
     handleBotJoinedChannel,
+    handleMemberJoinedChannel,
     observeMessage,
   };
 }

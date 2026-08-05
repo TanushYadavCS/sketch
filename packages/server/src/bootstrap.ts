@@ -61,6 +61,7 @@ import type { IntegrationProvider, IntegrationStatus } from "./integrations/type
 import { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import { LocalDeviceGateway } from "./local-devices/gateway";
 import { createLogger } from "./logger";
+import type { Logger } from "./logger";
 import { reconcileManagedTenantMembers } from "./managed-members";
 import { runManagedSeed } from "./managed-seed";
 import { channelsReconnectUrl, createOperationalAlertDefinitions } from "./operational-alerts/definitions";
@@ -120,8 +121,11 @@ export interface CreateServerOptions {
   backgroundWork?: boolean;
 }
 
-export async function seedSlackOrganizationDomain(db: Kysely<DB>): Promise<string | null> {
-  const admin = await db
+export async function seedSlackOrganizationDomain(
+  db: Kysely<DB>,
+  logger?: Pick<Logger, "warn">,
+): Promise<string | null> {
+  const admins = await db
     .selectFrom("users")
     .select(["email", "email_verified_at"])
     .where("auth_role", "=", "admin")
@@ -129,22 +133,44 @@ export async function seedSlackOrganizationDomain(db: Kysely<DB>): Promise<strin
     .where("email", "is not", null)
     .orderBy("created_at", "asc")
     .orderBy("id", "asc")
-    .executeTakeFirst();
-  const email = admin?.email?.trim().toLowerCase();
-  const domain = email?.split("@").pop()?.trim() ?? null;
-  if (!admin || !domain || !email?.includes("@") || isPersonalOrSharedDomain(domain)) return null;
-
-  await db
-    .insertInto("organization_domains")
-    .values({
-      id: randomUUID(),
-      domain,
-      source: "admin_email_seed",
-      verified_at: admin.email_verified_at as string,
-    })
-    .onConflict((oc) => oc.column("domain").doNothing())
     .execute();
-  return domain;
+  const domains = new Map<string, string>();
+  for (const admin of admins) {
+    const rawVerifiedAt: unknown = admin.email_verified_at;
+    const verifiedAt =
+      rawVerifiedAt instanceof Date
+        ? rawVerifiedAt.toISOString()
+        : typeof rawVerifiedAt === "string"
+          ? rawVerifiedAt
+          : null;
+    if (!verifiedAt) continue;
+    const email = admin.email?.trim().toLowerCase() ?? "";
+    const at = email.lastIndexOf("@");
+    const domain = at > 0 ? email.slice(at + 1).trim() : "";
+    if (!domain || isPersonalOrSharedDomain(domain)) continue;
+    domains.set(domain, verifiedAt);
+  }
+
+  if (domains.size === 0) {
+    logger?.warn(
+      "No corporate admin email domains could be seeded; classification will be unknown until a domain is configured",
+    );
+    return null;
+  }
+
+  for (const [domain, verifiedAt] of domains) {
+    await db
+      .insertInto("organization_domains")
+      .values({
+        id: randomUUID(),
+        domain,
+        source: "admin_email_seed",
+        verified_at: verifiedAt,
+      })
+      .onConflict((oc) => oc.column("domain").doNothing())
+      .execute();
+  }
+  return domains.keys().next().value ?? null;
 }
 
 export async function createServer(config: Config, options?: CreateServerOptions): Promise<ServerHandle> {
@@ -161,7 +187,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const db = await createDatabase(config);
   await runMigrations(db);
   logger.info("Database ready");
-  await seedSlackOrganizationDomain(db);
+  await seedSlackOrganizationDomain(db, logger);
 
   configureMaterializeDefaults({
     llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
@@ -726,6 +752,14 @@ export async function createServer(config: Config, options?: CreateServerOptions
     db,
     encryptionKey: config.ENCRYPTION_KEY,
     userCache,
+    onOAuthScopes: (scopes) => {
+      if (!scopes.includes("users:read.email")) {
+        logger.warn(
+          { requiredScope: "users:read.email", grantedScopes: scopes },
+          "Slack OAuth token is missing users:read.email; Slack entity classification will degrade",
+        );
+      }
+    },
   });
   const slackEntitySync = createSlackEntitySync({
     db,
@@ -877,6 +911,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
           logger,
           connectorConfigId: slackConnector.id,
           grandfatheringEnabled: config.SLACK_ACCESS_GRANDFATHERING,
+          entitySyncEnabled: config.SLACK_ENTITY_SYNC,
         });
       }
       let syncRowsFenced = 0;
@@ -1037,6 +1072,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
             logger,
             connectorConfigId: slackConnector.id,
             grandfatheringEnabled: config.SLACK_ACCESS_GRANDFATHERING,
+            entitySyncEnabled: config.SLACK_ENTITY_SYNC,
           });
         }
       } catch (err) {
