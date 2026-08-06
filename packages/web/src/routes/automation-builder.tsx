@@ -1,5 +1,6 @@
 import { ChatInput } from "@/components/sketch/chat-input";
 import { ChatThread, type ChatThreadInterruption, type ChatThreadMessage } from "@/components/sketch/chat-thread";
+import { useWebChatReconciliation } from "@/hooks/use-web-chat-reconciliation";
 import {
   ApiRequestError,
   type AutomationArtifact,
@@ -1198,6 +1199,22 @@ function BuilderChatTranscript({
     [chat.sendMessage, taskId],
   );
 
+  const loadMessagesForReconciliation = useCallback(async (targetConversationId: string, signal: AbortSignal) => {
+    const response = await api.webChat.messages(targetConversationId, { signal });
+    return { ...response, messages: response.messages as BuilderWebChatMessage[] };
+  }, []);
+  useWebChatReconciliation({
+    conversationId,
+    historyReady,
+    status: chat.status,
+    error: chat.error,
+    messages: chat.messages,
+    hasPendingProgress: hasPendingBuilderAssistantProgress,
+    loadMessages: loadMessagesForReconciliation,
+    setMessages: chat.setMessages,
+    clearError: chat.clearError,
+  });
+
   useEffect(() => {
     let cancelled = false;
     setLoadedHistoryKey(null);
@@ -1229,23 +1246,6 @@ function BuilderChatTranscript({
     });
     return () => window.cancelAnimationFrame(frameId);
   }, [historyReady, threadScrollKey]);
-
-  useEffect(() => {
-    if (!historyReady || !hasBackgroundRun || chat.status !== "ready") return;
-    let cancelled = false;
-    const intervalId = window.setInterval(() => {
-      void api.webChat
-        .messages(conversationId)
-        .then(({ messages }) => {
-          if (!cancelled) chat.setMessages(messages as BuilderWebChatMessage[]);
-        })
-        .catch(() => undefined);
-    }, 1500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [chat.setMessages, chat.status, conversationId, hasBackgroundRun, historyReady]);
 
   useEffect(() => {
     const busy = chat.status === "submitted" || chat.status === "streaming";
@@ -2022,9 +2022,15 @@ function RunsMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button size="sm" variant="outline" className={cn(canvasToolbarButtonClass, "gap-1.5 text-foreground/75")}>
+        <Button
+          size="sm"
+          variant="outline"
+          className={cn(canvasToolbarButtonClass, "min-w-0 max-w-full gap-1.5 text-foreground/75")}
+        >
           {activeRunId ? <EyeIcon size={14} weight="fill" /> : <CaretDownIcon size={13} />}
-          {activeRunId && active ? `Viewing · ${formatRunDate(active.startedAt)}` : `Runs · ${runs.length}`}
+          <span className="min-w-0 max-w-full truncate">
+            {activeRunId && active ? `Viewing · ${formatRunDate(active.startedAt)}` : `Runs · ${runs.length}`}
+          </span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-[310px]">

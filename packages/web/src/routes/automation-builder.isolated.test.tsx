@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   selectConversation: vi.fn(),
   archiveConversation: vi.fn(),
   interruptChat: vi.fn(),
+  clearError: vi.fn(),
   runTask: vi.fn(),
   saveAutomation: vi.fn(),
   testStep: vi.fn(),
@@ -29,6 +30,7 @@ const mocks = vi.hoisted(() => ({
     { id: "a1", role: "assistant", parts: [{ type: "text", text: "All set." }] },
   ] as Array<{ id: string; role: string; parts: Array<Record<string, unknown>> }>,
   chatStatus: "ready",
+  chatError: undefined as Error | undefined,
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -62,7 +64,8 @@ vi.mock("@ai-sdk/react", () => ({
   useChat: () => ({
     messages: mocks.chatMessages,
     status: mocks.chatStatus,
-    error: undefined,
+    error: mocks.chatError,
+    clearError: mocks.clearError,
     setMessages: mocks.setMessages,
     sendMessage: mocks.sendMessage,
   }),
@@ -371,6 +374,8 @@ describe("AutomationBuilderPage", () => {
     );
     mocks.interruptChat.mockClear();
     mocks.interruptChat.mockResolvedValue({ success: true, interrupted: true });
+    mocks.clearError.mockClear();
+    mocks.chatError = undefined;
     mocks.navigate.mockClear();
     mocks.runTask.mockResolvedValue({ status: "queued" });
     mocks.saveAutomation.mockClear();
@@ -423,6 +428,37 @@ describe("AutomationBuilderPage", () => {
     expect(mocks.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "Make it daily" }), {
       body: { automationTaskId: "task-123" },
     });
+  });
+
+  it("reloads persisted chat progress when returning to the builder window", async () => {
+    mocks.chatMessages = [
+      {
+        id: "a-progress",
+        role: "assistant",
+        parts: [{ type: "data-progress", data: { lines: ["Updating automation"] } }],
+      },
+    ];
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+
+    renderBuilder();
+
+    await screen.findByLabelText("Message Sketch");
+    await waitFor(() => expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha"));
+    mocks.loadMessages.mockClear();
+
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    await waitFor(() => expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha", expect.any(Object)));
+  });
+
+  it("keeps the active run label constrained inside the builder toolbar", async () => {
+    mocks.getAutomation.mockResolvedValue(automationWithStepOutput("latest step output"));
+
+    renderBuilder();
+
+    const viewingButton = await screen.findByRole("button", { name: /Viewing/ });
+    expect(viewingButton).toHaveClass("min-w-0", "max-w-full");
+    expect(viewingButton.querySelector("span")).toHaveClass("min-w-0", "max-w-full", "truncate");
   });
 
   it("shows an automation-aware empty state for an associated empty chat", async () => {
