@@ -12,6 +12,7 @@ function user(overrides: Partial<SlackIndexingUser> = {}): SlackIndexingUser {
     realName: "Alice Example",
     displayName: "Alice",
     email: null,
+    phone: null,
     profileTeamId: "T1",
     isBot: false,
     isGuest: false,

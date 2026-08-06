@@ -968,6 +968,26 @@ export function createEntityRepository(db: Kysely<DB>) {
         .execute();
     },
 
+    async getPersonEntitiesByContactPointKinds(
+      rawValue: string,
+      kinds: Array<Extract<EntityContactPointKind, "phone" | "whatsapp">>,
+    ): Promise<Selectable<EntitiesTable>[]> {
+      const value = normalizeContactPointValue("phone", rawValue);
+      const rows = await db
+        .selectFrom("entity_contact_points")
+        .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+        .selectAll("entities")
+        .where("entity_contact_points.kind", "in", kinds)
+        .where("entity_contact_points.value", "=", value)
+        .where("entities.source_type", "=", "person")
+        .where(whereLiveEntity())
+        .orderBy("entities.id", "asc")
+        .execute();
+      const byId = new Map<string, Selectable<EntitiesTable>>();
+      for (const row of rows) byId.set(row.id, row);
+      return [...byId.values()];
+    },
+
     async getPersonEntitiesByEmail(rawEmail: string): Promise<Selectable<EntitiesTable>[]> {
       const email = normalizeContactPointValue("email", rawEmail);
       const byContactPoint = await db

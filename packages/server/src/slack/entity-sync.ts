@@ -205,6 +205,7 @@ function profileFromUser(user: SlackIndexingUser, teamId: string, fetchedAt: str
     realName: user.realName,
     displayName: user.displayName ?? null,
     email: user.email,
+    phone: user.phone ?? null,
     profileTeamId: user.profileTeamId ?? null,
     isBot: user.isBot,
     isGuest: user.isGuest ?? false,

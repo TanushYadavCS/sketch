@@ -21,6 +21,7 @@ export interface SlackIndexingUser {
   realName: string;
   displayName?: string;
   email: string | null;
+  phone: string | null;
   profileTeamId?: string | null;
   isBot: boolean;
   isGuest?: boolean;
@@ -140,6 +141,7 @@ function mapUser(user: unknown, fallbackId?: string): SlackIndexingUser {
     realName,
     displayName,
     email: readString(profile, "email"),
+    phone: readString(profile, "phone"),
     profileTeamId: readString(raw, "team_id"),
     isBot: readBoolean(raw, "is_bot") || id === "USLACKBOT",
     isGuest: readBoolean(raw, "is_guest"),
@@ -158,6 +160,7 @@ function toCachedUser(user: SlackIndexingUser): CachedUser {
     name: user.name,
     realName: user.realName,
     email: user.email,
+    phone: user.phone,
     tz: null,
     isBot: user.isBot,
     slackUserId: user.slackUserId,
@@ -179,6 +182,7 @@ function fromCachedUser(user: CachedUser, fallbackId: string): SlackIndexingUser
     realName: user.realName,
     displayName: user.displayName ?? user.realName,
     email: user.email,
+    phone: user.phone ?? null,
     profileTeamId: user.profileTeamId ?? null,
     isBot: user.isBot,
     isGuest: user.isGuest ?? false,

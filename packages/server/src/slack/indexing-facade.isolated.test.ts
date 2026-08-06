@@ -8,6 +8,7 @@ function user(overrides: Partial<SlackIndexingUser> = {}): SlackIndexingUser {
     realName: "Alice Example",
     displayName: "Alice",
     email: "alice@example.com",
+    phone: null,
     profileTeamId: "T123",
     isBot: false,
     isGuest: false,
@@ -49,6 +50,46 @@ describe("Slack indexing facade", () => {
     await expect(collect(facade.iterateChannelMembers("C1"))).resolves.toEqual(["U1", "U2"]);
     expect(usersList).toHaveBeenNthCalledWith(1, { limit: 200 });
     expect(members).toHaveBeenNthCalledWith(1, { channel: "C1", limit: 200 });
+  });
+
+  it("extracts phone numbers from users.list and users.info", async () => {
+    const usersList = vi.fn().mockResolvedValue({
+      members: [
+        {
+          id: "U-LIST-PHONE",
+          name: "list-phone",
+          real_name: "List Phone",
+          team_id: "T123",
+          profile: { email: null, phone: "+1 415 555 1234" },
+        },
+      ],
+      response_metadata: {},
+    });
+    const info = vi.fn().mockResolvedValue({
+      user: {
+        id: "U-INFO-PHONE",
+        name: "info-phone",
+        real_name: "Info Phone",
+        team_id: "T123",
+        profile: { email: null, phone: "+1 212 555 1234" },
+      },
+    });
+    const client = {
+      users: { list: usersList, info },
+      conversations: { list: vi.fn(), members: vi.fn() },
+    };
+    const facade = createSlackIndexingFacade({
+      getBotToken: async () => "xoxb-phone",
+      clientFactory: () => client as never,
+    });
+
+    await expect(facade.listUsers()).resolves.toMatchObject([
+      { slackUserId: "U-LIST-PHONE", phone: "+1 415 555 1234" },
+    ]);
+    await expect(facade.getUserInfo("U-INFO-PHONE")).resolves.toMatchObject({
+      slackUserId: "U-INFO-PHONE",
+      phone: "+1 212 555 1234",
+    });
   });
 
   it("captures OAuth scopes once from the users.list connection", async () => {

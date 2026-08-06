@@ -10,6 +10,7 @@ export interface CachedUser {
   name: string;
   realName: string;
   email: string | null;
+  phone?: string | null;
   tz: string | null;
   isBot: boolean;
   slackUserId?: string;

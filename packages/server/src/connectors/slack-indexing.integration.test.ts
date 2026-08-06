@@ -23,7 +23,13 @@ function fakeFacade(overrides: Partial<SlackIndexingFacade> = {}): SlackIndexing
     isConfigured: async () => true,
     listMemberChannels: async () => [{ id: "C1", name: "general" }],
     listChannelMembers: async () => ["U0TEAM"],
-    getUserInfo: async () => ({ name: "priya", realName: "Priya", email: "priya@example.com", isBot: false }),
+    getUserInfo: async () => ({
+      name: "priya",
+      realName: "Priya",
+      email: "priya@example.com",
+      phone: null,
+      isBot: false,
+    }),
     iterateUsers: async function* () {},
     iterateChannels: async function* () {},
     iterateChannelMembers: async function* () {},
@@ -545,8 +551,8 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         listChannelMembers: async () => ["U0TEAM", "U0CRM", "U0EXT"],
         getUserInfo: async (userId: string) =>
           userId === "U0CRM"
-            ? { name: "asha", realName: "Asha M", email: "Asha@Client.com", isBot: false }
-            : { name: "guest", realName: "Guest Person", email: null, isBot: false },
+            ? { name: "asha", realName: "Asha M", email: "Asha@Client.com", phone: null, isBot: false }
+            : { name: "guest", realName: "Guest Person", email: null, phone: null, isBot: false },
       });
 
       const { resolveSlackChannelRoster } = await import("../slack/identity-resolution");
@@ -580,8 +586,8 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         listChannelMembers: async () => ["U0TEAM", "U0BOT", "U0EXTBOT"],
         getUserInfo: async (userId: string) =>
           userId === "U0TEAM"
-            ? { name: "roopak", realName: "Roopak", email: "roopak@example.com", isBot: false }
-            : { name: "botsy", realName: "Botsy", email: null, isBot: true },
+            ? { name: "roopak", realName: "Roopak", email: "roopak@example.com", phone: null, isBot: false }
+            : { name: "botsy", realName: "Botsy", email: null, phone: null, isBot: true },
       });
 
       const { resolveSlackChannelRoster } = await import("../slack/identity-resolution");
@@ -1043,8 +1049,8 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         listChannelMembers: async () => ["U0TEAM"],
         getUserInfo: async (slackUserId: string) =>
           slackUserId === "U0TEAM"
-            ? { name: "roopak", realName: "Roopak", email: "roopak@example.com", isBot: false }
-            : { name: "new", realName: "New Teammate", email: "new@example.com", isBot: false },
+            ? { name: "roopak", realName: "Roopak", email: "roopak@example.com", phone: null, isBot: false }
+            : { name: "new", realName: "New Teammate", email: "new@example.com", phone: null, isBot: false },
       });
       const firstItems = [];
       for await (const item of emitSlackSyncedItems({ db, logger, facade, grandfatheringEnabled: true })) {

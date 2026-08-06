@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { normalizeName } from "../../connectors/name-normalize";
 import { createTestPgDb } from "../../test-utils";
 import type { DB } from "../schema";
+import { createEntityRepository } from "./entities";
 import { upsertSlackPersonEntity } from "./slack-entity-sync";
 
 type SlackProfile = Parameters<typeof upsertSlackPersonEntity>[1];
@@ -14,6 +15,7 @@ function profile(overrides: Partial<SlackProfile> = {}): SlackProfile {
     name: "Alice Example",
     realName: "Alice Example",
     email: "alice@example.com",
+    phone: null,
     profileTeamId: "T123",
     isBot: false,
     isGuest: false,
@@ -131,6 +133,254 @@ describe("upsertSlackPersonEntity", () => {
       .executeTakeFirstOrThrow();
     expect(JSON.parse(row.candidate_entity_ids ?? "[]")).toEqual(["existing-person-a", "existing-person-b"]);
     expect(row.candidate_reason).toBe("ambiguous-email");
+  });
+
+  it("writes a normalized Slack phone contact point without using it for classification", async () => {
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-PHONE-CONTACT",
+        name: "Phone Contact",
+        realName: "Phone Contact",
+        email: null,
+        phone: "00 1 (415) 555-1234",
+      }),
+    );
+
+    const entity = await db
+      .selectFrom("entities")
+      .innerJoin("entity_source_refs", "entity_source_refs.entity_id", "entities.id")
+      .select("entities.id")
+      .where("entity_source_refs.source_id", "=", "T123:U-PHONE-CONTACT")
+      .executeTakeFirstOrThrow();
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select(["kind", "value", "source", "is_primary"])
+        .where("entity_id", "=", entity.id)
+        .where("kind", "=", "phone")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ kind: "phone", value: "+14155551234", source: "slack_user", is_primary: 1 });
+    await expect(
+      db
+        .selectFrom("slack_user_sync_state")
+        .select(["classification", "classification_source"])
+        .where("slack_user_id", "=", "U-PHONE-CONTACT")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ classification: "external", classification_source: "default_no_evidence" });
+  });
+
+  it("links a Slack profile to a WhatsApp entity by an exact phone match", async () => {
+    await db
+      .insertInto("entities")
+      .values({
+        id: "whatsapp-phone-person",
+        name: "WhatsApp Phone Person",
+        source_type: "person",
+        subtype: "external",
+        aliases: null,
+        metadata: null,
+        source_ref_id: null,
+        status: "confirmed",
+        provenance_tier: "inferred",
+        hotness: 0,
+        created_at: "2026-08-05T00:00:00.000Z",
+        updated_at: "2026-08-05T00:00:00.000Z",
+      })
+      .execute();
+    await db
+      .insertInto("entity_contact_points")
+      .values({
+        id: "whatsapp-phone-contact",
+        entity_id: "whatsapp-phone-person",
+        kind: "whatsapp",
+        value: "+16465550199",
+        display_value: "+1 646 555 0199",
+        label: null,
+        is_primary: 1,
+        source: "whatsapp",
+        connector_config_id: null,
+        created_by_user_id: null,
+        verified_at: null,
+        last_contacted_at: null,
+        created_at: "2026-08-05T00:00:00.000Z",
+        updated_at: "2026-08-05T00:00:00.000Z",
+      })
+      .execute();
+
+    await expect(
+      createEntityRepository(db).getPersonEntitiesByContactPointKinds("+1 (646) 555-0199", ["phone", "whatsapp"]),
+    ).resolves.toMatchObject([{ id: "whatsapp-phone-person" }]);
+
+    const result = await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-WHATSAPP-PHONE",
+        name: "Slack Phone Person",
+        realName: "Slack Phone Person",
+        email: null,
+        phone: "+1 (646) 555-0199",
+      }),
+    );
+    expect(result.entity?.id).toBe("whatsapp-phone-person");
+
+    await expect(
+      db
+        .selectFrom("entity_source_refs")
+        .select("entity_id")
+        .where("source_id", "=", "T123:U-WHATSAPP-PHONE")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ entity_id: "whatsapp-phone-person" });
+  });
+
+  it("creates a source-owned entity and review row for ambiguous phone matches", async () => {
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "phone-match-a",
+          name: "Phone Match A",
+          source_type: "person",
+          subtype: "external",
+          aliases: null,
+          metadata: null,
+          source_ref_id: null,
+          status: "confirmed",
+          provenance_tier: "inferred",
+          hotness: 0,
+          created_at: "2026-08-05T00:00:00.000Z",
+          updated_at: "2026-08-05T00:00:00.000Z",
+        },
+        {
+          id: "phone-match-b",
+          name: "Phone Match B",
+          source_type: "person",
+          subtype: "external",
+          aliases: null,
+          metadata: null,
+          source_ref_id: null,
+          status: "confirmed",
+          provenance_tier: "inferred",
+          hotness: 0,
+          created_at: "2026-08-05T00:00:00.000Z",
+          updated_at: "2026-08-05T00:00:00.000Z",
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("entity_contact_points")
+      .values([
+        {
+          id: "phone-match-contact-a",
+          entity_id: "phone-match-a",
+          kind: "whatsapp",
+          value: "+12125551234",
+          display_value: null,
+          label: null,
+          is_primary: 1,
+          source: "whatsapp",
+          connector_config_id: null,
+          created_by_user_id: null,
+          verified_at: null,
+          last_contacted_at: null,
+          created_at: "2026-08-05T00:00:00.000Z",
+          updated_at: "2026-08-05T00:00:00.000Z",
+        },
+        {
+          id: "phone-match-contact-b",
+          entity_id: "phone-match-b",
+          kind: "phone",
+          value: "+12125551234",
+          display_value: null,
+          label: null,
+          is_primary: 1,
+          source: "manual",
+          connector_config_id: null,
+          created_by_user_id: "admin",
+          verified_at: null,
+          last_contacted_at: null,
+          created_at: "2026-08-05T00:00:00.000Z",
+          updated_at: "2026-08-05T00:00:00.000Z",
+        },
+      ])
+      .execute();
+
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-AMBIGUOUS-PHONE",
+        name: "Ambiguous Phone",
+        realName: "Ambiguous Phone",
+        email: null,
+        phone: "+1 212 555 1234",
+      }),
+    );
+
+    const ref = await db
+      .selectFrom("entity_source_refs")
+      .select("entity_id")
+      .where("source_id", "=", "T123:U-AMBIGUOUS-PHONE")
+      .executeTakeFirstOrThrow();
+    expect(ref.entity_id).not.toBe("phone-match-a");
+    expect(ref.entity_id).not.toBe("phone-match-b");
+    await expect(
+      db
+        .selectFrom("entity_review_queue")
+        .select(["candidate_entity_ids", "candidate_reason"])
+        .where("source_id", "=", "T123:U-AMBIGUOUS-PHONE")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      candidate_entity_ids: JSON.stringify(["phone-match-a", "phone-match-b"]),
+      candidate_reason: "ambiguous-phone",
+    });
+  });
+
+  it("does not write a Slack phone contact point when the profile has no phone", async () => {
+    await upsertSlackPersonEntity(
+      db,
+      profile({ slackUserId: "U-NO-PHONE", name: "No Phone", realName: "No Phone", phone: null }),
+    );
+
+    const entity = await db
+      .selectFrom("entity_source_refs")
+      .select("entity_id")
+      .where("source_id", "=", "T123:U-NO-PHONE")
+      .executeTakeFirstOrThrow();
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select("id")
+        .where("entity_id", "=", entity.entity_id)
+        .where("kind", "=", "phone")
+        .execute(),
+    ).resolves.toEqual([]);
+  });
+
+  it("skips an unparseable Slack phone value", async () => {
+    await upsertSlackPersonEntity(
+      db,
+      profile({
+        slackUserId: "U-INVALID-PHONE",
+        name: "Invalid Phone",
+        realName: "Invalid Phone",
+        email: null,
+        phone: "not-a-phone",
+      }),
+    );
+
+    const entity = await db
+      .selectFrom("entity_source_refs")
+      .select("entity_id")
+      .where("source_id", "=", "T123:U-INVALID-PHONE")
+      .executeTakeFirstOrThrow();
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select("id")
+        .where("entity_id", "=", entity.entity_id)
+        .where("kind", "=", "phone")
+        .execute(),
+    ).resolves.toEqual([]);
   });
 
   it("creates separate source-scoped suggestions for same-name Slack users", async () => {

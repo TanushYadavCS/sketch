@@ -12,6 +12,7 @@ export interface SlackUserProfile {
   realName: string;
   displayName?: string | null;
   email: string | null;
+  phone: string | null;
   profileTeamId: string | null;
   isBot: boolean;
   isGuest: boolean;
@@ -49,6 +50,15 @@ const inflightByDb = new WeakMap<object, Map<string, Promise<SlackEntitySyncResu
 function normalizeEmail(email: string | null): string | null {
   if (!email?.trim() || !email.includes("@")) return null;
   return normalizeContactPointValue("email", email);
+}
+
+function normalizePhone(phone: string | null): string | null {
+  if (!phone?.trim()) return null;
+  try {
+    return normalizeContactPointValue("phone", phone);
+  } catch {
+    return null;
+  }
 }
 
 function tupleIsAtLeast(
@@ -169,29 +179,30 @@ function parseMetadata(raw: string | null): Record<string, unknown> {
   }
 }
 
-async function updateSlackEmailContactPoint(
+async function updateSlackContactPoint(
   trx: Kysely<DB>,
   entityId: string,
-  email: string,
+  kind: "email" | "phone",
+  value: string,
   connectorConfigId: string | null,
-  overwriteSlackOwnedEmail: boolean,
+  overwriteSlackOwnedValue: boolean,
   now: string,
 ): Promise<void> {
-  if (overwriteSlackOwnedEmail) {
+  if (overwriteSlackOwnedValue) {
     await trx
       .deleteFrom("entity_contact_points")
       .where("entity_id", "=", entityId)
-      .where("kind", "=", "email")
+      .where("kind", "=", kind)
       .where("source", "=", "slack_user")
-      .where("value", "!=", email)
+      .where("value", "!=", value)
       .execute();
   }
 
-  const hasPrimaryEmail = await trx
+  const hasPrimary = await trx
     .selectFrom("entity_contact_points")
     .select("id")
     .where("entity_id", "=", entityId)
-    .where("kind", "=", "email")
+    .where("kind", "=", kind)
     .where("is_primary", "=", 1)
     .executeTakeFirst();
 
@@ -200,11 +211,11 @@ async function updateSlackEmailContactPoint(
     .values({
       id: randomUUID(),
       entity_id: entityId,
-      kind: "email",
-      value: email,
-      display_value: email,
+      kind,
+      value,
+      display_value: value,
       label: null,
-      is_primary: hasPrimaryEmail ? 0 : 1,
+      is_primary: hasPrimary ? 0 : 1,
       source: "slack_user",
       connector_config_id: connectorConfigId,
       created_by_user_id: null,
@@ -215,7 +226,7 @@ async function updateSlackEmailContactPoint(
     })
     .onConflict((oc) =>
       oc.columns(["entity_id", "kind", "value"]).doUpdateSet({
-        display_value: email,
+        display_value: value,
         connector_config_id: sql`COALESCE(excluded.connector_config_id, entity_contact_points.connector_config_id)`,
         updated_at: now,
       }),
@@ -229,6 +240,7 @@ async function updateEntityFromSlackProfile(
   profile: SlackUserProfile,
   classification: "internal" | "external",
   email: string | null,
+  phone: string | null,
   connectorConfigId: string | null,
   slackOwned: boolean,
   now: string,
@@ -244,7 +256,10 @@ async function updateEntityFromSlackProfile(
 
   await trx.updateTable("entities").set(updates).where("id", "=", entity.id).execute();
   if (email) {
-    await updateSlackEmailContactPoint(trx, entity.id, email, connectorConfigId, slackOwned, now);
+    await updateSlackContactPoint(trx, entity.id, "email", email, connectorConfigId, slackOwned, now);
+  }
+  if (phone) {
+    await updateSlackContactPoint(trx, entity.id, "phone", phone, connectorConfigId, slackOwned, now);
   }
   return trx.selectFrom("entities").selectAll().where("id", "=", entity.id).executeTakeFirstOrThrow();
 }
@@ -314,6 +329,7 @@ async function runUpsertBody(
   const now = profile.fetchedAt;
   const sourceId = `${profile.teamId}:${profile.slackUserId}`;
   const email = normalizeEmail(profile.email);
+  const phone = normalizePhone(profile.phone);
   const domains = await trx.selectFrom("organization_domains").select("domain").execute();
   const teamRoster = options.teamRoster ?? (await loadSlackRosterProof(trx));
   const teamRosterMatch =
@@ -458,16 +474,33 @@ async function runUpsertBody(
       slackOwned = false;
     }
     if (!entity) slackOwned = false;
-  } else if (email) {
-    const matches = await createEntityRepository(trx).getPersonEntitiesByEmail(email);
-    if (matches.length === 1) {
-      entity = matches[0];
-    } else if (matches.length > 1) {
-      reviewReason = {
-        candidateEntityId: null,
-        candidateEntityIds: matches.map((match) => match.id),
-        reason: "ambiguous-email",
-      };
+  } else {
+    if (email) {
+      const matches = await createEntityRepository(trx).getPersonEntitiesByEmail(email);
+      if (matches.length === 1) {
+        entity = matches[0];
+      } else if (matches.length > 1) {
+        reviewReason = {
+          candidateEntityId: null,
+          candidateEntityIds: matches.map((match) => match.id),
+          reason: "ambiguous-email",
+        };
+      }
+    }
+    if (!entity && !reviewReason && phone) {
+      const matches = await createEntityRepository(trx).getPersonEntitiesByContactPointKinds(phone, [
+        "phone",
+        "whatsapp",
+      ]);
+      if (matches.length === 1) {
+        entity = matches[0];
+      } else if (matches.length > 1) {
+        reviewReason = {
+          candidateEntityId: null,
+          candidateEntityIds: matches.map((match) => match.id),
+          reason: "ambiguous-phone",
+        };
+      }
     }
   }
 
@@ -570,6 +603,7 @@ async function runUpsertBody(
       profile,
       classification.classification,
       email,
+      phone,
       connector?.id ?? null,
       slackOwned,
       now,
