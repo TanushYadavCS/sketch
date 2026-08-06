@@ -92,6 +92,33 @@ describe("Slack indexing facade", () => {
     });
   });
 
+  it("treats Slack app users, USLACKBOT, and is_bot users as bots", async () => {
+    const usersList = vi.fn().mockResolvedValue({
+      members: [
+        { id: "U-APP", name: "app", real_name: "App", profile: {}, is_app_user: true },
+        { id: "USLACKBOT", name: "slackbot", real_name: "Slackbot", profile: {} },
+        { id: "U-BOT", name: "bot", real_name: "Bot", profile: {}, is_bot: true },
+      ],
+      response_metadata: {},
+    });
+    const client = {
+      users: { list: usersList, info: vi.fn() },
+      conversations: { list: vi.fn(), members: vi.fn() },
+    };
+    const facade = createSlackIndexingFacade({
+      getBotToken: async () => "xoxb-bot-flags",
+      clientFactory: () => client as never,
+    });
+
+    await expect(facade.listUsers()).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ slackUserId: "U-APP", isBot: true }),
+        expect.objectContaining({ slackUserId: "USLACKBOT", isBot: true }),
+        expect.objectContaining({ slackUserId: "U-BOT", isBot: true }),
+      ]),
+    );
+  });
+
   it("captures OAuth scopes once from the users.list connection", async () => {
     const onOAuthScopes = vi.fn();
     const usersList = vi

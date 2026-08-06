@@ -1016,6 +1016,37 @@ export interface EntityContactPointsTable {
   updated_at: Generated<string>;
 }
 
+export interface UserEntityLinksTable {
+  id: string;
+  user_id: string;
+  entity_id: string;
+  matched_via: string;
+  confirmed_by_user_id: string | null;
+  created_at: Generated<string>;
+}
+
+export interface UserEntityLinkSweepRunsTable {
+  id: string;
+  run_key: string;
+  lease_token: string | null;
+  status: string;
+  stage: string;
+  entity_cursor: string | null;
+  user_cursor: string | null;
+  heartbeat_at: string | null;
+  linked_by_email: Generated<number>;
+  linked_by_phone: Generated<number>;
+  linked_by_user_creation: Generated<number>;
+  provisioned: Generated<number>;
+  review_queued: Generated<number>;
+  skipped: Generated<number>;
+  started_at: Generated<string>;
+  completed_at: string | null;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface EntityMentionsTable {
   id: string;
   entity_id: string;
@@ -1155,6 +1186,7 @@ export interface EntityReviewQueueTable {
   proposed_email: string | null;
   candidate_entity_id: string | null;
   candidate_entity_ids: string | null;
+  candidate_user_ids: string | null;
   candidate_score: number | null;
   candidate_reason: string | null;
   candidate_generated_at: string | null;
@@ -1516,6 +1548,8 @@ export interface DB {
   entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;
   entity_contact_points: EntityContactPointsTable;
+  user_entity_links: UserEntityLinksTable;
+  user_entity_link_sweep_runs: UserEntityLinkSweepRunsTable;
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;
   tool_calls: ToolCallsTable;

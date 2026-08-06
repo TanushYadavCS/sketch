@@ -144,6 +144,117 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
           .execute(),
       ).resolves.toHaveLength(0);
     });
+
+    it("logs conflicting Slack identity ids without dropping the sync", async () => {
+      await db
+        .insertInto("users")
+        .values({
+          id: "conflict-user",
+          name: "Existing Conflict",
+          type: "human",
+          email: "conflict@example.com",
+          slack_user_id: "U-EXISTING",
+        })
+        .execute();
+      await db
+        .insertInto("entities")
+        .values({
+          id: "conflict-entity",
+          name: "Existing Conflict",
+          source_type: "person",
+          subtype: "internal",
+          aliases: null,
+          metadata: JSON.stringify({ email: "conflict@example.com" }),
+          source_ref_id: null,
+          status: "confirmed",
+          provenance_tier: "inferred",
+          hotness: 0,
+          created_at: "2026-08-05T10:00:00.000Z",
+          updated_at: "2026-08-05T10:00:00.000Z",
+        })
+        .execute();
+      const logger = { warn: vi.fn() };
+
+      await upsertSlackPersonEntity(
+        db,
+        {
+          teamId: "T-CONFLICT",
+          slackUserId: "U-INCOMING",
+          name: "Existing Conflict",
+          realName: "Existing Conflict",
+          displayName: "Existing Conflict",
+          email: "conflict@example.com",
+          phone: null,
+          profileTeamId: "T-CONFLICT",
+          isBot: false,
+          isGuest: false,
+          isStranger: false,
+          isRestricted: false,
+          isUltraRestricted: false,
+          deleted: false,
+          providerUpdatedAt: "00000000001785924000",
+          fetchedAt: "2026-08-05T11:00:00.000Z",
+        },
+        { logger },
+      );
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        {
+          email: "conflict@example.com",
+          existingSlackUserId: "U-EXISTING",
+          incomingSlackUserId: "U-INCOMING",
+        },
+        "Skipped Sketch account link for conflicting Slack identity",
+      );
+    });
+
+    it("uses live Slack lookup when the human roster snapshot has no user", async () => {
+      await db
+        .insertInto("users")
+        .values({
+          id: "roster-agent",
+          name: "Roster Agent",
+          type: "agent",
+          email: "agent@example.com",
+          slack_user_id: "U-ROSTER-MISS",
+        })
+        .execute();
+
+      await expect(
+        upsertSlackPersonEntity(
+          db,
+          {
+            teamId: "T-ROSTER-MISS",
+            slackUserId: "U-ROSTER-MISS",
+            name: "Roster Agent",
+            realName: "Roster Agent",
+            displayName: "Roster Agent",
+            email: "new-human@example.com",
+            phone: null,
+            profileTeamId: "T-ROSTER-MISS",
+            isBot: false,
+            isGuest: false,
+            isStranger: false,
+            isRestricted: false,
+            isUltraRestricted: false,
+            deleted: false,
+            providerUpdatedAt: "00000000001785924000",
+            fetchedAt: "2026-08-05T11:00:00.000Z",
+          },
+          {
+            teamRoster: {
+              slackUserIds: new Set(["U-ROSTER-MISS"]),
+              emails: new Set(["new-human@example.com"]),
+              usersBySlackId: new Map(),
+            },
+          },
+        ),
+      ).resolves.toMatchObject({ applied: true });
+
+      await expect(
+        db.selectFrom("users").select(["id", "slack_user_id"]).where("slack_user_id", "=", "U-ROSTER-MISS").execute(),
+      ).resolves.toEqual([{ id: "roster-agent", slack_user_id: "U-ROSTER-MISS" }]);
+    });
   });
 }
 

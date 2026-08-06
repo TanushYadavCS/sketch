@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { type ExpressionBuilder, type Kysely, type Selectable, type SqlBool, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import { upsertSlackIdentity } from "../../slack/upsert-identity";
-import type { DB, EntitiesTable, SlackUserSyncStateTable } from "../schema";
+import type { DB, EntitiesTable, SlackUserSyncStateTable, UsersTable } from "../schema";
 import { createEntityRepository, isHumanSubtypeOverride, normalizeContactPointValue } from "./entities";
 import { createEntityReviewRepo } from "./entity-review";
+import { ensureUserEntityLinkForEntity } from "./user-entity-linking";
 import { createUserRepository } from "./users";
 
 export interface SlackUserProfile {
@@ -40,6 +41,7 @@ export interface SlackEntitySyncOptions {
 export interface SlackRosterProof {
   slackUserIds: ReadonlySet<string>;
   emails: ReadonlySet<string>;
+  usersBySlackId?: ReadonlyMap<string, Selectable<UsersTable>>;
 }
 
 export type SlackEntitySyncResult = {
@@ -269,14 +271,13 @@ async function updateEntityFromSlackProfile(
 }
 
 export async function loadSlackRosterProof(db: Kysely<DB>): Promise<SlackRosterProof> {
-  const users = await db
-    .selectFrom("users")
-    .select(["slack_user_id", "email"])
-    .where("type", "!=", "external")
-    .execute();
+  const users = await db.selectFrom("users").selectAll().where("type", "=", "human").execute();
   return {
     slackUserIds: new Set(users.map((user) => user.slack_user_id).filter((id): id is string => Boolean(id))),
     emails: new Set(users.map((user) => normalizeEmail(user.email)).filter((email): email is string => Boolean(email))),
+    usersBySlackId: new Map(
+      users.filter((user) => user.slack_user_id).map((user) => [user.slack_user_id as string, user]),
+    ),
   };
 }
 
@@ -517,29 +518,6 @@ async function runUpsertBody(
 
   const name = profileName(profile);
   let accountCreated = false;
-  if (classification.source === "organization_domain" && email && name) {
-    const accountResult = await upsertSlackIdentity(
-      createUserRepository(trx),
-      { name, email, slackUserId: profile.slackUserId },
-      { mode: "provisioning" },
-    );
-    accountCreated = accountResult.status === "created";
-    if (accountResult.status === "created") {
-      options.logger?.info?.(
-        { email, slackUserId: profile.slackUserId, userId: accountResult.user.id },
-        "Created Sketch account from Slack organization-domain identity",
-      );
-    } else if (accountResult.status === "conflict") {
-      options.logger?.warn(
-        {
-          email: accountResult.conflict.email,
-          existingSlackUserId: accountResult.conflict.existingSlackUserId,
-          incomingSlackUserId: accountResult.conflict.incomingSlackUserId,
-        },
-        "Skipped Sketch account link for conflicting Slack identity",
-      );
-    }
-  }
   if (reviewReason && !name) {
     options.logger?.warn(
       { candidateEntityIds: reviewReason.candidateEntityIds ?? [], slackUserId: profile.slackUserId },
@@ -712,6 +690,35 @@ async function runUpsertBody(
     .where("team_id", "=", profile.teamId)
     .where("slack_user_id", "=", profile.slackUserId)
     .execute();
+  if (entity) {
+    if (email && classification.classification === "internal") {
+      const identityResult = await upsertSlackIdentity(
+        createUserRepository(trx),
+        { name: name ?? profile.name, email, slackUserId: profile.slackUserId },
+        {
+          mode: "provisioning",
+          ...(options.teamRoster?.usersBySlackId?.has(profile.slackUserId)
+            ? { existingBySlack: options.teamRoster.usersBySlackId.get(profile.slackUserId) }
+            : {}),
+        },
+      );
+      accountCreated = identityResult.status === "created";
+      if (identityResult.status === "conflict") {
+        options.logger?.warn(
+          {
+            email: identityResult.conflict.email,
+            existingSlackUserId: identityResult.conflict.existingSlackUserId,
+            incomingSlackUserId: identityResult.conflict.incomingSlackUserId,
+          },
+          "Skipped Sketch account link for conflicting Slack identity",
+        );
+      }
+    }
+    const linkResult = await ensureUserEntityLinkForEntity(trx, entity.id, { users: createUserRepository(trx) });
+    if (linkResult.outcome === "linked") {
+      accountCreated ||= linkResult.matchedVia === "provisioning";
+    }
+  }
   const state = await trx
     .selectFrom("slack_user_sync_state")
     .selectAll()

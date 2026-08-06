@@ -36,6 +36,7 @@ async function seedUsers(db: Kysely<DB>) {
     emailVerified: true,
     passwordHash: hash,
     authRole: "admin",
+    skipEntityLinking: true,
   });
   await users.create({
     name: "owner",
@@ -43,6 +44,7 @@ async function seedUsers(db: Kysely<DB>) {
     emailVerified: true,
     passwordHash: hash,
     authRole: "member",
+    skipEntityLinking: true,
   });
   await users.create({
     name: "other",
@@ -50,6 +52,7 @@ async function seedUsers(db: Kysely<DB>) {
     emailVerified: true,
     passwordHash: hash,
     authRole: "member",
+    skipEntityLinking: true,
   });
   await settings.update({ onboardingCompletedAt: new Date().toISOString() });
 }

@@ -11,12 +11,12 @@ import {
   extractSummarizerSeedCandidates,
 } from "../../db/repositories/agent-outputs";
 import { createConversationFollowupsRepository } from "../../db/repositories/conversation-followups";
-import { createEntityRepository } from "../../db/repositories/entities";
 import {
   type ActiveTaskDurabilityRoute,
   type UserTaskDurabilityTransition,
   createTaskDurabilityTransitionRepository,
 } from "../../db/repositories/task-durability-transition";
+import { resolvePersonEntitiesForUser } from "../../db/repositories/user-entity-resolver";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import type { SketchMcpDeps, ToolResult } from "./types";
@@ -70,7 +70,7 @@ export async function handleListFollowups(_args: ListFollowupsArgs, deps: Sketch
   if (activeRoutes.length === 0) {
     try {
       const verifiedEmails = await createUserRepository(deps.db).getVerifiedEmailsForUser(deps.currentUserId);
-      const peopleByEmail = await createEntityRepository(deps.db).getPersonEntitiesByEmails(verifiedEmails);
+      const peopleByEmail = await resolvePersonEntitiesForUser(deps.db, deps.currentUserId, verifiedEmails);
       const assigneeEntityIds = [...new Set([...peopleByEmail.values()].flat().map((person) => person.id))];
       const assigned = await createConversationFollowupsRepository(deps.db).queryPersonalReminders({
         userId: deps.currentUserId,
@@ -150,7 +150,7 @@ export async function handleListFollowups(_args: ListFollowupsArgs, deps: Sketch
 
   try {
     const verifiedEmails = await createUserRepository(deps.db).getVerifiedEmailsForUser(deps.currentUserId);
-    const peopleByEmail = await createEntityRepository(deps.db).getPersonEntitiesByEmails(verifiedEmails);
+    const peopleByEmail = await resolvePersonEntitiesForUser(deps.db, deps.currentUserId, verifiedEmails);
     const assigneeEntityIds = [...new Set([...peopleByEmail.values()].flat().map((person) => person.id))];
     const reminders = await createConversationFollowupsRepository(deps.db).queryPersonalReminders({
       userId: deps.currentUserId,

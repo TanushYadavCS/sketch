@@ -653,6 +653,18 @@ async function seedIndexedFile(db: Kysely<DB>, id: string, userId: string): Prom
 }
 
 async function seedAssignablePerson(db: Kysely<DB>, id: string, name: string, email: string): Promise<void> {
+  const user = await db.selectFrom("users").select("id").where("email", "=", email).executeTakeFirst();
+  const existingLink = user
+    ? await db
+        .selectFrom("user_entity_links")
+        .select(["id", "entity_id"])
+        .where("user_id", "=", user.id)
+        .executeTakeFirst()
+    : undefined;
+  if (existingLink) {
+    await db.deleteFrom("user_entity_links").where("id", "=", existingLink.id).execute();
+    await db.deleteFrom("entities").where("id", "=", existingLink.entity_id).execute();
+  }
   await db
     .insertInto("entities")
     .values({
@@ -670,6 +682,18 @@ async function seedAssignablePerson(db: Kysely<DB>, id: string, name: string, em
       ai_brief: null,
     })
     .execute();
+  if (user) {
+    await db
+      .insertInto("user_entity_links")
+      .values({
+        id: `link-${id}`,
+        user_id: user.id,
+        entity_id: id,
+        matched_via: "user_creation",
+        confirmed_by_user_id: null,
+      })
+      .execute();
+  }
 }
 
 async function seedProject(db: Kysely<DB>, id: string, name: string): Promise<void> {

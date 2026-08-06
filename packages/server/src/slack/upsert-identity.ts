@@ -1,3 +1,5 @@
+import { provisionUnverifiedUser } from "../db/repositories/user-entity-linking";
+
 type UserRow = {
   id: string;
   name: string;
@@ -20,6 +22,7 @@ type UpsertUsersDeps = {
     slackUserId: string;
     email: string;
     emailVerified?: boolean;
+    skipEntityLinking?: boolean;
   }): Promise<UserRow>;
   update(
     id: string,
@@ -28,6 +31,7 @@ type UpsertUsersDeps = {
       slackUserId?: string | null;
       email?: string | null;
       emailVerified?: boolean;
+      skipEntityLinking?: boolean;
     },
   ): Promise<UserRow>;
 };
@@ -45,6 +49,7 @@ export type UpsertSlackIdentityResult =
 type UpsertSlackIdentityOptions = {
   emailVerified?: boolean;
   mode?: "oauth" | "provisioning";
+  existingBySlack?: UserRow | null;
 };
 
 function normalizeEmail(email: string): string {
@@ -65,7 +70,8 @@ export async function upsertSlackIdentity(
   const provisioningMode = options.mode === "provisioning";
   const emailVerified = provisioningMode ? false : (options.emailVerified ?? true);
 
-  const existingBySlack = await users.findBySlackId(identity.slackUserId);
+  const existingBySlack =
+    options.existingBySlack !== undefined ? options.existingBySlack : await users.findBySlackId(identity.slackUserId);
   if (existingBySlack) {
     const needsNameUpdate = existingBySlack.name !== name;
     const needsEmailUpdate = !provisioningMode && existingBySlack.email !== email;
@@ -113,11 +119,13 @@ export async function upsertSlackIdentity(
     return { status: "updated", user: updated };
   }
 
-  const created = await users.create({
-    name,
-    email,
-    slackUserId: identity.slackUserId,
-    emailVerified,
-  });
+  if (provisioningMode) {
+    const provisioned = await provisionUnverifiedUser(users, { name, email });
+    if (provisioned.slack_user_id === identity.slackUserId) return { status: "created", user: provisioned };
+    const created = await users.update(provisioned.id, { slackUserId: identity.slackUserId, skipEntityLinking: true });
+    return { status: "created", user: created };
+  }
+
+  const created = await users.create({ name, email, slackUserId: identity.slackUserId, emailVerified });
   return { status: "created", user: created };
 }

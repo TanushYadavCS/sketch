@@ -26,7 +26,7 @@ import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 import * as slackEntityLifecycleMigration from "./159-slack-entity-lifecycle-sync";
 
-const EXPECTED_MIGRATION_COUNT = 156;
+const EXPECTED_MIGRATION_COUNT = 157;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -226,6 +226,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[153]).toBe("158-slack-channel-participants");
     expect(names[154]).toBe("159-slack-entity-lifecycle-sync");
     expect(names[155]).toBe("160-slack-roster-evidence");
+    expect(names[156]).toBe("161-user-entity-links");
   });
 
   it("creates the Slack entity lifecycle schema and allows source-scoped review rows", async () => {

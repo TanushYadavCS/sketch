@@ -31,9 +31,10 @@
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import type { Logger } from "pino";
-import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
+import { whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { PERSON_PARTICIPANT_FACT_TYPES } from "../db/repositories/indexed-file-facts";
+import { resolvePersonEntitiesForEmails } from "../db/repositories/user-entity-resolver";
 import type { DB } from "../db/schema";
 import { isRoleAccountEmail } from "../entities/affiliations";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
@@ -175,8 +176,7 @@ export async function resolveFileAnchors(deps: FileScopeDeps, fileId: string): P
     .sort((a, b) => b.hotness - a.hotness)
     .slice(0, MAX_ANCHORS_PER_SIDE);
 
-  const entityRepo = createEntityRepository(deps.db);
-  const personsByEmail = await entityRepo.getPersonEntitiesByEmails(participantEmails);
+  const personsByEmail = await resolvePersonEntitiesForEmails(deps.db, participantEmails);
   const personMap = new Map<string, AnchorEntity>();
   for (const matches of personsByEmail.values()) {
     const candidates = matches.filter((person) => person.id !== TEST_ACCOUNT_ENTITY_ID);

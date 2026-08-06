@@ -29,6 +29,7 @@ async function seedAdmin(db: Kysely<DB>): Promise<{ id: string }> {
     emailVerified: true,
     passwordHash: await hashPassword(PASSWORD),
     authRole: "admin",
+    skipEntityLinking: true,
   });
   await settings.update({ onboardingCompletedAt: new Date().toISOString() });
   const admin = await users.findByEmail(ADMIN_EMAIL);
@@ -45,6 +46,7 @@ async function seedMember(db: Kysely<DB>): Promise<{ id: string; email: string }
     emailVerified: true,
     passwordHash: await hashPassword(PASSWORD),
     authRole: "member",
+    skipEntityLinking: true,
   });
   const member = await users.findByEmail(email);
   if (!member) throw new Error("member missing");

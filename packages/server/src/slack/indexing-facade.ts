@@ -143,7 +143,7 @@ function mapUser(user: unknown, fallbackId?: string): SlackIndexingUser {
     email: readString(profile, "email"),
     phone: readString(profile, "phone"),
     profileTeamId: readString(raw, "team_id"),
-    isBot: readBoolean(raw, "is_bot") || id === "USLACKBOT",
+    isBot: readBoolean(raw, "is_bot") || id === "USLACKBOT" || readBoolean(raw, "is_app_user"),
     isGuest: readBoolean(raw, "is_guest"),
     isStranger: readBoolean(raw, "is_stranger"),
     isRestricted: readBoolean(raw, "is_restricted"),

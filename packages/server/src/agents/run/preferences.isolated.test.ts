@@ -91,7 +91,12 @@ describe("AgentRunService", () => {
   it("defaults agent task creation off and passes the toggle through runtime context", async () => {
     const tasks: Array<() => Promise<void>> = [];
     const users = createUserRepository(db);
-    const user = await users.create({ name: "Agent User", email: "user@example.com", emailVerified: true });
+    const user = await users.create({
+      name: "Agent User",
+      email: "user@example.com",
+      emailVerified: true,
+      skipEntityLinking: true,
+    });
     await seedPersonEntity(db, { id: "person-agent-user", name: "Agent User", email: "user@example.com" });
     await seedIndexedFile(db, { id: "brief-file", providerUrl: null });
     const runAgent = vi.fn(async (params: Parameters<AgentRunServiceDeps["runAgent"]>[0]) => {

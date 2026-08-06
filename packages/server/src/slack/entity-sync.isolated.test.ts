@@ -148,7 +148,7 @@ describe("Slack entity sync", () => {
     const instrumentedDb = getDb().withPlugin({
       transformQuery({ node }) {
         const serialized = JSON.stringify(node);
-        if (serialized.includes('"name":"users"') && serialized.includes('"name":"slack_user_id"')) {
+        if (serialized.includes('"name":"users"') && serialized.includes('"kind":"SelectAllNode"')) {
           rosterQueries.push(serialized);
         }
         return node;

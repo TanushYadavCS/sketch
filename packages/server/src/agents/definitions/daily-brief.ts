@@ -13,13 +13,14 @@ import {
   createAgentOutputRepository,
 } from "../../db/repositories/agent-outputs";
 import { createConversationFollowupsRepository } from "../../db/repositories/conversation-followups";
-import { createEntityRepository, whereLiveEntity } from "../../db/repositories/entities";
+import { whereLiveEntity } from "../../db/repositories/entities";
 import { createTaskActivityRepository } from "../../db/repositories/task-activity";
 import {
   type ActiveTaskDurabilityRoute,
   createTaskDurabilityTransitionRepository,
 } from "../../db/repositories/task-durability-transition";
 import { type PromoteBriefTaskResult, createTaskRepository } from "../../db/repositories/tasks";
+import { resolvePersonEntitiesForUser } from "../../db/repositories/user-entity-resolver";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { createLogger } from "../../logger";
@@ -1476,7 +1477,6 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
   const outputRepo = createAgentOutputRepository(args.db);
   const followups = createConversationFollowupsRepository(args.db);
   const transitionRepo = createTaskDurabilityTransitionRepository(args.db);
-  const entities = createEntityRepository(args.db);
   const summarySince = dailyBriefSummarySince(args.baseContext);
   const userEmails = await args.users.getAllEmailsForUser(args.userId);
   const verifiedEmails = await args.users.getVerifiedEmailsForUser(args.userId);
@@ -1497,8 +1497,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
     typeof args.baseContext.maxItemsPerSection === "number"
       ? args.baseContext.maxItemsPerSection
       : args.maxItemsPerSection;
-  const peopleResult = await entities
-    .getPersonEntitiesByEmails(verifiedEmails)
+  const peopleResult = await resolvePersonEntitiesForUser(args.db, args.userId, verifiedEmails)
     .then((value) => ({ status: "ok" as const, value }))
     .catch(() => ({ status: "error" as const }));
   const assigneeEntityIds =

@@ -259,7 +259,12 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
 
   app.post("/confirm-batch", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
-      items?: Array<{ reviewId?: string; candidateGeneratedAt?: string; mergeIntoEntityId?: string }>;
+      items?: Array<{
+        reviewId?: string;
+        candidateGeneratedAt?: string;
+        mergeIntoEntityId?: string;
+        linkUserId?: string;
+      }>;
     };
     if (!Array.isArray(body.items)) {
       return c.json({ error: { code: "BAD_REQUEST", message: "items is required" } }, 400);
@@ -300,6 +305,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
         const result = await confirmReview({ db, userId: c.get("sub") }, item.reviewId, {
           mergeIntoEntityId: item.mergeIntoEntityId,
           candidateGeneratedAt: item.candidateGeneratedAt,
+          linkUserId: item.linkUserId,
         });
         if (result.row.entity_type === "project") confirmedProjectTargetEntityIds.add(result.targetEntityId);
         results.push({ reviewId: item.reviewId, ok: true, targetEntityId: result.targetEntityId });
@@ -475,6 +481,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
       mergeIntoEntityId?: string;
       candidateGeneratedAt?: string;
       nameOverride?: string;
+      linkUserId?: string;
     };
     if (!body.candidateGeneratedAt) {
       return c.json({ error: { code: "BAD_REQUEST", message: "candidateGeneratedAt is required" } }, 400);
@@ -491,6 +498,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
         mergeIntoEntityId: body.mergeIntoEntityId,
         candidateGeneratedAt: body.candidateGeneratedAt,
         nameOverride: body.nameOverride,
+        linkUserId: body.linkUserId,
       });
       if (result.row.entity_type === "project") {
         await backfillStructuralAssigneeForConfirmedProjects(db, deps.logger, [result.targetEntityId]);

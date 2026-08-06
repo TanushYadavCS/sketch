@@ -1,5 +1,5 @@
 import type { Kysely } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { createUserRepository } from "./users";
@@ -17,6 +17,14 @@ afterEach(async () => {
 });
 
 describe("create()", () => {
+  it("runs a standalone mutation through Kysely transaction()", async () => {
+    const transactionSpy = vi.spyOn(db, "transaction");
+
+    await users.create({ name: "Transactional Alice", skipEntityLinking: true });
+
+    expect(transactionSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("returns user with generated UUID id", async () => {
     const user = await users.create({ name: "Alice", slackUserId: "U001" });
     expect(user.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);

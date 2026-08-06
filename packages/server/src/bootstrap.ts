@@ -45,6 +45,7 @@ import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createOperationalAlertsRepository } from "./db/repositories/operational-alerts";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createSlackChannelParticipantsRepository } from "./db/repositories/slack-channel-participants";
+import { createUserEntityLinkSweepService } from "./db/repositories/user-entity-link-sweep";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
 import { createWhatsAppInboundEventsRepository } from "./db/repositories/whatsapp-inbound-events";
@@ -794,6 +795,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
     },
   });
   if (backgroundWork && externalStartup) slackEntitySync.start();
+  const userEntityLinkSweep = createUserEntityLinkSweepService({ db, users, logger });
+  if (backgroundWork && externalStartup) userEntityLinkSweep.start();
   const syncScheduler = backgroundWork
     ? startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config, slackIndexingFacade })
     : null;
@@ -1160,6 +1163,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     await telemetry.shutdown();
     await syncScheduler?.stop();
     await slackEntitySync.stop();
+    await userEntityLinkSweep.stop();
     whatsappWindowKeepAliveJob?.stop();
     if (backgroundWork) {
       agentScheduler.stop();
