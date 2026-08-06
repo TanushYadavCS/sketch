@@ -1,19 +1,33 @@
 import { randomUUID } from "node:crypto";
-import type { AutomationBuilderSaveRequest } from "@sketch/shared";
+import type {
+  AutomationBuilderSaveRequest,
+  AutomationDefinition,
+  WorkflowDelivery,
+  WorkflowEdge,
+  WorkflowStep,
+} from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
+import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import {
   type NewScheduledTask,
   type ScheduledTaskRow,
   createScheduledTaskRepository,
 } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
+import { normalizeScheduleTriggerSteps } from "../scheduler/trigger-metadata";
 import {
+  buildAutomationDefinition,
   parseAutomationBuilderSaveRequest,
   scheduledTaskFieldsFromSaveRequest,
   validateAutomationBuilderSaveRequest,
 } from "./definition";
+import {
+  type AutomationTaskConversationAssociation,
+  upsertAutomationTaskConversationAssociation,
+} from "./task-conversations";
 
 export interface AutomationCreateContext {
   id?: string;
@@ -39,6 +53,49 @@ export type AutomationReplaceResult =
   | { kind: "saved"; row: ScheduledTaskRow }
   | { kind: "not_found" }
   | { kind: "revision_conflict"; currentRevision: number };
+
+export interface AutomationStepContentPatch {
+  contentType?: "prompt" | "script";
+  content?: string;
+  apps?: string[] | null;
+}
+
+export interface AutomationDefinitionPatch {
+  expectedRevision?: number;
+  prompt?: string;
+  scheduleType?: "cron" | "interval" | "once" | "external";
+  scheduleValue?: string;
+  timezone?: string;
+  status?: "active" | "paused" | "completed";
+  title?: string | null;
+  description?: string | null;
+  delivery?: Partial<Pick<WorkflowDelivery, "platform" | "targetType" | "targetId" | "threadTs" | "mode">>;
+  steps?: WorkflowStep[];
+  edges?: WorkflowEdge[];
+  stepContent?: Record<string, AutomationStepContentPatch>;
+}
+
+export type AutomationMutationResult =
+  | { kind: "saved"; row: ScheduledTaskRow; request: AutomationBuilderSaveRequest }
+  | { kind: "not_found" }
+  | { kind: "access_denied" }
+  | { kind: "revision_conflict"; currentRevision: number };
+
+export interface AutomationDeletionScheduler {
+  removeTaskRuntime(taskId: string): Promise<boolean>;
+}
+
+export type AutomationDeletionResult =
+  | { kind: "deleted" }
+  | { kind: "not_found" }
+  | { kind: "access_denied" }
+  | { kind: "scheduler_failure"; error: unknown };
+
+class AutomationDeletionRaceError extends Error {
+  constructor() {
+    super("Automation was deleted concurrently");
+  }
+}
 
 function validatedRequest(request: AutomationBuilderSaveRequest, brokerCapable: boolean): AutomationBuilderSaveRequest {
   const parsed = parseAutomationBuilderSaveRequest(request);
@@ -76,11 +133,323 @@ async function replaceStepContent(
   }
 }
 
+function saveRequestFromDefinition(
+  definition: AutomationDefinition,
+  expectedRevision: number | undefined,
+): AutomationBuilderSaveRequest {
+  return {
+    ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    title: definition.title,
+    description: definition.description,
+    prompt: definition.prompt,
+    scheduleType: definition.scheduleType,
+    scheduleValue: definition.scheduleValue,
+    timezone: definition.timezone,
+    status: definition.status,
+    delivery: definition.delivery,
+    steps: definition.steps,
+    edges: definition.edges,
+    stepContent: definition.stepContent,
+  };
+}
+
+function mergeSteps(current: WorkflowStep[], requested: WorkflowStep[] | undefined): WorkflowStep[] {
+  if (!requested) return current;
+  const currentById = new Map(current.map((step) => [step.id, step]));
+  return requested.map((step) => {
+    const existing = currentById.get(step.id);
+    if (!existing) return step;
+    return {
+      ...existing,
+      ...step,
+      ...(step.triggerConfig === undefined ? { triggerConfig: existing.triggerConfig } : {}),
+    };
+  });
+}
+
+/**
+ * Reconciles scheduler-authoritative fields onto inherited trigger JSON before an unrelated canonical edit.
+ * This intentional hidden write repairs drift while preserving a custom label; explicit trigger configs are merged afterward and remain caller-owned through validation.
+ */
+function reconcileInheritedScheduleTriggerSteps(
+  steps: WorkflowStep[],
+  params: {
+    scheduleType: "cron" | "interval" | "once";
+    scheduleValue: string;
+    timezone: string;
+  },
+): WorkflowStep[] {
+  let updated = false;
+  const next = steps.map((step) => {
+    if (step.type !== "trigger" || step.triggerConfig?.type !== "schedule") return step;
+    if (
+      step.triggerConfig.scheduleType === params.scheduleType &&
+      step.triggerConfig.scheduleValue === params.scheduleValue &&
+      step.triggerConfig.timezone === params.timezone
+    ) {
+      return step;
+    }
+    updated = true;
+    return {
+      ...step,
+      triggerConfig: {
+        ...step.triggerConfig,
+        scheduleType: params.scheduleType,
+        scheduleValue: params.scheduleValue,
+        timezone: params.timezone,
+      },
+    };
+  });
+
+  return updated ? next : steps;
+}
+
+function contentTypeForStep(step: WorkflowStep | undefined): "prompt" | "script" {
+  return step?.type === "action" ? "script" : "prompt";
+}
+
+function mergeStepContent(
+  definition: AutomationDefinition,
+  steps: WorkflowStep[],
+  requested: Record<string, AutomationStepContentPatch> | undefined,
+): AutomationBuilderSaveRequest["stepContent"] {
+  const stepById = new Map(steps.map((step) => [step.id, step]));
+  const content = Object.fromEntries(
+    Object.entries(definition.stepContent).map(([stepId, value]) => [
+      stepId,
+      { ...value, taskId: definition.id, stepId },
+    ]),
+  ) as AutomationBuilderSaveRequest["stepContent"];
+
+  for (const [stepId, patch] of Object.entries(requested ?? {})) {
+    const current = content[stepId];
+    const step = stepById.get(stepId);
+    content[stepId] = {
+      taskId: definition.id,
+      stepId,
+      contentType: patch.contentType ?? current?.contentType ?? contentTypeForStep(step),
+      content: patch.content ?? current?.content ?? "",
+      apps: Object.prototype.hasOwnProperty.call(patch, "apps") ? (patch.apps ?? null) : (current?.apps ?? null),
+      ...(current?.updatedAt ? { updatedAt: current.updatedAt } : {}),
+    };
+  }
+
+  return content;
+}
+
+function applyDefinitionPatch(
+  definition: AutomationDefinition,
+  patch: AutomationDefinitionPatch,
+  expectedRevision: number,
+): AutomationBuilderSaveRequest {
+  let scheduleType = patch.scheduleType ?? definition.scheduleType;
+  let scheduleValue = patch.scheduleValue ?? definition.scheduleValue;
+  const timezone = patch.timezone ?? definition.timezone;
+  let inheritedSteps = definition.steps;
+  if (definition.scheduleType !== "external") {
+    inheritedSteps = reconcileInheritedScheduleTriggerSteps(inheritedSteps, {
+      scheduleType: definition.scheduleType,
+      scheduleValue: definition.scheduleValue,
+      timezone: definition.timezone,
+    });
+  }
+  const hasExplicitTriggerConfig =
+    patch.steps?.some((step) => step.type === "trigger" && step.triggerConfig !== undefined) ?? false;
+  let steps = mergeSteps(inheritedSteps, patch.steps);
+  const trigger = steps.find((step) => step.type === "trigger")?.triggerConfig;
+
+  if (trigger?.type === "slack_channel_message") {
+    scheduleType = "external";
+    scheduleValue = "slack_channel_message";
+  } else if (trigger?.type === "canvas") {
+    scheduleType = "external";
+    scheduleValue = "canvas";
+  } else if (
+    (patch.scheduleType !== undefined || patch.scheduleValue !== undefined || patch.timezone !== undefined) &&
+    scheduleType !== "external" &&
+    trigger?.type === "schedule" &&
+    !hasExplicitTriggerConfig
+  ) {
+    steps = normalizeScheduleTriggerSteps(steps, { scheduleType, scheduleValue, timezone });
+  }
+
+  const delivery = {
+    ...definition.delivery,
+    ...(patch.delivery?.platform === undefined ? {} : { platform: patch.delivery.platform }),
+    ...(patch.delivery?.targetType === undefined ? {} : { targetType: patch.delivery.targetType }),
+    ...(patch.delivery?.targetId === undefined ? {} : { targetId: patch.delivery.targetId }),
+    ...(Object.prototype.hasOwnProperty.call(patch.delivery ?? {}, "threadTs")
+      ? { threadTs: patch.delivery?.threadTs ?? null }
+      : {}),
+    ...(patch.delivery?.mode === undefined ? {} : { mode: patch.delivery.mode }),
+  };
+  const hasTitle = Object.prototype.hasOwnProperty.call(patch, "title");
+  const hasDescription = Object.prototype.hasOwnProperty.call(patch, "description");
+
+  return {
+    ...saveRequestFromDefinition(definition, expectedRevision),
+    expectedRevision,
+    title: hasTitle ? (patch.title ?? null) : definition.title,
+    description: hasDescription ? (patch.description ?? null) : definition.description,
+    prompt: patch.prompt ?? definition.prompt,
+    scheduleType,
+    scheduleValue,
+    timezone,
+    status: patch.status ?? definition.status,
+    delivery,
+    steps,
+    edges: patch.edges ?? definition.edges,
+    stepContent: mergeStepContent(definition, steps, patch.stepContent),
+  };
+}
+
+export async function getAutomationDefinition(params: {
+  db: Kysely<DB>;
+  taskId: string;
+}): Promise<AutomationDefinition | null> {
+  const row = await createScheduledTaskRepository(params.db).getById(params.taskId);
+  if (!row) return null;
+  const [stepContentRows, runRows] = await Promise.all([
+    createAutomationStepContentRepository(params.db).getByTask(params.taskId),
+    createAutomationRunsRepository(params.db).list(params.taskId),
+  ]);
+  return buildAutomationDefinition({ row, stepContentRows, runRows });
+}
+
+/**
+ * Deletes an automation and every persisted task-owned row in one transaction.
+ * The legacy automation tables do not declare task foreign keys, so the dependent
+ * rows are removed explicitly before the task row. Scheduler cleanup is deliberately
+ * post-commit: a scheduler failure is returned as inconsistent runtime state because
+ * the committed database deletion cannot be rolled back. Transcript files are not
+ * part of this operation. A missing task is a deterministic not-found result, so a
+ * retry after a successful delete does not perform another scheduler mutation.
+ */
+export async function deleteAutomation(params: {
+  db: Kysely<DB>;
+  taskId: string;
+  actor: AutomationEditActor;
+  scheduler: AutomationDeletionScheduler;
+}): Promise<AutomationDeletionResult> {
+  let databaseResult: Extract<AutomationDeletionResult, { kind: "deleted" | "not_found" | "access_denied" }>;
+  try {
+    databaseResult = await params.db.transaction().execute(async (trx) => {
+      const current = await trx
+        .selectFrom("scheduled_tasks")
+        .select(["id", "created_by"])
+        .where("id", "=", params.taskId)
+        .executeTakeFirst();
+
+      if (!current) return { kind: "not_found" as const };
+      if (!params.actor.userId || (!params.actor.canManageAnyTask && current.created_by !== params.actor.userId)) {
+        return { kind: "access_denied" as const };
+      }
+
+      await createScheduledTaskConversationRepository(trx).deleteByTaskId(params.taskId);
+      await createAutomationStepContentRepository(trx).deleteByTaskId(params.taskId);
+      await createAutomationRunsRepository(trx).deleteByTaskId(params.taskId);
+
+      const deleted = await trx.deleteFrom("scheduled_tasks").where("id", "=", params.taskId).executeTakeFirst();
+      if (Number(deleted.numDeletedRows ?? 0) === 0) throw new AutomationDeletionRaceError();
+
+      return { kind: "deleted" as const };
+    });
+  } catch (error) {
+    if (error instanceof AutomationDeletionRaceError) return { kind: "not_found" };
+    throw error;
+  }
+
+  if (databaseResult.kind !== "deleted") return databaseResult;
+
+  try {
+    if (!(await params.scheduler.removeTaskRuntime(params.taskId))) {
+      return { kind: "scheduler_failure", error: new Error("Scheduler removal returned false") };
+    }
+  } catch (error) {
+    return { kind: "scheduler_failure", error };
+  }
+
+  return databaseResult;
+}
+
+export async function updateAutomationDefinition(params: {
+  db: Kysely<DB>;
+  taskId: string;
+  patch: AutomationDefinitionPatch;
+  actor: AutomationEditActor;
+  brokerCapable: boolean;
+  taskConversationAssociation?: AutomationTaskConversationAssociation;
+}): Promise<AutomationMutationResult> {
+  return params.db.transaction().execute(async (trx) => {
+    const current = await trx
+      .selectFrom("scheduled_tasks")
+      .selectAll()
+      .where("id", "=", params.taskId)
+      .executeTakeFirst();
+    if (!current) return { kind: "not_found" as const };
+    if (!params.actor.userId) return { kind: "access_denied" as const };
+    if (!params.actor.canManageAnyTask && current.created_by !== params.actor.userId) {
+      return { kind: "access_denied" as const };
+    }
+
+    const currentDefinition = buildAutomationDefinition({
+      row: current,
+      stepContentRows: await createAutomationStepContentRepository(trx).getByTask(params.taskId),
+      runRows: [],
+      normalizeScheduleTriggers: false,
+    });
+    const expectedRevision = params.patch.expectedRevision ?? current.revision;
+    if (current.revision !== expectedRevision) {
+      return { kind: "revision_conflict" as const, currentRevision: current.revision };
+    }
+    const request = validatedRequest(
+      applyDefinitionPatch(currentDefinition, params.patch, expectedRevision),
+      params.brokerCapable,
+    );
+
+    const updateResult = await trx
+      .updateTable("scheduled_tasks")
+      .set({
+        ...scheduledTaskFieldsFromSaveRequest(request),
+        revision: sql<number>`revision + 1`,
+        updated_at: sql<string>`CURRENT_TIMESTAMP`,
+        last_edited_by: params.actor.userId,
+      })
+      .where("id", "=", params.taskId)
+      .where("revision", "=", expectedRevision)
+      .executeTakeFirst();
+    if (Number(updateResult.numUpdatedRows ?? 0) === 0) {
+      const latest = await trx
+        .selectFrom("scheduled_tasks")
+        .select("revision")
+        .where("id", "=", params.taskId)
+        .executeTakeFirst();
+      if (!latest) return { kind: "not_found" as const };
+      return { kind: "revision_conflict" as const, currentRevision: latest.revision };
+    }
+
+    await replaceStepContent(trx, params.taskId, request);
+    if (params.taskConversationAssociation) {
+      await upsertAutomationTaskConversationAssociation(trx, {
+        taskId: params.taskId,
+        ...params.taskConversationAssociation,
+      });
+    }
+    const row = await trx
+      .selectFrom("scheduled_tasks")
+      .selectAll()
+      .where("id", "=", params.taskId)
+      .executeTakeFirstOrThrow();
+    return { kind: "saved" as const, row, request };
+  });
+}
+
 export async function createAutomationDefinition(params: {
   db: Kysely<DB>;
   request: AutomationBuilderSaveRequest;
   context: AutomationCreateContext;
   brokerCapable: boolean;
+  taskConversationAssociation?: AutomationTaskConversationAssociation;
 }): Promise<AutomationCreateResult> {
   const request = validatedRequest(params.request, params.brokerCapable);
   const id = params.context.id ?? randomUUID();
@@ -94,8 +463,8 @@ export async function createAutomationDefinition(params: {
       delivery_target: params.context.deliveryTarget,
       thread_ts: params.context.threadTs,
       prompt: request.prompt,
-      schedule_type: request.scheduleType,
-      schedule_value: request.scheduleValue,
+      schedule_type: fields.schedule_type ?? request.scheduleType,
+      schedule_value: fields.schedule_value ?? request.scheduleValue,
       timezone: request.timezone,
       session_mode: "fresh",
       next_run_at: null,
@@ -117,6 +486,12 @@ export async function createAutomationDefinition(params: {
     };
     const created = await createScheduledTaskRepository(trx).add(task);
     await replaceStepContent(trx, id, request);
+    if (params.taskConversationAssociation) {
+      await upsertAutomationTaskConversationAssociation(trx, {
+        taskId: id,
+        ...params.taskConversationAssociation,
+      });
+    }
     return created;
   });
 
@@ -129,6 +504,7 @@ export async function replaceAutomationDefinition(params: {
   request: AutomationBuilderSaveRequest;
   actor: AutomationEditActor;
   brokerCapable: boolean;
+  taskConversationAssociation?: AutomationTaskConversationAssociation;
 }): Promise<AutomationReplaceResult> {
   const request = validatedRequest(params.request, params.brokerCapable);
 
@@ -142,7 +518,8 @@ export async function replaceAutomationDefinition(params: {
     if (!params.actor.userId || (!params.actor.canManageAnyTask && current.created_by !== params.actor.userId)) {
       return { kind: "not_found" as const };
     }
-    if (request.expectedRevision !== undefined && current.revision !== request.expectedRevision) {
+    const expectedRevision = request.expectedRevision ?? current.revision;
+    if (current.revision !== expectedRevision) {
       return { kind: "revision_conflict" as const, currentRevision: current.revision };
     }
 
@@ -155,9 +532,7 @@ export async function replaceAutomationDefinition(params: {
         last_edited_by: params.actor.userId,
       })
       .where("id", "=", params.taskId);
-    if (request.expectedRevision !== undefined) {
-      update = update.where("revision", "=", request.expectedRevision);
-    }
+    update = update.where("revision", "=", expectedRevision);
     const updateResult = await update.executeTakeFirst();
     if (Number(updateResult.numUpdatedRows ?? 0) === 0) {
       const latest = await trx
@@ -170,6 +545,12 @@ export async function replaceAutomationDefinition(params: {
     }
 
     await replaceStepContent(trx, params.taskId, request);
+    if (params.taskConversationAssociation) {
+      await upsertAutomationTaskConversationAssociation(trx, {
+        taskId: params.taskId,
+        ...params.taskConversationAssociation,
+      });
+    }
     const row = await trx
       .selectFrom("scheduled_tasks")
       .selectAll()

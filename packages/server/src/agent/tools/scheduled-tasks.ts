@@ -1,26 +1,28 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
+import type { Kysely } from "kysely";
 import { z } from "zod/v4";
 import { AutomationAuthoringValidationError } from "../../automation/authoring/service";
 import type { ChatAutomationAuthoring, ChatAutomationAuthoringResult } from "../../automation/chat-authoring";
+import { AutomationValidationError } from "../../automation/definition";
 import {
-  AutomationValidationError,
-  validateAutomationBuilderSaveRequest,
-  validateWorkflowGraph,
-} from "../../automation/definition";
+  type AutomationDefinitionPatch,
+  createAutomationDefinition,
+  deleteAutomation,
+  getAutomationDefinition,
+  updateAutomationDefinition,
+} from "../../automation/persistence";
+import { webChatTaskConversationAssociation } from "../../automation/task-conversations";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
+import type { DB } from "../../db/schema";
 import type { IntegrationProvider } from "../../integrations/types";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
 import { getActiveTaskContextQueueKey, getScheduledTaskQueueKey } from "../../scheduler/queue-key";
 import type { TaskScheduler } from "../../scheduler/service";
-import {
-  formatIntervalScheduleLabel,
-  normalizeScheduleTriggerSteps,
-  normalizeScheduleTriggerStepsJson,
-} from "../../scheduler/trigger-metadata";
-import type { ScheduledTask, TaskContext } from "../../scheduler/types";
-import type { WorkflowEdge, WorkflowStep } from "../../workflows/types";
+import { formatIntervalScheduleLabel, normalizeScheduleTriggerSteps } from "../../scheduler/trigger-metadata";
+import type { CurrentAutomation, ScheduledTask, TaskContext } from "../../scheduler/types";
+import type { WorkflowStep } from "../../workflows/types";
 import type { AutomationArtifactCollector, SearchableUserRepo } from "./types";
 
 const workflowStepSchema = z.object({
@@ -76,12 +78,13 @@ const deliverySchema = z.object({
 
 const manageScheduledTasksSchema = {
   action: z
-    .enum(["list", "add", "update", "remove", "pause", "resume", "run", "getRun", "share", "updateStepContent"])
+    .enum(["list", "add", "update", "remove", "pause", "resume", "run", "get", "getRun", "share", "updateStepContent"])
     .describe(
       `Action to perform.
 - 'add': create an automation (simple: prompt + schedule_type + schedule_value; multi-step: title + steps)
 - 'list': list automations in this context
-- 'update': modify an automation (requires task_id)
+- 'update': modify an automation (requires task_id unless the current builder automation is implicit)
+- 'get': inspect one complete automation definition, including step content and run history (requires task_id)
 - 'remove': delete an automation (requires task_id)
 - 'pause': pause an automation (requires task_id)
 - 'resume': resume a paused automation (requires task_id)
@@ -116,7 +119,12 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
     .enum(["fresh"])
     .optional()
     .describe("Scheduled automations currently support only 'fresh': no memory, each run starts clean."),
-  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun/share."),
+  task_id: z
+    .string()
+    .optional()
+    .describe(
+      "ID of the task. Required for update unless the current builder automation is implicit; required for get/remove/pause/resume/run/getRun/share/updateStepContent.",
+    ),
   title: z.string().optional().describe("Human-readable name. Required for multi-step automations."),
   description: z.string().optional().describe("Description of what this automation does."),
   steps: z
@@ -139,6 +147,22 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
     .optional()
     .describe("Use 'silent' to record successful runs without sending final output to Slack or WhatsApp."),
   delivery: deliverySchema.optional().describe("Canonical final-output delivery destination for the workflow."),
+  status: z
+    .enum(["active", "paused", "completed"])
+    .optional()
+    .describe("Lifecycle status for a full definition update."),
+  expected_revision: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("Expected persisted revision for compare-and-swap writes. Stale revisions are rejected."),
+  expectedRevision: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("Alias for expected_revision when the caller uses the canonical camelCase field."),
   run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),
   step_id: z.string().optional().describe("Step ID for updateStepContent action."),
   step_content: z.string().optional().describe("New prompt or script content for updateStepContent action."),
@@ -146,10 +170,11 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
 };
 
 const authoredScheduledTasksSchema = {
-  action: z.enum(["list", "add", "update", "remove", "pause", "resume", "run", "getRun", "share"]).describe(
+  action: z.enum(["list", "add", "update", "remove", "pause", "resume", "run", "get", "getRun", "share"]).describe(
     `Action to perform.
 - 'add': create an automation from the user's natural-language request
 - 'update': edit an automation from the user's natural-language request (requires task_id)
+- 'get': inspect one complete automation definition, including step content and run history (requires task_id)
 - 'list': list automations in this context
 - 'remove': delete an automation (requires task_id)
 - 'pause': pause an automation (requires task_id)
@@ -164,14 +189,30 @@ const authoredScheduledTasksSchema = {
     .describe(
       "The user's natural-language automation request. Required for add and update; preserve their intent verbatim.",
     ),
-  task_id: z.string().optional().describe("ID of the task. Required for update/remove/pause/resume/run/getRun/share."),
+  task_id: z
+    .string()
+    .optional()
+    .describe(
+      "ID of the task. Required for update unless the current builder automation is implicit; required for get/remove/pause/resume/run/getRun/share.",
+    ),
   run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),
 };
 
 export type WorkflowStepInput = z.infer<typeof workflowStepSchema>;
 
 type ManageScheduledTasksParams = {
-  action: "list" | "add" | "update" | "remove" | "pause" | "resume" | "run" | "getRun" | "share" | "updateStepContent";
+  action:
+    | "list"
+    | "add"
+    | "update"
+    | "remove"
+    | "pause"
+    | "resume"
+    | "run"
+    | "get"
+    | "getRun"
+    | "share"
+    | "updateStepContent";
   request?: string;
   prompt?: string;
   schedule_type?: "cron" | "interval" | "once" | "external";
@@ -187,6 +228,9 @@ type ManageScheduledTasksParams = {
   output_platform?: "slack" | "whatsapp";
   output_thread_ts?: string | null;
   output_mode?: "deliver" | "silent";
+  status?: "active" | "paused" | "completed";
+  expected_revision?: number;
+  expectedRevision?: number;
   delivery?: {
     platform?: "slack" | "whatsapp";
     targetType?: "dm" | "channel" | "group" | "thread";
@@ -212,6 +256,8 @@ export interface ManageScheduledTasksDeps {
   config?: { BASE_URL?: string; PORT: number };
   automationArtifactCollector?: AutomationArtifactCollector;
   chatAuthoring?: ChatAutomationAuthoring;
+  currentAutomation?: CurrentAutomation;
+  db?: Kysely<DB>;
 }
 
 function stripContentFromSteps(steps: WorkflowStepInput[]): WorkflowStep[] {
@@ -226,15 +272,6 @@ function defaultEdgesForSteps(steps: WorkflowStep[]): { id: string; from: string
   }));
 }
 
-function formatGraphValidationError(
-  steps: WorkflowStep[],
-  edges: { id: string; from: string; to: string }[],
-): string | null {
-  const issues = validateWorkflowGraph(steps, edges);
-  if (issues.length === 0) return null;
-  return `Error: automation graph is invalid:\n${issues.map((issue) => `- ${issue.code}: ${issue.message}`).join("\n")}`;
-}
-
 function parseWorkflowStepsJson(value: string | null | undefined): WorkflowStep[] | null {
   if (!value) return null;
   try {
@@ -245,46 +282,15 @@ function parseWorkflowStepsJson(value: string | null | undefined): WorkflowStep[
   }
 }
 
-function parseWorkflowEdgesJson(value: string | null | undefined): WorkflowEdge[] | null {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed) ? (parsed as WorkflowEdge[]) : null;
-  } catch {
-    return null;
-  }
-}
-
-function parseAppsJson(value: string | null | undefined): string[] | null {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : null;
-  } catch {
-    return null;
-  }
-}
-
-function stepContentForValidation(params: {
-  taskId: string;
-  steps: WorkflowStepInput[];
-  existingContent?: Awaited<ReturnType<NonNullable<ManageScheduledTasksDeps["stepContentRepo"]>["getByTask"]>>;
-}): AutomationBuilderSaveRequest["stepContent"] {
+function stepContentForDefinition(
+  taskId: string,
+  steps: WorkflowStepInput[],
+): AutomationBuilderSaveRequest["stepContent"] {
   const content: AutomationBuilderSaveRequest["stepContent"] = {};
-  for (const existing of params.existingContent ?? []) {
-    content[existing.step_id] = {
-      taskId: existing.task_id,
-      stepId: existing.step_id,
-      contentType: existing.content_type === "script" ? "script" : "prompt",
-      content: existing.content,
-      apps: parseAppsJson(existing.apps),
-      updatedAt: existing.updated_at,
-    };
-  }
-  for (const step of params.steps) {
+  for (const step of steps) {
     if (step.agentPrompt !== undefined) {
       content[step.id] = {
-        taskId: params.taskId,
+        taskId,
         stepId: step.id,
         contentType: "prompt",
         content: step.agentPrompt,
@@ -292,7 +298,7 @@ function stepContentForValidation(params: {
       };
     } else if (step.script !== undefined) {
       content[step.id] = {
-        taskId: params.taskId,
+        taskId,
         stepId: step.id,
         contentType: "script",
         content: step.script,
@@ -303,55 +309,84 @@ function stepContentForValidation(params: {
   return content;
 }
 
-function validateBuilderLikeDefinition(params: {
-  title: string | null;
-  description: string | null;
-  prompt: string;
-  scheduleType: "cron" | "interval" | "once" | "external";
-  scheduleValue: string;
-  timezone: string;
-  status: "active" | "paused" | "completed";
-  steps: WorkflowStep[];
-  edges: WorkflowEdge[];
-  outputPlatform: "slack" | "whatsapp";
-  outputTarget: string;
-  outputThreadTs: string | null;
-  outputMode: "deliver" | "silent";
-  stepContent: AutomationBuilderSaveRequest["stepContent"];
-}): string | null {
-  try {
-    validateAutomationBuilderSaveRequest({
-      request: {
-        expectedRevision: undefined,
-        title: params.title,
-        description: params.description,
-        prompt: params.prompt,
-        scheduleType: params.scheduleType,
-        scheduleValue: params.scheduleValue,
-        timezone: params.timezone,
-        status: params.status,
-        delivery: {
-          platform: params.outputPlatform,
-          targetType: "dm",
-          targetId: params.outputTarget,
-          threadTs: params.outputThreadTs,
-          mode: params.outputMode,
-        },
-        steps: params.steps,
-        edges: params.edges,
-        stepContent: params.stepContent,
-      },
-      brokerCapable: true,
-    });
-    return null;
-  } catch (err) {
-    if (err instanceof AutomationValidationError) {
-      return `Error: automation definition is invalid:\n${err.issues
-        .map((issue) => `- ${issue.code}: ${issue.message}`)
-        .join("\n")}`;
-    }
-    throw err;
+function stepContentPatchForSteps(steps: WorkflowStepInput[]): AutomationDefinitionPatch["stepContent"] {
+  const content: AutomationDefinitionPatch["stepContent"] = {};
+  for (const step of steps) {
+    const hasPrompt = hasOwn(step, "agentPrompt") && step.agentPrompt !== undefined;
+    const hasScript = hasOwn(step, "script") && step.script !== undefined;
+    const hasApps = hasOwn(step, "apps") && step.apps !== undefined;
+    if (!hasPrompt && !hasScript && !hasApps) continue;
+    content[step.id] = {
+      contentType: step.type === "action" ? "script" : "prompt",
+      ...(hasPrompt ? { content: step.agentPrompt } : {}),
+      ...(hasScript ? { content: step.script } : {}),
+      ...(hasApps ? { apps: step.apps ?? null } : {}),
+    };
   }
+  return content;
+}
+
+function definitionPatchFromParams(params: ManageScheduledTasksParams, ctx: TaskContext): AutomationDefinitionPatch {
+  const patch: AutomationDefinitionPatch = {};
+  if (params.prompt !== undefined) patch.prompt = params.prompt;
+  if (params.schedule_type !== undefined) patch.scheduleType = params.schedule_type;
+  if (params.schedule_value !== undefined) patch.scheduleValue = params.schedule_value;
+  if (params.timezone !== undefined) patch.timezone = params.timezone;
+  if (params.status !== undefined) patch.status = params.status;
+  if (params.title !== undefined) patch.title = params.title;
+  if (params.description !== undefined) patch.description = params.description;
+
+  const delivery: NonNullable<AutomationDefinitionPatch["delivery"]> = {};
+  if (params.output_platform !== undefined) delivery.platform = params.output_platform;
+  if (params.output_target !== undefined) delivery.targetId = params.output_target;
+  if (params.output_thread_ts !== undefined) delivery.threadTs = params.output_thread_ts;
+  if (params.output_mode !== undefined) delivery.mode = params.output_mode;
+  if (params.delivery) {
+    const hasExplicitThreadTs = hasOwn(params.delivery, "threadTs");
+    if (params.delivery.platform !== undefined) delivery.platform = params.delivery.platform;
+    if (params.delivery.targetType !== undefined) delivery.targetType = params.delivery.targetType;
+    if (params.delivery.targetId !== undefined) delivery.targetId = params.delivery.targetId;
+    if (hasExplicitThreadTs) delivery.threadTs = params.delivery.threadTs ?? null;
+    if (params.delivery.mode !== undefined) delivery.mode = params.delivery.mode;
+    if (params.delivery.targetType === "thread" && params.delivery.targetId === undefined) {
+      delivery.targetId = ctx.deliveryTarget;
+      delivery.platform ??= ctx.platform;
+      delivery.threadTs = ctx.threadTs ?? null;
+    } else if (
+      (params.delivery.targetType !== undefined && params.delivery.targetType !== "thread") ||
+      params.delivery.targetId !== undefined
+    ) {
+      delivery.threadTs = null;
+    }
+  }
+  if (Object.keys(delivery).length > 0) patch.delivery = delivery;
+
+  if (params.steps) {
+    const triggerStep = params.steps.find((step) => step.type === "trigger");
+    const steps = params.steps.map((step) => {
+      if (step.type !== "trigger" || !step.triggerConfig) return step;
+      if (step.triggerConfig.type !== "canvas") return step;
+      return {
+        ...step,
+        triggerConfig: {
+          ...step.triggerConfig,
+          status: step.triggerConfig.status ?? "pending_canvas_setup",
+        },
+      };
+    });
+    patch.steps = stripContentFromSteps(steps);
+    patch.stepContent = stepContentPatchForSteps(steps);
+    if (triggerStep?.triggerConfig?.type === "canvas") {
+      patch.scheduleType = "external";
+      patch.scheduleValue = "canvas";
+    }
+    if (triggerStep?.triggerConfig?.type === "slack_channel_message") {
+      patch.scheduleType = "external";
+      patch.scheduleValue = "slack_channel_message";
+    }
+  }
+  if (params.edges !== undefined) patch.edges = params.edges;
+  return patch;
 }
 
 function isLocalScheduleType(value: unknown): value is "cron" | "interval" | "once" {
@@ -403,7 +438,7 @@ function guardedActionLabel(action: ManageScheduledTasksParams["action"]): strin
   if (action === "resume") return "resume";
   if (action === "pause") return "pause";
   if (action === "run") return "run";
-  if (action === "getRun") return "inspect";
+  if (action === "getRun" || action === "get") return "inspect";
   if (action === "share") return "share";
   return "update";
 }
@@ -470,10 +505,31 @@ function displayPlatform(value: string): string {
   return value === "whatsapp" ? "WhatsApp" : "Slack";
 }
 
-function buildBuilderUrl(taskId: string, config: ManageScheduledTasksDeps["config"]): string {
+function buildBuilderUrl(taskId: string, config: ManageScheduledTasksDeps["config"], conversationId?: string): string {
   const path = `/scheduled-tasks/${encodeURIComponent(taskId)}/edit`;
   const base = config?.BASE_URL?.replace(/\/$/, "") ?? `http://localhost:${config?.PORT ?? 3000}`;
-  return `${base}${path}`;
+  const conversationQuery = conversationId?.trim()
+    ? `?conversationId=${encodeURIComponent(conversationId.trim())}`
+    : "";
+  return `${base}${path}${conversationQuery}`;
+}
+
+/**
+ * Uses the scheduler refresh result when available and keeps the row-read fallback only for older scheduler implementations without that method.
+ */
+async function refreshTaskAfterMutation(
+  scheduler: TaskScheduler,
+  taskId: string,
+): Promise<{ task: ScheduledTask | null; failed: boolean }> {
+  if (typeof scheduler.refreshTaskSchedule !== "function") {
+    return { task: await scheduler.getTaskById(taskId), failed: false };
+  }
+
+  try {
+    return { task: await scheduler.refreshTaskSchedule(taskId), failed: false };
+  } catch {
+    return { task: null, failed: true };
+  }
 }
 
 function buildArtifactTags(params: {
@@ -517,7 +573,9 @@ function collectAutomationArtifact(params: {
   scheduleValue: string;
   timezone: string;
 }): string {
-  const builderUrl = buildBuilderUrl(params.task.id, params.deps.config);
+  const sourceConversationId =
+    params.deps.taskContext.origin?.platform === "web" ? params.deps.taskContext.origin.conversationId : undefined;
+  const builderUrl = buildBuilderUrl(params.task.id, params.deps.config, sourceConversationId);
   const delivery = params.task.delivery;
   const deliveryLabel =
     delivery.mode === "silent"
@@ -556,6 +614,9 @@ const LEGACY_AUTHORING_FIELDS = [
   "output_platform",
   "output_thread_ts",
   "output_mode",
+  "status",
+  "expected_revision",
+  "expectedRevision",
   "delivery",
   "step_id",
   "step_content",
@@ -592,7 +653,10 @@ async function handleConfiguredChatAuthoring(
   if (!request) {
     return text(`Error: request is required for ${params.action} action.`);
   }
-  if (params.action === "update" && !params.task_id) {
+  const currentAutomation = deps.currentAutomation ?? deps.taskContext.currentAutomation;
+  const explicitTaskId = params.task_id?.trim() || undefined;
+  const targetTaskId = explicitTaskId ?? (params.action === "update" ? currentAutomation?.taskId : undefined);
+  if (params.action === "update" && !targetTaskId) {
     return text("Error: task_id is required for update action.");
   }
 
@@ -601,8 +665,9 @@ async function handleConfiguredChatAuthoring(
     result = await chatAuthoring.author({
       action: params.action === "add" ? "create" : "edit",
       request,
-      ...(params.task_id ? { taskId: params.task_id } : {}),
+      ...(targetTaskId ? { taskId: targetTaskId } : {}),
       taskContext: deps.taskContext,
+      ...(targetTaskId && currentAutomation?.taskId === targetTaskId ? { currentAutomation } : {}),
     });
   } catch (error) {
     if (error instanceof AutomationAuthoringValidationError) {
@@ -632,8 +697,13 @@ export async function handleManageScheduledTasks(
   params: ManageScheduledTasksParams,
   deps: ManageScheduledTasksDeps,
 ): Promise<{ content: { type: "text"; text: string }[] }> {
-  const { action, task_id } = params;
+  const { action } = params;
   const ctx = deps.taskContext;
+  const currentAutomation = deps.currentAutomation ?? ctx.currentAutomation;
+  const taskConversationAssociation = webChatTaskConversationAssociation(ctx);
+  const explicitTaskId = params.task_id?.trim() || undefined;
+  const task_id =
+    explicitTaskId ?? (action === "update" || action === "updateStepContent" ? currentAutomation?.taskId : undefined);
 
   const text = (msg: string) => ({ content: [{ type: "text" as const, text: msg }] });
 
@@ -646,6 +716,14 @@ export async function handleManageScheduledTasks(
     return handleConfiguredChatAuthoring(params, deps);
   }
 
+  let brokerCapabilitySnapshot: boolean | undefined;
+  const getBrokerCapabilitySnapshot = async (): Promise<boolean> => {
+    if (brokerCapabilitySnapshot !== undefined) return brokerCapabilitySnapshot;
+    const provider = deps.loadIntegrationProvider ? await deps.loadIntegrationProvider() : null;
+    brokerCapabilitySnapshot = Boolean(provider?.isBrokerCapable());
+    return brokerCapabilitySnapshot;
+  };
+
   /** Returns an error response if any action step is present but no broker-capable
    *  provider is configured. Returns null when validation passes (no action steps,
    *  or a broker-capable provider exists). */
@@ -653,14 +731,13 @@ export async function handleManageScheduledTasks(
     candidateSteps: WorkflowStepInput[] | undefined,
   ): Promise<ReturnType<typeof text> | null> => {
     if (!candidateSteps?.some((s) => s.type === "action")) return null;
-    if (!deps.loadIntegrationProvider) return text(BROKER_REQUIRED_MSG);
-    const provider = await deps.loadIntegrationProvider();
-    if (!provider || !provider.isBrokerCapable()) return text(BROKER_REQUIRED_MSG);
+    if (!(await getBrokerCapabilitySnapshot())) return text(BROKER_REQUIRED_MSG);
     return null;
   };
 
   const OWNERSHIP_GUARDED_ACTIONS = [
     "update",
+    "get",
     "remove",
     "pause",
     "resume",
@@ -835,6 +912,7 @@ export async function handleManageScheduledTasks(
       // Strip content from steps (stored separately in automation_step_content)
       const steps = params.steps as NonNullable<typeof params.steps>;
       const title = params.title as string;
+      const prompt = params.prompt ?? title;
       const scheduleType = params.schedule_type as NonNullable<typeof params.schedule_type>;
       const scheduleValue = params.schedule_value as string;
       let stepsForDb = stripContentFromSteps(steps);
@@ -850,80 +928,68 @@ export async function handleManageScheduledTasks(
       const outputTarget = deliveryFields.outputTarget ?? ctx.deliveryTarget;
       const outputThreadTs = deliveryFields.outputThreadTs ?? null;
       const outputMode = deliveryFields.outputMode ?? "deliver";
-      const builderError = validateBuilderLikeDefinition({
-        title,
-        description: params.description ?? null,
-        prompt: title,
-        scheduleType,
-        scheduleValue,
-        timezone: resolvedTimezone,
-        status: "active",
-        steps: stepsForDb,
-        edges: edgesForDb,
-        outputPlatform,
-        outputTarget,
-        outputThreadTs,
-        outputMode,
-        stepContent: stepContentForValidation({ taskId: "new-task", steps }),
-      });
-      if (builderError) return text(builderError);
-
-      // Guard against silently dropping step content if the repo wasn't plumbed
-      // through. Runs after input validation so user-input errors surface first.
-      // Without this guard, prompts/scripts vanish at creation time and the
-      // workflow fails at first run with 'has no prompt'.
-      if (!deps.stepContentRepo && steps.some((s) => s.agentPrompt || s.script)) {
-        return text(
-          "Error: step content storage is not available in this context. Multi-step automations with prompts or scripts cannot be created.",
-        );
+      if (!deps.db) {
+        return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
       }
 
-      const task = await deps.scheduler.addTask({
-        platform: ctx.platform,
-        contextType: ctx.contextType,
-        deliveryTarget: ctx.deliveryTarget,
-        threadTs: ctx.threadTs ?? null,
-        prompt: title,
-        scheduleType,
-        scheduleValue,
-        timezone: resolvedTimezone,
-        sessionMode,
-        createdBy: ctx.createdBy,
-        title: params.title,
-        description: params.description,
-        steps: JSON.stringify(stepsForDb),
-        edges: JSON.stringify(edgesForDb),
-        outputTarget: deliveryFields.outputTarget,
-        outputPlatform: deliveryFields.outputPlatform,
-        outputThreadTs: deliveryFields.outputThreadTs,
-        outputMode: deliveryFields.outputMode,
-        originPlatform: ctx.origin?.platform ?? null,
-        originConversationId: ctx.origin?.conversationId ?? null,
-        originProviderThreadId: ctx.origin?.providerThreadId ?? null,
-        originMessageId: ctx.origin?.currentMessageId ?? null,
-      });
-
-      // Store step content
-      if (deps.stepContentRepo) {
-        for (const step of steps) {
-          if (step.agentPrompt) {
-            await deps.stepContentRepo.upsert({
-              taskId: task.id,
-              stepId: step.id,
-              contentType: "prompt",
-              content: step.agentPrompt,
-              apps: step.apps,
-            });
-          } else if (step.script) {
-            await deps.stepContentRepo.upsert({
-              taskId: task.id,
-              stepId: step.id,
-              contentType: "script",
-              content: step.script,
-              apps: step.apps,
-            });
-          }
+      let saved: Awaited<ReturnType<typeof createAutomationDefinition>>;
+      try {
+        saved = await createAutomationDefinition({
+          db: deps.db,
+          request: {
+            title,
+            description: params.description ?? null,
+            prompt,
+            scheduleType: scheduleType as "cron" | "interval" | "once" | "external",
+            scheduleValue,
+            timezone: resolvedTimezone,
+            status: "active",
+            delivery: {
+              platform: outputPlatform,
+              targetType:
+                params.delivery?.targetType ??
+                (deliveryFields.outputThreadTs
+                  ? "thread"
+                  : ctx.contextType === "channel"
+                    ? "channel"
+                    : ctx.contextType),
+              targetId: outputTarget,
+              threadTs: outputThreadTs,
+              mode: outputMode,
+            },
+            steps: stepsForDb,
+            edges: edgesForDb,
+            stepContent: stepContentForDefinition("new-task", steps),
+          },
+          context: {
+            platform: ctx.platform,
+            contextType: ctx.contextType,
+            deliveryTarget: ctx.deliveryTarget,
+            threadTs: ctx.threadTs ?? null,
+            createdBy: ctx.createdBy,
+            originPlatform: ctx.origin?.platform ?? null,
+            originConversationId: ctx.origin?.conversationId ?? null,
+            originProviderThreadId: ctx.origin?.providerThreadId ?? null,
+            originMessageId: ctx.origin?.currentMessageId ?? null,
+          },
+          brokerCapable: await getBrokerCapabilitySnapshot(),
+          ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
+        });
+      } catch (error) {
+        if (error instanceof AutomationValidationError) {
+          return text(
+            `Error: automation definition is invalid:\n${error.issues.map((issue) => `- ${issue.code}: ${issue.message}`).join("\n")}`,
+          );
         }
+        throw error;
+      }
+
+      const { task: refreshedTask, failed: refreshFailed } = await refreshTaskAfterMutation(
+        deps.scheduler,
+        saved.row.id,
+      );
+      if (refreshFailed || !refreshedTask) {
+        return text("Error: automation was saved, but its scheduler state could not be refreshed.");
       }
 
       // Build webhook URL for webhook triggers
@@ -931,19 +997,19 @@ export async function handleManageScheduledTasks(
       let webhookUrl: string | undefined;
       if (triggerStep && deps.config) {
         const baseUrl = deps.config.BASE_URL ?? `http://localhost:${deps.config.PORT}`;
-        webhookUrl = `${baseUrl}/api/webhooks/wf/${task.id}`;
+        webhookUrl = `${baseUrl}/api/webhooks/wf/${refreshedTask.id}`;
       }
 
       collectAutomationArtifact({
         deps,
-        task,
+        task: refreshedTask,
         steps,
         scheduleType,
         scheduleValue,
         timezone: resolvedTimezone,
       });
 
-      const response: Record<string, unknown> = { ...task };
+      const response: Record<string, unknown> = { ...refreshedTask };
       if (webhookUrl) response.webhookUrl = webhookUrl;
       return text(`Automation created:\n${JSON.stringify(response, null, 2)}`);
     }
@@ -953,136 +1019,8 @@ export async function handleManageScheduledTasks(
         return text("Error: task_id is required for update action.");
       }
 
-      // Build update fields for the scheduler
-      const updateFields: Record<string, string | null | undefined> = {};
-      if (params.prompt !== undefined) updateFields.prompt = params.prompt;
-      if (params.schedule_type !== undefined) updateFields.scheduleType = params.schedule_type;
-      if (params.schedule_value !== undefined) updateFields.scheduleValue = params.schedule_value;
-      if (params.timezone !== undefined) updateFields.timezone = params.timezone;
-      if (params.session_mode !== undefined) updateFields.sessionMode = params.session_mode;
-      if (params.title !== undefined) updateFields.title = params.title;
-      if (params.description !== undefined) updateFields.description = params.description;
-      if (params.output_target !== undefined) updateFields.outputTarget = params.output_target;
-      if (params.output_platform !== undefined) updateFields.outputPlatform = params.output_platform;
-      if (params.output_thread_ts !== undefined) updateFields.outputThreadTs = params.output_thread_ts;
-      if (params.output_mode !== undefined) updateFields.outputMode = params.output_mode;
-      if (params.delivery) {
-        const deliveryFields = buildDeliveryFields(params, ctx);
-        if (deliveryFields.outputTarget !== undefined) updateFields.outputTarget = deliveryFields.outputTarget;
-        if (deliveryFields.outputPlatform !== undefined) updateFields.outputPlatform = deliveryFields.outputPlatform;
-        if (deliveryFields.outputThreadTs !== undefined) updateFields.outputThreadTs = deliveryFields.outputThreadTs;
-        if (deliveryFields.outputMode !== undefined) updateFields.outputMode = deliveryFields.outputMode;
-      }
-
-      // Handle steps update
-      if (params.steps) {
-        const brokerError = await ensureBrokerForActionSteps(params.steps);
-        if (brokerError) return brokerError;
-
-        if (!deps.stepContentRepo && params.steps.some((s) => s.type !== "trigger")) {
-          return text(
-            "Error: step content storage is not available in this context. Multi-step automations cannot be updated safely.",
-          );
-        }
-        const existingContent = deps.stepContentRepo ? await deps.stepContentRepo.getByTask(task_id) : [];
-
-        const triggerStep = params.steps.find((step) => step.type === "trigger");
-        if (triggerStep?.triggerConfig?.type === "canvas") {
-          updateFields.scheduleType = "external";
-          updateFields.scheduleValue = "canvas";
-          triggerStep.triggerConfig = {
-            ...triggerStep.triggerConfig,
-            status: triggerStep.triggerConfig.status ?? "pending_canvas_setup",
-          };
-        }
-        if (triggerStep?.triggerConfig?.type === "slack_channel_message") {
-          updateFields.scheduleType = "external";
-          updateFields.scheduleValue = "slack_channel_message";
-        }
-        let stepsForDb = stripContentFromSteps(params.steps);
-        if (triggerStep?.triggerConfig?.type !== "canvas") {
-          const scheduleType = updateFields.scheduleType ?? guardedTask?.scheduleType;
-          const scheduleValue = updateFields.scheduleValue ?? guardedTask?.scheduleValue;
-          const timezone = updateFields.timezone ?? guardedTask?.timezone;
-          if (isLocalScheduleType(scheduleType) && scheduleValue && timezone) {
-            stepsForDb = normalizeScheduleTriggerSteps(stepsForDb, { scheduleType, scheduleValue, timezone });
-          }
-        }
-        const currentEdges = parseWorkflowEdgesJson(guardedTask?.edges);
-        const edgesForDb = params.edges ?? currentEdges ?? defaultEdgesForSteps(stepsForDb);
-        const scheduleType = (updateFields.scheduleType ?? guardedTask?.scheduleType) as
-          | "cron"
-          | "interval"
-          | "once"
-          | "external";
-        const scheduleValue = updateFields.scheduleValue ?? guardedTask?.scheduleValue;
-        const timezone = updateFields.timezone ?? guardedTask?.timezone;
-        const outputPlatform = (updateFields.outputPlatform ?? guardedTask?.outputPlatform ?? ctx.platform) as
-          | "slack"
-          | "whatsapp";
-        const outputTarget = updateFields.outputTarget ?? guardedTask?.outputTarget ?? guardedTask?.deliveryTarget;
-        const outputThreadTs =
-          updateFields.outputThreadTs !== undefined
-            ? (updateFields.outputThreadTs ?? null)
-            : (guardedTask?.outputThreadTs ?? null);
-        const outputMode = (updateFields.outputMode ?? guardedTask?.outputMode ?? "deliver") as "deliver" | "silent";
-        if (!scheduleType || !scheduleValue || !timezone || !outputTarget) {
-          return text("Error: task metadata is not available for workflow validation.");
-        }
-        const builderError = validateBuilderLikeDefinition({
-          title: (updateFields.title ?? guardedTask?.title ?? null) as string | null,
-          description: (updateFields.description ?? guardedTask?.description ?? null) as string | null,
-          prompt: (updateFields.prompt ?? guardedTask?.prompt ?? params.title ?? task_id) as string,
-          scheduleType,
-          scheduleValue,
-          timezone,
-          status: guardedTask?.status ?? "active",
-          steps: stepsForDb,
-          edges: edgesForDb,
-          outputPlatform,
-          outputTarget,
-          outputThreadTs,
-          outputMode,
-          stepContent: stepContentForValidation({ taskId: task_id, steps: params.steps, existingContent }),
-        });
-        if (builderError) return text(builderError);
-        updateFields.steps = JSON.stringify(stepsForDb);
-        if (params.edges !== undefined || !guardedTask?.edges) updateFields.edges = JSON.stringify(edgesForDb);
-
-        // Sync step content
-        if (deps.stepContentRepo) {
-          const keepStepIds = params.steps.map((s) => s.id);
-          await deps.stepContentRepo.deleteOrphanedSteps(task_id, keepStepIds);
-
-          for (const step of params.steps) {
-            if (step.agentPrompt !== undefined) {
-              await deps.stepContentRepo.upsert({
-                taskId: task_id,
-                stepId: step.id,
-                contentType: "prompt",
-                content: step.agentPrompt,
-                apps: step.apps,
-              });
-            } else if (step.script !== undefined) {
-              await deps.stepContentRepo.upsert({
-                taskId: task_id,
-                stepId: step.id,
-                contentType: "script",
-                content: step.script,
-                apps: step.apps,
-              });
-            }
-          }
-        }
-      }
-
-      if (params.edges !== undefined && !params.steps) {
-        const currentSteps = parseWorkflowStepsJson(guardedTask?.steps);
-        if (!currentSteps) return text("Error: task workflow steps are not available for edge validation.");
-        const graphError = formatGraphValidationError(currentSteps, params.edges);
-        if (graphError) return text(graphError);
-        updateFields.edges = JSON.stringify(params.edges);
-      }
+      const brokerError = await ensureBrokerForActionSteps(params.steps);
+      if (brokerError) return brokerError;
 
       const scheduleChanged =
         params.schedule_type !== undefined || params.schedule_value !== undefined || params.timezone !== undefined;
@@ -1092,23 +1030,49 @@ export async function handleManageScheduledTasks(
       if (!params.steps && scheduleChanged && existingTrigger?.type === "slack_channel_message") {
         return text("Error: update the Slack channel message trigger steps to change its trigger metadata.");
       }
-      if (!params.steps && scheduleChanged && guardedTask?.steps) {
-        const scheduleType = updateFields.scheduleType ?? guardedTask.scheduleType;
-        const scheduleValue = updateFields.scheduleValue ?? guardedTask.scheduleValue;
-        const timezone = updateFields.timezone ?? guardedTask.timezone;
-        if (isLocalScheduleType(scheduleType) && scheduleValue && timezone) {
-          updateFields.steps = normalizeScheduleTriggerStepsJson(guardedTask.steps, {
-            scheduleType,
-            scheduleValue,
-            timezone,
-          });
-        }
+      if (!deps.db) {
+        return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
       }
 
-      const updated = await deps.scheduler.updateTask(task_id, updateFields);
-      if (!updated) {
-        return text(`Error: task ${task_id} not found.`);
+      const expectedRevision =
+        params.expected_revision ??
+        params.expectedRevision ??
+        (currentAutomation?.taskId === task_id ? currentAutomation.revision : undefined);
+      const patch = definitionPatchFromParams(params, ctx);
+      if (expectedRevision !== undefined) patch.expectedRevision = expectedRevision;
+
+      let saved: Awaited<ReturnType<typeof updateAutomationDefinition>>;
+      try {
+        saved = await updateAutomationDefinition({
+          db: deps.db,
+          taskId: task_id,
+          patch,
+          actor: {
+            userId: ctx.createdBy,
+            canManageAnyTask: ctx.canManageAnyTask ?? false,
+          },
+          brokerCapable: await getBrokerCapabilitySnapshot(),
+          ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
+        });
+      } catch (error) {
+        if (error instanceof AutomationValidationError) {
+          return text(
+            `Error: automation definition is invalid:\n${error.issues.map((issue) => `- ${issue.code}: ${issue.message}`).join("\n")}`,
+          );
+        }
+        throw error;
       }
+      if (saved.kind === "not_found") return text(`Error: task ${task_id} not found.`);
+      if (saved.kind === "access_denied") return text(`Error: you do not have permission to update task ${task_id}.`);
+      if (saved.kind === "revision_conflict") {
+        return text(
+          `Error: automation revision conflict. Task ${task_id} is now at revision ${saved.currentRevision}; refresh before retrying.`,
+        );
+      }
+
+      const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
+      if (refreshFailed || !updated)
+        return text("Error: automation was saved, but its scheduler state could not be refreshed.");
       return text(`Automation updated:\n${JSON.stringify(updated, null, 2)}`);
     }
 
@@ -1122,17 +1086,39 @@ export async function handleManageScheduledTasks(
       return text(`- Open your automation - ${buildBuilderUrl(guardedTask.id, deps.config)}`);
     }
 
+    case "get": {
+      if (!task_id) return text("Error: task_id is required for get action.");
+      if (!deps.db) {
+        return text("Error: canonical automation persistence is not available in this context.");
+      }
+      const definition = await getAutomationDefinition({ db: deps.db, taskId: task_id });
+      if (!definition) return text(`Error: task ${task_id} not found.`);
+      return text(JSON.stringify(definition, null, 2));
+    }
+
     case "remove": {
       if (!task_id) {
         return text("Error: task_id is required for remove action.");
       }
-      // Cascade delete step content and runs
-      if (deps.stepContentRepo) await deps.stepContentRepo.deleteByTaskId(task_id);
-      if (deps.automationRunsRepo) await deps.automationRunsRepo.deleteByTaskId(task_id);
-
-      const removed = await deps.scheduler.removeTask(task_id);
-      if (!removed) {
-        return text(`Error: task ${task_id} not found.`);
+      if (!deps.db) {
+        return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
+      }
+      const deletion = await deleteAutomation({
+        db: deps.db,
+        taskId: task_id,
+        actor: {
+          userId: ctx.createdBy,
+          canManageAnyTask: ctx.canManageAnyTask ?? false,
+        },
+        scheduler: { removeTaskRuntime: (id) => deps.scheduler.removeTaskRuntime(id) },
+      });
+      if (deletion.kind === "not_found") return text(`Error: task ${task_id} not found.`);
+      if (deletion.kind === "access_denied")
+        return text(`Error: you do not have permission to delete task ${task_id}.`);
+      if (deletion.kind === "scheduler_failure") {
+        return text(
+          `Error: automation ${task_id} was deleted, but scheduler cleanup failed. Runtime state is inconsistent.`,
+        );
       }
       return text(`Automation ${task_id} removed.`);
     }
@@ -1207,25 +1193,62 @@ export async function handleManageScheduledTasks(
       if (!params.step_id || !params.step_content) {
         return text("Error: step_id and step_content are required for updateStepContent action.");
       }
-      if (!deps.stepContentRepo) {
-        return text("Error: step content updates are not available in this context.");
+      if (!deps.db) {
+        return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
       }
 
-      const existing = await deps.stepContentRepo.getByStep(task_id, params.step_id);
-      if (!existing) {
+      const currentDefinition = await getAutomationDefinition({ db: deps.db, taskId: task_id });
+      const step = currentDefinition?.steps.find((candidate) => candidate.id === params.step_id);
+      const existing = currentDefinition?.stepContent[params.step_id];
+      if (!currentDefinition || !step || step.type === "trigger" || !existing) {
         return text(`Error: step ${params.step_id} not found for task ${task_id}.`);
       }
 
-      await deps.stepContentRepo.upsert({
-        taskId: task_id,
-        stepId: params.step_id,
-        contentType: existing.content_type as "prompt" | "script",
-        content: params.step_content,
-        apps: params.step_apps ?? (existing.apps ? JSON.parse(existing.apps) : null),
-      });
-      await deps.scheduler.touchTaskRevision(task_id);
-
-      return text(`Step ${params.step_id} content updated.`);
+      const expectedRevision =
+        params.expected_revision ??
+        params.expectedRevision ??
+        (currentAutomation?.taskId === task_id ? currentAutomation.revision : undefined);
+      let saved: Awaited<ReturnType<typeof updateAutomationDefinition>>;
+      try {
+        saved = await updateAutomationDefinition({
+          db: deps.db,
+          taskId: task_id,
+          patch: {
+            expectedRevision,
+            stepContent: {
+              [params.step_id]: {
+                contentType: existing.contentType,
+                content: params.step_content,
+                ...(params.step_apps === undefined ? {} : { apps: params.step_apps }),
+              },
+            },
+          },
+          actor: {
+            userId: ctx.createdBy,
+            canManageAnyTask: ctx.canManageAnyTask ?? false,
+          },
+          brokerCapable: await getBrokerCapabilitySnapshot(),
+          ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
+        });
+      } catch (error) {
+        if (error instanceof AutomationValidationError) {
+          return text(
+            `Error: automation definition is invalid:\n${error.issues.map((issue) => `- ${issue.code}: ${issue.message}`).join("\n")}`,
+          );
+        }
+        throw error;
+      }
+      if (saved.kind === "not_found") return text(`Error: task ${task_id} not found.`);
+      if (saved.kind === "access_denied") return text(`Error: you do not have permission to update task ${task_id}.`);
+      if (saved.kind === "revision_conflict") {
+        return text(
+          `Error: automation revision conflict. Task ${task_id} is now at revision ${saved.currentRevision}; refresh before retrying.`,
+        );
+      }
+      const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
+      if (refreshFailed || !updated)
+        return text("Error: automation was saved, but its scheduler state could not be refreshed.");
+      return text(`Step ${params.step_id} content updated at revision ${saved.row.revision}.`);
     }
   }
 }
@@ -1251,6 +1274,8 @@ export function createManageScheduledTasksTool(deps: Partial<ManageScheduledTask
         config: deps.config,
         automationArtifactCollector: deps.automationArtifactCollector,
         chatAuthoring: deps.chatAuthoring,
+        currentAutomation: deps.currentAutomation ?? deps.taskContext?.currentAutomation,
+        db: deps.db,
       });
     },
   );

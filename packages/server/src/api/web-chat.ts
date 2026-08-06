@@ -19,6 +19,10 @@ import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } f
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
+import {
+  createAutomationTaskConversationService,
+  touchActiveAutomationTaskConversationAssociations,
+} from "../automation/task-conversations";
 import { TOOL_PROGRESS_OPTIONS, type ToolProgressCommand } from "../commands";
 import type { Config } from "../config";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -44,8 +48,9 @@ import {
   resolveWebChatProgressRendererMode,
 } from "../progress-settings";
 import type { QueueManager } from "../queue";
+import { resolveScheduledTaskAccess } from "../scheduler/access";
 import type { TaskScheduler } from "../scheduler/service";
-import type { ScheduledTask } from "../scheduler/types";
+import type { CurrentAutomation, ScheduledTask } from "../scheduler/types";
 import type { SlackBot } from "../slack/bot";
 import { transcribeAudioFile } from "../transcription/service";
 import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
@@ -177,7 +182,11 @@ interface ParsedWebChatAttachment {
   file: WebChatFile;
 }
 
-type AutomationBuilderContext = { task: ScheduledTask; stepContentRows: StepContentRow[] } | null;
+type AutomationBuilderContext = {
+  task: ScheduledTask;
+  stepContentRows: StepContentRow[];
+  currentAutomation: CurrentAutomation;
+} | null;
 
 type WebChatUiChunk =
   | { type: "start"; messageMetadata?: { createdAt: string } }
@@ -276,6 +285,7 @@ async function resolveAutomationBuilderContext(params: {
   currentUserId: string;
   role: string | undefined;
   automationTaskId: string | null;
+  builderConversationId: string;
   logger: Logger;
 }): Promise<AutomationBuilderContext> {
   if (!params.automationTaskId || !params.deps.scheduler?.getTaskById) {
@@ -286,17 +296,97 @@ async function resolveAutomationBuilderContext(params: {
     params.logger.warn({ err, taskId: params.automationTaskId }, "Failed to resolve automation builder context");
     return null;
   });
-  if (!task || (params.role !== "admin" && task.createdBy !== params.currentUserId)) {
+  const accessibleTask = resolveScheduledTaskAccess(task, task?.createdBy, {
+    userId: params.currentUserId,
+    role: params.role,
+  });
+  if (!accessibleTask) {
     return null;
   }
 
   const stepContentRows = params.deps.stepContentRepo
-    ? await params.deps.stepContentRepo.getByTask(task.id).catch((err) => {
-        params.logger.warn({ err, taskId: task.id }, "Failed to load automation builder step content");
+    ? await params.deps.stepContentRepo.getByTask(accessibleTask.id).catch((err) => {
+        params.logger.warn({ err, taskId: accessibleTask.id }, "Failed to load automation builder step content");
         return [] as StepContentRow[];
       })
     : [];
-  return { task, stepContentRows };
+  return {
+    task: accessibleTask,
+    stepContentRows,
+    currentAutomation: buildCurrentAutomation({
+      task: accessibleTask,
+      stepContentRows,
+      builderConversationId: params.builderConversationId,
+    }),
+  };
+}
+
+type AutomationBuilderConversationAccess =
+  | { kind: "active" }
+  | { kind: "not_found" }
+  | { kind: "archived" }
+  | { kind: "error" };
+
+async function resolveAutomationBuilderConversationAccess(params: {
+  deps: WebChatRouteDeps;
+  taskId: string;
+  conversationId: string;
+  transcriptUserId: string;
+  logger: Logger;
+}): Promise<AutomationBuilderConversationAccess> {
+  try {
+    return await params.deps.db.transaction().execute(async (trx) => {
+      const conversationService = createAutomationTaskConversationService(trx);
+      const existing = await conversationService.getForTranscriptUser(
+        params.taskId,
+        params.conversationId,
+        params.transcriptUserId,
+        { includeArchived: true },
+      );
+      if (!existing) return { kind: "not_found" as const };
+
+      const active = await conversationService.getForTranscriptUser(
+        params.taskId,
+        params.conversationId,
+        params.transcriptUserId,
+      );
+      if (!active) return { kind: "archived" as const };
+
+      const touchedRows = await touchActiveAutomationTaskConversationAssociations(trx, {
+        taskId: params.taskId,
+        conversationId: params.conversationId,
+        transcriptUserId: params.transcriptUserId,
+      });
+      if (touchedRows === 0) {
+        const latest = await conversationService.getForTranscriptUser(
+          params.taskId,
+          params.conversationId,
+          params.transcriptUserId,
+          { includeArchived: true },
+        );
+        if (!latest) return { kind: "not_found" as const };
+        const latestActive = await conversationService.getForTranscriptUser(
+          params.taskId,
+          params.conversationId,
+          params.transcriptUserId,
+        );
+        if (!latestActive) return { kind: "archived" as const };
+        return { kind: "error" as const };
+      }
+      return { kind: "active" as const };
+    });
+  } catch (err) {
+    params.logger.warn(
+      {
+        errorType: err instanceof Error ? err.name : "unknown",
+        taskId: params.taskId,
+        conversationId: params.conversationId,
+        transcriptUserId: params.transcriptUserId,
+      },
+      "Failed to resolve automation builder conversation access",
+    );
+    return { kind: "error" };
+  }
 }
 
 function parseBuilderSteps(value: string | null): WorkflowStep[] {
@@ -328,6 +418,114 @@ function parseBuilderApps(value: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+const MAX_CURRENT_AUTOMATION_STEPS = 12;
+const MAX_CURRENT_AUTOMATION_EDGES = 24;
+const MAX_CURRENT_AUTOMATION_CONTENT = 800;
+const MAX_CURRENT_AUTOMATION_LIST_ITEMS = 12;
+
+function boundedOptionalBuilderText(value: string | undefined, maxLength: number): string | undefined {
+  return value === undefined ? undefined : builderContextText(value, maxLength);
+}
+
+function boundedBuilderStep(step: WorkflowStep): WorkflowStep {
+  const triggerConfig = step.triggerConfig
+    ? (() => {
+        const { configuredProps: _configuredProps, ...rest } = step.triggerConfig;
+        return {
+          ...rest,
+          channelId: boundedOptionalBuilderText(rest.channelId, 160),
+          scheduleValue: boundedOptionalBuilderText(rest.scheduleValue, 160),
+          timezone: boundedOptionalBuilderText(rest.timezone, 120),
+          app: boundedOptionalBuilderText(rest.app, 120),
+          eventDescription: boundedOptionalBuilderText(rest.eventDescription, 240),
+          componentKey: boundedOptionalBuilderText(rest.componentKey, 160),
+          canvasWorkflowId: boundedOptionalBuilderText(rest.canvasWorkflowId, 160),
+          canvasTriggerNodeId: boundedOptionalBuilderText(rest.canvasTriggerNodeId, 160),
+          canvasActionNodeId: boundedOptionalBuilderText(rest.canvasActionNodeId, 160),
+          errorMessage: boundedOptionalBuilderText(rest.errorMessage, 400),
+        };
+      })()
+    : undefined;
+  return {
+    ...step,
+    label: builderContextText(step.label, 160),
+    icon: builderContextText(step.icon, 80),
+    ...(step.agentModel ? { agentModel: builderContextText(step.agentModel, 160) } : {}),
+    ...(step.agentSkills
+      ? {
+          agentSkills: step.agentSkills
+            .slice(0, MAX_CURRENT_AUTOMATION_LIST_ITEMS)
+            .map((item) => builderContextText(item, 120)),
+        }
+      : {}),
+    ...(step.agentMcpServers
+      ? {
+          agentMcpServers: step.agentMcpServers
+            .slice(0, MAX_CURRENT_AUTOMATION_LIST_ITEMS)
+            .map((item) => builderContextText(item, 120)),
+        }
+      : {}),
+    ...(triggerConfig ? { triggerConfig } : {}),
+  };
+}
+
+function boundedBuilderEdge(edge: WorkflowEdge): WorkflowEdge {
+  return {
+    ...edge,
+    ...(edge.condition ? { condition: builderContextText(edge.condition, 240) } : {}),
+    ...(edge.label ? { label: builderContextText(edge.label, 160) } : {}),
+  };
+}
+
+function buildCurrentAutomation(params: {
+  task: ScheduledTask;
+  stepContentRows: StepContentRow[];
+  builderConversationId: string;
+}): CurrentAutomation {
+  const steps = parseBuilderSteps(params.task.steps).slice(0, MAX_CURRENT_AUTOMATION_STEPS).map(boundedBuilderStep);
+  const stepIds = new Set(steps.map((step) => step.id));
+  const edges = parseBuilderEdges(params.task.edges)
+    .filter((edge) => stepIds.has(edge.from) && stepIds.has(edge.to))
+    .slice(0, MAX_CURRENT_AUTOMATION_EDGES)
+    .map(boundedBuilderEdge);
+  const stepContent = Object.fromEntries(
+    params.stepContentRows
+      .filter((row) => stepIds.has(row.step_id))
+      .slice(0, MAX_CURRENT_AUTOMATION_STEPS)
+      .map((row) => [
+        row.step_id,
+        {
+          contentType: row.content_type === "script" ? ("script" as const) : ("prompt" as const),
+          content: builderContextText(row.content, MAX_CURRENT_AUTOMATION_CONTENT),
+          apps: parseBuilderApps(row.apps).slice(0, MAX_CURRENT_AUTOMATION_STEPS),
+        },
+      ]),
+  );
+
+  return {
+    taskId: params.task.id,
+    revision: params.task.revision,
+    builderConversationId: params.builderConversationId,
+    builderState: {
+      title: builderContextText(params.task.title, 240) || null,
+      description: builderContextText(params.task.description, 500) || null,
+      prompt: builderContextText(params.task.prompt, MAX_CURRENT_AUTOMATION_CONTENT),
+      scheduleType: params.task.scheduleType,
+      scheduleValue: builderContextText(params.task.scheduleValue, 160),
+      timezone: builderContextText(params.task.timezone, 120),
+      status: params.task.status,
+      delivery: {
+        ...params.task.delivery,
+        targetId: builderContextText(params.task.delivery.targetId, 160),
+        threadTs: params.task.delivery.threadTs ? builderContextText(params.task.delivery.threadTs, 80) : null,
+      },
+      steps,
+      edges,
+      stepContent,
+    },
+  };
 }
 
 function builderContextText(value: string | null | undefined, maxLength = 500): string {
@@ -1208,9 +1406,11 @@ function automationBuilderTaskContext(params: {
     contextType: task.contextType,
     deliveryTarget: task.deliveryTarget,
     createdBy: params.currentUser.id,
+    conversationKind: "builder" as const,
     creatorTimezone: params.currentUser.timezone,
     threadTs: task.threadTs ?? undefined,
     canManageAnyTask: params.role === "admin",
+    currentAutomation: params.context.currentAutomation,
     origin: {
       platform: "web" as const,
       conversationId: params.conversationId,
@@ -1520,15 +1720,41 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       id: `attachment-${index}`,
       data: item.file,
     }));
-    await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
-    const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
     const automationBuilderContext = await resolveAutomationBuilderContext({
       deps,
       currentUserId: currentUser.id,
       role: c.get("role"),
       automationTaskId,
+      builderConversationId: conversationId,
       logger: deps.logger,
     });
+    if (automationTaskId && !automationBuilderContext) {
+      return c.json(badRequest("AUTOMATION_NOT_FOUND", "Automation not found"), 404);
+    }
+
+    if (automationBuilderContext) {
+      const conversationAccess = await resolveAutomationBuilderConversationAccess({
+        deps,
+        taskId: automationBuilderContext.task.id,
+        conversationId,
+        transcriptUserId: currentUser.id,
+        logger: deps.logger,
+      });
+      if (conversationAccess.kind === "not_found") {
+        return c.json(badRequest("CONVERSATION_NOT_FOUND", "Conversation is not associated with this task"), 404);
+      }
+      if (conversationAccess.kind === "archived") {
+        return c.json(
+          badRequest("CONVERSATION_ARCHIVED", "Conversation is archived; restore it before selecting"),
+          409,
+        );
+      }
+      if (conversationAccess.kind === "error") {
+        return c.json(badRequest("CONVERSATION_UNAVAILABLE", "Conversation is temporarily unavailable"), 503);
+      }
+    }
+    await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
+    const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
     const taskContext = automationBuilderContext
       ? automationBuilderTaskContext({
           context: automationBuilderContext,
@@ -1542,8 +1768,10 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             contextType: "dm" as const,
             deliveryTarget: dmContext.deliveryTarget,
             createdBy: currentUser.id,
+            conversationKind: "web_chat" as const,
             creatorTimezone: currentUser.timezone,
             canManageAnyTask: c.get("role") === "admin",
+            currentAutomation: undefined,
             origin: {
               platform: "web" as const,
               conversationId,
@@ -1733,6 +1961,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
               sendDm: deps.sendDm,
               ...(attachments.length > 0 ? { attachments } : {}),
               ...(taskContext ? { taskContext } : {}),
+              ...(taskContext?.currentAutomation ? { currentAutomation: taskContext.currentAutomation } : {}),
             }),
           ),
         );

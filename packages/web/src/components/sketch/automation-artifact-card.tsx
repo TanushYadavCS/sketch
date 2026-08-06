@@ -4,6 +4,15 @@ import { Button } from "@sketch/ui/components/button";
 import { cn } from "@sketch/ui/lib/utils";
 import { useNavigate } from "@tanstack/react-router";
 
+function conversationIdFromBuilderUrl(builderUrl: string): string | undefined {
+  try {
+    const value = new URL(builderUrl, "http://sketch.local").searchParams.get("conversationId")?.trim();
+    return value || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function AutomationArtifactCard({
   artifact,
   conversationId,
@@ -15,12 +24,13 @@ export function AutomationArtifactCard({
 }) {
   const navigate = useNavigate();
   const tags = Array.from(new Set(artifact.tags));
+  const continuationConversationId = conversationIdFromBuilderUrl(artifact.builderUrl) ?? conversationId;
 
   const openBuilder = () => {
     void navigate({
       to: "/scheduled-tasks/$taskId/edit",
       params: { taskId: artifact.taskId },
-      search: conversationId ? { conversationId } : {},
+      search: continuationConversationId ? { conversationId: continuationConversationId } : {},
     });
   };
 
@@ -65,7 +75,7 @@ export function AutomationArtifactCard({
           className="h-9 rounded-[8px] bg-brand-accent px-4 font-mono text-[11px] font-bold uppercase tracking-[0.12em] text-[#161300] shadow-none hover:bg-brand-accent/90 sm:px-5"
           onClick={openBuilder}
         >
-          Open automation
+          {continuationConversationId ? "Continue" : "Open automation"}
         </Button>
         <Button
           type="button"

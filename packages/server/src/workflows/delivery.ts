@@ -38,7 +38,8 @@ function inferTargetType(
     return targetId.endsWith("@g.us") ? "group" : "dm";
   }
   if (threadTs) return "thread";
-  if (fallbackContextType === "dm" || isSlackDmChannelId(targetId) || isSlackUserId(targetId)) return "dm";
+  if (isSlackDmChannelId(targetId) || isSlackUserId(targetId)) return "dm";
+  if (fallbackContextType === "dm" && !targetId.startsWith("C")) return "dm";
   return "channel";
 }
 
