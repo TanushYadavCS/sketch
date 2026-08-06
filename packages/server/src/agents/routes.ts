@@ -457,7 +457,7 @@ async function hasCalendarConnector(db: Kysely<DB>, userId: string): Promise<boo
   const row = await db
     .selectFrom("connector_configs")
     .select("id")
-    .where("connector_type", "=", "google_calendar")
+    .where("connector_type", "in", ["google_calendar", "outlook_calendar"])
     .where("created_by", "=", userId)
     .limit(1)
     .executeTakeFirst();

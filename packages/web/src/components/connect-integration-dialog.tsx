@@ -131,7 +131,8 @@ export function ConnectIntegrationDialog({
 
   const isOAuthRedirect = integration?.oauthRedirect === true;
   const isZoho = integration?.type === "zoho_crm";
-  const isMicrosoft = integration?.type === "outlook" || integration?.type === "teams";
+  const isMicrosoft =
+    integration?.type === "outlook" || integration?.type === "outlook_calendar" || integration?.type === "teams";
   const canvasSupported =
     integration?.type === "google_drive" ||
     integration?.type === "google_calendar" ||

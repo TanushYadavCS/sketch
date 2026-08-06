@@ -174,6 +174,18 @@ describe("Microsoft OAuth callback", () => {
 });
 
 describe("Microsoft admin consent route", () => {
+  it("builds an Outlook Calendar authorization URL with delegated calendar read access", async () => {
+    const { app, userId } = createMicrosoftOauthTestApp();
+
+    const res = await app.request("/microsoft/authorize?connector=outlook_calendar", { redirect: "manual" });
+
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get("location") ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe("https://login.microsoftonline.com/tenant-id/oauth2/v2.0/authorize");
+    expect(url.searchParams.get("scope")).toBe("offline_access User.Read Calendars.Read");
+    expect(url.searchParams.get("state")).toContain(`${userId}:outlook_calendar:`);
+  });
+
   it("builds a Teams admin consent URL with the configured tenant and Graph default scope", async () => {
     const { app, userId } = createMicrosoftOauthTestApp();
 

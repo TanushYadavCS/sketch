@@ -11,6 +11,7 @@ export { connectorFactories, getConnector, VALID_CONNECTOR_TYPES } from "./regis
 export { createGoogleDriveConnector } from "./google-drive";
 export { createGoogleCalendarConnector } from "./google-calendar";
 export { createGmailConnector } from "./gmail";
+export { createOutlookCalendarConnector } from "./outlook-calendar";
 export { createClickUpConnector } from "./clickup";
 export { createNotionConnector } from "./notion";
 export { createLinearConnector } from "./linear";

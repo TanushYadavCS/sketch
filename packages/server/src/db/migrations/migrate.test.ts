@@ -25,7 +25,7 @@ import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 
-const EXPECTED_MIGRATION_COUNT = 154;
+const EXPECTED_MIGRATION_COUNT = 155;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -223,6 +223,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[151]).toBe("156-operational-alerts");
     expect(names[152]).toBe("157-task-activity-events");
     expect(names[153]).toBe("158-slack-channel-participants");
+    expect(names[154]).toBe("159-outlook-calendar-provider-file-scope");
   });
 
   it("resets reviewed combined durability routes for member-source reseeding", async () => {
