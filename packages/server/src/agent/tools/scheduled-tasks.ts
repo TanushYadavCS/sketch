@@ -32,16 +32,31 @@ const workflowStepSchema = z.object({
   script: z
     .string()
     .optional()
-    .describe("Script content for action steps. Stored in automation_step_content, not in steps JSON."),
+    .describe(
+      "Script content for deterministic action steps. Use for fixed mapping, filtering, normalization, calculations, bounded JSON transformations, routing, or known integration operations. Action scripts use the existing action executor, receive (input, ctx, signal), and must return JSON-serializable output. Stored in automation_step_content, not in steps JSON.",
+    ),
   agentPrompt: z
     .string()
     .optional()
-    .describe("Prompt content for agent steps. Stored in automation_step_content, not in steps JSON."),
-  apps: z.array(z.string()).optional().describe("MCP server slugs this step uses (e.g. ['clickup', 'slack'])."),
-  agentMode: z.enum(["light", "sketch"]).optional(),
-  agentSkills: z.array(z.string()).optional(),
-  agentModel: z.string().optional(),
-  agentMcpServers: z.array(z.string()).optional(),
+    .describe(
+      "Prompt content for explicit agent steps. Use only when the workflow needs interpretation, classification, planning, summarization, or natural-language generation. Stored in automation_step_content, not in steps JSON.",
+    ),
+  apps: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "MCP server slugs associated with this step (for example, ['clickup', 'slack']). This does not turn an action step into an agent step; action scripts use ctx.integrations.executeAction for known integration operations.",
+    ),
+  agentMode: z
+    .enum(["light", "sketch"])
+    .optional()
+    .describe("Execution mode for agent steps. Not used by action steps."),
+  agentSkills: z.array(z.string()).optional().describe("Skills available to an agent step. Not used by action steps."),
+  agentModel: z.string().optional().describe("Model override for an agent step. Not used by action steps."),
+  agentMcpServers: z
+    .array(z.string())
+    .optional()
+    .describe("MCP servers available to an agent step. Not used by action steps."),
   timeout: z.number().optional().describe("Step timeout in seconds. Default: 1800 (30 min)."),
   triggerConfig: z
     .object({
@@ -79,7 +94,7 @@ const manageScheduledTasksSchema = {
     .enum(["list", "add", "update", "remove", "pause", "resume", "run", "getRun", "share", "updateStepContent"])
     .describe(
       `Action to perform.
-- 'add': create an automation (simple: prompt + schedule_type + schedule_value; multi-step: title + steps)
+- 'add': create an automation (legacy agent form: prompt + schedule_type + schedule_value; deterministic form: title + steps with action scripts)
 - 'list': list automations in this context
 - 'update': modify an automation (requires task_id)
 - 'remove': delete an automation (requires task_id)
@@ -93,7 +108,9 @@ const manageScheduledTasksSchema = {
   prompt: z
     .string()
     .optional()
-    .describe("The instruction the agent executes each run. For simple automations (no steps array)."),
+    .describe(
+      "Legacy/simple automation prompt. When used without steps, Sketch expands it to one Sketch-mode agent step. Keep it for agent-driven or legacy automations; for deterministic work, pass an explicit steps array with action script content.",
+    ),
   schedule_type: z
     .enum(["cron", "interval", "once"])
     .optional()
@@ -122,7 +139,9 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
   steps: z
     .array(workflowStepSchema)
     .optional()
-    .describe("Workflow steps. When provided, creates a multi-step automation."),
+    .describe(
+      "Explicit workflow steps. Use this for deterministic work: include a trigger step and one or more action steps with script content. Use agent steps only when semantic judgment is needed. Legacy prompt-only automations remain supported.",
+    ),
   edges: z
     .array(z.object({ id: z.string(), from: z.string(), to: z.string() }))
     .optional()
@@ -141,7 +160,12 @@ For once: ISO 8601 datetime string. A naked local time (e.g. '2026-03-14T15:00:0
   delivery: deliverySchema.optional().describe("Canonical final-output delivery destination for the workflow."),
   run_id: z.string().optional().describe("Run ID for getRun action. Omit for latest run."),
   step_id: z.string().optional().describe("Step ID for updateStepContent action."),
-  step_content: z.string().optional().describe("New prompt or script content for updateStepContent action."),
+  step_content: z
+    .string()
+    .optional()
+    .describe(
+      "New content for updateStepContent: use script content for action steps and prompt content for agent steps.",
+    ),
   step_apps: z.array(z.string()).optional().describe("Updated MCP server slugs for updateStepContent action."),
 };
 

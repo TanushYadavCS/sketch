@@ -7,6 +7,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { handleManageScheduledTasks } from "../agent/sketch-tools";
+import { createManageScheduledTasksTool } from "../agent/tools/scheduled-tasks";
 import {
   AutomationAuthoringGeneratedOutputError,
   AutomationAuthoringValidationError,
@@ -126,6 +127,37 @@ const whatsappGroupContext: TaskContext = {
 };
 
 const stepContentRepo = makeMockStepContentRepo();
+
+type StructuredManageScheduledTasksTool = {
+  inputSchema: {
+    prompt: { description?: string };
+    steps: {
+      description?: string;
+      unwrap: () => {
+        element: {
+          shape: {
+            script: { description?: string };
+            agentPrompt: { description?: string };
+          };
+        };
+      };
+    };
+  };
+};
+
+describe("ManageScheduledTasks tool contract", () => {
+  it("distinguishes deterministic action steps from legacy agent prompts", () => {
+    const definition = createManageScheduledTasksTool({}) as unknown as StructuredManageScheduledTasksTool;
+    const stepSchema = definition.inputSchema.steps.unwrap().element;
+
+    expect(definition.inputSchema.prompt.description).toContain("Legacy/simple automation prompt");
+    expect(definition.inputSchema.prompt.description).toContain("one Sketch-mode agent step");
+    expect(definition.inputSchema.steps.description).toContain("deterministic work");
+    expect(definition.inputSchema.steps.description).toContain("action steps with script content");
+    expect(stepSchema.shape.script.description).toContain("deterministic action steps");
+    expect(stepSchema.shape.agentPrompt.description).toContain("explicit agent steps");
+  });
+});
 
 describe("handleManageScheduledTasks — configured chat authoring", () => {
   it("routes natural-language creation through the authorer and collects the saved artifact", async () => {
