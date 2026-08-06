@@ -917,8 +917,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
           db,
           logger,
           connectorConfigId: slackConnector.id,
-          grandfatheringEnabled: config.SLACK_ACCESS_GRANDFATHERING,
-          entitySyncEnabled: config.SLACK_ENTITY_SYNC,
         });
       }
       let syncRowsFenced = 0;
@@ -1078,8 +1076,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
             db,
             logger,
             connectorConfigId: slackConnector.id,
-            grandfatheringEnabled: config.SLACK_ACCESS_GRANDFATHERING,
-            entitySyncEnabled: config.SLACK_ENTITY_SYNC,
           });
         }
       } catch (err) {

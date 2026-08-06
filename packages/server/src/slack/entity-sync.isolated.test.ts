@@ -112,6 +112,36 @@ describe("Slack entity sync", () => {
     expect(facade.listChannelsPage).toHaveBeenCalledWith(undefined);
   });
 
+  it("counts domain-proven account creations in sweep stats", async () => {
+    await createDb();
+    await getDb()
+      .insertInto("organization_domains")
+      .values({
+        id: "domain-acme",
+        domain: "acme.example",
+        source: "admin_email",
+        verified_at: "2026-08-06T00:00:00.000Z",
+      })
+      .execute();
+    const facade: SlackEntitySyncFacade = {
+      listUsersPage: vi.fn(async () => ({
+        items: [user({ email: "alice@acme.example", providerUpdatedAt: "101" })],
+        nextCursor: null,
+      })),
+      listChannelsPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+      listChannelMembersPage: vi.fn(),
+      getUserInfo: vi.fn(),
+    };
+    const { sync, logger } = makeSync(facade);
+
+    await sync.enqueueSweep({ botToken: "xoxb-t1", teamId: "T1" });
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ accountsCreated: 1 }),
+      "Completed Slack entity sync run",
+    );
+  });
+
   it("loads roster proof once per durable sync run", async () => {
     await createDb();
     const rosterQueries: string[] = [];

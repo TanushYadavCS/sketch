@@ -29,13 +29,9 @@ export const configSchema = z.object({
   // Feature flags
   SLACK_ENTITY_SYNC: z
     .enum(["true", "false", "1", "0"])
-    .default("false")
-    .transform((v) => v === "true" || v === "1"),
-  SLACK_ENTITY_SYNC_PUBLIC_CHANNELS: z
-    .enum(["true", "false", "1", "0"])
     .default("true")
     .transform((v) => v === "true" || v === "1"),
-  SLACK_ACCESS_GRANDFATHERING: z
+  SLACK_ENTITY_SYNC_PUBLIC_CHANNELS: z
     .enum(["true", "false", "1", "0"])
     .default("true")
     .transform((v) => v === "true" || v === "1"),

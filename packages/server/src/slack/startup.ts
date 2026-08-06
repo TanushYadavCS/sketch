@@ -76,8 +76,9 @@ export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: Sl
         if (!nextTeamId) {
           throw new Error("Slack token validation did not return a team id");
         }
-        if (!tokens && previousTeamId && nextTeamId && previousTeamId !== nextTeamId) {
-          throw new Error("Slack token resolves to a different team; explicit admin reset required");
+        const teamChanged = Boolean(previousTeamId && previousTeamId !== nextTeamId);
+        if (teamChanged) {
+          deps.logger.warn({ previousTeamId, nextTeamId }, "Slack team changed during startup; fencing old-team state");
         }
 
         const existingBot = deps.getCurrentBot();
@@ -86,7 +87,11 @@ export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: Sl
           deps.setCurrentBot(null);
         }
 
-        if (tokens) {
+        if (teamChanged) {
+          await deps.beforeExplicitTokenReplacement?.({ previousTeamId: previousTeamId ?? null, nextTeamId });
+        }
+
+        if (tokens && !teamChanged) {
           const shouldReset = !previousTeamId || previousTeamId !== nextTeamId;
           if (shouldReset) {
             await deps.beforeExplicitTokenReplacement?.({ previousTeamId: previousTeamId ?? null, nextTeamId });

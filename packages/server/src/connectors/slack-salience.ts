@@ -20,9 +20,6 @@ export const SLACK_EMISSION_REFRESH_DAYS = 7;
 export const SLACK_SALIENCE_PROMPT_VERSION = "slack-salience-v1";
 
 const SALIENCE_CLAIM_STALE_MS = 15 * 60_000;
-const SLACK_FILE_ACCESS_PAGE_SIZE = 100;
-const SLACK_FILE_ACCESS_INSERT_CHUNK_SIZE = 500;
-const SLACK_FILE_ACCESS_CLAIM_STALE_MS = 15 * 60_000;
 const MENTION_TOKEN_PATTERN = /<@(U[A-Z0-9]+)(?:\|[^>]*)?>/g;
 
 export interface SlackSalienceRunSummary {
@@ -40,13 +37,6 @@ export interface SlackSalienceOptions {
   facade: SlackIndexingFacade;
   generator: GeminiGenerator | null;
   batchLimit?: number;
-}
-
-function isSlackGrandfatheringEnabled(options: {
-  grandfatheringEnabled?: boolean;
-  entitySyncEnabled?: boolean;
-}): boolean {
-  return (options.grandfatheringEnabled ?? true) && (options.entitySyncEnabled ?? true);
 }
 
 interface SlackSliceContext {
@@ -71,131 +61,6 @@ function emptySummary(batchLimit: number): SlackSalienceRunSummary {
 
 function stableContentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
-}
-
-/**
- * Historical files with a valid capture roster use that snapshot as the
- * source of teammate grants. Files without one fall back to the current
- * scope membership, which is an explicit approximation for older captures.
- */
-export async function backfillSlackFileAccess(options: {
-  db: Kysely<DB>;
-  grandfatheringEnabled: boolean;
-  entitySyncEnabled?: boolean;
-}): Promise<number> {
-  if (!isSlackGrandfatheringEnabled(options)) return 0;
-  const claim = await options.db.transaction().execute(async (trx) => {
-    const timestamp = new Date().toISOString();
-    await trx
-      .insertInto("slack_file_access_backfill")
-      .values({ id: "default", claimed_at: null, last_indexed_file_id: null, completed_at: null })
-      .onConflict((oc) => oc.column("id").doNothing())
-      .execute();
-    const marker = await trx
-      .selectFrom("slack_file_access_backfill")
-      .select(["completed_at", "claimed_at", "last_indexed_file_id"])
-      .where("id", "=", "default")
-      .executeTakeFirstOrThrow();
-    if (marker.completed_at) return null;
-    const staleBefore = new Date(Date.now() - SLACK_FILE_ACCESS_CLAIM_STALE_MS).toISOString();
-    const result = await trx
-      .updateTable("slack_file_access_backfill")
-      .set({ claimed_at: timestamp })
-      .where("id", "=", "default")
-      .where("completed_at", "is", null)
-      .where((eb) => eb.or([eb("claimed_at", "is", null), eb("claimed_at", "<", staleBefore)]))
-      .executeTakeFirst();
-    if (result.numUpdatedRows === 0n) return null;
-    return { claimedAt: timestamp, lastIndexedFileId: marker.last_indexed_file_id };
-  });
-  if (claim === null) return 0;
-
-  let lastIndexedFileId = claim.lastIndexedFileId;
-  let claimedAt = claim.claimedAt;
-  let insertedGrants = 0;
-  while (true) {
-    const page = await options.db.transaction().execute(async (trx) => {
-      let query = trx
-        .selectFrom("indexed_files")
-        .leftJoin("conversation_slices", "conversation_slices.id", "indexed_files.provider_file_id")
-        .select([
-          "indexed_files.id as indexedFileId",
-          "indexed_files.access_scope_id as accessScopeId",
-          "conversation_slices.roster_snapshot as rosterSnapshot",
-        ])
-        .where("indexed_files.source", "=", "slack")
-        .where("indexed_files.access_scope_id", "is not", null)
-        .orderBy("indexed_files.id", "asc")
-        .limit(SLACK_FILE_ACCESS_PAGE_SIZE);
-      if (lastIndexedFileId) query = query.where("indexed_files.id", ">", lastIndexedFileId);
-      const files = await query.execute();
-      const timestamp = new Date().toISOString();
-      if (files.length === 0) {
-        await trx
-          .updateTable("slack_file_access_backfill")
-          .set({ claimed_at: null, completed_at: timestamp })
-          .where("id", "=", "default")
-          .where("claimed_at", "=", claimedAt)
-          .execute();
-        return { done: true, lastIndexedFileId, inserted: 0 };
-      }
-
-      const fallbackFileIds: string[] = [];
-      const snapshotGrants: Array<{ indexed_file_id: string; email: string }> = [];
-      for (const file of files) {
-        const snapshot = parseSlackRosterSnapshot(file.rosterSnapshot);
-        if (!snapshot && file.accessScopeId) {
-          fallbackFileIds.push(file.indexedFileId);
-          continue;
-        }
-        for (const email of snapshot ? [...new Set(teammateEmailsFromRoster(snapshot))] : []) {
-          snapshotGrants.push({ indexed_file_id: file.indexedFileId, email });
-        }
-      }
-
-      let inserted = 0;
-      for (let offset = 0; offset < snapshotGrants.length; offset += SLACK_FILE_ACCESS_INSERT_CHUNK_SIZE) {
-        const grants = snapshotGrants.slice(offset, offset + SLACK_FILE_ACCESS_INSERT_CHUNK_SIZE);
-        const result = await trx
-          .insertInto("file_access")
-          .values(grants)
-          .onConflict((oc) => oc.columns(["indexed_file_id", "email"]).doNothing())
-          .executeTakeFirst();
-        inserted += Number(result.numInsertedOrUpdatedRows ?? 0);
-      }
-      if (fallbackFileIds.length > 0) {
-        const fallbackQuery = trx
-          .selectFrom("indexed_files")
-          .innerJoin("access_scope_members", "access_scope_members.access_scope_id", "indexed_files.access_scope_id")
-          .select(["indexed_files.id as indexed_file_id", "access_scope_members.email"])
-          .where("indexed_files.id", "in", fallbackFileIds);
-        const result = await trx
-          .insertInto("file_access")
-          .columns(["indexed_file_id", "email"])
-          .expression(fallbackQuery)
-          .onConflict((oc) => oc.columns(["indexed_file_id", "email"]).doNothing())
-          .executeTakeFirst();
-        inserted += Number(result.numInsertedOrUpdatedRows ?? 0);
-      }
-
-      const nextCursor = files[files.length - 1]?.indexedFileId ?? lastIndexedFileId;
-      const checkpoint = await trx
-        .updateTable("slack_file_access_backfill")
-        .set({ claimed_at: timestamp, last_indexed_file_id: nextCursor })
-        .where("id", "=", "default")
-        .where("completed_at", "is", null)
-        .where("claimed_at", "=", claimedAt)
-        .executeTakeFirst();
-      if (checkpoint.numUpdatedRows === 0n) {
-        return { done: true, lastIndexedFileId, inserted };
-      }
-      claimedAt = timestamp;
-      return { done: false, lastIndexedFileId: nextCursor, inserted };
-    });
-    insertedGrants += page.inserted;
-    if (page.done) return insertedGrants;
-    lastIndexedFileId = page.lastIndexedFileId;
-  }
 }
 
 /**
@@ -545,12 +410,8 @@ async function archiveLinkedSliceFileIfPresent(db: Kysely<DB>, context: SlackSli
 /**
  * Emits kept Slack slices as SyncedItems. The roster is re-resolved at
  * emission so the access scope reflects current channel membership, not
- * membership at judgment time. With access grandfathering enabled, the
- * emission-time teammate emails are also additive file grants. Those grants
- * intentionally outlive channel departure; account offboarding is the
- * practical revocation lever, with an explicit admin revocation path still
- * required for exceptional cases. Email reuse can therefore re-grant old
- * files to a newly created account using the same address.
+ * membership at judgment time. Emission-time teammate emails are retained as
+ * capture audit stamps; current scope membership is the read-time access grant.
  */
 export async function* emitSlackSyncedItems(options: {
   db: Kysely<DB>;
@@ -559,11 +420,8 @@ export async function* emitSlackSyncedItems(options: {
   emissionRefreshDays?: number;
   now?: Date;
   onSkippedNoScope?: () => void;
-  grandfatheringEnabled?: boolean;
-  entitySyncEnabled?: boolean;
 }): AsyncGenerator<SyncedItem> {
   const refreshDays = options.emissionRefreshDays ?? SLACK_EMISSION_REFRESH_DAYS;
-  const grandfatheringEnabled = isSlackGrandfatheringEnabled(options);
   const now = options.now ?? new Date();
   const refreshedAfter = new Date(now.getTime() - refreshDays * 24 * 60 * 60_000).toISOString();
   const kept = await listSliceContexts(options.db, "kept", null, refreshedAfter);
@@ -599,9 +457,7 @@ export async function* emitSlackSyncedItems(options: {
 
     const teammateEmails = teammateEmailsFromRoster(roster);
     if (teammateEmails.length === 0) {
-      if (!grandfatheringEnabled) {
-        await archiveLinkedSliceFileIfPresent(options.db, context);
-      }
+      await archiveLinkedSliceFileIfPresent(options.db, context);
       options.onSkippedNoScope?.();
       options.logger.warn(
         { sliceId: context.slice.id, channelId: context.channelId },
@@ -636,7 +492,7 @@ export async function* emitSlackSyncedItems(options: {
         label: `#${context.channelName}`,
         memberEmails: teammateEmails,
       },
-      accessEmails: grandfatheringEnabled ? teammateEmails : undefined,
+      accessEmails: teammateEmails,
     };
   }
 }
@@ -648,21 +504,14 @@ export async function* emitSlackSyncedItems(options: {
  * would keep serving its indexed slices forever.
  */
 /**
- * Disconnect handling: with access grandfathering enabled, previously emitted
- * slices remain readable because their emission-time grants are durable. The
- * practical revocation lever is account offboarding; an administrator can
- * still explicitly revoke files when required. Turning grandfathering off
- * restores archival because a disconnected bot cannot verify membership.
+ * Disconnect handling archives indexed channel files when the bot can no
+ * longer verify channel membership.
  */
 export async function archiveAllSlackChannelFiles(options: {
   db: Kysely<DB>;
   logger: Logger;
   connectorConfigId: string;
-  grandfatheringEnabled?: boolean;
-  entitySyncEnabled?: boolean;
 }): Promise<number> {
-  if (isSlackGrandfatheringEnabled(options)) return 0;
-
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
   if (scopes.length === 0) return 0;
@@ -715,8 +564,6 @@ export async function reconcileSlackChannelAcls(options: {
   logger: Logger;
   facade: SlackIndexingFacade;
   connectorConfigId: string;
-  grandfatheringEnabled?: boolean;
-  entitySyncEnabled?: boolean;
 }): Promise<{ scopesRefreshed: number; scopesArchived: number; filesArchived: number }> {
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
@@ -726,19 +573,15 @@ export async function reconcileSlackChannelAcls(options: {
   let scopesRefreshed = 0;
   let scopesArchived = 0;
   let filesArchived = 0;
-  const grandfatheringEnabled = isSlackGrandfatheringEnabled(options);
-
   for (const scope of scopes) {
     const channelName = visible.get(scope.providerScopeId);
     if (channelName === undefined) {
-      if (!grandfatheringEnabled) {
-        filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
-        scopesArchived += 1;
-        options.logger.info(
-          { channelId: scope.providerScopeId },
-          "Archived Slack slices for channel no longer visible to the bot",
-        );
-      }
+      filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
+      scopesArchived += 1;
+      options.logger.info(
+        { channelId: scope.providerScopeId },
+        "Archived Slack slices for channel no longer visible to the bot",
+      );
       continue;
     }
 
@@ -758,10 +601,8 @@ export async function reconcileSlackChannelAcls(options: {
 
     const teammateEmails = teammateEmailsFromRoster(roster);
     if (teammateEmails.length === 0) {
-      if (!grandfatheringEnabled) {
-        filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
-        scopesArchived += 1;
-      }
+      filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
+      scopesArchived += 1;
       continue;
     }
 

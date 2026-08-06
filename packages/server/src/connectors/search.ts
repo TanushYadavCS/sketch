@@ -51,8 +51,8 @@ export interface SearchOptions {
   category?: string;
   /**
    * RBAC (user-level): restrict results to files the user can access.
-   * Email addresses to match against access_scope_members and file_access.
-   * Files with no scope AND no file_access rows are unrestricted (visible to all).
+   * Email addresses to match against current scope membership and explicit shares.
+   * Non-chat files with no scope AND no file_access rows are unrestricted.
    * When omitted, no user-level filtering is applied.
    */
   userEmails?: string[];
@@ -63,25 +63,38 @@ export function fileAccessFilterSql(emailList: string[]) {
     emailList.map((e) => sql`${e}`),
     sql`,`,
   );
+  const nonChatSource = sql`(indexed_files.source IS NULL OR indexed_files.source NOT IN ('slack', 'whatsapp'))`;
   return sql<SqlBool>`(
-    (indexed_files.access_scope_id IS NULL
+    (${nonChatSource}
+      AND indexed_files.access_scope_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM file_access WHERE file_access.indexed_file_id = indexed_files.id))
     OR EXISTS (
       SELECT 1 FROM access_scope_members
       WHERE access_scope_members.access_scope_id = indexed_files.access_scope_id
       AND access_scope_members.email IN (${emailSql})
     )
-    OR EXISTS (
-      SELECT 1 FROM file_access
-      WHERE file_access.indexed_file_id = indexed_files.id
-      AND file_access.email IN (${emailSql})
-    )
+    OR (${nonChatSource}
+      AND EXISTS (
+        SELECT 1 FROM file_access
+        WHERE file_access.indexed_file_id = indexed_files.id
+        AND file_access.email IN (${emailSql})
+      ))
     OR EXISTS (
       SELECT 1 FROM file_share_emails
       WHERE file_share_emails.indexed_file_id = indexed_files.id
       AND file_share_emails.email IN (${emailSql})
     )
     OR indexed_files.share_with_everyone = 1
+    OR EXISTS (
+      SELECT 1 FROM entity_mentions em_shared
+      INNER JOIN entities ent_shared ON ent_shared.id = em_shared.entity_id
+      LEFT JOIN entity_share_emails ese
+        ON ese.entity_id = ent_shared.id AND ese.email IN (${emailSql})
+      WHERE em_shared.indexed_file_id = indexed_files.id
+        AND ent_shared.deleted_at IS NULL
+        AND ent_shared.merged_into_entity_id IS NULL
+        AND (ent_shared.share_with_everyone = 1 OR ese.email IS NOT NULL)
+    )
   )`;
 }
 
@@ -241,7 +254,8 @@ export async function getFileContent(
         .limit(1)
         .execute();
 
-      if (hasScope || hasFileAccess.length > 0) {
+      const isChatSource = file.source === "slack" || file.source === "whatsapp";
+      if (isChatSource || hasScope || hasFileAccess.length > 0) {
         let allowed = false;
 
         // Tier 2: scope-level access
@@ -257,7 +271,7 @@ export async function getFileContent(
         }
 
         // Tier 3: per-file access
-        if (!allowed && hasFileAccess.length > 0) {
+        if (!allowed && !isChatSource && hasFileAccess.length > 0) {
           const fileMatch = await db
             .selectFrom("file_access")
             .select("email")
@@ -344,7 +358,7 @@ export async function filterAccessibleFileIds(
 
   const files = await db
     .selectFrom("indexed_files")
-    .select(["id", "access_scope_id", "share_with_everyone", "is_archived"])
+    .select(["id", "source", "access_scope_id", "share_with_everyone", "is_archived"])
     .where("id", "in", fileIds)
     .execute();
 
@@ -422,10 +436,11 @@ export async function filterAccessibleFileIds(
     }
 
     const perFile = fileAccessByFile.get(file.id);
+    const isChatSource = file.source === "slack" || file.source === "whatsapp";
     const hasScope = file.access_scope_id != null;
     const hasFileAccess = (perFile?.size ?? 0) > 0;
 
-    if (!hasScope && !hasFileAccess) {
+    if (!isChatSource && !hasScope && !hasFileAccess) {
       allowed.add(file.id);
       continue;
     }
@@ -438,7 +453,7 @@ export async function filterAccessibleFileIds(
       }
     }
 
-    if (hasFileAccess && perFile) {
+    if (!isChatSource && hasFileAccess && perFile) {
       let matched = false;
       for (const email of emailSet) {
         if (perFile.has(email)) {

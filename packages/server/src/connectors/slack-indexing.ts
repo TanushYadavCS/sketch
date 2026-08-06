@@ -3,7 +3,6 @@ import {
   DEFAULT_SLACK_SALIENCE_BATCH_LIMIT,
   SLACK_EMISSION_REFRESH_DAYS,
   archiveAllSlackChannelFiles,
-  backfillSlackFileAccess,
   emitSlackSyncedItems,
   processSlackSalience,
   reconcileSlackChannelAcls,
@@ -47,26 +46,15 @@ export function createSlackIndexingConnector(): Connector {
       scopeConfig,
       salienceGenerator,
       slackIndexing,
-      appConfig,
     }): AsyncGenerator<SyncedItem> {
       assertSystemCredentials(credentials);
       if (!db) throw new Error("Slack indexing connector requires database access");
       if (!connectorConfigId) throw new Error("Slack indexing connector requires its connector config id");
-      const entitySyncEnabled = appConfig?.SLACK_ENTITY_SYNC ?? true;
-      const grandfatheringEnabled = appConfig?.SLACK_ACCESS_GRANDFATHERING ?? true;
-      const backfilledFileAccess = await backfillSlackFileAccess({
-        db,
-        grandfatheringEnabled,
-        entitySyncEnabled,
-      });
-      if (backfilledFileAccess > 0) logger.info({ backfilledFileAccess }, "Backfilled Slack historical file access");
       if (!slackIndexing || !(await slackIndexing.isConfigured())) {
         await archiveAllSlackChannelFiles({
           db,
           logger,
           connectorConfigId,
-          grandfatheringEnabled,
-          entitySyncEnabled,
         });
         logger.warn("Slack indexing skipped: no Slack bot token configured");
         return;
@@ -89,8 +77,6 @@ export function createSlackIndexingConnector(): Connector {
         logger,
         facade: slackIndexing,
         emissionRefreshDays: positiveInteger(scopeConfig.emissionRefreshDays) ?? SLACK_EMISSION_REFRESH_DAYS,
-        grandfatheringEnabled,
-        entitySyncEnabled,
         onSkippedNoScope: () => {
           skippedNoScope += 1;
         },
@@ -104,8 +90,6 @@ export function createSlackIndexingConnector(): Connector {
         logger,
         facade: slackIndexing,
         connectorConfigId,
-        grandfatheringEnabled,
-        entitySyncEnabled,
       });
       logger.info({ emitted, skippedNoScope }, "Completed Slack indexing sync");
     },

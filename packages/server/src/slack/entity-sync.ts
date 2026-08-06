@@ -136,6 +136,7 @@ type SyncCounters = {
   retries: number;
   userInfoSpillover: number;
   tombstoneSkipped: number;
+  accountsCreated: number;
 };
 
 function emptySyncCounters(): SyncCounters {
@@ -149,6 +150,7 @@ function emptySyncCounters(): SyncCounters {
     retries: 0,
     userInfoSpillover: 0,
     tombstoneSkipped: 0,
+    accountsCreated: 0,
   };
 }
 
@@ -784,6 +786,7 @@ export function createSlackEntitySync(deps: SlackEntitySyncDeps): SlackEntitySyn
     const result = await upsertSlackPersonEntity(deps.db, profile, { logger: deps.logger, teamRoster });
     if (!counters) return;
     counters.scanned += 1;
+    if (result.accountCreated) counters.accountsCreated += 1;
     if (!result.applied) {
       counters.skipped += 1;
       return;

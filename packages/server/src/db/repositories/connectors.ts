@@ -2,10 +2,9 @@
  * Repository for connector_configs, indexed_files, access_scopes, and file_access tables.
  * Handles CRUD + FTS5 search over indexed content.
  *
- * Access model (3 tiers):
- * 1. No scope + no file_access rows → unrestricted, visible to all
- * 2. Has access_scope_id → check access_scope_members for user's email
- * 3. Has file_access rows → check for user's email (per-file Google Drive My Drive)
+ * Access model: non-chat files retain unrestricted, scope-member, and per-file
+ * access doors; chat files require current scope membership unless an explicit
+ * share door opens them.
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
@@ -31,9 +30,9 @@ export interface FileViewer {
 /**
  * Predicate matching files visible to `viewer`. Composed into queries via `.where(...)`.
  *
- *   unrestricted      = no scope AND no per-file shares
+ *   unrestricted      = non-chat source with no scope AND no per-file shares
  *   scoped            = caller is in access_scope_members for the file's scope
- *   per-file          = caller has a row in file_access for the file
+ *   per-file          = non-chat caller has a row in file_access for the file
  *   manual share      = caller's email is in file_share_emails for the file
  *   org-wide          = indexed_files.share_with_everyone = 1
  *   entity-share prop = caller has access to an entity mentioned in the file
@@ -58,15 +57,18 @@ export function fileVisibilityPredicate(viewer: FileViewer, alias = "indexed_fil
   }
   const t = sql.raw(alias);
   const email = viewer.email ?? "";
+  const nonChatSource = sql`(${t}.source IS NULL OR ${t}.source NOT IN ('slack', 'whatsapp'))`;
   return sql<boolean>`(
-    (${t}.access_scope_id IS NULL
+    (${nonChatSource}
+      AND ${t}.access_scope_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM file_access fa WHERE fa.indexed_file_id = ${t}.id))
     OR EXISTS (SELECT 1 FROM access_scope_members asm
                WHERE asm.access_scope_id = ${t}.access_scope_id
                  AND asm.email = ${email})
-    OR EXISTS (SELECT 1 FROM file_access fa
-               WHERE fa.indexed_file_id = ${t}.id
-                 AND fa.email = ${email})
+    OR (${nonChatSource}
+        AND EXISTS (SELECT 1 FROM file_access fa
+                   WHERE fa.indexed_file_id = ${t}.id
+                     AND fa.email = ${email}))
     OR EXISTS (SELECT 1 FROM file_share_emails fse
                WHERE fse.indexed_file_id = ${t}.id
                  AND fse.email = ${email})
@@ -619,11 +621,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         .execute();
     },
 
-    /**
-     * Add per-file email grants without revoking existing grants. Slack uses
-     * this for grandfathered channel history: a later emission may add a new
-     * teammate while preserving access for people who were present earlier.
-     */
+    /** Add per-file email stamps without revoking existing stamps. */
     async grantFileAccessEmails(indexedFileId: string, emails: string[]) {
       const unique = [...new Set(emails)];
       if (unique.length === 0) return;

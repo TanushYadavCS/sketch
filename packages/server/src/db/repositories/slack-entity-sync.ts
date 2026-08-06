@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { type ExpressionBuilder, type Kysely, type Selectable, type SqlBool, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
+import { upsertSlackIdentity } from "../../slack/upsert-identity";
 import type { DB, EntitiesTable, SlackUserSyncStateTable } from "../schema";
 import { createEntityRepository, isHumanSubtypeOverride, normalizeContactPointValue } from "./entities";
 import { createEntityReviewRepo } from "./entity-review";
+import { createUserRepository } from "./users";
 
 export interface SlackUserProfile {
   teamId: string;
@@ -26,6 +28,7 @@ export interface SlackUserProfile {
 }
 
 export interface SlackEntitySyncLogger {
+  info?: (bindings: Record<string, unknown>, message: string) => void;
   warn: (bindings: Record<string, unknown>, message: string) => void;
 }
 
@@ -43,6 +46,7 @@ export type SlackEntitySyncResult = {
   entity: Selectable<EntitiesTable> | null;
   state: Selectable<SlackUserSyncStateTable>;
   applied: boolean;
+  accountCreated: boolean;
 };
 
 const inflightByDb = new WeakMap<object, Map<string, Promise<SlackEntitySyncResult>>>();
@@ -381,13 +385,20 @@ async function runUpsertBody(
     ? (await resolveSlackSourceRefEntity(trx, beforeState.entity_id)).entity
     : null;
   const classification: SlackClassification =
-    baseClassification.classification === "external" &&
-    baseClassification.source === "default_no_evidence" &&
+    baseClassification.classification === "internal" &&
+    baseClassification.source === "team_roster" &&
+    !email &&
     (beforeState.classification === "internal" ||
       ((beforeState.classification === null || beforeState.classification_source === "default_no_evidence") &&
         existingStateEntity?.subtype === "internal"))
       ? { classification: "internal", source: beforeState.classification_source }
-      : baseClassification;
+      : baseClassification.classification === "external" &&
+          baseClassification.source === "default_no_evidence" &&
+          (beforeState.classification === "internal" ||
+            ((beforeState.classification === null || beforeState.classification_source === "default_no_evidence") &&
+              existingStateEntity?.subtype === "internal"))
+        ? { classification: "internal", source: beforeState.classification_source }
+        : baseClassification;
   const applied = tupleIsAtLeast(
     { providerUpdatedAt: profile.providerUpdatedAt, fetchedAt: profile.fetchedAt },
     beforeState,
@@ -397,7 +408,7 @@ async function runUpsertBody(
     const staleEntity = beforeState.entity_id
       ? await trx.selectFrom("entities").selectAll().where("id", "=", beforeState.entity_id).executeTakeFirst()
       : null;
-    return { entity: staleEntity ?? null, state: beforeState, applied: false };
+    return { entity: staleEntity ?? null, state: beforeState, applied: false, accountCreated: false };
   }
 
   const updatedState = await trx
@@ -437,7 +448,7 @@ async function runUpsertBody(
     const currentEntity = current.entity_id
       ? await trx.selectFrom("entities").selectAll().where("id", "=", current.entity_id).executeTakeFirst()
       : null;
-    return { entity: currentEntity ?? null, state: current, applied: false };
+    return { entity: currentEntity ?? null, state: current, applied: false, accountCreated: false };
   }
 
   if (profile.isBot || profile.deleted) {
@@ -447,7 +458,7 @@ async function runUpsertBody(
       .where("team_id", "=", profile.teamId)
       .where("slack_user_id", "=", profile.slackUserId)
       .executeTakeFirstOrThrow();
-    return { entity: null, state, applied: true };
+    return { entity: null, state, applied: true, accountCreated: false };
   }
 
   const existingRef = await trx
@@ -505,6 +516,30 @@ async function runUpsertBody(
   }
 
   const name = profileName(profile);
+  let accountCreated = false;
+  if (classification.source === "organization_domain" && email && name) {
+    const accountResult = await upsertSlackIdentity(
+      createUserRepository(trx),
+      { name, email, slackUserId: profile.slackUserId },
+      { mode: "provisioning" },
+    );
+    accountCreated = accountResult.status === "created";
+    if (accountResult.status === "created") {
+      options.logger?.info?.(
+        { email, slackUserId: profile.slackUserId, userId: accountResult.user.id },
+        "Created Sketch account from Slack organization-domain identity",
+      );
+    } else if (accountResult.status === "conflict") {
+      options.logger?.warn(
+        {
+          email: accountResult.conflict.email,
+          existingSlackUserId: accountResult.conflict.existingSlackUserId,
+          incomingSlackUserId: accountResult.conflict.incomingSlackUserId,
+        },
+        "Skipped Sketch account link for conflicting Slack identity",
+      );
+    }
+  }
   if (reviewReason && !name) {
     options.logger?.warn(
       { candidateEntityIds: reviewReason.candidateEntityIds ?? [], slackUserId: profile.slackUserId },
@@ -683,7 +718,7 @@ async function runUpsertBody(
     .where("team_id", "=", profile.teamId)
     .where("slack_user_id", "=", profile.slackUserId)
     .executeTakeFirstOrThrow();
-  return { entity, state, applied: true };
+  return { entity, state, applied: true, accountCreated };
 }
 
 async function runUpsert(

@@ -188,16 +188,17 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
 
     it("replays after a simulated crash without duplicate rows", async () => {
       const groupJid = `${randomUUID()}@g.us`;
+      const newestHistoryTimestamp = Date.now() - 60_000;
       const batch1 = [
         groupMessage({
           groupJid,
           providerMessageId: "history-001",
-          providerTimestamp: "2026-07-07T09:05:00.000Z",
+          providerTimestamp: new Date(newestHistoryTimestamp).toISOString(),
         }),
         groupMessage({
           groupJid,
           providerMessageId: "history-002",
-          providerTimestamp: "2026-07-07T09:04:00.000Z",
+          providerTimestamp: new Date(newestHistoryTimestamp - 60_000).toISOString(),
         }),
       ];
       const batch2 = [
@@ -205,7 +206,7 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
         groupMessage({
           groupJid,
           providerMessageId: "history-003",
-          providerTimestamp: "2026-07-07T09:03:00.000Z",
+          providerTimestamp: new Date(newestHistoryTimestamp - 120_000).toISOString(),
         }),
       ];
       const conversations = createConversationRepository(db);
@@ -262,6 +263,7 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
 
     it("keeps backfilled conversation rows out of the live chunker", async () => {
       const groupJid = `${randomUUID()}@g.us`;
+      const newestHistoryTimestamp = Date.now() - 60_000;
       const group = await seedEnabledGroup(db, groupJid);
       const harness = await createHarness(db, dataDir);
 
@@ -271,12 +273,12 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
             groupMessage({
               groupJid,
               providerMessageId: "chunk-newer",
-              providerTimestamp: "2026-07-07T09:10:00.000Z",
+              providerTimestamp: new Date(newestHistoryTimestamp).toISOString(),
             }),
             groupMessage({
               groupJid,
               providerMessageId: "chunk-older",
-              providerTimestamp: "2026-07-07T09:00:00.000Z",
+              providerTimestamp: new Date(newestHistoryTimestamp - 60_000).toISOString(),
             }),
           ],
           { progress: 100 },

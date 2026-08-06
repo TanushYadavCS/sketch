@@ -123,22 +123,30 @@ describe("createSlackStartupManager", () => {
     expect(createBot).not.toHaveBeenCalled();
   });
 
-  it("passes the team change to the explicit replacement reset hook", async () => {
+  it("fences a different team during boot and continues startup", async () => {
     const beforeExplicitTokenReplacement = vi.fn(async () => {});
+    const createBot = vi.fn(() => ({ start: vi.fn(async () => {}), stop: vi.fn(async () => {}) }));
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const start = createSlackStartupManager({
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      logger,
       getSettingsTokens: async () => ({ botToken: "xoxb-db", appToken: "xapp-db", teamId: "T123" }),
       validateTokens: vi.fn(async () => ({ teamId: "T456" })),
       getCurrentTeamId: async () => "T123",
       beforeExplicitTokenReplacement,
       getCurrentBot: () => null,
       setCurrentBot: vi.fn(),
-      createBot: vi.fn(() => ({ start: async () => {}, stop: async () => {} })),
+      createBot,
     });
 
-    await start({ botToken: "xoxb-new", appToken: "xapp-new" });
+    await expect(start()).resolves.toBeUndefined();
 
     expect(beforeExplicitTokenReplacement).toHaveBeenCalledWith({ previousTeamId: "T123", nextTeamId: "T456" });
+    expect(createBot).toHaveBeenCalledWith({ botToken: "xoxb-db", appToken: "xapp-db" });
+    expect(createBot.mock.results[0]?.value.start).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledWith(
+      { previousTeamId: "T123", nextTeamId: "T456" },
+      "Slack team changed during startup; fencing old-team state",
+    );
   });
 
   it("enforces single-flight concurrency while startup is in progress", async () => {

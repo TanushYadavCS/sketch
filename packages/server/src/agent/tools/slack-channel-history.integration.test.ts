@@ -160,12 +160,11 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(resultText(result)).toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);
     });
 
-    it("accepts a verified email with a per-file Slack grant", async () => {
+    it("does not let a per-file Slack grant bypass current channel membership", async () => {
       await db.insertInto("file_access").values({ indexed_file_id: "file-1", email: "departed@example.com" }).execute();
 
       const result = await handleSlackChannelHistory({ sliceId }, depsFor(db, ["departed@example.com"]));
-      expect(resultText(result)).not.toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);
-      expect(JSON.parse(resultText(result)).messages).toHaveLength(2);
+      expect(resultText(result)).toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);
     });
 
     it("denies when no caller emails resolve", async () => {

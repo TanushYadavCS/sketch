@@ -42,6 +42,11 @@ export type UpsertSlackIdentityResult =
       conflict: { email: string; existingSlackUserId: string; incomingSlackUserId: string };
     };
 
+type UpsertSlackIdentityOptions = {
+  emailVerified?: boolean;
+  mode?: "oauth" | "provisioning";
+};
+
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
@@ -53,15 +58,18 @@ function trimName(name: string): string {
 export async function upsertSlackIdentity(
   users: UpsertUsersDeps,
   identity: { name: string; email: string; slackUserId: string },
+  options: UpsertSlackIdentityOptions = {},
 ): Promise<UpsertSlackIdentityResult> {
   const name = trimName(identity.name);
   const email = normalizeEmail(identity.email);
+  const provisioningMode = options.mode === "provisioning";
+  const emailVerified = provisioningMode ? false : (options.emailVerified ?? true);
 
   const existingBySlack = await users.findBySlackId(identity.slackUserId);
   if (existingBySlack) {
     const needsNameUpdate = existingBySlack.name !== name;
-    const needsEmailUpdate = existingBySlack.email !== email;
-    const needsVerification = !existingBySlack.email_verified_at;
+    const needsEmailUpdate = !provisioningMode && existingBySlack.email !== email;
+    const needsVerification = !provisioningMode && emailVerified && !existingBySlack.email_verified_at;
 
     if (!needsNameUpdate && !needsEmailUpdate && !needsVerification) {
       return { status: "unchanged", user: existingBySlack };
@@ -70,7 +78,7 @@ export async function upsertSlackIdentity(
     const updated = await users.update(existingBySlack.id, {
       ...(needsNameUpdate ? { name } : {}),
       ...(needsEmailUpdate ? { email } : {}),
-      ...(needsEmailUpdate || needsVerification ? { emailVerified: true } : {}),
+      ...(needsEmailUpdate || needsVerification ? { emailVerified } : {}),
     });
     return { status: "updated", user: updated };
   }
@@ -91,7 +99,7 @@ export async function upsertSlackIdentity(
 
     const needsNameUpdate = existingByEmail.name !== name;
     const needsSlackUpdate = existingByEmail.slack_user_id !== identity.slackUserId;
-    const needsVerification = !existingByEmail.email_verified_at;
+    const needsVerification = !provisioningMode && emailVerified && !existingByEmail.email_verified_at;
 
     if (!needsNameUpdate && !needsSlackUpdate && !needsVerification) {
       return { status: "unchanged", user: existingByEmail };
@@ -109,7 +117,7 @@ export async function upsertSlackIdentity(
     name,
     email,
     slackUserId: identity.slackUserId,
-    emailVerified: true,
+    emailVerified,
   });
   return { status: "created", user: created };
 }
