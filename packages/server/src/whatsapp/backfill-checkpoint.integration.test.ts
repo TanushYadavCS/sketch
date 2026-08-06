@@ -25,6 +25,10 @@ interface HistoryHarness {
   runAgent: ReturnType<typeof vi.fn>;
 }
 
+function recentHistoryTimestamp(minutesAgo: number): string {
+  return new Date(Date.now() - 24 * 60 * 60_000 - minutesAgo * 60_000).toISOString();
+}
+
 function createMockRuntime(): WhatsAppRuntime & Pick<HistoryHarness, "emitHistory"> {
   let historyHandler:
     | ((messages: WhatsAppInboundMessage[], metadata?: WhatsAppHistoryBatchMetadata) => Promise<unknown>)
@@ -192,12 +196,12 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
         groupMessage({
           groupJid,
           providerMessageId: "history-001",
-          providerTimestamp: "2026-07-07T09:05:00.000Z",
+          providerTimestamp: recentHistoryTimestamp(0),
         }),
         groupMessage({
           groupJid,
           providerMessageId: "history-002",
-          providerTimestamp: "2026-07-07T09:04:00.000Z",
+          providerTimestamp: recentHistoryTimestamp(1),
         }),
       ];
       const batch2 = [
@@ -205,7 +209,7 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
         groupMessage({
           groupJid,
           providerMessageId: "history-003",
-          providerTimestamp: "2026-07-07T09:03:00.000Z",
+          providerTimestamp: recentHistoryTimestamp(2),
         }),
       ];
       const conversations = createConversationRepository(db);
@@ -271,12 +275,12 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
             groupMessage({
               groupJid,
               providerMessageId: "chunk-newer",
-              providerTimestamp: "2026-07-07T09:10:00.000Z",
+              providerTimestamp: recentHistoryTimestamp(0),
             }),
             groupMessage({
               groupJid,
               providerMessageId: "chunk-older",
-              providerTimestamp: "2026-07-07T09:00:00.000Z",
+              providerTimestamp: recentHistoryTimestamp(1),
             }),
           ],
           { progress: 100 },
@@ -287,7 +291,7 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
         db,
         groups: [group],
         logger: createTestLogger(),
-        now: new Date("2026-07-07T09:20:00.000Z"),
+        now: new Date(),
       });
       const slices = await db.selectFrom("conversation_slices").selectAll().orderBy("started_at", "asc").execute();
 
