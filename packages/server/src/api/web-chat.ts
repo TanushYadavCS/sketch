@@ -14,6 +14,7 @@ import {
 } from "@sketch/shared";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
+import { interruptActiveWebChatRun, webChatRunKey, withActiveWebChatRun } from "../agent/active-runs";
 import { buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } from "../agent/runner";
 import { archiveRuntimeSessions } from "../agent/sessions";
@@ -771,11 +772,6 @@ const DEFAULT_WEB_CHAT_CONVERSATION_ID = "default";
 const WEB_CHAT_CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
 const webChatTranscriptLocks = new Map<string, Promise<void>>();
 const webChatAgentRunLocks = new Map<string, Promise<void>>();
-const activeWebChatRuns = new Map<string, AbortController>();
-
-function webChatRunKey(userId: string, conversationId: string): string {
-  return `${userId}:${conversationId}`;
-}
 
 function normalizeWebChatConversationId(value: string | null | undefined): string | null {
   const id = (value ?? DEFAULT_WEB_CHAT_CONVERSATION_ID).trim();
@@ -822,30 +818,6 @@ async function withWebChatAgentRunLock<T>(userId: string, conversationId: string
       webChatAgentRunLocks.delete(key);
     }
   }
-}
-
-async function withActiveWebChatRun<T>(
-  userId: string,
-  conversationId: string,
-  abortController: AbortController,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const key = webChatRunKey(userId, conversationId);
-  activeWebChatRuns.set(key, abortController);
-  try {
-    return await fn();
-  } finally {
-    if (activeWebChatRuns.get(key) === abortController) {
-      activeWebChatRuns.delete(key);
-    }
-  }
-}
-
-function interruptActiveWebChatRun(userId: string, conversationId: string): boolean {
-  const activeRun = activeWebChatRuns.get(webChatRunKey(userId, conversationId));
-  if (!activeRun || activeRun.signal.aborted) return false;
-  activeRun.abort();
-  return true;
 }
 
 function webChatTranscriptDir(config: Config, userId: string): string {

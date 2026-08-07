@@ -327,7 +327,14 @@ export async function createServer(config: Config, options?: CreateServerOptions
         : {}),
     };
     return limitExecution(() =>
-      instrumentAgentRun(tracer, pricing, providerCtx, enrichedParams, () => runAgent(enrichedParams)),
+      instrumentAgentRun(
+        tracer,
+        pricing,
+        providerCtx,
+        enrichedParams,
+        () => runAgent(enrichedParams),
+        config.AGENT_RUN_WATCHDOG_MS,
+      ),
     );
   };
   const trackedRunAgent = (params: RunAgentParams): Promise<RunAgentResult> =>
