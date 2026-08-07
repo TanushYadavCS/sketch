@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { withActiveRun } from "../agent/active-runs";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
 import { QueueManager } from "../queue";
@@ -95,12 +96,24 @@ describe("TaskScheduler.dispatchSlackChannelMessage", () => {
     const deps = makeDeps(db);
     const scheduler = new TaskScheduler(deps as never);
     const triggerData = { messageTs: "1.2", nested: { exact: true } };
+    const parentController = new AbortController();
 
-    await scheduler.dispatchSlackChannelMessage("C_MATCH", triggerData);
+    await withActiveRun(
+      "slack:mention",
+      parentController,
+      () => scheduler.dispatchSlackChannelMessage("C_MATCH", triggerData),
+      {
+        platform: "slack",
+        channelId: "C_MATCH",
+        threadTs: "1.2",
+      },
+    );
 
     await vi.waitFor(() => expect(executionParams).toHaveLength(1));
     expect(deps.getSlack().isUserInChannel).toHaveBeenCalledWith("C_MATCH", "U_CREATOR");
     expect(executionParams[0]?.triggerData).toBe(triggerData);
+    expect(executionParams[0]?.parentAbortSignal).toBeUndefined();
+    expect(executionParams[0]?.propagateParentAbort).toBe(false);
   });
 
   it("copies authenticated Slack files into each automation workspace before dispatch", async () => {
@@ -291,8 +304,13 @@ describe("TaskScheduler.dispatchSlackChannelMessage", () => {
     await scheduler.dispatchSlackChannelMessage("C_MATCH", { messageTs: "1.2" });
 
     await vi.waitFor(() => expect(executionParams).toHaveLength(1));
-    expect(enqueueTaskById).toHaveBeenNthCalledWith(1, first.id, { messageTs: "1.2" });
-    expect(enqueueTaskById).toHaveBeenNthCalledWith(2, second.id, { messageTs: "1.2" });
+    expect(enqueueTaskById).toHaveBeenNthCalledWith(1, first.id, { messageTs: "1.2" }, { propagateParentAbort: false });
+    expect(enqueueTaskById).toHaveBeenNthCalledWith(
+      2,
+      second.id,
+      { messageTs: "1.2" },
+      { propagateParentAbort: false },
+    );
     expect(deps.getSlack().isUserInChannel).toHaveBeenCalledOnce();
   });
 

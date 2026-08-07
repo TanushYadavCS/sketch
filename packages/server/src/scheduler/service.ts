@@ -21,6 +21,7 @@ import { pipeline } from "node:stream/promises";
 import { workflowTriggerConfigSchema } from "@sketch/shared";
 import { Cron } from "croner";
 import type { Kysely } from "kysely";
+import { getActiveRunContext } from "../agent/active-runs";
 import type { McpServerConfig, runAgent } from "../agent/runner";
 import { resolveAgentRuntimeProviderConfigFromSettings } from "../agent/runtime/provider";
 import type { Config } from "../config";
@@ -55,6 +56,16 @@ import { getScheduledTaskRowQueueKey } from "./queue-key";
 import type { ScheduledTask } from "./types";
 
 type AgentExecutionQueue = "interactive" | "scheduled";
+
+interface EnqueueTaskOptions {
+  localFileRoot?: string;
+  propagateParentAbort?: boolean;
+}
+
+function getSlackParentAbortSignal(): AbortSignal | undefined {
+  const context = getActiveRunContext();
+  return context?.metadata?.platform === "slack" ? context.controller.signal : undefined;
+}
 
 function parseSlackTriggerSteps(value: string | null): Array<{ type?: string; triggerConfig?: unknown }> {
   if (!value) return [];
@@ -341,6 +352,7 @@ export class TaskScheduler {
     task: ScheduledTaskRow,
     executionQueue: AgentExecutionQueue,
     trigger?: { provided: boolean; data: unknown; localFileRoot?: string },
+    parentAbortSignal?: AbortSignal,
   ): Promise<AutomationExecutionResult> {
     const { config, logger, loadIntegrationProvider } = this.deps;
     const delivery = resolveWorkflowDelivery(task);
@@ -362,7 +374,8 @@ export class TaskScheduler {
       listAgentEnvForRuntime: this.deps.listAgentEnvForRuntime,
       userRepo: this.deps.userRepo,
       runAgent: executionQueue === "scheduled" ? this.deps.runScheduledAgent : this.deps.runAgent,
-      propagateParentAbort: executionQueue === "interactive",
+      propagateParentAbort: executionQueue === "interactive" && parentAbortSignal !== undefined,
+      parentAbortSignal,
       buildMcpServers: this.deps.buildMcpServers,
       getSlack: this.deps.getSlack,
       inboxMessagesRepo: this.deps.inboxMessagesRepo,
@@ -376,16 +389,18 @@ export class TaskScheduler {
       trustedLocalFileRoot: trigger?.localFileRoot,
     });
 
-    const now = new Date().toISOString();
-    const cron = this.cronInstances.get(task.id);
-    const nextRun = task.schedule_type === "once" ? null : (cron?.nextRun()?.toISOString() ?? null);
-    await this.repo.updateRunTimestamps(task.id, now, nextRun);
+    if (!result.aborted) {
+      const now = new Date().toISOString();
+      const cron = this.cronInstances.get(task.id);
+      const nextRun = task.schedule_type === "once" ? null : (cron?.nextRun()?.toISOString() ?? null);
+      await this.repo.updateRunTimestamps(task.id, now, nextRun);
 
-    if (task.schedule_type === "once") {
-      await this.repo.updateStatus(task.id, "completed");
-      await this.repo.update(task.id, { next_run_at: null });
-      this.unscheduleTask(task.id);
-      this.deps.logger.debug({ taskId: task.id }, "TaskScheduler: once task completed, unscheduled");
+      if (task.schedule_type === "once") {
+        await this.repo.updateStatus(task.id, "completed");
+        await this.repo.update(task.id, { next_run_at: null });
+        this.unscheduleTask(task.id);
+        this.deps.logger.debug({ taskId: task.id }, "TaskScheduler: once task completed, unscheduled");
+      }
     }
 
     return result;
@@ -396,6 +411,7 @@ export class TaskScheduler {
     getTask: () => Promise<ScheduledTaskRow | null>,
     executionQueue: AgentExecutionQueue,
     trigger?: { provided: boolean; data: unknown; localFileRoot?: string },
+    parentAbortSignal?: AbortSignal,
   ): Promise<AutomationExecutionResult | null> {
     const queueKey = this.getQueueKey(task);
     return new Promise<AutomationExecutionResult | null>((resolve, reject) => {
@@ -406,7 +422,7 @@ export class TaskScheduler {
             resolve(null);
             return;
           }
-          resolve(await this.executeTaskNow(current, executionQueue, trigger));
+          resolve(await this.executeTaskNow(current, executionQueue, trigger, parentAbortSignal));
         } catch (err) {
           reject(err);
         }
@@ -594,13 +610,16 @@ export class TaskScheduler {
     if (!row) throw new Error(`Task ${id} not found`);
     if (row.status === "completed" && row.schedule_type === "once") return null;
     if (row.status !== "active") throw new Error(`Task ${id} is not active`);
-    return this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive");
+    return this.enqueueTaskRun(
+      row,
+      () => this.getRunnableTask(id, true),
+      "interactive",
+      undefined,
+      getSlackParentAbortSignal(),
+    );
   }
 
-  async enqueueTaskById(
-    id: string,
-    ...triggerData: [] | [unknown] | [unknown, { localFileRoot: string }]
-  ): Promise<void> {
+  async enqueueTaskById(id: string, ...triggerData: [] | [unknown] | [unknown, EnqueueTaskOptions]): Promise<void> {
     const row = await this.repo.getById(id);
     if (!row) throw new Error(`Task ${id} not found`);
     if (row.status === "completed" && row.schedule_type === "once") return;
@@ -610,7 +629,8 @@ export class TaskScheduler {
       triggerData.length === 0
         ? undefined
         : { provided: true, data: triggerData[0], localFileRoot: triggerData[1]?.localFileRoot };
-    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive", trigger)
+    const parentAbortSignal = triggerData[1]?.propagateParentAbort === false ? undefined : getSlackParentAbortSignal();
+    this.enqueueTaskRun(row, () => this.getRunnableTask(id, true), "interactive", trigger, parentAbortSignal)
       .catch((err) => {
         this.deps.logger.error({ err, taskId: id }, "Automation background execution failed");
       })
@@ -696,9 +716,9 @@ export class TaskScheduler {
         });
         localFileRoot = copied.localFileRoot;
         if (localFileRoot) {
-          await this.enqueueTaskById(task.id, copied.triggerData, { localFileRoot });
+          await this.enqueueTaskById(task.id, copied.triggerData, { localFileRoot, propagateParentAbort: false });
         } else {
-          await this.enqueueTaskById(task.id, copied.triggerData);
+          await this.enqueueTaskById(task.id, copied.triggerData, { propagateParentAbort: false });
         }
       } catch (err) {
         if (localFileRoot) await rm(localFileRoot, { recursive: true, force: true });

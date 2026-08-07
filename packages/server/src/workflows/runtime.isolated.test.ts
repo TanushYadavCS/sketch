@@ -193,6 +193,72 @@ function makeStepContent(rows: Array<{ stepId: string; content: string }>) {
   };
 }
 
+describe("executeAutomation stopped Sketch agent steps", () => {
+  it.each([
+    {
+      outcome: "returned an aborted result",
+      runAgent: vi.fn().mockResolvedValue({
+        pendingUploads: [],
+        trace: { finalText: "partial output" },
+        rawUsage: { stopReason: "aborted", toolCalls: [] },
+      }),
+    },
+    {
+      outcome: "threw after its abort controller fired",
+      runAgent: vi.fn().mockImplementation(async (agentParams) => {
+        agentParams.abortController?.abort();
+        throw new Error("Claude SDK aborted");
+      }),
+    },
+  ])("stops later steps when the Sketch agent $outcome on both runtimes", async ({ runAgent }) => {
+    const logger = { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const params = makeParams({
+      logger,
+      runAgent,
+      propagateParentAbort: true,
+      parentAbortSignal: new AbortController().signal,
+      task: makeActionTask([
+        {
+          id: "agent1",
+          type: "agent",
+          label: "Research",
+          icon: "sketch-ai",
+          position: { x: 0, y: 100 },
+          agentMode: "sketch",
+        },
+        { id: "later", type: "action", label: "Send ticket", icon: "code", position: { x: 0, y: 200 } },
+      ]),
+      stepContentRepo: makeStepContent([
+        { stepId: "agent1", content: "Research the issue." },
+        { stepId: "later", content: "return { sent: true };" },
+      ]),
+    });
+
+    for (const runtime of ["sdk", "aisdk"] as const) {
+      params.config.AGENT_RUNTIME = runtime;
+      const result = await executeAutomation(params as never);
+
+      expect(result.status).toBe("failed");
+      expect(result.stepOutputs.agent1?.status).toBe("failed");
+      expect(result.stepOutputs.later?.status).toBe("skipped");
+      expect(params.sendMessage).not.toHaveBeenCalled();
+      expect(params._runsRepo.update).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          status: "failed",
+          errorMessage: expect.stringContaining("aborted"),
+          completedAt: expect.any(String),
+        }),
+      );
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ stepId: "agent1" }),
+        "Automation: execution stopped by user",
+      );
+      expect(logger.error).not.toHaveBeenCalled();
+    }
+  });
+});
+
 describe("executeAutomation agent steps", () => {
   it("links an interactive workflow child to its Slack parent without sharing its controller", async () => {
     const parentController = new AbortController();
@@ -205,7 +271,11 @@ describe("executeAutomation agent steps", () => {
         rawUsage: { toolCalls: [] },
       };
     });
-    const params = makeParams({ runAgent, propagateParentAbort: true });
+    const params = makeParams({
+      runAgent,
+      propagateParentAbort: true,
+      parentAbortSignal: parentController.signal,
+    });
 
     await withActiveRun("workflow-parent", parentController, () => executeAutomation(params as never), {
       platform: "slack",
@@ -235,7 +305,11 @@ describe("executeAutomation agent steps", () => {
         rawUsage: { toolCalls: [] },
       };
     });
-    const params = makeParams({ runAgent, propagateParentAbort: true });
+    const params = makeParams({
+      runAgent,
+      propagateParentAbort: true,
+      parentAbortSignal: parentController.signal,
+    });
 
     await withActiveRun("workflow-parent", parentController, () => executeAutomation(params as never), {
       platform: "slack",
