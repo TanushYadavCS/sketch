@@ -20,10 +20,9 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
-
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
 
-const EXPECTED_MIGRATION_COUNT = 159;
+const EXPECTED_MIGRATION_COUNT = 160;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -197,6 +196,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[156]).toBe("161-slack-roster-evidence");
     expect(names[157]).toBe("162-user-entity-links");
     expect(names[158]).toBe("163-slack-file-access-backfill-cleanup");
+    expect(names[159]).toBe("164-outlook-calendar-provider-file-scope");
   });
 
   it("creates the task conversation association table", async () => {

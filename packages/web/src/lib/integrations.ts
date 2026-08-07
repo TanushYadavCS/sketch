@@ -13,6 +13,7 @@ export type IntegrationType =
   | "google_calendar"
   | "gmail"
   | "outlook"
+  | "outlook_calendar"
   | "teams"
   | "clickup"
   | "notion"
@@ -155,6 +156,14 @@ const TEAMS_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS = [
   "Paste the Application client ID, tenant, and Client Secret Value here, then connect with Microsoft",
 ];
 
+const OUTLOOK_CALENDAR_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS = [
+  "Create or open a Microsoft Entra app registration for the tenant you want calendar users to sign in with",
+  "In Authentication, add the Web redirect URI shown below exactly",
+  "In API permissions, add delegated Microsoft Graph permissions: Calendars.Read, User.Read, and offline_access",
+  "Create a client secret in Certificates & secrets and copy its Value before leaving the page",
+  "Paste the Application client ID, tenant, and Client Secret Value here, then connect with Microsoft",
+];
+
 const MICROSOFT_ENTRA_APP_REGISTRATIONS_URL =
   "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade";
 
@@ -293,6 +302,31 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
       "Inbox and sent messages sync automatically after authorization",
     ],
     oauthClientSetupSteps: OUTLOOK_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS,
+    perUserAuth: true,
+    requiresOAuthClientSetup: false,
+  },
+  {
+    type: "outlook_calendar",
+    name: "Outlook Calendar",
+    description: "Microsoft 365 calendar events and meetings",
+    category: "Calendar",
+    color: "#0078D4",
+    authType: "oauth",
+    oauthRedirect: true,
+    authFields: MICROSOFT_OAUTH_AUTH_FIELDS,
+    scopeLabel: "calendars",
+    scopeType: "flat",
+    scopeItemNoun: "calendars",
+    scopeConfigKey: "calendarIds",
+    itemNoun: "events",
+    credentialUrl: "https://learn.microsoft.com/en-us/graph/permissions-reference",
+    oauthClientCredentialUrl: MICROSOFT_ENTRA_APP_REGISTRATIONS_URL,
+    connectSteps: [
+      "Sign in with your Microsoft account",
+      "Authorize read-only access to your Microsoft 365 calendars",
+      "Choose which calendars Sketch should sync",
+    ],
+    oauthClientSetupSteps: OUTLOOK_CALENDAR_MICROSOFT_OAUTH_CLIENT_SETUP_STEPS,
     perUserAuth: true,
     requiresOAuthClientSetup: false,
   },

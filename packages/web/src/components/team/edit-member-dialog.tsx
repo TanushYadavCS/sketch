@@ -736,6 +736,8 @@ function getProviderIdPlaceholder(provider: string): string {
     case "google_drive":
     case "google_calendar":
       return "Google user ID or email";
+    case "outlook_calendar":
+      return "Microsoft user ID or email";
     case "linear":
       return "Linear user ID";
     case "notion":

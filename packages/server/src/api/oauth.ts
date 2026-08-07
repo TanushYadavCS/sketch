@@ -27,10 +27,11 @@ import {
   resolveMicrosoftOAuthConfig,
 } from "../connectors/microsoft-graph";
 import { OUTLOOK_MICROSOFT_SCOPE } from "../connectors/outlook";
+import { OUTLOOK_CALENDAR_MICROSOFT_SCOPE } from "../connectors/outlook-calendar";
 import { getConnector } from "../connectors/registry";
 import { runConnectorSync } from "../connectors/sync";
 import { TEAMS_MICROSOFT_SCOPE } from "../connectors/teams";
-import type { ConnectorType, OAuthCredentials } from "../connectors/types";
+import type { ConnectorType, OAuthCredentials, SyncStatus } from "../connectors/types";
 import { validateZohoCrmCredentials } from "../connectors/zoho-crm";
 import type { createConnectorRepository } from "../db/repositories/connectors";
 import type { createProviderIdentityRepository } from "../db/repositories/provider-identities";
@@ -93,7 +94,7 @@ const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const USERINFO_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
 const GOOGLE_OAUTH_CONNECTORS = new Set<ConnectorType>(["google_drive", "google_calendar", "gmail"]);
-const MICROSOFT_OAUTH_CONNECTORS = new Set<ConnectorType>(["outlook", "teams"]);
+const MICROSOFT_OAUTH_CONNECTORS = new Set<ConnectorType>(["outlook", "outlook_calendar", "teams"]);
 const ZOHO_SCOPE = "ZohoCRM.modules.ALL,ZohoCRM.users.READ,ZohoCRM.org.READ,ZohoCRM.settings.READ";
 const MICROSOFT_GRAPH_ADMIN_CONSENT_SCOPE = "https://graph.microsoft.com/.default";
 
@@ -160,15 +161,30 @@ export function shouldRunGoogleFirstSync(connectorType: ConnectorType): boolean 
 }
 
 function microsoftConnectorFromQuery(value: string | undefined): ConnectorType {
+  if (value === "outlook_calendar" || value === "calendar") return "outlook_calendar";
   return value === "teams" ? "teams" : "outlook";
 }
 
 function microsoftScopesFor(connectorType: ConnectorType): string {
-  return connectorType === "teams" ? TEAMS_MICROSOFT_SCOPE : OUTLOOK_MICROSOFT_SCOPE;
+  if (connectorType === "teams") return TEAMS_MICROSOFT_SCOPE;
+  return connectorType === "outlook_calendar" ? OUTLOOK_CALENDAR_MICROSOFT_SCOPE : OUTLOOK_MICROSOFT_SCOPE;
 }
 
 function microsoftConnectorName(connectorType: ConnectorType): string {
-  return connectorType === "teams" ? "Microsoft Teams" : "Outlook";
+  if (connectorType === "teams") return "Microsoft Teams";
+  return connectorType === "outlook_calendar" ? "Outlook Calendar" : "Outlook";
+}
+
+function initialMicrosoftScopeConfig(connectorType: ConnectorType): Record<string, unknown> {
+  return connectorType === "outlook_calendar" ? { calendarIds: [] } : {};
+}
+
+export function shouldRunMicrosoftFirstSync(connectorType: ConnectorType): boolean {
+  return connectorType !== "outlook_calendar";
+}
+
+export function initialMicrosoftSyncStatus(connectorType: ConnectorType): SyncStatus | undefined {
+  return connectorType === "outlook_calendar" ? "paused" : undefined;
 }
 
 function extractMicrosoftConsentRequiredCode(errorDescription: string | undefined): string | undefined {
@@ -605,7 +621,7 @@ export function oauthRoutes(
         {
           error: {
             code: "UNSUPPORTED_CONNECTOR",
-            message: "Microsoft admin consent requires a Microsoft connector (Outlook or Teams)",
+            message: "Microsoft admin consent requires a Microsoft connector (Outlook, Outlook Calendar, or Teams)",
             connector: connectorParam ?? null,
           },
         },
@@ -825,7 +841,8 @@ export function oauthRoutes(
         connectorType,
         authType: "oauth",
         credentials: JSON.stringify(oauthCreds),
-        scopeConfig: JSON.stringify({}),
+        scopeConfig: JSON.stringify(initialMicrosoftScopeConfig(connectorType)),
+        syncStatus: initialMicrosoftSyncStatus(connectorType),
         createdBy: userId,
         credentialHint: providerEmail,
       });
@@ -835,9 +852,11 @@ export function oauthRoutes(
         "Microsoft OAuth tokens saved",
       );
 
-      runConnectorSync(db, connectorConfig.id, logger, appConfig).catch((err) => {
-        logger.error({ err, connectorId: connectorConfig.id, connectorType }, "Microsoft first sync failed");
-      });
+      if (shouldRunMicrosoftFirstSync(connectorType)) {
+        runConnectorSync(db, connectorConfig.id, logger, appConfig).catch((err) => {
+          logger.error({ err, connectorId: connectorConfig.id, connectorType }, "Microsoft first sync failed");
+        });
+      }
 
       return c.redirect(`/files?oauth=success&connector=${connectorType}&connectorId=${connectorConfig.id}`);
     } catch (err) {

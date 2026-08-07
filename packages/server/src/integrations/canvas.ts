@@ -42,6 +42,7 @@ export type CanvasSketchConnectorType =
   | "google_calendar"
   | "gmail"
   | "outlook"
+  | "outlook_calendar"
   | "teams"
   | "fireflies"
   | "clickup"
@@ -71,6 +72,7 @@ const canvasSketchConnectorTypeSchema = z.enum([
   "google_calendar",
   "gmail",
   "outlook",
+  "outlook_calendar",
   "teams",
   "fireflies",
   "clickup",

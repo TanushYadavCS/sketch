@@ -142,7 +142,7 @@ export type DailyBriefCandidateContext = {
 
 export const DAILY_BRIEF_MEETING_ATTENDEE_LIMIT = 12;
 
-const CALENDAR_SOURCE = "google_calendar";
+const CALENDAR_SOURCES = ["google_calendar", "outlook_calendar"] as const;
 const CALENDAR_EVENT_FILE_TYPE = "calendar_event";
 
 export type TodaysMeetingAttendee = {
@@ -301,7 +301,7 @@ export async function buildTodaysMeetings({
   const files = await db
     .selectFrom("indexed_files")
     .select(["id", "file_name", "source_created_at", "provider_url", "source_path", "thread_id", "connector_config_id"])
-    .where("source", "=", CALENDAR_SOURCE)
+    .where("source", "in", [...CALENDAR_SOURCES])
     .where("file_type", "=", CALENDAR_EVENT_FILE_TYPE)
     .where("is_archived", "=", 0)
     .where("is_all_day", "=", 0)
@@ -370,12 +370,12 @@ type CalendarCopyFile = {
   connector_config_id: string;
 };
 
-/** The google_calendar connector configs the reader owns (created). */
+/** The calendar connector configs the reader owns (created). */
 async function readerOwnedCalendarConnectorIds(db: Kysely<DB>, userId: string): Promise<Set<string>> {
   const rows = await db
     .selectFrom("connector_configs")
     .select("id")
-    .where("connector_type", "=", CALENDAR_SOURCE)
+    .where("connector_type", "in", [...CALENDAR_SOURCES])
     .where("created_by", "=", userId)
     .execute();
   return new Set(rows.map((row) => row.id));
@@ -392,7 +392,7 @@ async function readerOwnedCalendarConnectorIds(db: Kysely<DB>, userId: string): 
  * owner-declined filter, since a declined event's reader-owned copy is archived
  * and only coworker copies would remain (those must not resurface the meeting).
  *
- * Deduped by `thread_id` (the event's iCalUID); the lowest id wins when the
+ * Deduped by `thread_id` (the event's provider calendar identity); the lowest id wins when the
  * reader holds multiple copies, so the result is stable regardless of query order.
  */
 function readerOwnedMeetingCopies<T extends CalendarCopyFile>(files: T[], readerConnectorIds: Set<string>): T[] {
