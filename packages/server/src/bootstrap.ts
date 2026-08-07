@@ -154,7 +154,7 @@ export async function seedSlackOrganizationDomain(
 
   if (domains.size === 0) {
     logger?.warn(
-      "No corporate admin email domains could be seeded; classification will be unknown until a domain is configured",
+      "No corporate admin email domains could be seeded; classification defaults to external without domain or roster evidence",
     );
     return null;
   }
@@ -188,7 +188,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const db = await createDatabase(config);
   await runMigrations(db);
   logger.info("Database ready");
-  await seedSlackOrganizationDomain(db, logger);
 
   configureMaterializeDefaults({
     llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
@@ -232,6 +231,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const agentEnvironmentVariables = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   await backfillFilesConnectorCredentialEncryption(db, config.ENCRYPTION_KEY, logger);
   await runManagedSeed(config, settingsRepo, users);
+  await seedSlackOrganizationDomain(db, logger);
   if (externalStartup) await migrateManagedConnectorCredentialsToCanvas({ db, appConfig: config, logger });
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
@@ -310,6 +310,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       openRouterApiKey: params.openRouterApiKey ?? config.OPENROUTER_API_KEY,
       maxAttachmentTotalBytes: params.maxAttachmentTotalBytes ?? config.MAX_ATTACHMENT_TOTAL_MB * 1024 * 1024,
       settingsEncryptionKey: params.settingsEncryptionKey ?? config.ENCRYPTION_KEY,
+      slackEntitySyncEnabled: params.slackEntitySyncEnabled ?? config.SLACK_ENTITY_SYNC,
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,
       agentRuntime: params.agentRuntime ?? config.AGENT_RUNTIME,
@@ -920,6 +921,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
           db,
           logger,
           connectorConfigId: slackConnector.id,
+          slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC,
         });
       }
       let syncRowsFenced = 0;
@@ -1079,6 +1081,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
             db,
             logger,
             connectorConfigId: slackConnector.id,
+            slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC,
           });
         }
       } catch (err) {

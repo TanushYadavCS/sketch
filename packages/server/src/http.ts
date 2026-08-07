@@ -318,6 +318,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.use(
     "/api/*",
     createAuthMiddleware(settings, {
+      slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC,
       managedAuthSecret: config.MANAGED_AUTH_SECRET,
       managedUrl: config.MANAGED_URL,
       hasSetupAdmin: async () =>

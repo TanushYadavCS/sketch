@@ -25,6 +25,7 @@ import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 import * as slackEntityLifecycleMigration from "./159-slack-entity-lifecycle-sync";
+import * as slackRosterEvidenceMigration from "./160-slack-roster-evidence";
 
 const EXPECTED_MIGRATION_COUNT = 157;
 
@@ -280,6 +281,73 @@ describe("runMigrations — full sequence", () => {
     await expect(
       db.selectFrom("entity_review_queue").select("id").where("normalized_name", "=", "same name").execute(),
     ).resolves.toHaveLength(2);
+  });
+
+  it("upgrades schema 158 with existing rows through the roster evidence migration", async () => {
+    const legacyDb = createBlankDb();
+    try {
+      const migrationResult = await createMigrator(legacyDb).migrateTo("158-slack-channel-participants");
+      expect(migrationResult.error).toBeUndefined();
+      await legacyDb
+        .insertInto("slack_channel_participants")
+        .values({ channel_id: "C-existing", slack_user_id: "U-existing", last_seen_at: "2026-08-07T00:00:00.000Z" })
+        .execute();
+
+      await runMigrations(legacyDb, { quiet: true });
+      await slackRosterEvidenceMigration.up(legacyDb as unknown as Kysely<unknown>);
+
+      const tables = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
+        ORDER BY name
+      `.execute(legacyDb);
+      expect(tables.rows.map((row) => row.name)).toEqual([
+        "organization_domains",
+        "slack_sync_runs",
+        "slack_user_sync_state",
+      ]);
+
+      const stateColumns = await sql<{ name: string }>`
+        SELECT name FROM pragma_table_info('slack_user_sync_state')
+      `.execute(legacyDb);
+      expect(stateColumns.rows.map((row) => row.name)).toEqual(
+        expect.arrayContaining(["team_id", "slack_user_id", "entity_created_by_sync", "last_roster_seen_at"]),
+      );
+      const settingsColumns = await sql<{ name: string }>`
+        SELECT name FROM pragma_table_info('settings') WHERE name = 'slack_team_id'
+      `.execute(legacyDb);
+      expect(settingsColumns.rows).toEqual([{ name: "slack_team_id" }]);
+
+      const indexes = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'index'
+          AND name IN ('idx_slack_user_sync_state_entity', 'idx_slack_sync_runs_status_heartbeat')
+        ORDER BY name
+      `.execute(legacyDb);
+      expect(indexes.rows.map((row) => row.name)).toEqual([
+        "idx_slack_sync_runs_status_heartbeat",
+        "idx_slack_user_sync_state_entity",
+      ]);
+
+      const definitions = await sql<{ name: string; sql: string }>`
+        SELECT name, sql FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
+      `.execute(legacyDb);
+      expect(definitions.rows.find((row) => row.name === "slack_user_sync_state")?.sql).toContain("primary key");
+      expect(definitions.rows.find((row) => row.name === "organization_domains")?.sql).toContain(
+        'constraint "organization_domains_domain_unique"',
+      );
+      expect(definitions.rows.find((row) => row.name === "slack_sync_runs")?.sql).toContain(
+        'constraint "slack_sync_runs_team_trigger_unique"',
+      );
+      await expect(
+        legacyDb.selectFrom("slack_channel_participants").select(["channel_id", "slack_user_id"]).execute(),
+      ).resolves.toEqual([{ channel_id: "C-existing", slack_user_id: "U-existing" }]);
+    } finally {
+      await legacyDb.destroy();
+    }
   });
 
   it("preserves review queue, evidence, and domain candidates across the SQLite rebuild", async () => {

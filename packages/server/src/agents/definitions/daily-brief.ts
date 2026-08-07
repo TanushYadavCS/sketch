@@ -237,12 +237,13 @@ async function filterVisibleCandidateFileIds(
   db: Kysely<DB>,
   fileIds: string[],
   contentUserEmails: string[] | undefined,
+  slackEntitySyncEnabled: boolean,
 ): Promise<Set<string>> {
   const uniqueFileIds = [...new Set(fileIds)];
   const visibleFileIds = new Set<string>();
   for (let i = 0; i < uniqueFileIds.length; i += FILE_ACCESS_FILTER_CHUNK_SIZE) {
     const chunk = uniqueFileIds.slice(i, i + FILE_ACCESS_FILTER_CHUNK_SIZE);
-    const visibleChunk = await filterAccessibleFileIds(db, chunk, contentUserEmails);
+    const visibleChunk = await filterAccessibleFileIds(db, chunk, contentUserEmails, slackEntitySyncEnabled);
     for (const fileId of visibleChunk) visibleFileIds.add(fileId);
   }
   return visibleFileIds;
@@ -292,6 +293,7 @@ export async function buildTodaysMeetings({
   user,
   outputDate,
   timezone,
+  slackEntitySyncEnabled = true,
 }: AgentRuntimeContextParams): Promise<TodaysMeeting[]> {
   const dayStart = new Date(outputDateWindowStartMs(outputDate, timezone)).toISOString();
   const dayEnd = new Date(outputDateWindowEndMs(outputDate, timezone)).toISOString();
@@ -313,6 +315,7 @@ export async function buildTodaysMeetings({
     db,
     files.map((file) => file.id),
     readerEmails,
+    slackEntitySyncEnabled,
   );
   const visibleFiles = files.filter((file) => visibleFileIds.has(file.id) && file.source_created_at);
   if (visibleFiles.length === 0) return [];
@@ -433,6 +436,7 @@ export async function buildDailyBriefCandidateContext({
   timezone,
   adminCanReadAllFiles,
   contentUserEmails,
+  slackEntitySyncEnabled = true,
   user,
 }: AgentRuntimeContextParams): Promise<DailyBriefCandidateContext> {
   const windowEndMs = outputDateWindowEndMs(outputDate, timezone);
@@ -476,6 +480,7 @@ export async function buildDailyBriefCandidateContext({
     db,
     rows.map((row) => row.indexed_file_id),
     candidateUserEmails,
+    slackEntitySyncEnabled,
   );
   const byEntity = new Map<string, CandidateAccumulator>();
   for (const row of rows as CandidateMentionRow[]) {
@@ -1508,6 +1513,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
     taskRepo.loadOpenDurableTasksForBrief({
       userId: args.userId,
       userEmails,
+      slackEntitySyncEnabled: args.config.SLACK_ENTITY_SYNC,
       assigneeEntityIds,
       limit: maxItemsPerSection * 4,
     }),
@@ -1551,6 +1557,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
     timezone: readString(args.baseContext.timezone) ?? "UTC",
     generatedAt: readString(args.baseContext.generationStartedAt) ?? new Date().toISOString(),
     maxItemsPerSection,
+    slackEntitySyncEnabled: args.config.SLACK_ENTITY_SYNC,
     initialPartial: peopleResult.status === "error",
     logger: createLogger(args.config),
   });

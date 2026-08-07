@@ -25,6 +25,7 @@ declare module "hono" {
     email: string | null;
     /** Org setting: when true, admins bypass per-file content RBAC for direct HTTP reads. */
     adminCanReadAllFiles: boolean;
+    slackEntitySyncEnabled: boolean;
   }
 }
 
@@ -56,6 +57,7 @@ export interface AuthMiddlewareOpts {
   resolveLocalSessionUser?: (
     sub: string,
   ) => Promise<{ id: string; authRole?: string | null; email?: string | null } | null>;
+  slackEntitySyncEnabled?: boolean;
 }
 
 function toAuthRole(value: string | null | undefined): "admin" | "member" {
@@ -106,6 +108,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
     let hasAdmin = false;
     let jwtSecret: string | null = null;
     let adminCanReadAllFiles = false;
+    const slackEntitySyncEnabled = opts?.slackEntitySyncEnabled ?? true;
     try {
       const row = await settings.get();
       setupComplete = Boolean(row?.onboarding_completed_at);
@@ -151,6 +154,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
         c.set("sub", "sketch-api-key");
         c.set("email", null);
         c.set("adminCanReadAllFiles", adminCanReadAllFiles);
+        c.set("slackEntitySyncEnabled", slackEntitySyncEnabled);
         return next();
       }
     }
@@ -176,6 +180,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
         c.set("sub", user.id);
         c.set("email", user.email ?? payload.email ?? null);
         c.set("adminCanReadAllFiles", adminCanReadAllFiles);
+        c.set("slackEntitySyncEnabled", slackEntitySyncEnabled);
         return next();
       }
     }
@@ -210,6 +215,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
       c.set("email", payload.email ?? null);
     }
     c.set("adminCanReadAllFiles", adminCanReadAllFiles);
+    c.set("slackEntitySyncEnabled", slackEntitySyncEnabled);
 
     return next();
   };

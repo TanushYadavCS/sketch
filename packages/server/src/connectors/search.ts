@@ -56,16 +56,19 @@ export interface SearchOptions {
    * When omitted, no user-level filtering is applied.
    */
   userEmails?: string[];
+  slackEntitySyncEnabled?: boolean;
 }
 
-export function fileAccessFilterSql(emailList: string[]) {
+export function fileAccessFilterSql(emailList: string[], slackEntitySyncEnabled = true) {
   const emailSql = sql.join(
     emailList.map((e) => sql`${e}`),
     sql`,`,
   );
-  const nonChatSource = sql`(indexed_files.source IS NULL OR indexed_files.source NOT IN ('slack', 'whatsapp'))`;
+  const accessDoor = slackEntitySyncEnabled
+    ? sql`(indexed_files.source IS NULL OR indexed_files.source NOT IN ('slack', 'whatsapp'))`
+    : sql`1 = 1`;
   return sql<SqlBool>`(
-    (${nonChatSource}
+    (${accessDoor}
       AND indexed_files.access_scope_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM file_access WHERE file_access.indexed_file_id = indexed_files.id))
     OR EXISTS (
@@ -73,7 +76,7 @@ export function fileAccessFilterSql(emailList: string[]) {
       WHERE access_scope_members.access_scope_id = indexed_files.access_scope_id
       AND access_scope_members.email IN (${emailSql})
     )
-    OR (${nonChatSource}
+    OR (${accessDoor}
       AND EXISTS (
         SELECT 1 FROM file_access
         WHERE file_access.indexed_file_id = indexed_files.id
@@ -112,7 +115,8 @@ export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOp
   if (opts?.userEmails !== undefined && opts.userEmails.length === 0) return [];
 
   const emailList = opts?.userEmails ?? [];
-  const userFilter = emailList.length > 0 ? sql`AND ${fileAccessFilterSql(emailList)}` : sql``;
+  const userFilter =
+    emailList.length > 0 ? sql`AND ${fileAccessFilterSql(emailList, opts?.slackEntitySyncEnabled ?? true)}` : sql``;
 
   // Hide bodyless CRM activities ("empty reminders") from search — they're rolled
   // up under their parent object, never surfaced as standalone results.
@@ -198,6 +202,7 @@ export async function getFileContent(
   db: Kysely<DB>,
   fileId: string,
   userEmails?: string[],
+  slackEntitySyncEnabled = true,
 ): Promise<{
   id: string;
   connectorConfigId: string;
@@ -254,7 +259,7 @@ export async function getFileContent(
         .limit(1)
         .execute();
 
-      const isChatSource = file.source === "slack" || file.source === "whatsapp";
+      const isChatSource = slackEntitySyncEnabled && (file.source === "slack" || file.source === "whatsapp");
       if (isChatSource || hasScope || hasFileAccess.length > 0) {
         let allowed = false;
 
@@ -351,6 +356,7 @@ export async function filterAccessibleFileIds(
   db: Kysely<DB>,
   fileIds: string[],
   userEmails?: string[],
+  slackEntitySyncEnabled = true,
 ): Promise<Set<string>> {
   if (fileIds.length === 0) return new Set();
   if (userEmails === undefined) return new Set(fileIds);
@@ -436,7 +442,7 @@ export async function filterAccessibleFileIds(
     }
 
     const perFile = fileAccessByFile.get(file.id);
-    const isChatSource = file.source === "slack" || file.source === "whatsapp";
+    const isChatSource = slackEntitySyncEnabled && (file.source === "slack" || file.source === "whatsapp");
     const hasScope = file.access_scope_id != null;
     const hasFileAccess = (perFile?.size ?? 0) > 0;
 
@@ -1026,7 +1032,7 @@ export async function hybridSearch(
         fileIds.map((id) => sql`${id}`),
         sql`,`,
       )})
-      AND ${fileAccessFilterSql(emailList)}
+      AND ${fileAccessFilterSql(emailList, opts?.slackEntitySyncEnabled ?? true)}
     `.execute(db);
 
     const allowedIds = new Set(accessRows.rows.map((r) => r.id));
@@ -1034,7 +1040,13 @@ export async function hybridSearch(
   }
 
   // ── 7. Build final results ─────────────────────────────────
-  const collapsed = await collapseEmailSearchResults(db, accessFiltered, scoreMap, opts?.userEmails);
+  const collapsed = await collapseEmailSearchResults(
+    db,
+    accessFiltered,
+    scoreMap,
+    opts?.userEmails,
+    opts?.slackEntitySyncEnabled ?? true,
+  );
 
   const results: HybridSearchResult[] = collapsed.sort((a, b) => b.score - a.score).slice(0, limit);
 
@@ -1080,9 +1092,10 @@ async function collapseEmailSearchResults(
   files: SearchMetadataFile[],
   scoreMap: Map<string, SearchScoreData>,
   userEmails?: string[],
+  slackEntitySyncEnabled = true,
 ): Promise<HybridSearchResult[]> {
   const emailFiles = files.filter((file) => file.file_type === "email_message");
-  const visibleThreadEnvelopes = await loadVisibleThreadEnvelopes(db, emailFiles, userEmails);
+  const visibleThreadEnvelopes = await loadVisibleThreadEnvelopes(db, emailFiles, userEmails, slackEntitySyncEnabled);
   const groups = new Map<string, SearchMetadataFile[]>();
   const output: HybridSearchResult[] = [];
 
@@ -1167,6 +1180,7 @@ async function loadVisibleThreadEnvelopes(
   db: Kysely<DB>,
   emailFiles: SearchMetadataFile[],
   userEmails?: string[],
+  slackEntitySyncEnabled = true,
 ): Promise<Map<string, EmailEnvelopeSearchRow[]>> {
   const rowsByThread = new Map<string, EmailEnvelopeSearchRow[]>();
   if (emailFiles.length === 0) return rowsByThread;
@@ -1219,6 +1233,7 @@ async function loadVisibleThreadEnvelopes(
     db,
     allRows.map((row) => row.indexed_file_id),
     userEmails,
+    slackEntitySyncEnabled,
   );
 
   for (const row of allRows) {
@@ -1243,6 +1258,7 @@ export async function browseFiles(
     contentCategory?: string;
     limit?: number;
     userEmails?: string[];
+    slackEntitySyncEnabled?: boolean;
   },
 ): Promise<
   Array<{
@@ -1375,6 +1391,7 @@ async function browseLatest(
     sources?: string[];
     fileIds?: string[];
     userEmails?: string[];
+    slackEntitySyncEnabled?: boolean;
     after?: string;
     before?: string;
     limit: number;
@@ -1418,7 +1435,7 @@ async function browseLatest(
 
   if ((opts.userEmails ?? []).length > 0) {
     const userEmails = opts.userEmails ?? [];
-    q = q.where(fileAccessFilterSql(userEmails));
+    q = q.where(fileAccessFilterSql(userEmails, opts.slackEntitySyncEnabled ?? true));
   }
 
   if (opts.after || opts.before) {
@@ -1493,6 +1510,7 @@ export async function search(
     after?: string;
     before?: string;
     userEmails?: string[];
+    slackEntitySyncEnabled?: boolean;
     entityId?: string;
     entityIds?: string[];
     entityIdsMode?: "and" | "or";
@@ -1536,6 +1554,7 @@ export async function search(
       sources: opts?.sources ?? (opts?.source ? [opts.source] : undefined),
       fileIds,
       userEmails: opts?.userEmails,
+      slackEntitySyncEnabled: opts?.slackEntitySyncEnabled,
       after: opts?.after,
       before: opts?.before,
       limit,
@@ -1596,6 +1615,7 @@ export async function search(
     limit: fetchLimit,
     queryEmbedding,
     userEmails: opts?.userEmails,
+    slackEntitySyncEnabled: opts?.slackEntitySyncEnabled,
     fileIds,
     entityFileIds,
     timeFilter: opts?.after || opts?.before ? { after: opts?.after, before: opts?.before } : undefined,

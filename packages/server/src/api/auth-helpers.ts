@@ -62,11 +62,16 @@ export function denyUnless(c: Context, allowed: boolean): Response | null {
 export interface FileViewer {
   email: string | null;
   isAdmin: boolean;
+  slackEntitySyncEnabled?: boolean;
 }
 
 /** Build a FileViewer from the request context. */
 export function getFileViewer(c: Context): FileViewer {
-  return { email: c.get("email") ?? null, isAdmin: isAdmin(c) };
+  return {
+    email: c.get("email") ?? null,
+    isAdmin: isAdmin(c),
+    slackEntitySyncEnabled: c.get("slackEntitySyncEnabled"),
+  };
 }
 
 /**
@@ -78,5 +83,9 @@ export function getFileViewer(c: Context): FileViewer {
  */
 export function getContentViewer(c: Context): FileViewer {
   const bypass = c.get("adminCanReadAllFiles") === true;
-  return { email: c.get("email") ?? null, isAdmin: isAdmin(c) && bypass };
+  return {
+    email: c.get("email") ?? null,
+    isAdmin: isAdmin(c) && bypass,
+    slackEntitySyncEnabled: c.get("slackEntitySyncEnabled"),
+  };
 }

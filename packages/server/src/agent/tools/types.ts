@@ -108,6 +108,7 @@ export interface SketchMcpDeps {
   currentUserId?: string;
   currentUserEmail?: string | null;
   currentUserName?: string | null;
+  slackEntitySyncEnabled?: boolean;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   localClaudeSessionService?: LocalClaudeSessionService;
   workspaceKey?: string;

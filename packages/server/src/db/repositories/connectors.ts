@@ -2,9 +2,9 @@
  * Repository for connector_configs, indexed_files, access_scopes, and file_access tables.
  * Handles CRUD + FTS5 search over indexed content.
  *
- * Access model: non-chat files retain unrestricted, scope-member, and per-file
- * access doors; chat files require current scope membership unless an explicit
- * share door opens them.
+ * Access model: when entity sync is enabled, chat files require current scope
+ * membership unless an explicit share door opens them. Disabled mode restores
+ * the pre-stack access doors for every source.
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
@@ -25,14 +25,15 @@ import type { DB } from "../schema";
 export interface FileViewer {
   email: string | null;
   isAdmin: boolean;
+  slackEntitySyncEnabled?: boolean;
 }
 
 /**
  * Predicate matching files visible to `viewer`. Composed into queries via `.where(...)`.
  *
- *   unrestricted      = non-chat source with no scope AND no per-file shares
+ *   unrestricted      = no scope AND no per-file shares, except restricted chat sources
  *   scoped            = caller is in access_scope_members for the file's scope
- *   per-file          = non-chat caller has a row in file_access for the file
+ *   per-file          = caller has a row in file_access, except restricted chat sources
  *   manual share      = caller's email is in file_share_emails for the file
  *   org-wide          = indexed_files.share_with_everyone = 1
  *   entity-share prop = caller has access to an entity mentioned in the file
@@ -57,15 +58,18 @@ export function fileVisibilityPredicate(viewer: FileViewer, alias = "indexed_fil
   }
   const t = sql.raw(alias);
   const email = viewer.email ?? "";
-  const nonChatSource = sql`(${t}.source IS NULL OR ${t}.source NOT IN ('slack', 'whatsapp'))`;
+  const accessDoor =
+    (viewer.slackEntitySyncEnabled ?? true)
+      ? sql`(${t}.source IS NULL OR ${t}.source NOT IN ('slack', 'whatsapp'))`
+      : sql`1 = 1`;
   return sql<boolean>`(
-    (${nonChatSource}
+    (${accessDoor}
       AND ${t}.access_scope_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM file_access fa WHERE fa.indexed_file_id = ${t}.id))
     OR EXISTS (SELECT 1 FROM access_scope_members asm
                WHERE asm.access_scope_id = ${t}.access_scope_id
                  AND asm.email = ${email})
-    OR (${nonChatSource}
+    OR (${accessDoor}
         AND EXISTS (SELECT 1 FROM file_access fa
                    WHERE fa.indexed_file_id = ${t}.id
                      AND fa.email = ${email}))
