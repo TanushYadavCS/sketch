@@ -62,7 +62,8 @@ describe("Outlook Calendar connector", () => {
     });
     expect(item?.content).toContain("Calendar: Work");
     expect(item?.content).toContain("Conference: https://teams.microsoft.com/l/meetup-join/example");
-    expect(item?.accessEmails?.sort()).toEqual(["jane@example.com", "owner@canvasx.ai"]);
+    expect(item?.accessPrincipals?.map((p) => p.value).sort()).toEqual(["jane@example.com", "owner@canvasx.ai"]);
+    expect(item?.accessPrincipals?.every((p) => p.type === "email")).toBe(true);
     expect(item?.attendees).toEqual([
       { name: "Owner", email: "owner@canvasx.ai" },
       { name: "Jane Doe", email: "jane@example.com" },

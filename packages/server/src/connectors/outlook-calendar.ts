@@ -12,6 +12,7 @@ import type {
   SourceItemRemovalRecord,
   SyncedItem,
 } from "./types";
+import { toEmailPrincipals } from "./types";
 
 export const OUTLOOK_CALENDAR_MICROSOFT_SCOPE = "offline_access User.Read Calendars.Read";
 
@@ -346,7 +347,10 @@ export function eventToSyncedItem(
     sourceUpdatedAt,
     isAllDay: event.isAllDay === true,
     mimeType: "text/calendar",
-    accessEmails: eventAccessEmails(event, calendar, ownerEmail),
+    accessPrincipals: (() => {
+      const emails = eventAccessEmails(event, calendar, ownerEmail);
+      return emails ? toEmailPrincipals(emails) : null;
+    })(),
     attendees: people.length > 0 ? people : undefined,
     authorEmail,
     authorName,
