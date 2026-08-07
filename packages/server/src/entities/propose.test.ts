@@ -149,6 +149,41 @@ describe("proposeEntity", () => {
     expect(queue).toHaveLength(0);
   });
 
+  it("promotes an email-matched existing person for an internal seed", async () => {
+    const entityRepo = createEntityRepository(db);
+    await entityRepo.upsertPersonEntity({
+      name: "Roster Match",
+      email: "roster@example.com",
+      subtype: "external",
+      source: "seed",
+      sourceId: "seed:roster-match",
+    });
+    const existing = await fetchPersonEntities(db);
+    const deps = {
+      entityRepo,
+      reviewRepo: createEntityReviewRepo(db),
+      lookup: makeLookup(() => existing),
+      readEmail,
+    };
+
+    const result = await proposeEntity(deps, {
+      name: "Roster Match",
+      email: "roster@example.com",
+      entityType: "person",
+      subtype: "internal",
+      source: "notion",
+      sourceId: "user:roster-match",
+      evidence: [],
+      triggeredByUserId: "user-1",
+      provenanceTier: "structural",
+    });
+
+    expect(result.kind).toBe("linked");
+    await expect(
+      db.selectFrom("entities").select("subtype").where("id", "=", existing[0].id).executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ subtype: "internal" });
+  });
+
   it("2. email-present-but-not-linked auto-creates and skips fuzzy ranking", async () => {
     // Pre-seed an existing Simran Suri with a different email so the ranker
     // would otherwise queue. The email-present short-circuit must take over.

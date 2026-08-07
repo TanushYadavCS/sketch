@@ -1558,7 +1558,7 @@ describe("Setup endpoints", () => {
 
       fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
         async () =>
-          new Response(JSON.stringify({ ok: true, team: "Test Workspace" }), {
+          new Response(JSON.stringify({ ok: true, team: "Test Workspace", team_id: "T123" }), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           }),

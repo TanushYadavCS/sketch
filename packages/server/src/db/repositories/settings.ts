@@ -321,6 +321,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
         onboardingCompletedAt: string;
         slackBotToken: string | null;
         slackAppToken: string | null;
+        slackTeamId: string | null;
         llmProvider: string | null;
         anthropicApiKey: string | null;
         awsAccessKeyId: string | null;
@@ -359,6 +360,7 @@ export function createSettingsRepository(db: Kysely<DB>, encryptionKey?: string,
       if (data.onboardingCompletedAt !== undefined) updates.onboarding_completed_at = data.onboardingCompletedAt;
       if (data.slackBotToken !== undefined) updates.slack_bot_token = data.slackBotToken;
       if (data.slackAppToken !== undefined) updates.slack_app_token = data.slackAppToken;
+      if (data.slackTeamId !== undefined) updates.slack_team_id = data.slackTeamId;
       if (data.llmProvider !== undefined) updates.llm_provider = data.llmProvider;
       if (data.anthropicApiKey !== undefined) updates.anthropic_api_key = data.anthropicApiKey;
       if (data.awsAccessKeyId !== undefined) updates.aws_access_key_id = data.awsAccessKeyId;

@@ -3,6 +3,7 @@ import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { z } from "zod/v4";
+import { fileAccessFilterSql } from "../../connectors/search";
 import type { ConversationSlicesTable, DB } from "../../db/schema";
 import type { Attachment } from "../../files";
 import { type SlackRosterSnapshot, parseSlackRosterSnapshot } from "../../slack/identity-resolution";
@@ -180,17 +181,17 @@ function toDrillAnchor(row: SliceAnchorRow): DrillAnchor {
 /**
  * Authorization is the load-bearing part of this tool: a slice is readable
  * only when it is linked to a live (unarchived) indexed file whose
- * slack_channel access scope contains one of the caller's verified emails.
+ * slack_channel access scope or per-file grants contain one of the caller's
+ * verified emails.
  * A thread filter or guessed slice id is never a substitute — every query
  * path below goes through this join.
  */
-function authorizedSliceAnchorQuery(db: Kysely<DB>, userEmails: string[]) {
+function authorizedSliceAnchorQuery(db: Kysely<DB>, userEmails: string[], slackEntitySyncEnabled = true) {
   return db
     .selectFrom("conversation_slices")
     .innerJoin("conversations", "conversations.id", "conversation_slices.conversation_id")
     .innerJoin("indexed_files", "indexed_files.id", "conversation_slices.indexed_file_id")
     .innerJoin("access_scopes", "access_scopes.id", "indexed_files.access_scope_id")
-    .innerJoin("access_scope_members", "access_scope_members.access_scope_id", "access_scopes.id")
     .select([
       "conversation_slices.id",
       "conversation_slices.conversation_id",
@@ -211,15 +212,16 @@ function authorizedSliceAnchorQuery(db: Kysely<DB>, userEmails: string[]) {
     .whereRef("indexed_files.provider_file_id", "=", "conversation_slices.id")
     .where("access_scopes.scope_type", "=", "slack_channel")
     .whereRef("access_scopes.provider_scope_id", "=", "conversations.provider_conversation_id")
-    .where("access_scope_members.email", "in", userEmails);
+    .where(fileAccessFilterSql(userEmails, slackEntitySyncEnabled));
 }
 
 async function loadAuthorizedSliceAnchor(
   db: Kysely<DB>,
   sliceId: string,
   userEmails: string[],
+  slackEntitySyncEnabled = true,
 ): Promise<DrillAnchor | null> {
-  const row = await authorizedSliceAnchorQuery(db, userEmails)
+  const row = await authorizedSliceAnchorQuery(db, userEmails, slackEntitySyncEnabled)
     .where("conversation_slices.id", "=", sliceId)
     .limit(1)
     .executeTakeFirst();
@@ -268,8 +270,9 @@ async function loadChannelWindowAuthorization(
   conversationId: number,
   userEmails: string[],
   window: SlackChannelHistoryWindow,
+  slackEntitySyncEnabled = true,
 ): Promise<ChannelWindowAuthorization | null> {
-  const overlappingRows = await authorizedSliceAnchorQuery(db, userEmails)
+  const overlappingRows = await authorizedSliceAnchorQuery(db, userEmails, slackEntitySyncEnabled)
     .where("conversation_slices.conversation_id", "=", conversationId)
     .where("conversation_slices.salience_verdict", "=", "kept")
     .where("conversation_slices.started_at", "<=", window.end)
@@ -558,7 +561,7 @@ export async function handleSlackChannelHistory(
   let messageWindows: AuthorizedMessageWindow[] = [];
 
   if (args.sliceId) {
-    anchor = await loadAuthorizedSliceAnchor(deps.db, args.sliceId, userEmails);
+    anchor = await loadAuthorizedSliceAnchor(deps.db, args.sliceId, userEmails, deps.slackEntitySyncEnabled ?? true);
     if (!anchor) return deniedResult();
     window = buildSlackChannelHistoryWindow(anchor.startedAt, anchor.endedAt, args.expandMinutes);
     if (window) messageWindows = [{ start: window.start, end: window.end }];
@@ -568,7 +571,13 @@ export async function handleSlackChannelHistory(
       maxWindowMinutes: MAX_SLACK_CHANNEL_HISTORY_WINDOW_MINUTES,
     });
     if (!window) return textResult(INVALID_INPUT_TEXT);
-    const authorization = await loadChannelWindowAuthorization(deps.db, conversationId, userEmails, window);
+    const authorization = await loadChannelWindowAuthorization(
+      deps.db,
+      conversationId,
+      userEmails,
+      window,
+      deps.slackEntitySyncEnabled ?? true,
+    );
     if (!authorization) return deniedResult();
     anchor = authorization.anchor;
     window = authorization.window;

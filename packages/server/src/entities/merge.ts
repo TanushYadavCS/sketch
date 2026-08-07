@@ -39,6 +39,11 @@ export type EntityMergeMove =
       rowId: string;
       colChanges: Record<string, { before: string | null; after: string | null }>;
     }
+  | {
+      table: "entities";
+      rowId: string;
+      colChanges: { subtype: { before: string | null; after: string } };
+    }
   | { kind: "alias_added"; value: string; normalizedKey: string };
 
 export type EntityMergeErrorCode =
@@ -869,6 +874,14 @@ async function reverseMove(db: Kysely<DB>, move: EntityMergeMove): Promise<void>
     await insertPayload(db, move.table, move.payload);
     return;
   }
+  if (move.table === "entities" && "colChanges" in move) {
+    await db
+      .updateTable("entities")
+      .set({ subtype: move.colChanges.subtype.before })
+      .where("id", "=", move.rowId)
+      .execute();
+    return;
+  }
   if ("colChanges" in move) {
     const updates: Record<string, string | null> = {};
     for (const [column, change] of Object.entries(move.colChanges)) updates[column] = change.before;
@@ -1017,6 +1030,21 @@ export async function mergeEntitiesInTransaction(
   assertMergeable(survivor, loser, input);
 
   const moves: EntityMergeMove[] = [];
+  if (survivor?.source_type === "person" && loser?.source_type === "person") {
+    const internalSubtype = survivor.subtype === "internal" || loser.subtype === "internal";
+    if (internalSubtype && survivor.subtype !== "internal") {
+      moves.push({
+        table: "entities",
+        rowId: survivor.id,
+        colChanges: { subtype: { before: survivor.subtype, after: "internal" } },
+      });
+      await db
+        .updateTable("entities")
+        .set({ subtype: "internal", updated_at: new Date().toISOString() })
+        .where("id", "=", survivor.id)
+        .execute();
+    }
+  }
   await applyMergeMoves(db, input.loserId, input.survivorId, moves);
   if (survivor && loser) await carryLoserAliasesToSurvivor(db, loser, survivor, moves);
 
