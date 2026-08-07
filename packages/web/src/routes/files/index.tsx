@@ -119,7 +119,8 @@ export function FilesPage() {
     const oauthStatus = params.get("oauth");
     const connectorId = params.get("connectorId");
     const connectorParam = params.get("connector");
-    const isMicrosoftFlow = connectorParam === "teams" || connectorParam === "outlook";
+    const isMicrosoftFlow =
+      connectorParam === "teams" || connectorParam === "outlook" || connectorParam === "outlook_calendar";
 
     if (!oauthStatus) return;
     if (oauthStatus !== "admin_consent_granted" && connectors.length === 0) return;
@@ -127,7 +128,12 @@ export function FilesPage() {
     window.history.replaceState({}, "", window.location.pathname);
 
     if (oauthStatus === "admin_consent_granted") {
-      const name = connectorParam === "outlook" ? "Outlook" : "Microsoft Teams";
+      const name =
+        connectorParam === "outlook"
+          ? "Outlook"
+          : connectorParam === "outlook_calendar"
+            ? "Outlook Calendar"
+            : "Microsoft Teams";
       toast.success(`Admin consent granted — teammates in your organization can now connect ${name}.`);
       return;
     }

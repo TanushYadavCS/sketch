@@ -1,7 +1,7 @@
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, describe, expect, it } from "vitest";
-import { up } from "./164-typed-access-principals";
+import { up } from "./165-typed-access-principals";
 
 type MigrationDb = {
   users: { id: string; name: string; email: string | null; whatsapp_lid: string | null };
@@ -15,7 +15,7 @@ function createDb(): Kysely<MigrationDb> {
   });
 }
 
-describe("164-typed-access-principals migration", () => {
+describe("165-typed-access-principals migration", () => {
   const databases: Kysely<MigrationDb>[] = [];
 
   afterEach(async () => {

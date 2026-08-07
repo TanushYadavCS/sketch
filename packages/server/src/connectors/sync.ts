@@ -651,7 +651,12 @@ async function resolveConnectorCredentialsForSync(params: {
     Pick<Config, "ENCRYPTION_KEY" | "MICROSOFT_CLIENT_ID" | "MICROSOFT_CLIENT_SECRET" | "MICROSOFT_TENANT">
   >;
 }): Promise<ConnectorCredentials> {
-  if (params.credentials.type !== "oauth" || (params.connectorType !== "outlook" && params.connectorType !== "teams")) {
+  if (
+    params.credentials.type !== "oauth" ||
+    (params.connectorType !== "outlook" &&
+      params.connectorType !== "outlook_calendar" &&
+      params.connectorType !== "teams")
+  ) {
     return params.credentials;
   }
 

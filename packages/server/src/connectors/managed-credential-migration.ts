@@ -45,7 +45,9 @@ export interface ManagedCredentialMigrationResult {
 }
 
 function providerIdentityNamesForConnector(connectorType: ConnectorType): string[] {
-  if (connectorType === "outlook" || connectorType === "teams") return ["microsoft"];
+  if (connectorType === "outlook" || connectorType === "outlook_calendar" || connectorType === "teams") {
+    return ["microsoft"];
+  }
   return [connectorType];
 }
 

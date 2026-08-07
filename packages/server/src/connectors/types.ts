@@ -17,6 +17,7 @@ export type ConnectorType =
   | "google_calendar"
   | "gmail"
   | "outlook"
+  | "outlook_calendar"
   | "teams"
   | "clickup"
   | "notion"

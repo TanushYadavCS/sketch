@@ -174,15 +174,16 @@ function stringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string" && item.length > 0);
 }
 
-function googleCalendarIdFromProviderFileId(providerFileId: string): string | null {
+function calendarIdFromProviderFileId(providerFileId: string): string | null {
   const separator = providerFileId.indexOf(":");
   return separator > 0 ? providerFileId.slice(0, separator) : null;
 }
 
-export async function pruneGoogleCalendarFilesOutsideScope(params: {
+export async function pruneCalendarFilesOutsideScope(params: {
   db: Kysely<DB>;
   connectorConfigId: string;
   scopeConfig: Record<string, unknown>;
+  connectorType: "google_calendar" | "outlook_calendar";
   logger?: Logger;
 }): Promise<{ itemsDeleted: number; affectedIndexedFileIds: string[] }> {
   if (!hasOwn(params.scopeConfig, "calendarIds")) return { itemsDeleted: 0, affectedIndexedFileIds: [] };
@@ -192,13 +193,13 @@ export async function pruneGoogleCalendarFilesOutsideScope(params: {
     .selectFrom("indexed_files")
     .select("provider_file_id")
     .where("connector_config_id", "=", params.connectorConfigId)
-    .where("source", "=", "google_calendar")
+    .where("source", "=", params.connectorType)
     .where("is_archived", "=", 0)
     .execute();
 
   const providerFileIds = rows
     .filter((row) => {
-      const calendarId = googleCalendarIdFromProviderFileId(row.provider_file_id);
+      const calendarId = calendarIdFromProviderFileId(row.provider_file_id);
       return !calendarId || !selectedCalendarIds.has(calendarId);
     })
     .map((row) => row.provider_file_id);
@@ -206,18 +207,27 @@ export async function pruneGoogleCalendarFilesOutsideScope(params: {
   const result = await removeConnectorSourceItems({
     db: params.db,
     connectorConfigId: params.connectorConfigId,
-    connectorType: "google_calendar",
+    connectorType: params.connectorType,
     providerFileIds,
   });
 
   if (result.itemsDeleted > 0) {
     params.logger?.info(
       { connectorId: params.connectorConfigId, itemsDeleted: result.itemsDeleted },
-      "Pruned Google Calendar files outside selected calendars",
+      "Pruned calendar files outside selected calendars",
     );
   }
 
   return result;
+}
+
+export async function pruneGoogleCalendarFilesOutsideScope(params: {
+  db: Kysely<DB>;
+  connectorConfigId: string;
+  scopeConfig: Record<string, unknown>;
+  logger?: Logger;
+}): Promise<{ itemsDeleted: number; affectedIndexedFileIds: string[] }> {
+  return pruneCalendarFilesOutsideScope({ ...params, connectorType: "google_calendar" });
 }
 
 export async function applyWhatsAppGroupScope(params: {
@@ -315,6 +325,7 @@ const CANVAS_APP_BY_CONNECTOR: Partial<Record<ConnectorType, string>> = {
   google_calendar: "google-calendar-oauth",
   gmail: "google-gmail-oauth",
   outlook: "microsoft-outlook-oauth",
+  outlook_calendar: "microsoft-outlook-calendar-oauth",
   teams: "microsoft-teams-oauth",
   fireflies: "fireflies",
   clickup: "clickup-api-key",
@@ -322,7 +333,13 @@ const CANVAS_APP_BY_CONNECTOR: Partial<Record<ConnectorType, string>> = {
   linear: "linear",
 };
 
-const SCOPE_REQUIRED_CONNECTORS = new Set<ConnectorType>(["google_drive", "google_calendar", "clickup", "notion"]);
+const SCOPE_REQUIRED_CONNECTORS = new Set<ConnectorType>([
+  "google_drive",
+  "google_calendar",
+  "outlook_calendar",
+  "clickup",
+  "notion",
+]);
 
 function defaultAuthTypeForConnector(connectorType: ConnectorType): AuthType {
   switch (connectorType) {
@@ -330,6 +347,7 @@ function defaultAuthTypeForConnector(connectorType: ConnectorType): AuthType {
     case "google_calendar":
     case "gmail":
     case "outlook":
+    case "outlook_calendar":
     case "teams":
     case "zoho_crm":
       return "oauth";
@@ -490,6 +508,7 @@ export function connectorRoutes(
 
     if (connectorType === "google_drive") return hasNonEmptyStringArray(parsed, ["sharedDrives", "folders"]);
     if (connectorType === "google_calendar") return hasNonEmptyStringArray(parsed, ["calendarIds"]);
+    if (connectorType === "outlook_calendar") return hasNonEmptyStringArray(parsed, ["calendarIds"]);
     if (connectorType === "clickup") return hasNonEmptyStringArray(parsed, ["workspaces", "spaces"]);
     if (connectorType === "notion") return hasNonEmptyStringArray(parsed, ["rootPages"]);
     return Object.keys(parsed).length > 0;
@@ -2278,11 +2297,12 @@ export function connectorRoutes(
       return scope;
     });
 
-    if (config.connector_type === "google_calendar") {
-      await pruneGoogleCalendarFilesOutsideScope({
+    if (config.connector_type === "google_calendar" || config.connector_type === "outlook_calendar") {
+      await pruneCalendarFilesOutsideScope({
         db,
         connectorConfigId: config.id,
         scopeConfig: requestedScope,
+        connectorType: config.connector_type,
         logger,
       });
     }

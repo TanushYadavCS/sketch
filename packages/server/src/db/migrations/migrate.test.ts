@@ -26,8 +26,9 @@ import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 import * as slackEntityLifecycleMigration from "./160-slack-entity-lifecycle-sync";
 import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
+import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calendar-provider-file-scope";
 
-const EXPECTED_MIGRATION_COUNT = 160;
+const EXPECTED_MIGRATION_COUNT = 161;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -230,7 +231,8 @@ describe("runMigrations — full sequence", () => {
     expect(names[156]).toBe("161-slack-roster-evidence");
     expect(names[157]).toBe("162-user-entity-links");
     expect(names[158]).toBe("163-slack-file-access-backfill-cleanup");
-    expect(names[159]).toBe("164-typed-access-principals");
+    expect(names[159]).toBe("164-outlook-calendar-provider-file-scope");
+    expect(names[160]).toBe("165-typed-access-principals");
   });
 
   it("backfills only exact web origin task conversations", async () => {
@@ -283,6 +285,31 @@ describe("runMigrations — full sequence", () => {
         conversation_id: "normal-chat-1",
         transcript_user_id: "origin-owner",
         kind: "web_chat",
+      },
+    ]);
+  });
+
+  it("migration 164 down restores Google Calendar and Teams scoped provider indexes", async () => {
+    await runMigrations(db, { quiet: true });
+
+    await outlookCalendarProviderFileScopeMigration.down(db as unknown as Kysely<unknown>);
+
+    const indexes = await sql<{ name: string; sql: string }>`
+      SELECT name, sql
+      FROM sqlite_master
+      WHERE type = 'index'
+        AND name IN ('idx_indexed_files_source_provider', 'uq_indexed_files_scoped_provider')
+      ORDER BY name ASC
+    `.execute(db);
+
+    expect(indexes.rows).toEqual([
+      {
+        name: "idx_indexed_files_source_provider",
+        sql: expect.stringContaining("source NOT IN ('teams', 'google_calendar')"),
+      },
+      {
+        name: "uq_indexed_files_scoped_provider",
+        sql: expect.stringContaining("source IN ('teams', 'google_calendar')"),
       },
     ]);
   });

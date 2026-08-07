@@ -212,6 +212,8 @@ export function ConnectorLogo({
       return <GoogleCalendarLogo {...props} />;
     case "outlook":
       return <OutlookLogo {...props} />;
+    case "outlook_calendar":
+      return <OutlookLogo {...props} />;
     case "teams":
       return <TeamsLogo {...props} />;
     case "clickup":

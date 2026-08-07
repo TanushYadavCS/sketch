@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import { createTestDb, createTestLogger } from "../test-utils";
-import { pruneGoogleCalendarFilesOutsideScope } from "./connectors";
+import { pruneCalendarFilesOutsideScope, pruneGoogleCalendarFilesOutsideScope } from "./connectors";
 
 const logger = createTestLogger();
 
@@ -89,15 +89,45 @@ describe("Google Calendar scope pruning", () => {
       await db.destroy();
     }
   });
+
+  it("prunes Outlook Calendar events using the same calendar scope contract", async () => {
+    const db = await createTestDb();
+    try {
+      const repo = createConnectorRepository(db);
+      const config = await repo.createConfig({
+        connectorType: "outlook_calendar",
+        authType: "oauth",
+        credentials: "{}",
+        createdBy: "owner-1",
+        scopeConfig: JSON.stringify({ calendarIds: ["calendar-1"] }),
+      });
+      await seedCalendarFile(repo, config.id, "calendar-1:old-event", "outlook_calendar");
+      await seedCalendarFile(repo, config.id, "calendar-2:removed-event", "outlook_calendar");
+
+      const result = await pruneCalendarFilesOutsideScope({
+        db,
+        connectorConfigId: config.id,
+        connectorType: "outlook_calendar",
+        scopeConfig: { calendarIds: ["calendar-1"] },
+        logger,
+      });
+
+      expect(result.itemsDeleted).toBe(1);
+      await expectActiveProviderFileIds(db, config.id, ["calendar-1:old-event"]);
+    } finally {
+      await db.destroy();
+    }
+  });
 });
 
 async function seedCalendarFile(
   repo: ReturnType<typeof createConnectorRepository>,
   connectorConfigId: string,
   providerFileId: string,
+  source: "google_calendar" | "outlook_calendar" = "google_calendar",
 ) {
   const result = await repo.upsertFile({
-    source: "google_calendar",
+    source,
     providerFileId,
     providerUrl: null,
     fileName: providerFileId,
