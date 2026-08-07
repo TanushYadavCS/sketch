@@ -19,10 +19,11 @@ import { createMigrator, runMigrations } from "../migrate";
 import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
-import * as slackRosterEvidenceMigration from "./160-slack-roster-evidence";
-import * as slackFileAccessBackfillCleanupMigration from "./162-slack-file-access-backfill-cleanup";
+import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 
-const EXPECTED_MIGRATION_COUNT = 158;
+import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
+
+const EXPECTED_MIGRATION_COUNT = 159;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -191,10 +192,21 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[151]).toBe("156-operational-alerts");
     expect(names[152]).toBe("157-task-activity-events");
     expect(names[153]).toBe("158-slack-channel-participants");
-    expect(names[154]).toBe("159-slack-entity-lifecycle-sync");
-    expect(names[155]).toBe("160-slack-roster-evidence");
-    expect(names[156]).toBe("161-user-entity-links");
-    expect(names[157]).toBe("162-slack-file-access-backfill-cleanup");
+    expect(names[154]).toBe("159-scheduled-task-conversations");
+    expect(names[155]).toBe("160-slack-entity-lifecycle-sync");
+    expect(names[156]).toBe("161-slack-roster-evidence");
+    expect(names[157]).toBe("162-user-entity-links");
+    expect(names[158]).toBe("163-slack-file-access-backfill-cleanup");
+  });
+
+  it("creates the task conversation association table", async () => {
+    const rows = await sql<{ relname: string }>`
+      SELECT relname
+      FROM pg_class
+      WHERE relname = 'scheduled_task_conversations'
+    `.execute(db);
+
+    expect(rows.rows).toEqual([{ relname: "scheduled_task_conversations" }]);
   });
 
   it("creates the Slack entity lifecycle schema and partial review uniqueness", async () => {
@@ -716,10 +728,10 @@ describe("runMigrations on Postgres — full sequence", () => {
     }
   });
 
-  it("upgrades schema 160 with existing rows through the user entity link migration", async () => {
+  it("upgrades schema 161 with existing rows through the user entity link migration", async () => {
     const legacyDb = await createTestPgDb();
     try {
-      const migrationResult = await createMigrator(legacyDb).migrateTo("160-slack-roster-evidence");
+      const migrationResult = await createMigrator(legacyDb).migrateTo("161-slack-roster-evidence");
       expect(migrationResult.error).toBeUndefined();
       await legacyDb.insertInto("users").values({ id: "migration-user", name: "Migration User" }).execute();
       const now = "2026-08-07T00:00:00.000Z";

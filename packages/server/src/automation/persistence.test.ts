@@ -1,10 +1,17 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { sql } from "kysely";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createTestDb } from "../test-utils";
-import { createAutomationDefinition, replaceAutomationDefinition } from "./persistence";
+import {
+  createAutomationDefinition,
+  deleteAutomation,
+  replaceAutomationDefinition,
+  updateAutomationDefinition,
+} from "./persistence";
 
 function makeDefinition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
   return {
@@ -332,5 +339,306 @@ describe("automation persistence", () => {
     await expect(createAutomationStepContentRepository(db).getByTask("automation-edit-rollback")).resolves.toEqual([
       expect.objectContaining({ content: "Check activity and summarize changes." }),
     ]);
+  });
+
+  it("updates the complete definition atomically with revision CAS", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-direct-update"),
+      brokerCapable: true,
+    });
+
+    const saved = await updateAutomationDefinition({
+      db,
+      taskId: "automation-direct-update",
+      patch: {
+        expectedRevision: 0,
+        prompt: "Updated prompt",
+        stepContent: {
+          agent: {
+            contentType: "prompt",
+            content: "Updated content",
+            apps: ["linear"],
+          },
+        },
+      },
+      actor: { userId: "user-1", canManageAnyTask: false },
+      brokerCapable: true,
+    });
+
+    expect(saved).toMatchObject({ kind: "saved", row: { revision: 1, prompt: "Updated prompt" } });
+    await expect(createAutomationStepContentRepository(db).getByTask("automation-direct-update")).resolves.toEqual([
+      expect.objectContaining({ content: "Updated content", apps: JSON.stringify(["linear"]) }),
+    ]);
+
+    const conflict = await updateAutomationDefinition({
+      db,
+      taskId: "automation-direct-update",
+      patch: {
+        expectedRevision: 0,
+        prompt: "Stale prompt",
+        stepContent: {
+          agent: { contentType: "prompt", content: "Stale content", apps: null },
+        },
+      },
+      actor: { userId: "user-1", canManageAnyTask: false },
+      brokerCapable: true,
+    });
+
+    expect(conflict).toEqual({ kind: "revision_conflict", currentRevision: 1 });
+    await expect(createScheduledTaskRepository(db).getById("automation-direct-update")).resolves.toMatchObject({
+      prompt: "Updated prompt",
+      revision: 1,
+    });
+    await expect(createAutomationStepContentRepository(db).getByTask("automation-direct-update")).resolves.toEqual([
+      expect.objectContaining({ content: "Updated content" }),
+    ]);
+  });
+
+  it("rolls back direct metadata and content updates together", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-direct-rollback"),
+      brokerCapable: true,
+    });
+    await sql`
+      CREATE TRIGGER reject_direct_update_content
+      BEFORE UPDATE ON automation_step_content
+      BEGIN
+        SELECT RAISE(FAIL, 'direct update rejected');
+      END
+    `.execute(db);
+
+    try {
+      await expect(
+        updateAutomationDefinition({
+          db,
+          taskId: "automation-direct-rollback",
+          patch: {
+            expectedRevision: 0,
+            title: "Must roll back",
+            stepContent: {
+              agent: { contentType: "prompt", content: "Rejected content", apps: null },
+            },
+          },
+          actor: { userId: "user-1", canManageAnyTask: false },
+          brokerCapable: true,
+        }),
+      ).rejects.toThrow("direct update rejected");
+      await expect(createScheduledTaskRepository(db).getById("automation-direct-rollback")).resolves.toMatchObject({
+        title: "Daily account brief",
+        revision: 0,
+      });
+      await expect(createAutomationStepContentRepository(db).getByTask("automation-direct-rollback")).resolves.toEqual([
+        expect.objectContaining({ content: "Check activity and summarize changes." }),
+      ]);
+    } finally {
+      await sql`DROP TRIGGER reject_direct_update_content`.execute(db);
+    }
+  });
+
+  it("deletes all task-owned rows and invokes runtime cleanup after commit", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-delete"),
+      brokerCapable: true,
+    });
+    const runId = await createAutomationRunsRepository(db).create({
+      taskId: "automation-delete",
+      triggerData: { source: "test" },
+    });
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "automation-delete",
+      conversationId: "builder-delete",
+      transcriptUserId: "user-1",
+      kind: "builder",
+    });
+
+    let taskVisibleAtRuntimeCleanup: boolean | undefined;
+    const removeTaskRuntime = vi.fn(async (taskId: string) => {
+      taskVisibleAtRuntimeCleanup = Boolean(await createScheduledTaskRepository(db).getById(taskId));
+      return true;
+    });
+    const result = await deleteAutomation({
+      db,
+      taskId: "automation-delete",
+      actor: { userId: "user-1", canManageAnyTask: false },
+      scheduler: { removeTaskRuntime },
+    });
+
+    expect(result).toEqual({ kind: "deleted" });
+    expect(taskVisibleAtRuntimeCleanup).toBe(false);
+    expect(removeTaskRuntime).toHaveBeenCalledWith("automation-delete");
+    await expect(createScheduledTaskRepository(db).getById("automation-delete")).resolves.toBeUndefined();
+    await expect(createAutomationStepContentRepository(db).getByTask("automation-delete")).resolves.toEqual([]);
+    await expect(createAutomationRunsRepository(db).getById(runId)).resolves.toBeUndefined();
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskConversation("automation-delete", "builder-delete"),
+    ).resolves.toEqual([]);
+  });
+
+  it("rolls back every dependent deletion when the database rejects a child delete", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-delete-rollback"),
+      brokerCapable: true,
+    });
+    await createAutomationRunsRepository(db).create({ taskId: "automation-delete-rollback" });
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "automation-delete-rollback",
+      conversationId: "builder-delete-rollback",
+      transcriptUserId: "user-1",
+      kind: "builder",
+    });
+    await sql`
+      CREATE TRIGGER reject_automation_run_delete
+      BEFORE DELETE ON automation_runs
+      BEGIN
+        SELECT RAISE(FAIL, 'run deletion rejected');
+      END
+    `.execute(db);
+    const removeTaskRuntime = vi.fn().mockResolvedValue(true);
+
+    try {
+      await expect(
+        deleteAutomation({
+          db,
+          taskId: "automation-delete-rollback",
+          actor: { userId: "user-1", canManageAnyTask: false },
+          scheduler: { removeTaskRuntime },
+        }),
+      ).rejects.toThrow("run deletion rejected");
+      await expect(createScheduledTaskRepository(db).getById("automation-delete-rollback")).resolves.toBeDefined();
+      await expect(
+        createAutomationStepContentRepository(db).getByTask("automation-delete-rollback"),
+      ).resolves.toHaveLength(1);
+      await expect(createAutomationRunsRepository(db).list("automation-delete-rollback")).resolves.toHaveLength(1);
+      await expect(
+        createScheduledTaskConversationRepository(db).listByTaskConversation(
+          "automation-delete-rollback",
+          "builder-delete-rollback",
+        ),
+      ).resolves.toHaveLength(1);
+      expect(removeTaskRuntime).not.toHaveBeenCalled();
+    } finally {
+      await sql`DROP TRIGGER reject_automation_run_delete`.execute(db);
+    }
+  });
+
+  it("surfaces false and thrown runtime cleanup without claiming a clean delete", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-delete-false"),
+      brokerCapable: true,
+    });
+    const falseCleanup = vi.fn().mockResolvedValue(false);
+    const falseResult = await deleteAutomation({
+      db,
+      taskId: "automation-delete-false",
+      actor: { userId: "user-1", canManageAnyTask: false },
+      scheduler: { removeTaskRuntime: falseCleanup },
+    });
+    expect(falseResult.kind).toBe("scheduler_failure");
+    await expect(createScheduledTaskRepository(db).getById("automation-delete-false")).resolves.toBeUndefined();
+
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-delete-throw"),
+      brokerCapable: true,
+    });
+    const thrownCleanup = vi.fn().mockRejectedValue(new Error("runtime unavailable"));
+    const thrownResult = await deleteAutomation({
+      db,
+      taskId: "automation-delete-throw",
+      actor: { userId: "user-1", canManageAnyTask: false },
+      scheduler: { removeTaskRuntime: thrownCleanup },
+    });
+    expect(thrownResult).toMatchObject({ kind: "scheduler_failure", error: new Error("runtime unavailable") });
+    await expect(createScheduledTaskRepository(db).getById("automation-delete-throw")).resolves.toBeUndefined();
+  });
+
+  it("preserves owner/admin access semantics and returns not-found for repeat deletes", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-delete-access"),
+      brokerCapable: true,
+    });
+    const removeTaskRuntime = vi.fn().mockResolvedValue(true);
+    await expect(
+      deleteAutomation({
+        db,
+        taskId: "automation-delete-access",
+        actor: { userId: "user-2", canManageAnyTask: false },
+        scheduler: { removeTaskRuntime },
+      }),
+    ).resolves.toEqual({ kind: "access_denied" });
+    await expect(createScheduledTaskRepository(db).getById("automation-delete-access")).resolves.toBeDefined();
+
+    await expect(
+      deleteAutomation({
+        db,
+        taskId: "automation-delete-access",
+        actor: { userId: "admin-1", canManageAnyTask: true },
+        scheduler: { removeTaskRuntime },
+      }),
+    ).resolves.toEqual({ kind: "deleted" });
+    await expect(
+      deleteAutomation({
+        db,
+        taskId: "automation-delete-access",
+        actor: { userId: "admin-1", canManageAnyTask: true },
+        scheduler: { removeTaskRuntime },
+      }),
+    ).resolves.toEqual({ kind: "not_found" });
+    expect(removeTaskRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("returns not-found for a concurrent delete that arrives during runtime cleanup", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition(),
+      context: createContext("automation-delete-race"),
+      brokerCapable: true,
+    });
+    let markCleanupStarted!: () => void;
+    const cleanupStarted = new Promise<void>((resolve) => {
+      markCleanupStarted = resolve;
+    });
+    let releaseCleanup!: () => void;
+    const cleanupReleased = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const firstCleanup = vi.fn(async () => {
+      markCleanupStarted();
+      await cleanupReleased;
+      return true;
+    });
+    const firstDelete = deleteAutomation({
+      db,
+      taskId: "automation-delete-race",
+      actor: { userId: "user-1", canManageAnyTask: false },
+      scheduler: { removeTaskRuntime: firstCleanup },
+    });
+    await cleanupStarted;
+
+    const secondCleanup = vi.fn().mockResolvedValue(true);
+    await expect(
+      deleteAutomation({
+        db,
+        taskId: "automation-delete-race",
+        actor: { userId: "user-1", canManageAnyTask: false },
+        scheduler: { removeTaskRuntime: secondCleanup },
+      }),
+    ).resolves.toEqual({ kind: "not_found" });
+    releaseCleanup();
+    await expect(firstDelete).resolves.toEqual({ kind: "deleted" });
+    expect(secondCleanup).not.toHaveBeenCalled();
   });
 });

@@ -154,6 +154,24 @@ export interface ScheduledTaskOriginChatMessage {
   createdAt: string;
 }
 
+export type ScheduledTaskConversationKind = "builder" | "web_chat";
+
+export interface ScheduledTaskConversationSummary {
+  conversationId: string;
+  kinds: ScheduledTaskConversationKind[];
+  createdAt: string;
+  updatedAt: string;
+  lastActiveAt: string;
+  archivedAt: string | null;
+  state: "active" | "archived";
+}
+
+export interface ScheduledTaskConversationsResponse {
+  taskId: string;
+  conversations: ScheduledTaskConversationSummary[];
+  transcriptAccess: "viewer";
+}
+
 export interface WorkflowTriggerConfig {
   type: "webhook" | "schedule" | "canvas" | "slack_channel_message";
   channelId?: string;
@@ -2297,6 +2315,49 @@ export const api = {
     originChatMessages(taskId: string) {
       return request<{ messages: ScheduledTaskOriginChatMessage[] }>(
         `/api/scheduled-tasks/${taskId}/origin-chat/messages`,
+      );
+    },
+    conversations(taskId: string, options?: { includeArchived?: boolean }) {
+      const query = options?.includeArchived ? "?includeArchived=true" : "";
+      return request<ScheduledTaskConversationsResponse>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations${query}`,
+      );
+    },
+    createConversation(
+      taskId: string,
+      body: {
+        createNew: true;
+      },
+    ) {
+      return request<{
+        conversation: ScheduledTaskConversationSummary;
+        created: boolean;
+      }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+    getConversation(taskId: string, conversationId: string) {
+      return request<{ conversation: ScheduledTaskConversationSummary }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}`,
+      );
+    },
+    selectConversation(taskId: string, conversationId: string, kind?: ScheduledTaskConversationKind) {
+      return request<{
+        conversation: ScheduledTaskConversationSummary;
+        created: false;
+      }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}`, {
+        method: "PUT",
+        body: JSON.stringify(kind ? { kind } : {}),
+      });
+    },
+    archiveConversation(taskId: string, conversationId: string, archived: boolean) {
+      return request<{ conversation: ScheduledTaskConversationSummary }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ archived }),
+        },
       );
     },
     async save(taskId: string, body: AutomationBuilderSaveRequest) {

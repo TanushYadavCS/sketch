@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Selectable } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UsersTable } from "../db/schema";
+import { createTestDb } from "../test-utils";
 import {
   AutomationArtifactCollector,
   UploadCollector,
@@ -86,12 +87,15 @@ describe("UploadCollector", () => {
 
 describe("createSketchMcpServer", () => {
   let tmpDir: string;
+  let db: Awaited<ReturnType<typeof createTestDb>>;
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "sketch-upload-test-"));
+    db = await createTestDb();
   });
 
   afterEach(async () => {
+    await db.destroy();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -125,10 +129,9 @@ describe("createSketchMcpServer", () => {
   it("forwards automation artifacts from the scheduled task tool", async () => {
     const uploadCollector = new UploadCollector();
     const automationArtifactCollector = new AutomationArtifactCollector();
-    const stepContentRepo = { upsert: vi.fn().mockResolvedValue(undefined) };
     const scheduler = {
-      addTask: vi.fn().mockResolvedValue({
-        id: "new-task",
+      refreshTaskSchedule: vi.fn().mockImplementation(async (id: string) => ({
+        id,
         platform: "slack",
         contextType: "dm",
         deliveryTarget: "D123",
@@ -148,8 +151,8 @@ describe("createSketchMcpServer", () => {
         originChat: null,
         steps: null,
         edges: null,
-        outputTarget: null,
-        outputPlatform: null,
+        outputTarget: "D123",
+        outputPlatform: "slack",
         outputThreadTs: null,
         outputMode: "deliver",
         delivery: {
@@ -159,14 +162,14 @@ describe("createSketchMcpServer", () => {
           threadTs: null,
           mode: "deliver",
         },
-      }),
+      })),
     };
     const server = createSketchMcpServer({
       uploadCollector,
       automationArtifactCollector,
       workspaceDir: tmpDir,
+      db,
       scheduler: scheduler as never,
-      stepContentRepo: stepContentRepo as never,
       taskContext: { platform: "slack", contextType: "dm", deliveryTarget: "D123", createdBy: "user-1" },
     });
     const tools = (
@@ -182,12 +185,14 @@ describe("createSketchMcpServer", () => {
       schedule_value: "0 9 * * 1",
     });
 
-    expect(automationArtifactCollector.drain()).toEqual([
+    const artifacts = automationArtifactCollector.drain();
+    expect(artifacts).toHaveLength(1);
+    expect(artifacts[0]).toEqual(
       expect.objectContaining({
-        taskId: "new-task",
-        builderUrl: "http://localhost:3000/scheduled-tasks/new-task/edit",
+        taskId: expect.any(String),
+        builderUrl: expect.stringMatching(/^http:\/\/localhost:3000\/scheduled-tasks\/[^/]+\/edit$/),
       }),
-    ]);
+    );
   });
 
   it("SearchChatHistory searches the scoped conversation", async () => {

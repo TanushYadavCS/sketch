@@ -1,7 +1,7 @@
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { up } from "./161-user-entity-links";
+import { up } from "./162-user-entity-links";
 
 type MigrationDb = {
   users: { id: string };
@@ -15,7 +15,7 @@ function createBlankDb(): Kysely<MigrationDb> {
   });
 }
 
-describe("161-user-entity-links migration", () => {
+describe("162-user-entity-links migration", () => {
   let db: Kysely<MigrationDb>;
 
   beforeEach(async () => {

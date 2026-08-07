@@ -1,7 +1,7 @@
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect } from "kysely";
 import { afterEach, describe, expect, it } from "vitest";
-import { up } from "./162-slack-file-access-backfill-cleanup";
+import { up } from "./163-slack-file-access-backfill-cleanup";
 
 type MigrationDb = {
   slack_file_access_backfill: { id: string };
@@ -13,7 +13,7 @@ function createDb(): Kysely<MigrationDb> {
   });
 }
 
-describe("162-slack-file-access-backfill-cleanup migration", () => {
+describe("163-slack-file-access-backfill-cleanup migration", () => {
   const databases: Kysely<MigrationDb>[] = [];
 
   afterEach(async () => {

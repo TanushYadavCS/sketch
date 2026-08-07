@@ -1,10 +1,17 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { sql } from "kysely";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createTestPgDb } from "../test-utils";
-import { createAutomationDefinition, replaceAutomationDefinition } from "./persistence";
+import {
+  createAutomationDefinition,
+  deleteAutomation,
+  replaceAutomationDefinition,
+  updateAutomationDefinition,
+} from "./persistence";
 
 function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
   return {
@@ -191,6 +198,43 @@ describe("automation persistence on Postgres", () => {
     }
   });
 
+  it("updates full definitions with portable Postgres CAS and content persistence", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("pg-direct-update"),
+      brokerCapable: true,
+    });
+
+    const saved = await updateAutomationDefinition({
+      db,
+      taskId: "pg-direct-update",
+      patch: {
+        expectedRevision: 0,
+        prompt: "Postgres direct update",
+        stepContent: {
+          agent: { contentType: "prompt", content: "Updated portable content", apps: ["linear"] },
+        },
+      },
+      actor: { userId: "pg-owner", canManageAnyTask: false },
+      brokerCapable: true,
+    });
+
+    expect(saved).toMatchObject({ kind: "saved", row: { revision: 1, prompt: "Postgres direct update" } });
+    await expect(createAutomationStepContentRepository(db).getByTask("pg-direct-update")).resolves.toEqual([
+      expect.objectContaining({ content: "Updated portable content", apps: JSON.stringify(["linear"]) }),
+    ]);
+    await expect(
+      updateAutomationDefinition({
+        db,
+        taskId: "pg-direct-update",
+        patch: { expectedRevision: 0, prompt: "Stale Postgres update" },
+        actor: { userId: "pg-owner", canManageAnyTask: false },
+        brokerCapable: true,
+      }),
+    ).resolves.toEqual({ kind: "revision_conflict", currentRevision: 1 });
+  });
+
   it("rolls back the task row when Postgres rejects step content", async () => {
     await sql`
       CREATE FUNCTION reject_automation_content() RETURNS trigger AS $$
@@ -219,5 +263,42 @@ describe("automation persistence on Postgres", () => {
       await sql`DROP TRIGGER reject_automation_content ON automation_step_content`.execute(db);
       await sql`DROP FUNCTION reject_automation_content()`.execute(db);
     }
+  });
+
+  it("deletes task content, runs, and chat associations in one Postgres transaction", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("pg-delete"),
+      brokerCapable: true,
+    });
+    const runId = await createAutomationRunsRepository(db).create({ taskId: "pg-delete" });
+    await createScheduledTaskConversationRepository(db).upsert({
+      taskId: "pg-delete",
+      conversationId: "pg-builder-delete",
+      transcriptUserId: "pg-owner",
+      kind: "builder",
+    });
+    let taskVisibleAtRuntimeCleanup: boolean | undefined;
+    const result = await deleteAutomation({
+      db,
+      taskId: "pg-delete",
+      actor: { userId: "pg-owner", canManageAnyTask: false },
+      scheduler: {
+        removeTaskRuntime: async (taskId) => {
+          taskVisibleAtRuntimeCleanup = Boolean(await createScheduledTaskRepository(db).getById(taskId));
+          return true;
+        },
+      },
+    });
+
+    expect(result).toEqual({ kind: "deleted" });
+    expect(taskVisibleAtRuntimeCleanup).toBe(false);
+    await expect(createScheduledTaskRepository(db).getById("pg-delete")).resolves.toBeUndefined();
+    await expect(createAutomationStepContentRepository(db).getByTask("pg-delete")).resolves.toEqual([]);
+    await expect(createAutomationRunsRepository(db).getById(runId)).resolves.toBeUndefined();
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskConversation("pg-delete", "pg-builder-delete"),
+    ).resolves.toEqual([]);
   });
 });

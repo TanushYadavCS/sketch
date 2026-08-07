@@ -41,12 +41,12 @@ function parseJson<T>(value: string | null, fallback: T): T {
   }
 }
 
-function safeSteps(row: ScheduledTaskRow): WorkflowStep[] {
+function safeSteps(row: ScheduledTaskRow, normalizeScheduleTriggers = true): WorkflowStep[] {
   const parsed = parseJson<unknown>(row.steps, null);
   if (Array.isArray(parsed)) {
     const result = workflowStepSchema.array().safeParse(parsed);
     if (result.success && result.data.length > 0) {
-      return normalizeTaskTriggerStep(row, result.data);
+      return normalizeScheduleTriggers ? normalizeTaskTriggerStep(row, result.data) : result.data;
     }
   }
   return [
@@ -156,8 +156,11 @@ export function buildAutomationDefinition(params: {
   row: ScheduledTaskRow;
   stepContentRows: StepContentRow[];
   runRows: AutomationRunRow[];
+  normalizeScheduleTriggers?: boolean;
+  createdByName?: string | null;
+  lastEditedByName?: string | null;
 }): AutomationDefinition {
-  const steps = safeSteps(params.row);
+  const steps = safeSteps(params.row, params.normalizeScheduleTriggers);
   const edges = safeEdges(params.row, steps);
   const delivery = resolveWorkflowDelivery(params.row);
   const recentRuns = params.runRows.map(parseRun);
@@ -185,9 +188,12 @@ export function buildAutomationDefinition(params: {
         ? params.row.status
         : "paused",
     createdBy: params.row.created_by,
+    createdByName: params.createdByName ?? null,
     createdAt: params.row.created_at,
     updatedAt: params.row.updated_at,
     revision: params.row.revision,
+    lastEditedBy: params.row.last_edited_by,
+    lastEditedByName: params.lastEditedByName ?? null,
     title: params.row.title,
     description: params.row.description,
     originChat:
