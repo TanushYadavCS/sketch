@@ -159,7 +159,11 @@ import * as m156 from "./migrations/156-operational-alerts";
 import * as m157 from "./migrations/157-task-activity-events";
 import * as m158 from "./migrations/158-slack-channel-participants";
 import * as m159 from "./migrations/159-scheduled-task-conversations";
-import * as m160 from "./migrations/160-outlook-calendar-provider-file-scope";
+import * as m160 from "./migrations/160-slack-entity-lifecycle-sync";
+import * as m161 from "./migrations/161-slack-roster-evidence";
+import * as m162 from "./migrations/162-user-entity-links";
+import * as m163 from "./migrations/163-slack-file-access-backfill-cleanup";
+import * as m164 from "./migrations/164-outlook-calendar-provider-file-scope";
 import type { DB } from "./schema";
 
 /**
@@ -328,7 +332,11 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "157-task-activity-events": m157,
           "158-slack-channel-participants": m158,
           "159-scheduled-task-conversations": m159,
-          "160-outlook-calendar-provider-file-scope": m160,
+          "160-slack-entity-lifecycle-sync": m160,
+          "161-slack-roster-evidence": m161,
+          "162-user-entity-links": m162,
+          "163-slack-file-access-backfill-cleanup": m163,
+          "164-outlook-calendar-provider-file-scope": m164,
         };
       },
     },

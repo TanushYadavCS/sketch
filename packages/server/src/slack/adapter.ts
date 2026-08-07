@@ -3,9 +3,11 @@
  * Extracted from index.ts for testability. All handler logic lives here; index.ts only calls
  * createConfiguredSlackBot() and passes the result to the startup manager.
  */
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
+import { withActiveRun } from "../agent/active-runs";
 import type { AuxLlmCall } from "../agent/aux-cost";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import {
@@ -70,6 +72,7 @@ import { transcribeEagerAttachments } from "../transcription/service";
 import { resolveVisionConfigFromAppConfig } from "../vision/service";
 import { slackApiCall } from "./api";
 import { SlackBot, type SlackFile, type SlackMessage, type SlackMessageHandler } from "./bot";
+import type { SlackEntitySyncService } from "./entity-sync";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
 import { SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
@@ -156,6 +159,7 @@ export interface SlackAdapterDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
+  slackEntitySync?: SlackEntitySyncService;
   onSlackChannelDiscovered?: () => void;
   recordSlackChannelParticipantJoined?: (channelId: string, slackUserId: string) => Promise<void>;
   recordSlackChannelParticipantObserved?: (channelId: string, slackUserId: string) => Promise<void>;
@@ -167,9 +171,11 @@ export interface SlackAdapterDeps {
   followupReviewHandler?: FollowupReviewCommandHandler;
 }
 
-export async function validateSlackTokens(botToken: string, appToken?: string) {
+export async function validateSlackTokens(botToken: string, appToken?: string): Promise<{ teamId: string }> {
   void appToken;
-  await slackApiCall(botToken, "auth.test");
+  const auth = await slackApiCall(botToken, "auth.test");
+  if (!auth.team_id) throw new Error("Slack auth.test did not return a team id");
+  return { teamId: auth.team_id };
 }
 
 interface DownloadedSlackAttachment extends Attachment {
@@ -305,6 +311,13 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     botToken: tokens.botToken,
     ...(mode === "socket" ? { appToken: tokens.appToken } : { signingSecret: config.SLACK_SIGNING_SECRET }),
     logger,
+    eventSilenceThresholdMs: config.SLACK_ENTITY_SYNC
+      ? config.SLACK_ENTITY_EVENT_SILENCE_THRESHOLD_MS
+      : Number.MAX_SAFE_INTEGER,
+    lifecycleEventsEnabled: config.SLACK_ENTITY_SYNC,
+    onTeamIdResolved: async (teamId) => {
+      await deps.repos.settings.update({ slackTeamId: teamId });
+    },
   });
   const slackChannelParticipants = repos.slackChannelParticipants ?? createSlackChannelParticipantsRepository(db);
   const recordSlackChannelParticipantJoined =
@@ -317,15 +330,60 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     deps.recordSlackChannelParticipantLeft ??
     ((channelId: string, slackUserId: string) => slackChannelParticipants.remove(channelId, slackUserId));
 
-  slackBot.onMemberJoinedChannel(({ channelId, slackUserId }) =>
-    recordSlackChannelParticipantJoined(channelId, slackUserId),
-  );
-  slackBot.onMemberLeftChannel(({ channelId, slackUserId }) =>
-    recordSlackChannelParticipantLeft(channelId, slackUserId),
-  );
+  slackBot.onMemberJoinedChannel(async ({ channelId, slackUserId, isBot, teamId }) => {
+    await recordSlackChannelParticipantJoined(channelId, slackUserId);
+    if (deps.slackEntitySync) {
+      const refresh = isBot
+        ? deps.slackEntitySync.handleBotJoinedChannel({
+            channelId,
+            ...(teamId ? { teamId } : {}),
+          })
+        : deps.slackEntitySync.handleMemberJoinedChannel({
+            channelId,
+            slackUserId,
+            ...(teamId ? { teamId } : {}),
+          });
+      void refresh.catch((error) => {
+        logger.warn({ error, teamId, channelId }, "Slack channel member entity sync failed");
+      });
+    }
+  });
+  slackBot.onMemberLeftChannel(async ({ channelId, slackUserId, teamId }) => {
+    await recordSlackChannelParticipantLeft(channelId, slackUserId);
+    await deps.slackEntitySync?.handleMemberLeftChannel({
+      channelId,
+      slackUserId,
+      ...(teamId ? { teamId } : {}),
+    });
+  });
+  slackBot.onTeamJoin?.(async ({ teamId, slackUserId }) => {
+    await deps.slackEntitySync?.handleUserEvent({
+      eventType: "team_join",
+      slackUserId,
+      ...(teamId ? { teamId } : {}),
+    });
+  });
+  slackBot.onUserChange?.(async ({ teamId, slackUserId }) => {
+    await deps.slackEntitySync?.handleUserEvent({
+      eventType: "user_change",
+      slackUserId,
+      ...(teamId ? { teamId } : {}),
+    });
+  });
   const recordObservedChannelParticipant = async (message: SlackMessage) => {
     if (message.userId && message.channelType !== "mpim") {
       await recordSlackChannelParticipantObserved(message.channelId, message.userId);
+    }
+    if (message.userId && deps.slackEntitySync) {
+      try {
+        await deps.slackEntitySync.observeMessage({
+          channelId: message.channelId,
+          slackUserId: message.userId,
+          ...(message.teamId ? { teamId: message.teamId } : {}),
+        });
+      } catch (err) {
+        logger.warn({ err, slackUserId: message.userId }, "Slack observe-on-message entity sync failed");
+      }
     }
   };
 
@@ -729,56 +787,64 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         };
         const userMessage = buildSketchContext(sketchContext);
 
-        const result = await runAgent({
-          db,
-          workspaceKey: user.id,
-          seedAuxCalls: eagerAuxCalls,
-          userMessage,
-          workspaceDir,
-          claudeConfigDir: config.CLAUDE_CONFIG_DIR,
-          userName: user.name,
-          userEmail: user.email,
-          logger,
-          platform: "slack",
-          getSlack: () => slackBot,
-          onProgressEvent,
-          ...(assistantThreadTs ? { threadTs: assistantThreadTs } : {}),
-          orgName: settingsRow?.org_name,
-          orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
-          botName: settingsRow?.bot_name,
-          visionConfig,
-          blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
-          attachments: attachments.length > 0 ? attachments : undefined,
-          integrationMcpServers,
-          loadIntegrationProvider,
-          contextType: "dm",
-          taskContext: {
-            platform: "slack" as const,
-            contextType: "dm" as const,
-            deliveryTarget: message.channelId,
-            createdBy: user.id,
-            canManageAnyTask: user.auth_role === "admin",
-            creatorTimezone: user.timezone,
-            origin: {
-              platform: "slack" as const,
-              conversationId: String(capture.conversation.id),
-              providerThreadId: null,
-              currentMessageId: capture.captured.id,
-            },
-          },
-          scheduler,
-          stepContentRepo,
-          automationRunsRepo,
-          queueManager: queue,
-          activeQueueKey,
-          toolConfig,
-          inboxMessagesRepo,
-          userRepo: repos.users,
-          currentUserId: user.id,
-          sendDm,
-          conversationRepo: repos.conversations,
-          conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
-        });
+        const abortController = new AbortController();
+        const result = await withActiveRun(
+          `slack:${randomUUID()}`,
+          abortController,
+          () =>
+            runAgent({
+              db,
+              workspaceKey: user.id,
+              seedAuxCalls: eagerAuxCalls,
+              userMessage,
+              workspaceDir,
+              claudeConfigDir: config.CLAUDE_CONFIG_DIR,
+              userName: user.name,
+              userEmail: user.email,
+              logger,
+              platform: "slack",
+              getSlack: () => slackBot,
+              onProgressEvent,
+              ...(assistantThreadTs ? { threadTs: assistantThreadTs } : {}),
+              orgName: settingsRow?.org_name,
+              orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
+              botName: settingsRow?.bot_name,
+              visionConfig,
+              blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
+              attachments: attachments.length > 0 ? attachments : undefined,
+              integrationMcpServers,
+              loadIntegrationProvider,
+              contextType: "dm",
+              taskContext: {
+                platform: "slack" as const,
+                contextType: "dm" as const,
+                deliveryTarget: message.channelId,
+                createdBy: user.id,
+                canManageAnyTask: user.auth_role === "admin",
+                creatorTimezone: user.timezone,
+                origin: {
+                  platform: "slack" as const,
+                  conversationId: String(capture.conversation.id),
+                  providerThreadId: null,
+                  currentMessageId: capture.captured.id,
+                },
+              },
+              scheduler,
+              stepContentRepo,
+              automationRunsRepo,
+              queueManager: queue,
+              activeQueueKey,
+              abortController,
+              toolConfig,
+              inboxMessagesRepo,
+              userRepo: repos.users,
+              currentUserId: user.id,
+              sendDm,
+              conversationRepo: repos.conversations,
+              conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
+            }),
+          { platform: "slack", channelId: message.channelId, threadTs: assistantThreadTs ?? null },
+        );
 
         const finalText = appendIntegrationConnectionLinks(
           appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
@@ -1165,65 +1231,74 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         const onProgressEvent = shimmer.onProgressEvent;
 
         const integrationMcpServers = await buildMcpServers(user.email);
+        const activeUser = user;
 
-        const result = await runAgent({
-          db,
-          workspaceKey: channelWorkspaceKey,
-          seedAuxCalls: eagerAuxCalls,
-          userMessage,
-          workspaceDir,
-          claudeConfigDir: config.CLAUDE_CONFIG_DIR,
-          userName: user.name,
-          userEmail: user.email,
-          logger,
-          platform: "slack",
-          getSlack: () => slackBot,
-          onProgressEvent,
-          threadTs,
-          orgName: settingsRow?.org_name,
-          orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
-          botName: settingsRow?.bot_name,
-          visionConfig,
-          blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
-          attachments: attachments.length > 0 ? attachments : undefined,
-          integrationMcpServers,
-          loadIntegrationProvider,
-          contextType: "channel_mention",
-          currentUserId: user.id,
-          taskContext: {
-            platform: "slack" as const,
-            contextType: "channel" as const,
-            deliveryTarget: message.channelId,
-            createdBy: user.id,
-            canManageAnyTask: user.auth_role === "admin",
-            creatorTimezone: user.timezone,
-            threadTs: message.threadTs ? threadTs : undefined,
-            origin: {
-              platform: "slack" as const,
-              conversationId: String(capture.conversation.id),
-              providerThreadId: threadTs,
-              currentMessageId: capture.captured.id,
-            },
-          },
-          scheduler,
-          stepContentRepo,
-          automationRunsRepo,
-          queueManager: queue,
-          activeQueueKey,
-          toolConfig,
-          inboxMessagesRepo,
-          userRepo: repos.users,
-          sendDm,
-          agentInstructions,
-          agentAllowedTools,
-          conversationRepo: repos.conversations,
-          conversationContext: {
-            conversationId: capture.conversation.id,
-            currentMessageId: capture.captured.id,
-            providerThreadId: message.threadTs ? threadTs : undefined,
-            ...(message.threadTs ? {} : { isThreadReply: false }),
-          },
-        });
+        const abortController = new AbortController();
+        const result = await withActiveRun(
+          `slack:${randomUUID()}`,
+          abortController,
+          () =>
+            runAgent({
+              db,
+              workspaceKey: channelWorkspaceKey,
+              seedAuxCalls: eagerAuxCalls,
+              userMessage,
+              workspaceDir,
+              claudeConfigDir: config.CLAUDE_CONFIG_DIR,
+              userName: activeUser.name,
+              userEmail: activeUser.email,
+              logger,
+              platform: "slack",
+              getSlack: () => slackBot,
+              onProgressEvent,
+              threadTs,
+              orgName: settingsRow?.org_name,
+              orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
+              botName: settingsRow?.bot_name,
+              visionConfig,
+              blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
+              attachments: attachments.length > 0 ? attachments : undefined,
+              integrationMcpServers,
+              loadIntegrationProvider,
+              contextType: "channel_mention",
+              currentUserId: activeUser.id,
+              taskContext: {
+                platform: "slack" as const,
+                contextType: "channel" as const,
+                deliveryTarget: message.channelId,
+                createdBy: activeUser.id,
+                canManageAnyTask: activeUser.auth_role === "admin",
+                creatorTimezone: activeUser.timezone,
+                threadTs: message.threadTs ? threadTs : undefined,
+                origin: {
+                  platform: "slack" as const,
+                  conversationId: String(capture.conversation.id),
+                  providerThreadId: threadTs,
+                  currentMessageId: capture.captured.id,
+                },
+              },
+              scheduler,
+              stepContentRepo,
+              automationRunsRepo,
+              queueManager: queue,
+              activeQueueKey,
+              abortController,
+              toolConfig,
+              inboxMessagesRepo,
+              userRepo: repos.users,
+              sendDm,
+              agentInstructions,
+              agentAllowedTools,
+              conversationRepo: repos.conversations,
+              conversationContext: {
+                conversationId: capture.conversation.id,
+                currentMessageId: capture.captured.id,
+                providerThreadId: message.threadTs ? threadTs : undefined,
+                ...(message.threadTs ? {} : { isThreadReply: false }),
+              },
+            }),
+          { platform: "slack", channelId: message.channelId, threadTs },
+        );
 
         const finalText = appendIntegrationConnectionLinks(
           appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),

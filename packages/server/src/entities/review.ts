@@ -52,6 +52,24 @@ function readEmail(metadata: string | null): string | null {
 
 type CandidateSummary = { id: string; name: string; email: string | null };
 
+function candidateIdsForRow(row: {
+  candidate_entity_id: string | null;
+  candidate_entity_ids: string | null;
+}): string[] {
+  const ids = row.candidate_entity_id ? [row.candidate_entity_id] : [];
+  if (row.candidate_entity_ids) {
+    try {
+      const parsed = JSON.parse(row.candidate_entity_ids) as unknown;
+      if (Array.isArray(parsed)) {
+        ids.push(...parsed.filter((id): id is string => typeof id === "string" && id.length > 0));
+      }
+    } catch {
+      return [...new Set(ids)];
+    }
+  }
+  return [...new Set(ids)];
+}
+
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 const RECLASSIFIABLE_TYPES = new Set(["project", "product", "team"]);
@@ -208,9 +226,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
 
     // Candidate-entity summary (name + email) — UI renders this in place of the raw id.
     const entityRepo = createEntityRepository(db);
-    const candidateIds = Array.from(
-      new Set(visibleRows.map((r) => r.candidate_entity_id).filter((v): v is string => !!v)),
-    );
+    const candidateIds = Array.from(new Set(visibleRows.flatMap((row) => candidateIdsForRow(row))));
     const candidatesById = new Map<string, CandidateSummary>();
     if (candidateIds.length > 0) {
       const entities = await entityRepo.getEntities(candidateIds);
@@ -223,7 +239,10 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
       const breakdown = summaryByReview.get(r.id) ?? [];
       const evidenceCount = breakdown.reduce((acc, b) => acc + b.count, 0);
       const candidate = r.candidate_entity_id ? (candidatesById.get(r.candidate_entity_id) ?? null) : null;
-      return { ...r, evidenceCount, sourceBreakdown: breakdown, candidate };
+      const candidates = candidateIdsForRow(r)
+        .map((id) => candidatesById.get(id))
+        .filter((value): value is CandidateSummary => value !== undefined);
+      return { ...r, evidenceCount, sourceBreakdown: breakdown, candidate, candidates };
     });
 
     return c.json({ rows: rowsWithSummary, total });
@@ -240,7 +259,12 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
 
   app.post("/confirm-batch", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
-      items?: Array<{ reviewId?: string; candidateGeneratedAt?: string; mergeIntoEntityId?: string }>;
+      items?: Array<{
+        reviewId?: string;
+        candidateGeneratedAt?: string;
+        mergeIntoEntityId?: string;
+        linkUserId?: string;
+      }>;
     };
     if (!Array.isArray(body.items)) {
       return c.json({ error: { code: "BAD_REQUEST", message: "items is required" } }, 400);
@@ -281,6 +305,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
         const result = await confirmReview({ db, userId: c.get("sub") }, item.reviewId, {
           mergeIntoEntityId: item.mergeIntoEntityId,
           candidateGeneratedAt: item.candidateGeneratedAt,
+          linkUserId: item.linkUserId,
         });
         if (result.row.entity_type === "project") confirmedProjectTargetEntityIds.add(result.targetEntityId);
         results.push({ reviewId: item.reviewId, ok: true, targetEntityId: result.targetEntityId });
@@ -397,14 +422,23 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
     for (const e of evidence) breakdown.set(e.source, (breakdown.get(e.source) ?? 0) + 1);
     const sourceBreakdown = Array.from(breakdown, ([source, count]) => ({ source, count }));
 
-    let candidate: CandidateSummary | null = null;
-    if (baseRow.candidate_entity_id) {
-      const entityRepo = createEntityRepository(db);
-      const candidateEntity = await entityRepo.getEntity(baseRow.candidate_entity_id);
-      if (candidateEntity) {
-        candidate = { id: candidateEntity.id, name: candidateEntity.name, email: readEmail(candidateEntity.metadata) };
-      }
-    }
+    const entityRepo = createEntityRepository(db);
+    const candidateEntities = await entityRepo.getEntities(candidateIdsForRow(baseRow));
+    const candidatesById = new Map(
+      candidateEntities.map((candidateEntity) => [
+        candidateEntity.id,
+        {
+          id: candidateEntity.id,
+          name: candidateEntity.name,
+          email: readEmail(candidateEntity.metadata),
+        },
+      ]),
+    );
+    const candidates = candidateIdsForRow(baseRow)
+      .map((candidateId) => candidatesById.get(candidateId))
+      .filter((candidate): candidate is CandidateSummary => candidate !== undefined);
+    const candidate = candidates.find((value) => value.id === baseRow.candidate_entity_id) ?? null;
+    const enrichedRow = { ...baseRow, evidenceCount: evidence.length, sourceBreakdown, candidate, candidates };
 
     // Evidence with file names for the review-mode drawer — capped so a
     // 1000-evidence proposal doesn't drag the modal to its knees.
@@ -422,8 +456,6 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
         sourcePath: e.source_path,
       },
     }));
-
-    const enrichedRow = { ...baseRow, evidenceCount: evidence.length, sourceBreakdown, candidate };
 
     // Structural-seed rows (project/team pulled from a tracker) carry no file
     // evidence — the seed fact has no indexed_file_id. Surface the child tasks
@@ -449,6 +481,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
       mergeIntoEntityId?: string;
       candidateGeneratedAt?: string;
       nameOverride?: string;
+      linkUserId?: string;
     };
     if (!body.candidateGeneratedAt) {
       return c.json({ error: { code: "BAD_REQUEST", message: "candidateGeneratedAt is required" } }, 400);
@@ -465,6 +498,7 @@ export function entityReviewRoutes(db: Kysely<DB>, deps: { logger: Logger }) {
         mergeIntoEntityId: body.mergeIntoEntityId,
         candidateGeneratedAt: body.candidateGeneratedAt,
         nameOverride: body.nameOverride,
+        linkUserId: body.linkUserId,
       });
       if (result.row.entity_type === "project") {
         await backfillStructuralAssigneeForConfirmedProjects(db, deps.logger, [result.targetEntityId]);

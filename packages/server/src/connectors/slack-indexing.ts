@@ -44,6 +44,7 @@ export function createSlackIndexingConnector(): Connector {
       credentials,
       logger,
       scopeConfig,
+      appConfig,
       salienceGenerator,
       slackIndexing,
     }): AsyncGenerator<SyncedItem> {
@@ -51,7 +52,12 @@ export function createSlackIndexingConnector(): Connector {
       if (!db) throw new Error("Slack indexing connector requires database access");
       if (!connectorConfigId) throw new Error("Slack indexing connector requires its connector config id");
       if (!slackIndexing || !(await slackIndexing.isConfigured())) {
-        await archiveAllSlackChannelFiles({ db, logger, connectorConfigId });
+        await archiveAllSlackChannelFiles({
+          db,
+          logger,
+          connectorConfigId,
+          slackEntitySyncEnabled: appConfig?.SLACK_ENTITY_SYNC ?? true,
+        });
         logger.warn("Slack indexing skipped: no Slack bot token configured");
         return;
       }
@@ -76,12 +82,19 @@ export function createSlackIndexingConnector(): Connector {
         onSkippedNoScope: () => {
           skippedNoScope += 1;
         },
+        slackEntitySyncEnabled: appConfig?.SLACK_ENTITY_SYNC ?? true,
       })) {
         emitted += 1;
         yield item;
       }
 
-      await reconcileSlackChannelAcls({ db, logger, facade: slackIndexing, connectorConfigId });
+      await reconcileSlackChannelAcls({
+        db,
+        logger,
+        facade: slackIndexing,
+        connectorConfigId,
+        slackEntitySyncEnabled: appConfig?.SLACK_ENTITY_SYNC ?? true,
+      });
       logger.info({ emitted, skippedNoScope }, "Completed Slack indexing sync");
     },
 

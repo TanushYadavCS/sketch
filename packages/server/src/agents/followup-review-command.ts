@@ -3,6 +3,7 @@ import { parseFollowupReviewCommand } from "../commands";
 import { createConversationFollowupsRepository } from "../db/repositories/conversation-followups";
 import { createEntityRepository } from "../db/repositories/entities";
 import { createTaskDurabilityTransitionRepository } from "../db/repositories/task-durability-transition";
+import { resolvePersonEntitiesForUser as resolveLinkedPersonEntitiesForUser } from "../db/repositories/user-entity-resolver";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 
@@ -41,6 +42,7 @@ interface FollowupReviewCommandDependencies {
   entities: {
     getPersonEntitiesByEmails(emails: string[]): Promise<Map<string, Array<{ id: string }>>>;
   };
+  resolvePersonEntitiesForUser(userId: string, emails: string[]): Promise<Map<string, Array<{ id: string }>>>;
   followups: {
     reviewRecommendation(input: {
       code: string;
@@ -99,6 +101,11 @@ export function createFollowupReviewCommandHandler(
 ): FollowupReviewCommandHandler {
   const users = overrides.users ?? createUserRepository(db);
   const entities = overrides.entities ?? createEntityRepository(db);
+  const resolvePersonEntities =
+    overrides.resolvePersonEntitiesForUser ??
+    (overrides.entities
+      ? (_userId: string, emails: string[]) => entities.getPersonEntitiesByEmails(emails)
+      : (userId: string, emails: string[]) => resolveLinkedPersonEntitiesForUser(db, userId, emails));
   const followups = overrides.followups ?? createConversationFollowupsRepository(db);
   const transition = overrides.transition ?? createTaskDurabilityTransitionRepository(db);
   const now = overrides.now ?? (() => new Date().toISOString());
@@ -110,7 +117,7 @@ export function createFollowupReviewCommandHandler(
     try {
       if (command.action === "confirm_done" || command.action === "keep_open") {
         const verifiedEmails = await users.getVerifiedEmailsForUser(userId);
-        const peopleByEmail = await entities.getPersonEntitiesByEmails(verifiedEmails);
+        const peopleByEmail = await resolvePersonEntities(userId, verifiedEmails);
         const assigneeEntityIds = [...new Set([...peopleByEmail.values()].flat().map((person) => person.id))];
         const result = await followups.reviewRecommendation({
           code: command.code,

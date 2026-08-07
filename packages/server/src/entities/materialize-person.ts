@@ -146,7 +146,7 @@ export async function materializePersonFact(
   const relation = PERSON_FACT_RELATION[factType];
   const confidence = fact.fact_type === "llm_extracted" ? "INFERRED" : "EXTRACTED";
   const mentionSource = fact.fact_type === "llm_extracted" ? "llm_extraction" : `${fact.source}_${fact.fact_type}`;
-  const subtype = fact.subject_email ? "external" : "external";
+  const subtype = "external";
 
   let entity: IndexEntityRow | null = null;
   if (fact.subject_source && fact.subject_source_id) {

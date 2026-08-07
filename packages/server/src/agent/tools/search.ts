@@ -121,6 +121,7 @@ async function filterEntityRowsForPublic<
     deps.db,
     mentions.map((mention) => mention.indexed_file_id),
     userEmails,
+    deps.slackEntitySyncEnabled ?? true,
   );
   const visibleEntityIds = new Set(
     mentions.filter((mention) => accessibleIds.has(mention.indexed_file_id)).map((mention) => mention.entity_id),
@@ -131,6 +132,11 @@ async function filterEntityRowsForPublic<
 
 function parseAliases(value: string | null): string[] {
   return value ? (JSON.parse(value) as string[]) : [];
+}
+
+function displayEntitySubtype(sourceType: string, subtype: string | null): string | null {
+  if (sourceType !== "person") return subtype;
+  return subtype === "internal" ? "internal" : "external";
 }
 
 export async function handleSearch(
@@ -196,7 +202,8 @@ export async function handleSearch(
     const entityParts = entityMatches.map((e) => {
       const aliases = parseAliases(e.aliases);
       const aliasStr = aliases.length > 0 ? `, aliases: ${aliases.join(", ")}` : "";
-      const subtypeStr = e.subtype ? ` (${e.subtype})` : "";
+      const subtype = displayEntitySubtype(e.source_type, e.subtype);
+      const subtypeStr = subtype ? ` (${subtype})` : "";
       return `${e.name} (${e.id}) [${e.source_type}${subtypeStr}${aliasStr}]`;
     });
     lines.push(`**Matching entities**: ${entityParts.join(" | ")}`);
@@ -231,6 +238,7 @@ export async function handleSearch(
     entityIdsMode,
     sortBy,
     userEmails,
+    slackEntitySyncEnabled: deps.slackEntitySyncEnabled,
     skipAutoEntityBoost,
     geminiMaxRpm: deps.geminiConfig?.maxRpm,
     geminiMaxRetries: deps.geminiConfig?.maxRetries,
@@ -299,7 +307,7 @@ export async function handleSearchEntities(
           id: entity.id,
           name: entity.name,
           sourceType: entity.source_type,
-          subtype: entity.subtype,
+          subtype: displayEntitySubtype(entity.source_type, entity.subtype),
           aliases: parseAliases(entity.aliases),
           status: entity.status,
           hotness: entity.hotness,
@@ -363,6 +371,7 @@ export async function handleGetEntityContext(
     deps.db,
     rawMentions.map((m) => m.indexed_file_id),
     userEmails,
+    deps.slackEntitySyncEnabled ?? true,
   );
 
   const mentions = rawMentions.filter((m) => accessibleIds.has(m.indexed_file_id)).slice(0, requestedLimit);
@@ -374,8 +383,9 @@ export async function handleGetEntityContext(
   const lines: string[] = [];
   const aliases = parseAliases(entity.aliases);
   const aliasStr = aliases.length > 0 ? ` (aliases: ${aliases.join(", ")})` : "";
+  const subtype = displayEntitySubtype(entity.source_type, entity.subtype);
   lines.push(`## ${entity.name}${aliasStr}`);
-  lines.push(`Type: ${entity.source_type}${entity.subtype ? ` (${entity.subtype})` : ""} | Status: ${entity.status}`);
+  lines.push(`Type: ${entity.source_type}${subtype ? ` (${subtype})` : ""} | Status: ${entity.status}`);
   lines.push(
     `Total mentions found: ${mentions.length}${mentions.length === requestedLimit ? " (limit reached, use 'since' or increase 'limit' for more)" : ""}`,
   );
@@ -416,7 +426,7 @@ export async function handleGetFileContent({ fileId }: GetFileContentArgs, deps:
   if (deps.publicMcp && userEmails.length === 0) {
     return { content: [{ type: "text", text: `File ${fileId} not found.` }] };
   }
-  const file = await getFileContent(deps.db, fileId, userEmails);
+  const file = await getFileContent(deps.db, fileId, userEmails, deps.slackEntitySyncEnabled ?? true);
 
   if (!file) {
     return { content: [{ type: "text", text: `File ${fileId} not found.` }] };

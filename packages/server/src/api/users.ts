@@ -807,18 +807,12 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
       }
     }
 
-    await deps.db
-      .updateTable("users")
-      .set({
-        type: "human",
-        name: parsed.data.name,
-        email,
-        role: parsed.data.role ?? null,
-      })
-      .where("id", "=", id)
-      .execute();
-
-    const promoted = await users.findById(id);
+    const promoted = await users.update(id, {
+      type: "human",
+      name: parsed.data.name,
+      email,
+      role: parsed.data.role ?? null,
+    });
     if (!promoted) {
       return c.json({ error: { code: "NOT_FOUND", message: "User not found" } }, 404);
     }

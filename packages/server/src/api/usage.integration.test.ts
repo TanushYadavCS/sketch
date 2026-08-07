@@ -7,7 +7,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
-import { createTestConfig, createTestDb, createTestLogger, getSharedPgDb } from "../test-utils";
+import { createTestConfig, createTestDb, createTestLogger, createTestPgDb, getSharedPgDb } from "../test-utils";
 
 const config = createTestConfig();
 const logger = createTestLogger();
@@ -851,17 +851,13 @@ describe("Usage API", () => {
 describe("Usage API on Postgres", () => {
   let db!: Kysely<DB>;
 
-  beforeAll(async () => {
-    db = await getSharedPgDb();
+  beforeEach(async () => {
+    db = await createTestPgDb();
+    await seedAdmin(db);
   }, 30000);
 
-  beforeEach(async () => {
-    await sql`BEGIN`.execute(db);
-    await seedAdmin(db);
-  });
-
   afterEach(async () => {
-    await sql`ROLLBACK`.execute(db);
+    await db.destroy();
   });
 
   it("returns member and org usage without Postgres real rounding errors", async () => {

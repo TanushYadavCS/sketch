@@ -99,6 +99,7 @@ export interface AgentRuntimeContextParams {
   now: Date;
   adminCanReadAllFiles: boolean;
   contentUserEmails: string[] | undefined;
+  slackEntitySyncEnabled?: boolean;
   agentConfig?: {
     enabledSections: Record<string, boolean>;
     maxItemsPerSection: number;

@@ -213,6 +213,13 @@ async function syncItemAccess(
   if (item.accessScope) {
     const scopeId = await repo.upsertAccessScope(connectorConfigId, item.accessScope);
     await repo.setFileAccessScope(indexedFileId, scopeId);
+    if (item.accessEmails !== undefined && item.accessEmails !== null) {
+      if (item.accessEmails.length === 0) {
+        await repo.syncFileAccessEmails(indexedFileId, []);
+      } else {
+        await repo.grantFileAccessEmails(indexedFileId, item.accessEmails);
+      }
+    }
   } else if (item.accessEmails && item.accessEmails.length > 0) {
     await repo.syncFileAccessEmails(indexedFileId, item.accessEmails);
   }

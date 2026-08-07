@@ -392,6 +392,7 @@ export function connectorRoutes(
       | "CANVAS_CREDENTIAL_PRIVATE_KEY_PATH"
       | "CANVAS_CREDENTIAL_PUBLIC_KEY_ID"
       | "OPENROUTER_API_KEY"
+      | "SLACK_ENTITY_SYNC"
     >
   >,
 ) {
@@ -1092,6 +1093,7 @@ export function connectorRoutes(
       after: after ?? undefined,
       before: before ?? undefined,
       userEmails,
+      slackEntitySyncEnabled: appConfig?.SLACK_ENTITY_SYNC,
       geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
       openRouterApiKey: appConfig?.OPENROUTER_API_KEY,
@@ -1117,7 +1119,7 @@ export function connectorRoutes(
     if (!exists) {
       return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
     }
-    const file = await getFileContent(db, fileId, userEmails);
+    const file = await getFileContent(db, fileId, userEmails, contentViewer.slackEntitySyncEnabled ?? true);
     if (!file) {
       // Admins already see the file metadata in the list; surface name/source/etc.
       // here so they can triage which file is gated and ask the owner. For non-admins,
@@ -2151,6 +2153,7 @@ export function connectorRoutes(
       db,
       rows.map((row) => row.indexed_file_id),
       userEmails,
+      contentViewer.slackEntitySyncEnabled ?? true,
     );
     const visible = rows.filter((row) => visibleIds.has(row.indexed_file_id));
     if (visible.length === 0) {

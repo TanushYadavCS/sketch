@@ -39,7 +39,7 @@ export function useReviewRowSheets() {
   };
 
   const openRow = (row: EntityReviewQueueRow) => {
-    if (row.candidate) setReconcileId(row.id);
+    if (row.candidate || (row.candidates?.length ?? 0) > 0) setReconcileId(row.id);
     else setBirthId(row.id);
   };
 
@@ -101,9 +101,10 @@ export function ReviewRowCompact({
   detail?: boolean;
 }) {
   const mutations = useReviewMutations(row, onResolved);
-  const hasCandidate = row.candidate_entity_id !== null;
+  const candidates = row.candidates ?? (row.candidate ? [row.candidate] : []);
+  const hasCandidate = row.candidate_entity_id !== null || candidates.length > 0;
   const suggestion = hasCandidate
-    ? `→ ${row.candidate?.name}${detail && row.candidate?.email ? ` · ${row.candidate.email}` : ""}`
+    ? `→ ${candidates.map((candidate) => `${candidate.name}${detail && candidate.email ? ` · ${candidate.email}` : ""}`).join(", ")}`
     : "new — no suggested match";
   const evidence =
     detail && row.sourceBreakdown.length > 0
