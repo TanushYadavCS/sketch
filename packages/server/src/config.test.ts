@@ -4,6 +4,20 @@ import { configSchema, loadConfig, validateConfig } from "./config";
 import type { Config } from "./config";
 
 describe("configSchema", () => {
+  it("enables Slack entity sync by default", () => {
+    const result = configSchema.parse({});
+
+    expect(result.SLACK_ENTITY_SYNC).toBe(true);
+    expect(result.SLACK_ENTITY_SYNC_PUBLIC_CHANNELS).toBe(true);
+    expect(result.SLACK_ENTITY_SYNC_USER_INFO_CAP).toBe(1000);
+  });
+
+  it("keeps the emergency kill switch fully disabled", () => {
+    const result = configSchema.parse({ SLACK_ENTITY_SYNC: "false" });
+
+    expect(result.SLACK_ENTITY_SYNC).toBe(false);
+  });
+
   describe("valid configs", () => {
     it("parses minimal config with all defaults", () => {
       const result = configSchema.safeParse({});

@@ -283,10 +283,16 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       return c.json({ error: { code: "BAD_REQUEST", message: "name and sourceType are required" } }, 400);
     }
 
+    const sourceType = body.sourceType.trim();
+    const subtype = sourceType === "person" ? (body.subtype === undefined ? "external" : body.subtype) : body.subtype;
+    if (sourceType === "person" && subtype !== "internal" && subtype !== "external") {
+      return c.json({ error: { code: "BAD_REQUEST", message: "person subtype must be internal or external" } }, 400);
+    }
+
     const entity = await repo.upsertEntity({
       name: body.name.trim(),
-      sourceType: body.sourceType.trim(),
-      subtype: body.subtype,
+      sourceType,
+      subtype,
       aliases: body.aliases,
       status: "confirmed",
       provenanceTier: "declared",
@@ -693,6 +699,7 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
       sourceType?: string;
       status?: string;
       aliases?: string[];
+      subtype?: string;
     };
 
     const updates: Record<string, unknown> = {};
@@ -700,6 +707,18 @@ export function createEntityProfileRoutes(db: Kysely<DB>, _deps: EntityRoutesDep
     if (body.sourceType !== undefined) updates.source_type = body.sourceType;
     if (body.status !== undefined) updates.status = body.status;
     if (body.aliases !== undefined) updates.aliases = JSON.stringify(body.aliases);
+
+    const nextSourceType = body.sourceType?.trim() ?? entity.source_type;
+    if (body.subtype !== undefined || (nextSourceType === "person" && entity.source_type !== "person")) {
+      const subtype = body.subtype === undefined ? "external" : body.subtype;
+      if (nextSourceType === "person" && subtype !== "internal" && subtype !== "external") {
+        return c.json({ error: { code: "BAD_REQUEST", message: "person subtype must be internal or external" } }, 400);
+      }
+      if (nextSourceType === "person") {
+        updates.subtype = subtype;
+        updates.provenance_tier = "declared";
+      }
+    }
 
     if (Object.keys(updates).length > 0) {
       await repo.updateEntity(entity.id, updates);

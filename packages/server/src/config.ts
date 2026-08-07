@@ -20,6 +20,8 @@ export const configSchema = z.object({
   SLACK_THREAD_HISTORY_LIMIT: z.coerce.number().default(50),
   MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS: z.coerce.number().int().min(1).default(4),
   MAX_CONCURRENT_SCHEDULED_AGENT_RUNS: z.coerce.number().int().min(1).default(4),
+  AGENT_MODEL_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1).default(600000),
+  AGENT_RUN_WATCHDOG_MS: z.coerce.number().int().min(1).default(900000),
 
   // Files
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),
@@ -27,6 +29,25 @@ export const configSchema = z.object({
   MAX_ATTACHMENT_TOTAL_MB: z.coerce.number().default(30),
 
   // Feature flags
+  SLACK_ENTITY_SYNC: z
+    .enum(["true", "false", "1", "0"])
+    .default("true")
+    .transform((v) => v === "true" || v === "1"),
+  SLACK_ENTITY_SYNC_PUBLIC_CHANNELS: z
+    .enum(["true", "false", "1", "0"])
+    .default("true")
+    .transform((v) => v === "true" || v === "1"),
+  SLACK_ENTITY_SYNC_USER_INFO_CAP: z.coerce.number().int().min(1).default(1000),
+  SLACK_ENTITY_SWEEP_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(7 * 24 * 60 * 60 * 1000),
+  SLACK_ENTITY_EVENT_SILENCE_THRESHOLD_MS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(7 * 24 * 60 * 60 * 1000),
   BIRTH_GATE_DRY_RUN: z
     .enum(["true", "false", "1", "0"])
     .default("true")
@@ -202,6 +223,12 @@ export function loadConfig(): Config {
 export function validateConfig(config: Config): void {
   if (config.DB_TYPE === "postgres" && !config.DATABASE_URL) {
     console.error("DB_TYPE=postgres requires DATABASE_URL");
+    process.exit(1);
+  }
+  if (config.AGENT_RUN_WATCHDOG_MS <= config.AGENT_MODEL_REQUEST_TIMEOUT_MS) {
+    console.error(
+      "AGENT_RUN_WATCHDOG_MS must exceed AGENT_MODEL_REQUEST_TIMEOUT_MS so a stalled request fails on its own deadline before the watchdog reports the run as slow",
+    );
     process.exit(1);
   }
   if (config.SLACK_MODE === "http" && !config.SLACK_SIGNING_SECRET) {

@@ -179,6 +179,28 @@ export interface UpsertPersonEntityData {
   provenanceTier?: ProvenanceTier;
 }
 
+export function isHumanSubtypeOverride(provenanceTier: string | null | undefined): boolean {
+  return provenanceTier === "declared" || provenanceTier === "human_confirmed";
+}
+
+function reconcilePersonSubtype(
+  existingSubtype: string | null,
+  existingProvenanceTier: string | null,
+  incomingSubtype: "internal" | "external",
+  incomingProvenanceTier: ProvenanceTier | undefined,
+): { subtype: string | null; provenanceTier: string | null } {
+  if (isHumanSubtypeOverride(incomingProvenanceTier)) {
+    return { subtype: incomingSubtype, provenanceTier: incomingProvenanceTier ?? null };
+  }
+  if (isHumanSubtypeOverride(existingProvenanceTier)) {
+    return { subtype: existingSubtype, provenanceTier: existingProvenanceTier };
+  }
+  if (existingSubtype === "internal" && incomingSubtype === "external") {
+    return { subtype: "internal", provenanceTier: existingProvenanceTier };
+  }
+  return { subtype: incomingSubtype, provenanceTier: existingProvenanceTier };
+}
+
 export type EntityContactPointKind = "email" | "phone" | "linkedin" | "whatsapp";
 
 export interface UpsertContactPointData {
@@ -368,6 +390,42 @@ export function createEntityRepository(db: Kysely<DB>) {
       .executeTakeFirstOrThrow();
   }
 
+  async function reconcilePersonSubtypeForEntity(
+    entityId: string,
+    incomingSubtype: "internal" | "external",
+    incomingProvenanceTier: ProvenanceTier | undefined,
+  ) {
+    const existing = await db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", entityId)
+      .where(whereLiveEntity())
+      .executeTakeFirstOrThrow();
+    const next = reconcilePersonSubtype(
+      existing.subtype,
+      existing.provenance_tier,
+      incomingSubtype,
+      incomingProvenanceTier,
+    );
+    if (next.subtype !== existing.subtype || next.provenanceTier !== existing.provenance_tier) {
+      await db
+        .updateTable("entities")
+        .set({
+          subtype: next.subtype,
+          provenance_tier: next.provenanceTier ?? existing.provenance_tier,
+          updated_at: new Date().toISOString(),
+        })
+        .where("id", "=", existing.id)
+        .execute();
+    }
+    return db
+      .selectFrom("entities")
+      .selectAll()
+      .where("id", "=", existing.id)
+      .where(whereLiveEntity())
+      .executeTakeFirstOrThrow();
+  }
+
   return {
     // ── CRUD ──
 
@@ -381,19 +439,31 @@ export function createEntityRepository(db: Kysely<DB>) {
         .executeTakeFirst();
 
       if (existing) {
+        const personSubtype =
+          data.sourceType === "person" && (data.subtype === "internal" || data.subtype === "external")
+            ? reconcilePersonSubtype(existing.subtype, existing.provenance_tier, data.subtype, data.provenanceTier)
+            : null;
         await db
           .updateTable("entities")
           .set({
-            subtype: data.subtype ?? existing.subtype,
+            subtype: personSubtype?.subtype ?? data.subtype ?? existing.subtype,
             aliases: data.aliases ? JSON.stringify(data.aliases) : existing.aliases,
             metadata: data.metadata ? JSON.stringify(data.metadata) : existing.metadata,
             source_ref_id: data.sourceRefId ?? existing.source_ref_id,
             status: data.status ?? existing.status,
+            provenance_tier: personSubtype
+              ? (personSubtype.provenanceTier ?? existing.provenance_tier)
+              : (data.provenanceTier ?? existing.provenance_tier),
             updated_at: new Date().toISOString(),
           })
           .where("id", "=", existing.id)
           .execute();
-        return { ...existing, updated_at: new Date().toISOString() };
+        return await db
+          .selectFrom("entities")
+          .selectAll()
+          .where("id", "=", existing.id)
+          .where(whereLiveEntity())
+          .executeTakeFirstOrThrow();
       }
 
       const id = randomUUID();
@@ -565,11 +635,13 @@ export function createEntityRepository(db: Kysely<DB>) {
       id: string,
       updates: Partial<{
         name: string;
+        source_type: string;
         subtype: string;
         aliases: string;
         metadata: string;
         status: string;
         hotness: number;
+        provenance_tier: string;
       }>,
     ) {
       const entityId = await resolveLiveEntityId(db, id);
@@ -584,6 +656,10 @@ export function createEntityRepository(db: Kysely<DB>) {
       if (existing && updates.name && existing.name !== updates.name) {
         await deleteNameEmbedding(db, "entity", entityId);
       }
+    },
+
+    async reconcilePersonSubtype(entityId: string, subtype: "internal" | "external", provenanceTier?: ProvenanceTier) {
+      return reconcilePersonSubtypeForEntity(entityId, subtype, provenanceTier);
     },
 
     /**
@@ -890,6 +966,26 @@ export function createEntityRepository(db: Kysely<DB>) {
         .where(whereLiveEntity())
         .orderBy("entities.id", "asc")
         .execute();
+    },
+
+    async getPersonEntitiesByContactPointKinds(
+      rawValue: string,
+      kinds: Array<Extract<EntityContactPointKind, "phone" | "whatsapp">>,
+    ): Promise<Selectable<EntitiesTable>[]> {
+      const value = normalizeContactPointValue("phone", rawValue);
+      const rows = await db
+        .selectFrom("entity_contact_points")
+        .innerJoin("entities", "entities.id", "entity_contact_points.entity_id")
+        .selectAll("entities")
+        .where("entity_contact_points.kind", "in", kinds)
+        .where("entity_contact_points.value", "=", value)
+        .where("entities.source_type", "=", "person")
+        .where(whereLiveEntity())
+        .orderBy("entities.id", "asc")
+        .execute();
+      const byId = new Map<string, Selectable<EntitiesTable>>();
+      for (const row of rows) byId.set(row.id, row);
+      return [...byId.values()];
     },
 
     async getPersonEntitiesByEmail(rawEmail: string): Promise<Selectable<EntitiesTable>[]> {
@@ -1223,12 +1319,20 @@ export function createEntityRepository(db: Kysely<DB>) {
 
       if (existing) {
         // If name changed, add old name as alias
+        const personSubtype =
+          existing.source_type === "person"
+            ? reconcilePersonSubtype(existing.subtype, existing.provenance_tier, "external", data.provenanceTier)
+            : null;
         const updates: Record<string, unknown> = {
           name: data.name,
           metadata: data.metadata ? JSON.stringify(data.metadata) : existing.metadata,
           source_ref_id: data.sourceRefId ?? existing.source_ref_id,
           updated_at: new Date().toISOString(),
         };
+        if (personSubtype) {
+          updates.subtype = personSubtype.subtype;
+          updates.provenance_tier = personSubtype.provenanceTier ?? existing.provenance_tier;
+        }
 
         if (existing.name !== data.name) {
           const aliases: string[] = JSON.parse(existing.aliases || "[]");
@@ -1254,7 +1358,12 @@ export function createEntityRepository(db: Kysely<DB>) {
           .where("source_id", "=", data.sourceId)
           .execute();
 
-        return existing;
+        return await db
+          .selectFrom("entities")
+          .selectAll()
+          .where("id", "=", existing.id)
+          .where(whereLiveEntity())
+          .executeTakeFirstOrThrow();
       }
 
       const id = randomUUID();
@@ -1265,7 +1374,7 @@ export function createEntityRepository(db: Kysely<DB>) {
           id,
           name: data.name,
           source_type: data.sourceType,
-          subtype: null,
+          subtype: data.sourceType === "person" ? "external" : null,
           aliases: null,
           metadata: data.metadata ? JSON.stringify(data.metadata) : null,
           source_ref_id: data.sourceRefId ?? null,
@@ -1387,7 +1496,7 @@ export function createEntityRepository(db: Kysely<DB>) {
             .where("source", "=", data.source)
             .where("source_id", "=", data.sourceId)
             .execute();
-          return bySourceRef;
+          return reconcilePersonSubtypeForEntity(bySourceRef.id, data.subtype, data.provenanceTier);
         }
       }
 
@@ -1475,7 +1584,7 @@ export function createEntityRepository(db: Kysely<DB>) {
               .execute();
           }
 
-          return byEmail;
+          return reconcilePersonSubtypeForEntity(byEmail.id, data.subtype, data.provenanceTier);
         }
       }
 
@@ -1549,7 +1658,7 @@ export function createEntityRepository(db: Kysely<DB>) {
             .execute();
         }
 
-        return byName;
+        return reconcilePersonSubtypeForEntity(byName.id, data.subtype, data.provenanceTier);
       }
 
       // No match — create new person entity

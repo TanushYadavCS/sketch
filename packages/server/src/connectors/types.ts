@@ -121,7 +121,8 @@ export interface SyncedItem {
   /**
    * Scope-level access: assigns all files in a container (workspace, space, drive)
    * to a shared member list. Stored once per scope, referenced by many files.
-   * Mutually exclusive with accessEmails for a given item.
+   * Normally mutually exclusive with accessEmails for a given item. Slack
+   * Chat emissions provide both current scope membership and capture-time email stamps.
    *
    * Used by: ClickUp (workspace/space), Google Drive (shared drives).
    */
@@ -495,6 +496,8 @@ export interface Connector {
      * ignore it.
      */
     slackIndexing?: SlackIndexingFacade | null;
+    /** Optional application flags used by connectors with platform-specific policy switches. */
+    appConfig?: { SLACK_ENTITY_SYNC?: boolean };
     onEntitySeed?: EntitySeedCallback;
     onPersonSeed?: PersonEntitySeedCallback;
     onEmailSuppressed?: (record: SuppressedEmailRecord) => Promise<void>;

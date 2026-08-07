@@ -13,13 +13,14 @@ import {
   createAgentOutputRepository,
 } from "../../db/repositories/agent-outputs";
 import { createConversationFollowupsRepository } from "../../db/repositories/conversation-followups";
-import { createEntityRepository, whereLiveEntity } from "../../db/repositories/entities";
+import { whereLiveEntity } from "../../db/repositories/entities";
 import { createTaskActivityRepository } from "../../db/repositories/task-activity";
 import {
   type ActiveTaskDurabilityRoute,
   createTaskDurabilityTransitionRepository,
 } from "../../db/repositories/task-durability-transition";
 import { type PromoteBriefTaskResult, createTaskRepository } from "../../db/repositories/tasks";
+import { resolvePersonEntitiesForUser } from "../../db/repositories/user-entity-resolver";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { createLogger } from "../../logger";
@@ -236,12 +237,13 @@ async function filterVisibleCandidateFileIds(
   db: Kysely<DB>,
   fileIds: string[],
   contentUserEmails: string[] | undefined,
+  slackEntitySyncEnabled: boolean,
 ): Promise<Set<string>> {
   const uniqueFileIds = [...new Set(fileIds)];
   const visibleFileIds = new Set<string>();
   for (let i = 0; i < uniqueFileIds.length; i += FILE_ACCESS_FILTER_CHUNK_SIZE) {
     const chunk = uniqueFileIds.slice(i, i + FILE_ACCESS_FILTER_CHUNK_SIZE);
-    const visibleChunk = await filterAccessibleFileIds(db, chunk, contentUserEmails);
+    const visibleChunk = await filterAccessibleFileIds(db, chunk, contentUserEmails, slackEntitySyncEnabled);
     for (const fileId of visibleChunk) visibleFileIds.add(fileId);
   }
   return visibleFileIds;
@@ -291,6 +293,7 @@ export async function buildTodaysMeetings({
   user,
   outputDate,
   timezone,
+  slackEntitySyncEnabled = true,
 }: AgentRuntimeContextParams): Promise<TodaysMeeting[]> {
   const dayStart = new Date(outputDateWindowStartMs(outputDate, timezone)).toISOString();
   const dayEnd = new Date(outputDateWindowEndMs(outputDate, timezone)).toISOString();
@@ -312,6 +315,7 @@ export async function buildTodaysMeetings({
     db,
     files.map((file) => file.id),
     readerEmails,
+    slackEntitySyncEnabled,
   );
   const visibleFiles = files.filter((file) => visibleFileIds.has(file.id) && file.source_created_at);
   if (visibleFiles.length === 0) return [];
@@ -432,6 +436,7 @@ export async function buildDailyBriefCandidateContext({
   timezone,
   adminCanReadAllFiles,
   contentUserEmails,
+  slackEntitySyncEnabled = true,
   user,
 }: AgentRuntimeContextParams): Promise<DailyBriefCandidateContext> {
   const windowEndMs = outputDateWindowEndMs(outputDate, timezone);
@@ -475,6 +480,7 @@ export async function buildDailyBriefCandidateContext({
     db,
     rows.map((row) => row.indexed_file_id),
     candidateUserEmails,
+    slackEntitySyncEnabled,
   );
   const byEntity = new Map<string, CandidateAccumulator>();
   for (const row of rows as CandidateMentionRow[]) {
@@ -1476,7 +1482,6 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
   const outputRepo = createAgentOutputRepository(args.db);
   const followups = createConversationFollowupsRepository(args.db);
   const transitionRepo = createTaskDurabilityTransitionRepository(args.db);
-  const entities = createEntityRepository(args.db);
   const summarySince = dailyBriefSummarySince(args.baseContext);
   const userEmails = await args.users.getAllEmailsForUser(args.userId);
   const verifiedEmails = await args.users.getVerifiedEmailsForUser(args.userId);
@@ -1497,8 +1502,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
     typeof args.baseContext.maxItemsPerSection === "number"
       ? args.baseContext.maxItemsPerSection
       : args.maxItemsPerSection;
-  const peopleResult = await entities
-    .getPersonEntitiesByEmails(verifiedEmails)
+  const peopleResult = await resolvePersonEntitiesForUser(args.db, args.userId, verifiedEmails)
     .then((value) => ({ status: "ok" as const, value }))
     .catch(() => ({ status: "error" as const }));
   const assigneeEntityIds =
@@ -1509,6 +1513,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
     taskRepo.loadOpenDurableTasksForBrief({
       userId: args.userId,
       userEmails,
+      slackEntitySyncEnabled: args.config.SLACK_ENTITY_SYNC,
       assigneeEntityIds,
       limit: maxItemsPerSection * 4,
     }),
@@ -1552,6 +1557,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
     timezone: readString(args.baseContext.timezone) ?? "UTC",
     generatedAt: readString(args.baseContext.generationStartedAt) ?? new Date().toISOString(),
     maxItemsPerSection,
+    slackEntitySyncEnabled: args.config.SLACK_ENTITY_SYNC,
     initialPartial: peopleResult.status === "error",
     logger: createLogger(args.config),
   });

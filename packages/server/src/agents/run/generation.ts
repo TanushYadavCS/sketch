@@ -135,6 +135,7 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
               now,
               adminCanReadAllFiles,
               contentUserEmails,
+              slackEntitySyncEnabled: this.deps.config.SLACK_ENTITY_SYNC,
               agentConfig: {
                 enabledSections: routeSections,
                 maxItemsPerSection: routeMaxItemsPerSection,

@@ -3,9 +3,14 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleVertex } from "@ai-sdk/google-vertex";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { Instructions, ModelMessage, SystemModelMessage, UserContent, UserModelMessage } from "ai";
+import { configSchema } from "../../config";
 import type { SettingsTable } from "../../db/schema";
 import type { AgentRuntimeCostTable, AgentRuntimeProviderFactoryConfig, AgentRuntimeProviderKind } from "./contracts";
+import { ModelRequestTimeoutError } from "./errors";
 import { DEFAULT_AGENT_RUNTIME_COST_TABLE } from "./pricing";
+
+const DEFAULT_MODEL_REQUEST_TIMEOUT_MS = 600_000;
+const MODEL_REQUEST_DEADLINE_REASON = Symbol("model request deadline");
 
 export interface AgentRuntimePromptInput {
   systemPrompt: string;
@@ -37,6 +42,89 @@ type RuntimeLlmSettings = Pick<
 >;
 
 type RuntimeProviderOptions = NonNullable<SystemModelMessage["providerOptions"]>;
+
+/**
+ * A caller abort outranks the deadline. Both signals can be aborted by the time a slow transport
+ * finally rejects; without this precedence a user interruption would be reported as a timeout.
+ */
+function isModelRequestDeadline(deadlineController: AbortController, callerSignal?: AbortSignal | null): boolean {
+  if (callerSignal?.aborted) return false;
+  return deadlineController.signal.reason === MODEL_REQUEST_DEADLINE_REASON;
+}
+
+function deadlineBody(
+  body: ReadableStream<Uint8Array>,
+  deadlineController: AbortController,
+  clearDeadline: () => void,
+  callerSignal?: AbortSignal | null,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let clearAfterPull = false;
+      try {
+        const result = await reader.read();
+        if (result.done) {
+          controller.close();
+          clearAfterPull = true;
+          return;
+        }
+        controller.enqueue(result.value);
+      } catch (error) {
+        controller.error(
+          isModelRequestDeadline(deadlineController, callerSignal) ? new ModelRequestTimeoutError(error) : error,
+        );
+        clearAfterPull = true;
+      } finally {
+        if (clearAfterPull) clearDeadline();
+      }
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason);
+      } finally {
+        clearDeadline();
+      }
+    },
+  });
+}
+
+export const withDeadline =
+  (ms: number, inner: typeof fetch = fetch): typeof fetch =>
+  async (input, init) => {
+    const deadlineController = new AbortController();
+    const signals = [deadlineController.signal];
+    if (init?.signal) signals.push(init.signal);
+    const signal = AbortSignal.any(signals);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let streamOwnsDeadline = false;
+    const clearDeadline = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    };
+
+    timer = setTimeout(() => deadlineController.abort(MODEL_REQUEST_DEADLINE_REASON), ms);
+
+    try {
+      const response = await inner(input, { ...init, signal });
+      if (!response.body) return response;
+
+      const body = deadlineBody(response.body, deadlineController, clearDeadline, init?.signal);
+      const wrappedResponse = new Response(body, {
+        headers: response.headers,
+        status: response.status,
+        statusText: response.statusText,
+      });
+      streamOwnsDeadline = true;
+      return wrappedResponse;
+    } catch (error) {
+      if (isModelRequestDeadline(deadlineController, init?.signal)) throw new ModelRequestTimeoutError(error);
+      throw error;
+    } finally {
+      if (!streamOwnsDeadline) clearDeadline();
+    }
+  };
 
 function compactHeaders(headers: Record<string, string | undefined>): Record<string, string> {
   return Object.fromEntries(Object.entries(headers).filter((entry): entry is [string, string] => Boolean(entry[1])));
@@ -135,12 +223,14 @@ export function createAgentRuntimeProvider(
   config: AgentRuntimeProviderFactoryConfig,
   deps: AgentRuntimeProviderFactoryDeps = {},
 ): AgentRuntimeProvider {
+  const fetchWithDeadline = withDeadline(config.modelRequestTimeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS, deps.fetch);
+
   if (config.provider === "anthropic") {
     const anthropic = createAnthropic({
       apiKey: config.apiKey ?? undefined,
       baseURL: config.baseUrl ?? undefined,
       headers: config.headers,
-      fetch: deps.fetch,
+      fetch: fetchWithDeadline,
     });
     return {
       provider: "anthropic",
@@ -159,7 +249,7 @@ export function createAgentRuntimeProvider(
       sessionToken: config.awsSessionToken ?? undefined,
       baseURL: config.baseUrl ?? undefined,
       headers: config.headers,
-      fetch: deps.fetch,
+      fetch: fetchWithDeadline,
     });
     return {
       provider: "bedrock",
@@ -176,7 +266,7 @@ export function createAgentRuntimeProvider(
       baseURL: config.baseUrl ?? "https://openrouter.ai/api/v1",
       apiKey: config.apiKey ?? undefined,
       headers: config.headers,
-      fetch: deps.fetch,
+      fetch: fetchWithDeadline,
       includeUsage: true,
       // OpenRouter advertises JSON-schema structured output for the authoring model.
       // Without this flag the AI SDK silently downgrades Output.object to JSON-object
@@ -198,7 +288,7 @@ export function createAgentRuntimeProvider(
     location: config.vertexLocation ?? config.region ?? undefined,
     baseURL: config.baseUrl ?? undefined,
     headers: config.headers,
-    fetch: deps.fetch,
+    fetch: fetchWithDeadline,
   });
   return {
     provider: "vertex",
@@ -215,6 +305,9 @@ export function resolveAgentRuntimeProviderConfigFromSettings(
   costTable: AgentRuntimeCostTable = DEFAULT_AGENT_RUNTIME_COST_TABLE,
 ): AgentRuntimeProviderFactoryConfig | null {
   const provider = settings?.llm_provider ?? null;
+  const modelRequestTimeoutMs = configSchema.shape.AGENT_MODEL_REQUEST_TIMEOUT_MS.parse(
+    env.AGENT_MODEL_REQUEST_TIMEOUT_MS,
+  );
 
   if (provider === "anthropic") {
     const apiKey = settings?.anthropic_api_key || env.ANTHROPIC_API_KEY || null;
@@ -223,6 +316,7 @@ export function resolveAgentRuntimeProviderConfigFromSettings(
       provider: "anthropic",
       modelId: settings?.model_id || env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
       apiKey,
+      modelRequestTimeoutMs,
       costTable,
     };
   }
@@ -238,6 +332,7 @@ export function resolveAgentRuntimeProviderConfigFromSettings(
       awsSecretAccessKey,
       awsSessionToken: env.AWS_SESSION_TOKEN ?? null,
       region,
+      modelRequestTimeoutMs,
       costTable,
     };
   }
@@ -255,6 +350,7 @@ export function resolveAgentRuntimeProviderConfigFromSettings(
         "HTTP-Referer": env.BASE_URL,
         "X-Title": "Sketch",
       }),
+      modelRequestTimeoutMs,
       costTable,
     };
   }
@@ -266,6 +362,7 @@ export function resolveAgentRuntimeProviderConfigFromSettings(
       apiKey: env.GOOGLE_VERTEX_API_KEY ?? null,
       vertexProject: env.GOOGLE_VERTEX_PROJECT ?? null,
       vertexLocation: env.GOOGLE_VERTEX_LOCATION ?? null,
+      modelRequestTimeoutMs,
       costTable,
     };
   }
@@ -281,6 +378,7 @@ export function resolveAgentRuntimeProviderConfigFromSettings(
       awsSecretAccessKey,
       awsSessionToken: env.AWS_SESSION_TOKEN ?? null,
       region,
+      modelRequestTimeoutMs,
       costTable,
     };
   }
@@ -292,6 +390,7 @@ export function resolveAgentRuntimeProviderConfigFromSettings(
       apiKey: env.GOOGLE_VERTEX_API_KEY ?? null,
       vertexProject: env.GOOGLE_VERTEX_PROJECT ?? null,
       vertexLocation: env.GOOGLE_VERTEX_LOCATION ?? null,
+      modelRequestTimeoutMs,
       costTable,
     };
   }
@@ -313,6 +412,7 @@ export function resolveAgentRuntimeProviderConfigFromSettings(
         modelId,
         apiKey,
         baseUrl: normalizeOpenRouterBaseUrl(anthropicBaseUrl),
+        modelRequestTimeoutMs,
         costTable,
       };
     }
@@ -324,6 +424,7 @@ export function resolveAgentRuntimeProviderConfigFromSettings(
       modelId,
       apiKey,
       baseUrl: anthropicBaseUrl,
+      modelRequestTimeoutMs,
       costTable,
     };
   }
@@ -334,6 +435,7 @@ export function resolveAgentRuntimeProviderConfigFromSettings(
     provider: "anthropic",
     modelId: env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
     apiKey,
+    modelRequestTimeoutMs,
     costTable,
   };
 }

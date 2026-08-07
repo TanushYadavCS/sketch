@@ -260,7 +260,7 @@ function PersonRow({ person }: { person: EntityListItem }) {
   const meta = person.metadata ?? {};
   const isAi = meta.origin === "ai";
   const role = (meta.role ?? meta.title ?? null) as string | null;
-  const subtype = person.subtype === "internal" ? "Internal" : person.subtype === "external" ? "External" : null;
+  const subtype = person.subtype === "internal" ? "Internal" : "External";
   const subtitle = [role, subtype].filter(Boolean).join(" · ") || null;
   const contacts = contactPointsFromMetadata(person.metadata);
 
