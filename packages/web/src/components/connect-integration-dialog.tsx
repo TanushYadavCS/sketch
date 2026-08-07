@@ -155,12 +155,17 @@ export function ConnectIntegrationDialog({
   });
   const isCanvasMode = credentialSource.data?.mode === "canvas" && canvasSupported;
   const useCanvasCredentialFlow =
-    canvasSupported && (isCanvasMode || preferCanvasCredentialSource || canvasConnectionLookupPending);
+    canvasSupported &&
+    (!credentialSource.isSuccess || isCanvasMode || preferCanvasCredentialSource || canvasConnectionLookupPending);
   const canvasCredentialImportConfigured = credentialSource.data?.canvasCredentialImportConfigured !== false;
   const canvasConnectionCanImport = canvasConnectionReady;
   const shouldAutoImportCanvasCredential = canvasConnectionReady && useCanvasCredentialFlow;
   const waitingForCanvasConnectionLookup =
-    useCanvasCredentialFlow && canvasConnectionLookupPending && !canvasConnectionReady && !canvasPopupOpened;
+    useCanvasCredentialFlow &&
+    !credentialSource.isError &&
+    (!credentialSource.isSuccess || canvasConnectionLookupPending) &&
+    !canvasConnectionReady &&
+    !canvasPopupOpened;
   const waitingForCanvasConnectionCompletion = useCanvasCredentialFlow && canvasPopupOpened && !canvasConnectionReady;
 
   useEffect(() => {
@@ -852,7 +857,14 @@ export function ConnectIntegrationDialog({
             </DialogHeader>
 
             <div className="flex flex-col gap-3 py-4">
-              {waitingForCanvasConnectionLookup || waitingForCanvasConnectionCompletion ? (
+              {credentialSource.isError ? (
+                <div className="flex flex-col items-center gap-3 rounded-md border border-border bg-muted/30 px-3 py-4 text-center text-sm text-muted-foreground">
+                  <p>Sketch could not check the connected-account setup.</p>
+                  <Button variant="outline" onClick={() => void credentialSource.refetch()}>
+                    Try again
+                  </Button>
+                </div>
+              ) : waitingForCanvasConnectionLookup || waitingForCanvasConnectionCompletion ? (
                 <div className="flex items-center justify-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
                   <SpinnerGapIcon size={16} className="animate-spin" />
                   {waitingForCanvasConnectionCompletion

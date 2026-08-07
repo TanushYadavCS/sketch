@@ -272,6 +272,7 @@ describe("Outlook Calendar connector", () => {
       { providerFileId: "calendar-1:deleted", reason: "outlook_calendar_event_deleted" },
       { providerFileId: "calendar-1:cancelled", reason: "outlook_calendar_event_cancelled" },
       { providerFileId: "calendar-1:declined", reason: "outlook_calendar_event_declined" },
+      { providerFileIdPrefix: "calendar-1:", reason: "outlook_calendar_empty_full_sync" },
     ]);
   });
 

@@ -179,6 +179,10 @@ function initialMicrosoftScopeConfig(connectorType: ConnectorType): Record<strin
   return connectorType === "outlook_calendar" ? { calendarIds: [] } : {};
 }
 
+export function shouldRunMicrosoftFirstSync(connectorType: ConnectorType): boolean {
+  return connectorType !== "outlook_calendar";
+}
+
 function extractMicrosoftConsentRequiredCode(errorDescription: string | undefined): string | undefined {
   return errorDescription?.match(/\bAADSTS(?:90094|65001)\b/)?.[0];
 }
@@ -843,9 +847,11 @@ export function oauthRoutes(
         "Microsoft OAuth tokens saved",
       );
 
-      runConnectorSync(db, connectorConfig.id, logger, appConfig).catch((err) => {
-        logger.error({ err, connectorId: connectorConfig.id, connectorType }, "Microsoft first sync failed");
-      });
+      if (shouldRunMicrosoftFirstSync(connectorType)) {
+        runConnectorSync(db, connectorConfig.id, logger, appConfig).catch((err) => {
+          logger.error({ err, connectorId: connectorConfig.id, connectorType }, "Microsoft first sync failed");
+        });
+      }
 
       return c.redirect(`/files?oauth=success&connector=${connectorType}&connectorId=${connectorConfig.id}`);
     } catch (err) {

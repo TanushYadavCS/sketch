@@ -381,4 +381,45 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
     );
     expect(await screen.findByRole("heading", { name: "Select calendars" })).toBeInTheDocument();
   });
+
+  it("waits for credential mode before showing the local Outlook Calendar OAuth flow", async () => {
+    let releaseCredentialSource: () => void = () => {};
+    const credentialSource = new Promise<Response>((resolve) => {
+      releaseCredentialSource = () =>
+        resolve(
+          HttpResponse.json({
+            mode: "local",
+            canvasConfigured: false,
+            canvasCredentialImportConfigured: false,
+            publicKeyId: null,
+          }),
+        );
+    });
+    const integration = INTEGRATIONS.find((item) => item.type === "outlook_calendar");
+    if (!integration) throw new Error("Outlook Calendar integration is missing");
+
+    server.use(
+      http.get("/api/connectors/credential-source", () => credentialSource),
+      http.get("/api/oauth/microsoft/status", () =>
+        HttpResponse.json({
+          configured: true,
+          envConfigured: true,
+          settingsConfigured: false,
+          clientId: "client-id",
+          baseUrl: "http://localhost",
+          tenant: "common",
+        }),
+      ),
+    );
+
+    renderWithProviders(
+      <ConnectIntegrationDialog integration={integration} open={true} onOpenChange={() => {}} onConnected={() => {}} />,
+    );
+
+    expect(await screen.findByText("Checking connected accounts...")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect with Microsoft" })).not.toBeInTheDocument();
+
+    releaseCredentialSource();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Connect with Microsoft" })).toBeInTheDocument());
+  });
 });

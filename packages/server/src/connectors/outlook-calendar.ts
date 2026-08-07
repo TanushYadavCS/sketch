@@ -419,7 +419,7 @@ async function* streamEventsForCalendar(params: {
   let nextLink: string | null = params.deltaLink ?? initialPath;
   let deltaLink: string | null = null;
   let firstRequest = params.deltaLink === null;
-  let sawEvents = false;
+  let sawIndexableItems = false;
 
   while (nextLink) {
     let response: GraphCollection<OutlookCalendarEvent>;
@@ -448,7 +448,6 @@ async function* streamEventsForCalendar(params: {
 
     for (const event of response.value ?? []) {
       if (!event.id) continue;
-      sawEvents = true;
       const providerFileId = providerFileIdForEvent(params.calendar.id, event.id);
       if (event["@removed"] || event.isCancelled) {
         await params.onSourceItemRemoved?.({
@@ -462,7 +461,10 @@ async function* streamEventsForCalendar(params: {
         continue;
       }
       const item = eventToSyncedItem(event, params.calendar, params.ownerEmail);
-      if (item) yield item;
+      if (item) {
+        sawIndexableItems = true;
+        yield item;
+      }
     }
 
     if (response["@odata.deltaLink"]) deltaLink = response["@odata.deltaLink"];
@@ -479,7 +481,7 @@ async function* streamEventsForCalendar(params: {
   if (!deltaLink) {
     params.logger.warn({ calendarId: params.calendar.id }, "Microsoft Calendar response did not include a delta link");
   }
-  if (params.deltaLink === null && !sawEvents) {
+  if (params.deltaLink === null && !sawIndexableItems) {
     await params.onSourceItemRemoved?.({
       providerFileIdPrefix: `${params.calendar.id}:`,
       reason: "outlook_calendar_empty_full_sync",

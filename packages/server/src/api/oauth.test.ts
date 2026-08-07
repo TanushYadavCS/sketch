@@ -8,6 +8,7 @@ import {
   oauthRoutes,
   resolveOrigin,
   shouldRunGoogleFirstSync,
+  shouldRunMicrosoftFirstSync,
 } from "./oauth";
 
 /**
@@ -170,6 +171,12 @@ describe("Microsoft OAuth callback", () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/files?oauth=admin_consent_granted&connector=outlook");
+  });
+
+  it("defers the first Outlook Calendar sync until calendars are selected", () => {
+    expect(shouldRunMicrosoftFirstSync("outlook_calendar")).toBe(false);
+    expect(shouldRunMicrosoftFirstSync("outlook")).toBe(true);
+    expect(shouldRunMicrosoftFirstSync("teams")).toBe(true);
   });
 });
 
