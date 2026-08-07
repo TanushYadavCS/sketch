@@ -105,6 +105,28 @@ function connectorRowByDescription(description: string): HTMLElement {
 }
 
 describe("ConnectorPicker connector capabilities", () => {
+  it("hides Outlook Calendar when Canvas credential mode has no supported connector", async () => {
+    const user = userEvent.setup();
+    setupStatus();
+    server.use(
+      http.get("/api/connectors/credential-source", () =>
+        HttpResponse.json({
+          mode: "canvas",
+          canvasConfigured: true,
+          canvasCredentialImportConfigured: true,
+          publicKeyId: "key-1",
+        }),
+      ),
+    );
+    renderPicker([]);
+
+    await user.click(await screen.findByRole("button", { name: /Browse all/i }));
+    expect(await screen.findByText("Calendar events and meetings")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText("Microsoft 365 calendar events and meetings")).not.toBeInTheDocument(),
+    );
+  });
+
   it.each(INTEGRATIONS.filter((def) => def.perUserAuth).map((def) => [def.name, def] as const))(
     "applies the visible account pattern to %s",
     async (_name, def) => {

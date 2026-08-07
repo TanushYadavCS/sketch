@@ -24,6 +24,7 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
+import * as outlookCalendarProviderFileScopeMigration from "./160-outlook-calendar-provider-file-scope";
 
 const EXPECTED_MIGRATION_COUNT = 156;
 
@@ -277,6 +278,31 @@ describe("runMigrations — full sequence", () => {
         conversation_id: "normal-chat-1",
         transcript_user_id: "origin-owner",
         kind: "web_chat",
+      },
+    ]);
+  });
+
+  it("migration 160 down restores Google Calendar and Teams scoped provider indexes", async () => {
+    await runMigrations(db, { quiet: true });
+
+    await outlookCalendarProviderFileScopeMigration.down(db as unknown as Kysely<unknown>);
+
+    const indexes = await sql<{ name: string; sql: string }>`
+      SELECT name, sql
+      FROM sqlite_master
+      WHERE type = 'index'
+        AND name IN ('idx_indexed_files_source_provider', 'uq_indexed_files_scoped_provider')
+      ORDER BY name ASC
+    `.execute(db);
+
+    expect(indexes.rows).toEqual([
+      {
+        name: "idx_indexed_files_source_provider",
+        sql: expect.stringContaining("source NOT IN ('teams', 'google_calendar')"),
+      },
+      {
+        name: "uq_indexed_files_scoped_provider",
+        sql: expect.stringContaining("source IN ('teams', 'google_calendar')"),
       },
     ]);
   });

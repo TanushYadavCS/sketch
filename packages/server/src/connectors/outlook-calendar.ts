@@ -21,6 +21,8 @@ const DEFAULT_INITIAL_FUTURE_DAYS = 365;
 const MAX_INITIAL_DAYS = 3650;
 const FULL_WIPE_SOURCE_CREATED_BEFORE = "9999-12-31T23:59:59.999Z";
 const CURSOR_VERSION = 1;
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+const DELTA_WINDOW_REFRESH_FRACTION = 0.5;
 const GRAPH_HEADERS = {
   Prefer: `odata.maxpagesize=${CALENDAR_PAGE_SIZE}, outlook.timezone=\"UTC\", outlook.body-content-type=\"text\", IdType=\"ImmutableId\"`,
 };
@@ -156,6 +158,16 @@ function parseCursor(cursor: string | null): ParsedCursorState {
   } catch {
     return { cursor: null, needsFullReset: true };
   }
+}
+
+function shouldRefreshDeltaWindow(cursor: OutlookCalendarCursor | null, scopeConfig: Record<string, unknown>): boolean {
+  if (!cursor) return false;
+  const lastSyncedAt = cursor.lastSyncedAt ? Date.parse(cursor.lastSyncedAt) : Number.NaN;
+  if (!Number.isFinite(lastSyncedAt)) return true;
+
+  const futureDays = parsePositiveInt(scopeConfig.initialFutureDays, DEFAULT_INITIAL_FUTURE_DAYS);
+  const refreshAfterMs = Math.max(1, Math.floor(futureDays * DELTA_WINDOW_REFRESH_FRACTION)) * MILLISECONDS_PER_DAY;
+  return Date.now() - lastSyncedAt >= refreshAfterMs;
 }
 
 function serializeCursor(cursor: OutlookCalendarCursor): string {
@@ -493,6 +505,8 @@ export function createOutlookCalendarConnector(): Connector {
       assertOAuth(credentials);
       const client = graphClient(credentials, accessTokenProvider);
       const parsedCursor = parseCursor(cursor);
+      const refreshDeltaWindow = shouldRefreshDeltaWindow(parsedCursor.cursor, scopeConfig);
+      const cursorForSync = refreshDeltaWindow ? null : parsedCursor.cursor;
       const calendars = await listCalendars(client);
       const hasCalendarSelection = hasOwn(scopeConfig, "calendarIds");
       const selectedCalendarIds = new Set(parseStringArray(scopeConfig.calendarIds));
@@ -506,15 +520,17 @@ export function createOutlookCalendarConnector(): Connector {
       };
       nextCursor = null;
 
-      if (parsedCursor.needsFullReset) {
+      if (parsedCursor.needsFullReset || refreshDeltaWindow) {
         await onSourceItemRemoved?.({
           sourceCreatedBefore: FULL_WIPE_SOURCE_CREATED_BEFORE,
-          reason: "outlook_calendar_cursor_reset",
+          reason: parsedCursor.needsFullReset
+            ? "outlook_calendar_cursor_reset"
+            : "outlook_calendar_delta_window_refresh",
         });
       }
 
       const selectedIds = new Set(selectedCalendars.map((calendar) => calendar.id));
-      for (const calendarId of Object.keys(parsedCursor.cursor?.calendars ?? {})) {
+      for (const calendarId of Object.keys(cursorForSync?.calendars ?? {})) {
         if (!selectedIds.has(calendarId)) {
           await onSourceItemRemoved?.({
             providerFileIdPrefix: `${calendarId}:`,
@@ -525,7 +541,7 @@ export function createOutlookCalendarConnector(): Connector {
 
       let expired = false;
       for (const calendar of selectedCalendars) {
-        const previousDeltaLink = parsedCursor.cursor?.calendars[calendar.id] ?? null;
+        const previousDeltaLink = cursorForSync?.calendars[calendar.id] ?? null;
         const outcome = yield* streamEventsForCalendar({
           client,
           calendar,
@@ -561,6 +577,7 @@ export function createOutlookCalendarConnector(): Connector {
           });
           if (outcome.deltaLink) runCursor.calendars[calendar.id] = outcome.deltaLink;
         }
+        runCursor.lastSyncedAt = new Date().toISOString();
       }
 
       nextCursor = runCursor;

@@ -141,6 +141,60 @@ describe("Outlook Calendar connector", () => {
     });
   });
 
+  it("refreshes a stale delta cursor with a fresh calendar window", async () => {
+    const requests: Array<{ url: URL; init: RequestInit | undefined }> = [];
+    const removals: Array<{ sourceCreatedBefore?: string; reason: string }> = [];
+    mockGraphFetch((url, init) => {
+      requests.push({ url, init });
+      if (url.pathname === "/v1.0/me/calendars") return jsonResponse({ value: [workCalendar] });
+      if (url.pathname.endsWith("/calendarView/delta")) {
+        if (url.searchParams.has("$deltatoken")) throw new Error("stale delta link should not be reused");
+        return jsonResponse({
+          value: [calendarEvent("fresh-event")],
+          "@odata.deltaLink": "https://graph.microsoft.com/v1.0/calendar-delta-fresh",
+        });
+      }
+      throw new Error(`Unexpected Microsoft Graph request: ${url.toString()}`);
+    });
+
+    const connector = createOutlookCalendarConnector();
+    const items = await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { calendarIds: ["calendar-1"], initialFutureDays: 30 },
+        cursor: JSON.stringify({
+          version: 1,
+          calendars: { "calendar-1": "https://graph.microsoft.com/v1.0/calendar-delta-stale" },
+          lastSyncedAt: new Date(Date.now() - 16 * 24 * 60 * 60 * 1000).toISOString(),
+        }),
+        logger,
+        onSourceItemRemoved: async (record) => {
+          removals.push(record as { sourceCreatedBefore?: string; reason: string });
+        },
+      }),
+    );
+
+    expect(items.map((item) => item.providerFileId)).toEqual(["calendar-1:fresh-event"]);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.url.searchParams.has("$deltatoken")).toBe(false);
+    expect(requests[1]?.url.searchParams.get("startDateTime")).toBeTruthy();
+    expect(requests[1]?.url.searchParams.get("endDateTime")).toBeTruthy();
+    expect(removals).toEqual([
+      { sourceCreatedBefore: "9999-12-31T23:59:59.999Z", reason: "outlook_calendar_delta_window_refresh" },
+    ]);
+
+    const nextCursor = await connector.getCursor({
+      credentials: validCredentials(),
+      scopeConfig: { calendarIds: ["calendar-1"], initialFutureDays: 30 },
+      currentCursor: null,
+      logger,
+    });
+    expect(JSON.parse(nextCursor ?? "")).toMatchObject({
+      calendars: { "calendar-1": "https://graph.microsoft.com/v1.0/calendar-delta-fresh" },
+      lastSyncedAt: expect.any(String),
+    });
+  });
+
   it("emits removals for deleted, cancelled, and declined events", async () => {
     const removals: Array<{ providerFileId?: string; sourceCreatedBefore?: string; reason: string }> = [];
     mockGraphFetch((url) => {
@@ -226,6 +280,7 @@ describe("Outlook Calendar connector", () => {
         cursor: JSON.stringify({
           version: 1,
           calendars: { "calendar-1": "https://graph.microsoft.com/v1.0/calendar-delta?$deltatoken=expired" },
+          lastSyncedAt: new Date().toISOString(),
         }),
         logger,
         onSourceItemRemoved: async (record) => {
