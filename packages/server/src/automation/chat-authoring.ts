@@ -5,12 +5,13 @@ import { createAutomationStepContentRepository } from "../db/repositories/automa
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
+import { resolveScheduledTaskAccess } from "../scheduler/access";
 import type { TaskScheduler } from "../scheduler/service";
-import type { TaskContext } from "../scheduler/types";
-import type { ScheduledTask } from "../scheduler/types";
+import type { CurrentAutomation, ScheduledTask, TaskContext } from "../scheduler/types";
 import type { AutomationAuthoringService } from "./authoring/service";
 import { buildAutomationDefinition } from "./definition";
 import { createAutomationDefinition, replaceAutomationDefinition } from "./persistence";
+import { webChatTaskConversationAssociation } from "./task-conversations";
 
 type AuthoringScheduler = Pick<TaskScheduler, "getTaskById" | "refreshTaskSchedule">;
 
@@ -19,6 +20,7 @@ export interface ChatAutomationAuthoringInput {
   request: string;
   taskId?: string;
   taskContext: TaskContext;
+  currentAutomation?: CurrentAutomation;
 }
 
 export type ChatAutomationAuthoringResult =
@@ -102,6 +104,7 @@ export function createChatAutomationAuthoring(deps: {
       return { kind: "error", message: "Automation creator is not available in this context." };
     }
     const taskId = createId();
+    const taskConversationAssociation = webChatTaskConversationAssociation(input.taskContext);
     const canUseBroker = await brokerCapable(deps.loadIntegrationProvider);
     const result = await deps.authoring.create({
       request: input.request,
@@ -141,28 +144,39 @@ export function createChatAutomationAuthoring(deps: {
         originMessageId: input.taskContext.origin?.currentMessageId ?? null,
       },
       brokerCapable: canUseBroker,
+      ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
     });
     return refreshOrError(taskId, artifactFromDefinition(result.definition));
   }
 
   async function edit(input: ChatAutomationAuthoringInput): Promise<ChatAutomationAuthoringResult> {
     if (!input.taskId) return { kind: "error", message: "Automation not found." };
+    const currentAutomation = input.currentAutomation ?? input.taskContext.currentAutomation;
+    const taskConversationAssociation = webChatTaskConversationAssociation(input.taskContext);
     const row = await tasks.getById(input.taskId);
-    if (
-      !row ||
-      !input.taskContext.createdBy ||
-      (!input.taskContext.canManageAnyTask && row.created_by !== input.taskContext.createdBy)
-    ) {
+    const accessibleRow = resolveScheduledTaskAccess(row, row?.created_by, {
+      userId: input.taskContext.createdBy,
+      role: input.taskContext.canManageAnyTask ? "admin" : undefined,
+    });
+    if (!accessibleRow) {
       return { kind: "error", message: "Automation not found." };
     }
 
-    const stepContentRows = await stepContent.getByTask(row.id);
-    const existing = buildAutomationDefinition({ row, stepContentRows, runRows: [] });
+    const stepContentRows = await stepContent.getByTask(accessibleRow.id);
+    const existing = buildAutomationDefinition({ row: accessibleRow, stepContentRows, runRows: [] });
     const canUseBroker = await brokerCapable(deps.loadIntegrationProvider);
     const result = await deps.authoring.edit({
       request: input.request,
       existing,
       brokerCapable: canUseBroker,
+      ...(currentAutomation?.taskId === accessibleRow.id
+        ? {
+            currentAutomation,
+            expectedRevision: currentAutomation.revision,
+          }
+        : {}),
+      timezone: input.taskContext.creatorTimezone?.trim() || accessibleRow.timezone,
+      currentTime: now().toISOString(),
     });
     if (result.kind === "clarification") {
       return { kind: "clarification", message: result.question };
@@ -170,13 +184,14 @@ export function createChatAutomationAuthoring(deps: {
 
     const saved = await replaceAutomationDefinition({
       db: deps.db,
-      taskId: row.id,
+      taskId: accessibleRow.id,
       request: result.definition,
       actor: {
         userId: input.taskContext.createdBy,
         canManageAnyTask: input.taskContext.canManageAnyTask ?? false,
       },
       brokerCapable: canUseBroker,
+      ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
     });
     if (saved.kind === "not_found") return { kind: "error", message: "Automation not found." };
     if (saved.kind === "revision_conflict") {
@@ -185,7 +200,7 @@ export function createChatAutomationAuthoring(deps: {
         message: "Automation was changed by another editor. Refresh it and try again.",
       };
     }
-    return refreshOrError(row.id, artifactFromDefinition(result.definition));
+    return refreshOrError(accessibleRow.id, artifactFromDefinition(result.definition));
   }
 
   return {

@@ -1,7 +1,9 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import { createScheduledTaskConversationRepository } from "../db/repositories/scheduled-task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
+import type { CurrentAutomation } from "../scheduler/types";
 import { createTestDb } from "../test-utils";
 import { createChatAutomationAuthoring } from "./chat-authoring";
 import type { buildAutomationDefinition } from "./definition";
@@ -77,6 +79,33 @@ function taskContext() {
   };
 }
 
+function currentAutomation(taskId: string, revision: number): CurrentAutomation {
+  return {
+    taskId,
+    revision,
+    builderConversationId: "builder-conversation-1",
+    builderState: {
+      title: "Daily brief",
+      description: "Summarize updates",
+      prompt: "Summarize updates",
+      scheduleType: "interval",
+      scheduleValue: "120",
+      timezone: "Asia/Kolkata",
+      status: "active",
+      delivery: {
+        platform: "slack",
+        targetType: "dm",
+        targetId: "D123",
+        threadTs: null,
+        mode: "deliver",
+      },
+      steps: [],
+      edges: [],
+      stepContent: {},
+    },
+  };
+}
+
 describe("chat automation authoring orchestration", () => {
   let db: Awaited<ReturnType<typeof createTestDb>>;
 
@@ -118,6 +147,7 @@ describe("chat automation authoring orchestration", () => {
             status: "active" as const,
             createdBy: row.created_by,
             createdAt: row.created_at,
+            revision: row.revision,
             title: row.title,
             description: row.description,
             originChat: null,
@@ -170,6 +200,11 @@ describe("chat automation authoring orchestration", () => {
       task: { id: "automation-created" },
       artifact: { scheduleType: "interval", steps: [expect.anything(), expect.objectContaining({ apps: ["linear"] })] },
     });
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskAndTranscriptUser("automation-created", "user-1", {
+        kind: "web_chat",
+      }),
+    ).resolves.toEqual([expect.objectContaining({ conversation_id: "conversation-1", kind: "web_chat" })]);
   });
 
   it("returns a clarification without persisting or refreshing", async () => {
@@ -237,12 +272,21 @@ describe("chat automation authoring orchestration", () => {
         request: "Rename it",
         taskId: "automation-edit",
         taskContext: taskContext(),
+        currentAutomation: currentAutomation("automation-edit", 0),
       }),
     ).resolves.toEqual({
       kind: "error",
       message: "Automation was changed by another editor. Refresh it and try again.",
     });
     expect(refreshTaskSchedule).not.toHaveBeenCalled();
+    expect(edit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentAutomation: currentAutomation("automation-edit", 0),
+        expectedRevision: 0,
+        timezone: "Asia/Kolkata",
+        currentTime: expect.any(String),
+      }),
+    );
     await expect(createScheduledTaskRepository(db).getById("automation-edit")).resolves.toMatchObject({
       title: "Daily brief",
       revision: 1,
@@ -284,5 +328,116 @@ describe("chat automation authoring orchestration", () => {
       }),
     ).resolves.toEqual({ kind: "error", message: "Automation not found." });
     expect(edit).not.toHaveBeenCalled();
+  });
+
+  it("lets an admin edit a foreign-owned task without changing its owner", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: {
+        id: "foreign-admin-edit",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D123",
+        threadTs: null,
+        createdBy: "owner-id",
+        originPlatform: null,
+        originConversationId: null,
+        originProviderThreadId: null,
+        originMessageId: null,
+      },
+      brokerCapable: true,
+    });
+
+    const current = currentAutomation("foreign-admin-edit", 0);
+    const edit = vi.fn().mockResolvedValue({
+      kind: "definition" as const,
+      definition: definition({ expectedRevision: 0, title: "Admin-edited brief" }),
+    });
+    const service = createChatAutomationAuthoring({
+      db,
+      authoring: { create: vi.fn(), edit },
+      scheduler: {
+        refreshTaskSchedule: vi.fn().mockResolvedValue({ id: "foreign-admin-edit" }),
+        getTaskById: vi.fn(),
+      },
+      loadIntegrationProvider: async () => null,
+    });
+
+    await expect(
+      service.author({
+        action: "edit",
+        request: "Rename the brief",
+        taskId: "foreign-admin-edit",
+        taskContext: { ...taskContext(), createdBy: "admin-id", canManageAnyTask: true },
+        currentAutomation: current,
+      }),
+    ).resolves.toMatchObject({ kind: "saved", task: { id: "foreign-admin-edit" } });
+
+    expect(edit).toHaveBeenCalledWith(expect.objectContaining({ currentAutomation: current, expectedRevision: 0 }));
+    await expect(createScheduledTaskRepository(db).getById("foreign-admin-edit")).resolves.toMatchObject({
+      created_by: "owner-id",
+      last_edited_by: "admin-id",
+      title: "Admin-edited brief",
+      revision: 1,
+    });
+  });
+
+  it("associates a configured edit with its normal web chat without rewriting origin provenance", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: {
+        id: "configured-edit-provenance",
+        platform: "slack",
+        contextType: "dm",
+        deliveryTarget: "D123",
+        threadTs: null,
+        createdBy: "user-1",
+        originPlatform: "web",
+        originConversationId: "creation-chat",
+        originProviderThreadId: null,
+        originMessageId: 42,
+      },
+      brokerCapable: true,
+    });
+
+    const service = createChatAutomationAuthoring({
+      db,
+      authoring: {
+        create: vi.fn(),
+        edit: vi.fn().mockResolvedValue({
+          kind: "definition" as const,
+          definition: definition({ expectedRevision: 0, title: "Edited brief" }),
+        }),
+      },
+      scheduler: {
+        refreshTaskSchedule: vi.fn().mockResolvedValue({ id: "configured-edit-provenance" }),
+        getTaskById: vi.fn(),
+      },
+      loadIntegrationProvider: async () => null,
+    });
+
+    await expect(
+      service.author({
+        action: "edit",
+        request: "Rename the brief",
+        taskId: "configured-edit-provenance",
+        taskContext: { ...taskContext(), origin: { ...taskContext().origin, conversationId: "edit-chat" } },
+      }),
+    ).resolves.toMatchObject({ kind: "saved", task: { id: "configured-edit-provenance" } });
+
+    await expect(
+      createScheduledTaskConversationRepository(db).listByTaskAndTranscriptUser(
+        "configured-edit-provenance",
+        "user-1",
+        { kind: "web_chat" },
+      ),
+    ).resolves.toEqual([expect.objectContaining({ conversation_id: "edit-chat", kind: "web_chat" })]);
+    await expect(createScheduledTaskRepository(db).getById("configured-edit-provenance")).resolves.toMatchObject({
+      origin_conversation_id: "creation-chat",
+      revision: 1,
+      title: "Edited brief",
+    });
   });
 });

@@ -175,6 +175,7 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     getSlack: params.getSlack,
     loadIntegrationProvider: params.loadIntegrationProvider,
     taskContext: params.taskContext,
+    currentAutomation: params.currentAutomation ?? params.taskContext?.currentAutomation,
     scheduler: params.scheduler,
     chatAuthoring: params.chatAutomationAuthoring,
     stepContentRepo: params.stepContentRepo,

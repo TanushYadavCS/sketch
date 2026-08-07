@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CurrentAutomation } from "../../scheduler/types";
 import { AutomationValidationError } from "../definition";
 import { existingAutomationDefinition, poorGenerationFixtures, validAuthoringDefinition } from "./fixtures";
 import {
@@ -177,6 +178,57 @@ describe("automation authoring service", () => {
     expect(call?.prompt).toContain('"revision":7');
     expect(call?.prompt).toContain('"agentModel":"xiaomi/mimo-v2.5"');
     expect(call?.prompt).toContain('"brokerCapable":true');
+  });
+
+  it("passes structured current automation alignment and authoritative revision context to edits", async () => {
+    const { service, generate } = createHarness([{ kind: "definition", definition: validAuthoringDefinition }]);
+    const currentAutomation = {
+      taskId: existingAutomationDefinition.id,
+      revision: existingAutomationDefinition.revision,
+      builderConversationId: "builder-conversation-1",
+      builderState: {
+        title: existingAutomationDefinition.title,
+        description: existingAutomationDefinition.description,
+        prompt: existingAutomationDefinition.prompt,
+        scheduleType: existingAutomationDefinition.scheduleType,
+        scheduleValue: existingAutomationDefinition.scheduleValue,
+        timezone: existingAutomationDefinition.timezone,
+        status: existingAutomationDefinition.status,
+        delivery: existingAutomationDefinition.delivery,
+        steps: existingAutomationDefinition.steps,
+        edges: existingAutomationDefinition.edges,
+        stepContent: {
+          digest: {
+            contentType: "prompt" as const,
+            content: "Summarize updates and call out blockers.",
+            apps: ["linear"],
+          },
+        },
+      },
+    } satisfies CurrentAutomation;
+
+    await service.edit({
+      request: "Make the filter stricter",
+      existing: existingAutomationDefinition,
+      brokerCapable: true,
+      currentAutomation,
+      expectedRevision: currentAutomation.revision,
+      timezone: "Asia/Kolkata",
+      currentTime: "2026-08-04T12:00:00.000Z",
+    });
+
+    const prompt = JSON.parse(generate.mock.calls[0]?.[0].prompt ?? "{}") as Record<string, unknown>;
+    expect(prompt).toMatchObject({
+      requestedChange: "Make the filter stricter",
+      existingDefinition: { id: "task-123", revision: 7 },
+      currentAutomation,
+      serverContext: {
+        taskId: "task-123",
+        persistedRevision: 7,
+        timezone: "Asia/Kolkata",
+        currentTime: "2026-08-04T12:00:00.000Z",
+      },
+    });
   });
 
   it("preserves the server-owned operational status during edits", async () => {

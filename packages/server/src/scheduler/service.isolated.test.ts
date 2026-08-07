@@ -367,6 +367,29 @@ describe("removeTask()", () => {
     const dbRow = await repo.getById(task.id);
     expect(dbRow).toBeUndefined();
   });
+
+  it("removes only runtime schedule state after canonical database deletion", async () => {
+    const deps = buildDeps(db);
+    const scheduler = new TaskScheduler(deps as never);
+    const task = await scheduler.addTask({
+      platform: "slack",
+      contextType: "dm",
+      deliveryTarget: "U_USER1",
+      prompt: "Runtime-only cleanup",
+      scheduleType: "cron",
+      scheduleValue: "0 9 * * 1",
+      createdBy: "U_USER1",
+    });
+    const row = await repo.getById(task.id);
+    if (!row) throw new Error("Expected task row");
+    await scheduler.scheduleTask(row);
+
+    const removed = await scheduler.removeTaskRuntime(task.id);
+
+    expect(removed).toBe(true);
+    await expect(repo.getById(task.id)).resolves.toBeDefined();
+    expect(mockCronInstances.at(-1)?.stopped).toBe(true);
+  });
 });
 
 describe("pauseTask()", () => {
