@@ -320,15 +320,14 @@ export async function getFileContent(
         // Tier 5: entity-share propagation — a shared entity mentioned in
         // this file grants read access to the file (read-time, no file_access
         // rows written).
-        if (!allowed && emailValues.length > 0) {
+        if (!allowed) {
           const entityMatch = await db
             .selectFrom("entity_mentions")
             .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
-            .leftJoin("entity_share_emails", (join) =>
-              join
-                .onRef("entity_share_emails.entity_id", "=", "entities.id")
-                .on("entity_share_emails.email", "in", emailValues),
-            )
+            .leftJoin("entity_share_emails", (join) => {
+              const condition = join.onRef("entity_share_emails.entity_id", "=", "entities.id");
+              return emailValues.length > 0 ? condition.on("entity_share_emails.email", "in", emailValues) : condition;
+            })
             .select("entities.id")
             .where("entity_mentions.indexed_file_id", "=", fileId)
             .where(whereLiveEntity())
@@ -413,23 +412,23 @@ export async function filterAccessibleFileIds(
           .execute(),
     // Entity-share propagation: a file is accessible if it mentions any entity
     // that is shared with the viewer (or share_with_everyone). Read-time only.
-    emailValues.length === 0
-      ? Promise.resolve([])
-      : db
-          .selectFrom("entity_mentions")
-          .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
-          .leftJoin("entity_share_emails", (join) =>
-            join
-              .onRef("entity_share_emails.entity_id", "=", "entities.id")
-              .on("entity_share_emails.email", "in", emailValues),
-          )
-          .select(["entity_mentions.indexed_file_id"])
-          .where("entity_mentions.indexed_file_id", "in", fileIds)
-          .where(whereLiveEntity())
-          .where((eb) =>
-            eb.or([eb("entities.share_with_everyone", "=", 1), eb("entity_share_emails.email", "is not", null)]),
-          )
-          .execute(),
+    db
+      .selectFrom("entity_mentions")
+      .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+      .leftJoin("entity_share_emails", (join) => {
+        const condition = join.onRef("entity_share_emails.entity_id", "=", "entities.id");
+        return emailValues.length > 0 ? condition.on("entity_share_emails.email", "in", emailValues) : condition;
+      })
+      .select(["entity_mentions.indexed_file_id"])
+      .where("entity_mentions.indexed_file_id", "in", fileIds)
+      .where(whereLiveEntity())
+      .where((eb) =>
+        eb.or([
+          eb("entities.share_with_everyone", "=", 1),
+          ...(emailValues.length > 0 ? [eb("entity_share_emails.email", "is not", null)] : []),
+        ]),
+      )
+      .execute(),
   ]);
 
   const principalSet = new Set(principals.map((principal) => `${principal.type}\0${principal.value}`));

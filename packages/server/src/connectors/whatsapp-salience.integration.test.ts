@@ -13,7 +13,7 @@ import { runEnrichment } from "./enrichment";
 import type { GeminiGenerator } from "./gemini-generate";
 import { runConnectorSync } from "./sync";
 import { createWhatsAppConnector } from "./whatsapp";
-import { emitWhatsAppSyncedItems } from "./whatsapp-salience";
+import { emitWhatsAppSyncedItems, reconcileWhatsAppGroupAcls } from "./whatsapp-salience";
 
 const RAW_IDENTIFIER_PATTERN = /(?:\+?[1-9]\d{9,14}\b|@s\.whatsapp\.net|@lid)/iu;
 const SALIENCE_SIGNALS = JSON.stringify({ signals: ["decision"], entities: [] });
@@ -543,6 +543,38 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       expect(result.itemsProcessed).toBe(1);
       expect(slice.indexed_file_id).not.toBeNull();
       await expect(db.selectFrom("indexed_files").selectAll().execute()).resolves.toHaveLength(1);
+    });
+
+    it("archives a group when its typed principal set is truly empty", async () => {
+      const seeded = await seedSlice(db, {
+        teammatePhone: "+15550000003",
+        verdict: "kept",
+        salienceSignals: SALIENCE_SIGNALS,
+      });
+      const config = await seedConnectorConfig(db);
+      const scopeId = await createConnectorRepository(db).upsertAccessScope(config.id, {
+        scopeType: "whatsapp_group",
+        providerScopeId: seeded.groupJid,
+        label: "Deal Room",
+        members: [],
+      });
+      const fileId = await linkSliceToIndexedFile(db, config.id, seeded.sliceId);
+      await db.updateTable("indexed_files").set({ access_scope_id: scopeId }).where("id", "=", fileId).execute();
+
+      await db.deleteFrom("whatsapp_group_participants").where("group_jid", "=", seeded.groupJid).execute();
+      const result = await reconcileWhatsAppGroupAcls({
+        db,
+        logger: createTestLogger(),
+        connectorConfigId: config.id,
+      });
+      const file = await db
+        .selectFrom("indexed_files")
+        .select(["is_archived", "access_scope_id"])
+        .where("id", "=", fileId)
+        .executeTakeFirstOrThrow();
+
+      expect(result.filesArchived).toBe(1);
+      expect(file).toEqual({ is_archived: 1, access_scope_id: null });
     });
 
     it("keeps an existing linked file when email resolution later disappears", async () => {

@@ -88,24 +88,54 @@ function principalLookupKey(type: string, value: string): string {
 
 function maskPrincipalValue(type: string, value: string): string {
   const trimmed = value.trim();
-  if (type === "email") {
-    const at = trimmed.indexOf("@");
-    if (at <= 0) return "***";
-    return `${trimmed[0]}***${trimmed.slice(at)}`;
-  }
+  if (type !== "phone" && type !== "whatsapp_lid") return trimmed;
   if (trimmed.length <= 4) return "…";
   return `${trimmed.slice(0, 4)}…${trimmed.slice(-2)}`;
 }
 
-async function loadPrincipalResolution(db: Kysely<DB>): Promise<Map<string, ResolvedPrincipal>> {
-  const [users, providerIdentities] = await Promise.all([
-    db
-      .selectFrom("users")
-      .select(["id", "name", "email", "whatsapp_number", "whatsapp_lid", "slack_user_id"])
-      .execute(),
-    db.selectFrom("user_provider_identities").select(["user_id", "provider_email"]).execute(),
-  ]);
+async function loadPrincipalResolution(
+  db: Kysely<DB>,
+  principals: AccessPrincipal[],
+): Promise<Map<string, ResolvedPrincipal>> {
+  if (principals.length === 0) return new Map();
+
+  const valuesByType = new Map<AccessPrincipal["type"], string[]>();
+  for (const principal of principals) {
+    const values = valuesByType.get(principal.type) ?? [];
+    values.push(principal.value);
+    valuesByType.set(principal.type, values);
+  }
+  const emailValues = valuesByType.get("email") ?? [];
+  const providerIdentities =
+    emailValues.length > 0
+      ? await db
+          .selectFrom("user_provider_identities")
+          .select(["user_id", "provider_email"])
+          .where("provider_email", "in", emailValues)
+          .execute()
+      : [];
+  const providerUserIds = providerIdentities.map((identity) => identity.user_id);
+  const users = await db
+    .selectFrom("users")
+    .select(["id", "name", "email", "whatsapp_number", "whatsapp_lid", "slack_user_id"])
+    .where((eb) =>
+      eb.or([
+        ...(emailValues.length > 0 ? [eb("email", "in", emailValues)] : []),
+        ...((valuesByType.get("phone") ?? []).length > 0
+          ? [eb("whatsapp_number", "in", valuesByType.get("phone") ?? [])]
+          : []),
+        ...((valuesByType.get("whatsapp_lid") ?? []).length > 0
+          ? [eb("whatsapp_lid", "in", valuesByType.get("whatsapp_lid") ?? [])]
+          : []),
+        ...((valuesByType.get("slack_user") ?? []).length > 0
+          ? [eb("slack_user_id", "in", valuesByType.get("slack_user") ?? [])]
+          : []),
+        ...(providerUserIds.length > 0 ? [eb("id", "in", providerUserIds)] : []),
+      ]),
+    )
+    .execute();
   const resolved = new Map<string, ResolvedPrincipal>();
+  const usersById = new Map(users.map((user) => [user.id, user]));
   for (const user of users) {
     const identity = { userId: user.id, userName: user.name, email: user.email };
     if (user.email) resolved.set(principalLookupKey("email", user.email), identity);
@@ -114,14 +144,13 @@ async function loadPrincipalResolution(db: Kysely<DB>): Promise<Map<string, Reso
     if (user.slack_user_id) resolved.set(principalLookupKey("slack_user", user.slack_user_id), identity);
   }
   for (const identity of providerIdentities) {
-    if (identity.provider_email) {
-      const user = users.find((candidate) => candidate.id === identity.user_id);
-      if (user)
-        resolved.set(principalLookupKey("email", identity.provider_email), {
-          userId: user.id,
-          userName: user.name,
-          email: user.email,
-        });
+    const user = usersById.get(identity.user_id);
+    if (user && identity.provider_email) {
+      resolved.set(principalLookupKey("email", identity.provider_email), {
+        userId: user.id,
+        userName: user.name,
+        email: user.email,
+      });
     }
   }
   return resolved;
@@ -180,18 +209,16 @@ export function fileVisibilityPredicate(viewer: FileViewer, alias = "indexed_fil
                WHERE fse.indexed_file_id = ${t}.id
                  AND fse.email IN (${emailSql}))`
     : sql`0 = 1`;
-  const entityShareDoor = emailSql
-    ? sql`EXISTS (
+  const entityShareDoor = sql`EXISTS (
       SELECT 1 FROM entity_mentions em_shared
       INNER JOIN entities ent_shared ON ent_shared.id = em_shared.entity_id
       LEFT JOIN entity_share_emails ese
-        ON ese.entity_id = ent_shared.id AND ese.email IN (${emailSql})
+        ON ese.entity_id = ent_shared.id ${emailSql ? sql`AND ese.email IN (${emailSql})` : sql``}
       WHERE em_shared.indexed_file_id = ${t}.id
         AND ent_shared.deleted_at IS NULL
         AND ent_shared.merged_into_entity_id IS NULL
-        AND (ent_shared.share_with_everyone = 1 OR ese.email IS NOT NULL)
-    )`
-    : sql`0 = 1`;
+        AND (ent_shared.share_with_everyone = 1 OR ${emailSql ? sql`ese.email IS NOT NULL` : sql`0 = 1`})
+    )`;
   return sql<boolean>`(
     (${accessDoor}
       AND ${t}.access_scope_id IS NULL
@@ -773,7 +800,6 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       if (fileIds.length === 0) return new Map();
 
       const map = new Map<string, { type: "scope" | "file"; count: number }>();
-      const resolution = await loadPrincipalResolution(db);
 
       // Check scope-based access
       const scopeFiles = await db
@@ -783,12 +809,36 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         .where("indexed_files.access_scope_id", "is not", null)
         .execute();
 
+      const scopeIds = scopeFiles
+        .map((row) => row.access_scope_id)
+        .filter((scopeId): scopeId is string => scopeId !== null);
+      const [scopeMembers, fileAccessRows] = await Promise.all([
+        scopeIds.length > 0
+          ? db
+              .selectFrom("access_scope_members")
+              .select(["access_scope_id", "principal_type", "principal_value"])
+              .where("access_scope_id", "in", scopeIds)
+              .execute()
+          : Promise.resolve([]),
+        db
+          .selectFrom("file_access")
+          .select(["indexed_file_id", "principal_type", "principal_value"])
+          .where("indexed_file_id", "in", fileIds)
+          .execute(),
+      ]);
+      const accessRows = [...scopeMembers, ...fileAccessRows];
+      const resolution = await loadPrincipalResolution(
+        db,
+        accessRows.map((row) => ({ type: row.principal_type as AccessPrincipal["type"], value: row.principal_value })),
+      );
+      const scopeMembersByScope = new Map<string, typeof scopeMembers>();
+      for (const member of scopeMembers) {
+        const members = scopeMembersByScope.get(member.access_scope_id) ?? [];
+        members.push(member);
+        scopeMembersByScope.set(member.access_scope_id, members);
+      }
       for (const row of scopeFiles) {
-        const members = await db
-          .selectFrom("access_scope_members")
-          .select(["principal_type", "principal_value"])
-          .where("access_scope_id", "=", row.access_scope_id as string)
-          .execute();
+        const members = scopeMembersByScope.get(row.access_scope_id as string) ?? [];
         const uniqueMembers = new Set(
           members.map((member) => {
             const resolved = resolution.get(principalLookupKey(member.principal_type, member.principal_value));
@@ -800,12 +850,6 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         map.set(row.id, { type: "scope", count: uniqueMembers.size });
       }
 
-      // Check per-file access
-      const fileAccessRows = await db
-        .selectFrom("file_access")
-        .select(["indexed_file_id", "principal_type", "principal_value"])
-        .where("indexed_file_id", "in", fileIds)
-        .execute();
       const membersByFile = new Map<string, Set<string>>();
       for (const row of fileAccessRows) {
         const members = membersByFile.get(row.indexed_file_id) ?? new Set<string>();
@@ -839,7 +883,6 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
 
       if (!file) return [];
 
-      const resolution = await loadPrincipalResolution(db);
       const rows = file.access_scope_id
         ? await db
             .selectFrom("access_scope_members")
@@ -852,6 +895,10 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
             .where("indexed_file_id", "=", fileId)
             .execute();
       const source = file.access_scope_id ? ("scope" as const) : ("file" as const);
+      const resolution = await loadPrincipalResolution(
+        db,
+        rows.map((row) => ({ type: row.principal_type as AccessPrincipal["type"], value: row.principal_value })),
+      );
       const seen = new Set<string>();
       return rows
         .flatMap((row) => {
@@ -872,7 +919,9 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         })
         .sort(
           (left, right) =>
-            (left.userName ?? "").localeCompare(right.userName ?? "") || left.email.localeCompare(right.email),
+            Number(left.userName === null) - Number(right.userName === null) ||
+            (left.userName ?? "").localeCompare(right.userName ?? "") ||
+            left.email.localeCompare(right.email),
         );
     },
 

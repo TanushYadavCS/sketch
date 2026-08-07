@@ -49,7 +49,11 @@ export type AccessPrincipalInput = AccessPrincipal | string;
 
 export function normalizeAccessPrincipals(principals: AccessPrincipalInput[]): AccessPrincipal[] {
   const normalized = principals.map((principal) =>
-    typeof principal === "string" ? { type: "email" as const, value: principal.trim().toLowerCase() } : principal,
+    typeof principal === "string"
+      ? { type: "email" as const, value: principal.trim().toLowerCase() }
+      : principal.type === "email"
+        ? { ...principal, value: principal.value.trim().toLowerCase() }
+        : principal,
   );
   return [
     ...new Map(

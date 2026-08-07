@@ -10,6 +10,7 @@
  */
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { fileAccessFilterSql, filterAccessibleFileIds, getFileContent } from "../../connectors/search";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { type FileViewer, createConnectorRepository } from "./connectors";
@@ -324,6 +325,75 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
     ).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: "f-lid" })]));
   });
 
+  it("keeps entity share_with_everyone visible across every read gate without email", async () => {
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values({
+        id: "ent-shared-everyone",
+        name: "Shared Entity",
+        source_type: "manual",
+        subtype: null,
+        aliases: null,
+        metadata: null,
+        source_ref_id: null,
+        status: "confirmed",
+        hotness: 0,
+        created_at: now,
+        updated_at: now,
+        share_with_everyone: 1,
+      })
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "f-entity-share-everyone",
+        connector_config_id: "cfg",
+        provider_file_id: "entity-share-everyone",
+        file_name: "entity-share-everyone.txt",
+        file_type: "doc",
+        content_category: "document",
+        source: "google_drive",
+        content: "shared content",
+        content_hash: "entity-share-everyone-hash",
+        synced_at: now,
+        access_scope_id: "scope-a",
+      })
+      .execute();
+    await db
+      .insertInto("entity_mentions")
+      .values({
+        id: "mention-shared-everyone",
+        entity_id: "ent-shared-everyone",
+        indexed_file_id: "f-entity-share-everyone",
+        chunk_index: null,
+        context_snippet: null,
+        confidence: "EXTRACTED",
+        source: "test",
+        relation: "mentioned",
+        mentioned_at: now,
+      })
+      .execute();
+
+    const phoneOnly = [{ type: "phone" as const, value: "+15550000009" }];
+    const nullEmailWebViewer: FileViewer = { email: null, phone: "+15550000009", isAdmin: false };
+    const repo = createConnectorRepository(db);
+    const filterSqlVisible = await db
+      .selectFrom("indexed_files")
+      .select("id")
+      .where(fileAccessFilterSql(phoneOnly))
+      .where("id", "=", "f-entity-share-everyone")
+      .execute();
+    const visibleByList = await repo.listAllFiles({ limit: 50, offset: 0, viewer: nullEmailWebViewer });
+    const visibleByIds = await filterAccessibleFileIds(db, ["f-entity-share-everyone"], phoneOnly);
+    const visibleByContent = await getFileContent(db, "f-entity-share-everyone", phoneOnly);
+
+    expect(filterSqlVisible.map((file) => file.id)).toEqual(["f-entity-share-everyone"]);
+    expect(visibleByList.map((file) => file.id)).toContain("f-entity-share-everyone");
+    expect(visibleByIds).toEqual(new Set(["f-entity-share-everyone"]));
+    expect(visibleByContent?.id).toBe("f-entity-share-everyone");
+  });
+
   it("deduplicates multiple principals that resolve to one user in access summaries", async () => {
     const repo = createConnectorRepository(db);
     await db
@@ -351,6 +421,29 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
     );
     await expect(repo.getFileAccessDetails("f-scope-a")).resolves.toEqual([
       { email: "alice@example.com", userName: "Multi Principal", userId: "multi-principal-user", source: "scope" },
+    ]);
+  });
+
+  it("shows unresolved emails raw and sorts named members first", async () => {
+    const repo = createConnectorRepository(db);
+    await db
+      .insertInto("users")
+      .values({ id: "named-user", name: "Alice Named", email: "named@example.com" })
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values([
+        { access_scope_id: "scope-a", principal_type: "email", principal_value: "named@example.com" },
+        { access_scope_id: "scope-a", principal_type: "email", principal_value: "unresolved@example.com" },
+        { access_scope_id: "scope-a", principal_type: "phone", principal_value: "+15550000008" },
+      ])
+      .execute();
+
+    await expect(repo.getFileAccessDetails("f-scope-a")).resolves.toEqual([
+      { email: "named@example.com", userName: "Alice Named", userId: "named-user", source: "scope" },
+      { email: "+155…08", userName: null, userId: null, source: "scope" },
+      { email: "alice@example.com", userName: null, userId: null, source: "scope" },
+      { email: "unresolved@example.com", userName: null, userId: null, source: "scope" },
     ]);
   });
 

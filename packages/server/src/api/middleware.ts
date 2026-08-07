@@ -237,6 +237,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
       c.set("email", user.email ?? payload.email ?? null);
       c.set("viewerIdentity", identityForUser(user));
     } else {
+      /** The payload-only fallback intentionally remains email-only because it has no trusted user row to supply other identifiers. */
       c.set("role", payload.role);
       c.set("sub", payload.sub);
       c.set("email", payload.email ?? null);
