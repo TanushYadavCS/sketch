@@ -27,7 +27,7 @@ import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durabi
 import * as slackEntityLifecycleMigration from "./160-slack-entity-lifecycle-sync";
 import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 
-const EXPECTED_MIGRATION_COUNT = 159;
+const EXPECTED_MIGRATION_COUNT = 160;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -230,6 +230,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[156]).toBe("161-slack-roster-evidence");
     expect(names[157]).toBe("162-user-entity-links");
     expect(names[158]).toBe("163-slack-file-access-backfill-cleanup");
+    expect(names[159]).toBe("164-typed-access-principals");
   });
 
   it("backfills only exact web origin task conversations", async () => {
