@@ -40,6 +40,88 @@ function createHarness(outputs: unknown[]) {
   return { service, generate, telemetry };
 }
 
+function createRequest(request: string) {
+  return {
+    request,
+    serverContext: {
+      taskId: "task-new",
+      platform: "slack" as const,
+      contextType: "dm" as const,
+      deliveryDefaults: {
+        platform: "slack" as const,
+        targetType: "dm" as const,
+        targetId: "U123",
+        threadTs: null,
+        mode: "deliver" as const,
+      },
+      timezone: "Asia/Kolkata",
+      currentTime: "2026-07-27T12:00:00.000Z",
+    },
+    brokerCapable: true,
+  };
+}
+
+function pollingDefinition() {
+  return {
+    ...validAuthoringDefinition,
+    scheduleType: "interval" as const,
+    scheduleValue: "300",
+    steps: validAuthoringDefinition.steps.map((step) =>
+      step.id === "trigger"
+        ? {
+            ...step,
+            label: "Every five minutes",
+            triggerConfig: {
+              type: "schedule" as const,
+              scheduleType: "interval" as const,
+              scheduleValue: "300",
+              timezone: "Asia/Kolkata",
+            },
+          }
+        : step,
+    ),
+  };
+}
+
+function slackTriggerDefinition() {
+  return {
+    ...validAuthoringDefinition,
+    scheduleType: "external" as const,
+    scheduleValue: "slack_channel_message",
+    steps: validAuthoringDefinition.steps.map((step) =>
+      step.id === "trigger"
+        ? {
+            ...step,
+            label: "Slack channel message",
+            triggerConfig: { type: "slack_channel_message" as const, channelId: "C123" },
+          }
+        : step,
+    ),
+  };
+}
+
+function gmailCanvasTriggerDefinition() {
+  return {
+    ...validAuthoringDefinition,
+    scheduleType: "external" as const,
+    scheduleValue: "canvas",
+    steps: validAuthoringDefinition.steps.map((step) =>
+      step.id === "trigger"
+        ? {
+            ...step,
+            label: "Gmail invoice trigger",
+            triggerConfig: {
+              type: "canvas" as const,
+              app: "gmail",
+              eventDescription: "new invoice email",
+              componentKey: "gmail.new_invoice_email",
+            },
+          }
+        : step,
+    ),
+  };
+}
+
 describe("automation authoring service", () => {
   it("creates a complete definition using bounded structured generation", async () => {
     const { service, generate } = createHarness([{ kind: "definition", definition: validAuthoringDefinition }]);
@@ -118,6 +200,80 @@ describe("automation authoring service", () => {
       question: "Which Slack channel should receive it?",
     });
     expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("clarifies invoice forwarding when the request omits polling versus trigger intent", async () => {
+    const { service, generate, telemetry } = createHarness([{ kind: "definition", definition: pollingDefinition() }]);
+
+    await expect(service.create(createRequest("Forward invoice emails from Gmail to Slack"))).resolves.toEqual({
+      kind: "clarification",
+      question: expect.stringContaining("polling"),
+    });
+    expect(generate).not.toHaveBeenCalled();
+    expect(telemetry.recordAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({ validationOutcome: "clarification", validationIssueCodes: ["TRIGGER_INTENT"] }),
+    );
+  });
+
+  it("rejects an explicitly requested Gmail event before generation", async () => {
+    const { service, generate } = createHarness([]);
+
+    await expect(
+      service.create(createRequest("When new invoice emails arrive in Gmail, forward them to Slack")),
+    ).resolves.toEqual({
+      kind: "clarification",
+      question: expect.stringContaining("Gmail event triggers are not available"),
+    });
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a nonexistent Gmail event trigger even when the request explicitly chooses polling", async () => {
+    const { service, generate } = createHarness([
+      { kind: "definition", definition: gmailCanvasTriggerDefinition() },
+      { kind: "definition", definition: gmailCanvasTriggerDefinition() },
+    ]);
+
+    await expect(
+      service.create(createRequest("Poll Gmail every five minutes and forward new invoice emails")),
+    ).rejects.toMatchObject({
+      name: "AutomationAuthoringValidationError",
+      cause: expect.objectContaining({
+        name: "AutomationValidationError",
+        issues: expect.arrayContaining([expect.objectContaining({ code: "UNSUPPORTED_TRIGGER" })]),
+      }),
+    });
+    expect(generate).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts an explicitly scheduled polling definition", async () => {
+    const { service } = createHarness([{ kind: "definition", definition: pollingDefinition() }]);
+
+    const result = await service.create(createRequest("Poll Gmail every five minutes and forward new invoice emails"));
+    expect(result).toMatchObject({
+      kind: "definition",
+      definition: { scheduleType: "interval", scheduleValue: "300" },
+    });
+    if (result.kind === "definition") {
+      const trigger = result.definition.steps.find((step) => step.type === "trigger");
+      expect(trigger?.triggerConfig).toMatchObject({ type: "schedule", scheduleType: "interval" });
+    }
+  });
+
+  it("accepts the supported Slack channel event trigger", async () => {
+    const { service } = createHarness([{ kind: "definition", definition: slackTriggerDefinition() }]);
+
+    await expect(
+      service.create(createRequest("When a message is posted in Slack channel C123, process it")),
+    ).resolves.toMatchObject({
+      kind: "definition",
+      definition: {
+        scheduleType: "external",
+        scheduleValue: "slack_channel_message",
+        steps: expect.arrayContaining([
+          expect.objectContaining({ triggerConfig: { type: "slack_channel_message", channelId: "C123" } }),
+        ]),
+      },
+    });
   });
 
   it("gives code-heavy replacement edits enough output budget", async () => {
