@@ -12,7 +12,7 @@ import { sql } from "kysely";
 import { decodeSecretField, encodeSecretField } from "../../auth/secret-fields";
 import { getSyncIdentity, syncIdentityKey } from "../../connectors/sync-identity";
 import { forEachChunk } from "../../connectors/sync-utils";
-import type { ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
+import type { AccessPrincipal, ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
 import { normalizeSourceTimestampForStorage } from "../../timestamps";
 import type { DB } from "../schema";
 
@@ -513,7 +513,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
      */
     async upsertAccessScope(
       connectorConfigId: string,
-      scope: { scopeType: string; providerScopeId: string; label: string; memberEmails: string[] },
+      scope: { scopeType: string; providerScopeId: string; label: string; members: AccessPrincipal[] },
     ): Promise<string> {
       const existing = await db
         .selectFrom("access_scopes")
@@ -546,10 +546,19 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
 
       // Replace members
       await db.deleteFrom("access_scope_members").where("access_scope_id", "=", scopeId).execute();
-      if (scope.memberEmails.length > 0) {
+      const uniqueMembers = [
+        ...new Map(scope.members.map((principal) => [`${principal.type}\u0000${principal.value}`, principal])).values(),
+      ];
+      if (uniqueMembers.length > 0) {
         await db
           .insertInto("access_scope_members")
-          .values(scope.memberEmails.map((email) => ({ access_scope_id: scopeId, email })))
+          .values(
+            uniqueMembers.map((principal) => ({
+              access_scope_id: scopeId,
+              principal_type: principal.type,
+              principal_value: principal.value,
+            })),
+          )
           .execute();
       }
 
@@ -613,26 +622,36 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
      * Replace per-file access emails for an indexed file.
      * Used for Google Drive My Drive files with individual sharing.
      */
-    async syncFileAccessEmails(indexedFileId: string, emails: string[]) {
+    async syncFileAccessEmails(indexedFileId: string, principals: AccessPrincipal[]) {
       await db.deleteFrom("file_access").where("indexed_file_id", "=", indexedFileId).execute();
 
-      const unique = [...new Set(emails)];
+      const unique = [
+        ...new Map(principals.map((principal) => [`${principal.type}\u0000${principal.value}`, principal])).values(),
+      ];
       if (unique.length === 0) return;
 
       await db
         .insertInto("file_access")
-        .values(unique.map((email) => ({ indexed_file_id: indexedFileId, email })))
+        .values(
+          unique.map((principal) => ({
+            indexed_file_id: indexedFileId,
+            principal_type: principal.type,
+            principal_value: principal.value,
+          })),
+        )
         .execute();
     },
 
     /** Add per-file email stamps without revoking existing stamps. */
-    async grantFileAccessEmails(indexedFileId: string, emails: string[]) {
-      const unique = [...new Set(emails)];
+    async grantFileAccessEmails(indexedFileId: string, principals: AccessPrincipal[]) {
+      const unique = [
+        ...new Map(principals.map((principal) => [`${principal.type}\u0000${principal.value}`, principal])).values(),
+      ];
       if (unique.length === 0) return;
 
       await sql`
-        INSERT INTO file_access (indexed_file_id, email)
-        VALUES ${sql.join(unique.map((email) => sql`(${indexedFileId}, ${email})`))}
+        INSERT INTO file_access (indexed_file_id, principal_type, principal_value)
+        VALUES ${sql.join(unique.map((principal) => sql`(${indexedFileId}, ${principal.type}, ${principal.value})`))}
         ON CONFLICT DO NOTHING
       `.execute(db);
     },

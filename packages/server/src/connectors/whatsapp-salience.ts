@@ -10,13 +10,19 @@ import {
   type WhatsAppRosterParticipantSnapshot,
   type WhatsAppRosterSnapshot,
   buildWhatsAppRosterSnapshot,
+  normalizeWhatsAppIdentityLid,
   normalizeWhatsAppIdentityPhone,
   stableWhatsAppParticipantJidRef,
 } from "../whatsapp/identity-resolution";
 import { sanitizeWhatsAppDisplayText } from "../whatsapp/privacy";
 import { phoneE164ToWhatsAppJid } from "../whatsapp/provider";
 import type { GeminiGenerator } from "./gemini-generate";
-import { type SyncedItem, WHATSAPP_CONVERSATION_SLICE_FILE_TYPE } from "./types";
+import {
+  type AccessPrincipal,
+  type SyncedItem,
+  WHATSAPP_CONVERSATION_SLICE_FILE_TYPE,
+  toEmailPrincipals,
+} from "./types";
 
 export const DEFAULT_WHATSAPP_SALIENCE_BATCH_LIMIT = 50;
 export const WHATSAPP_EMISSION_REFRESH_DAYS = 7;
@@ -81,7 +87,7 @@ interface RenderedSlice {
   rosterBlock: string;
   transcript: string;
   content: string;
-  teammateEmails: string[];
+  accessPrincipals: AccessPrincipal[];
 }
 
 interface PendingProcessResult {
@@ -357,20 +363,39 @@ async function listKeptSliceContexts(
   }));
 }
 
-async function loadTeammateEmails(db: Kysely<DB>, snapshot: WhatsAppRosterSnapshot): Promise<string[]> {
+async function loadWhatsAppAccessPrincipals(
+  db: Kysely<DB>,
+  groupJid: string,
+  snapshot: WhatsAppRosterSnapshot,
+): Promise<AccessPrincipal[]> {
   const userIds = uniqueStrings(
     snapshot.participants
       .filter((participant) => participant.resolutionKind === "teammate" && !!participant.userId)
       .map((participant) => participant.userId as string),
   );
-  if (userIds.length === 0) return [];
-  const rows = await db
-    .selectFrom("users")
-    .select(["id", "email"])
-    .where("id", "in", userIds)
-    .where("email", "is not", null)
+  const users =
+    userIds.length === 0
+      ? []
+      : await db
+          .selectFrom("users")
+          .select(["id", "email"])
+          .where("id", "in", userIds)
+          .where("email", "is not", null)
+          .execute();
+  const participants = await db
+    .selectFrom("whatsapp_group_participants")
+    .select(["phone_e164", "lid"])
+    .where("group_jid", "=", groupJid)
     .execute();
-  return uniqueStrings(rows.map((row) => row.email?.trim().toLowerCase() ?? "").filter((email) => email.length > 0));
+  const principals: AccessPrincipal[] = [];
+  for (const participant of participants) {
+    const phone = normalizeWhatsAppIdentityPhone(participant.phone_e164);
+    const lid = normalizeWhatsAppIdentityLid(participant.lid);
+    if (phone) principals.push({ type: "phone", value: phone });
+    if (lid) principals.push({ type: "whatsapp_lid", value: lid });
+  }
+  principals.push(...toEmailPrincipals(users.map((row) => row.email ?? "")));
+  return [...new Map(principals.map((principal) => [`${principal.type}\u0000${principal.value}`, principal])).values()];
 }
 
 async function renderSlice(db: Kysely<DB>, context: SliceContext, logger: Logger): Promise<RenderedSlice> {
@@ -398,7 +423,7 @@ async function renderSlice(db: Kysely<DB>, context: SliceContext, logger: Logger
     rosterBlock,
     transcript,
     content,
-    teammateEmails: await loadTeammateEmails(db, roster.snapshot),
+    accessPrincipals: await loadWhatsAppAccessPrincipals(db, context.groupJid, roster.snapshot),
   };
 }
 
@@ -521,7 +546,7 @@ async function syncedItemForKeptSlice(
       .where("id", "=", context.slice.id)
       .execute();
   }
-  if (rendered.teammateEmails.length === 0) {
+  if (rendered.accessPrincipals.length === 0) {
     await archiveLinkedSliceFileIfPresent(db, context);
     logger.warn(
       { sliceId: context.slice.id, conversationId: context.conversationId, groupJid: context.groupJid },
@@ -549,7 +574,7 @@ async function syncedItemForKeptSlice(
         scopeType: "whatsapp_group",
         providerScopeId: context.groupJid,
         label: titleGroup,
-        memberEmails: rendered.teammateEmails,
+        members: rendered.accessPrincipals,
       },
     },
   };
@@ -697,7 +722,7 @@ export async function reconcileWhatsAppGroupAcls(options: {
       .executeTakeFirst();
     if (!conversation) continue;
 
-    let teammateEmails: string[];
+    let accessPrincipals: AccessPrincipal[];
     try {
       const roster = await buildWhatsAppRosterSnapshot({
         db: options.db,
@@ -705,13 +730,13 @@ export async function reconcileWhatsAppGroupAcls(options: {
         conversationId: conversation.id,
         logger: options.logger,
       });
-      teammateEmails = await loadTeammateEmails(options.db, roster.snapshot);
+      accessPrincipals = await loadWhatsAppAccessPrincipals(options.db, scope.providerScopeId, roster.snapshot);
     } catch (err) {
       options.logger.warn({ err, groupJid: scope.providerScopeId }, "WhatsApp ACL reconciliation roster failed");
       continue;
     }
 
-    if (teammateEmails.length === 0) {
+    if (accessPrincipals.length === 0) {
       if (config.indexEnabled) {
         filesArchived += await connectorRepo.archiveFilesForAccessScopes([scope.id]);
         scopesArchived += 1;
@@ -721,7 +746,7 @@ export async function reconcileWhatsAppGroupAcls(options: {
         scopeType: "whatsapp_group",
         providerScopeId: scope.providerScopeId,
         label: sanitizeWhatsAppDisplayText(config.name) || "WhatsApp group",
-        memberEmails: [],
+        members: [],
       });
       scopesRefreshed += 1;
       continue;
@@ -731,7 +756,7 @@ export async function reconcileWhatsAppGroupAcls(options: {
       scopeType: "whatsapp_group",
       providerScopeId: scope.providerScopeId,
       label: sanitizeWhatsAppDisplayText(config.name) || "WhatsApp group",
-      memberEmails: teammateEmails,
+      members: accessPrincipals,
     });
     scopesRefreshed += 1;
   }

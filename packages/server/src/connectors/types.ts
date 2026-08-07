@@ -38,6 +38,19 @@ export type SyncStatus = "pending" | "active" | "syncing" | "paused" | "error" |
 
 export type ContentCategory = "document" | "structured";
 
+export type AccessPrincipalType = "email" | "phone" | "slack_user" | "whatsapp_lid";
+
+export interface AccessPrincipal {
+  type: AccessPrincipalType;
+  value: string;
+}
+
+export function toEmailPrincipals(emails: string[]): AccessPrincipal[] {
+  return [...new Set(emails.map((email) => email.trim().toLowerCase()).filter((email) => email.length > 0))].map(
+    (value) => ({ type: "email", value }),
+  );
+}
+
 export type HierarchyTarget = "team" | "project" | "sprint" | "ignore";
 
 export interface HierarchyLevelDeclaration {
@@ -121,7 +134,7 @@ export interface SyncedItem {
   /**
    * Scope-level access: assigns all files in a container (workspace, space, drive)
    * to a shared member list. Stored once per scope, referenced by many files.
-   * Normally mutually exclusive with accessEmails for a given item. Slack
+   * Normally mutually exclusive with accessPrincipals for a given item. Slack
    * Chat emissions provide both current scope membership and capture-time email stamps.
    *
    * Used by: ClickUp (workspace/space), Google Drive (shared drives).
@@ -130,14 +143,14 @@ export interface SyncedItem {
     scopeType: string;
     providerScopeId: string;
     label: string;
-    memberEmails: string[];
+    members: AccessPrincipal[];
   };
   /**
    * Per-file email access list. Used when access varies per file
    * (e.g., Google Drive My Drive files with individual sharing).
    * null → no per-file restrictions.
    */
-  accessEmails?: string[] | null;
+  accessPrincipals?: AccessPrincipal[] | null;
   /**
    * Structured assignee data for deterministic entity linking.
    * Each assignee is matched to a person entity and linked via entity_mentions.
@@ -169,7 +182,7 @@ export interface SyncedItem {
   /**
    * People meaningfully attached to this item (meeting speakers, doc authors).
    * Sync seeds person entities from entries where `name` is present or can be
-   * derived from `email`; `accessEmails` separately covers ACL.
+   * derived from `email`; `accessPrincipals` separately covers ACL.
    */
   attendees?: Array<{ name?: string; email?: string }>;
   authorEmail?: string;

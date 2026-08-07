@@ -98,7 +98,11 @@ async function main() {
     const scopeMembers = await db
       .selectFrom("access_scope_members")
       .innerJoin("access_scopes", "access_scopes.id", "access_scope_members.access_scope_id")
-      .select(["access_scopes.provider_scope_id", "access_scope_members.email"])
+      .select([
+        "access_scopes.provider_scope_id",
+        "access_scope_members.principal_type",
+        "access_scope_members.principal_value",
+      ])
       .where("access_scopes.scope_type", "=", "whatsapp_group")
       .execute();
     await table(db, "access_scope_members", scopeMembers);

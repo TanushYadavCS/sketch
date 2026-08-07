@@ -72,6 +72,15 @@ export function normalizeWhatsAppIdentityPhone(value: string | null | undefined)
   }
 }
 
+export function normalizeWhatsAppIdentityLid(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim().toLowerCase();
+  const withoutSuffix = trimmed.endsWith("@lid") ? trimmed.slice(0, -4) : trimmed;
+  const deviceSeparator = withoutSuffix.indexOf(":");
+  const bare = deviceSeparator === -1 ? withoutSuffix : withoutSuffix.slice(0, deviceSeparator);
+  return bare.length > 0 ? `${bare}@lid` : null;
+}
+
 export function stableWhatsAppParticipantJidRef(jid: string): string {
   const hash = createHash("sha256").update(jid).digest("hex").slice(0, 24);
   const encoded = [...hash].map((char) => REF_ALPHABET[Number.parseInt(char, 16)] ?? "a").join("");

@@ -11,6 +11,7 @@ import type {
   SourceItemRemovalRecord,
   SyncedItem,
 } from "./types";
+import { toEmailPrincipals } from "./types";
 
 const CALENDAR_API = "https://www.googleapis.com/calendar/v3";
 export const GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
@@ -660,7 +661,7 @@ export function eventToSyncedItem(
     sourceUpdatedAt,
     isAllDay: isAllDayEvent(event),
     mimeType: "text/calendar",
-    accessEmails: eventAccessEmails(event, ownerEmail, calendlyPeople),
+    accessPrincipals: toEmailPrincipals(eventAccessEmails(event, ownerEmail, calendlyPeople)),
     attendees: people.length > 0 ? people : undefined,
     authorEmail,
     authorName,
