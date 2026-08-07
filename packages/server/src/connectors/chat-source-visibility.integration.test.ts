@@ -258,6 +258,25 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         expect.arrayContaining(["chat-manual", "chat-org", "chat-entity"]),
       );
     });
+
+    it("restores pre-stack access doors when Slack entity sync is disabled", async () => {
+      const repo = createConnectorRepository(db);
+      const viewer = { email: DEPARTED_EMAIL, isAdmin: false, slackEntitySyncEnabled: false };
+      const files = await repo.listAllFiles({ limit: 50, offset: 0, viewer });
+
+      expect(files.map((file) => file.id)).toEqual(expect.arrayContaining(["chat-stamped", "chat-no-scope"]));
+      expect(await filterAccessibleFileIds(db, ["chat-stamped", "chat-no-scope"], [DEPARTED_EMAIL], false)).toEqual(
+        new Set(["chat-stamped", "chat-no-scope"]),
+      );
+      expect(await getFileContent(db, "chat-stamped", [DEPARTED_EMAIL], false)).not.toBeNull();
+      expect(await getFileContent(db, "chat-no-scope", [DEPARTED_EMAIL], false)).not.toBeNull();
+
+      const results = await searchFiles(db, "revocation", {
+        userEmails: [DEPARTED_EMAIL],
+        slackEntitySyncEnabled: false,
+      });
+      expect(results.map((file) => file.id)).toEqual(expect.arrayContaining(["chat-stamped", "chat-no-scope"]));
+    });
   });
 }
 

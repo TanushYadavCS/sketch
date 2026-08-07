@@ -744,6 +744,18 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
 
       expect(items).toHaveLength(1);
       expect(items[0]?.accessEmails).toEqual(["roopak@example.com"]);
+
+      const disabledItems = [];
+      for await (const item of emitSlackSyncedItems({
+        db,
+        logger,
+        facade: fakeFacade(),
+        slackEntitySyncEnabled: false,
+      })) {
+        disabledItems.push(item);
+      }
+      expect(disabledItems).toHaveLength(1);
+      expect(disabledItems[0]?.accessEmails).toBeUndefined();
     });
 
     it("emission with no teammate member archives the linked file and emits nothing", async () => {
@@ -1146,6 +1158,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         logger,
         facade: fakeFacade(),
         connectorConfigId: config.id,
+        slackEntitySyncEnabled: false,
       });
       expect(summary.scopesRefreshed).toBe(1);
       expect(summary.scopesArchived).toBe(1);

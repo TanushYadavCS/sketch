@@ -108,6 +108,7 @@ export interface ReanchorNullParentTasksResult {
 export interface LoadOpenDurableTasksForBriefOptions {
   userId: string;
   userEmails: string[];
+  slackEntitySyncEnabled?: boolean;
   assigneeEntityIds?: string[];
   activeSummarySourceKeys?: string[];
   activeSummaryConversationIds?: number[];
@@ -409,7 +410,7 @@ export function createTaskRepository(db: Kysely<DB>) {
             INNER JOIN indexed_files ON indexed_files.id = task_evidence.ref_id
             WHERE task_evidence.task_id = tasks.id
               AND task_evidence.kind = 'file'
-              AND ${fileAccessFilterSql(opts.userEmails)}
+              AND ${fileAccessFilterSql(opts.userEmails, opts.slackEntitySyncEnabled ?? true)}
           )`;
       const assigneeEntityIds = [...new Set(opts.assigneeEntityIds ?? [])].filter(Boolean);
       return db

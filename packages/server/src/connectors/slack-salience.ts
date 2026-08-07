@@ -420,6 +420,7 @@ export async function* emitSlackSyncedItems(options: {
   emissionRefreshDays?: number;
   now?: Date;
   onSkippedNoScope?: () => void;
+  slackEntitySyncEnabled?: boolean;
 }): AsyncGenerator<SyncedItem> {
   const refreshDays = options.emissionRefreshDays ?? SLACK_EMISSION_REFRESH_DAYS;
   const now = options.now ?? new Date();
@@ -492,7 +493,7 @@ export async function* emitSlackSyncedItems(options: {
         label: `#${context.channelName}`,
         memberEmails: teammateEmails,
       },
-      accessEmails: teammateEmails,
+      accessEmails: options.slackEntitySyncEnabled === false ? undefined : teammateEmails,
     };
   }
 }
@@ -511,6 +512,7 @@ export async function archiveAllSlackChannelFiles(options: {
   db: Kysely<DB>;
   logger: Logger;
   connectorConfigId: string;
+  slackEntitySyncEnabled?: boolean;
 }): Promise<number> {
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
@@ -564,6 +566,7 @@ export async function reconcileSlackChannelAcls(options: {
   logger: Logger;
   facade: SlackIndexingFacade;
   connectorConfigId: string;
+  slackEntitySyncEnabled?: boolean;
 }): Promise<{ scopesRefreshed: number; scopesArchived: number; filesArchived: number }> {
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");

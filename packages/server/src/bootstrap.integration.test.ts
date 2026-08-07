@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { createServer } from "./bootstrap";
 import { seedSlackOrganizationDomain } from "./bootstrap";
+import { upsertSlackPersonEntity } from "./db/repositories/slack-entity-sync";
 import { createUserRepository } from "./db/repositories/users";
 import type { DB } from "./db/schema";
 import { createTestConfig, createTestDb, createTestPgDb } from "./test-utils";
@@ -62,9 +63,10 @@ vi.mock("./managed-members", async (importOriginal) => {
   };
 });
 
-vi.mock("./managed-seed", () => ({
-  runManagedSeed: vi.fn(),
-}));
+vi.mock("./managed-seed", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./managed-seed")>();
+  return { ...actual, runManagedSeed: vi.fn(actual.runManagedSeed) };
+});
 
 type ServerHandle = Awaited<ReturnType<typeof createServer>>;
 
@@ -111,6 +113,44 @@ describe("bootstrap", () => {
   it("has no Slack bot when tokens are not configured", async () => {
     const h = await boot();
     expect(h.getSlack()).toBeNull();
+  });
+
+  it("seeds the bootstrap admin domain before Slack classification on first boot", async () => {
+    const h = await boot(
+      {
+        BOOTSTRAP_ADMIN_EMAIL: "admin@acme.example",
+        BOOTSTRAP_ADMIN_PASSWORD_HASH: "password-hash",
+      },
+      false,
+      false,
+      false,
+    );
+
+    await expect(h.db.selectFrom("organization_domains").select("domain").execute()).resolves.toEqual([
+      { domain: "acme.example" },
+    ]);
+
+    const result = await upsertSlackPersonEntity(h.db, {
+      teamId: "T-first-boot",
+      slackUserId: "U-first-boot",
+      name: "Acme User",
+      realName: "Acme User",
+      displayName: "acme-user",
+      email: "user@acme.example",
+      phone: null,
+      profileTeamId: "T-first-boot",
+      isBot: false,
+      isGuest: false,
+      isStranger: false,
+      isRestricted: false,
+      isUltraRestricted: false,
+      deleted: false,
+      providerUpdatedAt: "2026-08-07T00:00:00.000Z",
+      fetchedAt: "2026-08-07T00:00:00.000Z",
+      profile: null,
+    });
+
+    expect(result.state.classification).toBe("internal");
   });
 
   it("runs remote startup work by default", async () => {
@@ -407,7 +447,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
 
       await expect(seedSlackOrganizationDomain(db, logger)).resolves.toBeNull();
       expect(logger.warn).toHaveBeenCalledWith(
-        "No corporate admin email domains could be seeded; classification will be unknown until a domain is configured",
+        "No corporate admin email domains could be seeded; classification defaults to external without domain or roster evidence",
       );
     });
   });

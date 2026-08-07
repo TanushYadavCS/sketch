@@ -121,6 +121,7 @@ async function filterEntityRowsForPublic<
     deps.db,
     mentions.map((mention) => mention.indexed_file_id),
     userEmails,
+    deps.slackEntitySyncEnabled ?? true,
   );
   const visibleEntityIds = new Set(
     mentions.filter((mention) => accessibleIds.has(mention.indexed_file_id)).map((mention) => mention.entity_id),
@@ -237,6 +238,7 @@ export async function handleSearch(
     entityIdsMode,
     sortBy,
     userEmails,
+    slackEntitySyncEnabled: deps.slackEntitySyncEnabled,
     skipAutoEntityBoost,
     geminiMaxRpm: deps.geminiConfig?.maxRpm,
     geminiMaxRetries: deps.geminiConfig?.maxRetries,
@@ -369,6 +371,7 @@ export async function handleGetEntityContext(
     deps.db,
     rawMentions.map((m) => m.indexed_file_id),
     userEmails,
+    deps.slackEntitySyncEnabled ?? true,
   );
 
   const mentions = rawMentions.filter((m) => accessibleIds.has(m.indexed_file_id)).slice(0, requestedLimit);
@@ -423,7 +426,7 @@ export async function handleGetFileContent({ fileId }: GetFileContentArgs, deps:
   if (deps.publicMcp && userEmails.length === 0) {
     return { content: [{ type: "text", text: `File ${fileId} not found.` }] };
   }
-  const file = await getFileContent(deps.db, fileId, userEmails);
+  const file = await getFileContent(deps.db, fileId, userEmails, deps.slackEntitySyncEnabled ?? true);
 
   if (!file) {
     return { content: [{ type: "text", text: `File ${fileId} not found.` }] };

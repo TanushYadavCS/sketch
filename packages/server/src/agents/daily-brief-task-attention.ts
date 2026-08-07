@@ -82,6 +82,7 @@ export async function resolveDailyBriefTaskAttention(input: {
   db: Kysely<DB>;
   userId: string;
   userEmails: string[];
+  slackEntitySyncEnabled: boolean;
   assigneeEntityIds: string[];
   outputDate: string;
   timezone: string;
@@ -107,6 +108,7 @@ export async function resolveDailyBriefTaskAttention(input: {
     candidateRows = await loadCandidateTasks(input.db, {
       userId: input.userId,
       userEmails: input.userEmails,
+      slackEntitySyncEnabled: input.slackEntitySyncEnabled,
       assigneeEntityIds: input.assigneeEntityIds,
       carriedTaskIds: previous.failed ? [] : previous.taskIds,
       windowStart,
@@ -120,6 +122,7 @@ export async function resolveDailyBriefTaskAttention(input: {
       candidateRows = await loadCandidateTasks(input.db, {
         userId: input.userId,
         userEmails: input.userEmails,
+        slackEntitySyncEnabled: input.slackEntitySyncEnabled,
         assigneeEntityIds: input.assigneeEntityIds,
         carriedTaskIds: previous.failed ? [] : previous.taskIds,
         windowStart,
@@ -236,6 +239,7 @@ export async function resolveDailyBriefTaskAttention(input: {
     input.db,
     ranked.map((item) => item.taskId),
     input.userEmails,
+    input.slackEntitySyncEnabled,
   ).catch(() => {
     partial = true;
     return new Map<string, DailyBriefTaskAttentionItem["evidence"]>();
@@ -293,6 +297,7 @@ async function loadCandidateTasks(
   input: {
     userId: string;
     userEmails: string[];
+    slackEntitySyncEnabled: boolean;
     assigneeEntityIds: string[];
     carriedTaskIds: string[];
     windowStart: string;
@@ -311,7 +316,7 @@ async function loadCandidateTasks(
           inner join indexed_files on indexed_files.id = task_evidence.ref_id
           where task_evidence.task_id = t.id
             and task_evidence.kind = 'file'
-            and ${fileAccessFilterSql(input.userEmails)}
+            and ${fileAccessFilterSql(input.userEmails, input.slackEntitySyncEnabled)}
         )`;
   const carriedRank =
     input.carriedTaskIds.length === 0
@@ -493,7 +498,7 @@ function hasAttentionRank(item: DailyBriefTaskAttentionItem, key: AttentionRankK
   return item.attentionReasons.includes(key);
 }
 
-async function loadEvidence(db: Kysely<DB>, taskIds: string[], userEmails: string[]) {
+async function loadEvidence(db: Kysely<DB>, taskIds: string[], userEmails: string[], slackEntitySyncEnabled: boolean) {
   if (taskIds.length === 0) return new Map<string, DailyBriefTaskAttentionItem["evidence"]>();
   const messageRows = await sql<{ task_id: string; conversation_message_id: number; row_number: number }>`
     select task_id, conversation_message_id, row_number
@@ -521,7 +526,7 @@ async function loadEvidence(db: Kysely<DB>, taskIds: string[], userEmails: strin
       inner join indexed_files on indexed_files.id = task_evidence.ref_id
       where task_evidence.task_id in (${sql.join(taskIds)})
         and task_evidence.kind = 'file'
-        and ${fileAccessFilterSql(userEmails)}
+        and ${fileAccessFilterSql(userEmails, slackEntitySyncEnabled)}
     ) ranked
     where row_number <= ${EVIDENCE_LIMIT + 1}
   `.execute(db);

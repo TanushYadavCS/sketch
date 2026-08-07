@@ -15,10 +15,11 @@
 import { type Kysely, sql } from "kysely";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestPgDb, getSharedPgDb } from "../../test-utils";
-import { runMigrations } from "../migrate";
+import { createMigrator, runMigrations } from "../migrate";
 import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
+import * as slackRosterEvidenceMigration from "./160-slack-roster-evidence";
 
 const EXPECTED_MIGRATION_COUNT = 156;
 
@@ -637,6 +638,78 @@ describe("runMigrations on Postgres — full sequence", () => {
       expect(rows.rows).toHaveLength(EXPECTED_MIGRATION_COUNT);
     } finally {
       await freshDb.destroy();
+    }
+  });
+
+  it("upgrades schema 158 with existing rows through the roster evidence migration", async () => {
+    const legacyDb = await createTestPgDb();
+    try {
+      const migrationResult = await createMigrator(legacyDb).migrateTo("158-slack-channel-participants");
+      expect(migrationResult.error).toBeUndefined();
+      await legacyDb
+        .insertInto("slack_channel_participants")
+        .values({ channel_id: "C-existing", slack_user_id: "U-existing", last_seen_at: "2026-08-07T00:00:00.000Z" })
+        .execute();
+
+      await runMigrations(legacyDb, { quiet: true });
+      await slackRosterEvidenceMigration.up(legacyDb as unknown as Kysely<unknown>);
+
+      const tables = await sql<{ table_name: string }>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
+        ORDER BY table_name
+      `.execute(legacyDb);
+      expect(tables.rows.map((row) => row.table_name)).toEqual([
+        "organization_domains",
+        "slack_sync_runs",
+        "slack_user_sync_state",
+      ]);
+
+      const stateColumns = await sql<{ column_name: string }>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'slack_user_sync_state'
+      `.execute(legacyDb);
+      expect(stateColumns.rows.map((row) => row.column_name)).toEqual(
+        expect.arrayContaining(["team_id", "slack_user_id", "entity_created_by_sync", "last_roster_seen_at"]),
+      );
+      const settingsColumns = await sql<{ column_name: string }>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'slack_team_id'
+      `.execute(legacyDb);
+      expect(settingsColumns.rows).toEqual([{ column_name: "slack_team_id" }]);
+
+      const indexes = await sql<{ indexname: string }>`
+        SELECT indexname FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname IN ('idx_slack_user_sync_state_entity', 'idx_slack_sync_runs_status_heartbeat')
+        ORDER BY indexname
+      `.execute(legacyDb);
+      expect(indexes.rows.map((row) => row.indexname)).toEqual([
+        "idx_slack_sync_runs_status_heartbeat",
+        "idx_slack_user_sync_state_entity",
+      ]);
+
+      const constraints = await sql<{ constraint_name: string }>`
+        SELECT constraint_name FROM information_schema.table_constraints
+        WHERE table_schema = 'public'
+          AND constraint_name IN (
+            'slack_user_sync_state_pk',
+            'organization_domains_domain_unique',
+            'slack_sync_runs_team_trigger_unique'
+          )
+        ORDER BY constraint_name
+      `.execute(legacyDb);
+      expect(constraints.rows.map((row) => row.constraint_name)).toEqual([
+        "organization_domains_domain_unique",
+        "slack_sync_runs_team_trigger_unique",
+        "slack_user_sync_state_pk",
+      ]);
+      await expect(
+        legacyDb.selectFrom("slack_channel_participants").select(["channel_id", "slack_user_id"]).execute(),
+      ).resolves.toEqual([{ channel_id: "C-existing", slack_user_id: "U-existing" }]);
+    } finally {
+      await legacyDb.destroy();
     }
   });
 
