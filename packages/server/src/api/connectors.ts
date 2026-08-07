@@ -325,6 +325,7 @@ const CANVAS_APP_BY_CONNECTOR: Partial<Record<ConnectorType, string>> = {
   google_calendar: "google-calendar-oauth",
   gmail: "google-gmail-oauth",
   outlook: "microsoft-outlook-oauth",
+  outlook_calendar: "microsoft-outlook-calendar-oauth",
   teams: "microsoft-teams-oauth",
   fireflies: "fireflies",
   clickup: "clickup-api-key",
@@ -332,7 +333,13 @@ const CANVAS_APP_BY_CONNECTOR: Partial<Record<ConnectorType, string>> = {
   linear: "linear",
 };
 
-const SCOPE_REQUIRED_CONNECTORS = new Set<ConnectorType>(["google_drive", "google_calendar", "clickup", "notion"]);
+const SCOPE_REQUIRED_CONNECTORS = new Set<ConnectorType>([
+  "google_drive",
+  "google_calendar",
+  "outlook_calendar",
+  "clickup",
+  "notion",
+]);
 
 function defaultAuthTypeForConnector(connectorType: ConnectorType): AuthType {
   switch (connectorType) {

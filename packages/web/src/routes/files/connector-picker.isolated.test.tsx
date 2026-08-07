@@ -105,7 +105,7 @@ function connectorRowByDescription(description: string): HTMLElement {
 }
 
 describe("ConnectorPicker connector capabilities", () => {
-  it("hides Outlook Calendar when Canvas credential mode has no supported connector", async () => {
+  it("shows Outlook Calendar in Canvas credential mode", async () => {
     const user = userEvent.setup();
     setupStatus();
     server.use(
@@ -122,12 +122,10 @@ describe("ConnectorPicker connector capabilities", () => {
 
     await user.click(await screen.findByRole("button", { name: /Browse all/i }));
     expect(await screen.findByText("Calendar events and meetings")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.queryByText("Microsoft 365 calendar events and meetings")).not.toBeInTheDocument(),
-    );
+    expect(await screen.findByText("Microsoft 365 calendar events and meetings")).toBeInTheDocument();
   });
 
-  it("keeps Outlook Calendar hidden until credential mode resolves", async () => {
+  it("keeps Outlook Calendar visible while credential mode resolves", async () => {
     const user = userEvent.setup();
     let releaseCredentialSource: () => void = () => {};
     const credentialSource = new Promise<Response>((resolve) => {
@@ -146,10 +144,10 @@ describe("ConnectorPicker connector capabilities", () => {
     renderPicker([]);
 
     await user.click(await screen.findByRole("button", { name: /Browse all/i }));
-    expect(screen.queryByText("Microsoft 365 calendar events and meetings")).not.toBeInTheDocument();
+    expect(await screen.findByText("Microsoft 365 calendar events and meetings")).toBeInTheDocument();
 
     releaseCredentialSource();
-    expect(await screen.findByText("Microsoft 365 calendar events and meetings")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Microsoft 365 calendar events and meetings")).toBeInTheDocument());
   });
 
   it.each(INTEGRATIONS.filter((def) => def.perUserAuth).map((def) => [def.name, def] as const))(

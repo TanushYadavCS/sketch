@@ -191,10 +191,6 @@ export function ConnectorPicker({
     queryKey: ["setup-status"],
     queryFn: () => api.setup.status(),
   });
-  const credentialSourceQuery = useQuery({
-    queryKey: ["connector-credential-source"],
-    queryFn: () => api.integrations.credentialSource(),
-  });
 
   const connectedByType = new Map<string, ConnectorConfig>();
   // aggregatedByType drives sync-status indicator on the chip (which is
@@ -211,7 +207,6 @@ export function ConnectorPicker({
     });
   }
   const visibleIntegrations = INTEGRATIONS.filter((def) => {
-    if (def.type === "outlook_calendar" && credentialSourceQuery.data?.mode !== "local") return false;
     if (def.type !== "whatsapp") return true;
     return (
       setupStatusQuery.data?.whatsappConnected === true ||

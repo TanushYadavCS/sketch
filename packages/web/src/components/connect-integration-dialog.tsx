@@ -138,6 +138,7 @@ export function ConnectIntegrationDialog({
     integration?.type === "google_calendar" ||
     integration?.type === "gmail" ||
     integration?.type === "outlook" ||
+    integration?.type === "outlook_calendar" ||
     integration?.type === "teams" ||
     integration?.type === "fireflies" ||
     integration?.type === "clickup" ||
