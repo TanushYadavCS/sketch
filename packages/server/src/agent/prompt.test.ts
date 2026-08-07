@@ -189,6 +189,18 @@ describe("buildSystemContext", () => {
       expect(result).toContain("durable follow-up state is authoritative");
     });
 
+    it("prefers deterministic action steps for fixed automation work", () => {
+      const result = buildSystemContext({ platform: "slack" });
+
+      expect(result).toContain("Prefer explicit workflow steps for deterministic automations");
+      expect(result).toContain("mapping fields, filtering records, normalizing data, calculations");
+      expect(result).toContain("bounded JSON transformations");
+      expect(result).toContain("action steps with script content");
+      expect(result).toContain("legacy shorthand creates an agent step");
+      expect(result).toContain("only when the workflow needs interpretation, classification, planning, summarization");
+      expect(result).toContain("Operational actions remain deterministic");
+    });
+
     it("routes semantic authoring through natural-language ManageScheduledTasks requests when configured", () => {
       const result = buildSystemContext({ platform: "slack", automationAuthoringEnabled: true });
 
@@ -207,6 +219,7 @@ describe("buildSystemContext", () => {
       expect(result).not.toContain("Do not construct or pass automation definition fields");
       expect(result).not.toContain("Never use updateStepContent");
       expect(result).toContain("pass the resolved target ID in ManageScheduledTasks delivery");
+      expect(result).toContain("Operational actions remain deterministic");
     });
   });
 
