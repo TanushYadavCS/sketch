@@ -1,4 +1,11 @@
 import { type AutomationRunItem, type AutomationStepContentItem, type ScheduledTaskListItem, api } from "@/lib/api";
+import {
+  AUTOMATION_QUERY_KEY,
+  AUTOMATION_REFRESH_INTERVAL_MS,
+  automationRunsQueryKey,
+  automationStepContentQueryKey,
+  invalidateAutomationQueries,
+} from "@/lib/automation-refresh";
 import { useDashboardAuth } from "@/routes/dashboard";
 import {
   CaretRightIcon,
@@ -56,7 +63,7 @@ export const scheduledTasksRoute = createRoute({
   component: ScheduledTasksPage,
 });
 
-const TASKS_QUERY_KEY = ["scheduled-tasks"];
+const TASKS_QUERY_KEY = AUTOMATION_QUERY_KEY;
 
 type OwnershipTab = "all" | "mine" | "system";
 type StatusFilter = "all" | "active" | "attention" | "paused";
@@ -416,12 +423,15 @@ export function ScheduledTasksPage() {
   const tasksQuery = useQuery({
     queryKey: TASKS_QUERY_KEY,
     queryFn: () => api.scheduledTasks.list(),
+    refetchInterval: AUTOMATION_REFRESH_INTERVAL_MS,
+    refetchOnWindowFocus: true,
   });
 
   const pauseMutation = useMutation({
     mutationFn: (taskId: string) => api.scheduledTasks.pause(taskId),
     onSuccess: (task) => {
       queryClient.setQueryData<ScheduledTaskListItem[]>(TASKS_QUERY_KEY, (tasks) => replaceTaskInCache(tasks, task));
+      void invalidateAutomationQueries(queryClient, [task.id]);
       toast.success("Automation paused");
     },
     onError: (error) => {
@@ -433,6 +443,7 @@ export function ScheduledTasksPage() {
     mutationFn: (taskId: string) => api.scheduledTasks.resume(taskId),
     onSuccess: (task) => {
       queryClient.setQueryData<ScheduledTaskListItem[]>(TASKS_QUERY_KEY, (tasks) => replaceTaskInCache(tasks, task));
+      void invalidateAutomationQueries(queryClient, [task.id]);
       toast.success("Automation resumed");
     },
     onError: (error) => {
@@ -444,6 +455,7 @@ export function ScheduledTasksPage() {
     mutationFn: (taskId: string) => api.scheduledTasks.remove(taskId),
     onSuccess: (_result, taskId) => {
       queryClient.setQueryData<ScheduledTaskListItem[]>(TASKS_QUERY_KEY, (tasks) => removeTaskFromCache(tasks, taskId));
+      void invalidateAutomationQueries(queryClient, [taskId]);
       setDeletingTask(null);
       setExpandedTaskId((current) => (current === taskId ? null : current));
       toast.success("Automation deleted");
@@ -455,7 +467,8 @@ export function ScheduledTasksPage() {
 
   const triggerMutation = useMutation({
     mutationFn: (taskId: string) => api.scheduledTasks.trigger(taskId),
-    onSuccess: () => {
+    onSuccess: (_result, taskId) => {
+      void invalidateAutomationQueries(queryClient, [taskId]);
       toast.success("Automation triggered");
     },
     onError: (error) => {
@@ -1087,8 +1100,10 @@ function StepsList({ task }: { task: ScheduledTaskListItem }) {
   const [expandedStepIds, setExpandedStepIds] = useState<Set<string>>(new Set());
 
   const stepContentQuery = useQuery({
-    queryKey: ["automation-step-content", task.id],
+    queryKey: automationStepContentQueryKey(task.id),
     queryFn: () => api.scheduledTasks.getStepContent(task.id),
+    refetchInterval: AUTOMATION_REFRESH_INTERVAL_MS,
+    refetchOnWindowFocus: true,
   });
 
   if (!task.steps) return null;
@@ -1204,8 +1219,10 @@ function RunHistory({ taskId }: { taskId: string }) {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   const runsQuery = useQuery({
-    queryKey: ["automation-runs", taskId],
+    queryKey: automationRunsQueryKey(taskId),
     queryFn: () => api.scheduledTasks.listRuns(taskId),
+    refetchInterval: AUTOMATION_REFRESH_INTERVAL_MS,
+    refetchOnWindowFocus: true,
   });
 
   const runs = runsQuery.data ?? [];

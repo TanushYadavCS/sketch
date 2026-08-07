@@ -18,6 +18,12 @@ import {
   type WorkflowStep,
   api,
 } from "@/lib/api";
+import {
+  AUTOMATION_ACTIVE_RUN_REFRESH_INTERVAL_MS,
+  AUTOMATION_REFRESH_INTERVAL_MS,
+  automationDefinitionQueryKey,
+  invalidateAutomationQueries,
+} from "@/lib/automation-refresh";
 import { WEB_CHAT_CONVERSATIONS_QUERY_KEY } from "@/lib/web-chat-conversations";
 import { useChat } from "@ai-sdk/react";
 import {
@@ -303,22 +309,27 @@ export function AutomationBuilderPage() {
   const { conversationId: requestedConversationId } = useSearch({ from: automationBuilderRoute.id });
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const queryKey = useMemo(() => ["scheduled-tasks", taskId, "builder"] as const, [taskId]);
+  const queryKey = useMemo(() => automationDefinitionQueryKey(taskId), [taskId]);
   const [draft, setDraft] = useState<DraftAutomation | null>(null);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [savingPromptStepId, setSavingPromptStepId] = useState<string | null>(null);
   const latestDraftRef = useRef<DraftAutomation | null>(null);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingSaveCountRef = useRef(0);
 
   const automationQuery = useQuery({
     queryKey,
     queryFn: () => api.scheduledTasks.get(taskId),
-    refetchInterval: (query) => (query.state.data?.recentRuns.some((run) => run.status === "running") ? 1500 : false),
+    refetchInterval: (query) =>
+      query.state.data?.recentRuns.some((run) => run.status === "running")
+        ? AUTOMATION_ACTIVE_RUN_REFRESH_INTERVAL_MS
+        : AUTOMATION_REFRESH_INTERVAL_MS,
+    refetchOnWindowFocus: true,
   });
 
   useEffect(() => {
-    if (!automationQuery.data) return;
+    if (!automationQuery.data || pendingSaveCountRef.current > 0) return;
     const nextDraft = draftFromDefinition(automationQuery.data);
     latestDraftRef.current = nextDraft;
     setDraft(nextDraft);
@@ -328,7 +339,7 @@ export function AutomationBuilderPage() {
     mutationFn: () => api.scheduledTasks.run(taskId),
     onSuccess: async () => {
       toast.success("Run requested");
-      await queryClient.invalidateQueries({ queryKey });
+      await invalidateAutomationQueries(queryClient, [taskId]);
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Could not start the run"),
   });
@@ -337,7 +348,7 @@ export function AutomationBuilderPage() {
     mutationFn: (stepId: string) => api.scheduledTasks.testStep(taskId, stepId, { useLatestUpstreamOutput: true }),
     onSuccess: async () => {
       toast.success("Test complete");
-      await queryClient.invalidateQueries({ queryKey });
+      await invalidateAutomationQueries(queryClient, [taskId]);
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Test failed"),
   });
@@ -348,6 +359,7 @@ export function AutomationBuilderPage() {
       options: { message?: string; promptStepId?: string } = {},
     ) => {
       if (options.promptStepId) setSavingPromptStepId(options.promptStepId);
+      pendingSaveCountRef.current += 1;
       const save = saveQueueRef.current
         .catch(() => undefined)
         .then(async () => {
@@ -365,6 +377,7 @@ export function AutomationBuilderPage() {
             latestDraftRef.current = updatedDraft;
             queryClient.setQueryData(queryKey, updatedAutomation);
             setDraft(updatedDraft);
+            await invalidateAutomationQueries(queryClient, [taskId]);
             if (options.message) toast.success(options.message);
           } catch (error) {
             toast.error(error instanceof Error ? error.message : "Failed to save automation");
@@ -375,7 +388,7 @@ export function AutomationBuilderPage() {
               queryClient.setQueryData(queryKey, refreshed);
               setDraft(refreshedDraft);
             } catch {
-              await queryClient.invalidateQueries({ queryKey });
+              await invalidateAutomationQueries(queryClient, [taskId]);
             }
             throw error;
           } finally {
@@ -383,6 +396,9 @@ export function AutomationBuilderPage() {
               setSavingPromptStepId((current) => (current === options.promptStepId ? null : current));
             }
           }
+        })
+        .finally(() => {
+          pendingSaveCountRef.current -= 1;
         });
       saveQueueRef.current = save.catch(() => undefined);
     },
@@ -1383,9 +1399,9 @@ function BuilderChatTranscript({
     }
     if (!historyReady || !wasBusyRef.current) return;
     wasBusyRef.current = false;
-    void queryClient.invalidateQueries({ queryKey });
+    void invalidateAutomationQueries(queryClient, [taskId]);
     void queryClient.invalidateQueries({ queryKey: conversationsQueryKey });
-  }, [chat.status, conversationsQueryKey, historyReady, queryClient, queryKey]);
+  }, [chat.status, conversationsQueryKey, historyReady, queryClient, taskId]);
 
   const handleStop = useCallback(() => {
     if (stoppingRun) return;
