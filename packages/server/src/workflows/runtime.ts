@@ -11,6 +11,7 @@
  */
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
+import { type AutomationSketchToolName, workflowStepUsesIntegrationActions } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { removeReservedAgentEnv } from "../agent/environment";
 import { buildPlatformFormattingLines, buildSketchContext } from "../agent/prompt";
@@ -20,6 +21,12 @@ import { runAgentRuntimeCore } from "../agent/runtime/core";
 import { createAgentRuntimeWorkspaceToolScopePolicy } from "../agent/runtime/path-guard";
 import { createAgentRuntimeProvider } from "../agent/runtime/provider";
 import { createAgentRuntimeWorkspaceTools } from "../agent/runtime/workspace-tools";
+import {
+  type AutomationCapabilityCallEvent,
+  type AutomationCapabilityRegistry,
+  type AutomationSketchTools,
+  createAutomationCapabilityRegistry,
+} from "../automation/capabilities";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
@@ -61,6 +68,8 @@ export interface ExecuteAutomationParams {
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
   trustedLocalFileRoot?: string;
+  automationCapabilityRegistry?: AutomationCapabilityRegistry;
+  recordAutomationCapabilityCall?: (event: AutomationCapabilityCallEvent) => void | Promise<void>;
 }
 
 export type AutomationExecutionEvent =
@@ -437,6 +446,10 @@ async function executeWorkflowStep(params: {
       loadIntegrationProvider: runtimeParams.loadIntegrationProvider,
       listAgentEnvForRuntime: runtimeParams.listAgentEnvForRuntime,
       trustedLocalFileRoot: runtimeParams.trustedLocalFileRoot,
+      db: runtimeParams.db,
+      userRepo: runtimeParams.userRepo,
+      automationCapabilityRegistry: runtimeParams.automationCapabilityRegistry,
+      recordAutomationCapabilityCall: runtimeParams.recordAutomationCapabilityCall,
     });
   }
 
@@ -697,6 +710,7 @@ export interface ScriptContext {
   log: Logger;
   env: Readonly<Record<string, string>>;
   workspaceDir: string;
+  tools: Readonly<AutomationSketchTools>;
   integrations: {
     executeAction(request: ScriptIntegrationActionRequest, signal?: AbortSignal): Promise<unknown>;
   };
@@ -717,31 +731,41 @@ interface ActionStepParams {
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   trustedLocalFileRoot?: string;
+  db: Kysely<DB>;
+  userRepo: NonNullable<RunAgentParams["userRepo"]>;
+  automationCapabilityRegistry?: AutomationCapabilityRegistry;
+  recordAutomationCapabilityCall?: (event: AutomationCapabilityCallEvent) => void | Promise<void>;
 }
 
 async function executeActionStep(params: ActionStepParams): Promise<unknown> {
-  const { script, step, input, runId, logger, creatorEmail, workspaceDir, loadIntegrationProvider } = params;
-  const integrationProvider = await loadIntegrationProvider();
-  const integrationAccess = await startIntegrationAccess({
-    userEmail: creatorEmail,
-    claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
-    workspaceDir,
-    loadIntegrationProvider: async () => integrationProvider,
-    logger,
-  });
-
-  if (!integrationAccess.envVars.CANVAS_CLI && !integrationProvider?.executeAction) {
-    await cleanupIntegrationAccess(integrationAccess);
-    throw new Error(
-      `Action step ${step.id} requires a broker-capable integration provider; none is currently configured. Reconfigure the integration in Settings → Integrations.`,
-    );
+  const { script, step, input, runId, logger, creatorId, creatorEmail, workspaceDir, loadIntegrationProvider } = params;
+  const usesIntegrationActions = workflowStepUsesIntegrationActions(step);
+  const sketchTools = step.actionCapabilities?.sketchTools ?? [];
+  if (sketchTools.length > 0 && !creatorId) {
+    throw new Error(`Action step ${step.id} requires an automation creator to use Sketch tools`);
   }
+  const integrationProvider = usesIntegrationActions ? await loadIntegrationProvider() : null;
+  const integrationAccess = usesIntegrationActions
+    ? await startIntegrationAccess({
+        userEmail: creatorEmail,
+        claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
+        workspaceDir,
+        loadIntegrationProvider: async () => integrationProvider,
+        logger,
+      })
+    : null;
 
   try {
+    if (usesIntegrationActions && !integrationAccess?.envVars.CANVAS_CLI && !integrationProvider?.executeAction) {
+      throw new Error(
+        `Action step ${step.id} requires a broker-capable integration provider; none is currently configured. Reconfigure the integration in Settings → Integrations.`,
+      );
+    }
+
     const env = await buildScriptEnv({
       runtimeContext: buildAgentEnvironmentRuntimeContext(params.task),
       listAgentEnvForRuntime: params.listAgentEnvForRuntime,
-      integrationEnv: integrationAccess.envVars,
+      integrationEnv: integrationAccess?.envVars ?? {},
     });
 
     const timeoutMs = (step.timeout ?? 1800) * 1000;
@@ -762,8 +786,27 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
       logger,
       env,
       workspaceDir,
+      tools:
+        sketchTools.length > 0
+          ? (params.automationCapabilityRegistry ?? createAutomationCapabilityRegistry()).createTools({
+              context: {
+                taskId: params.taskId,
+                runId,
+                stepId: step.id,
+                creatorId: creatorId as string,
+                creatorEmail,
+                workspaceDir,
+                db: params.db,
+                userRepo: params.userRepo,
+                logger,
+                signal: controller.signal,
+                recordCall: params.recordAutomationCapabilityCall,
+              },
+              allowedTools: sketchTools as AutomationSketchToolName[],
+            })
+          : Object.freeze({}),
       executeIntegrationAction: async (request) => {
-        if (!integrationProvider?.executeAction || !creatorEmail) {
+        if (!usesIntegrationActions || !integrationProvider?.executeAction || !creatorEmail) {
           throw new Error("The configured integration provider cannot execute server-owned actions");
         }
         const configuredProps = await materializeIntegrationActionFiles({
@@ -789,7 +832,7 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
       clearTimeout(timeout);
     }
   } finally {
-    await cleanupIntegrationAccess(integrationAccess);
+    if (integrationAccess) await cleanupIntegrationAccess(integrationAccess);
   }
 }
 
@@ -867,6 +910,7 @@ function buildScriptContext(params: {
   logger: Logger;
   env: Readonly<Record<string, string>>;
   workspaceDir: string;
+  tools: Readonly<AutomationSketchTools>;
   executeIntegrationAction: (request: ScriptIntegrationActionRequest, signal?: AbortSignal) => Promise<unknown>;
 }): ScriptContext {
   const log =
@@ -875,6 +919,7 @@ function buildScriptContext(params: {
     log,
     env: params.env,
     workspaceDir: params.workspaceDir,
+    tools: params.tools,
     integrations: Object.freeze({ executeAction: params.executeIntegrationAction }),
   });
 }

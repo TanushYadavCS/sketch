@@ -9,6 +9,7 @@ import {
   stepOutputSchema,
   workflowEdgeSchema,
   workflowStepSchema,
+  workflowStepUsesIntegrationActions,
 } from "@sketch/shared";
 import { Cron } from "croner";
 import type { Selectable } from "kysely";
@@ -272,7 +273,28 @@ export function validateAutomationBuilderSaveRequest(params: {
           `stepContent.${step.id}`,
         );
       }
-      if (!params.brokerCapable) {
+      if (step.actionCapabilities) {
+        if (!step.actionCapabilities.usesIntegrationActions && step.actionCapabilities.sketchTools.length === 0) {
+          addIssue(
+            issues,
+            "ACTION_CAPABILITIES_REQUIRED",
+            `Action step "${step.label}" must declare a Sketch tool or integration action capability`,
+            `steps.${step.id}.actionCapabilities`,
+          );
+        }
+        const duplicateTools = step.actionCapabilities.sketchTools.filter(
+          (tool, index, tools) => tools.indexOf(tool) !== index,
+        );
+        if (duplicateTools.length > 0) {
+          addIssue(
+            issues,
+            "DUPLICATE_SKETCH_TOOL",
+            `Action step "${step.label}" declares the Sketch tool "${duplicateTools[0]}" more than once`,
+            `steps.${step.id}.actionCapabilities.sketchTools`,
+          );
+        }
+      }
+      if (!params.brokerCapable && workflowStepUsesIntegrationActions(step)) {
         addIssue(
           issues,
           "BROKER_REQUIRED",
@@ -280,6 +302,14 @@ export function validateAutomationBuilderSaveRequest(params: {
           `steps.${step.id}`,
         );
       }
+    }
+    if (step.type !== "action" && step.actionCapabilities) {
+      addIssue(
+        issues,
+        "ACTION_CAPABILITIES_ACTION_ONLY",
+        `Step "${step.label}" can only declare action capabilities when it is an action step`,
+        `steps.${step.id}.actionCapabilities`,
+      );
     }
   }
 

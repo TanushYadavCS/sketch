@@ -1,3 +1,4 @@
+import { workflowStepUsesIntegrationActions } from "@sketch/shared";
 import { type Context, Hono } from "hono";
 import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
@@ -484,7 +485,7 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    const brokerCapable = request.steps.some((step) => step.type === "action")
+    const brokerCapable = request.steps.some((step) => workflowStepUsesIntegrationActions(step))
       ? await hasBrokerCapableProvider()
       : true;
     const userId = await resolveUserId(c.get("sub"));

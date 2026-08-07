@@ -549,6 +549,9 @@ function builderStepSummary(step: WorkflowStep, content: StepContentRow | undefi
   if (step.type === "trigger" && step.triggerConfig) {
     parts.push(`trigger: ${builderContextText(JSON.stringify(step.triggerConfig), 260)}`);
   }
+  if (step.actionCapabilities) {
+    parts.push(`actionCapabilities: ${builderContextText(JSON.stringify(step.actionCapabilities), 260)}`);
+  }
   if (content) {
     const kind = content.content_type === "script" ? "script" : "prompt";
     parts.push(`${kind}: ${builderContextText(content.content, 360)}`);

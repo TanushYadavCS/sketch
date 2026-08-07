@@ -1135,6 +1135,88 @@ describe("Scheduled Tasks API", () => {
     expect(refreshTaskSchedule).not.toHaveBeenCalled();
   });
 
+  it("accepts read-only Sketch action steps when no broker-capable provider is configured", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const alice = await users.create({ name: "Alice", email: "alice-sketch-action@test.com" });
+    const baseRequest = makeBuilderSaveRequest();
+
+    await tasks.add({
+      id: "task-builder",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Old prompt",
+      schedule_type: "interval",
+      schedule_value: "120",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: alice.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const actionRequest = makeBuilderSaveRequest({
+      steps: [
+        ...baseRequest.steps,
+        {
+          id: "action-1",
+          type: "action",
+          label: "Find account",
+          icon: "magnifying-glass",
+          position: { x: 520, y: 0 },
+          actionCapabilities: { sketchTools: ["searchEntities"], usesIntegrationActions: false },
+        },
+      ],
+      edges: [
+        { id: "trigger-1-agent-1", from: "trigger-1", to: "agent-1" },
+        { id: "agent-1-action-1", from: "agent-1", to: "action-1" },
+      ],
+      stepContent: {
+        ...baseRequest.stepContent,
+        "action-1": {
+          taskId: "task-builder",
+          stepId: "action-1",
+          contentType: "script",
+          content: "return await ctx.tools.searchEntities({ queries: ['Acme'] });",
+          apps: null,
+        },
+      },
+    });
+    const refreshTaskSchedule = vi.fn(async () => null);
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+        refreshTaskSchedule,
+      },
+    });
+    const cookie = await loginAdmin(app);
+
+    const res = await app.request("/api/scheduled-tasks/task-builder", {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(actionRequest),
+    });
+
+    expect(res.status).toBe(200);
+    expect(refreshTaskSchedule).toHaveBeenCalledWith("task-builder");
+    await expect(res.json()).resolves.toMatchObject({
+      automation: {
+        steps: expect.arrayContaining([
+          expect.objectContaining({
+            id: "action-1",
+            actionCapabilities: { sketchTools: ["searchEntities"], usesIntegrationActions: false },
+          }),
+        ]),
+      },
+    });
+  });
+
   it("runs single builder steps through the scheduler", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);

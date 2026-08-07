@@ -108,8 +108,14 @@ export async function handleSendMessageToUser(
   };
 }
 
+export const searchUsersToolSchema = {
+  queries: z.array(z.string()).describe("Names, emails, Slack mentions, or Slack user IDs to resolve."),
+};
+
+export type SearchUsersArgs = { queries: string[] };
+
 export async function handleSearchUsers(
-  params: { queries: string[] },
+  params: SearchUsersArgs,
   deps: Pick<SketchMcpDeps, "userRepo" | "currentUserId">,
 ): Promise<ToolResult> {
   if (!deps.userRepo) {
@@ -215,9 +221,7 @@ export function createMessagingTools(deps: SketchMcpDeps) {
     tool(
       "SearchUsers",
       "Resolve names, emails, Slack mentions, and Slack user IDs into tenant users. Returns ranked candidates so you can confirm recipients before sending messages.",
-      {
-        queries: z.array(z.string()).describe("Names, emails, Slack mentions, or Slack user IDs to resolve."),
-      },
+      searchUsersToolSchema,
       async (params) => handleSearchUsers(params, deps),
     ),
 

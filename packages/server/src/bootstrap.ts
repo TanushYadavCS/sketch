@@ -20,6 +20,7 @@ import { createAiSdkAutomationAuthoringGenerator } from "./automation/authoring/
 import { createAutomationAuthoringProviderLoader } from "./automation/authoring/provider";
 import { createAutomationAuthoringService } from "./automation/authoring/service";
 import { createAutomationAuthoringTelemetry } from "./automation/authoring/telemetry";
+import { createAutomationCapabilityRegistry } from "./automation/capabilities";
 import { createChatAutomationAuthoring } from "./automation/chat-authoring";
 import type { Config } from "./config";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
@@ -641,6 +642,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   };
 
   // 8.5. Task scheduler — getSlack is a lazy getter so the live slack reference is captured correctly
+  const automationCapabilityRegistry = createAutomationCapabilityRegistry();
   const scheduler = new TaskScheduler({
     db,
     config,
@@ -662,6 +664,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     recordWorkflowStep,
     limitAgentExecution,
     limitScheduledAgentExecution,
+    automationCapabilityRegistry,
   });
   if (config.AUTOMATION_AUTHORING_MODEL) {
     const loadAuthoringProvider = createAutomationAuthoringProviderLoader({

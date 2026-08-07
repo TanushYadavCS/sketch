@@ -1,5 +1,9 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
-import type { AutomationBuilderSaveRequest } from "@sketch/shared";
+import {
+  type AutomationBuilderSaveRequest,
+  automationActionCapabilitiesSchema,
+  workflowStepUsesIntegrationActions,
+} from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { z } from "zod/v4";
 import { AutomationAuthoringValidationError } from "../../automation/authoring/service";
@@ -59,6 +63,9 @@ const workflowStepSchema = z.object({
     .array(z.string())
     .optional()
     .describe("MCP servers available to an agent step. Not used by action steps."),
+  actionCapabilities: automationActionCapabilitiesSchema
+    .describe("Capabilities available to action scripts. Sketch tools are creator-scoped and read-only.")
+    .optional(),
   timeout: z.number().optional().describe("Step timeout in seconds. Default: 1800 (30 min)."),
   triggerConfig: z
     .object({
@@ -732,7 +739,7 @@ export async function handleManageScheduledTasks(
   const text = (msg: string) => ({ content: [{ type: "text" as const, text: msg }] });
 
   const BROKER_REQUIRED_MSG =
-    "Error: Action steps require a broker-capable integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.";
+    "Error: Integration-backed action steps require a broker-capable integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use a read-only Sketch tool action.";
   const FRESH_SESSION_ONLY_MSG =
     "Error: scheduled automations currently support only 'fresh' session_mode. Omit session_mode or set it to 'fresh'.";
 
@@ -748,13 +755,11 @@ export async function handleManageScheduledTasks(
     return brokerCapabilitySnapshot;
   };
 
-  /** Returns an error response if any action step is present but no broker-capable
-   *  provider is configured. Returns null when validation passes (no action steps,
-   *  or a broker-capable provider exists). */
+  /** Returns an error response when an integration-backed action lacks a broker-capable provider. */
   const ensureBrokerForActionSteps = async (
     candidateSteps: WorkflowStepInput[] | undefined,
   ): Promise<ReturnType<typeof text> | null> => {
-    if (!candidateSteps?.some((s) => s.type === "action")) return null;
+    if (!candidateSteps?.some((s) => workflowStepUsesIntegrationActions(s))) return null;
     if (!(await getBrokerCapabilitySnapshot())) return text(BROKER_REQUIRED_MSG);
     return null;
   };

@@ -2333,7 +2333,10 @@ function NodeInputPanel({
         <>
           <Field label="Uses">
             <Input
-              value={(content?.apps ?? []).join(", ")}
+              value={[
+                ...(content?.apps ?? []),
+                ...(step.actionCapabilities?.sketchTools ?? []).map((tool) => `Sketch: ${tool}`),
+              ].join(", ")}
               className={builderReadOnlyInputClass}
               readOnly
               aria-readonly="true"

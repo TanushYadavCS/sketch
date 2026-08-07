@@ -23,6 +23,7 @@ import { Cron } from "croner";
 import type { Kysely } from "kysely";
 import type { McpServerConfig, runAgent } from "../agent/runner";
 import { resolveAgentRuntimeProviderConfigFromSettings } from "../agent/runtime/provider";
+import type { AutomationCapabilityCallEvent, AutomationCapabilityRegistry } from "../automation/capabilities";
 import type { Config } from "../config";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -203,6 +204,8 @@ export interface TaskSchedulerDeps {
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   limitScheduledAgentExecution: <T>(work: () => Promise<T>) => Promise<T>;
+  automationCapabilityRegistry?: AutomationCapabilityRegistry;
+  recordAutomationCapabilityCall?: (event: AutomationCapabilityCallEvent) => void | Promise<void>;
 }
 
 export class TaskScheduler {
@@ -373,6 +376,8 @@ export class TaskScheduler {
       loadAgentRuntimeProviderConfig: async () =>
         resolveAgentRuntimeProviderConfigFromSettings(await this.deps.settingsRepo.get()),
       trustedLocalFileRoot: trigger?.localFileRoot,
+      automationCapabilityRegistry: this.deps.automationCapabilityRegistry,
+      recordAutomationCapabilityCall: this.deps.recordAutomationCapabilityCall,
     });
 
     const now = new Date().toISOString();
@@ -794,6 +799,8 @@ export class TaskScheduler {
       stepId,
       input: options.input,
       useLatestUpstreamOutput: options.useLatestUpstreamOutput,
+      automationCapabilityRegistry: this.deps.automationCapabilityRegistry,
+      recordAutomationCapabilityCall: this.deps.recordAutomationCapabilityCall,
     });
   }
 

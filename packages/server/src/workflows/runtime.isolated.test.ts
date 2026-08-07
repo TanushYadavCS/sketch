@@ -589,6 +589,50 @@ describe("testAutomationStep", () => {
 });
 
 describe("executeAutomation action steps", () => {
+  it("runs a read-only Sketch tool action without a Canvas broker", async () => {
+    const searchEntities = vi.fn().mockResolvedValue([{ id: "entity-acme", name: "Acme" }]);
+    const automationCapabilityRegistry = {
+      createTools: vi.fn().mockReturnValue({ searchEntities }),
+    };
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(null);
+    const params = makeParams({
+      task: makeActionTask([
+        {
+          id: "act1",
+          type: "action",
+          label: "Find Acme",
+          icon: "magnifying-glass",
+          position: { x: 0, y: 100 },
+          actionCapabilities: { sketchTools: ["searchEntities"], usesIntegrationActions: false },
+        },
+      ]),
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: `
+            const entities = await ctx.tools.searchEntities({ queries: ["Acme"] });
+            return { entities, hasCanvasCli: Boolean(ctx.env.CANVAS_CLI) };
+          `,
+        },
+      ]),
+      loadIntegrationProvider,
+      automationCapabilityRegistry,
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(result.finalOutput).toEqual({
+      entities: [{ id: "entity-acme", name: "Acme" }],
+      hasCanvasCli: false,
+    });
+    expect(searchEntities).toHaveBeenCalledWith({ queries: ["Acme"] });
+    expect(loadIntegrationProvider).not.toHaveBeenCalled();
+    expect(automationCapabilityRegistry.createTools).toHaveBeenCalledWith(
+      expect.objectContaining({ allowedTools: ["searchEntities"] }),
+    );
+  });
+
   it("executes action scripts in process with previous input and script context", async () => {
     const logger = { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() };
     const childLogger = { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() };

@@ -84,6 +84,7 @@ describe("automation authoring service", () => {
     expect(generate.mock.calls[0]?.[0].prompt).toContain('"brokerCapable":true');
     expect(generate.mock.calls[0]?.[0].instructions).toContain("native Slack channel message trigger");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("server-authenticated localPath");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.tools");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.integrations.executeAction");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("fetch Slack urlPrivate without authentication");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("Do not implement this as polling");

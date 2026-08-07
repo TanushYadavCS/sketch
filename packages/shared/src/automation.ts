@@ -29,6 +29,19 @@ export const workflowTriggerConfigSchema = z
 
 export type WorkflowTriggerConfig = z.infer<typeof workflowTriggerConfigSchema>;
 
+export const automationSketchToolNameSchema = z.enum(["search", "searchEntities", "getEntityContext", "findTeammate"]);
+
+export type AutomationSketchToolName = z.infer<typeof automationSketchToolNameSchema>;
+
+export const automationActionCapabilitiesSchema = z
+  .object({
+    sketchTools: z.array(automationSketchToolNameSchema).max(8),
+    usesIntegrationActions: z.boolean(),
+  })
+  .strict();
+
+export type AutomationActionCapabilities = z.infer<typeof automationActionCapabilitiesSchema>;
+
 export const workflowStepSchema = z.object({
   id: z.string().trim().min(1),
   type: z.enum(["trigger", "action", "agent"]),
@@ -39,6 +52,7 @@ export const workflowStepSchema = z.object({
   agentSkills: z.array(z.string()).optional(),
   agentModel: z.string().optional(),
   agentMcpServers: z.array(z.string()).optional(),
+  actionCapabilities: automationActionCapabilitiesSchema.optional(),
   timeout: z.number().int().positive().optional(),
   triggerConfig: workflowTriggerConfigSchema.optional(),
 });
@@ -172,6 +186,13 @@ export const automationBuilderSaveRequestSchema = z.object({
 });
 
 export type AutomationBuilderSaveRequest = z.infer<typeof automationBuilderSaveRequestSchema>;
+
+export function workflowStepUsesIntegrationActions(step: Pick<WorkflowStep, "type" | "actionCapabilities">): boolean {
+  if (step.type !== "action") return false;
+  if (!step.actionCapabilities) return true;
+  const parsed = automationActionCapabilitiesSchema.safeParse(step.actionCapabilities);
+  return !parsed.success || parsed.data.usesIntegrationActions;
+}
 
 export type AutomationUiStepStatus = "idle" | "running" | "success" | "failed" | "skipped";
 
