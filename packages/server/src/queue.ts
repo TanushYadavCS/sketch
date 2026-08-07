@@ -53,6 +53,12 @@ export class ChannelQueue {
     return true;
   }
 
+  clear(): number {
+    const dropped = this.queue.length;
+    this.queue = [];
+    return dropped;
+  }
+
   /**
    * True when nothing is queued and nothing is running, so the owner can
    * safely evict this instance without dropping in-flight work.
@@ -116,6 +122,14 @@ export class QueueManager {
    */
   size(): number {
     return this.queues.size;
+  }
+
+  clear(channelId: string): number {
+    const queue = this.queues.get(channelId);
+    if (!queue) return 0;
+    const dropped = queue.clear();
+    this.evictIfIdle(channelId, queue);
+    return dropped;
   }
 
   /**

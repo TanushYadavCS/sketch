@@ -411,6 +411,8 @@ export class SlackBot {
       if (!this.isEventForActiveTeam(mentionTeamId)) return;
 
       const hasText = event.text;
+      const botId = "bot_id" in event && typeof event.bot_id === "string" ? event.bot_id : undefined;
+      const subtype = "subtype" in event && typeof event.subtype === "string" ? event.subtype : undefined;
       const rawFiles = "files" in event && Array.isArray(event.files) ? event.files : [];
       const hasFiles = rawFiles.length > 0;
 
@@ -428,6 +430,8 @@ export class SlackBot {
         type: "channel_mention",
         text: cleanText,
         userId: event.user,
+        ...(botId ? { botId } : {}),
+        ...(subtype ? { subtype } : {}),
         channelId: event.channel,
         ts: event.ts,
         threadTs: event.thread_ts,

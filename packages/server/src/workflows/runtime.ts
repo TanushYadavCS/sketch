@@ -12,6 +12,7 @@
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import type { Kysely } from "kysely";
+import { createChildAbortController } from "../agent/active-runs";
 import { removeReservedAgentEnv } from "../agent/environment";
 import { buildPlatformFormattingLines, buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
@@ -61,6 +62,8 @@ export interface ExecuteAutomationParams {
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
   trustedLocalFileRoot?: string;
+  propagateParentAbort?: boolean;
+  parentAbortSignal?: AbortSignal;
 }
 
 export type AutomationExecutionEvent =
@@ -98,6 +101,14 @@ export interface AutomationExecutionResult {
   status: string;
   finalOutput: unknown;
   stepOutputs: Record<string, StepOutput>;
+  aborted?: boolean;
+}
+
+export class AutomationRunAbortedError extends Error {
+  constructor() {
+    super("Automation run aborted by user");
+    this.name = "AutomationRunAbortedError";
+  }
 }
 
 export async function executeAutomation(params: ExecuteAutomationParams): Promise<AutomationExecutionResult> {
@@ -162,6 +173,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   const stepOutputs: Record<string, StepOutput> = {};
   let previousOutput: unknown = triggerData ?? null;
   let failed = false;
+  let aborted = false;
 
   for (const step of executionSteps) {
     const content = contentMap.get(step.id);
@@ -227,14 +239,25 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         status: "failed",
         stepOutputs,
         completedAt: new Date().toISOString(),
-        errorMessage: `Step "${step.label}" failed: ${error.message}`,
+        errorMessage:
+          error instanceof AutomationRunAbortedError
+            ? `Automation run aborted by user at step "${step.label}"`
+            : `Step "${step.label}" failed: ${error.message}`,
       });
 
       failed = true;
-      logger.error(
-        { err, taskId: task.id, runId, stepId: step.id, stepLabel: step.label, durationMs },
-        "Automation: step failed",
-      );
+      aborted = error instanceof AutomationRunAbortedError;
+      if (error instanceof AutomationRunAbortedError) {
+        logger.info(
+          { taskId: task.id, runId, stepId: step.id, stepLabel: step.label, durationMs },
+          "Automation: execution stopped by user",
+        );
+      } else {
+        logger.error(
+          { err, taskId: task.id, runId, stepId: step.id, stepLabel: step.label, durationMs },
+          "Automation: step failed",
+        );
+      }
       await emitEvent({
         type: "step.failed",
         runId,
@@ -245,7 +268,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         error: { message: error.message },
       });
 
-      if (sendMessage) {
+      if (!(error instanceof AutomationRunAbortedError) && sendMessage) {
         await sendMessage(`Automation '${task.title ?? task.prompt}' failed at step '${step.label}': ${error.message}`);
       }
       break;
@@ -302,7 +325,13 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     logger,
   });
 
-  return { runId, status: failed ? "failed" : "completed", finalOutput, stepOutputs };
+  return {
+    runId,
+    status: failed ? "failed" : "completed",
+    finalOutput,
+    stepOutputs,
+    ...(aborted ? { aborted: true } : {}),
+  };
 }
 
 export async function testAutomationStep(
@@ -467,6 +496,8 @@ async function executeWorkflowStep(params: {
       recordWorkflowStep: runtimeParams.recordWorkflowStep,
       limitAgentExecution: runtimeParams.limitAgentExecution,
       loadAgentRuntimeProviderConfig: runtimeParams.loadAgentRuntimeProviderConfig,
+      propagateParentAbort: runtimeParams.propagateParentAbort,
+      parentAbortSignal: runtimeParams.parentAbortSignal,
     });
   }
 
@@ -927,6 +958,8 @@ interface AgentStepParams {
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
+  propagateParentAbort?: boolean;
+  parentAbortSignal?: AbortSignal;
 }
 
 /**
@@ -1166,31 +1199,44 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
   });
 
   const integrationMcpServers = buildMcpServers ? await buildMcpServers(creatorEmail) : {};
-  const result = await runSketchAgent({
-    db: params.db,
-    workspaceKey: resolveWorkspaceKey(task),
-    userMessage,
-    workspaceDir,
-    claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
-    userName: creator?.name ?? "Automation",
-    userEmail: creatorEmail,
-    logger,
-    platform: outputPlatform,
-    onProgressEvent: async () => {},
-    integrationMcpServers,
-    getSlack: params.getSlack,
-    loadIntegrationProvider: params.loadIntegrationProvider,
-    sessionMode: "fresh",
-    contextType: "scheduled_task",
-    currentUserId: task.created_by,
-    taskContext: buildRunAgentTaskContext(task),
-    userRepo: params.userRepo,
-    inboxMessagesRepo: params.inboxMessagesRepo,
-    sendDm: params.sendDm,
-    toolConfig: { BASE_URL: params.config.BASE_URL, PORT: params.config.PORT },
-    model: step.agentModel,
-    maxTurns: 50,
-  });
+  const inheritsParentAbort = params.propagateParentAbort !== false && params.parentAbortSignal !== undefined;
+  const abortController = inheritsParentAbort ? createChildAbortController(params.parentAbortSignal) : undefined;
+  let result: Awaited<ReturnType<typeof runAgent>>;
+  try {
+    result = await runSketchAgent({
+      db: params.db,
+      workspaceKey: resolveWorkspaceKey(task),
+      userMessage,
+      workspaceDir,
+      claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
+      userName: creator?.name ?? "Automation",
+      userEmail: creatorEmail,
+      logger,
+      platform: outputPlatform,
+      onProgressEvent: async () => {},
+      integrationMcpServers,
+      getSlack: params.getSlack,
+      loadIntegrationProvider: params.loadIntegrationProvider,
+      sessionMode: "fresh",
+      contextType: "scheduled_task",
+      currentUserId: task.created_by,
+      taskContext: buildRunAgentTaskContext(task),
+      userRepo: params.userRepo,
+      inboxMessagesRepo: params.inboxMessagesRepo,
+      sendDm: params.sendDm,
+      toolConfig: { BASE_URL: params.config.BASE_URL, PORT: params.config.PORT },
+      model: step.agentModel,
+      maxTurns: 50,
+      ...(abortController ? { abortController } : {}),
+    });
+  } catch (err) {
+    if (abortController?.signal.aborted) throw new AutomationRunAbortedError();
+    throw err;
+  }
+
+  if (abortController?.signal.aborted || result.rawUsage.stopReason === "aborted") {
+    throw new AutomationRunAbortedError();
+  }
 
   if (result.pendingUploads.length > 0) {
     logger.warn(

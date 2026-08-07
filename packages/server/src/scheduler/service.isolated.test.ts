@@ -11,6 +11,7 @@
  */
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { withActiveRun } from "../agent/active-runs";
 import { createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
@@ -1302,11 +1303,83 @@ describe("executeTaskById() queueing", () => {
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0].runAgent).toBe(scheduledRunAgent);
     expect(calls[0].limitAgentExecution).toBe(scheduledLimit);
+    expect(calls[0].parentAbortSignal).toBeUndefined();
 
     await scheduler.executeTaskById(row.id);
     expect(calls).toHaveLength(2);
     expect(calls[1].runAgent).toBe(interactiveRunAgent);
     expect(calls[1].limitAgentExecution).toBe(interactiveLimit);
+  });
+
+  it("captures each manual run parent before it waits behind another run of the same task", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
+    const executeAutomationMock = vi.mocked(executeAutomation);
+    const calls: ExecuteAutomationParams[] = [];
+    let releaseFirst: (() => void) | undefined;
+    let callCount = 0;
+    executeAutomationMock.mockImplementation(async (params: ExecuteAutomationParams) => {
+      calls.push(params);
+      callCount += 1;
+      if (callCount === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return { runId: `run-${callCount}`, status: "completed", finalOutput: null, stepOutputs: {} };
+    });
+
+    const scheduler = new TaskScheduler(buildDeps(db) as never);
+    const row = await repo.add({ ...baseTaskFields });
+    const firstParent = new AbortController();
+    const secondParent = new AbortController();
+
+    const firstRun = withActiveRun("slack:first", firstParent, () => scheduler.executeTaskById(row.id), {
+      platform: "slack",
+      channelId: "C123",
+      threadTs: "1.1",
+    });
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+
+    const secondRun = withActiveRun("slack:second", secondParent, () => scheduler.executeTaskById(row.id), {
+      platform: "slack",
+      channelId: "C123",
+      threadTs: "1.1",
+    });
+    releaseFirst?.();
+
+    await firstRun;
+    await secondRun;
+
+    expect(calls[0]?.parentAbortSignal).toBe(firstParent.signal);
+    expect(calls[1]?.parentAbortSignal).toBe(secondParent.signal);
+  });
+
+  it("does not update the automation task after an aborted manual run", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
+    vi.mocked(executeAutomation).mockResolvedValue({
+      runId: "aborted-run",
+      status: "failed",
+      finalOutput: null,
+      stepOutputs: {},
+      aborted: true,
+    });
+    const scheduler = new TaskScheduler(buildDeps(db) as never);
+    const row = await repo.add({
+      ...baseTaskFields,
+      schedule_type: "once",
+      schedule_value: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+
+    await scheduler.executeTaskById(row.id);
+
+    const after = await repo.getById(row.id);
+    expect(after).toMatchObject({
+      status: "active",
+      last_run_at: null,
+      next_run_at: null,
+      prompt: row.prompt,
+      steps: row.steps,
+    });
   });
 
   it("serializes manual runs through the scheduler queue", async () => {
