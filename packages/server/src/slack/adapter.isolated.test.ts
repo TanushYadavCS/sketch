@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { listActiveRuns } from "../agent/active-runs";
 import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
 import { refreshSlackChannelName } from "../connectors/slack-salience";
@@ -8,6 +9,14 @@ import { createTestConfig, flush } from "../test-utils";
 import { transcribeEagerAttachments } from "../transcription/service";
 import type { SlackAdapterDeps } from "./adapter";
 import { createConfiguredSlackBot, validateSlackTokens } from "./adapter";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 // --- Fixtures ---
 
@@ -460,6 +469,30 @@ describe("slack/adapter", () => {
           text: "hello back",
         }),
       );
+    });
+
+    it("registers a controller during the run and removes it afterwards", async () => {
+      const runFinished = deferred<ReturnType<typeof makeAgentResult>>();
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async (params) => {
+          expect(params.abortController).toBeInstanceOf(AbortController);
+          expect(listActiveRuns()).toEqual([
+            expect.objectContaining({
+              controller: params.abortController,
+              metadata: { platform: "slack", channelId: "D1", threadTs: null },
+            }),
+          ]);
+          return runFinished.promise;
+        }),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await vi.waitFor(() => expect(deps.runAgent).toHaveBeenCalledOnce());
+
+      runFinished.resolve(makeAgentResult());
+      await vi.waitFor(() => expect(listActiveRuns()).toHaveLength(0));
     });
 
     it("loads durable DM backlog without a Slack thread filter", async () => {
@@ -1219,6 +1252,30 @@ describe("slack/adapter", () => {
   });
 
   describe("channel mention handler", () => {
+    it("registers a controller during the run and removes it afterwards", async () => {
+      const runFinished = deferred<ReturnType<typeof makeAgentResult>>();
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async (params) => {
+          expect(params.abortController).toBeInstanceOf(AbortController);
+          expect(listActiveRuns()).toEqual([
+            expect.objectContaining({
+              controller: params.abortController,
+              metadata: { platform: "slack", channelId: "C1", threadTs: "1" },
+            }),
+          ]);
+          return runFinished.promise;
+        }),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "hello", userId: "S1", channelId: "C1", ts: "2", threadTs: "1", type: "channel_mention" });
+      await vi.waitFor(() => expect(deps.runAgent).toHaveBeenCalledOnce());
+
+      runFinished.resolve(makeAgentResult());
+      await vi.waitFor(() => expect(listActiveRuns()).toHaveLength(0));
+    });
+
     it("handles an addressed threaded keep-open command without running the agent", async () => {
       const followupReviewHandler = vi.fn().mockResolvedValue({ handled: true, message: "Kept the follow-up open." });
       const deps = makeDeps({ followupReviewHandler });

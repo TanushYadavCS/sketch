@@ -20,6 +20,8 @@ export const configSchema = z.object({
   SLACK_THREAD_HISTORY_LIMIT: z.coerce.number().default(50),
   MAX_CONCURRENT_INTERACTIVE_AGENT_RUNS: z.coerce.number().int().min(1).default(4),
   MAX_CONCURRENT_SCHEDULED_AGENT_RUNS: z.coerce.number().int().min(1).default(4),
+  AGENT_MODEL_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1).default(600000),
+  AGENT_RUN_WATCHDOG_MS: z.coerce.number().int().min(1).default(900000),
 
   // Files
   MAX_FILE_SIZE_MB: z.coerce.number().default(20),
