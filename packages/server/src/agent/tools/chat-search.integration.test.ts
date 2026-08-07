@@ -59,7 +59,7 @@ async function linkSliceScopeFile(
     source: "slack" | "whatsapp";
     scopeType: "slack_channel" | "whatsapp_group";
     providerScopeId: string;
-    memberEmails: string[];
+    members: string[];
     firstMessageId: number;
     lastMessageId: number;
     rosterSnapshot?: string | null;
@@ -84,7 +84,7 @@ async function linkSliceScopeFile(
     scopeType: options.scopeType,
     providerScopeId: options.providerScopeId,
     label: options.providerScopeId,
-    memberEmails: options.memberEmails,
+    members: options.members,
   });
   const fileId = `file-${randomUUID()}`;
   await db
@@ -112,7 +112,7 @@ async function seedSlackChannel(
   options: {
     channelId: string;
     text: string;
-    memberEmails: string[];
+    members: string[];
     connectorConfigId: string;
     displayName?: string;
     archived?: boolean;
@@ -133,7 +133,7 @@ async function seedSlackChannel(
       .where("id", "=", conversation.id)
       .execute();
   }
-  if (options.memberEmails.includes(USER_EMAIL)) {
+  if (options.members.includes(USER_EMAIL)) {
     await db
       .insertInto("slack_channel_participants")
       .values({
@@ -158,7 +158,7 @@ async function seedSlackChannel(
     source: "slack",
     scopeType: "slack_channel",
     providerScopeId: options.channelId,
-    memberEmails: options.memberEmails,
+    members: options.members,
     firstMessageId: message.row.id,
     lastMessageId: message.row.id,
     rosterSnapshot: options.rosterSnapshot,
@@ -178,7 +178,7 @@ async function seedWhatsAppGroup(
   db: Kysely<DB>,
   options: {
     text: string;
-    memberEmails: string[];
+    members: string[];
     connectorConfigId: string;
     indexEnabled?: boolean;
     displayName?: string;
@@ -195,7 +195,7 @@ async function seedWhatsAppGroup(
     updated_at: "2026-07-17T09:00:00.000Z",
   });
   await groups.setIndexEnabled(groupJid, options.indexEnabled ?? true);
-  if (options.memberEmails.includes(USER_EMAIL)) {
+  if (options.members.includes(USER_EMAIL)) {
     await db
       .insertInto("whatsapp_group_participants")
       .values({
@@ -236,7 +236,7 @@ async function seedWhatsAppGroup(
     source: "whatsapp",
     scopeType: "whatsapp_group",
     providerScopeId: groupJid,
-    memberEmails: options.memberEmails,
+    members: options.members,
     firstMessageId: message.row.id,
     lastMessageId: message.row.id,
     rosterSnapshot: options.rosterSnapshot,
@@ -330,13 +330,13 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C1",
         text: "atlas pricing decision in slack",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
         displayName: "general",
       });
       await seedWhatsAppGroup(db, {
         text: "atlas pricing agreed in whatsapp",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         displayName: "Deal Room",
       });
@@ -364,7 +364,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         const seeded = await seedSlackChannel(db, {
           channelId,
           text: "candidate-first marker",
-          memberEmails: [USER_EMAIL],
+          members: [USER_EMAIL],
           connectorConfigId: slackConfigId,
         });
         matchingIds.push(seeded.conversationId);
@@ -372,7 +372,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C-NONMATCH",
         text: "completely unrelated",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
       const deps = depsFor(db);
@@ -399,7 +399,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C2",
         text: "secret finance topic",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
       const outcome = await handleAllChatsSearch(
@@ -424,7 +424,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C-LEAVE-CACHE",
         text: "leave cache marker",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
       const deps = depsFor(db);
@@ -443,7 +443,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C2-ERROR",
         text: "provider failure secret",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
       await db
@@ -461,7 +461,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C2-DISCONNECT",
         text: "disconnect revocation marker",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
       const before = await handleAllChatsSearch({ query: "disconnect revocation marker" }, depsFor(db));
@@ -477,7 +477,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C3",
         text: "archived channel content",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
         archived: true,
       });
@@ -491,7 +491,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C4",
         text: "broadcast topic",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
         shareWithEveryone: true,
       });
@@ -504,7 +504,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("searches WhatsApp group history when indexing is disabled", async () => {
       await seedWhatsAppGroup(db, {
         text: "disabled group content",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -517,7 +517,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("excludes WhatsApp groups where the requester is not a current participant", async () => {
       await seedWhatsAppGroup(db, {
         text: "other group secret",
-        memberEmails: ["other@example.com"],
+        members: ["other@example.com"],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -531,7 +531,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("revokes retained WhatsApp history when the requester leaves the group", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "departed group retained history",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -551,7 +551,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("authorizes a WhatsApp group through a stable persisted phone-to-LID mapping", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "stable lid mapping marker",
-        memberEmails: ["other@example.com"],
+        members: ["other@example.com"],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -593,7 +593,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("authorizes a stable phone-JID-to-LID mapping when phone_e164 is unavailable", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "phone jid lid mapping marker",
-        memberEmails: ["other@example.com"],
+        members: ["other@example.com"],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -635,7 +635,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("does not infer WhatsApp membership from an ambiguous phone-to-LID mapping", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "ambiguous lid mapping marker",
-        memberEmails: ["other@example.com"],
+        members: ["other@example.com"],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -685,7 +685,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("does not infer WhatsApp membership when one LID maps to multiple phones", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "ambiguous reverse lid marker",
-        memberEmails: ["other@example.com"],
+        members: ["other@example.com"],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -739,7 +739,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("keeps a direct WhatsApp phone match valid when inferred LID mappings are ambiguous", async () => {
       await seedWhatsAppGroup(db, {
         text: "direct phone survives ambiguity",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -781,7 +781,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("reads sanitized chronology around an authorized cross-chat search hit", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "context before the decision",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
         displayName: "Decision Room",
@@ -851,7 +851,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("reauthorizes Search then Read from passive WhatsApp membership without changing knowledge state", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "cached membership target",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -877,7 +877,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("emits both directions at limit one and reauthorizes continuation tokens", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "before the token anchor",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -940,7 +940,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("requires a search-hit anchor when starting a referenced read", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "anchor required marker",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -1295,7 +1295,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("does not reveal whether a cross-chat conversation ref exists after access is revoked", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "revoked read target",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
@@ -1375,12 +1375,12 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C5",
         text: "crossplatform token in slack",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
       await seedWhatsAppGroup(db, {
         text: "crossplatform token in whatsapp",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
       });
       const conversations = createConversationRepository(db);
@@ -1420,7 +1420,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C-SLACK-ONLY",
         text: "slack-only provider marker",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
       const outcome = await handleAllChatsSearch({ query: "slack-only provider", platform: "slack" }, depsFor(db));
@@ -1433,7 +1433,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const seeded = await seedSlackChannel(db, {
         channelId: "C6",
         text: "botfilter human message",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
       await createConversationRepository(db).insertMessage({
@@ -1475,7 +1475,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       const seeded = await seedSlackChannel(db, {
         channelId: "C7",
         text: "snapshot marker arrived later",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
       expect(seeded.messageId).toBeGreaterThan(trigger.row.id);
@@ -1493,7 +1493,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C8",
         text: "gated content",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
 
@@ -1514,7 +1514,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C10",
         text: "shared context marker in slack",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
       });
       const conversations = createConversationRepository(db);
@@ -1573,7 +1573,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       await seedSlackChannel(db, {
         channelId: "C9",
         text: "mention check <@U0TEAM> please",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: slackConfigId,
         rosterSnapshot: slackRoster,
       });
@@ -1592,7 +1592,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       });
       await seedWhatsAppGroup(db, {
         text: "mention check from unknown sender",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         senderJid: "15559998888@s.whatsapp.net",
         rosterSnapshot: whatsappRoster,
@@ -1613,7 +1613,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
     it("renders WhatsApp group names from whatsapp_groups when the conversation display name is a raw JID", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "jid name guard message",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
         displayName: "Deal Room",
       });
@@ -1654,13 +1654,13 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       await db.destroy();
     });
 
-    async function scopeEmails(scopeId: string): Promise<string[]> {
+    async function scopePrincipalValues(scopeId: string): Promise<string[]> {
       const rows = await db
         .selectFrom("access_scope_members")
-        .select("email")
+        .select("principal_value")
         .where("access_scope_id", "=", scopeId)
         .execute();
-      return rows.map((row) => row.email).sort();
+      return rows.map((row) => row.principal_value).sort();
     }
 
     it("removes a departed member from a quiet group's scope on reconciliation", async () => {
@@ -1673,7 +1673,7 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       });
       const seeded = await seedWhatsAppGroup(db, {
         text: "quiet group",
-        memberEmails: ["tara@example.com", "departed@example.com"],
+        members: ["tara@example.com", "departed@example.com"],
         connectorConfigId: whatsappConfigId,
       });
       const groups = createWhatsAppGroupRepository(db);
@@ -1687,7 +1687,7 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         connectorConfigId: whatsappConfigId,
       });
       expect(summary.scopesRefreshed).toBe(1);
-      expect(await scopeEmails(seeded.scopeId)).toEqual(["tara@example.com"]);
+      expect(await scopePrincipalValues(seeded.scopeId)).toEqual(["+15551230001", "tara@example.com"]);
     });
 
     it("still reconciles membership for disabled groups without archiving their retained files", async () => {
@@ -1700,7 +1700,7 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       });
       const seeded = await seedWhatsAppGroup(db, {
         text: "soon disabled",
-        memberEmails: ["tara2@example.com", "departed@example.com"],
+        members: ["tara2@example.com", "departed@example.com"],
         connectorConfigId: whatsappConfigId,
       });
       const groups = createWhatsAppGroupRepository(db);
@@ -1716,7 +1716,7 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       });
       expect(summary.scopesRefreshed).toBe(1);
       expect(summary.scopesArchived).toBe(0);
-      expect(await scopeEmails(seeded.scopeId)).toEqual(["tara2@example.com"]);
+      expect(await scopePrincipalValues(seeded.scopeId)).toEqual(["+15551230002", "tara2@example.com"]);
       const file = await db
         .selectFrom("indexed_files")
         .select("is_archived")
@@ -1728,7 +1728,7 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
     it("clears scope members instead of archiving when a disabled group's roster has zero teammates", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "disabled zero teammates",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
       });
       const groups = createWhatsAppGroupRepository(db);
@@ -1744,7 +1744,7 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       });
       expect(summary.scopesArchived).toBe(0);
       expect(summary.scopesRefreshed).toBe(1);
-      expect(await scopeEmails(seeded.scopeId)).toEqual([]);
+      expect(await scopePrincipalValues(seeded.scopeId)).toEqual(["+15559990001"]);
       const file = await db
         .selectFrom("indexed_files")
         .select("is_archived")
@@ -1753,10 +1753,10 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(file?.is_archived).toBe(0);
     });
 
-    it("archives files when the roster resolves to zero teammates", async () => {
+    it("retains files when the roster has only an unresolved phone principal", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "external only group",
-        memberEmails: [USER_EMAIL],
+        members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
       });
       await createWhatsAppGroupRepository(db).refreshParticipants(seeded.groupJid, [
@@ -1768,7 +1768,9 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         logger: createTestLogger(),
         connectorConfigId: whatsappConfigId,
       });
-      expect(summary.scopesArchived).toBe(1);
+      expect(summary.scopesArchived).toBe(0);
+      expect(summary.scopesRefreshed).toBe(1);
+      expect(await scopePrincipalValues(seeded.scopeId)).toEqual(["+15559990000"]);
     });
   });
 }

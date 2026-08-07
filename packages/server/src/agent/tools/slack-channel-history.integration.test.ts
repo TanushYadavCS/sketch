@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AccessPrincipalInput } from "../../connectors/types";
 import { createConnectorRepository } from "../../db/repositories/connectors";
 import { createConversationSlicesRepository } from "../../db/repositories/conversation-slices";
 import { createConversationRepository } from "../../db/repositories/conversations";
@@ -8,8 +9,8 @@ import { createTestDb, createTestPgDb } from "../../test-utils";
 import { SLACK_CHANNEL_HISTORY_DENIED_TEXT, handleSlackChannelHistory } from "./slack-channel-history";
 import type { SketchMcpDeps } from "./types";
 
-function depsFor(db: Kysely<DB>, emails: string[]): SketchMcpDeps {
-  return { db, publicMcp: { userEmails: emails } } as unknown as SketchMcpDeps;
+function depsFor(db: Kysely<DB>, principals: AccessPrincipalInput[]): SketchMcpDeps {
+  return { db, publicMcp: { userPrincipals: principals } } as unknown as SketchMcpDeps;
 }
 
 function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -94,7 +95,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         scopeType: "slack_channel",
         providerScopeId: "C1",
         label: "#general",
-        memberEmails: ["roopak@example.com"],
+        members: ["roopak@example.com"],
       });
       await db
         .insertInto("indexed_files")
@@ -161,7 +162,10 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
     });
 
     it("does not let a per-file Slack grant bypass current channel membership", async () => {
-      await db.insertInto("file_access").values({ indexed_file_id: "file-1", email: "departed@example.com" }).execute();
+      await db
+        .insertInto("file_access")
+        .values({ indexed_file_id: "file-1", principal_type: "email", principal_value: "departed@example.com" })
+        .execute();
 
       const result = await handleSlackChannelHistory({ sliceId }, depsFor(db, ["departed@example.com"]));
       expect(resultText(result)).toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);
@@ -170,6 +174,28 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
     it("denies when no caller emails resolve", async () => {
       const result = await handleSlackChannelHistory({ sliceId }, depsFor(db, []));
       expect(resultText(result)).toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);
+    });
+
+    it("authorizes a Slack user whose account has no email", async () => {
+      await db.updateTable("users").set({ email: null }).where("id", "=", "user-admin").execute();
+      const scopeId = (
+        await db
+          .selectFrom("indexed_files")
+          .select("access_scope_id")
+          .where("id", "=", "file-1")
+          .executeTakeFirstOrThrow()
+      ).access_scope_id as string;
+      await db.deleteFrom("access_scope_members").where("access_scope_id", "=", scopeId).execute();
+      await db
+        .insertInto("access_scope_members")
+        .values({ access_scope_id: scopeId, principal_type: "slack_user", principal_value: "U0TEAM" })
+        .execute();
+
+      const result = await handleSlackChannelHistory(
+        { sliceId },
+        depsFor(db, [{ type: "slack_user", value: "U0TEAM" }]),
+      );
+      expect(resultText(result)).not.toBe(SLACK_CHANNEL_HISTORY_DENIED_TEXT);
     });
 
     it("denies a guessed slice id and an unlinked (archived) slice", async () => {
@@ -250,7 +276,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         scopeType: "slack_channel",
         providerScopeId: "C1",
         label: "#general",
-        memberEmails: ["roopak@example.com"],
+        members: ["roopak@example.com"],
       });
       await db
         .insertInto("indexed_files")

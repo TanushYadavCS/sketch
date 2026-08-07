@@ -45,7 +45,7 @@ beforeEach(async () => {
     .execute();
   await db
     .insertInto("access_scope_members")
-    .values({ access_scope_id: "scope-alice", email: "alice@example.com" })
+    .values({ access_scope_id: "scope-alice", principal_type: "email", principal_value: "alice@example.com" })
     .execute();
 
   const now = new Date().toISOString();
@@ -188,7 +188,7 @@ function deps() {
     db,
     userRepo: createUserRepository(db),
     publicMcp: {
-      userEmails: ["alice@example.com"],
+      userPrincipals: ["alice@example.com"],
       filterEntityMetadata: true,
       maxFileContentChars: 50,
     },
@@ -199,7 +199,7 @@ function zeroEmailDeps() {
   return {
     ...deps(),
     publicMcp: {
-      userEmails: [],
+      userPrincipals: [],
       filterEntityMetadata: true,
       maxFileContentChars: 50,
     },

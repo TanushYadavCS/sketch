@@ -6,13 +6,16 @@ import { createTestDb, createTestLogger } from "../test-utils";
 import { microsoftGraphRequest, parseVttToTranscript } from "./microsoft-graph";
 import { runConnectorSync } from "./sync";
 import { createTeamsConnector } from "./teams";
-import type { OAuthCredentials, SyncedItem } from "./types";
+import { type OAuthCredentials, type SyncedItem, toEmailPrincipals } from "./types";
 
 const logger = createTestLogger();
 const TEAMS_EVENT_START = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
 const TEAMS_EVENT_END = new Date(TEAMS_EVENT_START.getTime() + 60 * 60 * 1000);
 const TEAMS_EVENT_MODIFIED = new Date(TEAMS_EVENT_END.getTime() + 5 * 60 * 1000);
 const TEAMS_TRANSCRIPT_CREATED = new Date(TEAMS_EVENT_START.getTime() + 45 * 60 * 1000);
+
+const sortedEmailPrincipals = (emails: string[]) =>
+  toEmailPrincipals(emails).sort((left, right) => left.value.localeCompare(right.value));
 
 describe("Teams connector", () => {
   let db: Kysely<DB> | null = null;
@@ -70,7 +73,7 @@ describe("Teams connector", () => {
       { name: "Jane Doe", email: "jane@example.com" },
       { name: "Owner User", email: "owner@canvasx.ai" },
     ]);
-    expect(items[0].accessEmails?.sort()).toEqual(["jane@example.com", "owner@canvasx.ai"]);
+    expect(items[0].accessPrincipals).toEqual(sortedEmailPrincipals(["jane@example.com", "owner@canvasx.ai"]));
   });
 
   it("honors Retry-After while retrying Microsoft Graph throttles", async () => {

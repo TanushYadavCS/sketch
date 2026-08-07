@@ -331,13 +331,29 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           user = await users.findByEmail(sub);
         }
         if (!user) return null;
-        return { id: user.id, authRole: user.auth_role, email: user.email };
+        return {
+          id: user.id,
+          authRole: user.auth_role,
+          email: user.email,
+          emails: await users.getAllEmailsForUser(user.id),
+          whatsappNumber: user.whatsapp_number,
+          slackUserId: user.slack_user_id,
+          whatsappLid: user.whatsapp_lid,
+        };
       },
       findUserByEmail: config.MANAGED_AUTH_SECRET
         ? async (email) => {
             const user = await users.findByEmail(email);
             if (!user) return null;
-            return { id: user.id, authRole: user.auth_role, email: user.email };
+            return {
+              id: user.id,
+              authRole: user.auth_role,
+              email: user.email,
+              emails: await users.getAllEmailsForUser(user.id),
+              whatsappNumber: user.whatsapp_number,
+              slackUserId: user.slack_user_id,
+              whatsappLid: user.whatsapp_lid,
+            };
           }
         : undefined,
       verifySketchApiKey: async (token) => {

@@ -22,6 +22,7 @@ import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
+import * as typedAccessPrincipalsMigration from "./164-typed-access-principals";
 
 const EXPECTED_MIGRATION_COUNT = 160;
 
@@ -199,6 +200,68 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[158]).toBe("163-slack-file-access-backfill-cleanup");
     expect(names[159]).toBe("164-typed-access-principals");
   });
+
+  it("upgrades existing email access rows on Postgres", async () => {
+    const freshDb = await createTestPgDb();
+    try {
+      await sql`DROP INDEX IF EXISTS idx_scope_members_pk`.execute(freshDb);
+      await sql`DROP INDEX IF EXISTS idx_scope_members_email`.execute(freshDb);
+      await sql`DROP INDEX IF EXISTS idx_file_access_pk`.execute(freshDb);
+      await sql`DROP INDEX IF EXISTS idx_file_access_email`.execute(freshDb);
+      await sql`DROP INDEX IF EXISTS idx_users_whatsapp_lid`.execute(freshDb);
+      await sql`ALTER TABLE access_scope_members DROP COLUMN IF EXISTS principal_type`.execute(freshDb);
+      await sql`ALTER TABLE access_scope_members RENAME COLUMN principal_value TO email`.execute(freshDb);
+      await sql`ALTER TABLE file_access DROP COLUMN IF EXISTS principal_type`.execute(freshDb);
+      await sql`ALTER TABLE file_access RENAME COLUMN principal_value TO email`.execute(freshDb);
+      await sql`ALTER TABLE users DROP COLUMN IF EXISTS whatsapp_lid`.execute(freshDb);
+
+      await sql`
+        INSERT INTO connector_configs (id, connector_type, auth_type, credentials, created_by)
+        VALUES ('m164-config', 'google_drive', 'oauth', '{}', 'm164-user')
+      `.execute(freshDb);
+      await sql`
+        INSERT INTO access_scopes (id, connector_config_id, scope_type, provider_scope_id)
+        VALUES ('m164-scope', 'm164-config', 'drive', 'drive-1')
+      `.execute(freshDb);
+      await sql`
+        INSERT INTO indexed_files (id, connector_config_id, provider_file_id, file_name, content_category, source, synced_at)
+        VALUES ('m164-file', 'm164-config', 'file-1', 'File', 'document', 'google_drive', CURRENT_TIMESTAMP)
+      `.execute(freshDb);
+      await sql`
+        INSERT INTO access_scope_members (access_scope_id, email)
+        VALUES ('m164-scope', 'legacy@example.com')
+      `.execute(freshDb);
+      await sql`
+        INSERT INTO file_access (indexed_file_id, email)
+        VALUES ('m164-file', 'legacy@example.com')
+      `.execute(freshDb);
+
+      await typedAccessPrincipalsMigration.up(freshDb as unknown as Kysely<unknown>);
+
+      await expect(
+        sql`SELECT principal_type, principal_value FROM access_scope_members WHERE access_scope_id = 'm164-scope'`.execute(
+          freshDb,
+        ),
+      ).resolves.toMatchObject({ rows: [{ principal_type: "email", principal_value: "legacy@example.com" }] });
+      await expect(
+        sql`SELECT principal_type, principal_value FROM file_access WHERE indexed_file_id = 'm164-file'`.execute(
+          freshDb,
+        ),
+      ).resolves.toMatchObject({ rows: [{ principal_type: "email", principal_value: "legacy@example.com" }] });
+      await expect(
+        sql`INSERT INTO file_access (indexed_file_id, principal_type, principal_value) VALUES ('m164-file', 'phone', '+15550000001')`.execute(
+          freshDb,
+        ),
+      ).resolves.toBeTruthy();
+      await expect(
+        sql`INSERT INTO file_access (indexed_file_id, principal_type, principal_value) VALUES ('m164-file', 'phone', '+15550000001')`.execute(
+          freshDb,
+        ),
+      ).rejects.toThrow();
+    } finally {
+      await freshDb.destroy();
+    }
+  }, 30000);
 
   it("creates the task conversation association table", async () => {
     const rows = await sql<{ relname: string }>`

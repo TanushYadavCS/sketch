@@ -661,7 +661,10 @@ export function eventToSyncedItem(
     sourceUpdatedAt,
     isAllDay: isAllDayEvent(event),
     mimeType: "text/calendar",
-    accessPrincipals: toEmailPrincipals(eventAccessEmails(event, ownerEmail, calendlyPeople)),
+    accessPrincipals: (() => {
+      const emails = eventAccessEmails(event, ownerEmail, calendlyPeople);
+      return emails ? toEmailPrincipals(emails) : null;
+    })(),
     attendees: people.length > 0 ? people : undefined,
     authorEmail,
     authorName,

@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DB } from "../../db/schema";
 import { createTestDb } from "../../test-utils";
+import { toEmailPrincipals } from "../types";
 import { emailToSyncedItem } from "./email-to-synced-item";
 import { persistEnvelopeMetadata } from "./envelope-metadata";
 import { type NormalizedEmail, normalizeHeaderMap } from "./normalized-email";
@@ -117,8 +118,8 @@ describe("email shared layer", () => {
     expect(item.fileType).toBe("email_message");
     expect(item.content).toBe("Pricing discussion\n\nCan we discuss pricing?");
     expect(item.content).not.toContain("From:");
-    expect(item.accessEmails?.sort()).toEqual(["jane@example.com", "owner@canvasx.ai"]);
-    expect(item.accessEmails).not.toContain("hidden@example.com");
+    expect(item.accessPrincipals).toEqual(toEmailPrincipals(["jane@example.com", "owner@canvasx.ai"]));
+    expect(item.accessPrincipals).not.toContainEqual({ type: "email", value: "hidden@example.com" });
     expect(item.authorEmail).toBe("jane@example.com");
     expect(item.attendees).toBeUndefined();
     expect(JSON.stringify(item.emailEnvelope)).not.toContain("hidden@example.com");

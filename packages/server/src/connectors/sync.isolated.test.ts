@@ -19,7 +19,7 @@ import { materializeUnmaterializedFacts } from "../entities/materialize";
 import { createTestDb, createTestLogger } from "../test-utils";
 import { clearEnrichmentData } from "./enrichment";
 import { recoverStaleEnrichments, runAllSyncs, runConnectorSync, startSyncScheduler } from "./sync";
-import type { NameResolver, SourceItemRemovalRecord, SyncedItem } from "./types";
+import { type NameResolver, type SourceItemRemovalRecord, type SyncedItem, toEmailPrincipals } from "./types";
 
 const TEST_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -419,10 +419,10 @@ describe("findSyncableConfigs / findStaleSyncingConfigs (Phase 0 prereqs)", () =
 
     const accessRows = await db
       .selectFrom("file_access")
-      .select("email")
+      .select("principal_value")
       .where("indexed_file_id", "=", aResult.id)
       .execute();
-    expect(accessRows.map((r) => r.email).sort()).toEqual(["a@example.com", "b@example.com"]);
+    expect(accessRows.map((r) => r.principal_value).sort()).toEqual(["a@example.com", "b@example.com"]);
 
     const indexedFiles = await db
       .selectFrom("indexed_files")
@@ -684,7 +684,7 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     }
   });
 
-  it("syncs accessEmails even when content hash is unchanged", async () => {
+  it("syncs accessPrincipals even when content hash is unchanged", async () => {
     // Setup: connector config + existing indexed file with hash "abc123"
     db = await createTestDb();
     await db
@@ -726,7 +726,7 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
       })
       .execute();
 
-    // Configure the module-level mock to yield an item with same hash but new accessEmails
+    // Configure the module-level mock to yield an item with same hash but new accessPrincipals
     async function* mockGen() {
       yield {
         providerFileId: "provider-file-1",
@@ -739,7 +739,7 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
         contentHash: "abc123",
         sourceCreatedAt: null,
         sourceUpdatedAt: null,
-        accessEmails: ["alice@example.com", "bob@example.com"],
+        accessPrincipals: toEmailPrincipals(["alice@example.com", "bob@example.com"]),
       } satisfies SyncedItem;
     }
     mockConnectorSync.mockReturnValue(mockGen());
@@ -754,11 +754,11 @@ describe("runConnectorSync — ACL sync on unchanged items", () => {
     // But ACL should still be synced — verify file_access rows exist
     const accessRows = await db
       .selectFrom("file_access")
-      .select(["email", "indexed_file_id"])
+      .select(["principal_value", "indexed_file_id"])
       .where("indexed_file_id", "=", "file-acl-test")
       .execute();
 
-    const emails = accessRows.map((r) => r.email).sort();
+    const emails = accessRows.map((r) => r.principal_value).sort();
     expect(emails).toEqual(["alice@example.com", "bob@example.com"]);
   });
 
@@ -2051,7 +2051,7 @@ describe("runConnectorSync — name resolver wiring", () => {
    * End-to-end equivalent of "Test C" in the PR's manual test plan: two
    * Sketch users share a normalized name, so the resolver returns null
    * for that speaker. The connector emits an attendee with no email and
-   * an empty accessEmails set. The dispatcher must NOT write a file_access
+   * an empty accessPrincipals set. The dispatcher must NOT write a file_access
    * row.
    *
    * Paired with a positive control (single user → resolved → file_access
@@ -2067,13 +2067,13 @@ describe("runConnectorSync — name resolver wiring", () => {
      * Mock connector that mirrors what Fireflies' buildPeople does: looks up
      * a speaker via resolveNameToEmail, emits an attendee with/without an
      * email based on the result, and propagates the resolved email into
-     * accessEmails. Keeps the test focused on dispatcher wiring + the
+     * accessPrincipals. Keeps the test focused on dispatcher wiring + the
      * file_access write path, not on Fireflies' own attendee logic.
      */
     function speakerResolvingMock(speakerName: string, providerFileId: string, fileName: string) {
       return async function* (opts: { resolveNameToEmail?: NameResolver }) {
         const recovered = opts.resolveNameToEmail?.(speakerName);
-        const accessEmails = recovered ? [recovered.email] : [];
+        const accessPrincipals = recovered ? [recovered.email] : [];
         yield {
           providerFileId,
           providerUrl: null,
@@ -2085,7 +2085,7 @@ describe("runConnectorSync — name resolver wiring", () => {
           contentHash: `hash-${providerFileId}`,
           sourceCreatedAt: null,
           sourceUpdatedAt: null,
-          accessEmails: accessEmails.length > 0 ? accessEmails : null,
+          accessPrincipals: accessPrincipals.length > 0 ? toEmailPrincipals(accessPrincipals) : null,
           attendees: recovered ? [{ name: speakerName, email: recovered.email }] : [{ name: speakerName }],
         } satisfies SyncedItem;
       };
@@ -2095,10 +2095,10 @@ describe("runConnectorSync — name resolver wiring", () => {
       const rows = await testDb
         .selectFrom("file_access")
         .innerJoin("indexed_files", "indexed_files.id", "file_access.indexed_file_id")
-        .select("file_access.email")
+        .select("file_access.principal_value")
         .where("indexed_files.provider_file_id", "=", providerFileId)
         .execute();
-      return rows.map((r) => r.email).sort();
+      return rows.map((r) => r.principal_value).sort();
     }
 
     it("does not write file_access for an ambiguous speaker (resolver returns null)", async () => {

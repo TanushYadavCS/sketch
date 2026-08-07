@@ -81,6 +81,40 @@ export function normalizeWhatsAppIdentityLid(value: string | null | undefined): 
   return bare.length > 0 ? `${bare}@lid` : null;
 }
 
+export async function captureWhatsAppLidForPhone(
+  db: Kysely<DB>,
+  phoneE164: string | null | undefined,
+  lid: string | null | undefined,
+  logger?: Pick<Logger, "warn">,
+): Promise<void> {
+  const phone = normalizeWhatsAppIdentityPhone(phoneE164);
+  const normalizedLid = normalizeWhatsAppIdentityLid(lid);
+  if (!phone || !normalizedLid) return;
+
+  const user = await db
+    .selectFrom("users")
+    .select(["id", "whatsapp_lid"])
+    .where("whatsapp_number", "=", phone)
+    .executeTakeFirst();
+  if (!user || user.whatsapp_lid === normalizedLid) return;
+
+  const conflictingUser = await db
+    .selectFrom("users")
+    .select("id")
+    .where("whatsapp_lid", "=", normalizedLid)
+    .where("id", "!=", user.id)
+    .executeTakeFirst();
+  if (conflictingUser) {
+    logger?.warn(
+      { userId: user.id, conflictingUserId: conflictingUser.id },
+      "Skipped conflicting WhatsApp LID capture",
+    );
+    return;
+  }
+
+  await db.updateTable("users").set({ whatsapp_lid: normalizedLid }).where("id", "=", user.id).execute();
+}
+
 export function stableWhatsAppParticipantJidRef(jid: string): string {
   const hash = createHash("sha256").update(jid).digest("hex").slice(0, 24);
   const encoded = [...hash].map((char) => REF_ALPHABET[Number.parseInt(char, 16)] ?? "a").join("");

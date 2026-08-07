@@ -9,7 +9,7 @@ export interface UsersTable {
   auth_role: Generated<string>;
   slack_user_id: string | null;
   whatsapp_number: string | null;
-  whatsapp_lid: string | null;
+  whatsapp_lid: Generated<string | null>;
   description: string | null;
   type: Generated<string>;
   role: string | null;

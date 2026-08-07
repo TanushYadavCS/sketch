@@ -7,6 +7,7 @@ import {
   extractOtterTranscriptSegments,
   otterSpeechToSyncedItem,
 } from "./otter";
+import { toEmailPrincipals } from "./types";
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
@@ -172,7 +173,7 @@ describe("Otter speech mapping", () => {
     expect(item.contentCategory).toBe("document");
     expect(item.sourceCreatedAt).toBe("2026-07-02T13:46:40.000Z");
     expect(item.sourceUpdatedAt).toBe("2026-07-02T14:01:40.000Z");
-    expect(item.accessEmails).toEqual(["owner@example.com", "tanush@example.com"]);
+    expect(item.accessPrincipals).toEqual(toEmailPrincipals(["owner@example.com", "tanush@example.com"]));
     expect(item.attendees).toEqual([{ name: "Tanush", email: "tanush@example.com" }, { name: "Himanshu" }]);
     expect(item.content).toContain("## Summary\nDiscussed launch blockers.");
     expect(item.content).toContain("## Transcript");
@@ -240,7 +241,7 @@ describe("Otter connector", () => {
     expect(items[0]).toMatchObject({
       providerFileId: "otid-123",
       fileName: "Customer sync",
-      accessEmails: ["owner@example.com"],
+      accessPrincipals: toEmailPrincipals(["owner@example.com"]),
     });
     expect(items[0]?.content).toContain("Tanush: Ship the Otter connector.");
   });

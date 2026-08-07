@@ -4,10 +4,11 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { z } from "zod/v4";
 import { fileAccessFilterSql } from "../../connectors/search";
+import type { AccessPrincipal } from "../../connectors/types";
 import type { ConversationSlicesTable, DB } from "../../db/schema";
 import type { Attachment } from "../../files";
 import { type SlackRosterSnapshot, parseSlackRosterSnapshot } from "../../slack/identity-resolution";
-import { resolveUserEmails } from "./search";
+import { resolveUserPrincipals } from "./search";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const SLACK_CHANNEL_HISTORY_TOOL_NAME = "SlackChannelHistory";
@@ -186,7 +187,7 @@ function toDrillAnchor(row: SliceAnchorRow): DrillAnchor {
  * A thread filter or guessed slice id is never a substitute — every query
  * path below goes through this join.
  */
-function authorizedSliceAnchorQuery(db: Kysely<DB>, userEmails: string[], slackEntitySyncEnabled = true) {
+function authorizedSliceAnchorQuery(db: Kysely<DB>, userPrincipals: AccessPrincipal[], slackEntitySyncEnabled = true) {
   return db
     .selectFrom("conversation_slices")
     .innerJoin("conversations", "conversations.id", "conversation_slices.conversation_id")
@@ -212,16 +213,16 @@ function authorizedSliceAnchorQuery(db: Kysely<DB>, userEmails: string[], slackE
     .whereRef("indexed_files.provider_file_id", "=", "conversation_slices.id")
     .where("access_scopes.scope_type", "=", "slack_channel")
     .whereRef("access_scopes.provider_scope_id", "=", "conversations.provider_conversation_id")
-    .where(fileAccessFilterSql(userEmails, slackEntitySyncEnabled));
+    .where(fileAccessFilterSql(userPrincipals, slackEntitySyncEnabled));
 }
 
 async function loadAuthorizedSliceAnchor(
   db: Kysely<DB>,
   sliceId: string,
-  userEmails: string[],
+  userPrincipals: AccessPrincipal[],
   slackEntitySyncEnabled = true,
 ): Promise<DrillAnchor | null> {
-  const row = await authorizedSliceAnchorQuery(db, userEmails, slackEntitySyncEnabled)
+  const row = await authorizedSliceAnchorQuery(db, userPrincipals, slackEntitySyncEnabled)
     .where("conversation_slices.id", "=", sliceId)
     .limit(1)
     .executeTakeFirst();
@@ -268,11 +269,11 @@ interface ChannelWindowAuthorization {
 async function loadChannelWindowAuthorization(
   db: Kysely<DB>,
   conversationId: number,
-  userEmails: string[],
+  userPrincipals: AccessPrincipal[],
   window: SlackChannelHistoryWindow,
   slackEntitySyncEnabled = true,
 ): Promise<ChannelWindowAuthorization | null> {
-  const overlappingRows = await authorizedSliceAnchorQuery(db, userEmails, slackEntitySyncEnabled)
+  const overlappingRows = await authorizedSliceAnchorQuery(db, userPrincipals, slackEntitySyncEnabled)
     .where("conversation_slices.conversation_id", "=", conversationId)
     .where("conversation_slices.salience_verdict", "=", "kept")
     .where("conversation_slices.started_at", "<=", window.end)
@@ -551,8 +552,8 @@ export async function handleSlackChannelHistory(
 ): Promise<ToolResult> {
   if (!deps.db) return deniedResult();
 
-  const userEmails = normalizeEmails(await resolveUserEmails(deps));
-  if (userEmails.length === 0) return deniedResult();
+  const userPrincipals = await resolveUserPrincipals(deps);
+  if (userPrincipals.length === 0) return deniedResult();
 
   const limit = normalizeSlackChannelHistoryLimit(args.limit);
 
@@ -561,7 +562,12 @@ export async function handleSlackChannelHistory(
   let messageWindows: AuthorizedMessageWindow[] = [];
 
   if (args.sliceId) {
-    anchor = await loadAuthorizedSliceAnchor(deps.db, args.sliceId, userEmails, deps.slackEntitySyncEnabled ?? true);
+    anchor = await loadAuthorizedSliceAnchor(
+      deps.db,
+      args.sliceId,
+      userPrincipals,
+      deps.slackEntitySyncEnabled ?? true,
+    );
     if (!anchor) return deniedResult();
     window = buildSlackChannelHistoryWindow(anchor.startedAt, anchor.endedAt, args.expandMinutes);
     if (window) messageWindows = [{ start: window.start, end: window.end }];
@@ -574,7 +580,7 @@ export async function handleSlackChannelHistory(
     const authorization = await loadChannelWindowAuthorization(
       deps.db,
       conversationId,
-      userEmails,
+      userPrincipals,
       window,
       deps.slackEntitySyncEnabled ?? true,
     );

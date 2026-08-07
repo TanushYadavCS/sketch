@@ -10,6 +10,7 @@ import {
   type WhatsAppRosterParticipantSnapshot,
   type WhatsAppRosterSnapshot,
   buildWhatsAppRosterSnapshot,
+  captureWhatsAppLidForPhone,
   normalizeWhatsAppIdentityLid,
   normalizeWhatsAppIdentityPhone,
   stableWhatsAppParticipantJidRef,
@@ -391,6 +392,7 @@ async function loadWhatsAppAccessPrincipals(
   for (const participant of participants) {
     const phone = normalizeWhatsAppIdentityPhone(participant.phone_e164);
     const lid = normalizeWhatsAppIdentityLid(participant.lid);
+    await captureWhatsAppLidForPhone(db, phone, lid);
     if (phone) principals.push({ type: "phone", value: phone });
     if (lid) principals.push({ type: "whatsapp_lid", value: lid });
   }

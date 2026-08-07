@@ -37,6 +37,7 @@ function makeUser(overrides: Record<string, unknown> = {}) {
     auth_role: "member",
     slack_user_id: "S1",
     whatsapp_number: null,
+    whatsapp_lid: null,
     created_at: "2025-01-01",
     email_verified_at: null,
     description: null,

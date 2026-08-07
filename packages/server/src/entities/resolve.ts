@@ -294,8 +294,8 @@ async function insertHeldMention(
 }
 
 /**
- * Ensure (file, email) is in file_access. The typed unique index makes the
- * ON CONFLICT path safe.
+ * Ensure an email principal is in file_access. The typed unique index makes
+ * the ON CONFLICT path safe.
  */
 async function ensureFileAccess(ctx: ResolveTxnCtx, indexedFileId: string, email: string): Promise<void> {
   await sql`

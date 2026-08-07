@@ -15,6 +15,7 @@ import {
   reconcileSlackChannelAcls,
 } from "./slack-salience";
 import { loadExistingContentHashes, processSyncedItem } from "./sync-item";
+import { toEmailPrincipals } from "./types";
 
 const logger = pino({ level: "silent" });
 
@@ -743,7 +744,11 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       }
 
       expect(items).toHaveLength(1);
-      expect(items[0]?.accessEmails).toEqual(["roopak@example.com"]);
+      expect(items[0]?.accessPrincipals).toEqual([{ type: "email", value: "roopak@example.com" }]);
+      expect(items[0]?.accessScope?.members).toEqual([
+        { type: "slack_user", value: "U0TEAM" },
+        { type: "email", value: "roopak@example.com" },
+      ]);
 
       const disabledItems = [];
       for await (const item of emitSlackSyncedItems({
@@ -755,10 +760,10 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         disabledItems.push(item);
       }
       expect(disabledItems).toHaveLength(1);
-      expect(disabledItems[0]?.accessEmails).toBeUndefined();
+      expect(disabledItems[0]?.accessPrincipals).toBeUndefined();
     });
 
-    it("emission with no teammate member archives the linked file and emits nothing", async () => {
+    it("emission with only an external Slack member stamps a dormant principal", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const config = await db
         .selectFrom("connector_configs")
@@ -827,23 +832,25 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         items.push(item);
       }
 
-      expect(items).toHaveLength(0);
-      expect(skipped).toBe(1);
+      expect(items).toHaveLength(1);
+      expect(skipped).toBe(0);
+      expect(items[0]?.accessPrincipals).toEqual([]);
+      expect(items[0]?.accessScope?.members).toEqual([{ type: "slack_user", value: "U0EXT" }]);
       const file = await db
         .selectFrom("indexed_files")
         .select(["is_archived"])
         .where("id", "=", "file-no-teammate")
         .executeTakeFirstOrThrow();
-      expect(file.is_archived).toBe(1);
+      expect(file.is_archived).toBe(0);
       const unlinked = await db
         .selectFrom("conversation_slices")
         .select("indexed_file_id")
         .where("id", "=", slice.row.id)
         .executeTakeFirstOrThrow();
-      expect(unlinked.indexed_file_id).toBeNull();
+      expect(unlinked.indexed_file_id).toBe("file-no-teammate");
     });
 
-    it("emission with no teammate archives the file of a requeued unlinked slice", async () => {
+    it("emission with only an external Slack member preserves a queued slice", async () => {
       await ensureSlackConnectorConfig({ db, logger });
       const config = await db
         .selectFrom("connector_configs")
@@ -904,14 +911,16 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         items.push(item);
       }
 
-      expect(items).toHaveLength(0);
-      expect(skipped).toBe(1);
+      expect(items).toHaveLength(1);
+      expect(skipped).toBe(0);
+      expect(items[0]?.accessPrincipals).toEqual([]);
+      expect(items[0]?.accessScope?.members).toEqual([{ type: "slack_user", value: "U0EXT" }]);
       const file = await db
         .selectFrom("indexed_files")
         .select(["is_archived", "access_scope_id"])
         .where("id", "=", "file-requeued")
         .executeTakeFirstOrThrow();
-      expect(file.is_archived).toBe(1);
+      expect(file.is_archived).toBe(0);
       expect(file.access_scope_id).toBeNull();
     });
 
@@ -992,7 +1001,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(secondItems).toHaveLength(1);
       const secondItem = secondItems[0];
       if (!secondItem) throw new Error("Expected a Slack item for the second emission");
-      expect(secondItem.accessEmails).toEqual(["new@example.com"]);
+      expect(secondItem.accessPrincipals).toEqual(toEmailPrincipals(["new@example.com"]));
       await processSyncedItem({
         db,
         repo,
@@ -1010,11 +1019,11 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .executeTakeFirstOrThrow();
       const grants = await db
         .selectFrom("file_access")
-        .select("email")
+        .select("principal_value")
         .where("indexed_file_id", "=", indexedFile.id)
-        .orderBy("email", "asc")
+        .orderBy("principal_value", "asc")
         .execute();
-      expect(grants.map((row) => row.email)).toEqual(["new@example.com", "roopak@example.com"]);
+      expect(grants.map((row) => row.principal_value)).toEqual(["new@example.com", "roopak@example.com"]);
 
       const laterMessage = await conversations.insertMessage({
         conversationId: conversation.id,
@@ -1043,7 +1052,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       }
       const laterItem = laterItems.find((item) => item.providerFileId === String(laterSlice.row.id));
       if (!laterItem) throw new Error("Expected a Slack item for the later slice");
-      expect(laterItem.accessEmails).toEqual(["new@example.com"]);
+      expect(laterItem.accessPrincipals).toEqual(toEmailPrincipals(["new@example.com"]));
       await processSyncedItem({
         db,
         repo,
@@ -1062,24 +1071,24 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       if (!laterIndexedFile.access_scope_id) throw new Error("Expected the later Slack item to have an access scope");
       const laterGrants = await db
         .selectFrom("file_access")
-        .select("email")
+        .select("principal_value")
         .where("indexed_file_id", "=", laterIndexedFile.id)
         .execute();
-      expect(laterGrants.map((row) => row.email)).toEqual(["new@example.com"]);
+      expect(laterGrants.map((row) => row.principal_value)).toEqual(["new@example.com"]);
       const currentScopeMembers = await db
         .selectFrom("access_scope_members")
-        .select("email")
+        .select("principal_value")
         .where("access_scope_id", "=", laterIndexedFile.access_scope_id)
         .execute();
-      expect(currentScopeMembers.map((row) => row.email)).toEqual(["new@example.com"]);
+      expect(currentScopeMembers.map((row) => row.principal_value).sort()).toEqual(["U1TEAM", "new@example.com"]);
 
       await db.deleteFrom("users").where("id", "=", "user-admin").execute();
       const grantsAfterAccountOffboarding = await db
         .selectFrom("file_access")
-        .select("email")
+        .select("principal_value")
         .where("indexed_file_id", "=", indexedFile.id)
         .execute();
-      expect(grantsAfterAccountOffboarding.map((row) => row.email)).toContain("roopak@example.com");
+      expect(grantsAfterAccountOffboarding.map((row) => row.principal_value)).toContain("roopak@example.com");
       await db
         .insertInto("users")
         .values({
@@ -1090,7 +1099,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
           slack_user_id: "U2TEAM",
         })
         .execute();
-      expect(grantsAfterAccountOffboarding.map((row) => row.email)).toContain("roopak@example.com");
+      expect(grantsAfterAccountOffboarding.map((row) => row.principal_value)).toContain("roopak@example.com");
     });
 
     it("reconciles ACLs: refreshes visible-channel membership, archives invisible channels", async () => {
@@ -1106,13 +1115,13 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         scopeType: "slack_channel",
         providerScopeId: "C1",
         label: "#general",
-        memberEmails: ["roopak@example.com", "departed@example.com"],
+        members: ["roopak@example.com", "departed@example.com"],
       });
       const goneScope = await repo.upsertAccessScope(config.id, {
         scopeType: "slack_channel",
         providerScopeId: "C-GONE",
         label: "#gone",
-        memberEmails: ["roopak@example.com"],
+        members: ["roopak@example.com"],
       });
 
       const conversations = createConversationRepository(db);
@@ -1166,10 +1175,10 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
 
       const members = await db
         .selectFrom("access_scope_members")
-        .select("email")
+        .select("principal_value")
         .where("access_scope_id", "=", visibleScope)
         .execute();
-      expect(members.map((row) => row.email)).toEqual(["roopak@example.com"]);
+      expect(members.map((row) => row.principal_value).sort()).toEqual(["U0TEAM", "roopak@example.com"]);
 
       const goneFile = await db
         .selectFrom("indexed_files")
@@ -1199,7 +1208,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         scopeType: "slack_channel",
         providerScopeId: "C1",
         label: "#general",
-        memberEmails: ["roopak@example.com"],
+        members: ["roopak@example.com"],
       });
 
       const conversations = createConversationRepository(db);

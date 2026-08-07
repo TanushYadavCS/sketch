@@ -167,7 +167,10 @@ async function seedIndexedGroupSlice(db: Kysely<DB>): Promise<SeededDrill> {
       label: "Deal Room",
     })
     .execute();
-  await db.insertInto("access_scope_members").values({ access_scope_id: scopeId, email: memberEmail }).execute();
+  await db
+    .insertInto("access_scope_members")
+    .values({ access_scope_id: scopeId, principal_type: "email", principal_value: memberEmail })
+    .execute();
   await db
     .insertInto("indexed_files")
     .values({
@@ -366,6 +369,26 @@ function runWhatsAppGroupHistorySuite(label: string, createDb: () => Promise<Kys
       expect(payload.messages[3]).toMatchObject({ attachments: ["[image]"] });
       expect(result.content[0].text).not.toContain("/tmp/photo.jpg");
       expect(result.content[0].text).not.toMatch(/@s\.whatsapp\.net|@lid/u);
+    });
+
+    it("authorizes a phone-only teammate through the typed scope", async () => {
+      const seeded = await seedIndexedGroupSlice(db);
+      await db.updateTable("users").set({ email: null }).where("id", "=", seeded.memberUserId).execute();
+      const scopeId = (
+        await db
+          .selectFrom("indexed_files")
+          .select("access_scope_id")
+          .where("provider_file_id", "=", seeded.sliceId)
+          .executeTakeFirstOrThrow()
+      ).access_scope_id as string;
+      await db.deleteFrom("access_scope_members").where("access_scope_id", "=", scopeId).execute();
+      await db
+        .insertInto("access_scope_members")
+        .values({ access_scope_id: scopeId, principal_type: "phone", principal_value: "+15550000001" })
+        .execute();
+
+      const result = await runTool(db, seeded.memberUserId, { sliceId: seeded.sliceId, limit: 10 });
+      expect(result.content[0].text).not.toBe(WHATSAPP_GROUP_HISTORY_DENIED_TEXT);
     });
 
     it("supports direct group windows through the returned groupRef", async () => {

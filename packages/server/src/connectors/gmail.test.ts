@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestLogger } from "../test-utils";
 import type { EmailSyncedItem } from "./email";
 import { type GmailMessage, createGmailConnector, toNormalizedEmail } from "./gmail";
-import type { OAuthCredentials } from "./types";
+import { type OAuthCredentials, toEmailPrincipals } from "./types";
 
 const logger = createTestLogger();
 
@@ -146,7 +146,7 @@ describe("Gmail connector", () => {
       providerFileId: "retained",
       providerMessageId: "<retained@example.com>",
       fileType: "email_message",
-      accessEmails: ["jane@example.com", "owner@canvasx.ai"],
+      accessPrincipals: toEmailPrincipals(["jane@example.com", "owner@canvasx.ai"]),
       authorEmail: "jane@example.com",
     });
     expect(items[0].emailEnvelope.connectorConfigId).toBe("connector-gmail");

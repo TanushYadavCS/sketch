@@ -20,12 +20,14 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
+import { accessPrincipalPredicateSql } from "../db/repositories/connectors";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import { parseEmailAddrJson, parseEmailAddrListJson } from "./email/envelope-metadata";
 import type { EmailAddr } from "./email/normalized-email";
 import { createEnrichmentQueryEmbedder, resolveOpenRouterEnrichmentConfig } from "./enrichment-providers";
+import { type AccessPrincipalInput, normalizeAccessPrincipals } from "./types";
 
 export interface SearchResult {
   id: string;
@@ -51,19 +53,26 @@ export interface SearchOptions {
   category?: string;
   /**
    * RBAC (user-level): restrict results to files the user can access.
-   * Email addresses to match against current scope membership and explicit shares.
+   * Typed principals to match against current scope membership and explicit shares.
    * Non-chat files with no scope AND no file_access rows are unrestricted.
    * When omitted, no user-level filtering is applied.
    */
-  userEmails?: string[];
+  userPrincipals?: AccessPrincipalInput[];
   slackEntitySyncEnabled?: boolean;
 }
 
-export function fileAccessFilterSql(emailList: string[], slackEntitySyncEnabled = true) {
-  const emailSql = sql.join(
-    emailList.map((e) => sql`${e}`),
-    sql`,`,
-  );
+export function fileAccessFilterSql(principalInput: AccessPrincipalInput[], slackEntitySyncEnabled = true) {
+  const principalList = normalizeAccessPrincipals(principalInput);
+  const emailValues = principalList
+    .filter((principal) => principal.type === "email")
+    .map((principal) => principal.value);
+  const emailSql =
+    emailValues.length > 0
+      ? sql.join(
+          emailValues.map((email) => sql`${email}`),
+          sql`,`,
+        )
+      : null;
   const accessDoor = slackEntitySyncEnabled
     ? sql`(indexed_files.source IS NULL OR indexed_files.source NOT IN ('slack', 'whatsapp'))`
     : sql`1 = 1`;
@@ -74,29 +83,33 @@ export function fileAccessFilterSql(emailList: string[], slackEntitySyncEnabled 
     OR EXISTS (
       SELECT 1 FROM access_scope_members
       WHERE access_scope_members.access_scope_id = indexed_files.access_scope_id
-      AND access_scope_members.email IN (${emailSql})
+      AND ${accessPrincipalPredicateSql("access_scope_members", principalList)}
     )
     OR (${accessDoor}
       AND EXISTS (
         SELECT 1 FROM file_access
         WHERE file_access.indexed_file_id = indexed_files.id
-        AND file_access.email IN (${emailSql})
+        AND ${accessPrincipalPredicateSql("file_access", principalList)}
       ))
-    OR EXISTS (
+    OR ${
+      emailSql
+        ? sql`EXISTS (
       SELECT 1 FROM file_share_emails
       WHERE file_share_emails.indexed_file_id = indexed_files.id
       AND file_share_emails.email IN (${emailSql})
-    )
+    )`
+        : sql`0 = 1`
+    }
     OR indexed_files.share_with_everyone = 1
     OR EXISTS (
       SELECT 1 FROM entity_mentions em_shared
       INNER JOIN entities ent_shared ON ent_shared.id = em_shared.entity_id
       LEFT JOIN entity_share_emails ese
-        ON ese.entity_id = ent_shared.id AND ese.email IN (${emailSql})
+        ON ese.entity_id = ent_shared.id ${emailSql ? sql`AND ese.email IN (${emailSql})` : sql``}
       WHERE em_shared.indexed_file_id = indexed_files.id
         AND ent_shared.deleted_at IS NULL
         AND ent_shared.merged_into_entity_id IS NULL
-        AND (ent_shared.share_with_everyone = 1 OR ese.email IS NOT NULL)
+        AND (ent_shared.share_with_everyone = 1 OR ${emailSql ? sql`ese.email IS NOT NULL` : sql`0 = 1`})
     )
   )`;
 }
@@ -112,11 +125,13 @@ export function fileAccessFilterSql(emailList: string[], slackEntitySyncEnabled 
  */
 export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOptions): Promise<SearchResult[]> {
   const limit = opts?.limit ?? 10;
-  if (opts?.userEmails !== undefined && opts.userEmails.length === 0) return [];
+  if (opts?.userPrincipals !== undefined && opts.userPrincipals.length === 0) return [];
 
-  const emailList = opts?.userEmails ?? [];
+  const principalList = opts?.userPrincipals ?? [];
   const userFilter =
-    emailList.length > 0 ? sql`AND ${fileAccessFilterSql(emailList, opts?.slackEntitySyncEnabled ?? true)}` : sql``;
+    principalList.length > 0
+      ? sql`AND ${fileAccessFilterSql(principalList, opts?.slackEntitySyncEnabled ?? true)}`
+      : sql``;
 
   // Hide bodyless CRM activities ("empty reminders") from search — they're rolled
   // up under their parent object, never surfaced as standalone results.
@@ -191,17 +206,17 @@ export async function searchFiles(db: Kysely<DB>, query: string, opts?: SearchOp
  * and by the frontend file detail sheet.
  *
  * Access control:
- *   - `userEmails === undefined` → trusted bypass (server/agent boot paths,
+ *   - `userPrincipals === undefined` → trusted bypass (server/agent boot paths,
  *     admin bypass when the org setting is on). Returns the file unfiltered.
- *   - `userEmails === []`        → caller has no resolvable email → fail closed.
+ *   - `userPrincipals === []`        → caller has no resolvable principal → fail closed.
  *     Returns null regardless of the file's access shape. Prevents an unauth'd
  *     user from inheriting visibility through the empty-array path.
- *   - `userEmails.length > 0`    → 3-tier check (unrestricted / scope / per-file).
+ *   - `userPrincipals.length > 0`    → 3-tier check (unrestricted / scope / per-file).
  */
 export async function getFileContent(
   db: Kysely<DB>,
   fileId: string,
-  userEmails?: string[],
+  userPrincipals?: AccessPrincipalInput[],
   slackEntitySyncEnabled = true,
 ): Promise<{
   id: string;
@@ -239,9 +254,12 @@ export async function getFileContent(
 
   if (!file) return null;
 
-  // userEmails === undefined → trusted bypass; userEmails === [] → fail closed.
-  if (userEmails !== undefined) {
-    if (userEmails.length === 0) return null;
+  if (userPrincipals !== undefined) {
+    const principals = normalizeAccessPrincipals(userPrincipals);
+    if (principals.length === 0) return null;
+    const emailValues = principals
+      .filter((principal) => principal.type === "email")
+      .map((principal) => principal.value);
 
     /**
      * Archived files are denied on the RBAC path: archival severs the scope
@@ -254,7 +272,7 @@ export async function getFileContent(
       const hasScope = file.access_scope_id != null;
       const hasFileAccess = await db
         .selectFrom("file_access")
-        .select("email")
+        .select(["principal_type", "principal_value"])
         .where("indexed_file_id", "=", fileId)
         .limit(1)
         .execute();
@@ -267,9 +285,9 @@ export async function getFileContent(
         if (hasScope && file.access_scope_id) {
           const scopeMatch = await db
             .selectFrom("access_scope_members")
-            .select("email")
+            .select(["principal_type", "principal_value"])
             .where("access_scope_id", "=", file.access_scope_id)
-            .where("email", "in", userEmails)
+            .where(accessPrincipalPredicateSql("access_scope_members", principals))
             .limit(1)
             .execute();
           if (scopeMatch.length > 0) allowed = true;
@@ -279,21 +297,21 @@ export async function getFileContent(
         if (!allowed && !isChatSource && hasFileAccess.length > 0) {
           const fileMatch = await db
             .selectFrom("file_access")
-            .select("email")
+            .select(["principal_type", "principal_value"])
             .where("indexed_file_id", "=", fileId)
-            .where("email", "in", userEmails)
+            .where(accessPrincipalPredicateSql("file_access", principals))
             .limit(1)
             .execute();
           if (fileMatch.length > 0) allowed = true;
         }
 
         // Tier 4: manual share
-        if (!allowed) {
+        if (!allowed && emailValues.length > 0) {
           const shareMatch = await db
             .selectFrom("file_share_emails")
             .select("email")
             .where("indexed_file_id", "=", fileId)
-            .where("email", "in", userEmails)
+            .where("email", "in", emailValues)
             .limit(1)
             .execute();
           if (shareMatch.length > 0) allowed = true;
@@ -302,14 +320,14 @@ export async function getFileContent(
         // Tier 5: entity-share propagation — a shared entity mentioned in
         // this file grants read access to the file (read-time, no file_access
         // rows written).
-        if (!allowed) {
+        if (!allowed && emailValues.length > 0) {
           const entityMatch = await db
             .selectFrom("entity_mentions")
             .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
             .leftJoin("entity_share_emails", (join) =>
               join
                 .onRef("entity_share_emails.entity_id", "=", "entities.id")
-                .on("entity_share_emails.email", "in", userEmails),
+                .on("entity_share_emails.email", "in", emailValues),
             )
             .select("entities.id")
             .where("entity_mentions.indexed_file_id", "=", fileId)
@@ -346,21 +364,22 @@ export async function getFileContent(
  * Filter a list of indexed file IDs down to only those the user can access.
  *
  * Contract mirrors `getFileContent`:
- *   - `userEmails === undefined` → trusted bypass (server/agent boot, admin
+ *   - `userPrincipals === undefined` → trusted bypass (server/agent boot, admin
  *     bypass): returns the input set unchanged.
- *   - `userEmails === []`        → caller has no resolvable email → fail closed:
+ *   - `userPrincipals === []`        → caller has no resolvable principal → fail closed:
  *     returns an empty set.
- *   - `userEmails.length > 0`    → 3-tier check (unrestricted / scope / per-file).
+ *   - `userPrincipals.length > 0`    → 3-tier check (unrestricted / scope / per-file).
  */
 export async function filterAccessibleFileIds(
   db: Kysely<DB>,
   fileIds: string[],
-  userEmails?: string[],
+  userPrincipals?: AccessPrincipalInput[],
   slackEntitySyncEnabled = true,
 ): Promise<Set<string>> {
   if (fileIds.length === 0) return new Set();
-  if (userEmails === undefined) return new Set(fileIds);
-  if (userEmails.length === 0) return new Set();
+  if (userPrincipals === undefined) return new Set(fileIds);
+  const principals = normalizeAccessPrincipals(userPrincipals);
+  if (principals.length === 0) return new Set();
 
   const files = await db
     .selectFrom("indexed_files")
@@ -368,53 +387,62 @@ export async function filterAccessibleFileIds(
     .where("id", "in", fileIds)
     .execute();
 
+  const emailValues = principals.filter((principal) => principal.type === "email").map((principal) => principal.value);
   const [fileAccessRows, scopeMemberRows, shareRows, entityPropRows] = await Promise.all([
-    db.selectFrom("file_access").select(["indexed_file_id", "email"]).where("indexed_file_id", "in", fileIds).execute(),
+    db
+      .selectFrom("file_access")
+      .select(["indexed_file_id", "principal_type", "principal_value"])
+      .where("indexed_file_id", "in", fileIds)
+      .execute(),
     (async () => {
       const scopeIds = files.map((f) => f.access_scope_id).filter((s): s is string => !!s);
       if (scopeIds.length === 0) return [];
       return db
         .selectFrom("access_scope_members")
-        .select(["access_scope_id", "email"])
+        .select(["access_scope_id", "principal_type", "principal_value"])
         .where("access_scope_id", "in", scopeIds)
-        .where("email", "in", userEmails)
         .execute();
     })(),
-    db
-      .selectFrom("file_share_emails")
-      .select(["indexed_file_id", "email"])
-      .where("indexed_file_id", "in", fileIds)
-      .where("email", "in", userEmails)
-      .execute(),
+    emailValues.length === 0
+      ? Promise.resolve([])
+      : db
+          .selectFrom("file_share_emails")
+          .select(["indexed_file_id", "email"])
+          .where("indexed_file_id", "in", fileIds)
+          .where("email", "in", emailValues)
+          .execute(),
     // Entity-share propagation: a file is accessible if it mentions any entity
     // that is shared with the viewer (or share_with_everyone). Read-time only.
-    db
-      .selectFrom("entity_mentions")
-      .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
-      .leftJoin("entity_share_emails", (join) =>
-        join
-          .onRef("entity_share_emails.entity_id", "=", "entities.id")
-          .on("entity_share_emails.email", "in", userEmails),
-      )
-      .select(["entity_mentions.indexed_file_id"])
-      .where("entity_mentions.indexed_file_id", "in", fileIds)
-      .where(whereLiveEntity())
-      .where((eb) =>
-        eb.or([eb("entities.share_with_everyone", "=", 1), eb("entity_share_emails.email", "is not", null)]),
-      )
-      .execute(),
+    emailValues.length === 0
+      ? Promise.resolve([])
+      : db
+          .selectFrom("entity_mentions")
+          .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
+          .leftJoin("entity_share_emails", (join) =>
+            join
+              .onRef("entity_share_emails.entity_id", "=", "entities.id")
+              .on("entity_share_emails.email", "in", emailValues),
+          )
+          .select(["entity_mentions.indexed_file_id"])
+          .where("entity_mentions.indexed_file_id", "in", fileIds)
+          .where(whereLiveEntity())
+          .where((eb) =>
+            eb.or([eb("entities.share_with_everyone", "=", 1), eb("entity_share_emails.email", "is not", null)]),
+          )
+          .execute(),
   ]);
 
+  const principalSet = new Set(principals.map((principal) => `${principal.type}\0${principal.value}`));
   const fileAccessByFile = new Map<string, Set<string>>();
   for (const row of fileAccessRows) {
     const set = fileAccessByFile.get(row.indexed_file_id) ?? new Set<string>();
-    set.add(row.email);
+    set.add(`${row.principal_type}\0${row.principal_value}`);
     fileAccessByFile.set(row.indexed_file_id, set);
   }
   const scopeMemberByScope = new Map<string, Set<string>>();
   for (const row of scopeMemberRows) {
     const set = scopeMemberByScope.get(row.access_scope_id) ?? new Set<string>();
-    set.add(row.email);
+    set.add(`${row.principal_type}\0${row.principal_value}`);
     scopeMemberByScope.set(row.access_scope_id, set);
   }
   const manualSharesByFile = new Set<string>();
@@ -426,7 +454,6 @@ export async function filterAccessibleFileIds(
     entityPropByFile.add(row.indexed_file_id);
   }
 
-  const emailSet = new Set(userEmails);
   const allowed = new Set<string>();
   for (const file of files) {
     /**
@@ -453,7 +480,7 @@ export async function filterAccessibleFileIds(
 
     if (hasScope && file.access_scope_id) {
       const scopeMembers = scopeMemberByScope.get(file.access_scope_id);
-      if (scopeMembers && scopeMembers.size > 0) {
+      if (scopeMembers && [...scopeMembers].some((principal) => principalSet.has(principal))) {
         allowed.add(file.id);
         continue;
       }
@@ -461,8 +488,8 @@ export async function filterAccessibleFileIds(
 
     if (!isChatSource && hasFileAccess && perFile) {
       let matched = false;
-      for (const email of emailSet) {
-        if (perFile.has(email)) {
+      for (const principal of principalSet) {
+        if (perFile.has(principal)) {
           allowed.add(file.id);
           matched = true;
           break;
@@ -715,7 +742,7 @@ export async function hybridSearch(
 ): Promise<HybridSearchResult[]> {
   const limit = opts?.limit ?? 10;
   const candidateLimit = Math.max(limit * 40, 200);
-  if (opts?.userEmails !== undefined && opts.userEmails.length === 0) return [];
+  if (opts?.userPrincipals !== undefined && opts.userPrincipals.length === 0) return [];
   const ftsResults = new Map<string, { rank: number; snippet: string | null }>();
   const vecResults = new Map<string, { rank: number; similarity: number; snippet: string | null }>();
 
@@ -1019,10 +1046,10 @@ export async function hybridSearch(
   }
 
   // ── 6. Apply RBAC (batch query — same pattern as searchFiles) ─
-  const emailList = opts?.userEmails ?? [];
+  const principalList = opts?.userPrincipals ?? [];
   let accessFiltered = filteredFiles;
 
-  if (emailList.length > 0 && filteredFiles.length > 0) {
+  if (principalList.length > 0 && filteredFiles.length > 0) {
     const fileIds = filteredFiles.map((f) => f.id);
 
     const accessRows = await sql<{ id: string }>`
@@ -1032,7 +1059,7 @@ export async function hybridSearch(
         fileIds.map((id) => sql`${id}`),
         sql`,`,
       )})
-      AND ${fileAccessFilterSql(emailList, opts?.slackEntitySyncEnabled ?? true)}
+      AND ${fileAccessFilterSql(principalList, opts?.slackEntitySyncEnabled ?? true)}
     `.execute(db);
 
     const allowedIds = new Set(accessRows.rows.map((r) => r.id));
@@ -1044,7 +1071,7 @@ export async function hybridSearch(
     db,
     accessFiltered,
     scoreMap,
-    opts?.userEmails,
+    opts?.userPrincipals,
     opts?.slackEntitySyncEnabled ?? true,
   );
 
@@ -1091,11 +1118,16 @@ async function collapseEmailSearchResults(
   db: Kysely<DB>,
   files: SearchMetadataFile[],
   scoreMap: Map<string, SearchScoreData>,
-  userEmails?: string[],
+  userPrincipals?: AccessPrincipalInput[],
   slackEntitySyncEnabled = true,
 ): Promise<HybridSearchResult[]> {
   const emailFiles = files.filter((file) => file.file_type === "email_message");
-  const visibleThreadEnvelopes = await loadVisibleThreadEnvelopes(db, emailFiles, userEmails, slackEntitySyncEnabled);
+  const visibleThreadEnvelopes = await loadVisibleThreadEnvelopes(
+    db,
+    emailFiles,
+    userPrincipals,
+    slackEntitySyncEnabled,
+  );
   const groups = new Map<string, SearchMetadataFile[]>();
   const output: HybridSearchResult[] = [];
 
@@ -1179,7 +1211,7 @@ async function collapseEmailSearchResults(
 async function loadVisibleThreadEnvelopes(
   db: Kysely<DB>,
   emailFiles: SearchMetadataFile[],
-  userEmails?: string[],
+  userPrincipals?: AccessPrincipalInput[],
   slackEntitySyncEnabled = true,
 ): Promise<Map<string, EmailEnvelopeSearchRow[]>> {
   const rowsByThread = new Map<string, EmailEnvelopeSearchRow[]>();
@@ -1232,7 +1264,7 @@ async function loadVisibleThreadEnvelopes(
   const visibleIds = await filterAccessibleFileIds(
     db,
     allRows.map((row) => row.indexed_file_id),
-    userEmails,
+    userPrincipals,
     slackEntitySyncEnabled,
   );
 
@@ -1257,7 +1289,7 @@ export async function browseFiles(
     folderPath?: string;
     contentCategory?: string;
     limit?: number;
-    userEmails?: string[];
+    userPrincipals?: AccessPrincipalInput[];
     slackEntitySyncEnabled?: boolean;
   },
 ): Promise<
@@ -1390,7 +1422,7 @@ async function browseLatest(
     kindRules?: KindRule[];
     sources?: string[];
     fileIds?: string[];
-    userEmails?: string[];
+    userPrincipals?: AccessPrincipalInput[];
     slackEntitySyncEnabled?: boolean;
     after?: string;
     before?: string;
@@ -1399,7 +1431,7 @@ async function browseLatest(
 ): Promise<HybridSearchResult[]> {
   // Caller is responsible for the empty-fileIds short-circuit; selectFrom().where("id", "in", [])
   // emits invalid `IN ()` SQL on SQLite.
-  if (opts.userEmails !== undefined && opts.userEmails.length === 0) return [];
+  if (opts.userPrincipals !== undefined && opts.userPrincipals.length === 0) return [];
   let q = db
     .selectFrom("indexed_files")
     .select([
@@ -1433,9 +1465,9 @@ async function browseLatest(
   if (opts.sources?.length) q = q.where("source", "in", opts.sources);
   if (opts.fileIds?.length) q = q.where("id", "in", opts.fileIds);
 
-  if ((opts.userEmails ?? []).length > 0) {
-    const userEmails = opts.userEmails ?? [];
-    q = q.where(fileAccessFilterSql(userEmails, opts.slackEntitySyncEnabled ?? true));
+  if ((opts.userPrincipals ?? []).length > 0) {
+    const userPrincipals = opts.userPrincipals ?? [];
+    q = q.where(fileAccessFilterSql(userPrincipals, opts.slackEntitySyncEnabled ?? true));
   }
 
   if (opts.after || opts.before) {
@@ -1509,7 +1541,7 @@ export async function search(
     limit?: number;
     after?: string;
     before?: string;
-    userEmails?: string[];
+    userPrincipals?: AccessPrincipalInput[];
     slackEntitySyncEnabled?: boolean;
     entityId?: string;
     entityIds?: string[];
@@ -1553,7 +1585,7 @@ export async function search(
       kindRules: opts?.kindRules,
       sources: opts?.sources ?? (opts?.source ? [opts.source] : undefined),
       fileIds,
-      userEmails: opts?.userEmails,
+      userPrincipals: opts?.userPrincipals,
       slackEntitySyncEnabled: opts?.slackEntitySyncEnabled,
       after: opts?.after,
       before: opts?.before,
@@ -1614,7 +1646,7 @@ export async function search(
     category: opts?.category,
     limit: fetchLimit,
     queryEmbedding,
-    userEmails: opts?.userEmails,
+    userPrincipals: opts?.userPrincipals,
     slackEntitySyncEnabled: opts?.slackEntitySyncEnabled,
     fileIds,
     entityFileIds,

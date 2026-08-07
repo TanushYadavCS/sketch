@@ -23,6 +23,7 @@ interface SeededSlice {
   groupJid: string;
   conversationId: number;
   sliceId: string;
+  teammatePhone: string;
   teammateEmail: string | null;
   teammateUserId: string | null;
 }
@@ -160,7 +161,14 @@ async function seedSlice(
     salienceSignals: options.salienceSignals ?? null,
   });
 
-  return { groupJid, conversationId: conversation.id, sliceId: inserted.row.id, teammateEmail, teammateUserId };
+  return {
+    groupJid,
+    conversationId: conversation.id,
+    sliceId: inserted.row.id,
+    teammatePhone,
+    teammateEmail,
+    teammateUserId,
+  };
 }
 
 async function collectWhatsAppItems(db: Kysely<DB>, generator?: GeminiGenerator | null) {
@@ -286,7 +294,11 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
         accessScope: {
           scopeType: "whatsapp_group",
           providerScopeId: seeded.groupJid,
-          memberEmails: [seeded.teammateEmail],
+          members: expect.arrayContaining([
+            { type: "phone", value: seeded.teammatePhone },
+            { type: "phone", value: "+15550000002" },
+            { type: "email", value: seeded.teammateEmail },
+          ]),
         },
       });
       expect(firstItems[0]?.content).toContain("Group: ");
@@ -452,13 +464,20 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       expect(keptSlice.salience_verdict).toBe("kept");
       expect(keptSlice.salience_signals).toContain("Project Atlas");
       expect(droppedSlice.salience_verdict).toBe("dropped");
-      expect(items.map((item) => item.providerFileId)).toEqual([kept.sliceId]);
-      expect(unscopedItems.map((item) => item.providerFileId)).not.toContain(unscoped.sliceId);
-      expect(items[0]?.accessScope?.memberEmails).toEqual([kept.teammateEmail]);
-      expect(items[0]?.content).toContain("Group: ");
-      expect(items[0]?.content).not.toContain("WhatsApp roster:");
-      expect(items[0]?.content).toContain("Tara Teammate:");
-      expect(items[0]?.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
+      expect(items.map((item) => item.providerFileId).sort()).toEqual([kept.sliceId, unscoped.sliceId].sort());
+      expect(unscopedItems.map((item) => item.providerFileId)).toContain(unscoped.sliceId);
+      const keptItem = items.find((item) => item.providerFileId === kept.sliceId);
+      expect(keptItem?.accessScope?.members).toEqual(
+        expect.arrayContaining([
+          { type: "phone", value: kept.teammatePhone },
+          { type: "phone", value: "+15550000002" },
+          { type: "email", value: kept.teammateEmail },
+        ]),
+      );
+      expect(keptItem?.content).toContain("Group: ");
+      expect(keptItem?.content).not.toContain("WhatsApp roster:");
+      expect(keptItem?.content).toContain("Tara Teammate:");
+      expect(keptItem?.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
       await expect(db.selectFrom("tasks").selectAll().execute()).resolves.toEqual([]);
     });
 
@@ -506,7 +525,7 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       expect(slice.salience_verdict).toBe("kept");
     });
 
-    it("fails closed when a kept slice has zero resolved teammate emails", async () => {
+    it("keeps a phone-only group when no teammate email resolves", async () => {
       const seeded = await seedSlice(db, {
         teammate: false,
         verdict: "kept",
@@ -521,12 +540,12 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
         .where("id", "=", seeded.sliceId)
         .executeTakeFirstOrThrow();
 
-      expect(result.itemsProcessed).toBe(0);
-      expect(slice.indexed_file_id).toBeNull();
-      await expect(db.selectFrom("indexed_files").selectAll().execute()).resolves.toEqual([]);
+      expect(result.itemsProcessed).toBe(1);
+      expect(slice.indexed_file_id).not.toBeNull();
+      await expect(db.selectFrom("indexed_files").selectAll().execute()).resolves.toHaveLength(1);
     });
 
-    it("archives an existing linked file if scope later resolves to zero teammates", async () => {
+    it("keeps an existing linked file when email resolution later disappears", async () => {
       const seeded = await seedSlice(db, {
         verdict: "kept",
         salienceSignals: JSON.stringify({ signals: ["decision"], entities: [] }),
@@ -562,13 +581,13 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
         .where("id", "=", before.indexed_file_id)
         .executeTakeFirstOrThrow();
 
-      expect(result.itemsProcessed).toBe(0);
-      expect(after.indexed_file_id).toBeNull();
-      expect(archivedFile.is_archived).toBe(1);
-      expect(archivedFile.access_scope_id).toBeNull();
+      expect(result.itemsProcessed).toBe(1);
+      expect(after.indexed_file_id).toBe(before.indexed_file_id);
+      expect(archivedFile.is_archived).toBe(0);
+      expect(archivedFile.access_scope_id).not.toBeNull();
     });
 
-    it("archives the file of a requeued unlinked slice when scope resolves to zero teammates", async () => {
+    it("keeps a requeued slice when email resolution later disappears", async () => {
       const seeded = await seedSlice(db, {
         verdict: "kept",
         salienceSignals: JSON.stringify({ signals: ["decision"], entities: [] }),
@@ -604,9 +623,9 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
         .where("id", "=", before.indexed_file_id)
         .executeTakeFirstOrThrow();
 
-      expect(result.itemsProcessed).toBe(0);
-      expect(archivedFile.is_archived).toBe(1);
-      expect(archivedFile.access_scope_id).toBeNull();
+      expect(result.itemsProcessed).toBe(1);
+      expect(archivedFile.is_archived).toBe(0);
+      expect(archivedFile.access_scope_id).not.toBeNull();
     });
 
     it("links a kept slice to the indexed file after sync persistence", async () => {
@@ -633,7 +652,7 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       const scopeMembers = await db
         .selectFrom("access_scope_members")
         .innerJoin("access_scopes", "access_scopes.id", "access_scope_members.access_scope_id")
-        .select(["access_scope_members.email", "access_scopes.provider_scope_id"])
+        .select(["access_scope_members.principal_value", "access_scopes.provider_scope_id"])
         .execute();
 
       expect(result.itemsCreated).toBe(1);
@@ -642,7 +661,13 @@ function runSalienceIntegrationSuite(label: string, createDb: () => Promise<Kyse
       expect(file.provider_file_id).toBe(seeded.sliceId);
       expect(file.source).toBe("whatsapp");
       expect(file.content).not.toMatch(RAW_IDENTIFIER_PATTERN);
-      expect(scopeMembers).toEqual([{ email: seeded.teammateEmail, provider_scope_id: seeded.groupJid }]);
+      expect(scopeMembers.map((row) => `${row.principal_value}\u0000${row.provider_scope_id}`).sort()).toEqual(
+        [
+          `+15550000002\u0000${seeded.groupJid}`,
+          `${seeded.teammateEmail}\u0000${seeded.groupJid}`,
+          `${seeded.teammatePhone}\u0000${seeded.groupJid}`,
+        ].sort(),
+      );
     });
 
     it("emits old unlinked and recent linked kept slices while skipping old linked slices", async () => {

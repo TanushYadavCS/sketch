@@ -34,6 +34,7 @@ import type { Logger } from "../logger";
 import { createDbAuthState } from "./auth-store";
 import { WHATSAPP_TEXT_LIMIT, chunkText } from "./chunking";
 import { collectWhatsAppGroupParticipants, toParticipantInputs } from "./group-participants";
+import { captureWhatsAppLidForPhone } from "./identity-resolution";
 import type { WhatsAppGroupMetadata as ProviderWhatsAppGroupMetadata } from "./provider";
 
 const ECHO_TTL_MS = 60_000;
@@ -798,6 +799,7 @@ export class WhatsAppBot {
         this.logger.warn({ lid: jid }, "Could not resolve LID to phone number — dropping message");
         return;
       }
+      await captureWhatsAppLidForPhone(this.db, phoneNumber, jid, this.logger);
     }
 
     if (this.handler) {

@@ -45,10 +45,25 @@ export interface AccessPrincipal {
   value: string;
 }
 
-export function toEmailPrincipals(emails: string[]): AccessPrincipal[] {
-  return [...new Set(emails.map((email) => email.trim().toLowerCase()).filter((email) => email.length > 0))].map(
-    (value) => ({ type: "email", value }),
+export type AccessPrincipalInput = AccessPrincipal | string;
+
+export function normalizeAccessPrincipals(principals: AccessPrincipalInput[]): AccessPrincipal[] {
+  const normalized = principals.map((principal) =>
+    typeof principal === "string" ? { type: "email" as const, value: principal.trim().toLowerCase() } : principal,
   );
+  return [
+    ...new Map(
+      normalized
+        .filter((principal) => principal.value)
+        .map((principal) => [`${principal.type}\0${principal.value}`, principal]),
+    ).values(),
+  ];
+}
+
+export function toEmailPrincipals(emails: string[]): AccessPrincipal[] {
+  return [...new Set(emails.map((email) => email.trim().toLowerCase()).filter((email) => email.length > 0))]
+    .sort()
+    .map((value) => ({ type: "email", value }));
 }
 
 export type HierarchyTarget = "team" | "project" | "sprint" | "ignore";

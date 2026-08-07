@@ -1,6 +1,7 @@
 import { sql } from "kysely";
 import type { Kysely, Selectable } from "kysely";
 import { fileAccessFilterSql } from "../connectors/search";
+import type { AccessPrincipalInput } from "../connectors/types";
 import type { DB, TaskActivityEventsTable, TasksTable } from "../db/schema";
 import type { Logger } from "../logger";
 import { parseOnceSchedule } from "../scheduler/parse-once";
@@ -81,7 +82,7 @@ type ActivityEvent = Pick<
 export async function resolveDailyBriefTaskAttention(input: {
   db: Kysely<DB>;
   userId: string;
-  userEmails: string[];
+  userPrincipals: AccessPrincipalInput[];
   slackEntitySyncEnabled: boolean;
   assigneeEntityIds: string[];
   outputDate: string;
@@ -107,7 +108,7 @@ export async function resolveDailyBriefTaskAttention(input: {
   try {
     candidateRows = await loadCandidateTasks(input.db, {
       userId: input.userId,
-      userEmails: input.userEmails,
+      userPrincipals: input.userPrincipals,
       slackEntitySyncEnabled: input.slackEntitySyncEnabled,
       assigneeEntityIds: input.assigneeEntityIds,
       carriedTaskIds: previous.failed ? [] : previous.taskIds,
@@ -121,7 +122,7 @@ export async function resolveDailyBriefTaskAttention(input: {
     try {
       candidateRows = await loadCandidateTasks(input.db, {
         userId: input.userId,
-        userEmails: input.userEmails,
+        userPrincipals: input.userPrincipals,
         slackEntitySyncEnabled: input.slackEntitySyncEnabled,
         assigneeEntityIds: input.assigneeEntityIds,
         carriedTaskIds: previous.failed ? [] : previous.taskIds,
@@ -238,7 +239,7 @@ export async function resolveDailyBriefTaskAttention(input: {
   const evidence = await loadEvidence(
     input.db,
     ranked.map((item) => item.taskId),
-    input.userEmails,
+    input.userPrincipals,
     input.slackEntitySyncEnabled,
   ).catch(() => {
     partial = true;
@@ -296,7 +297,7 @@ async function loadCandidateTasks(
   db: Kysely<DB>,
   input: {
     userId: string;
-    userEmails: string[];
+    userPrincipals: AccessPrincipalInput[];
     slackEntitySyncEnabled: boolean;
     assigneeEntityIds: string[];
     carriedTaskIds: string[];
@@ -308,7 +309,7 @@ async function loadCandidateTasks(
   },
 ): Promise<CandidateTask[]> {
   const visibleFileEvidence =
-    input.userEmails.length === 0
+    input.userPrincipals.length === 0
       ? sql<boolean>`false`
       : sql<boolean>`exists (
           select 1
@@ -316,7 +317,7 @@ async function loadCandidateTasks(
           inner join indexed_files on indexed_files.id = task_evidence.ref_id
           where task_evidence.task_id = t.id
             and task_evidence.kind = 'file'
-            and ${fileAccessFilterSql(input.userEmails, input.slackEntitySyncEnabled)}
+            and ${fileAccessFilterSql(input.userPrincipals, input.slackEntitySyncEnabled)}
         )`;
   const carriedRank =
     input.carriedTaskIds.length === 0
@@ -498,7 +499,12 @@ function hasAttentionRank(item: DailyBriefTaskAttentionItem, key: AttentionRankK
   return item.attentionReasons.includes(key);
 }
 
-async function loadEvidence(db: Kysely<DB>, taskIds: string[], userEmails: string[], slackEntitySyncEnabled: boolean) {
+async function loadEvidence(
+  db: Kysely<DB>,
+  taskIds: string[],
+  userPrincipals: AccessPrincipalInput[],
+  slackEntitySyncEnabled: boolean,
+) {
   if (taskIds.length === 0) return new Map<string, DailyBriefTaskAttentionItem["evidence"]>();
   const messageRows = await sql<{ task_id: string; conversation_message_id: number; row_number: number }>`
     select task_id, conversation_message_id, row_number
@@ -513,7 +519,7 @@ async function loadEvidence(db: Kysely<DB>, taskIds: string[], userEmails: strin
     where row_number <= ${EVIDENCE_LIMIT + 1}
   `.execute(db);
   const fileRows =
-    userEmails.length === 0
+    userPrincipals.length === 0
       ? { rows: [] as Array<{ task_id: string; ref_id: string; row_number: number }> }
       : await sql<{ task_id: string; ref_id: string; row_number: number }>`
     select task_id, ref_id, row_number
@@ -526,7 +532,7 @@ async function loadEvidence(db: Kysely<DB>, taskIds: string[], userEmails: strin
       inner join indexed_files on indexed_files.id = task_evidence.ref_id
       where task_evidence.task_id in (${sql.join(taskIds)})
         and task_evidence.kind = 'file'
-        and ${fileAccessFilterSql(userEmails, slackEntitySyncEnabled)}
+        and ${fileAccessFilterSql(userPrincipals, slackEntitySyncEnabled)}
     ) ranked
     where row_number <= ${EVIDENCE_LIMIT + 1}
   `.execute(db);
