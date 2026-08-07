@@ -12,6 +12,7 @@
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import type { Kysely } from "kysely";
+import { createChildAbortController, getActiveRunContext } from "../agent/active-runs";
 import { removeReservedAgentEnv } from "../agent/environment";
 import { buildPlatformFormattingLines, buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
@@ -61,6 +62,7 @@ export interface ExecuteAutomationParams {
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
   trustedLocalFileRoot?: string;
+  propagateParentAbort?: boolean;
 }
 
 export type AutomationExecutionEvent =
@@ -467,6 +469,7 @@ async function executeWorkflowStep(params: {
       recordWorkflowStep: runtimeParams.recordWorkflowStep,
       limitAgentExecution: runtimeParams.limitAgentExecution,
       loadAgentRuntimeProviderConfig: runtimeParams.loadAgentRuntimeProviderConfig,
+      propagateParentAbort: runtimeParams.propagateParentAbort,
     });
   }
 
@@ -927,6 +930,7 @@ interface AgentStepParams {
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
+  propagateParentAbort?: boolean;
 }
 
 /**
@@ -1166,6 +1170,15 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
   });
 
   const integrationMcpServers = buildMcpServers ? await buildMcpServers(creatorEmail) : {};
+  /**
+   * Linking is decided by what CAUSED this step, not by where its output lands. A user who runs an
+   * automation from a thread and then says "stop" expects it to die even when that automation is
+   * configured to deliver elsewhere. Scheduled work is already excluded upstream via
+   * propagateParentAbort, so the delivery target carries no information about stoppability.
+   */
+  const parentContext = getActiveRunContext();
+  const inheritsParentAbort = params.propagateParentAbort !== false && parentContext?.metadata?.platform === "slack";
+  const abortController = inheritsParentAbort ? createChildAbortController(parentContext.controller.signal) : undefined;
   const result = await runSketchAgent({
     db: params.db,
     workspaceKey: resolveWorkspaceKey(task),
@@ -1190,6 +1203,7 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
     toolConfig: { BASE_URL: params.config.BASE_URL, PORT: params.config.PORT },
     model: step.agentModel,
     maxTurns: 50,
+    ...(abortController ? { abortController } : {}),
   });
 
   if (result.pendingUploads.length > 0) {

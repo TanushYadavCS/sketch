@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { listActiveRuns } from "../agent/active-runs";
+import { listActiveRuns, registerActiveRun, unregisterActiveRun } from "../agent/active-runs";
 import { PROMPT_TOO_LONG_RECOVERY_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE } from "../agent/errors";
 import { NEW_SESSION_CONFIRMATIONS } from "../commands";
 import { refreshSlackChannelName } from "../connectors/slack-salience";
@@ -16,6 +16,14 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function heldWork(): { work: () => Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { work: () => promise, release };
 }
 
 // --- Fixtures ---
@@ -543,6 +551,130 @@ describe("slack/adapter", () => {
   });
 
   describe("DM handler", () => {
+    it("intercepts stop before enqueue, aborts the DM run, clears backlog, and reacts once", async () => {
+      const queue = new QueueManager();
+      const running = heldWork();
+      const dmQueue = queue.getQueue("u1");
+      dmQueue.enqueue(running.work);
+      dmQueue.enqueue(async () => {});
+      const controller = new AbortController();
+      registerActiveRun("stop-dm-run", controller, { platform: "slack", channelId: "D1", threadTs: null });
+      const getQueue = vi.spyOn(queue, "getQueue");
+      const deps = makeDeps({ queue });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "stop it please!", userId: "S1", channelId: "D1", ts: "2", type: "dm" });
+
+      expect(controller.signal.aborted).toBe(true);
+      expect(getQueue).not.toHaveBeenCalled();
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(deps.repos.conversations.insertMessage).not.toHaveBeenCalled();
+      expect(mockBotInstance.addReaction).toHaveBeenCalledExactlyOnceWith("D1", "2", "white_check_mark");
+      expect(mockBotInstance.postMessage).not.toHaveBeenCalled();
+
+      running.release();
+      await vi.waitFor(() => expect(queue.size()).toBe(0));
+      unregisterActiveRun("stop-dm-run", controller);
+    });
+
+    it("reacts to an idle stop without sending a textual reply", async () => {
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "cancel", userId: "S1", channelId: "D1", ts: "2", type: "dm" });
+
+      expect(mockBotInstance.addReaction).toHaveBeenCalledExactlyOnceWith("D1", "2", "white_check_mark");
+      expect(mockBotInstance.postMessage).not.toHaveBeenCalled();
+      expect(deps.runAgent).not.toHaveBeenCalled();
+    });
+
+    it("handles concurrent DM stops without throwing or reviving the run", async () => {
+      const controller = new AbortController();
+      registerActiveRun("concurrent-stop-run", controller, { platform: "slack", channelId: "D1", threadTs: null });
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await Promise.all([
+        dm({ text: "stop", userId: "S1", channelId: "D1", ts: "2", type: "dm" }),
+        dm({ text: "kill", userId: "S1", channelId: "D1", ts: "3", type: "dm" }),
+      ]);
+
+      expect(controller.signal.aborted).toBe(true);
+      expect(mockBotInstance.addReaction).toHaveBeenCalledTimes(2);
+      expect(mockBotInstance.postMessage).not.toHaveBeenCalled();
+      unregisterActiveRun("concurrent-stop-run", controller);
+    });
+
+    it("suppresses every output leak and advances the DM watermark on a returned abort", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockResolvedValue(
+          makeAgentResult({
+            messageSent: true,
+            stopReason: "aborted",
+            pendingUploads: ["/tmp/stopped.pdf"],
+            trace: { progressEvents: [], finalText: "partial answer" },
+          }),
+        ),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "work", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(mockBotInstance.postMessage).not.toHaveBeenCalledWith("D1", "partial answer");
+      expect(mockBotInstance.postMessage).not.toHaveBeenCalledWith("D1", "_No response_");
+      expect(mockBotInstance.uploadFile).not.toHaveBeenCalled();
+      expect(deps.repos.conversations.updateWatermark).toHaveBeenCalledWith(1, 1);
+      expect(deps.inboxMessagesRepo?.markConsumed).not.toHaveBeenCalled();
+    });
+
+    it("suppresses a thrown abort and advances the DM watermark", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async (params) => {
+          params.abortController?.abort();
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "work", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+      await flush();
+
+      expect(mockBotInstance.postMessage).not.toHaveBeenCalled();
+      expect(mockBotInstance.uploadFile).not.toHaveBeenCalled();
+      expect(deps.repos.conversations.updateWatermark).toHaveBeenCalledWith(1, 1);
+    });
+
+    it("registers before preprocessing so a stop during MCP setup suppresses the run", async () => {
+      const mcpSetup = deferred<Record<string, never>>();
+      const deps = makeDeps({
+        buildMcpServers: vi.fn().mockReturnValue(mcpSetup.promise),
+        runAgent: vi.fn().mockResolvedValue(makeAgentResult()),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+      const original = dm({ text: "work", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+
+      await vi.waitFor(() =>
+        expect(listActiveRuns()).toEqual([
+          expect.objectContaining({ metadata: { platform: "slack", channelId: "D1", threadTs: null } }),
+        ]),
+      );
+      await dm({ text: "stop", userId: "S1", channelId: "D1", ts: "2", type: "dm" });
+      mcpSetup.resolve({});
+      await original;
+      await flush();
+
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mockBotInstance.postMessage).not.toHaveBeenCalled();
+      expect(deps.repos.conversations.updateWatermark).toHaveBeenCalledWith(1, 1);
+    });
+
     it.each([
       ["  confirm   done a1b2  ", "Marked the follow-up done."],
       ["dismiss c3d4", "Dismissed that reconstructed follow-up."],
@@ -1072,6 +1204,126 @@ describe("slack/adapter", () => {
   });
 
   describe("channel mention handler", () => {
+    it("intercepts stop before enqueue and only aborts the matching thread", async () => {
+      const queue = new QueueManager();
+      const running = heldWork();
+      const targetQueue = queue.getQueue("C1:1");
+      targetQueue.enqueue(running.work);
+      targetQueue.enqueue(async () => {});
+      const targetController = new AbortController();
+      const otherController = new AbortController();
+      registerActiveRun("stop-thread-run", targetController, {
+        platform: "slack",
+        channelId: "C1",
+        threadTs: "1",
+      });
+      registerActiveRun("other-thread-run", otherController, {
+        platform: "slack",
+        channelId: "C1",
+        threadTs: "2",
+      });
+      const getQueue = vi.spyOn(queue, "getQueue");
+      const deps = makeDeps({ queue });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({
+        text: "<@U123> stop it please!",
+        userId: "S1",
+        channelId: "C1",
+        ts: "3",
+        threadTs: "1",
+        type: "channel_mention",
+      });
+
+      expect(targetController.signal.aborted).toBe(true);
+      expect(otherController.signal.aborted).toBe(false);
+      expect(getQueue).not.toHaveBeenCalled();
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(deps.repos.conversations.insertMessage).not.toHaveBeenCalled();
+      expect(mockBotInstance.addReaction).toHaveBeenCalledExactlyOnceWith("C1", "3", "white_check_mark");
+      expect(mockBotInstance.postThreadReply).not.toHaveBeenCalled();
+
+      running.release();
+      await vi.waitFor(() => expect(queue.size()).toBe(0));
+      otherController.abort();
+      unregisterActiveRun("stop-thread-run", targetController);
+      unregisterActiveRun("other-thread-run", otherController);
+    });
+
+    it("ignores a bot-authored stop mention", async () => {
+      const controller = new AbortController();
+      registerActiveRun("bot-stop-target", controller, { platform: "slack", channelId: "C1", threadTs: "1" });
+      const deps = makeDeps();
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({
+        text: "stop",
+        userId: "S1",
+        botId: "B_WORKFLOW",
+        subtype: "bot_message",
+        channelId: "C1",
+        ts: "2",
+        threadTs: "1",
+        type: "channel_mention",
+      });
+
+      expect(controller.signal.aborted).toBe(false);
+      expect(mockBotInstance.addReaction).not.toHaveBeenCalled();
+      unregisterActiveRun("bot-stop-target", controller);
+    });
+
+    it("suppresses every output leak and advances the channel cursor on a returned abort", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockResolvedValue(
+          makeAgentResult({
+            messageSent: true,
+            stopReason: "aborted",
+            pendingUploads: ["/tmp/stopped.pdf"],
+            trace: { progressEvents: [], finalText: "partial answer" },
+          }),
+        ),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "work", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(mockBotInstance.postThreadReply).not.toHaveBeenCalledWith("C1", "1", "partial answer");
+      expect(mockBotInstance.postThreadReply).not.toHaveBeenCalledWith("C1", "1", "_No response_");
+      expect(mockBotInstance.uploadFile).not.toHaveBeenCalled();
+      expect(deps.repos.conversations.updateCursor).toHaveBeenCalledWith({
+        conversationId: 1,
+        scopeType: "slack_thread",
+        scopeKey: "1",
+        messageId: 1,
+      });
+    });
+
+    it("suppresses a thrown abort and advances the channel cursor", async () => {
+      const deps = makeDeps({
+        runAgent: vi.fn().mockImplementation(async (params) => {
+          params.abortController?.abort();
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }),
+      });
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { mention } = getHandlers();
+
+      await mention({ text: "work", userId: "S1", channelId: "C1", ts: "1", type: "channel_mention" });
+      await flush();
+
+      expect(mockBotInstance.postThreadReply).not.toHaveBeenCalled();
+      expect(mockBotInstance.uploadFile).not.toHaveBeenCalled();
+      expect(deps.repos.conversations.updateCursor).toHaveBeenCalledWith({
+        conversationId: 1,
+        scopeType: "slack_thread",
+        scopeKey: "1",
+        messageId: 1,
+      });
+    });
     it("returns the current channel tool progress on /toolprogress with no args", async () => {
       const deps = makeDeps({
         repos: {

@@ -3,6 +3,7 @@ import { createTestLogger } from "../test-utils";
 
 const mocks = vi.hoisted(() => ({
   messageHandler: undefined as undefined | ((event: { message: Record<string, unknown> }) => Promise<void>),
+  mentionHandler: undefined as undefined | ((event: { event: Record<string, unknown> }) => Promise<void>),
   auth: { user_id: "U_SKETCH", bot_id: "B_SKETCH", team_id: "T_SKETCH" },
 }));
 
@@ -12,7 +13,9 @@ vi.mock("@slack/bolt", () => ({
     message(handler: (event: { message: Record<string, unknown> }) => Promise<void>) {
       mocks.messageHandler = handler;
     }
-    event() {}
+    event(name: string, handler: (event: { event: Record<string, unknown> }) => Promise<void>) {
+      if (name === "app_mention") mocks.mentionHandler = handler;
+    }
     action() {}
     async start() {}
     async stop() {}
@@ -38,6 +41,7 @@ describe("SlackBot channel message normalization", () => {
 
   beforeEach(() => {
     mocks.messageHandler = undefined;
+    mocks.mentionHandler = undefined;
     mocks.auth = { user_id: "U_SKETCH", bot_id: "B_SKETCH", team_id: "T_SKETCH" };
   });
 
@@ -79,6 +83,33 @@ describe("SlackBot channel message normalization", () => {
     await deliver({ type: "message", bot_id: "B_SKETCH", channel: "C1", text: "self", ts: "2" });
 
     expect(onChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("forwards bot metadata on app mentions", async () => {
+    const bot = makeBot();
+    const onChannelMention = vi.fn().mockResolvedValue(undefined);
+    bot.onChannelMention(onChannelMention);
+    await bot.start();
+
+    await mocks.mentionHandler?.({
+      event: {
+        user: "U_WORKFLOW",
+        bot_id: "B_WORKFLOW",
+        subtype: "bot_message",
+        channel: "C1",
+        text: "<@U_SKETCH> stop",
+        ts: "1.2",
+      },
+    });
+
+    expect(onChannelMention).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "channel_mention",
+        userId: "U_WORKFLOW",
+        botId: "B_WORKFLOW",
+        subtype: "bot_message",
+      }),
+    );
   });
 
   it("does not forward a userless bot thread reply to the passive thread handler", async () => {

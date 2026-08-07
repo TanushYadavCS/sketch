@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   abortActiveRun,
+  abortActiveRuns,
+  createChildAbortController,
   isActiveRun,
   listActiveRuns,
   registerActiveRun,
@@ -70,6 +72,64 @@ describe("active runs", () => {
 
   it("returns false when interrupting a run that is not live", () => {
     expect(abortActiveRun("missing")).toBe(false);
+  });
+
+  it("aborts only live runs selected by metadata", async () => {
+    const targetController = new AbortController();
+    const secondTargetController = new AbortController();
+    const otherController = new AbortController();
+    const waitForAbort = (controller: AbortController) =>
+      new Promise<void>((resolve) => {
+        controller.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    const targetRun = withActiveRun("target-run", targetController, () => waitForAbort(targetController), {
+      platform: "slack",
+      channelId: "C1",
+      threadTs: "1",
+    });
+    const secondTargetRun = withActiveRun(
+      "second-target-run",
+      secondTargetController,
+      () => waitForAbort(secondTargetController),
+      { platform: "slack", channelId: "C1", threadTs: "1" },
+    );
+    const otherRun = withActiveRun("other-run", otherController, () => waitForAbort(otherController), {
+      platform: "slack",
+      channelId: "C1",
+      threadTs: "2",
+    });
+
+    expect(
+      abortActiveRuns(
+        (entry) =>
+          entry.metadata?.platform === "slack" && entry.metadata.channelId === "C1" && entry.metadata.threadTs === "1",
+      ),
+    ).toBe(2);
+    expect(targetController.signal.aborted).toBe(true);
+    expect(secondTargetController.signal.aborted).toBe(true);
+    expect(otherController.signal.aborted).toBe(false);
+    expect(
+      abortActiveRuns(
+        (entry) =>
+          entry.metadata?.platform === "slack" && entry.metadata.channelId === "C1" && entry.metadata.threadTs === "1",
+      ),
+    ).toBe(0);
+
+    otherController.abort();
+    await Promise.all([targetRun, secondTargetRun, otherRun]);
+  });
+
+  it("links a child controller to its parent without sharing upward aborts", () => {
+    const parentController = new AbortController();
+    const childController = createChildAbortController(parentController.signal);
+
+    childController.abort();
+    expect(childController.signal.aborted).toBe(true);
+    expect(parentController.signal.aborted).toBe(false);
+
+    const secondChildController = createChildAbortController(parentController.signal);
+    parentController.abort();
+    expect(secondChildController.signal.aborted).toBe(true);
   });
 
   it("builds the web chat key from user and conversation", () => {

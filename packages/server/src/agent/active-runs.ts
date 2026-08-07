@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 export interface ActiveRunMetadata {
   platform: "slack" | "web";
   channelId?: string;
@@ -11,6 +13,10 @@ export interface ActiveRunEntry {
 }
 
 const activeRuns = new Map<string, ActiveRunEntry>();
+const activeRunContext = new AsyncLocalStorage<{
+  controller: AbortController;
+  metadata?: ActiveRunMetadata;
+}>();
 
 export function registerActiveRun(key: string, controller: AbortController, metadata?: ActiveRunMetadata): void {
   activeRuns.set(key, { key, controller, metadata });
@@ -26,6 +32,39 @@ export function abortActiveRun(key: string): boolean {
   if (!activeRun || activeRun.controller.signal.aborted) return false;
   activeRun.controller.abort();
   return true;
+}
+
+export function abortActiveRuns(predicate: (entry: ActiveRunEntry) => boolean): number {
+  let aborted = 0;
+  for (const entry of activeRuns.values()) {
+    if (!predicate(entry) || entry.controller.signal.aborted) continue;
+    entry.controller.abort();
+    aborted += 1;
+  }
+  return aborted;
+}
+
+export function createChildAbortController(parentSignal?: AbortSignal): AbortController {
+  const childController = new AbortController();
+  if (!parentSignal) return childController;
+
+  const combinedSignal = AbortSignal.any([parentSignal, childController.signal]);
+  const abortChild = () => childController.abort(combinedSignal.reason);
+  if (combinedSignal.aborted) {
+    abortChild();
+  } else {
+    combinedSignal.addEventListener("abort", abortChild, { once: true });
+  }
+  return childController;
+}
+
+export function getActiveRunContext():
+  | {
+      controller: AbortController;
+      metadata?: ActiveRunMetadata;
+    }
+  | undefined {
+  return activeRunContext.getStore();
 }
 
 export function isActiveRun(key: string): boolean {
@@ -45,7 +84,7 @@ export async function withActiveRun<T>(
 ): Promise<T> {
   registerActiveRun(key, controller, metadata);
   try {
-    return await fn();
+    return await activeRunContext.run({ controller, metadata }, fn);
   } finally {
     unregisterActiveRun(key, controller);
   }

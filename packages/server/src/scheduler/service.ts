@@ -362,6 +362,7 @@ export class TaskScheduler {
       listAgentEnvForRuntime: this.deps.listAgentEnvForRuntime,
       userRepo: this.deps.userRepo,
       runAgent: executionQueue === "scheduled" ? this.deps.runScheduledAgent : this.deps.runAgent,
+      propagateParentAbort: executionQueue === "interactive",
       buildMcpServers: this.deps.buildMcpServers,
       getSlack: this.deps.getSlack,
       inboxMessagesRepo: this.deps.inboxMessagesRepo,

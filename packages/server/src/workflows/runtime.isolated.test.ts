@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
+import { withActiveRun } from "../agent/active-runs";
 import { runAgentRuntimeCore } from "../agent/runtime/core";
 import { DEFAULT_AGENT_RUNTIME_COST_TABLE } from "../agent/runtime/pricing";
 import { executeAutomation, testAutomationStep } from "./runtime";
@@ -193,6 +194,78 @@ function makeStepContent(rows: Array<{ stepId: string; content: string }>) {
 }
 
 describe("executeAutomation agent steps", () => {
+  it("links an interactive workflow child to its Slack parent without sharing its controller", async () => {
+    const parentController = new AbortController();
+    let childController: AbortController | undefined;
+    const runAgent = vi.fn().mockImplementation(async (params) => {
+      childController = params.abortController;
+      return {
+        pendingUploads: [],
+        trace: { finalText: "sketch result" },
+        rawUsage: { toolCalls: [] },
+      };
+    });
+    const params = makeParams({ runAgent, propagateParentAbort: true });
+
+    await withActiveRun("workflow-parent", parentController, () => executeAutomation(params as never), {
+      platform: "slack",
+      channelId: "D123",
+      threadTs: null,
+    });
+
+    expect(childController).toBeInstanceOf(AbortController);
+    expect(childController).not.toBe(parentController);
+    parentController.abort();
+    expect(childController?.signal.aborted).toBe(true);
+  });
+
+  /**
+   * "Run my automation now" from a thread is reentrant under that run, but the automation's own
+   * delivery target is configured at creation time and often points elsewhere. Linking must follow
+   * causation, or a user could start work from a thread and then be unable to stop it.
+   */
+  it("links a child whose automation delivers somewhere other than the triggering thread", async () => {
+    const parentController = new AbortController();
+    let childController: AbortController | undefined;
+    const runAgent = vi.fn().mockImplementation(async (params) => {
+      childController = params.abortController;
+      return {
+        pendingUploads: [],
+        trace: { finalText: "sketch result" },
+        rawUsage: { toolCalls: [] },
+      };
+    });
+    const params = makeParams({ runAgent, propagateParentAbort: true });
+
+    await withActiveRun("workflow-parent", parentController, () => executeAutomation(params as never), {
+      platform: "slack",
+      channelId: "C_SOMEWHERE_ELSE",
+      threadTs: "9999.0000",
+    });
+
+    expect(childController).toBeInstanceOf(AbortController);
+    parentController.abort();
+    expect(childController?.signal.aborted).toBe(true);
+  });
+
+  it("does not link scheduled workflow execution to an interactive parent", async () => {
+    const parentController = new AbortController();
+    const runAgent = vi.fn().mockResolvedValue({
+      pendingUploads: [],
+      trace: { finalText: "sketch result" },
+      rawUsage: { toolCalls: [] },
+    });
+    const params = makeParams({ runAgent, propagateParentAbort: false });
+
+    await withActiveRun("scheduled-parent", parentController, () => executeAutomation(params as never), {
+      platform: "slack",
+      channelId: "D123",
+      threadTs: null,
+    });
+
+    expect(runAgent.mock.calls[0]?.[0].abortController).toBeUndefined();
+  });
+
   it("defaults scheduled agent steps without an explicit mode to the Sketch runtime", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],

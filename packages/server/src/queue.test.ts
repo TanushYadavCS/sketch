@@ -25,6 +25,27 @@ function createWork(order: number[], id: number, delayMs = 0): () => Promise<voi
 }
 
 describe("ChannelQueue", () => {
+  it("clears only the backlog and returns the number of dropped items", async () => {
+    const queue = new ChannelQueue();
+    const running = createGatedWork();
+    const completed: number[] = [];
+
+    queue.enqueue(running.work);
+    queue.enqueue(async () => {
+      completed.push(1);
+    });
+    queue.enqueue(async () => {
+      completed.push(2);
+    });
+
+    expect(queue.clear()).toBe(2);
+    expect(queue.clear()).toBe(0);
+    running.release();
+
+    await vi.waitFor(() => expect(queue.isIdle()).toBe(true));
+    expect(completed).toEqual([]);
+  });
+
   it("processes items sequentially in enqueue order", async () => {
     const queue = new ChannelQueue();
     const order: number[] = [];
@@ -101,6 +122,31 @@ describe("ChannelQueue", () => {
 });
 
 describe("QueueManager", () => {
+  it("clears an existing queue without creating a missing queue", async () => {
+    const manager = new QueueManager();
+    expect(manager.clear("missing")).toBe(0);
+    expect(manager.size()).toBe(0);
+
+    const running = createGatedWork();
+    const otherRunning = createGatedWork();
+    const queue = manager.getQueue("target");
+    const otherQueue = manager.getQueue("other");
+    queue.enqueue(running.work);
+    queue.enqueue(async () => {});
+    queue.enqueue(async () => {});
+    otherQueue.enqueue(otherRunning.work);
+
+    expect(manager.clear("target")).toBe(2);
+    expect(otherQueue.isIdle()).toBe(false);
+    expect(manager.size()).toBe(2);
+
+    running.release();
+    await vi.waitFor(() => expect(manager.size()).toBe(1));
+    otherRunning.release();
+    await vi.waitFor(() => expect(manager.size()).toBe(0));
+    expect(manager.clear("target")).toBe(0);
+  });
+
   it("returns the same instance for the same channelId", () => {
     const manager = new QueueManager();
     const q1 = manager.getQueue("channel-1");

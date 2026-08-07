@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { createChildAbortController, getActiveRunContext } from "../../agent/active-runs";
 import { AgentRunAdmissionCancelledError } from "../../agent/concurrency-limiter";
 import { buildSketchContext } from "../../agent/prompt";
 import type { RunAgentParams, RunAgentResult } from "../../agent/runner";
@@ -252,7 +253,15 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
           },
         });
       } else {
-        result = await this.deps.runAgent(agentParams);
+        const parentContext = getActiveRunContext();
+        const abortController =
+          parentContext?.metadata?.platform === "slack"
+            ? createChildAbortController(parentContext.controller.signal)
+            : undefined;
+        result = await this.deps.runAgent({
+          ...agentParams,
+          ...(abortController ? { abortController } : {}),
+        });
       }
       if (!saved) {
         if (writeAttempted) {
