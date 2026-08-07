@@ -72,25 +72,44 @@ describe("active runs", () => {
     expect(abortActiveRun("missing")).toBe(false);
   });
 
-  it("keeps the parent registered when a reentrant child is aborted", async () => {
+  it("builds the web chat key from user and conversation", () => {
+    expect(webChatRunKey("user", "conversation")).toBe("user:conversation");
+  });
+
+  /**
+   * A reentrant child runs in its parent's channel and thread. Keying on that shared
+   * context would make the child overwrite the parent, so the parent would survive the
+   * child's deregistration only by accident and could never be aborted again. Keys are
+   * per-run precisely so both coexist.
+   */
+  it("keeps a reentrant child in the same channel and thread separate from its parent", async () => {
+    const sharedContext = { platform: "slack", channelId: "C1", threadTs: "1" } as const;
     const parentController = new AbortController();
     const childController = new AbortController();
     const child = deferred<void>();
 
-    registerActiveRun("parent", parentController, { platform: "slack", channelId: "C1", threadTs: "1" });
-    const childRun = withActiveRun("child", childController, () => child.promise, {
-      platform: "slack",
-      channelId: "C1",
-      threadTs: "1",
-    });
+    const parentKey = "slack:11111111-1111-4111-8111-111111111111";
+    const childKey = "slack:22222222-2222-4222-8222-222222222222";
 
-    expect(webChatRunKey("user", "conversation")).toBe("user:conversation");
-    expect(abortActiveRun("child")).toBe(true);
+    registerActiveRun(parentKey, parentController, { ...sharedContext });
+    const childRun = withActiveRun(childKey, childController, () => child.promise, { ...sharedContext });
+
+    const sharedThreadRuns = listActiveRuns().filter(
+      (entry) => entry.metadata?.channelId === "C1" && entry.metadata?.threadTs === "1",
+    );
+    expect(sharedThreadRuns).toHaveLength(2);
+
+    expect(abortActiveRun(childKey)).toBe(true);
     expect(childController.signal.aborted).toBe(true);
-    expect(isActiveRun("parent")).toBe(true);
+    expect(parentController.signal.aborted).toBe(false);
+    expect(isActiveRun(parentKey)).toBe(true);
 
     child.resolve();
     await childRun;
-    unregisterActiveRun("parent", parentController);
+
+    expect(isActiveRun(childKey)).toBe(false);
+    expect(isActiveRun(parentKey)).toBe(true);
+
+    unregisterActiveRun(parentKey, parentController);
   });
 });

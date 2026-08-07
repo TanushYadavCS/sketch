@@ -206,6 +206,12 @@ export function validateConfig(config: Config): void {
     console.error("DB_TYPE=postgres requires DATABASE_URL");
     process.exit(1);
   }
+  if (config.AGENT_RUN_WATCHDOG_MS <= config.AGENT_MODEL_REQUEST_TIMEOUT_MS) {
+    console.error(
+      "AGENT_RUN_WATCHDOG_MS must exceed AGENT_MODEL_REQUEST_TIMEOUT_MS so a stalled request fails on its own deadline before the watchdog reports the run as slow",
+    );
+    process.exit(1);
+  }
   if (config.SLACK_MODE === "http" && !config.SLACK_SIGNING_SECRET) {
     console.error("SLACK_MODE=http requires SLACK_SIGNING_SECRET");
     process.exit(1);
