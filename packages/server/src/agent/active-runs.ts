@@ -94,6 +94,10 @@ export function webChatRunKey(userId: string, conversationId: string): string {
   return `${userId}:${conversationId}`;
 }
 
+export function builderWebChatRunKey(taskId: string): string {
+  return `builder:${taskId}`;
+}
+
 export function withActiveWebChatRun<T>(
   userId: string,
   conversationId: string,
@@ -103,6 +107,18 @@ export function withActiveWebChatRun<T>(
   return withActiveRun(webChatRunKey(userId, conversationId), abortController, fn, { platform: "web" });
 }
 
+export function withActiveBuilderWebChatRun<T>(
+  taskId: string,
+  abortController: AbortController,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return withActiveRun(builderWebChatRunKey(taskId), abortController, fn, { platform: "web" });
+}
+
 export function interruptActiveWebChatRun(userId: string, conversationId: string): boolean {
   return abortActiveRun(webChatRunKey(userId, conversationId));
+}
+
+export function interruptActiveBuilderWebChatRun(taskId: string): boolean {
+  return abortActiveRun(builderWebChatRunKey(taskId));
 }

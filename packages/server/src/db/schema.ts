@@ -839,6 +839,15 @@ export interface ScheduledTaskConversationsTable {
   archived_at: string | null;
 }
 
+export interface ScheduledTaskBuilderLocksTable {
+  task_id: string;
+  conversation_id: string;
+  transcript_user_id: string;
+  acquired_at: Generated<string>;
+  renewed_at: Generated<string>;
+  expires_at: number;
+}
+
 export interface AgentOutputsTable {
   id: string;
   agent_key: string;
@@ -1551,6 +1560,7 @@ export interface DB {
   automation_runs: AutomationRunsTable;
   automation_step_content: AutomationStepContentTable;
   scheduled_task_conversations: ScheduledTaskConversationsTable;
+  scheduled_task_builder_locks: ScheduledTaskBuilderLocksTable;
   agent_outputs: AgentOutputsTable;
   agent_output_items: AgentOutputItemsTable;
   agent_output_deliveries: AgentOutputDeliveriesTable;

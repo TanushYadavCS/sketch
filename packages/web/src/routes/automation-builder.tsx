@@ -7,6 +7,8 @@ import {
   type AutomationBuilderSaveRequest,
   type AutomationDefinition,
   type AutomationStepContent,
+  type ScheduledTaskConversationKind,
+  type ScheduledTaskConversationLock,
   type ScheduledTaskConversationSummary,
   type ScheduledTaskConversationsResponse,
   type StepOutput,
@@ -724,6 +726,13 @@ function conversationDisplayUpdatedAt(
   return summary?.updatedAt ?? conversation.lastActiveAt;
 }
 
+function builderChatMutationError(error: unknown, fallback: string): string {
+  if (error instanceof ApiRequestError && error.code === "BUILDER_CHAT_LOCKED") {
+    return "This automation's builder chat is in use by another user. You can edit the automation, but chat is temporarily locked.";
+  }
+  return error instanceof Error ? error.message : fallback;
+}
+
 function BuilderChatSidecar({
   requestedConversationId,
   taskId,
@@ -783,7 +792,7 @@ function BuilderChatSidecar({
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openConversation(conversation.conversationId);
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Could not start a chat"),
+    onError: (error) => toast.error(builderChatMutationError(error, "Could not start a chat")),
   });
   const selectMutation = useMutation({
     mutationFn: (conversation: ScheduledTaskConversationSummary) =>
@@ -792,7 +801,7 @@ function BuilderChatSidecar({
       replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
       openConversation(conversation.conversationId);
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "This chat is unavailable"),
+    onError: (error) => toast.error(builderChatMutationError(error, "This chat is unavailable")),
   });
   const archiveMutation = useMutation({
     mutationFn: (conversationId: string) => api.scheduledTasks.archiveConversation(taskId, conversationId, true),
@@ -843,6 +852,7 @@ function BuilderChatSidecar({
         ) : !requestedConversationId ? (
           <BuilderChatListView
             conversations={conversationsQuery.data.conversations}
+            builderLock={conversationsQuery.data.builderLock}
             summaryById={webChatSummaryById}
             onSelect={(conversation) => {
               if (conversation.state === "archived") openConversation(conversation.conversationId);
@@ -862,10 +872,12 @@ function BuilderChatSidecar({
           <BuilderChatTranscript
             key={selectedConversation.conversationId}
             conversationId={selectedConversation.conversationId}
+            conversationKind={selectedConversation.kinds[0]}
             taskId={taskId}
             title={title}
             queryKey={queryKey}
             conversationsQueryKey={conversationsQueryKey}
+            onBack={openChatList}
           />
         )}
       </div>
@@ -973,11 +985,13 @@ function BuilderChatHeader({
 
 function BuilderChatListView({
   conversations,
+  builderLock,
   summaryById,
   onSelect,
   selectingConversationId,
 }: {
   conversations: ScheduledTaskConversationSummary[];
+  builderLock?: ScheduledTaskConversationLock;
   summaryById: ReadonlyMap<string, WebChatConversationSummary>;
   onSelect: (conversation: ScheduledTaskConversationSummary) => void;
   selectingConversationId: string | null;
@@ -1029,6 +1043,7 @@ function BuilderChatListView({
   return (
     <div className="chat-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-3">
       <div className="flex min-h-full flex-col gap-5">
+        {builderLock?.state === "held" ? <BuilderChatLockNotice lock={builderLock} /> : null}
         <div>
           <p className="px-2.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">Recent</p>
           {active.length > 0 ? (
@@ -1048,6 +1063,25 @@ function BuilderChatListView({
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function BuilderChatLockNotice({ lock }: { lock: ScheduledTaskConversationLock }) {
+  const isOtherUser = lock.owner === "other";
+  return (
+    <div
+      data-testid="automation-builder-chat-lock-notice"
+      className="mx-2.5 border-l-2 border-amber-500/70 pl-3 text-[12px] leading-5 text-muted-foreground"
+    >
+      <p className="font-medium text-foreground">
+        {isOtherUser ? "Builder chat is in use" : "Builder chat is open in another session"}
+      </p>
+      <p>
+        {isOtherUser
+          ? "You can still inspect and edit this automation. Chat becomes available when the other session leaves or goes idle."
+          : "Return to the open session to continue this chat, or wait for its lease to expire."}
+      </p>
     </div>
   );
 }
@@ -1097,6 +1131,44 @@ function BuilderChatUnavailableState({ onBack }: { onBack: () => void }) {
   );
 }
 
+function BuilderChatLockState({
+  locked,
+  onBack,
+  onRetry,
+}: {
+  locked: boolean;
+  onBack: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <div data-testid="automation-builder-chat-locked" className="flex min-h-full items-center justify-center px-5 py-6">
+      <div className="w-full border-l-2 border-amber-500/70 pl-4">
+        <p className="text-[13px] font-semibold text-foreground">
+          {locked ? "Builder chat is in use" : "Builder chat unavailable"}
+        </p>
+        <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+          {locked
+            ? "Another session owns this active chat. You can still inspect and edit the automation; chat becomes available when the lease is released or expires."
+            : "Sketch could not verify the builder chat lease. Try again before sending a message."}
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 rounded-[7px] border-border/70 bg-background text-[12px] shadow-none"
+            onClick={onRetry}
+          >
+            Try again
+          </Button>
+          <Button size="sm" variant="ghost" className="h-8 rounded-[7px] text-[12px] shadow-none" onClick={onBack}>
+            Back to chats
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BuilderChatArchivedState({
   onBack,
   onRestore,
@@ -1140,20 +1212,29 @@ function BuilderChatArchivedState({
   );
 }
 
+type BuilderChatLockStatus = "loading" | "ready" | "locked" | "error";
+
+const BUILDER_CHAT_LOCK_RENEWAL_INTERVAL_MS = 60_000;
+
 function BuilderChatTranscript({
   conversationId,
+  conversationKind,
   taskId,
   title,
   queryKey,
   conversationsQueryKey,
+  onBack,
 }: {
   conversationId: string;
+  conversationKind: ScheduledTaskConversationKind;
   taskId: string;
   title: string;
   queryKey: readonly unknown[];
   conversationsQueryKey: readonly unknown[];
+  onBack: () => void;
 }) {
   const queryClient = useQueryClient();
+  const [lockStatus, setLockStatus] = useState<BuilderChatLockStatus>("loading");
   const [loadedHistoryKey, setLoadedHistoryKey] = useState<string | null>(null);
   const [historyLoadError, setHistoryLoadError] = useState<string | null>(null);
   const [historyLoadAttempt, setHistoryLoadAttempt] = useState(0);
@@ -1171,8 +1252,32 @@ function BuilderChatTranscript({
     id: conversationId,
     transport,
   });
+  const selectBuilderConversation = useCallback(
+    async (isCancelled?: () => boolean) => {
+      setLockStatus("loading");
+      try {
+        const { conversation } = await api.scheduledTasks.selectConversation(taskId, conversationId, conversationKind);
+        if (isCancelled?.()) return;
+        replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
+        setLockStatus("ready");
+      } catch (error: unknown) {
+        if (isCancelled?.()) return;
+        setLockStatus(error instanceof ApiRequestError && error.code === "BUILDER_CHAT_LOCKED" ? "locked" : "error");
+      }
+    },
+    [conversationId, conversationKind, conversationsQueryKey, queryClient, taskId],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    void selectBuilderConversation(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectBuilderConversation]);
+
+  const lockReady = lockStatus === "ready";
   const historyKey = `${conversationId}:${historyLoadAttempt}`;
-  const historyReady = loadedHistoryKey === historyKey;
+  const historyReady = lockReady && loadedHistoryKey === historyKey;
   const latestMessage = chat.messages.at(-1);
   const threadScrollKey = latestMessage
     ? [
@@ -1217,6 +1322,14 @@ function BuilderChatTranscript({
 
   useEffect(() => {
     let cancelled = false;
+    if (!lockReady) {
+      setLoadedHistoryKey(null);
+      setHistoryLoadError(null);
+      chat.setMessages([]);
+      return () => {
+        cancelled = true;
+      };
+    }
     setLoadedHistoryKey(null);
     setHistoryLoadError(null);
     chat.setMessages([]);
@@ -1234,7 +1347,22 @@ function BuilderChatTranscript({
     return () => {
       cancelled = true;
     };
-  }, [chat.setMessages, conversationId, historyKey]);
+  }, [chat.setMessages, conversationId, historyKey, lockReady]);
+
+  useEffect(() => {
+    if (!lockReady) return;
+    const timer = window.setInterval(() => {
+      void api.scheduledTasks
+        .selectConversation(taskId, conversationId, conversationKind)
+        .then(({ conversation }) => {
+          replaceBuilderConversationCache(queryClient, conversationsQueryKey, conversation);
+        })
+        .catch((error: unknown) => {
+          setLockStatus(error instanceof ApiRequestError && error.code === "BUILDER_CHAT_LOCKED" ? "locked" : "error");
+        });
+    }, BUILDER_CHAT_LOCK_RENEWAL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [conversationId, conversationKind, conversationsQueryKey, lockReady, queryClient, taskId]);
 
   useEffect(() => {
     if (!historyReady || !threadScrollKey) return;
@@ -1263,10 +1391,20 @@ function BuilderChatTranscript({
     if (stoppingRun) return;
     setStoppingRun(true);
     void api.webChat
-      .interrupt(conversationId)
+      .interrupt(conversationId, taskId)
       .catch(() => undefined)
       .finally(() => setStoppingRun(false));
-  }, [conversationId, stoppingRun]);
+  }, [conversationId, stoppingRun, taskId]);
+
+  if (lockStatus === "locked" || lockStatus === "error") {
+    return (
+      <BuilderChatLockState
+        locked={lockStatus === "locked"}
+        onBack={onBack}
+        onRetry={() => void selectBuilderConversation()}
+      />
+    );
+  }
 
   return (
     <>

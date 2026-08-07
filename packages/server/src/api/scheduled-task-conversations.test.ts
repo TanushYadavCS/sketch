@@ -104,6 +104,13 @@ describe("scheduled task conversation API", () => {
     expect(refresh.status).toBe(200);
     expect((await refresh.json()).conversation.conversationId).toBe(firstConversationId);
 
+    const archive = await app.request(`/api/scheduled-tasks/task-conversations/conversations/${firstConversationId}`, {
+      method: "PATCH",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ archived: true }),
+    });
+    expect(archive.status).toBe(200);
+
     const second = await app.request("/api/scheduled-tasks/task-conversations/conversations", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
@@ -113,23 +120,17 @@ describe("scheduled task conversation API", () => {
     const secondConversationId = (await second.json()).conversation.conversationId;
     expect(secondConversationId).not.toBe(firstConversationId);
 
-    const list = await app.request("/api/scheduled-tasks/task-conversations/conversations", {
+    const list = await app.request("/api/scheduled-tasks/task-conversations/conversations?includeArchived=true", {
       headers: { Cookie: cookie },
     });
     expect(list.status).toBe(200);
     expect((await list.json()).conversations).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ conversationId: firstConversationId, state: "active" }),
+        expect.objectContaining({ conversationId: firstConversationId, state: "archived" }),
         expect.objectContaining({ conversationId: secondConversationId, state: "active" }),
       ]),
     );
 
-    const archive = await app.request(`/api/scheduled-tasks/task-conversations/conversations/${firstConversationId}`, {
-      method: "PATCH",
-      headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ archived: true }),
-    });
-    expect(archive.status).toBe(200);
     expect((await archive.json()).conversation).toMatchObject({
       conversationId: firstConversationId,
       state: "archived",
@@ -216,6 +217,43 @@ describe("scheduled task conversation API", () => {
     });
     expect(memberResponse.status).toBe(404);
     expect(admin.id).not.toBe(owner.id);
+  });
+
+  it("does not let an admin create a second active builder chat while the owner holds one", async () => {
+    await seedAdmin(db);
+    const owner = await createUserRepository(db).create({ name: "Owner", email: "owner-builder-lock@test.com" });
+    await seedTask(db, "locked-task", owner.id);
+
+    const app = createApp(db, config, {
+      scheduler: {
+        pauseTask: vi.fn(),
+        resumeTask: vi.fn(),
+        removeTask: vi.fn(),
+        executeTaskById: vi.fn(),
+      },
+    });
+    const ownerCookie = await memberCookie(db, owner.id);
+    const ownerStart = await app.request("/api/scheduled-tasks/locked-task/conversations", {
+      method: "POST",
+      headers: { Cookie: ownerCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ createNew: true }),
+    });
+    expect(ownerStart.status).toBe(201);
+
+    const adminCookie = await loginAdmin(app);
+    const adminStart = await app.request("/api/scheduled-tasks/locked-task/conversations", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ createNew: true }),
+    });
+
+    expect(adminStart.status).toBe(409);
+    await expect(adminStart.json()).resolves.toMatchObject({
+      error: { code: "BUILDER_CHAT_LOCKED" },
+    });
+    await expect(
+      db.selectFrom("scheduled_task_conversations").selectAll().where("task_id", "=", "locked-task").execute(),
+    ).resolves.toEqual([expect.objectContaining({ transcript_user_id: owner.id, kind: "builder" })]);
   });
 
   it("rejects unrelated or malformed selections without creating associations", async () => {
