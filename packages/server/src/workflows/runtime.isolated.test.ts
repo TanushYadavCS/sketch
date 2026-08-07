@@ -168,8 +168,9 @@ function makeBrokerProvider(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function makeActionTask(steps: Array<Record<string, unknown>>) {
+function makeActionTask(steps: Array<Record<string, unknown>>, overrides: Record<string, unknown> = {}) {
   return makeTask({
+    ...overrides,
     steps: JSON.stringify([
       { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
       ...steps,
@@ -596,16 +597,19 @@ describe("executeAutomation action steps", () => {
     };
     const loadIntegrationProvider = vi.fn().mockResolvedValue(null);
     const params = makeParams({
-      task: makeActionTask([
-        {
-          id: "act1",
-          type: "action",
-          label: "Find Acme",
-          icon: "magnifying-glass",
-          position: { x: 0, y: 100 },
-          actionCapabilities: { sketchTools: ["searchEntities"], usesIntegrationActions: false },
-        },
-      ]),
+      task: makeActionTask(
+        [
+          {
+            id: "act1",
+            type: "action",
+            label: "Find Acme",
+            icon: "magnifying-glass",
+            position: { x: 0, y: 100 },
+            actionCapabilities: { sketchTools: ["searchEntities"], usesIntegrationActions: false },
+          },
+        ],
+        { output_mode: "silent" },
+      ),
       stepContentRepo: makeStepContent([
         {
           stepId: "act1",
@@ -631,6 +635,99 @@ describe("executeAutomation action steps", () => {
     expect(automationCapabilityRegistry.createTools).toHaveBeenCalledWith(
       expect.objectContaining({ allowedTools: ["searchEntities"] }),
     );
+  });
+
+  it("fails action steps that use the legacy Sketch tool namespace", async () => {
+    const automationCapabilityRegistry = { createTools: vi.fn() };
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(null);
+    const params = makeParams({
+      task: makeActionTask([
+        {
+          id: "act1",
+          type: "action",
+          label: "Find Acme",
+          icon: "magnifying-glass",
+          position: { x: 0, y: 100 },
+          actionCapabilities: { sketchTools: ["search"], usesIntegrationActions: false },
+        },
+      ]),
+      stepContentRepo: makeStepContent([
+        { stepId: "act1", content: "return await ctx.sketch.search({ query: 'Acme' });" },
+      ]),
+      loadIntegrationProvider,
+      automationCapabilityRegistry,
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("invalid Sketch tool namespace");
+    expect(automationCapabilityRegistry.createTools).not.toHaveBeenCalled();
+    expect(loadIntegrationProvider).not.toHaveBeenCalled();
+  });
+
+  it("fails a run when a Sketch capability fails even if the script catches it", async () => {
+    const search = vi.fn().mockRejectedValue(new Error("search backend unavailable"));
+    const createTools = vi.fn((options: { context: { onFailure?: (capability: string, error: unknown) => void } }) => ({
+      search: async (args: unknown) => {
+        try {
+          return await search(args);
+        } catch (error) {
+          options.context.onFailure?.("search", error);
+          throw error;
+        }
+      },
+    }));
+    const params = makeParams({
+      task: makeActionTask([
+        {
+          id: "act1",
+          type: "action",
+          label: "Find Acme",
+          icon: "magnifying-glass",
+          position: { x: 0, y: 100 },
+          actionCapabilities: { sketchTools: ["search"], usesIntegrationActions: false },
+        },
+      ]),
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: `
+            try {
+              await ctx.tools.search({ query: "Acme" });
+            } catch {
+              return { items: [] };
+            }
+          `,
+        },
+      ]),
+      automationCapabilityRegistry: { createTools },
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain(
+      'Sketch capability "search" failed: search backend unavailable',
+    );
+    expect(params.sendMessage).toHaveBeenCalledWith(
+      expect.stringContaining('Sketch capability "search" failed: search backend unavailable'),
+    );
+  });
+
+  it("fails message delivery instead of JSON-stringifying structured final output", async () => {
+    const params = makeParams({
+      task: makeActionTask([{ id: "act1", type: "action", label: "Report", icon: "code", position: { x: 0, y: 100 } }]),
+      stepContentRepo: makeStepContent([{ stepId: "act1", content: 'return { summary: "done" };' }]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("Message delivery requires");
+    expect(params.sendMessage).toHaveBeenCalledWith(expect.stringContaining("Message delivery requires"));
+    expect(params.sendMessage).not.toHaveBeenCalledWith(expect.stringContaining('"summary"'));
   });
 
   it("executes action scripts in process with previous input and script context", async () => {
@@ -673,7 +770,7 @@ describe("executeAutomation action steps", () => {
           content: `
             export default async function action(input, ctx, signal) {
             if (input.prepared !== 42) throw new Error("previous output missing");
-            return { done: true, previousEnv: input.envValue, workspaceDir: input.workspaceDir };
+            return "Done: previous environment value was " + input.envValue + "; workspace is " + input.workspaceDir;
             }
           `,
         },
@@ -685,11 +782,9 @@ describe("executeAutomation action steps", () => {
     const result = await executeAutomation(params as never);
 
     expect(result.status).toBe("completed");
-    expect(result.finalOutput).toEqual({
-      done: true,
-      previousEnv: "safe-value",
-      workspaceDir: "/tmp/sketch-runtime-test/workspaces/user-1",
-    });
+    expect(result.finalOutput).toBe(
+      "Done: previous environment value was safe-value; workspace is /tmp/sketch-runtime-test/workspaces/user-1",
+    );
     expect(result.stepOutputs.act1.output).toEqual({
       prepared: 42,
       envValue: "safe-value",
@@ -698,11 +793,7 @@ describe("executeAutomation action steps", () => {
     expect(logger.child).toHaveBeenCalledWith({ taskId: "task-1", runId: "run-1", stepId: "act1" });
     expect(childLogger.info).toHaveBeenCalledWith({ ok: true }, "action script log");
     expect(params.sendMessage).toHaveBeenCalledWith(
-      JSON.stringify(
-        { done: true, previousEnv: "safe-value", workspaceDir: "/tmp/sketch-runtime-test/workspaces/user-1" },
-        null,
-        2,
-      ),
+      "Done: previous environment value was safe-value; workspace is /tmp/sketch-runtime-test/workspaces/user-1",
     );
     expect(spawn).not.toHaveBeenCalled();
     expect(listAgentEnvForRuntime).toHaveBeenCalledWith({
@@ -723,9 +814,10 @@ describe("executeAutomation action steps", () => {
     await writeFile(filePath, "jpeg-bytes");
     const executeAction = vi.fn().mockResolvedValue({ id: "clickup-task-1" });
     const params = makeParams({
-      task: makeActionTask([
-        { id: "act1", type: "action", label: "Create ClickUp task", icon: "code", position: { x: 0, y: 100 } },
-      ]),
+      task: makeActionTask(
+        [{ id: "act1", type: "action", label: "Create ClickUp task", icon: "code", position: { x: 0, y: 100 } }],
+        { output_mode: "silent" },
+      ),
       triggerData: { filePath },
       trustedLocalFileRoot,
       stepContentRepo: makeStepContent([

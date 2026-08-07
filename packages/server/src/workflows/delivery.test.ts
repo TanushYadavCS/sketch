@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
-import { resolveWorkflowDelivery } from "./delivery";
+import { requireWorkflowMessageText, resolveWorkflowDelivery } from "./delivery";
 
 function makeTask(overrides: Partial<ScheduledTaskRow> = {}): ScheduledTaskRow {
   return {
@@ -64,5 +64,18 @@ describe("resolveWorkflowDelivery", () => {
       threadTs: null,
       mode: "deliver",
     });
+  });
+});
+
+describe("requireWorkflowMessageText", () => {
+  it("accepts and trims human-readable text", () => {
+    expect(requireWorkflowMessageText("  *Done*\n  ")).toBe("*Done*");
+  });
+
+  it("rejects structured output", () => {
+    expect(() => requireWorkflowMessageText({ summary: "Done" })).toThrow("human-readable string");
+    expect(() => requireWorkflowMessageText(["Done"])).toThrow("human-readable string");
+    expect(() => requireWorkflowMessageText(' {"summary":"Done"} ')).toThrow("serialized JSON");
+    expect(() => requireWorkflowMessageText('```json\n{"summary":"Done"}\n``` ')).toThrow("serialized JSON");
   });
 });

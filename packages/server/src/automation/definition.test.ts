@@ -91,4 +91,25 @@ describe("automation action capability validation", () => {
       }),
     );
   });
+
+  it("rejects the legacy Sketch tool namespace", () => {
+    const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
+    request.stepContent.action.content = "return await ctx.sketch.searchEntities({ queries: ['Acme'] });";
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "SKETCH_TOOL_NAMESPACE_INVALID" })]),
+      }),
+    );
+  });
+
+  it("requires scripts to declare each referenced Sketch capability", () => {
+    const request = requestForAction({ sketchTools: [], usesIntegrationActions: false });
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "SKETCH_TOOL_NOT_DECLARED" })]),
+      }),
+    );
+  });
 });

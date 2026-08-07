@@ -14,13 +14,14 @@ import { join, sep } from "node:path";
 import { type AutomationSketchToolName, workflowStepUsesIntegrationActions } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { removeReservedAgentEnv } from "../agent/environment";
-import { buildPlatformFormattingLines, buildSketchContext } from "../agent/prompt";
+import { buildAutomationMessageDeliveryLines, buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
 import type { AgentRuntimeProviderFactoryConfig } from "../agent/runtime/contracts";
 import { runAgentRuntimeCore } from "../agent/runtime/core";
 import { createAgentRuntimeWorkspaceToolScopePolicy } from "../agent/runtime/path-guard";
 import { createAgentRuntimeProvider } from "../agent/runtime/provider";
 import { createAgentRuntimeWorkspaceTools } from "../agent/runtime/workspace-tools";
+import { hasInvalidAutomationSketchToolNamespace, undeclaredAutomationSketchTools } from "../automation/action-script";
 import {
   type AutomationCapabilityCallEvent,
   type AutomationCapabilityRegistry,
@@ -37,7 +38,7 @@ import type { IntegrationProvider } from "../integrations/types";
 import { cleanupIntegrationAccess, startIntegrationAccess } from "../integrations/wrapper";
 import type { Logger } from "../logger";
 import type { RecordWorkflowStep, WorkflowStepUsage } from "../telemetry/agent-run-telemetry";
-import { resolveWorkflowDelivery } from "./delivery";
+import { requireWorkflowMessageText, resolveWorkflowDelivery } from "./delivery";
 import type { StepOutput, WorkflowEdge, WorkflowStep } from "./types";
 
 export interface ExecuteAutomationParams {
@@ -171,10 +172,13 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   const stepOutputs: Record<string, StepOutput> = {};
   let previousOutput: unknown = triggerData ?? null;
   let failed = false;
+  const lastExecutionStepId = executionSteps[executionSteps.length - 1]?.id;
 
   for (const step of executionSteps) {
     const content = contentMap.get(step.id);
     const startTime = Date.now();
+    const isMessageDeliveryStep =
+      Boolean(sendMessage) && task.output_mode !== "silent" && step.id === lastExecutionStepId;
 
     logger.info(
       { taskId: task.id, runId, stepId: step.id, stepType: step.type, stepLabel: step.label },
@@ -201,12 +205,14 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         creator,
         creatorId,
         creatorEmail,
+        isMessageDeliveryStep,
       });
 
       const normalizedOutput = normalizeStepOutput(output);
+      const outputForStep = isMessageDeliveryStep ? requireWorkflowMessageText(normalizedOutput) : normalizedOutput;
       const durationMs = Date.now() - startTime;
-      stepOutputs[step.id] = { output: normalizedOutput, status: "completed", duration_ms: durationMs };
-      previousOutput = normalizedOutput;
+      stepOutputs[step.id] = { output: outputForStep, status: "completed", duration_ms: durationMs };
+      previousOutput = outputForStep;
 
       logger.info({ taskId: task.id, runId, stepId: step.id, durationMs }, "Automation: step completed");
 
@@ -218,7 +224,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         stepId: step.id,
         status: "completed",
         durationMs,
-        outputSummary: summarizeOutput(normalizedOutput),
+        outputSummary: summarizeOutput(outputForStep),
       });
     } catch (err) {
       const durationMs = Date.now() - startTime;
@@ -275,10 +281,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     logger.info({ taskId: task.id, runId }, "Automation: execution completed");
 
     if (sendMessage && task.output_mode !== "silent") {
-      if (finalOutput != null) {
-        const message = typeof finalOutput === "string" ? finalOutput : JSON.stringify(finalOutput, null, 2);
-        await sendMessage(message);
-      }
+      if (finalOutput != null) await sendMessage(requireWorkflowMessageText(finalOutput));
     }
   }
 
@@ -423,6 +426,7 @@ async function executeWorkflowStep(params: {
   creator: Awaited<ReturnType<NonNullable<RunAgentParams["userRepo"]>["findById"]>> | undefined;
   creatorId: string | null;
   creatorEmail: string | null;
+  isMessageDeliveryStep?: boolean;
 }): Promise<unknown> {
   const { step, content, input, task, runId, workspaceDir, creator, creatorId, creatorEmail } = params;
   const runtimeParams = params.params;
@@ -477,6 +481,7 @@ async function executeWorkflowStep(params: {
       inboxMessagesRepo: runtimeParams.inboxMessagesRepo,
       sendDm: runtimeParams.sendDm,
       outputPlatform: resolveWorkflowDelivery(task).platform,
+      isMessageDeliveryStep: params.isMessageDeliveryStep ?? false,
       recordWorkflowStep: runtimeParams.recordWorkflowStep,
       limitAgentExecution: runtimeParams.limitAgentExecution,
       loadAgentRuntimeProviderConfig: runtimeParams.loadAgentRuntimeProviderConfig,
@@ -741,6 +746,15 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
   const { script, step, input, runId, logger, creatorId, creatorEmail, workspaceDir, loadIntegrationProvider } = params;
   const usesIntegrationActions = workflowStepUsesIntegrationActions(step);
   const sketchTools = step.actionCapabilities?.sketchTools ?? [];
+  if (hasInvalidAutomationSketchToolNamespace(script)) {
+    throw new Error(`Action step ${step.id} uses an invalid Sketch tool namespace; use ctx.tools.<capability>`);
+  }
+  const undeclaredSketchTools = undeclaredAutomationSketchTools(script, sketchTools as AutomationSketchToolName[]);
+  if (undeclaredSketchTools.length > 0) {
+    throw new Error(
+      `Action step ${step.id} calls undeclared Sketch tool(s): ${undeclaredSketchTools.map((tool) => `ctx.tools.${tool}`).join(", ")}`,
+    );
+  }
   if (sketchTools.length > 0 && !creatorId) {
     throw new Error(`Action step ${step.id} requires an automation creator to use Sketch tools`);
   }
@@ -778,6 +792,7 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
         { once: true },
       );
     });
+    let capabilityFailure: Error | null = null;
 
     const ctx = buildScriptContext({
       taskId: params.taskId,
@@ -801,6 +816,11 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
                 logger,
                 signal: controller.signal,
                 recordCall: params.recordAutomationCapabilityCall,
+                onFailure: (capability, error) => {
+                  if (capabilityFailure) return;
+                  const detail = error instanceof Error ? error.message : String(error);
+                  capabilityFailure = new Error(`Sketch capability "${capability}" failed: ${detail}`);
+                },
               },
               allowedTools: sketchTools as AutomationSketchToolName[],
             })
@@ -826,6 +846,7 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
     try {
       const fn = AsyncFunction("input", "ctx", "signal", wrapActionScript(script));
       const output = await Promise.race([fn(input ?? null, ctx, controller.signal), timeoutPromise]);
+      if (capabilityFailure) throw capabilityFailure;
       logger.info({ runId, stepId: step.id, timeoutMs }, "Automation action: script completed");
       return output ?? null;
     } finally {
@@ -969,6 +990,7 @@ interface AgentStepParams {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
   outputPlatform: "slack" | "whatsapp";
+  isMessageDeliveryStep: boolean;
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
@@ -1006,17 +1028,16 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
   // Anthropic-format model ID here breaks every non-Anthropic backend.
   const modelOverride = step.agentModel;
 
-  // System prompt: generic workflow-step directive + channel-native formatting
-  // rules so the final step of an automation renders correctly wherever the
-  // output is delivered (Slack mrkdwn vs WhatsApp conventions). Uses the same
-  // helper the main chat agent uses via buildSystemContext — any tweaks to
-  // platform formatting rules land in both paths at once.
   const systemPromptLines = [
     "You are a workflow step in an automation. Complete the task described below and return a concise result. Do not ask questions — work with what you have.",
     "",
-    "The text you return is delivered directly to the user's chat channel. Format it for that channel:",
-    "",
-    ...buildPlatformFormattingLines(outputPlatform),
+    ...(params.isMessageDeliveryStep
+      ? [
+          "This is the final message delivery. Return only text that can be sent directly to the user's chat channel:",
+          "",
+          ...buildAutomationMessageDeliveryLines(outputPlatform),
+        ]
+      : ["This result is passed to a later workflow step. Structured JSON is allowed when useful."]),
   ];
 
   const limitAgentExecution = params.limitAgentExecution ?? (<T>(work: () => Promise<T>) => work());
@@ -1090,10 +1111,6 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
     "Automation agent: step completed",
   );
 
-  // Return the raw assistant text, not a wrapper object. The delivery path
-  // (executeAutomation) sends strings as-is and stringifies objects — so the
-  // raw string both renders cleanly in Slack/WhatsApp and makes the run log
-  // readable (no `{ "response": "..." }` wrapper in stored step_outputs).
   return lastText;
 }
 
@@ -1108,9 +1125,13 @@ async function executeAiSdkLightAgentStep(params: AgentStepParams): Promise<unkn
   const systemPromptLines = [
     "You are a workflow step in an automation. Complete the task described below and return a concise result. Do not ask questions — work with what you have.",
     "",
-    "The text you return is delivered directly to the user's chat channel. Format it for that channel:",
-    "",
-    ...buildPlatformFormattingLines(outputPlatform),
+    ...(params.isMessageDeliveryStep
+      ? [
+          "This is the final message delivery. Return only text that can be sent directly to the user's chat channel:",
+          "",
+          ...buildAutomationMessageDeliveryLines(outputPlatform),
+        ]
+      : ["This result is passed to a later workflow step. Structured JSON is allowed when useful."]),
   ];
   const provider = createAgentRuntimeProvider({
     ...providerConfig,
@@ -1194,7 +1215,12 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
     currentMessage: [
       "You are executing one step of a scheduled workflow.",
       "Complete the step using the provided input and available tools.",
-      "Do not ask follow-up questions. Return the result for the next workflow step or final delivery.",
+      ...(params.isMessageDeliveryStep
+        ? [
+            "This is the final Slack or WhatsApp message delivery. Return only a concise, human-readable message body.",
+            ...buildAutomationMessageDeliveryLines(outputPlatform),
+          ]
+        : ["Do not ask follow-up questions. Return the result for the next workflow step or final delivery."]),
       "",
       `Step: ${step.label}`,
       "",

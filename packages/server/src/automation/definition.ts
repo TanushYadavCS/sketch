@@ -20,6 +20,7 @@ import type { ScheduledTasksTable } from "../db/schema";
 import { parseOnceSchedule } from "../scheduler/parse-once";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerSteps } from "../scheduler/trigger-metadata";
 import { resolveWorkflowDelivery } from "../workflows/delivery";
+import { hasInvalidAutomationSketchToolNamespace, undeclaredAutomationSketchTools } from "./action-script";
 
 export type BuilderValidationIssue = { code: string; message: string; path?: string };
 
@@ -272,6 +273,27 @@ export function validateAutomationBuilderSaveRequest(params: {
           `Action step "${step.label}" requires script content`,
           `stepContent.${step.id}`,
         );
+      }
+      if (content?.contentType === "script") {
+        if (hasInvalidAutomationSketchToolNamespace(content.content)) {
+          addIssue(
+            issues,
+            "SKETCH_TOOL_NAMESPACE_INVALID",
+            `Action step "${step.label}" must call Sketch tools through ctx.tools, not ctx.sketch or ctx.sketchTools`,
+            `stepContent.${step.id}`,
+          );
+        }
+        for (const tool of undeclaredAutomationSketchTools(
+          content.content,
+          step.actionCapabilities?.sketchTools ?? [],
+        )) {
+          addIssue(
+            issues,
+            "SKETCH_TOOL_NOT_DECLARED",
+            `Action step "${step.label}" calls ctx.tools.${tool} but does not declare that capability`,
+            `stepContent.${step.id}`,
+          );
+        }
       }
       if (step.actionCapabilities) {
         if (!step.actionCapabilities.usesIntegrationActions && step.actionCapabilities.sketchTools.length === 0) {

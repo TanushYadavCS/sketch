@@ -78,11 +78,13 @@ describe("automation Sketch capability registry", () => {
   });
 
   it("fails when a structured capability is unavailable instead of returning an empty result", async () => {
+    const onFailure = vi.fn();
     const tools = createAutomationCapabilityRegistry().createTools({
-      context: createContext({ db: undefined }) as never,
+      context: createContext({ db: undefined, onFailure }) as never,
       allowedTools: ["searchEntities"],
     });
 
     await expect(tools.searchEntities?.({ queries: ["Acme"] })).rejects.toThrow("unavailable or invalid response");
+    expect(onFailure).toHaveBeenCalledWith("searchEntities", expect.any(Error));
   });
 });

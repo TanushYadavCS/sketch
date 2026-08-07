@@ -62,6 +62,7 @@ export interface AutomationCapabilityContext {
   logger: Logger;
   signal: AbortSignal;
   recordCall?: (event: AutomationCapabilityCallEvent) => void | Promise<void>;
+  onFailure?: (capability: AutomationSketchToolName, error: unknown) => void;
 }
 
 export interface AutomationCapabilityCallEvent {
@@ -235,6 +236,7 @@ async function invoke<T>(
     });
     return result;
   } catch (error) {
+    context.onFailure?.(capability, error);
     await reportCall(context, {
       taskId: context.taskId,
       runId: context.runId,

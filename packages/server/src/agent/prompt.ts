@@ -248,6 +248,16 @@ function renderInboxMessage(message: InboxMessageContext): string[] {
 
 export type ResponseSurface = "slack" | "whatsapp" | "web";
 
+export function buildAutomationMessageDeliveryLines(platform: "slack" | "whatsapp"): string[] {
+  return [
+    "Workflow outputs may be passed to later steps. If this is the final Slack or WhatsApp message delivery, return only a concise, human-readable message body as plain text.",
+    "Do not return a JSON object or array, JSON.stringify output, code-fenced JSON, raw tool payloads, schema fields, debug output, or stack traces.",
+    "Use short headings and bullet lists. If no matching data exists, state that plainly and include the relevant time window.",
+    "",
+    ...buildPlatformFormattingLines(platform),
+  ];
+}
+
 export function buildPlatformFormattingLines(platform: ResponseSurface): string[] {
   if (platform === "slack") {
     return [
