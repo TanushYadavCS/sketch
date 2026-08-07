@@ -37,7 +37,7 @@ import type { LocalClaudeSessionService } from "../local-devices/claude-sessions
 import type { LocalDeviceGateway } from "../local-devices/gateway";
 import type { Logger } from "../logger";
 import type { TaskScheduler } from "../scheduler/service";
-import type { TaskContext } from "../scheduler/types";
+import type { CurrentAutomation, TaskContext } from "../scheduler/types";
 import type { SlackBot } from "../slack/bot";
 import type { TranscriptionSettings } from "../transcription/service";
 import { resolveTranscriptionConfig } from "../transcription/service";
@@ -313,6 +313,7 @@ export interface RunAgentParams {
   sessionMode?: "fresh" | "persistent" | "chat";
   persistSession?: boolean;
   taskContext?: TaskContext;
+  currentAutomation?: CurrentAutomation;
   getSlack?: () => SlackBot | null;
   scheduler?: TaskScheduler;
   chatAutomationAuthoring?: ChatAutomationAuthoring;
@@ -1209,6 +1210,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     getSlack: params.getSlack,
     loadIntegrationProvider: params.loadIntegrationProvider,
     taskContext: params.taskContext,
+    currentAutomation: params.currentAutomation ?? params.taskContext?.currentAutomation,
     scheduler: params.scheduler,
     chatAuthoring: params.chatAutomationAuthoring,
     stepContentRepo: params.stepContentRepo,

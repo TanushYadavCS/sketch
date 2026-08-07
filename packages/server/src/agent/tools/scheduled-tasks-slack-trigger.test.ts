@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createScheduledTaskRepository } from "../../db/repositories/scheduled-tasks";
+import { createTestDb } from "../../test-utils";
 import { handleManageScheduledTasks } from "./scheduled-tasks";
 
 const trigger = (channelId: string) => ({
@@ -22,6 +24,11 @@ const agent = {
 function makeDeps(overrides: Record<string, unknown> = {}) {
   const scheduler = {
     addTask: vi.fn().mockResolvedValue({ id: "task-1", status: "active", delivery: { mode: "silent" } }),
+    refreshTaskSchedule: vi.fn().mockImplementation(async (id: string) => ({
+      id,
+      status: "active",
+      delivery: { mode: "silent" },
+    })),
     getTaskById: vi.fn().mockResolvedValue({
       id: "task-1",
       platform: "slack",
@@ -55,17 +62,29 @@ function makeDeps(overrides: Record<string, unknown> = {}) {
 }
 
 describe("manage_scheduled_tasks Slack channel trigger", () => {
+  let db: Awaited<ReturnType<typeof createTestDb>>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
   it("infers the external Slack trigger schedule when adding a channel-message workflow", async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ db });
 
     await handleManageScheduledTasks(
       { action: "add", title: "Slack bug report", steps: [trigger("C1"), agent], output_mode: "silent" },
       deps as never,
     );
 
-    expect(deps.scheduler.addTask).toHaveBeenCalledWith(
-      expect.objectContaining({ scheduleType: "external", scheduleValue: "slack_channel_message" }),
-    );
+    expect(deps.scheduler.refreshTaskSchedule).toHaveBeenCalledOnce();
+    expect(deps.scheduler.addTask).not.toHaveBeenCalled();
+    await expect(createScheduledTaskRepository(db).listAll()).resolves.toEqual([
+      expect.objectContaining({ schedule_type: "external", schedule_value: "slack_channel_message" }),
+    ]);
   });
 
   it("rejects a blank Slack channel ID", async () => {

@@ -25,6 +25,10 @@ interface HistoryHarness {
   runAgent: ReturnType<typeof vi.fn>;
 }
 
+function recentHistoryTimestamp(minutesAgo: number): string {
+  return new Date(Date.now() - 24 * 60 * 60_000 - minutesAgo * 60_000).toISOString();
+}
+
 function createMockRuntime(): WhatsAppRuntime & Pick<HistoryHarness, "emitHistory"> {
   let historyHandler:
     | ((messages: WhatsAppInboundMessage[], metadata?: WhatsAppHistoryBatchMetadata) => Promise<unknown>)
@@ -188,17 +192,16 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
 
     it("replays after a simulated crash without duplicate rows", async () => {
       const groupJid = `${randomUUID()}@g.us`;
-      const newestHistoryTimestamp = Date.now() - 60_000;
       const batch1 = [
         groupMessage({
           groupJid,
           providerMessageId: "history-001",
-          providerTimestamp: new Date(newestHistoryTimestamp).toISOString(),
+          providerTimestamp: recentHistoryTimestamp(0),
         }),
         groupMessage({
           groupJid,
           providerMessageId: "history-002",
-          providerTimestamp: new Date(newestHistoryTimestamp - 60_000).toISOString(),
+          providerTimestamp: recentHistoryTimestamp(1),
         }),
       ];
       const batch2 = [
@@ -206,7 +209,7 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
         groupMessage({
           groupJid,
           providerMessageId: "history-003",
-          providerTimestamp: new Date(newestHistoryTimestamp - 120_000).toISOString(),
+          providerTimestamp: recentHistoryTimestamp(2),
         }),
       ];
       const conversations = createConversationRepository(db);
@@ -263,7 +266,6 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
 
     it("keeps backfilled conversation rows out of the live chunker", async () => {
       const groupJid = `${randomUUID()}@g.us`;
-      const newestHistoryTimestamp = Date.now() - 60_000;
       const group = await seedEnabledGroup(db, groupJid);
       const harness = await createHarness(db, dataDir);
 
@@ -273,12 +275,12 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
             groupMessage({
               groupJid,
               providerMessageId: "chunk-newer",
-              providerTimestamp: new Date(newestHistoryTimestamp).toISOString(),
+              providerTimestamp: recentHistoryTimestamp(0),
             }),
             groupMessage({
               groupJid,
               providerMessageId: "chunk-older",
-              providerTimestamp: new Date(newestHistoryTimestamp - 60_000).toISOString(),
+              providerTimestamp: recentHistoryTimestamp(1),
             }),
           ],
           { progress: 100 },
@@ -289,7 +291,7 @@ function runBackfillCheckpointSuite(label: string, getDb: () => Promise<Kysely<D
         db,
         groups: [group],
         logger: createTestLogger(),
-        now: new Date("2026-07-07T09:20:00.000Z"),
+        now: new Date(),
       });
       const slices = await db.selectFrom("conversation_slices").selectAll().orderBy("started_at", "asc").execute();
 

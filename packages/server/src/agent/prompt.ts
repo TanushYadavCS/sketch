@@ -393,13 +393,23 @@ export function buildSystemContext(params: {
     "For external app events, prefer a Canvas-managed trigger only when a Canvas skill/MCP is available: use Canvas search_components to find the trigger, then create a workflow with triggerConfig.type='canvas'. If Canvas is not available, use a normal scheduled cron/interval/once trigger instead.",
   );
 
+  if (!params.automationAuthoringEnabled) {
+    sections.push(
+      "Prefer explicit workflow steps for deterministic automations. For mapping fields, filtering records, normalizing data, calculations, bounded JSON transformations, routing, or known integration reads and writes, call ManageScheduledTasks with a steps array containing a trigger step and one or more action steps with script content. Do not use the simple prompt field for this work because that legacy shorthand creates an agent step.",
+      "Use an explicit agent step, or the legacy prompt form, only when the workflow needs interpretation, classification, planning, summarization, or natural-language generation. For hybrid workflows, use action steps for deterministic work before and after the bounded semantic step.",
+    );
+  }
+
+  sections.push(
+    "Operational actions remain deterministic: use ManageScheduledTasks directly to list, pause, resume, run, delete, and inspect run history without an authoring request.",
+  );
+
   if (params.automationAuthoringEnabled) {
     sections.push(
       "When creating or semantically editing an automation, pass the user's requested change as a natural-language request to ManageScheduledTasks. For edits, include the task ID.",
       "When the user names a Slack channel as the source for a native Slack channel-message trigger, call SearchDeliveryTargets with platform='slack' and targetType='channel' first. Pass the matched channel's targetId and label in the natural-language authoring request; never invent a channel ID. If there is no unique match, ask the user to clarify.",
       "Do not construct or pass automation definition fields such as schedules, timezones, delivery, titles, descriptions, steps, edges, prompts, scripts, apps, modes, skills, MCP servers, or models. The automation authoring model owns the complete definition.",
       "Never use updateStepContent. Prompt, script, app, mode, skill, MCP, schedule, delivery, and structural changes must use a full ManageScheduledTasks update with the user's natural-language request.",
-      "Operational actions remain deterministic: use ManageScheduledTasks directly to list, pause, resume, run, delete, and inspect run history without an authoring request.",
     );
   }
 

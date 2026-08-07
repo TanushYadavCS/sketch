@@ -12,7 +12,7 @@ import type { LocalClaudeSessionService } from "../../local-devices/claude-sessi
 import type { LocalDeviceGateway } from "../../local-devices/gateway";
 import type { Logger } from "../../logger";
 import type { TaskScheduler } from "../../scheduler/service";
-import type { TaskContext } from "../../scheduler/types";
+import type { CurrentAutomation, TaskContext } from "../../scheduler/types";
 import type { SlackBot } from "../../slack/bot";
 import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
@@ -93,6 +93,7 @@ export interface SketchMcpDeps {
   db?: Kysely<DB>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   taskContext?: TaskContext;
+  currentAutomation?: CurrentAutomation;
   getSlack?: () => SlackBot | null;
   scheduler?: TaskScheduler;
   chatAuthoring?: ChatAutomationAuthoring;

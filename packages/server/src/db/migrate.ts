@@ -158,8 +158,9 @@ import * as m155 from "./migrations/155-requeue-kept-slice-reemission";
 import * as m156 from "./migrations/156-operational-alerts";
 import * as m157 from "./migrations/157-task-activity-events";
 import * as m158 from "./migrations/158-slack-channel-participants";
-import * as m159 from "./migrations/159-slack-entity-lifecycle-sync";
-import * as m160 from "./migrations/160-slack-roster-evidence";
+import * as m159 from "./migrations/159-scheduled-task-conversations";
+import * as m160 from "./migrations/160-slack-entity-lifecycle-sync";
+import * as m161 from "./migrations/161-slack-roster-evidence";
 import type { DB } from "./schema";
 
 /**
@@ -327,8 +328,9 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "156-operational-alerts": m156,
           "157-task-activity-events": m157,
           "158-slack-channel-participants": m158,
-          "159-slack-entity-lifecycle-sync": m159,
-          "160-slack-roster-evidence": m160,
+          "159-scheduled-task-conversations": m159,
+          "160-slack-entity-lifecycle-sync": m160,
+          "161-slack-roster-evidence": m161,
         };
       },
     },
