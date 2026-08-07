@@ -46,8 +46,6 @@ export interface OutlookCalendarListEntry {
   owner?: OutlookCalendarPerson;
   canViewPrivateItems?: boolean;
   canEdit?: boolean;
-  isShared?: boolean;
-  isSharedWithMe?: boolean;
 }
 
 interface OutlookCalendarDateTime {
@@ -377,7 +375,7 @@ async function listCalendars(client: ReturnType<typeof graphClient>): Promise<Ou
   const calendars: OutlookCalendarListEntry[] = [];
   const seenLinks = new Set<string>();
   const params = {
-    $select: "id,name,isDefaultCalendar,owner,canViewPrivateItems,canEdit,isShared,isSharedWithMe",
+    $select: "id,name,isDefaultCalendar,owner,canViewPrivateItems,canEdit",
     $top: String(CALENDAR_PAGE_SIZE),
   };
   let nextLink: string | null = "/me/calendars";

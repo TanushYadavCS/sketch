@@ -121,6 +121,9 @@ describe("Outlook Calendar connector", () => {
 
     expect(items.map((item) => item.providerFileId)).toEqual(["calendar-1:event-1", "calendar-1:event-2"]);
     expect(requests).toHaveLength(3);
+    expect(requests[0]?.url.searchParams.get("$select")).toBe(
+      "id,name,isDefaultCalendar,owner,canViewPrivateItems,canEdit",
+    );
     expect(requests[1]?.url.searchParams.get("$select")).toBeNull();
     expect(requests[1]?.init?.headers).toMatchObject({
       Prefer: expect.stringContaining('IdType="ImmutableId"'),
