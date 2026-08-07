@@ -2,10 +2,9 @@
  * Repository for connector_configs, indexed_files, access_scopes, and file_access tables.
  * Handles CRUD + FTS5 search over indexed content.
  *
- * Access model (3 tiers):
- * 1. No scope + no file_access rows → unrestricted, visible to all
- * 2. Has access_scope_id → check access_scope_members for user's email
- * 3. Has file_access rows → check for user's email (per-file Google Drive My Drive)
+ * Access model: when entity sync is enabled, chat files require current scope
+ * membership unless an explicit share door opens them. Disabled mode restores
+ * the pre-stack access doors for every source.
  */
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
@@ -26,14 +25,15 @@ import type { DB } from "../schema";
 export interface FileViewer {
   email: string | null;
   isAdmin: boolean;
+  slackEntitySyncEnabled?: boolean;
 }
 
 /**
  * Predicate matching files visible to `viewer`. Composed into queries via `.where(...)`.
  *
- *   unrestricted      = no scope AND no per-file shares
+ *   unrestricted      = no scope AND no per-file shares, except restricted chat sources
  *   scoped            = caller is in access_scope_members for the file's scope
- *   per-file          = caller has a row in file_access for the file
+ *   per-file          = caller has a row in file_access, except restricted chat sources
  *   manual share      = caller's email is in file_share_emails for the file
  *   org-wide          = indexed_files.share_with_everyone = 1
  *   entity-share prop = caller has access to an entity mentioned in the file
@@ -58,15 +58,21 @@ export function fileVisibilityPredicate(viewer: FileViewer, alias = "indexed_fil
   }
   const t = sql.raw(alias);
   const email = viewer.email ?? "";
+  const accessDoor =
+    (viewer.slackEntitySyncEnabled ?? true)
+      ? sql`(${t}.source IS NULL OR ${t}.source NOT IN ('slack', 'whatsapp'))`
+      : sql`1 = 1`;
   return sql<boolean>`(
-    (${t}.access_scope_id IS NULL
+    (${accessDoor}
+      AND ${t}.access_scope_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM file_access fa WHERE fa.indexed_file_id = ${t}.id))
     OR EXISTS (SELECT 1 FROM access_scope_members asm
                WHERE asm.access_scope_id = ${t}.access_scope_id
                  AND asm.email = ${email})
-    OR EXISTS (SELECT 1 FROM file_access fa
-               WHERE fa.indexed_file_id = ${t}.id
-                 AND fa.email = ${email})
+    OR (${accessDoor}
+        AND EXISTS (SELECT 1 FROM file_access fa
+                   WHERE fa.indexed_file_id = ${t}.id
+                     AND fa.email = ${email}))
     OR EXISTS (SELECT 1 FROM file_share_emails fse
                WHERE fse.indexed_file_id = ${t}.id
                  AND fse.email = ${email})
@@ -617,6 +623,18 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
         .insertInto("file_access")
         .values(unique.map((email) => ({ indexed_file_id: indexedFileId, email })))
         .execute();
+    },
+
+    /** Add per-file email stamps without revoking existing stamps. */
+    async grantFileAccessEmails(indexedFileId: string, emails: string[]) {
+      const unique = [...new Set(emails)];
+      if (unique.length === 0) return;
+
+      await sql`
+        INSERT INTO file_access (indexed_file_id, email)
+        VALUES ${sql.join(unique.map((email) => sql`(${indexedFileId}, ${email})`))}
+        ON CONFLICT DO NOTHING
+      `.execute(db);
     },
 
     /**

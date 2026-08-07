@@ -27,6 +27,25 @@ export const configSchema = z.object({
   MAX_ATTACHMENT_TOTAL_MB: z.coerce.number().default(30),
 
   // Feature flags
+  SLACK_ENTITY_SYNC: z
+    .enum(["true", "false", "1", "0"])
+    .default("true")
+    .transform((v) => v === "true" || v === "1"),
+  SLACK_ENTITY_SYNC_PUBLIC_CHANNELS: z
+    .enum(["true", "false", "1", "0"])
+    .default("true")
+    .transform((v) => v === "true" || v === "1"),
+  SLACK_ENTITY_SYNC_USER_INFO_CAP: z.coerce.number().int().min(1).default(1000),
+  SLACK_ENTITY_SWEEP_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(7 * 24 * 60 * 60 * 1000),
+  SLACK_ENTITY_EVENT_SILENCE_THRESHOLD_MS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(7 * 24 * 60 * 60 * 1000),
   BIRTH_GATE_DRY_RUN: z
     .enum(["true", "false", "1", "0"])
     .default("true")

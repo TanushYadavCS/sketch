@@ -410,7 +410,8 @@ async function archiveLinkedSliceFileIfPresent(db: Kysely<DB>, context: SlackSli
 /**
  * Emits kept Slack slices as SyncedItems. The roster is re-resolved at
  * emission so the access scope reflects current channel membership, not
- * membership at judgment time.
+ * membership at judgment time. Emission-time teammate emails are retained as
+ * capture audit stamps; current scope membership is the read-time access grant.
  */
 export async function* emitSlackSyncedItems(options: {
   db: Kysely<DB>;
@@ -419,6 +420,7 @@ export async function* emitSlackSyncedItems(options: {
   emissionRefreshDays?: number;
   now?: Date;
   onSkippedNoScope?: () => void;
+  slackEntitySyncEnabled?: boolean;
 }): AsyncGenerator<SyncedItem> {
   const refreshDays = options.emissionRefreshDays ?? SLACK_EMISSION_REFRESH_DAYS;
   const now = options.now ?? new Date();
@@ -491,6 +493,7 @@ export async function* emitSlackSyncedItems(options: {
         label: `#${context.channelName}`,
         memberEmails: teammateEmails,
       },
+      accessEmails: options.slackEntitySyncEnabled === false ? undefined : teammateEmails,
     };
   }
 }
@@ -502,16 +505,14 @@ export async function* emitSlackSyncedItems(options: {
  * would keep serving its indexed slices forever.
  */
 /**
- * Disconnect handling: with no bot token the sync cannot verify channel
- * membership, so previously emitted slices must not stay readable under the
- * last-known ACLs. Archival is reversible — kept slices keep their salience
- * verdicts and re-emit on reconnect because archiving clears their
- * indexed_file_id link.
+ * Disconnect handling archives indexed channel files when the bot can no
+ * longer verify channel membership.
  */
 export async function archiveAllSlackChannelFiles(options: {
   db: Kysely<DB>;
   logger: Logger;
   connectorConfigId: string;
+  slackEntitySyncEnabled?: boolean;
 }): Promise<number> {
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
@@ -565,6 +566,7 @@ export async function reconcileSlackChannelAcls(options: {
   logger: Logger;
   facade: SlackIndexingFacade;
   connectorConfigId: string;
+  slackEntitySyncEnabled?: boolean;
 }): Promise<{ scopesRefreshed: number; scopesArchived: number; filesArchived: number }> {
   const repo = createConnectorRepository(options.db);
   const scopes = await repo.listAccessScopesForConnector(options.connectorConfigId, "slack_channel");
@@ -574,7 +576,6 @@ export async function reconcileSlackChannelAcls(options: {
   let scopesRefreshed = 0;
   let scopesArchived = 0;
   let filesArchived = 0;
-
   for (const scope of scopes) {
     const channelName = visible.get(scope.providerScopeId);
     if (channelName === undefined) {

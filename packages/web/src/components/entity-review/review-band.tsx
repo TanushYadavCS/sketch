@@ -78,8 +78,8 @@ export function ReviewBand({ types, title = "Needs your review" }: { types: stri
 
   if (rows.length === 0) return null;
 
-  const births = rows.filter((r) => !r.candidate);
-  const duplicates = rows.filter((r) => r.candidate);
+  const births = rows.filter((r) => !hasReviewCandidate(r));
+  const duplicates = rows.filter(hasReviewCandidate);
 
   return (
     <section className="mb-9 overflow-hidden rounded-xl border border-amber-300/60 bg-amber-50/40 dark:border-amber-700/50 dark:bg-amber-950/20">
@@ -117,6 +117,15 @@ export function ReviewBand({ types, title = "Needs your review" }: { types: stri
       />
     </section>
   );
+}
+
+function hasReviewCandidate(row: EntityReviewQueueRow): boolean {
+  return Boolean(row.candidate || (row.candidates?.length ?? 0) > 0);
+}
+
+function reviewCandidateNames(row: EntityReviewQueueRow): string[] {
+  const candidates = row.candidates ?? (row.candidate ? [row.candidate] : []);
+  return candidates.map((candidate) => candidate.name);
 }
 
 function GroupHeader({ label, count }: { label: string; count: number }) {
@@ -565,7 +574,11 @@ export function GhostReviewRow({ row, onSelect }: { row: EntityReviewQueueRow; o
             <p className="truncate text-sm font-medium">{row.proposed_name}</p>
             <p className="truncate text-[11px] text-muted-foreground">
               <span className="font-medium text-amber-700 dark:text-amber-400">Under review</span>
-              {row.candidate?.name ? <> · suggests {row.candidate.name}</> : <> · no suggested match</>}
+              {hasReviewCandidate(row) ? (
+                <> · suggests {reviewCandidateNames(row).join(", ")}</>
+              ) : (
+                <> · no suggested match</>
+              )}
             </p>
           </div>
         </div>
@@ -705,6 +718,7 @@ function ReconcileBody({
       ) : (
         <ChooserView
           row={row}
+          suggestedCandidates={row.candidates ?? []}
           isPending={mutations.isPending}
           errorMessage={mutations.errorCopy?.message ?? null}
           canBackToCandidate={hasOriginalCandidate && !isPickedPreview}
@@ -933,6 +947,7 @@ function CandidateView({
  */
 function ChooserView({
   row,
+  suggestedCandidates,
   isPending,
   errorMessage,
   canBackToCandidate,
@@ -941,6 +956,7 @@ function ChooserView({
   onCreateNew,
 }: {
   row: EntityReviewQueueRow;
+  suggestedCandidates: Array<{ id: string; name: string; email: string | null }>;
   isPending: boolean;
   errorMessage: string | null;
   canBackToCandidate: boolean;
@@ -967,6 +983,27 @@ function ChooserView({
         <div className="border-b border-border px-3 py-2 text-xs text-destructive">{errorMessage}</div>
       ) : null}
       <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 py-3">
+        {suggestedCandidates.length > 0 ? (
+          <div>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Possible matches</p>
+            <div className="mt-2 space-y-1.5">
+              {suggestedCandidates.map((candidate) => (
+                <button
+                  key={candidate.id}
+                  type="button"
+                  onClick={() => onPick(candidate.id)}
+                  className="flex w-full items-center justify-between rounded-md border border-border px-2.5 py-2 text-left hover:bg-muted"
+                  data-testid={`suggested-candidate-${candidate.id}`}
+                >
+                  <span className="truncate text-sm font-medium">{candidate.name}</span>
+                  {candidate.email ? (
+                    <span className="ml-2 truncate text-[11px] text-muted-foreground">{candidate.email}</span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
         <div>
           <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Search for a match</p>
           <div className="mt-2">

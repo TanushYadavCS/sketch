@@ -4,6 +4,7 @@ export interface SlackAuthTestResponse {
   ok?: boolean;
   error?: string;
   team?: string;
+  team_id?: string;
 }
 
 export async function slackApiCall(

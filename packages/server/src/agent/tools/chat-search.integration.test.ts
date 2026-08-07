@@ -1774,6 +1774,6 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
 }
 
 runSuite("chat-search sqlite", createTestDb);
-runSuite("chat-search postgres", getSharedPgDb, { shared: true });
+runSuite("chat-search postgres", createTestPgDb);
 runReconcileSuite("sqlite", createTestDb);
 runReconcileSuite("postgres", createTestPgDb);

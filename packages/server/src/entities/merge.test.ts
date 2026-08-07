@@ -173,6 +173,22 @@ describe("entity merge core", () => {
     ).resolves.toEqual({ provenance_tier: "declared" });
   });
 
+  it.each([
+    ["external", "internal"],
+    ["internal", "external"],
+  ] as const)("keeps internal subtype when merging %s survivor and %s loser", async (survivorSubtype, loserSubtype) => {
+    await seedEntity(db, "subtype-survivor", "Subtype Survivor");
+    await seedEntity(db, "subtype-loser", "Subtype Loser");
+    await db.updateTable("entities").set({ subtype: survivorSubtype }).where("id", "=", "subtype-survivor").execute();
+    await db.updateTable("entities").set({ subtype: loserSubtype }).where("id", "=", "subtype-loser").execute();
+
+    await mergeEntities(db, { survivorId: "subtype-survivor", loserId: "subtype-loser", userId: USER_ID });
+
+    await expect(
+      db.selectFrom("entities").select("subtype").where("id", "=", "subtype-survivor").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({ subtype: "internal" });
+  });
+
   it("unmerges re-pointed rows, collisions, self-loops, and relationship evidence", async () => {
     await seedEntity(db, "survivor", "Alex");
     await seedEntity(db, "loser", "Alex Duplicate");

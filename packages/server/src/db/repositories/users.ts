@@ -2,9 +2,12 @@ import { randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, type Transaction, sql } from "kysely";
 import type { DB, UsersTable } from "../schema";
 import { invalidateSettingsCache } from "./settings";
+import { ensureEntityForUser } from "./user-entity-linking";
 
 type UserDb = Kysely<DB> | Transaction<DB>;
 type UserRow = Selectable<UsersTable>;
+export type UserRepositoryOptions = { slackEntitySyncEnabled?: boolean };
+type UserRepositoryContextOptions = UserRepositoryOptions & { skipMutationTransaction?: boolean };
 
 export interface UserRepository {
   list(): Promise<UserRow[]>;
@@ -35,6 +38,7 @@ export interface UserRepository {
     role?: string;
     reportsTo?: string;
     allowedTools?: string[] | null;
+    skipEntityLinking?: boolean;
   }): Promise<UserRow>;
   update(
     id: string,
@@ -53,6 +57,8 @@ export interface UserRepository {
       reasoningText?: boolean | null;
       allowedTools?: string[] | null;
       timezone?: string | null;
+      type?: string;
+      skipEntityLinking?: boolean;
     },
   ): Promise<UserRow>;
   remove(id: string): Promise<unknown>;
@@ -88,14 +94,21 @@ function recordSettingsWrite(context: SettingsCacheInvalidationContext): void {
   invalidateSettingsCache(context.cacheDb);
 }
 
-export function createUserRepository(db: UserDb): UserRepository {
-  return createUserRepositoryWithContext(db, { cacheDb: db });
+async function runUserMutation<T>(db: UserDb, callback: (trx: UserDb) => Promise<T>): Promise<T> {
+  if (db.isTransaction) return callback(db);
+  return db.transaction().execute((trx) => callback(trx));
+}
+
+export function createUserRepository(db: UserDb, options: UserRepositoryOptions = {}): UserRepository {
+  return createUserRepositoryWithContext(db, { cacheDb: db }, options);
 }
 
 function createUserRepositoryWithContext(
   db: UserDb,
   settingsCacheInvalidation: SettingsCacheInvalidationContext,
+  options: UserRepositoryContextOptions = {},
 ): UserRepository {
+  const slackEntitySyncEnabled = options.slackEntitySyncEnabled ?? true;
   return {
     async list() {
       return db.selectFrom("users").selectAll().where("type", "!=", "external").orderBy("created_at", "desc").execute();
@@ -259,7 +272,16 @@ function createUserRepositoryWithContext(
       role?: string;
       reportsTo?: string;
       allowedTools?: string[] | null;
+      skipEntityLinking?: boolean;
     }) {
+      if (!db.isTransaction && !options.skipMutationTransaction) {
+        return runUserMutation(db, (trx) =>
+          createUserRepositoryWithContext(trx, settingsCacheInvalidation, {
+            ...options,
+            skipMutationTransaction: true,
+          }).create(data),
+        );
+      }
       const id = data.id ?? randomUUID();
       await db
         .insertInto("users")
@@ -280,7 +302,11 @@ function createUserRepositoryWithContext(
         })
         .execute();
 
-      return db.selectFrom("users").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      const user = await db.selectFrom("users").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      if (slackEntitySyncEnabled && user.type === "human" && !data.skipEntityLinking) {
+        await ensureEntityForUser(db, id);
+      }
+      return user;
     },
 
     async update(
@@ -300,8 +326,18 @@ function createUserRepositoryWithContext(
         reasoningText?: boolean | null;
         allowedTools?: string[] | null;
         timezone?: string | null;
+        type?: string;
+        skipEntityLinking?: boolean;
       },
     ) {
+      if (!db.isTransaction && !options.skipMutationTransaction) {
+        return runUserMutation(db, (trx) =>
+          createUserRepositoryWithContext(trx, settingsCacheInvalidation, {
+            ...options,
+            skipMutationTransaction: true,
+          }).update(id, data),
+        );
+      }
       const values: Record<string, unknown> = {};
       if (data.name !== undefined) values.name = data.name;
       if (data.email !== undefined) {
@@ -332,15 +368,26 @@ function createUserRepositoryWithContext(
       if (data.allowedTools !== undefined)
         values.allowed_tools = data.allowedTools == null ? null : JSON.stringify(data.allowedTools);
       if (data.timezone !== undefined) values.timezone = data.timezone;
+      if (data.type !== undefined) values.type = data.type;
+      const identityChanged =
+        data.email !== undefined ||
+        data.whatsappNumber !== undefined ||
+        data.name !== undefined ||
+        data.type !== undefined;
 
       if (Object.keys(values).length > 0) {
         await db.updateTable("users").set(values).where("id", "=", id).execute();
       }
 
-      return db.selectFrom("users").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      const user = await db.selectFrom("users").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      if (slackEntitySyncEnabled && user.type === "human" && identityChanged && !data.skipEntityLinking) {
+        await ensureEntityForUser(db, id);
+      }
+      return user;
     },
 
     async remove(id: string) {
+      await db.deleteFrom("user_entity_links").where("user_id", "=", id).execute();
       await db
         .deleteFrom("agent_environment_variable_shares")
         .where("variable_id", "in", db.selectFrom("agent_environment_variables").select("id").where("user_id", "=", id))
@@ -371,16 +418,20 @@ function createUserRepositoryWithContext(
       if (settingsCacheInvalidation.deferred) {
         return db
           .transaction()
-          .execute(async (trx) => callback(createUserRepositoryWithContext(trx, settingsCacheInvalidation)));
+          .execute(async (trx) => callback(createUserRepositoryWithContext(trx, settingsCacheInvalidation, options)));
       }
 
       const deferred = { pending: false };
       const result = await db.transaction().execute(async (trx) =>
         callback(
-          createUserRepositoryWithContext(trx, {
-            cacheDb: settingsCacheInvalidation.cacheDb,
-            deferred,
-          }),
+          createUserRepositoryWithContext(
+            trx,
+            {
+              cacheDb: settingsCacheInvalidation.cacheDb,
+              deferred,
+            },
+            options,
+          ),
         ),
       );
       if (deferred.pending) {

@@ -36,7 +36,13 @@ export interface ResolveSlackUserDeps {
     }): Promise<UserRow>;
     update(
       id: string,
-      data: { slackUserId?: string | null; email?: string | null; emailVerified?: boolean; timezone?: string | null },
+      data: {
+        slackUserId?: string | null;
+        email?: string | null;
+        emailVerified?: boolean;
+        timezone?: string | null;
+        skipEntityLinking?: boolean;
+      },
     ): Promise<UserRow>;
   };
   getUserInfo(

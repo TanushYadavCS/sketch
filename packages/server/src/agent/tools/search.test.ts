@@ -138,6 +138,49 @@ it("accepts WhatsApp as a search source filter", () => {
   expect(searchToolSchema.source.safeParse("whatsapp").success).toBe(true);
 });
 
+it("normalizes legacy person subtypes in search and context output", async () => {
+  await db
+    .insertInto("entities")
+    .values({
+      id: "legacy-person",
+      name: "Legacy Person",
+      source_type: "person",
+      subtype: null,
+      aliases: null,
+      metadata: null,
+      source_ref_id: null,
+      status: "confirmed",
+      provenance_tier: "inferred",
+      hotness: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .execute();
+  await db
+    .insertInto("entity_mentions")
+    .values({
+      id: "mention-legacy-person",
+      entity_id: "legacy-person",
+      indexed_file_id: "file-alice",
+      chunk_index: 0,
+      context_snippet: "legacy person context",
+      confidence: "EXTRACTED",
+      source: "test",
+      relation: "mentioned",
+      mentioned_at: new Date().toISOString(),
+    })
+    .execute();
+
+  const entitySearch = await handleSearchEntities({ queries: ["Legacy Person"] }, deps());
+  expect(entitySearch.content[0]?.text).toContain('"subtype": "external"');
+
+  const context = await handleGetEntityContext({ entityId: "legacy-person" }, deps());
+  expect(context.content[0]?.text).toContain("Type: person (external)");
+
+  const searchResult = await handleSearch({ query: "Legacy Person" }, deps());
+  expect(searchResult.content[0]?.text).toContain("(external)");
+});
+
 function deps() {
   return {
     uploadCollector: new UploadCollector(),

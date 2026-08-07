@@ -44,6 +44,11 @@ export interface EntityContext {
   coMentionedEntities: EntityCoMentionContext[];
 }
 
+function displayEntitySubtype(entityType: string, subtype: string | null): string | null {
+  if (entityType !== "person") return subtype;
+  return subtype === "internal" ? "internal" : "external";
+}
+
 export interface EntityAdjudicationVerdict {
   matchEntityId: string | null;
   confidence: EntityAdjudicationConfidence;
@@ -192,7 +197,7 @@ export async function buildEntityAdjudicationContext(db: Kysely<DB>, entityId: s
     entityType: entity.source_type,
     name: entity.name,
     aliases: parseAliases(entity.aliases).slice(0, 5),
-    subtype: entity.subtype,
+    subtype: displayEntitySubtype(entity.source_type, entity.subtype),
     email: readPersonEmailFromMetadata(entity.metadata),
     corporateDomains: corporateDomains.map((row) => row.domain),
     worksAtCompanies: worksAtCompanies.map((row) => row.name),

@@ -4,11 +4,19 @@ import { resolveSlackTokens } from "./tokens";
 type SlackTokenSource = {
   botToken: string | null | undefined;
   appToken: string | null | undefined;
+  teamId?: string | null;
 };
+
+export type SlackTokenValidation = { teamId: string };
 
 type StartupTokens = {
   botToken: string;
   appToken?: string;
+};
+
+type TeamReplacement = {
+  previousTeamId: string | null;
+  nextTeamId: string | null;
 };
 
 type SlackRuntimeBot = {
@@ -20,11 +28,13 @@ interface SlackStartupDeps<TBot extends SlackRuntimeBot> {
   logger: Pick<Logger, "info" | "warn" | "error">;
   slackMode?: "socket" | "http";
   getSettingsTokens: () => Promise<SlackTokenSource | null>;
-  validateTokens: (botToken: string, appToken?: string) => Promise<void>;
+  validateTokens: (botToken: string, appToken?: string) => Promise<undefined | SlackTokenValidation>;
+  getCurrentTeamId?: () => Promise<string | null>;
   getCurrentBot: () => TBot | null;
   setCurrentBot: (bot: TBot | null) => void;
   createBot: (tokens: StartupTokens) => TBot;
-  beforeExplicitTokenReplacement?: () => Promise<void>;
+  onConnectionActivated?: (connection: { botToken: string; teamId: string }) => void;
+  beforeExplicitTokenReplacement?: (replacement?: TeamReplacement) => Promise<void>;
 }
 
 export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: SlackStartupDeps<TBot>) {
@@ -53,11 +63,22 @@ export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: Sl
 
         const { botToken, appToken } = resolved;
 
+        let validation: undefined | SlackTokenValidation;
         try {
-          await deps.validateTokens(botToken, appToken);
+          validation = await deps.validateTokens(botToken, appToken);
         } catch (err) {
           deps.logger.warn({ err }, "Slack tokens failed validation");
           throw new Error("Invalid Slack tokens");
+        }
+
+        const previousTeamId = await deps.getCurrentTeamId?.();
+        const nextTeamId = validation?.teamId ?? null;
+        if (!nextTeamId) {
+          throw new Error("Slack token validation did not return a team id");
+        }
+        const teamChanged = Boolean(previousTeamId && previousTeamId !== nextTeamId);
+        if (teamChanged) {
+          deps.logger.warn({ previousTeamId, nextTeamId }, "Slack team changed during startup; fencing old-team state");
         }
 
         const existingBot = deps.getCurrentBot();
@@ -66,8 +87,15 @@ export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: Sl
           deps.setCurrentBot(null);
         }
 
-        if (tokens) {
-          await deps.beforeExplicitTokenReplacement?.();
+        if (teamChanged) {
+          await deps.beforeExplicitTokenReplacement?.({ previousTeamId: previousTeamId ?? null, nextTeamId });
+        }
+
+        if (tokens && !teamChanged) {
+          const shouldReset = !previousTeamId || previousTeamId !== nextTeamId;
+          if (shouldReset) {
+            await deps.beforeExplicitTokenReplacement?.({ previousTeamId: previousTeamId ?? null, nextTeamId });
+          }
         }
 
         const nextBot = deps.createBot({
@@ -79,6 +107,7 @@ export function createSlackStartupManager<TBot extends SlackRuntimeBot>(deps: Sl
         try {
           await nextBot.start();
           deps.logger.info("Slack bot connected");
+          if (nextTeamId) deps.onConnectionActivated?.({ botToken, teamId: nextTeamId });
         } catch (err) {
           deps.logger.error({ err }, "Failed to start Slack bot, disabling Slack integration");
           deps.setCurrentBot(null);
