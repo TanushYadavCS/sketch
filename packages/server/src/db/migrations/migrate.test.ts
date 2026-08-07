@@ -27,7 +27,7 @@ import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durabi
 import * as slackEntityLifecycleMigration from "./159-slack-entity-lifecycle-sync";
 import * as slackRosterEvidenceMigration from "./160-slack-roster-evidence";
 
-const EXPECTED_MIGRATION_COUNT = 157;
+const EXPECTED_MIGRATION_COUNT = 158;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -228,6 +228,7 @@ describe("runMigrations — full sequence", () => {
     expect(names[154]).toBe("159-slack-entity-lifecycle-sync");
     expect(names[155]).toBe("160-slack-roster-evidence");
     expect(names[156]).toBe("161-user-entity-links");
+    expect(names[157]).toBe("162-slack-file-access-backfill-cleanup");
   });
 
   it("creates the Slack entity lifecycle schema and allows source-scoped review rows", async () => {
@@ -345,6 +346,106 @@ describe("runMigrations — full sequence", () => {
       await expect(
         legacyDb.selectFrom("slack_channel_participants").select(["channel_id", "slack_user_id"]).execute(),
       ).resolves.toEqual([{ channel_id: "C-existing", slack_user_id: "U-existing" }]);
+    } finally {
+      await legacyDb.destroy();
+    }
+  });
+
+  it("upgrades schema 160 with existing rows through the user entity link migration", async () => {
+    const legacyDb = createBlankDb();
+    try {
+      const migrationResult = await createMigrator(legacyDb).migrateTo("160-slack-roster-evidence");
+      expect(migrationResult.error).toBeUndefined();
+      await legacyDb.insertInto("users").values({ id: "migration-user", name: "Migration User" }).execute();
+      const now = "2026-08-07T00:00:00.000Z";
+      await legacyDb
+        .insertInto("entities")
+        .values([
+          {
+            id: "migration-entity",
+            name: "Migration User",
+            source_type: "person",
+            status: "confirmed",
+            hotness: 0,
+            created_at: now,
+            updated_at: now,
+          },
+          {
+            id: "migration-entity-2",
+            name: "Migration User 2",
+            source_type: "person",
+            status: "confirmed",
+            hotness: 0,
+            created_at: now,
+            updated_at: now,
+          },
+        ])
+        .execute();
+      await legacyDb
+        .insertInto("entity_review_queue")
+        .values({
+          id: "migration-review",
+          proposed_name: "Migration User",
+          normalized_name: "migration user",
+          entity_type: "person",
+          triggered_by_user_id: "migration-user",
+        })
+        .execute();
+
+      await runMigrations(legacyDb, { quiet: true });
+
+      const tables = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN ('user_entity_links', 'user_entity_link_sweep_runs')
+        ORDER BY name
+      `.execute(legacyDb);
+      expect(tables.rows.map((row) => row.name)).toEqual(["user_entity_link_sweep_runs", "user_entity_links"]);
+      const reviewColumns = await sql<{ name: string }>`
+        SELECT name FROM pragma_table_info('entity_review_queue') WHERE name = 'candidate_user_ids'
+      `.execute(legacyDb);
+      expect(reviewColumns.rows).toEqual([{ name: "candidate_user_ids" }]);
+      const indexes = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'index' AND name = 'idx_entity_review_queue_source_source_id'
+      `.execute(legacyDb);
+      expect(indexes.rows).toEqual([{ name: "idx_entity_review_queue_source_source_id" }]);
+      const definitions = await sql<{ name: string; sql: string }>`
+        SELECT name, sql FROM sqlite_master
+        WHERE type = 'table' AND name IN ('user_entity_links', 'user_entity_link_sweep_runs')
+      `.execute(legacyDb);
+      expect(definitions.rows.find((row) => row.name === "user_entity_links")?.sql).toContain(
+        'constraint "user_entity_links_user_unique"',
+      );
+      expect(definitions.rows.find((row) => row.name === "user_entity_links")?.sql).toContain(
+        'constraint "user_entity_links_entity_unique"',
+      );
+      expect(definitions.rows.find((row) => row.name === "user_entity_link_sweep_runs")?.sql).toContain(
+        'constraint "user_entity_link_sweep_runs_key_unique"',
+      );
+      await expect(
+        legacyDb.selectFrom("entity_review_queue").select("id").where("id", "=", "migration-review").execute(),
+      ).resolves.toEqual([{ id: "migration-review" }]);
+      await legacyDb
+        .insertInto("user_entity_links")
+        .values({
+          id: "migration-link",
+          user_id: "migration-user",
+          entity_id: "migration-entity",
+          matched_via: "email",
+        })
+        .execute();
+      await expect(
+        legacyDb
+          .insertInto("user_entity_links")
+          .values({
+            id: "migration-link-2",
+            user_id: "migration-user",
+            entity_id: "migration-entity-2",
+            matched_via: "phone",
+          })
+          .execute(),
+      ).rejects.toThrow();
     } finally {
       await legacyDb.destroy();
     }

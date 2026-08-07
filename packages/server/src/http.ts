@@ -199,7 +199,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     }),
   );
   const settings = createSettingsRepository(db, config.ENCRYPTION_KEY);
-  const users = createUserRepository(db);
+  const users = createUserRepository(db, { slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC });
   const channels = createChannelRepository(db);
   const whatsappGroups = createWhatsAppGroupRepository(db);
   const conversations = createConversationRepository(db);

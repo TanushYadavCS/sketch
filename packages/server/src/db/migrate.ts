@@ -161,6 +161,7 @@ import * as m158 from "./migrations/158-slack-channel-participants";
 import * as m159 from "./migrations/159-slack-entity-lifecycle-sync";
 import * as m160 from "./migrations/160-slack-roster-evidence";
 import * as m161 from "./migrations/161-user-entity-links";
+import * as m162 from "./migrations/162-slack-file-access-backfill-cleanup";
 import type { DB } from "./schema";
 
 /**
@@ -331,6 +332,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "159-slack-entity-lifecycle-sync": m159,
           "160-slack-roster-evidence": m160,
           "161-user-entity-links": m161,
+          "162-slack-file-access-backfill-cleanup": m162,
         };
       },
     },

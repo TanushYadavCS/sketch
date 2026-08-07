@@ -17,6 +17,35 @@ afterEach(async () => {
 });
 
 describe("create()", () => {
+  it("does not create an entity or link when Slack entity sync is disabled", async () => {
+    const syncOffUsers = createUserRepository(db, { slackEntitySyncEnabled: false });
+
+    const user = await syncOffUsers.create({ name: "Sync Off User", email: "sync-off@example.com" });
+    await syncOffUsers.update(user.id, { name: "Sync Off Updated", email: "updated@example.com" });
+
+    await expect(
+      db.selectFrom("user_entity_links").selectAll().where("user_id", "=", user.id).execute(),
+    ).resolves.toEqual([]);
+    await expect(
+      db
+        .selectFrom("entity_source_refs")
+        .selectAll()
+        .where("source", "=", "sketch_user")
+        .where("source_id", "=", user.id)
+        .execute(),
+    ).resolves.toEqual([]);
+  });
+
+  it("creates an entity link when Slack entity sync is enabled", async () => {
+    const syncOnUsers = createUserRepository(db, { slackEntitySyncEnabled: true });
+
+    const user = await syncOnUsers.create({ name: "Sync On User", email: "sync-on@example.com" });
+
+    await expect(
+      db.selectFrom("user_entity_links").select("user_id").where("user_id", "=", user.id).execute(),
+    ).resolves.toEqual([{ user_id: user.id }]);
+  });
+
   it("runs a standalone mutation through Kysely transaction()", async () => {
     const transactionSpy = vi.spyOn(db, "transaction");
 

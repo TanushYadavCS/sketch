@@ -115,6 +115,20 @@ describe("bootstrap", () => {
     expect(h.getSlack()).toBeNull();
   });
 
+  it("does not start the user entity link sweep when Slack entity sync is disabled", async () => {
+    const h = await boot({ SLACK_ENTITY_SYNC: false });
+
+    await expect(h.db.selectFrom("user_entity_link_sweep_runs").selectAll().execute()).resolves.toEqual([]);
+  });
+
+  it("starts the user entity link sweep when Slack entity sync is enabled", async () => {
+    const h = await boot({ SLACK_ENTITY_SYNC: true });
+
+    await vi.waitFor(async () => {
+      await expect(h.db.selectFrom("user_entity_link_sweep_runs").selectAll().execute()).resolves.toHaveLength(1);
+    });
+  });
+
   it("seeds the bootstrap admin domain before Slack classification on first boot", async () => {
     const h = await boot(
       {

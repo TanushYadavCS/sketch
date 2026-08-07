@@ -223,7 +223,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   if (externalStartup) await syncFeaturedSkills(config, logger);
 
   // 3. Repositories
-  const users = createUserRepository(db);
+  const users = createUserRepository(db, { slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC });
   const channels = createChannelRepository(db);
   const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const operationalAlertsRepo = createOperationalAlertsRepository(db);
@@ -797,7 +797,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   });
   if (backgroundWork && externalStartup) slackEntitySync.start();
   const userEntityLinkSweep = createUserEntityLinkSweepService({ db, users, logger });
-  if (backgroundWork && externalStartup) userEntityLinkSweep.start();
+  if (config.SLACK_ENTITY_SYNC && backgroundWork && externalStartup) userEntityLinkSweep.start();
   const syncScheduler = backgroundWork
     ? startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config, slackIndexingFacade })
     : null;

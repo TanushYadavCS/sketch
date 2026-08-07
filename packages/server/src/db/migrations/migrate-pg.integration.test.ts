@@ -20,8 +20,9 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as slackRosterEvidenceMigration from "./160-slack-roster-evidence";
+import * as slackFileAccessBackfillCleanupMigration from "./162-slack-file-access-backfill-cleanup";
 
-const EXPECTED_MIGRATION_COUNT = 157;
+const EXPECTED_MIGRATION_COUNT = 158;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -193,6 +194,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[154]).toBe("159-slack-entity-lifecycle-sync");
     expect(names[155]).toBe("160-slack-roster-evidence");
     expect(names[156]).toBe("161-user-entity-links");
+    expect(names[157]).toBe("162-slack-file-access-backfill-cleanup");
   });
 
   it("creates the Slack entity lifecycle schema and partial review uniqueness", async () => {
@@ -714,12 +716,136 @@ describe("runMigrations on Postgres — full sequence", () => {
     }
   });
 
+  it("upgrades schema 160 with existing rows through the user entity link migration", async () => {
+    const legacyDb = await createTestPgDb();
+    try {
+      const migrationResult = await createMigrator(legacyDb).migrateTo("160-slack-roster-evidence");
+      expect(migrationResult.error).toBeUndefined();
+      await legacyDb.insertInto("users").values({ id: "migration-user", name: "Migration User" }).execute();
+      const now = "2026-08-07T00:00:00.000Z";
+      await legacyDb
+        .insertInto("entities")
+        .values([
+          {
+            id: "migration-entity",
+            name: "Migration User",
+            source_type: "person",
+            status: "confirmed",
+            hotness: 0,
+            created_at: now,
+            updated_at: now,
+          },
+          {
+            id: "migration-entity-2",
+            name: "Migration User 2",
+            source_type: "person",
+            status: "confirmed",
+            hotness: 0,
+            created_at: now,
+            updated_at: now,
+          },
+        ])
+        .execute();
+      await legacyDb
+        .insertInto("entity_review_queue")
+        .values({
+          id: "migration-review",
+          proposed_name: "Migration User",
+          normalized_name: "migration user",
+          entity_type: "person",
+          triggered_by_user_id: "migration-user",
+        })
+        .execute();
+
+      await runMigrations(legacyDb, { quiet: true });
+
+      const tables = await sql<{ table_name: string }>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name IN ('user_entity_links', 'user_entity_link_sweep_runs')
+        ORDER BY table_name
+      `.execute(legacyDb);
+      expect(tables.rows.map((row) => row.table_name)).toEqual(["user_entity_link_sweep_runs", "user_entity_links"]);
+      const reviewColumns = await sql<{ column_name: string }>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'entity_review_queue'
+          AND column_name = 'candidate_user_ids'
+      `.execute(legacyDb);
+      expect(reviewColumns.rows).toEqual([{ column_name: "candidate_user_ids" }]);
+      const indexes = await sql<{ indexname: string }>`
+        SELECT indexname FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname = 'idx_entity_review_queue_source_source_id'
+      `.execute(legacyDb);
+      expect(indexes.rows).toEqual([{ indexname: "idx_entity_review_queue_source_source_id" }]);
+      const constraints = await sql<{ constraint_name: string }>`
+        SELECT constraint_name FROM information_schema.table_constraints
+        WHERE table_schema = 'public'
+          AND constraint_name IN (
+            'user_entity_links_user_unique',
+            'user_entity_links_entity_unique',
+            'user_entity_link_sweep_runs_key_unique'
+          )
+        ORDER BY constraint_name
+      `.execute(legacyDb);
+      expect(constraints.rows.map((row) => row.constraint_name)).toEqual([
+        "user_entity_link_sweep_runs_key_unique",
+        "user_entity_links_entity_unique",
+        "user_entity_links_user_unique",
+      ]);
+      await expect(
+        legacyDb.selectFrom("entity_review_queue").select("id").where("id", "=", "migration-review").execute(),
+      ).resolves.toEqual([{ id: "migration-review" }]);
+      await legacyDb
+        .insertInto("user_entity_links")
+        .values({
+          id: "migration-link",
+          user_id: "migration-user",
+          entity_id: "migration-entity",
+          matched_via: "email",
+        })
+        .execute();
+      await expect(
+        legacyDb
+          .insertInto("user_entity_links")
+          .values({
+            id: "migration-link-2",
+            user_id: "migration-user",
+            entity_id: "migration-entity-2",
+            matched_via: "phone",
+          })
+          .execute(),
+      ).rejects.toThrow();
+    } finally {
+      await legacyDb.destroy();
+    }
+  });
+
   it("creates entity_contact_points table", async () => {
     const result = await sql<{ table_name: string }>`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public' AND table_name = 'entity_contact_points'
     `.execute(db);
     expect(result.rows).toHaveLength(1);
+  });
+
+  it("drops the stale Slack file access backfill table and tolerates its absence", async () => {
+    const cleanupDb = await createTestPgDb();
+    try {
+      await cleanupDb.schema.createTable("slack_file_access_backfill").addColumn("id", "text").execute();
+      await slackFileAccessBackfillCleanupMigration.up(cleanupDb as unknown as Kysely<unknown>);
+      await expect(
+        sql`
+          SELECT table_name FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name = 'slack_file_access_backfill'
+        `.execute(cleanupDb),
+      ).resolves.toMatchObject({ rows: [] });
+      await expect(
+        slackFileAccessBackfillCleanupMigration.up(cleanupDb as unknown as Kysely<unknown>),
+      ).resolves.toBeUndefined();
+    } finally {
+      await cleanupDb.destroy();
+    }
   });
 
   it("creates the entity merge ledger tombstone schema", async () => {

@@ -6,7 +6,8 @@ import { ensureEntityForUser } from "./user-entity-linking";
 
 type UserDb = Kysely<DB> | Transaction<DB>;
 type UserRow = Selectable<UsersTable>;
-type UserRepositoryContextOptions = { skipMutationTransaction?: boolean };
+export type UserRepositoryOptions = { slackEntitySyncEnabled?: boolean };
+type UserRepositoryContextOptions = UserRepositoryOptions & { skipMutationTransaction?: boolean };
 
 export interface UserRepository {
   list(): Promise<UserRow[]>;
@@ -98,8 +99,8 @@ async function runUserMutation<T>(db: UserDb, callback: (trx: UserDb) => Promise
   return db.transaction().execute((trx) => callback(trx));
 }
 
-export function createUserRepository(db: UserDb): UserRepository {
-  return createUserRepositoryWithContext(db, { cacheDb: db });
+export function createUserRepository(db: UserDb, options: UserRepositoryOptions = {}): UserRepository {
+  return createUserRepositoryWithContext(db, { cacheDb: db }, options);
 }
 
 function createUserRepositoryWithContext(
@@ -107,6 +108,7 @@ function createUserRepositoryWithContext(
   settingsCacheInvalidation: SettingsCacheInvalidationContext,
   options: UserRepositoryContextOptions = {},
 ): UserRepository {
+  const slackEntitySyncEnabled = options.slackEntitySyncEnabled ?? true;
   return {
     async list() {
       return db.selectFrom("users").selectAll().where("type", "!=", "external").orderBy("created_at", "desc").execute();
@@ -274,9 +276,10 @@ function createUserRepositoryWithContext(
     }) {
       if (!db.isTransaction && !options.skipMutationTransaction) {
         return runUserMutation(db, (trx) =>
-          createUserRepositoryWithContext(trx, settingsCacheInvalidation, { skipMutationTransaction: true }).create(
-            data,
-          ),
+          createUserRepositoryWithContext(trx, settingsCacheInvalidation, {
+            ...options,
+            skipMutationTransaction: true,
+          }).create(data),
         );
       }
       const id = data.id ?? randomUUID();
@@ -300,7 +303,9 @@ function createUserRepositoryWithContext(
         .execute();
 
       const user = await db.selectFrom("users").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
-      if (user.type === "human" && !data.skipEntityLinking) await ensureEntityForUser(db, id);
+      if (slackEntitySyncEnabled && user.type === "human" && !data.skipEntityLinking) {
+        await ensureEntityForUser(db, id);
+      }
       return user;
     },
 
@@ -327,10 +332,10 @@ function createUserRepositoryWithContext(
     ) {
       if (!db.isTransaction && !options.skipMutationTransaction) {
         return runUserMutation(db, (trx) =>
-          createUserRepositoryWithContext(trx, settingsCacheInvalidation, { skipMutationTransaction: true }).update(
-            id,
-            data,
-          ),
+          createUserRepositoryWithContext(trx, settingsCacheInvalidation, {
+            ...options,
+            skipMutationTransaction: true,
+          }).update(id, data),
         );
       }
       const values: Record<string, unknown> = {};
@@ -375,7 +380,9 @@ function createUserRepositoryWithContext(
       }
 
       const user = await db.selectFrom("users").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
-      if (user.type === "human" && identityChanged && !data.skipEntityLinking) await ensureEntityForUser(db, id);
+      if (slackEntitySyncEnabled && user.type === "human" && identityChanged && !data.skipEntityLinking) {
+        await ensureEntityForUser(db, id);
+      }
       return user;
     },
 
@@ -411,16 +418,20 @@ function createUserRepositoryWithContext(
       if (settingsCacheInvalidation.deferred) {
         return db
           .transaction()
-          .execute(async (trx) => callback(createUserRepositoryWithContext(trx, settingsCacheInvalidation)));
+          .execute(async (trx) => callback(createUserRepositoryWithContext(trx, settingsCacheInvalidation, options)));
       }
 
       const deferred = { pending: false };
       const result = await db.transaction().execute(async (trx) =>
         callback(
-          createUserRepositoryWithContext(trx, {
-            cacheDb: settingsCacheInvalidation.cacheDb,
-            deferred,
-          }),
+          createUserRepositoryWithContext(
+            trx,
+            {
+              cacheDb: settingsCacheInvalidation.cacheDb,
+              deferred,
+            },
+            options,
+          ),
         ),
       );
       if (deferred.pending) {
