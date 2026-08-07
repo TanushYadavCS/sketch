@@ -51,7 +51,7 @@ describe("configSchema", () => {
         expect(result.data.MAX_CONCURRENT_SCHEDULED_AGENT_RUNS).toBe(4);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
         expect(result.data.VISION_ENABLED).toBe(false);
-        expect(result.data.AGENT_RUNTIME).toBe("sdk");
+        expect(result.data.AGENT_RUNTIME).toBe("aisdk");
       }
     });
 
@@ -60,6 +60,14 @@ describe("configSchema", () => {
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.AGENT_RUNTIME).toBe("aisdk");
+      }
+    });
+
+    it("still accepts an explicit opt-in to the legacy sdk runtime", () => {
+      const result = configSchema.safeParse({ AGENT_RUNTIME: "sdk" });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.AGENT_RUNTIME).toBe("sdk");
       }
     });
 
