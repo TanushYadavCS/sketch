@@ -127,6 +127,31 @@ describe("ConnectorPicker connector capabilities", () => {
     );
   });
 
+  it("keeps Outlook Calendar hidden until credential mode resolves", async () => {
+    const user = userEvent.setup();
+    let releaseCredentialSource: () => void = () => {};
+    const credentialSource = new Promise<Response>((resolve) => {
+      releaseCredentialSource = () =>
+        resolve(
+          HttpResponse.json({
+            mode: "local",
+            canvasConfigured: false,
+            canvasCredentialImportConfigured: false,
+            publicKeyId: null,
+          }),
+        );
+    });
+    setupStatus();
+    server.use(http.get("/api/connectors/credential-source", () => credentialSource));
+    renderPicker([]);
+
+    await user.click(await screen.findByRole("button", { name: /Browse all/i }));
+    expect(screen.queryByText("Microsoft 365 calendar events and meetings")).not.toBeInTheDocument();
+
+    releaseCredentialSource();
+    expect(await screen.findByText("Microsoft 365 calendar events and meetings")).toBeInTheDocument();
+  });
+
   it.each(INTEGRATIONS.filter((def) => def.perUserAuth).map((def) => [def.name, def] as const))(
     "applies the visible account pattern to %s",
     async (_name, def) => {

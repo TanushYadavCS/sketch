@@ -195,6 +195,49 @@ describe("Outlook Calendar connector", () => {
     });
   });
 
+  it("preserves the delta window timestamp during incremental syncs", async () => {
+    const windowStartedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    mockGraphFetch((url) => {
+      if (url.pathname === "/v1.0/me/calendars") return jsonResponse({ value: [workCalendar] });
+      if (url.pathname.endsWith("/calendarView/delta")) {
+        expect(url.searchParams.get("$deltatoken")).toBe("existing");
+        return jsonResponse({
+          value: [calendarEvent("incremental-event")],
+          "@odata.deltaLink": "https://graph.microsoft.com/v1.0/calendar-delta-incremental",
+        });
+      }
+      throw new Error(`Unexpected Microsoft Graph request: ${url.toString()}`);
+    });
+
+    const connector = createOutlookCalendarConnector();
+    await drain(
+      connector.sync({
+        credentials: validCredentials(),
+        scopeConfig: { calendarIds: ["calendar-1"], initialFutureDays: 30 },
+        cursor: JSON.stringify({
+          version: 1,
+          calendars: {
+            "calendar-1":
+              "https://graph.microsoft.com/v1.0/me/calendars/calendar-1/calendarView/delta?$deltatoken=existing",
+          },
+          lastSyncedAt: windowStartedAt,
+        }),
+        logger,
+      }),
+    );
+
+    const nextCursor = await connector.getCursor({
+      credentials: validCredentials(),
+      scopeConfig: { calendarIds: ["calendar-1"], initialFutureDays: 30 },
+      currentCursor: null,
+      logger,
+    });
+    expect(JSON.parse(nextCursor ?? "")).toMatchObject({
+      calendars: { "calendar-1": "https://graph.microsoft.com/v1.0/calendar-delta-incremental" },
+      lastSyncedAt: windowStartedAt,
+    });
+  });
+
   it("emits removals for deleted, cancelled, and declined events", async () => {
     const removals: Array<{ providerFileId?: string; sourceCreatedBefore?: string; reason: string }> = [];
     mockGraphFetch((url) => {

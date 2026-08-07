@@ -211,7 +211,7 @@ export function ConnectorPicker({
     });
   }
   const visibleIntegrations = INTEGRATIONS.filter((def) => {
-    if (credentialSourceQuery.data?.mode === "canvas" && def.type === "outlook_calendar") return false;
+    if (def.type === "outlook_calendar" && credentialSourceQuery.data?.mode !== "local") return false;
     if (def.type !== "whatsapp") return true;
     return (
       setupStatusQuery.data?.whatsappConnected === true ||

@@ -507,6 +507,8 @@ export function createOutlookCalendarConnector(): Connector {
       const parsedCursor = parseCursor(cursor);
       const refreshDeltaWindow = shouldRefreshDeltaWindow(parsedCursor.cursor, scopeConfig);
       const cursorForSync = refreshDeltaWindow ? null : parsedCursor.cursor;
+      const cursorTimestamp = parsedCursor.cursor?.lastSyncedAt;
+      const deltaWindowTimestamp = !refreshDeltaWindow && cursorTimestamp ? cursorTimestamp : new Date().toISOString();
       const calendars = await listCalendars(client);
       const hasCalendarSelection = hasOwn(scopeConfig, "calendarIds");
       const selectedCalendarIds = new Set(parseStringArray(scopeConfig.calendarIds));
@@ -516,7 +518,7 @@ export function createOutlookCalendarConnector(): Connector {
       const runCursor: OutlookCalendarCursor = {
         version: CURSOR_VERSION,
         calendars: {},
-        lastSyncedAt: new Date().toISOString(),
+        lastSyncedAt: deltaWindowTimestamp,
       };
       nextCursor = null;
 
@@ -564,7 +566,6 @@ export function createOutlookCalendarConnector(): Connector {
           reason: "outlook_calendar_delta_expired",
         });
         runCursor.calendars = {};
-        runCursor.lastSyncedAt = new Date().toISOString();
         for (const calendar of selectedCalendars) {
           const outcome = yield* streamEventsForCalendar({
             client,
