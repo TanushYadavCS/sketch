@@ -46,6 +46,8 @@ function createDmProvider(id: string): WhatsAppDmProvider {
       providerConversationId: providerConversationId(target),
       providerTimestamp: null,
     })),
+    startComposing: vi.fn(),
+    stopComposing: vi.fn(),
   };
 }
 
@@ -60,6 +62,8 @@ function createGroupProvider(id: string): WhatsAppGroupProvider {
       providerConversationId: providerConversationId(target),
       providerTimestamp: null,
     })),
+    startComposing: vi.fn(),
+    stopComposing: vi.fn(),
   };
 }
 
@@ -113,6 +117,35 @@ function groupMessage(providerId: string): WhatsAppInboundMessage {
 }
 
 describe("createWhatsAppRuntime", () => {
+  it("delegates composing to the selected DM and group providers", () => {
+    const dmProvider = createDmProvider("wati");
+    const groupProvider = createGroupProvider("baileys");
+    const runtime = createWhatsAppRuntime({
+      dmProviderId: "wati",
+      groupProviderId: "baileys",
+      dmProviders: [dmProvider],
+      groupProviders: [groupProvider],
+      inboundProviders: [],
+      logger: createTestLogger(),
+    });
+    const dmTarget = { kind: "dm", phoneE164: "+111" } as const;
+    const groupTarget = { kind: "group", groupId: "group@g.us" } as const;
+
+    runtime.startComposing(dmTarget);
+    runtime.stopComposing(dmTarget);
+    runtime.startComposing(groupTarget);
+    runtime.stopComposing(groupTarget);
+
+    expect(dmProvider.startComposing).toHaveBeenCalledOnce();
+    expect(dmProvider.startComposing).toHaveBeenCalledWith(dmTarget);
+    expect(dmProvider.stopComposing).toHaveBeenCalledOnce();
+    expect(dmProvider.stopComposing).toHaveBeenCalledWith(dmTarget);
+    expect(groupProvider.startComposing).toHaveBeenCalledOnce();
+    expect(groupProvider.startComposing).toHaveBeenCalledWith(groupTarget);
+    expect(groupProvider.stopComposing).toHaveBeenCalledOnce();
+    expect(groupProvider.stopComposing).toHaveBeenCalledWith(groupTarget);
+  });
+
   it("routes DM targets to the configured DM provider and group targets to the configured group provider", async () => {
     const dmProvider = createDmProvider("wati");
     const groupProvider = createGroupProvider("baileys");

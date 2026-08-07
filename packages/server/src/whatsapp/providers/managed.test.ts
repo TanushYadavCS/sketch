@@ -2,8 +2,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Logger } from "pino";
-import { describe, expect, it, vi } from "vitest";
-import { createTestLogger } from "../../test-utils";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createTestLogger, flush } from "../../test-utils";
 import type { WhatsAppInboundMessage } from "../provider";
 import { WHATSAPP_TEMPLATE_KEYS } from "../templates";
 import {
@@ -27,6 +27,138 @@ function inboundPayload(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+describe("managed WhatsApp typing indicators", () => {
+  const composingCleanups: Array<() => void> = [];
+
+  afterEach(() => {
+    for (const cleanup of composingCleanups) cleanup();
+    composingCleanups.length = 0;
+    vi.restoreAllMocks();
+  });
+
+  function createTypingProvider(requestFetch: ReturnType<typeof vi.fn>, logger = createTestLogger()) {
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai/",
+      tenantToken: "tenant-token",
+      logger,
+      fetch: requestFetch as unknown as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    composingCleanups.push(() => provider.dmProvider.stopComposing?.(target));
+    return { provider, target };
+  }
+
+  it("advertises typing support", () => {
+    const provider = createManagedWhatsAppProvider({
+      platformUrl: "https://app.getsketch.ai",
+      tenantToken: "tenant-token",
+      logger: createTestLogger(),
+    });
+
+    expect(provider.dmProvider.capabilities.typing).toBe(true);
+  });
+
+  it("posts a typing request to the platform for a DM", async () => {
+    const requestFetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const { provider, target } = createTypingProvider(requestFetch);
+
+    expect(() => provider.dmProvider.startComposing?.(target)).not.toThrow();
+    await flush();
+
+    expect(requestFetch).toHaveBeenCalledOnce();
+    const [url, init] = requestFetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://app.getsketch.ai/api/whatsapp/outbound/typing");
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: { Authorization: "Bearer tenant-token", "Content-Type": "application/json" },
+    });
+    expect(JSON.parse(init.body as string)).toEqual({ to: "+15551234567" });
+  });
+
+  it("ignores group targets and invalid phone numbers", async () => {
+    const requestFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    const { provider } = createTypingProvider(requestFetch);
+
+    provider.dmProvider.startComposing?.({ kind: "group", groupId: "group@g.us" });
+    provider.dmProvider.startComposing?.({ kind: "dm", phoneE164: "not-a-phone" });
+    await flush();
+
+    expect(requestFetch).not.toHaveBeenCalled();
+  });
+
+  it("issues one request per session and sends again after stop", async () => {
+    const requestFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    const { provider, target } = createTypingProvider(requestFetch);
+
+    provider.dmProvider.startComposing?.(target);
+    provider.dmProvider.startComposing?.(target);
+    await flush();
+    expect(requestFetch).toHaveBeenCalledOnce();
+
+    provider.dmProvider.stopComposing?.(target);
+    provider.dmProvider.startComposing?.(target);
+    await flush();
+    expect(requestFetch).toHaveBeenCalledTimes(2);
+
+    const firstSignal = (requestFetch.mock.calls[0] as unknown as [string, RequestInit])[1].signal;
+    expect(firstSignal?.aborted).toBe(true);
+  });
+
+  it("swallows platform failures and logs only safe metadata", async () => {
+    const requestFetch = vi.fn(async () => new Response("recipient +15551234567 rejected", { status: 502 }));
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const { provider, target } = createTypingProvider(requestFetch, logger);
+
+    expect(() => provider.dmProvider.startComposing?.(target)).not.toThrow();
+    await flush();
+
+    expect(warn).toHaveBeenCalledWith(
+      { provider: "managed", action: "typing", status: 502, targetKind: "dm" },
+      "Managed WhatsApp typing request failed",
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("tenant-token");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("15551234567");
+  });
+
+  it("swallows rejected typing fetches without an unhandled rejection", async () => {
+    const requestFetch = vi.fn(async () => {
+      throw new Error("platform unreachable from +15551234567 with tenant-token");
+    });
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const { provider, target } = createTypingProvider(requestFetch, logger);
+
+    expect(() => provider.dmProvider.startComposing?.(target)).not.toThrow();
+    await flush();
+
+    expect(warn).toHaveBeenCalledWith(
+      { provider: "managed", action: "typing", status: null, targetKind: "dm" },
+      "Managed WhatsApp typing request failed",
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("tenant-token");
+  });
+
+  it("ignores a stale in-flight response after stop and restart", async () => {
+    const pending: Array<(response: Response) => void> = [];
+    const requestFetch = vi.fn(() => new Promise<Response>((resolve) => pending.push(resolve)));
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const { provider, target } = createTypingProvider(requestFetch, logger);
+
+    provider.dmProvider.startComposing?.(target);
+    provider.dmProvider.stopComposing?.(target);
+    provider.dmProvider.startComposing?.(target);
+
+    pending[0]?.(new Response(null, { status: 502 }));
+    pending[1]?.(new Response(null, { status: 200 }));
+    await flush();
+    await flush();
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
 
 describe("managed WhatsApp provider", () => {
   it("advertises managed inbound media support", () => {

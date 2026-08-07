@@ -25,7 +25,7 @@ import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
 
-const EXPECTED_MIGRATION_COUNT = 155;
+const EXPECTED_MIGRATION_COUNT = 156;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -223,7 +223,62 @@ describe("runMigrations — full sequence", () => {
     expect(names[151]).toBe("156-operational-alerts");
     expect(names[152]).toBe("157-task-activity-events");
     expect(names[153]).toBe("158-slack-channel-participants");
-    expect(names[154]).toBe("159-outlook-calendar-provider-file-scope");
+    expect(names[154]).toBe("159-scheduled-task-conversations");
+    expect(names[155]).toBe("160-outlook-calendar-provider-file-scope");
+  });
+
+  it("backfills only exact web origin task conversations", async () => {
+    const migrator = createMigrator(db);
+    await migrator.migrateTo("158-slack-channel-participants");
+
+    await db
+      .insertInto("scheduled_tasks")
+      .values([
+        {
+          id: "task-origin-backfill",
+          platform: "slack",
+          context_type: "dm",
+          delivery_target: "D123",
+          prompt: "Use the exact origin",
+          schedule_type: "cron",
+          schedule_value: "0 9 * * *",
+          created_by: "origin-owner",
+          origin_platform: "web",
+          origin_conversation_id: "normal-chat-1",
+          created_at: "2026-08-01T00:00:00.000Z",
+          updated_at: "2026-08-01T00:00:00.000Z",
+        },
+        {
+          id: "task-without-origin",
+          platform: "slack",
+          context_type: "dm",
+          delivery_target: "D123",
+          prompt: "Do not infer a relationship",
+          schedule_type: "cron",
+          schedule_value: "0 10 * * *",
+          created_by: "origin-owner",
+          created_at: "2026-08-01T00:00:00.000Z",
+          updated_at: "2026-08-01T00:00:00.000Z",
+        },
+      ])
+      .execute();
+
+    await migrator.migrateToLatest();
+
+    await expect(
+      db
+        .selectFrom("scheduled_task_conversations")
+        .select(["task_id", "conversation_id", "transcript_user_id", "kind"])
+        .orderBy("task_id", "asc")
+        .execute(),
+    ).resolves.toEqual([
+      {
+        task_id: "task-origin-backfill",
+        conversation_id: "normal-chat-1",
+        transcript_user_id: "origin-owner",
+        kind: "web_chat",
+      },
+    ]);
   });
 
   it("resets reviewed combined durability routes for member-source reseeding", async () => {

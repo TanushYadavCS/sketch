@@ -20,7 +20,7 @@ import type { DB } from "../schema";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 
-const EXPECTED_MIGRATION_COUNT = 155;
+const EXPECTED_MIGRATION_COUNT = 156;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -189,7 +189,18 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[151]).toBe("156-operational-alerts");
     expect(names[152]).toBe("157-task-activity-events");
     expect(names[153]).toBe("158-slack-channel-participants");
-    expect(names[154]).toBe("159-outlook-calendar-provider-file-scope");
+    expect(names[154]).toBe("159-scheduled-task-conversations");
+    expect(names[155]).toBe("160-outlook-calendar-provider-file-scope");
+  });
+
+  it("creates the task conversation association table", async () => {
+    const rows = await sql<{ relname: string }>`
+      SELECT relname
+      FROM pg_class
+      WHERE relname = 'scheduled_task_conversations'
+    `.execute(db);
+
+    expect(rows.rows).toEqual([{ relname: "scheduled_task_conversations" }]);
   });
 
   it("creates the bounded open-materializable partial index", async () => {

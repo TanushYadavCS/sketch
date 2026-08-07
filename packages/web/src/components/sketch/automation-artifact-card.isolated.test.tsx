@@ -36,9 +36,9 @@ describe("AutomationArtifactCard", () => {
 
     expect(screen.getByText("Daily account brief")).toBeInTheDocument();
     expect(screen.getByText("ClickUp")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open automation" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Open automation" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(mocks.navigate).toHaveBeenCalledWith({
       to: "/scheduled-tasks/$taskId/edit",
       params: { taskId: "task-123" },
@@ -47,5 +47,22 @@ describe("AutomationArtifactCard", () => {
 
     await user.click(screen.getByRole("button", { name: "Save as-is" }));
     expect(mocks.navigate).toHaveBeenLastCalledWith({ to: "/scheduled-tasks" });
+  });
+
+  it("uses the exact conversation embedded in the artifact URL when no prop is supplied", async () => {
+    const user = userEvent.setup();
+    render(
+      <AutomationArtifactCard
+        artifact={{ ...artifact, builderUrl: "/scheduled-tasks/task-123/edit?conversationId=source-chat" }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      to: "/scheduled-tasks/$taskId/edit",
+      params: { taskId: "task-123" },
+      search: { conversationId: "source-chat" },
+    });
   });
 });

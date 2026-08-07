@@ -27,7 +27,7 @@ const MANAGED_CAPABILITIES: WhatsAppCapabilities = {
   templateProvisioning: "manual",
   interactive: false,
   deliveryStatus: false,
-  typing: false,
+  typing: true,
   reactions: false,
   edit: false,
   groups: false,
@@ -128,10 +128,74 @@ export interface ManagedWhatsAppProvider {
   handleInboundEvent(payload: unknown): Promise<ManagedWhatsAppInboundHandleResult>;
 }
 
+interface ManagedTypingSession {
+  generation: number;
+  controller: AbortController;
+}
+
 export function createManagedWhatsAppProvider(config: ManagedWhatsAppConfig): ManagedWhatsAppProvider {
   const platformUrl = config.platformUrl.replace(/\/+$/u, "");
   const requestFetch = config.fetch ?? fetch;
   const handlers = new Set<WhatsAppMessageHandler>();
+  const typingSessions = new Map<string, ManagedTypingSession>();
+  let nextTypingGeneration = 0;
+
+  const isCurrentTypingSession = (phoneE164: string, generation: number): boolean =>
+    typingSessions.get(phoneE164)?.generation === generation;
+
+  const logTypingFailure = (status: number | null): void => {
+    config.logger.warn(
+      { provider: WHATSAPP_MANAGED_PROVIDER_ID, action: "typing", status, targetKind: "dm" },
+      "Managed WhatsApp typing request failed",
+    );
+  };
+
+  const issueTypingRequest = (phoneE164: string, session: ManagedTypingSession): void => {
+    const requestPromise = (async () => {
+      const response = await requestFetch(`${platformUrl}/api/whatsapp/outbound/typing`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${config.tenantToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ to: phoneE164 }),
+        signal: session.controller.signal,
+      });
+      if (!isCurrentTypingSession(phoneE164, session.generation)) return;
+      if (!response.ok) logTypingFailure(response.status);
+    })();
+
+    void requestPromise.catch(() => {
+      if (isCurrentTypingSession(phoneE164, session.generation)) logTypingFailure(null);
+    });
+  };
+
+  /**
+   * Typing is best-effort and one-shot: the platform forwards it to the WhatsApp provider, which dismisses the
+   * indicator after about 25 seconds or when the reply is sent. There is no refresh or stop operation, so a run
+   * longer than that window shows no indicator for its remainder.
+   */
+  const startComposing = (target: WhatsAppTarget): void => {
+    if (target.kind !== "dm") return;
+    const phoneE164 = target.phoneE164;
+    if (!E164_PHONE_PATTERN.test(phoneE164) || typingSessions.has(phoneE164)) return;
+
+    const session: ManagedTypingSession = {
+      generation: ++nextTypingGeneration,
+      controller: new AbortController(),
+    };
+    typingSessions.set(phoneE164, session);
+    issueTypingRequest(phoneE164, session);
+  };
+
+  const stopComposing = (target: WhatsAppTarget): void => {
+    if (target.kind !== "dm") return;
+
+    const session = typingSessions.get(target.phoneE164);
+    if (!session) return;
+    typingSessions.delete(target.phoneE164);
+    session.controller.abort();
+  };
 
   const sendText = async (
     target: WhatsAppTarget,
@@ -269,6 +333,8 @@ export function createManagedWhatsAppProvider(config: ManagedWhatsAppConfig): Ma
       },
       sendText,
       sendTemplate,
+      startComposing,
+      stopComposing,
       downloadMedia: (message, workspaceDir, params) =>
         message.kind === "dm" ? downloadMedia(message, workspaceDir, params) : Promise.resolve([]),
     },

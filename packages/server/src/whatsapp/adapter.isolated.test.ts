@@ -1729,8 +1729,10 @@ describe("whatsapp/adapter", () => {
       const deps = makeDeps();
       const checkpointRepo = deps.repos.conversationSlices;
       if (!checkpointRepo) throw new Error("expected checkpoint repository");
+      const checkpointTimestamp = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+      const replayedTimestamp = new Date(Date.parse(checkpointTimestamp) - 5 * 60_000).toISOString();
       const completeCheckpointKey = encodeWhatsAppBackfillCheckpointKey({
-        providerTimestamp: "2026-07-07T09:05:00.000Z",
+        providerTimestamp: checkpointTimestamp,
         providerMessageId: "checkpoint",
       });
       vi.mocked(checkpointRepo.getBackfillCheckpoint).mockResolvedValue({
@@ -1742,7 +1744,7 @@ describe("whatsapp/adapter", () => {
         graph_last_served_at: null,
         graph_halted_at: null,
         graph_halt_reason: null,
-        updated_at: "2026-07-07T09:05:00.000Z",
+        updated_at: checkpointTimestamp,
       });
 
       const { mock, getHistoryHandler } = createMockWhatsApp();
@@ -1757,7 +1759,7 @@ describe("whatsapp/adapter", () => {
             providerMessageId: "history-not-yet-stored",
             providerConversationId: "group@g.us",
             canonicalConversationId: "group:group@g.us",
-            providerTimestamp: "2026-07-07T09:00:00.000Z",
+            providerTimestamp: replayedTimestamp,
             senderName: "Bob",
             senderProviderId: "5555@s.whatsapp.net",
             senderPhoneE164: "+5555",

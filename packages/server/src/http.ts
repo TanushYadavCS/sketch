@@ -29,6 +29,7 @@ import { createAuthMiddleware } from "./api/middleware";
 import { productRoutes } from "./api/products";
 import { createProjectRoutes } from "./api/projects";
 import { providerIdentityRoutes } from "./api/provider-identities";
+import { scheduledTaskConversationRoutes } from "./api/scheduled-task-conversations";
 import { scheduledTaskRoutes } from "./api/scheduled-tasks";
 import { settingsRoutes } from "./api/settings";
 import { setupRoutes } from "./api/setup";
@@ -114,6 +115,7 @@ interface AppDeps {
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
   scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById"> &
+    Partial<Pick<TaskScheduler, "removeTaskRuntime">> &
     Partial<Pick<TaskScheduler, "refreshTaskSchedule" | "executeStepById" | "getTaskById">>;
   runAgent?: (params: RunAgentParams) => Promise<RunAgentResult>;
   buildMcpServers?: (email: string | null) => Promise<Record<string, McpServerConfig>>;
@@ -544,6 +546,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       }),
     );
   }
+  app.route("/api/scheduled-tasks", scheduledTaskConversationRoutes(db, { logger }));
   app.route(
     "/api/channels",
     channelRoutes({

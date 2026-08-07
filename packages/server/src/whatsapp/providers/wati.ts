@@ -32,7 +32,7 @@ const WATI_CAPABILITIES: WhatsAppCapabilities = {
   templateProvisioning: "api",
   interactive: true,
   deliveryStatus: true,
-  typing: false,
+  typing: true,
   reactions: false,
   edit: false,
   groups: false,
@@ -86,12 +86,83 @@ type WatiParsedWebhookEvent =
   | { kind: "ignored"; reason: string }
   | { kind: "unrecognized"; reason: string; eventType: string | null; messageType: string | null };
 
+interface WatiTypingSession {
+  generation: number;
+  controller: AbortController;
+}
+
 export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhatsAppProvider {
   const endpoint = normalizeApiEndpoint(config.apiEndpoint);
   const v3Endpoint = normalizeApiEndpoint(new URL(endpoint).origin);
   const requestFetch = config.fetch ?? fetch;
   const channelPhoneDigits = phoneDigits(config.channelPhoneNumber ?? null);
   const handlers = new Set<WhatsAppMessageHandler>();
+  const typingSessions = new Map<string, WatiTypingSession>();
+  let nextTypingGeneration = 0;
+
+  const isCurrentTypingSession = (phone: string, generation: number): boolean =>
+    typingSessions.get(phone)?.generation === generation;
+
+  const logTypingFailure = (status: number | null): void => {
+    config.logger.warn(
+      { provider: WHATSAPP_WATI_PROVIDER_ID, action: "typing", status, targetKind: "dm" },
+      "Wati typing request failed",
+    );
+  };
+
+  const issueTypingRequest = (phone: string, session: WatiTypingSession): void => {
+    const requestPromise = (async () => {
+      const request = buildWatiTypingRequest(v3Endpoint, config.accessToken, channelPhoneDigits, phone);
+      const response = await requestFetch(request.url, {
+        ...request.init,
+        signal: session.controller.signal,
+      });
+      if (!isCurrentTypingSession(phone, session.generation)) return;
+      if (!response.ok) {
+        logTypingFailure(response.status);
+        return;
+      }
+
+      const text = await response.text();
+      if (!isCurrentTypingSession(phone, session.generation)) return;
+      if (!text) return;
+
+      let body: unknown;
+      try {
+        body = JSON.parse(text) as unknown;
+      } catch {
+        logTypingFailure(response.status);
+        return;
+      }
+      if (watiTypingResponseFailed(body)) logTypingFailure(response.status);
+    })();
+
+    void requestPromise.catch(() => {
+      if (isCurrentTypingSession(phone, session.generation)) logTypingFailure(null);
+    });
+  };
+
+  const startComposing = (target: WhatsAppTarget): void => {
+    const phone = composingTargetPhoneDigits(target);
+    if (!phone || typingSessions.has(phone)) return;
+
+    const session: WatiTypingSession = {
+      generation: ++nextTypingGeneration,
+      controller: new AbortController(),
+    };
+    typingSessions.set(phone, session);
+    issueTypingRequest(phone, session);
+  };
+
+  const stopComposing = (target: WhatsAppTarget): void => {
+    const phone = composingTargetPhoneDigits(target);
+    if (!phone) return;
+
+    const session = typingSessions.get(phone);
+    if (!session) return;
+    typingSessions.delete(phone);
+    session.controller.abort();
+  };
 
   const sendText = async (
     target: WhatsAppTarget,
@@ -305,6 +376,8 @@ export function createWatiWhatsAppProvider(config: WatiWhatsAppConfig): WatiWhat
       sendText,
       sendTemplate,
       sendFile,
+      startComposing,
+      stopComposing,
       downloadMedia: (message, workspaceDir, params) =>
         message.kind === "dm" ? downloadMedia(message, workspaceDir, params) : Promise.resolve([]),
     },
@@ -533,6 +606,11 @@ function targetPhoneDigits(target: WhatsAppTarget): string {
   return digits;
 }
 
+function composingTargetPhoneDigits(target: WhatsAppTarget): string | null {
+  if (target.kind !== "dm") return null;
+  return phoneDigits(target.phoneE164);
+}
+
 function phoneDigits(value: unknown): string | null {
   if (typeof value !== "string" && typeof value !== "number") return null;
   const digits = String(value).replace(/\D/gu, "");
@@ -541,6 +619,37 @@ function phoneDigits(value: unknown): string | null {
 
 function authorizationHeaders(accessToken: string): Record<string, string> {
   return { Authorization: `Bearer ${accessToken}`, "User-Agent": WATI_USER_AGENT };
+}
+
+/**
+ * Contract verified against a live Wati tenant on 2026-08-04 via the tenant API Docs and a real DM probe.
+ * The indicator is one-shot: it auto-dismisses after ~25 seconds or when a reply is sent, and it marks the
+ * last incoming message as read. It requires Wati's tenant-level typing feature gate and the Team Inbox
+ * "Show typing indicator to customers" setting. The target is `channel:phone` when a channel number is
+ * configured, otherwise the bare phone digits. Wati returns 400 code 5004 when the conversation has no
+ * incoming message.
+ */
+function buildWatiTypingRequest(
+  v3Endpoint: string,
+  accessToken: string,
+  channelPhoneDigits: string | null,
+  phone: string,
+): { url: URL; init: RequestInit } {
+  return {
+    url: new URL(`${v3Endpoint}/api/ext/v3/conversations/typingIndicator`),
+    init: {
+      method: "POST",
+      headers: { ...authorizationHeaders(accessToken), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target: channelPhoneDigits ? `${channelPhoneDigits}:${phone}` : phone,
+      }),
+    },
+  };
+}
+
+function watiTypingResponseFailed(body: unknown): boolean {
+  if (!isRecord(body)) return false;
+  return body.ok === false || body.result === false || body.success === false || "error" in body;
 }
 
 async function fetchJson(requestFetch: typeof fetch, url: URL, init: RequestInit): Promise<unknown> {

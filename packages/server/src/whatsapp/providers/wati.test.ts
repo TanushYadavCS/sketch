@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWhatsAppProviderEventRepository } from "../../db/repositories/whatsapp-provider-events";
 import { createWhatsAppTemplateMappingRepository } from "../../db/repositories/whatsapp-template-mappings";
-import { createTestLogger } from "../../test-utils";
-import { createTestDb } from "../../test-utils";
-import { type WhatsAppInboundMessage, whatsappDeliveryTargetFromTarget } from "../provider";
+import { createTestDb, createTestLogger, flush } from "../../test-utils";
+import { type WhatsAppInboundMessage, type WhatsAppTarget, whatsappDeliveryTargetFromTarget } from "../provider";
 import { WHATSAPP_TEMPLATE_KEYS } from "../templates";
 import {
+  type WatiWhatsAppProvider,
   createWatiWhatsAppProvider,
   normalizeWatiPhoneNumber,
   parseWatiDeliveryStatusEvent,
@@ -219,8 +219,330 @@ describe("Wati webhook parsing", () => {
 });
 
 describe("Wati outbound provider", () => {
+  const composingCleanups: Array<() => void> = [];
+
   afterEach(() => {
+    for (const cleanup of composingCleanups) cleanup();
+    composingCleanups.length = 0;
+    vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  function trackComposing(provider: WatiWhatsAppProvider, target: WhatsAppTarget): void {
+    composingCleanups.push(() => provider.dmProvider.stopComposing?.(target));
+  }
+
+  it("sends the verified Wati typing indicator request for a DM", async () => {
+    const requestFetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://live-mt-server.wati.io/tenant-1/",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      channelPhoneNumber: "+17435002445",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+8618719149214" } as const;
+    trackComposing(provider, target);
+
+    expect(() => provider.dmProvider.startComposing?.(target)).not.toThrow();
+    await flush();
+
+    const [url, init] = firstFetchCall(requestFetch);
+    expect(url.toString()).toBe("https://live-mt-server.wati.io/api/ext/v3/conversations/typingIndicator");
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: {
+        Authorization: "Bearer wati-token",
+        "Content-Type": "application/json",
+        "User-Agent": WATI_USER_AGENT,
+      },
+    });
+    expect(JSON.parse(init.body as string)).toEqual({
+      target: "17435002445:8618719149214",
+    });
+  });
+
+  it("sends the bare phone target when no channel number is configured", async () => {
+    const requestFetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    expect(() => provider.dmProvider.startComposing?.(target)).not.toThrow();
+    await flush();
+
+    const [, init] = firstFetchCall(requestFetch);
+    expect(JSON.parse(init.body as string)).toEqual({ target: "15551234567" });
+  });
+
+  it("accepts an empty successful typing response without logging a failure", async () => {
+    const requestFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger,
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    expect(() => provider.dmProvider.startComposing?.(target)).not.toThrow();
+    await flush();
+
+    expect(requestFetch).toHaveBeenCalledOnce();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("treats the documented success body as accepted", async () => {
+    const requestFetch = vi.fn(async () => new Response('{"success":true}', { status: 200 }));
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger,
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    provider.dmProvider.startComposing?.(target);
+    await flush();
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("logs a typing failure for a 2xx response with a provider failure body", async () => {
+    const requestFetch = vi.fn(async () => new Response('{"success":false}', { status: 200 }));
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger,
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    provider.dmProvider.startComposing?.(target);
+    await flush();
+
+    expect(warn).toHaveBeenCalledWith(
+      { provider: "wati", action: "typing", status: 200, targetKind: "dm" },
+      "Wati typing request failed",
+    );
+  });
+
+  it("logs a typing failure for malformed 2xx JSON", async () => {
+    const requestFetch = vi.fn(async () => new Response("not-json", { status: 200 }));
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger,
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    provider.dmProvider.startComposing?.(target);
+    await flush();
+
+    expect(warn).toHaveBeenCalledWith(
+      { provider: "wati", action: "typing", status: 200, targetKind: "dm" },
+      "Wati typing request failed",
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("not-json");
+  });
+
+  it("logs the documented no-incoming-message failure without leaking the body", async () => {
+    const requestFetch = vi.fn(
+      async () =>
+        new Response('{"code":5004,"message":"No incoming message found for this conversation"}', { status: 400 }),
+    );
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger,
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    provider.dmProvider.startComposing?.(target);
+    await flush();
+
+    expect(warn).toHaveBeenCalledWith(
+      { provider: "wati", action: "typing", status: 400, targetKind: "dm" },
+      "Wati typing request failed",
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("No incoming message");
+  });
+
+  it("swallows HTTP typing failures and logs safe metadata", async () => {
+    const requestFetch = vi.fn(async () => new Response("secret response", { status: 503 }));
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger,
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    expect(() => provider.dmProvider.startComposing?.(target)).not.toThrow();
+    await flush();
+
+    expect(warn).toHaveBeenCalledWith(
+      { provider: "wati", action: "typing", status: 503, targetKind: "dm" },
+      "Wati typing request failed",
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("wati-token");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("15551234567");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("secret response");
+  });
+
+  it("swallows rejected typing fetches and logs safe metadata", async () => {
+    const requestFetch = vi.fn(async () => {
+      throw new Error("fetch failed for +15551234567 with wati-token");
+    });
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger,
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    expect(() => provider.dmProvider.startComposing?.(target)).not.toThrow();
+    await flush();
+
+    expect(warn).toHaveBeenCalledWith(
+      { provider: "wati", action: "typing", status: null, targetKind: "dm" },
+      "Wati typing request failed",
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("wati-token");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("15551234567");
+  });
+
+  it("treats group composing as a silent no-op", async () => {
+    const requestFetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "group", groupId: "group@g.us" } as const;
+    trackComposing(provider, target);
+
+    expect(() => provider.dmProvider.startComposing?.(target)).not.toThrow();
+    await flush();
+
+    expect(requestFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not issue duplicate typing requests for repeated starts of one session", async () => {
+    const requestFetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    provider.dmProvider.startComposing?.(target);
+    provider.dmProvider.startComposing?.(target);
+    await flush();
+
+    expect(requestFetch).toHaveBeenCalledOnce();
+  });
+
+  it("sends typing again after stop clears the local session", async () => {
+    const requestFetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger: createTestLogger(),
+      fetch: requestFetch as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    provider.dmProvider.startComposing?.(target);
+    provider.dmProvider.stopComposing?.(target);
+    provider.dmProvider.startComposing?.(target);
+    await flush();
+
+    expect(requestFetch).toHaveBeenCalledTimes(2);
+    const fetchCalls = (requestFetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const firstSignal = (fetchCalls[0]?.[1] as RequestInit | undefined)?.signal;
+    const secondSignal = (fetchCalls[1]?.[1] as RequestInit | undefined)?.signal;
+    expect(firstSignal?.aborted).toBe(true);
+    expect(secondSignal?.aborted).toBe(false);
+  });
+
+  it("ignores a stale in-flight response after stop and restart", async () => {
+    const pendingResponses: Array<(response: Response) => void> = [];
+    const requestFetch = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          pendingResponses.push((response) => resolve(response));
+        }),
+    );
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const provider = createWatiWhatsAppProvider({
+      apiEndpoint: "https://tenant.wati.io",
+      accessToken: "wati-token",
+      webhookToken: "webhook-token",
+      logger,
+      fetch: requestFetch as unknown as typeof fetch,
+    });
+    const target = { kind: "dm", phoneE164: "+15551234567" } as const;
+    trackComposing(provider, target);
+
+    provider.dmProvider.startComposing?.(target);
+    provider.dmProvider.stopComposing?.(target);
+    provider.dmProvider.startComposing?.(target);
+    expect(requestFetch).toHaveBeenCalledTimes(2);
+
+    pendingResponses[0]?.(new Response("stale response", { status: 503 }));
+    pendingResponses[1]?.(new Response(null, { status: 204 }));
+    await flush();
+    await flush();
+
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("sends quoted session text messages through the v1 Wati endpoint", async () => {

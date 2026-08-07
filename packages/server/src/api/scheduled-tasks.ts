@@ -6,7 +6,7 @@ import {
   buildAutomationDefinition,
   parseAutomationBuilderSaveRequest,
 } from "../automation/definition";
-import { replaceAutomationDefinition } from "../automation/persistence";
+import { deleteAutomation, replaceAutomationDefinition } from "../automation/persistence";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
@@ -16,6 +16,7 @@ import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB, ScheduledTasksTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
+import { resolveScheduledTaskAccess } from "../scheduler/access";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerStepsJson } from "../scheduler/trigger-metadata";
 import { type WorkflowDelivery, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import type { WorkflowStep } from "../workflows/types";
@@ -27,6 +28,7 @@ interface ScheduledTaskMutationDeps {
   pauseTask: (id: string) => Promise<void>;
   resumeTask: (id: string) => Promise<void>;
   removeTask: (id: string) => Promise<boolean>;
+  removeTaskRuntime?: (id: string) => Promise<boolean>;
   executeTaskById: (id: string) => Promise<unknown>;
   refreshTaskSchedule?: (id: string) => Promise<unknown>;
   executeStepById?: (
@@ -366,11 +368,6 @@ export function scheduledTaskRoutes(
     return user?.id ?? null;
   }
 
-  function canAccess(row: ScheduledTaskRow, userId: string | null, role: string | undefined): boolean {
-    if (!userId) return false;
-    return role === "admin" || row.created_by === userId;
-  }
-
   async function loadAccessibleTask(c: Context, id: string) {
     const row = await repo.getById(id);
     if (!row) {
@@ -379,7 +376,11 @@ export function scheduledTaskRoutes(
       };
     }
     const userId = await resolveUserId(c.get("sub"));
-    if (!canAccess(row, userId, c.get("role"))) {
+    const accessibleRow = resolveScheduledTaskAccess(row, row.created_by, {
+      userId,
+      role: c.get("role"),
+    });
+    if (!accessibleRow) {
       logger?.warn(
         { userId, taskId: id, ownerUserId: row.created_by },
         "scheduled-tasks: member denied access to task",
@@ -388,14 +389,25 @@ export function scheduledTaskRoutes(
         response: c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404),
       };
     }
-    return { row };
+    return { row: accessibleRow };
   }
 
   async function loadFullDefinition(row: ScheduledTaskRow) {
     const stepContentRepo = createAutomationStepContentRepository(db);
     const runsRepo = createAutomationRunsRepository(db);
-    const [stepContentRows, runRows] = await Promise.all([stepContentRepo.getByTask(row.id), runsRepo.list(row.id)]);
-    return buildAutomationDefinition({ row, stepContentRows, runRows });
+    const [stepContentRows, runRows, owner, editor] = await Promise.all([
+      stepContentRepo.getByTask(row.id),
+      runsRepo.list(row.id),
+      row.created_by ? users.findById(row.created_by) : Promise.resolve(undefined),
+      row.last_edited_by ? users.findById(row.last_edited_by) : Promise.resolve(undefined),
+    ]);
+    return buildAutomationDefinition({
+      row,
+      stepContentRows,
+      runRows,
+      createdByName: owner?.name ?? null,
+      lastEditedByName: editor?.name ?? null,
+    });
   }
 
   async function hasBrokerCapableProvider(): Promise<boolean> {
@@ -595,16 +607,39 @@ export function scheduledTaskRoutes(
 
   routes.delete("/:id", async (c) => {
     const id = c.req.param("id");
-    const result = await loadAccessibleTask(c, id);
-    if ("response" in result) return result.response;
-
-    // Cascade delete runs and step content
-    const runsRepo2 = createAutomationRunsRepository(db);
-    const stepContentRepo = createAutomationStepContentRepository(db);
-    await runsRepo2.deleteByTaskId(id);
-    await stepContentRepo.deleteByTaskId(id);
-
-    await scheduler.removeTask(id);
+    const access = await loadAccessibleTask(c, id);
+    if ("response" in access) return access.response;
+    if (!scheduler.removeTaskRuntime) {
+      return c.json(
+        { error: { code: "SCHEDULER_UNAVAILABLE", message: "Scheduler runtime cleanup is unavailable" } },
+        503,
+      );
+    }
+    const userId = await resolveUserId(c.get("sub"));
+    const deletion = await deleteAutomation({
+      db,
+      taskId: id,
+      actor: { userId, canManageAnyTask: c.get("role") === "admin" },
+      scheduler: { removeTaskRuntime: scheduler.removeTaskRuntime },
+    });
+    if (deletion.kind === "not_found" || deletion.kind === "access_denied") {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    if (deletion.kind === "scheduler_failure") {
+      logger?.error(
+        { err: deletion.error, taskId: id },
+        "scheduled-tasks: database deletion committed before scheduler failure",
+      );
+      return c.json(
+        {
+          error: {
+            code: "SCHEDULER_INCONSISTENT",
+            message: "Automation was deleted from the database, but scheduler cleanup failed.",
+          },
+        },
+        503,
+      );
+    }
     return c.json({ success: true });
   });
 
