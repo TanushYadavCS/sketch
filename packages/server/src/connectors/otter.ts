@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import type { Connector, ConnectorCredentials, NameResolver, SyncedItem } from "./types";
+import {
+  type Connector,
+  type ConnectorCredentials,
+  type NameResolver,
+  type SyncedItem,
+  toEmailPrincipals,
+} from "./types";
 
 const DEFAULT_API_BASE_URL = "https://otter.ai/forward/api/v1/";
 const DEFAULT_WEB_BASE_URL = "https://otter.ai";
@@ -412,7 +418,7 @@ export function otterSpeechToSyncedItem(
     contentHash: createHash("sha256").update(content).digest("hex"),
     sourceCreatedAt: createdAt,
     sourceUpdatedAt: updatedAt,
-    accessEmails: people.accessEmails.length > 0 ? people.accessEmails : null,
+    accessPrincipals: people.accessValues.length > 0 ? toEmailPrincipals(people.accessValues) : null,
     attendees: people.attendees.length > 0 ? people.attendees : undefined,
   };
 }
@@ -656,22 +662,22 @@ function extractSpeakerNames(speech: OtterSpeechSummary, segments: OtterTranscri
 
 function buildPeople(names: string[], ownerEmail: string | null, resolveNameToEmail: NameResolver | undefined) {
   const attendees: Array<{ name?: string; email?: string }> = [];
-  const accessEmails = new Set<string>();
+  const accessValues = new Set<string>();
 
-  if (ownerEmail) accessEmails.add(ownerEmail);
+  if (ownerEmail) accessValues.add(ownerEmail);
 
   for (const name of names) {
     const resolvedEmail =
       normalizeEmail(resolveNameToEmail?.(name)?.email) ?? normalizeEmail(name.includes("@") ? name : null);
     if (resolvedEmail) {
       attendees.push({ name, email: resolvedEmail });
-      accessEmails.add(resolvedEmail);
+      accessValues.add(resolvedEmail);
     } else {
       attendees.push({ name });
     }
   }
 
-  return { attendees, accessEmails: [...accessEmails] };
+  return { attendees, accessValues: [...accessValues] };
 }
 
 function normalizeEmail(email: string | null | undefined) {

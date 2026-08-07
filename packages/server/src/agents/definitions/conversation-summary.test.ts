@@ -407,7 +407,7 @@ describe("conversationSummaryDefinition", () => {
         timezone: "UTC",
         now: NOW,
         adminCanReadAllFiles: false,
-        contentUserEmails: ["user@example.com"],
+        contentUserPrincipals: ["user@example.com"],
         agentConfig: {
           enabledSections: {},
           maxItemsPerSection: 5,
@@ -537,7 +537,7 @@ describe("conversationSummaryDefinition", () => {
         timezone: "UTC",
         now: NOW,
         adminCanReadAllFiles: false,
-        contentUserEmails: ["user@example.com"],
+        contentUserPrincipals: ["user@example.com"],
         agentConfig: {
           enabledSections: {},
           maxItemsPerSection: 5,
@@ -627,7 +627,7 @@ describe("conversationSummaryDefinition", () => {
         timezone: "UTC",
         now: NOW,
         adminCanReadAllFiles: false,
-        contentUserEmails: ["user@example.com"],
+        contentUserPrincipals: ["user@example.com"],
         agentConfig: {
           enabledSections: {},
           maxItemsPerSection: 5,
@@ -757,7 +757,7 @@ describe("conversationSummaryDefinition", () => {
         timezone: "UTC",
         now: NOW,
         adminCanReadAllFiles: false,
-        contentUserEmails: ["user@example.com"],
+        contentUserPrincipals: ["user@example.com"],
         agentConfig: {
           enabledSections: {},
           maxItemsPerSection: 5,
@@ -1169,7 +1169,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["user@example.com"],
+      contentUserPrincipals: ["user@example.com"],
       agentConfig: {
         enabledSections: {},
         maxItemsPerSection: 5,
@@ -1233,7 +1233,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["user@example.com"],
+      contentUserPrincipals: ["user@example.com"],
       agentConfig: {
         enabledSections: {},
         maxItemsPerSection: 5,
@@ -1322,7 +1322,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["user@example.com"],
+      contentUserPrincipals: ["user@example.com"],
       agentConfig: {
         enabledSections: {},
         maxItemsPerSection: 5,
@@ -1395,7 +1395,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["user@example.com"],
+      contentUserPrincipals: ["user@example.com"],
       agentConfig: {
         enabledSections: {},
         maxItemsPerSection: 5,
@@ -1457,7 +1457,7 @@ describe("buildConversationSummaryRuntimeContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["user@example.com"],
+      contentUserPrincipals: ["user@example.com"],
       agentConfig: {
         enabledSections: {},
         maxItemsPerSection: 5,

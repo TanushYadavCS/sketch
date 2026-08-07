@@ -244,7 +244,12 @@ describe("confirmReview", () => {
     const aliases: string[] = refreshedTarget.aliases ? JSON.parse(refreshedTarget.aliases) : [];
     expect(aliases).toContain("Simran Suri Neeli");
 
-    const access = await db.selectFrom("file_access").selectAll().where("email", "=", "simran@acme.com").execute();
+    const access = await db
+      .selectFrom("file_access")
+      .selectAll()
+      .where("principal_type", "=", "email")
+      .where("principal_value", "=", "simran@acme.com")
+      .execute();
     expect(access.map((a) => a.indexed_file_id).sort()).toEqual(["file-1", "file-2", "file-3"]);
 
     const mentions = await db.selectFrom("entity_mentions").selectAll().where("entity_id", "=", target.id).execute();

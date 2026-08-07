@@ -16,6 +16,7 @@ import {
   searchToolSchema,
 } from "../../agent/tools/search";
 import { type SketchMcpDeps, UploadCollector } from "../../agent/tools/types";
+import { toEmailPrincipals } from "../../connectors/types";
 import type { createExternalMcpToolCallRepository } from "../../db/repositories/external-mcp-tool-calls";
 import type { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
@@ -35,7 +36,7 @@ export async function createPublicSketchMcpServer(params: {
   workspaceDir: string;
   auditRepo: AuditRepo;
 }): Promise<McpServer> {
-  const userEmails = await params.userRepo.getVerifiedEmailsForUser(params.userId);
+  const userPrincipals = toEmailPrincipals(await params.userRepo.getVerifiedEmailsForUser(params.userId));
   const deps: SketchMcpDeps = {
     uploadCollector: new UploadCollector(),
     workspaceDir: params.workspaceDir,
@@ -43,7 +44,7 @@ export async function createPublicSketchMcpServer(params: {
     userRepo: params.userRepo,
     currentUserId: params.userId,
     publicMcp: {
-      userEmails,
+      userPrincipals,
       filterEntityMetadata: true,
       maxFileContentChars: MAX_FILE_CONTENT_CHARS,
     },

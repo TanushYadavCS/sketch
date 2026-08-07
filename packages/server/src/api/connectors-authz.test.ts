@@ -1571,7 +1571,7 @@ describe("Connectors API — authorization", () => {
         .execute();
       await db
         .insertInto("access_scope_members")
-        .values({ access_scope_id: "scope-restricted", email: OTHER_MEMBER_EMAIL })
+        .values({ access_scope_id: "scope-restricted", principal_type: "email", principal_value: OTHER_MEMBER_EMAIL })
         .execute();
       const repo = createConnectorRepository(db);
       const result = await repo.upsertFile({

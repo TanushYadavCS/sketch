@@ -34,6 +34,7 @@ import type {
   PersonEntitySeedCallback,
   SyncedItem,
 } from "./types";
+import { toEmailPrincipals } from "./types";
 
 const CLICKUP_API = "https://api.clickup.com/api/v2";
 const CLICKUP_API_V3 = "https://api.clickup.com/api/v3";
@@ -696,7 +697,7 @@ export function createClickUpConnector(): Connector {
           scopeType: "workspace",
           providerScopeId: team.id,
           label: workspaceName,
-          memberEmails: workspaceEmails,
+          members: toEmailPrincipals(workspaceEmails),
         };
 
         let syncedAnyAllowedSpace = false;
@@ -708,15 +709,15 @@ export function createClickUpConnector(): Connector {
 
           let spaceScope: SyncedItem["accessScope"];
           if (space.private && space.members) {
-            const memberEmails = extractMemberEmails(space.members);
+            const memberValues = extractMemberEmails(space.members);
             spaceScope = {
               scopeType: "space",
               providerScopeId: space.id,
               label: space.name,
-              memberEmails,
+              members: toEmailPrincipals(memberValues),
             };
             logger.debug(
-              { spaceId: space.id, spaceName: space.name, memberCount: memberEmails.length },
+              { spaceId: space.id, spaceName: space.name, memberCount: memberValues.length },
               "Private space — using space members",
             );
           } else {

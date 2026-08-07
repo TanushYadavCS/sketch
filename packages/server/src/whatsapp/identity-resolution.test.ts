@@ -12,7 +12,12 @@ import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { createTestDb } from "../test-utils";
-import { buildWhatsAppRosterSnapshot, createWhatsAppIdentityResolutionService } from "./identity-resolution";
+import {
+  buildWhatsAppRosterSnapshot,
+  captureWhatsAppLidForPhone,
+  createWhatsAppIdentityResolutionService,
+  normalizeWhatsAppIdentityLid,
+} from "./identity-resolution";
 
 const RAW_PRIVATE_IDENTIFIER_PATTERN =
   /(?:[^\s"'<>()[\]{}]+@(?:s\.whatsapp\.net|lid)\b|(?:\+|00)?(?=(?:[\d\s().-]*\d){7})[1-9][\d\s().-]*\d)/iu;
@@ -90,6 +95,56 @@ function expectNoRawPrivateIdentifiers(serializedSnapshot: string): void {
 }
 
 describe("WhatsApp identity resolution", () => {
+  it("normalizes LIDs by removing device suffixes", () => {
+    expect(normalizeWhatsAppIdentityLid("12345:7@lid")).toBe("12345@lid");
+    expect(normalizeWhatsAppIdentityLid("12345@LID")).toBe("12345@lid");
+  });
+
+  it("captures a LID for its phone user and skips conflicts", async () => {
+    await seedUser("lid-owner", "LID Owner", "+15550000011");
+    await seedUser("lid-other", "Other", "+15550000012");
+
+    await captureWhatsAppLidForPhone(db, "+1 (555) 000-0011", "12345:7@lid");
+    await expect(
+      db.selectFrom("users").select("whatsapp_lid").where("id", "=", "lid-owner").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      whatsapp_lid: "12345@lid",
+    });
+
+    const warn = vi.fn();
+    await captureWhatsAppLidForPhone(db, "+15550000012", "12345@lid", { warn });
+    await expect(
+      db.selectFrom("users").select("whatsapp_lid").where("id", "=", "lid-other").executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      whatsapp_lid: null,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      { userId: "lid-other", conflictingUserId: "lid-owner" },
+      "Skipped conflicting WhatsApp LID capture",
+    );
+  });
+
+  it("treats a concurrent LID capture race as a benign conflict", async () => {
+    await seedUser("lid-race-a", "Race A", "+15550000021");
+    await seedUser("lid-race-b", "Race B", "+15550000022");
+    const warn = vi.fn();
+
+    await expect(
+      Promise.all([
+        captureWhatsAppLidForPhone(db, "+15550000021", "race@lid", { warn }),
+        captureWhatsAppLidForPhone(db, "+15550000022", "race@lid", { warn }),
+      ]),
+    ).resolves.toEqual([undefined, undefined]);
+
+    const owners = await db
+      .selectFrom("users")
+      .select(["id", "whatsapp_lid"])
+      .where("whatsapp_lid", "=", "race@lid")
+      .execute();
+    expect(owners).toHaveLength(1);
+    expect(warn).toHaveBeenCalledWith(expect.any(Object), "Skipped conflicting WhatsApp LID capture");
+  });
+
   it("resolves rungs in teammate, entity, label, unresolved order", async () => {
     const groupJid = "120363000000001@g.us";
     const groups = await seedGroup(groupJid);

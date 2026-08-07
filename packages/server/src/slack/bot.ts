@@ -673,9 +673,17 @@ export class SlackBot {
     }
   }
 
-  async getUserInfo(
-    userId: string,
-  ): Promise<{ name: string; realName: string; email: string | null; tz: string | null; isBot: boolean }> {
+  async getUserInfo(userId: string): Promise<{
+    name: string;
+    realName: string;
+    email: string | null;
+    tz: string | null;
+    isBot: boolean;
+    isGuest?: boolean;
+    isStranger?: boolean;
+    isRestricted?: boolean;
+    isUltraRestricted?: boolean;
+  }> {
     const result = await this.app.client.users.info({ user: userId });
     return {
       name: result.user?.name ?? "unknown",
@@ -683,6 +691,9 @@ export class SlackBot {
       email: result.user?.profile?.email ?? null,
       tz: result.user?.tz ?? null,
       isBot: result.user?.is_bot === true || userId === "USLACKBOT",
+      isStranger: result.user?.is_stranger === true,
+      isRestricted: result.user?.is_restricted === true,
+      isUltraRestricted: result.user?.is_ultra_restricted === true,
     };
   }
 

@@ -23,8 +23,14 @@ export async function handleListTasks(
   if (!parentEntityId && !assigneeEntityId) {
     return { content: [{ type: "text", text: "Provide parentEntityId or assigneeEntityId." }] };
   }
+  const user =
+    deps.currentUserId && deps.userRepo?.findById ? await deps.userRepo.findById(deps.currentUserId) : undefined;
   const viewer = {
     email: await resolvePrimaryEmail(deps),
+    emails: user && deps.userRepo?.getAllEmailsForUser ? await deps.userRepo.getAllEmailsForUser(user.id) : [],
+    phone: user?.whatsapp_number ?? null,
+    slackUserId: user?.slack_user_id ?? null,
+    whatsappLid: user?.whatsapp_lid ?? null,
     isAdmin: false,
   };
   const repo = createTaskRepository(deps.db);
@@ -59,7 +65,11 @@ export function createListTasksTool(deps: SketchMcpDeps) {
 }
 
 async function resolvePrimaryEmail(deps: SketchMcpDeps): Promise<string | null> {
-  if (deps.publicMcp?.userEmails?.length) return deps.publicMcp.userEmails[0];
+  const publicEmail = deps.publicMcp?.userPrincipals?.find(
+    (principal) => typeof principal === "string" || principal.type === "email",
+  );
+  if (typeof publicEmail === "string") return publicEmail;
+  if (publicEmail) return publicEmail.value;
   if (!deps.currentUserId || !deps.userRepo?.getAllEmailsForUser) return null;
   const emails = await deps.userRepo.getAllEmailsForUser(deps.currentUserId);
   return emails[0] ?? null;

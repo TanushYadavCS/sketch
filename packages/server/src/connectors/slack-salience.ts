@@ -6,9 +6,9 @@ import { type ConversationSliceRow, createConversationSlicesRepository } from ".
 import type { DB } from "../db/schema";
 import {
   type SlackRosterSnapshot,
+  accessPrincipalsFromRoster,
   parseSlackRosterSnapshot,
   resolveSlackChannelRoster,
-  teammateEmailsFromRoster,
 } from "../slack/identity-resolution";
 import type { SlackIndexingFacade } from "../slack/indexing-facade";
 import type { GeminiGenerator } from "./gemini-generate";
@@ -52,7 +52,7 @@ interface RenderedSlackSlice {
   content: string;
   roster: SlackRosterSnapshot;
   serializedRoster: string;
-  teammateEmails: string[];
+  accessPrincipals: ReturnType<typeof accessPrincipalsFromRoster>;
 }
 
 function emptySummary(batchLimit: number): SlackSalienceRunSummary {
@@ -226,7 +226,7 @@ async function renderSlackSlice(
     content: `${channelLine}\n\n${transcript}`,
     roster,
     serializedRoster: JSON.stringify(roster),
-    teammateEmails: teammateEmailsFromRoster(roster),
+    accessPrincipals: accessPrincipalsFromRoster(roster),
   };
 }
 
@@ -456,8 +456,8 @@ export async function* emitSlackSyncedItems(options: {
       context.slice = { ...context.slice, roster_snapshot: serializedRoster };
     }
 
-    const teammateEmails = teammateEmailsFromRoster(roster);
-    if (teammateEmails.length === 0) {
+    const accessPrincipals = accessPrincipalsFromRoster(roster);
+    if (accessPrincipals.length === 0) {
       await archiveLinkedSliceFileIfPresent(options.db, context);
       options.onSkippedNoScope?.();
       options.logger.warn(
@@ -491,9 +491,12 @@ export async function* emitSlackSyncedItems(options: {
         scopeType: "slack_channel",
         providerScopeId: context.channelId,
         label: `#${context.channelName}`,
-        memberEmails: teammateEmails,
+        members: rendered.accessPrincipals,
       },
-      accessEmails: options.slackEntitySyncEnabled === false ? undefined : teammateEmails,
+      accessPrincipals:
+        options.slackEntitySyncEnabled === false
+          ? undefined
+          : rendered.accessPrincipals.filter((principal) => principal.type === "email"),
     };
   }
 }
@@ -602,8 +605,8 @@ export async function reconcileSlackChannelAcls(options: {
       continue;
     }
 
-    const teammateEmails = teammateEmailsFromRoster(roster);
-    if (teammateEmails.length === 0) {
+    const accessPrincipals = accessPrincipalsFromRoster(roster);
+    if (accessPrincipals.length === 0) {
       filesArchived += await repo.archiveFilesForAccessScopes([scope.id]);
       scopesArchived += 1;
       continue;
@@ -613,7 +616,7 @@ export async function reconcileSlackChannelAcls(options: {
       scopeType: "slack_channel",
       providerScopeId: scope.providerScopeId,
       label: `#${channelName}`,
-      memberEmails: teammateEmails,
+      members: accessPrincipals,
     });
     scopesRefreshed += 1;
 

@@ -9,6 +9,7 @@ export interface UsersTable {
   auth_role: Generated<string>;
   slack_user_id: string | null;
   whatsapp_number: string | null;
+  whatsapp_lid: Generated<string | null>;
   description: string | null;
   type: Generated<string>;
   role: string | null;
@@ -234,7 +235,8 @@ export interface AccessScopesTable {
 
 export interface AccessScopeMembersTable {
   access_scope_id: string;
-  email: string;
+  principal_type: string;
+  principal_value: string;
 }
 
 export interface ConnectorFilesTable {
@@ -256,7 +258,8 @@ export interface UserProviderIdentitiesTable {
 
 export interface FileAccessTable {
   indexed_file_id: string;
-  email: string;
+  principal_type: string;
+  principal_value: string;
 }
 
 export interface FileShareEmailsTable {

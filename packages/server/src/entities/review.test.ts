@@ -1359,7 +1359,7 @@ describe("entity-review routes — child tasks preview", () => {
       .execute();
     await db
       .insertInto("access_scope_members")
-      .values({ access_scope_id: "scope-other", email: OTHER_EMAIL })
+      .values({ access_scope_id: "scope-other", principal_type: "email", principal_value: OTHER_EMAIL })
       .execute();
     await seedChildTask("task-visible", "team-2", "SKE-3: Visible");
     await seedChildTask("task-hidden", "team-2", "SKE-4: Hidden", {

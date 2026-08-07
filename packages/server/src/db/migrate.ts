@@ -164,6 +164,7 @@ import * as m161 from "./migrations/161-slack-roster-evidence";
 import * as m162 from "./migrations/162-user-entity-links";
 import * as m163 from "./migrations/163-slack-file-access-backfill-cleanup";
 import * as m164 from "./migrations/164-outlook-calendar-provider-file-scope";
+import * as m165 from "./migrations/165-typed-access-principals";
 import type { DB } from "./schema";
 
 /**
@@ -337,6 +338,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "162-user-entity-links": m162,
           "163-slack-file-access-backfill-cleanup": m163,
           "164-outlook-calendar-provider-file-scope": m164,
+          "165-typed-access-principals": m165,
         };
       },
     },

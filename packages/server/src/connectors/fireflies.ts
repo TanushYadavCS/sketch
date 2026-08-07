@@ -16,7 +16,13 @@
 import { createHash } from "node:crypto";
 import pino, { type Logger } from "pino";
 import { type AmbiguityAwareMap, createAmbiguityAwareMap, normalizeName } from "./name-normalize";
-import type { Connector, ConnectorCredentials, NameResolver, SyncedItem } from "./types";
+import {
+  type Connector,
+  type ConnectorCredentials,
+  type NameResolver,
+  type SyncedItem,
+  toEmailPrincipals,
+} from "./types";
 
 const FIREFLIES_API = "https://api.fireflies.ai/graphql";
 
@@ -233,7 +239,7 @@ function formatTranscriptContent(transcript: FirefliesTranscript): string {
   parts.push(`# ${transcript.title}`);
   parts.push(`Date: ${date.toISOString().split("T")[0]} | Duration: ${durationMin}min`);
 
-  // Participant emails live in accessEmails for ACL — keeping them out of the body avoids polluting embeddings and the entity extractor.
+  // Participant emails live in accessPrincipals for ACL — keeping them out of the body avoids polluting embeddings and the entity extractor.
 
   // AI summary
   if (transcript.summary?.overview) {
@@ -287,7 +293,7 @@ function lowerEmail(email: string | null | undefined): string | null {
 }
 
 /**
- * Build attendees + accessEmails coherently. Emails are lowercased on
+ * Build attendees + accessPrincipals coherently. Emails are lowercased on
  * every insert/lookup — Fireflies returns mixed-case across fields, so
  * canonicalization is required for dedup to work.
  *
@@ -304,7 +310,7 @@ function buildPeople(
   contactsByName: AmbiguityAwareMap<string, string>,
   ownerEmail: string | null,
   resolveNameToEmail: NameResolver | undefined,
-): { attendees: Array<{ name?: string; email?: string }>; accessEmails: string[] } {
+): { attendees: Array<{ name?: string; email?: string }>; accessValues: string[] } {
   const emailByName = createAmbiguityAwareMap<string, string>();
   const allEmails = new Set<string>();
 
@@ -352,16 +358,16 @@ function buildPeople(
     }
   }
 
-  // Resolver-recovered speakers contribute their emails to accessEmails too,
+  // Resolver-recovered speakers contribute their emails to accessPrincipals too,
   // not just attendees — the whole point is the right humans get RBAC.
-  const accessEmails = new Set<string>(allEmails);
+  const accessValues = new Set<string>(allEmails);
   for (const a of attendees) {
-    if (a.email) accessEmails.add(a.email);
+    if (a.email) accessValues.add(a.email);
   }
   const owner = lowerEmail(ownerEmail);
-  if (owner) accessEmails.add(owner);
+  if (owner) accessValues.add(owner);
 
-  return { attendees, accessEmails: [...accessEmails] };
+  return { attendees, accessValues: [...accessValues] };
 }
 
 function transcriptToSyncedItem(
@@ -374,7 +380,7 @@ function transcriptToSyncedItem(
   const content = formatTranscriptContent(transcript);
   const date = new Date(transcript.date);
 
-  const { attendees, accessEmails } = buildPeople(transcript, contacts, contactsByName, ownerEmail, resolveNameToEmail);
+  const { attendees, accessValues } = buildPeople(transcript, contacts, contactsByName, ownerEmail, resolveNameToEmail);
 
   return {
     providerFileId: transcript.id,
@@ -387,7 +393,7 @@ function transcriptToSyncedItem(
     contentHash: contentHash(content),
     sourceCreatedAt: date.toISOString(),
     sourceUpdatedAt: date.toISOString(),
-    accessEmails: accessEmails.length > 0 ? accessEmails : null,
+    accessPrincipals: accessValues.length > 0 ? toEmailPrincipals(accessValues) : null,
     attendees: attendees.length > 0 ? attendees : undefined,
   };
 }

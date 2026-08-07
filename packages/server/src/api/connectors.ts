@@ -52,7 +52,7 @@ import { getSyncProgress, runConnectorSync } from "../connectors/sync";
 import { removeConnectorSourceItems } from "../connectors/sync-reconcile";
 import { parseCredentials, serializeCredentials } from "../connectors/sync-utils";
 import type { AuthType, ConnectorCredentials, ConnectorType, OAuthCredentials } from "../connectors/types";
-import { createConnectorRepository } from "../db/repositories/connectors";
+import { createConnectorRepository, viewerPrincipals } from "../db/repositories/connectors";
 import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { createEntityReviewRepo } from "../db/repositories/entity-review";
@@ -524,13 +524,6 @@ export function connectorRoutes(
       return { name: err.name, message: err.message };
     }
     return { message: String(err) };
-  }
-
-  async function getUserEmails(c: { get: (key: string) => unknown }): Promise<string[]> {
-    if (!userRepo) return [];
-    const userId = c.get("sub");
-    if (typeof userId !== "string" || !userId) return [];
-    return userRepo.getAllEmailsForUser(userId);
   }
 
   async function getOwnerEmail(createdBy: string): Promise<string | null> {
@@ -1085,14 +1078,14 @@ export function connectorRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    const userEmails = await getUserEmails(c);
+    const userPrincipals = viewerPrincipals(getContentViewer(c));
     const results = await search(db, parsed.data.query, {
       source: parsed.data.source,
       category: parsed.data.category,
       limit: parsed.data.limit,
       after: after ?? undefined,
       before: before ?? undefined,
-      userEmails,
+      userPrincipals,
       slackEntitySyncEnabled: appConfig?.SLACK_ENTITY_SYNC,
       geminiMaxRpm: appConfig?.GEMINI_MAX_RPM,
       geminiMaxRetries: appConfig?.GEMINI_MAX_RETRIES,
@@ -1110,7 +1103,7 @@ export function connectorRoutes(
     // signals trusted bypass to getFileContent; otherwise pass the caller's
     // resolved emails so the 3-tier RBAC check runs.
     const contentViewer = getContentViewer(c);
-    const userEmails = contentViewer.isAdmin ? undefined : await getUserEmails(c);
+    const userPrincipals = contentViewer.isAdmin ? undefined : viewerPrincipals(contentViewer);
     const exists = await db
       .selectFrom("indexed_files")
       .select(["id", "file_name", "file_type", "source", "source_path", "synced_at", "enrichment_status"])
@@ -1119,7 +1112,7 @@ export function connectorRoutes(
     if (!exists) {
       return c.json({ error: { code: "NOT_FOUND", message: "File not found" } }, 404);
     }
-    const file = await getFileContent(db, fileId, userEmails, contentViewer.slackEntitySyncEnabled ?? true);
+    const file = await getFileContent(db, fileId, userPrincipals, contentViewer.slackEntitySyncEnabled ?? true);
     if (!file) {
       // Admins already see the file metadata in the list; surface name/source/etc.
       // here so they can triage which file is gated and ask the owner. For non-admins,
@@ -2148,11 +2141,11 @@ export function connectorRoutes(
     // Mirror GET /files/:fileId/content: admins bypass only with the
     // admin_can_read_all_files setting; everyone else is filtered to visible files.
     const contentViewer = getContentViewer(c);
-    const userEmails = contentViewer.isAdmin ? undefined : await getUserEmails(c);
+    const userPrincipals = contentViewer.isAdmin ? undefined : viewerPrincipals(contentViewer);
     const visibleIds = await filterAccessibleFileIds(
       db,
       rows.map((row) => row.indexed_file_id),
-      userEmails,
+      userPrincipals,
       contentViewer.slackEntitySyncEnabled ?? true,
     );
     const visible = rows.filter((row) => visibleIds.has(row.indexed_file_id));

@@ -9,7 +9,14 @@ import {
   refreshMicrosoftTokens,
 } from "./microsoft-graph";
 import { streamWithConcurrency } from "./sync-utils";
-import type { Connector, ConnectorCredentials, OAuthCredentials, SourceItemRemovalRecord, SyncedItem } from "./types";
+import {
+  type Connector,
+  type ConnectorCredentials,
+  type OAuthCredentials,
+  type SourceItemRemovalRecord,
+  type SyncedItem,
+  toEmailPrincipals,
+} from "./types";
 
 export const TEAMS_MICROSOFT_SCOPE =
   "offline_access User.Read Calendars.Read OnlineMeetings.Read OnlineMeetingTranscript.Read.All OnlineMeetingRecording.Read.All";
@@ -398,7 +405,7 @@ function buildPeople(params: {
   transcript: TeamsTranscript;
   speakerNames: string[];
   ownerEmail: string | null;
-}): { attendees: Array<{ name?: string; email?: string }>; accessEmails: string[] } {
+}): { attendees: Array<{ name?: string; email?: string }>; accessValues: string[] } {
   const emailPeople = new Map<string, { name?: string; email?: string }>();
   const allEmails = new Set<string>();
   const emailByName = new Map<string, string>();
@@ -456,7 +463,7 @@ function buildPeople(params: {
     if (attendee.email) allEmails.add(attendee.email);
   }
 
-  return { attendees, accessEmails: [...allEmails] };
+  return { attendees, accessValues: [...allEmails] };
 }
 
 export function teamsMeetingToSyncedItems(params: {
@@ -498,7 +505,7 @@ export function teamsMeetingToSyncedItems(params: {
         contentHash: contentHash(content),
         sourceCreatedAt,
         sourceUpdatedAt: graphDateTime(transcript.createdDateTime) ?? sourceUpdatedAt,
-        accessEmails: people.accessEmails.length > 0 ? people.accessEmails : null,
+        accessPrincipals: people.accessValues.length > 0 ? toEmailPrincipals(people.accessValues) : null,
         attendees: people.attendees.length > 0 ? people.attendees : undefined,
       },
     ];

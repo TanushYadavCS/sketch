@@ -26,6 +26,7 @@ declare module "hono" {
     /** Org setting: when true, admins bypass per-file content RBAC for direct HTTP reads. */
     adminCanReadAllFiles: boolean;
     slackEntitySyncEnabled: boolean;
+    viewerIdentity: ViewerIdentity;
   }
 }
 
@@ -48,20 +49,44 @@ const PLATFORM_COOKIE = "sketch_platform_session";
 
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 
+export interface ViewerIdentity {
+  emails: string[];
+  phone: string | null;
+  slackUserId: string | null;
+  whatsappLid: string | null;
+}
+
+interface AuthenticatedUser {
+  id: string;
+  authRole?: string | null;
+  email?: string | null;
+  emails?: string[];
+  whatsappNumber?: string | null;
+  slackUserId?: string | null;
+  whatsappLid?: string | null;
+}
+
 export interface AuthMiddlewareOpts {
   managedAuthSecret?: string;
   managedUrl?: string;
-  findUserByEmail?: (email: string) => Promise<{ id: string; authRole?: string | null; email?: string | null } | null>;
+  findUserByEmail?: (email: string) => Promise<AuthenticatedUser | null>;
   verifySketchApiKey?: (token: string) => Promise<boolean>;
   hasSetupAdmin?: () => Promise<boolean>;
-  resolveLocalSessionUser?: (
-    sub: string,
-  ) => Promise<{ id: string; authRole?: string | null; email?: string | null } | null>;
+  resolveLocalSessionUser?: (sub: string) => Promise<AuthenticatedUser | null>;
   slackEntitySyncEnabled?: boolean;
 }
 
 function toAuthRole(value: string | null | undefined): "admin" | "member" {
   return value === "admin" ? "admin" : "member";
+}
+
+function identityForUser(user: AuthenticatedUser): ViewerIdentity {
+  return {
+    emails: user.emails ?? (user.email ? [user.email] : []),
+    phone: user.whatsappNumber ?? null,
+    slackUserId: user.slackUserId ?? null,
+    whatsappLid: user.whatsappLid ?? null,
+  };
 }
 
 function canUseSketchApiKey(path: string, method: string): boolean {
@@ -179,6 +204,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
         c.set("role", toAuthRole(user.authRole));
         c.set("sub", user.id);
         c.set("email", user.email ?? payload.email ?? null);
+        c.set("viewerIdentity", identityForUser(user));
         c.set("adminCanReadAllFiles", adminCanReadAllFiles);
         c.set("slackEntitySyncEnabled", slackEntitySyncEnabled);
         return next();
@@ -209,10 +235,18 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
       c.set("role", toAuthRole(user.authRole));
       c.set("sub", user.id);
       c.set("email", user.email ?? payload.email ?? null);
+      c.set("viewerIdentity", identityForUser(user));
     } else {
+      /** The payload-only fallback intentionally remains email-only because it has no trusted user row to supply other identifiers. */
       c.set("role", payload.role);
       c.set("sub", payload.sub);
       c.set("email", payload.email ?? null);
+      c.set("viewerIdentity", {
+        emails: payload.email ? [payload.email] : [],
+        phone: null,
+        slackUserId: null,
+        whatsappLid: null,
+      });
     }
     c.set("adminCanReadAllFiles", adminCanReadAllFiles);
     c.set("slackEntitySyncEnabled", slackEntitySyncEnabled);

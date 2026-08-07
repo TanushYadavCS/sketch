@@ -47,7 +47,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         .execute();
       await db
         .insertInto("access_scope_members")
-        .values({ access_scope_id: "chat-scope", email: CURRENT_EMAIL })
+        .values({ access_scope_id: "chat-scope", principal_type: "email", principal_value: CURRENT_EMAIL })
         .execute();
 
       const files = [
@@ -125,8 +125,8 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       await db
         .insertInto("file_access")
         .values([
-          { indexed_file_id: "chat-stamped", email: DEPARTED_EMAIL },
-          { indexed_file_id: "drive-stamped", email: DEPARTED_EMAIL },
+          { indexed_file_id: "chat-stamped", principal_type: "email", principal_value: DEPARTED_EMAIL },
+          { indexed_file_id: "drive-stamped", principal_type: "email", principal_value: DEPARTED_EMAIL },
         ])
         .execute();
       await db
@@ -246,14 +246,14 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
     });
 
     it("applies chat-source revocation to raw search visibility", async () => {
-      const departed = await searchFiles(db, "revocation", { userEmails: [DEPARTED_EMAIL] });
-      const current = await searchFiles(db, "revocation", { userEmails: [CURRENT_EMAIL] });
+      const departed = await searchFiles(db, "revocation", { userPrincipals: [DEPARTED_EMAIL] });
+      const current = await searchFiles(db, "revocation", { userPrincipals: [CURRENT_EMAIL] });
 
       expect(departed.map((file) => file.id)).not.toContain("chat-stamped");
       expect(departed.map((file) => file.id)).toContain("drive-stamped");
       expect(current.map((file) => file.id)).toContain("chat-current");
 
-      const outsider = await searchFiles(db, "revocation", { userEmails: [OUTSIDER_EMAIL] });
+      const outsider = await searchFiles(db, "revocation", { userPrincipals: [OUTSIDER_EMAIL] });
       expect(outsider.map((file) => file.id)).toEqual(
         expect.arrayContaining(["chat-manual", "chat-org", "chat-entity"]),
       );
@@ -272,7 +272,7 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(await getFileContent(db, "chat-no-scope", [DEPARTED_EMAIL], false)).not.toBeNull();
 
       const results = await searchFiles(db, "revocation", {
-        userEmails: [DEPARTED_EMAIL],
+        userPrincipals: [DEPARTED_EMAIL],
         slackEntitySyncEnabled: false,
       });
       expect(results.map((file) => file.id)).toEqual(expect.arrayContaining(["chat-stamped", "chat-no-scope"]));

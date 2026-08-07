@@ -88,7 +88,10 @@ describe("GET /api/entities/:id/mentions — RBAC", () => {
       .insertInto("access_scopes")
       .values({ id: "scope-a", connector_config_id: "cfg", scope_type: "drive", provider_scope_id: "drive-a" })
       .execute();
-    await db.insertInto("access_scope_members").values({ access_scope_id: "scope-a", email: ALICE_EMAIL }).execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({ access_scope_id: "scope-a", principal_type: "email", principal_value: ALICE_EMAIL })
+      .execute();
 
     const baseFile = {
       connector_config_id: "cfg",

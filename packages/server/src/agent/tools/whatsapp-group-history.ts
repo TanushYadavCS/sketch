@@ -2,6 +2,8 @@ import { Buffer } from "node:buffer";
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { Kysely } from "kysely";
 import { z } from "zod/v4";
+import type { AccessPrincipal } from "../../connectors/types";
+import { accessPrincipalPredicateSql } from "../../db/repositories/connectors";
 import type { StoredConversationMessage } from "../../db/repositories/conversations";
 import type { ConversationSlicesTable, DB } from "../../db/schema";
 import type { Attachment } from "../../files";
@@ -11,7 +13,7 @@ import {
   stableWhatsAppParticipantJidRef,
 } from "../../whatsapp/identity-resolution";
 import { stripPersonalNumberTokens } from "../../whatsapp/privacy";
-import { resolveUserEmails } from "./search";
+import { resolveUserPrincipals } from "./search";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const WHATSAPP_GROUP_HISTORY_TOOL_NAME = "WhatsAppGroupHistory";
@@ -115,10 +117,6 @@ function textResult(text: string): ToolResult {
 
 function deniedResult(): ToolResult {
   return textResult(WHATSAPP_GROUP_HISTORY_DENIED_TEXT);
-}
-
-function normalizeEmails(emails: string[]): string[] {
-  return [...new Set(emails.map((email) => email.trim().toLowerCase()).filter((email) => email.length > 0))];
 }
 
 export function normalizeWhatsAppGroupHistoryExpandMinutes(value: number | undefined): number {
@@ -239,7 +237,7 @@ function baseSliceAnchorQuery(db: Kysely<DB>) {
     .where("whatsapp_groups.index_enabled", "=", 1);
 }
 
-function authorizedSliceAnchorQuery(db: Kysely<DB>, userEmails: string[]) {
+function authorizedSliceAnchorQuery(db: Kysely<DB>, userPrincipals: AccessPrincipal[]) {
   return baseSliceAnchorQuery(db)
     .innerJoin("indexed_files", "indexed_files.id", "conversation_slices.indexed_file_id")
     .innerJoin("access_scopes", "access_scopes.id", "indexed_files.access_scope_id")
@@ -250,15 +248,15 @@ function authorizedSliceAnchorQuery(db: Kysely<DB>, userEmails: string[]) {
     .whereRef("indexed_files.provider_file_id", "=", "conversation_slices.id")
     .where("access_scopes.scope_type", "=", "whatsapp_group")
     .whereRef("access_scopes.provider_scope_id", "=", "conversations.provider_conversation_id")
-    .where("access_scope_members.email", "in", userEmails);
+    .where(accessPrincipalPredicateSql("access_scope_members", userPrincipals));
 }
 
 async function loadAuthorizedSliceAnchor(
   db: Kysely<DB>,
   sliceId: string,
-  userEmails: string[],
+  userPrincipals: AccessPrincipal[],
 ): Promise<DrillAnchor | null> {
-  const row = await authorizedSliceAnchorQuery(db, userEmails)
+  const row = await authorizedSliceAnchorQuery(db, userPrincipals)
     .where("conversation_slices.id", "=", sliceId)
     .limit(1)
     .executeTakeFirst();
@@ -273,8 +271,8 @@ function parseGroupRef(groupRef: string): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
-function accessibleGroupAnchorQuery(db: Kysely<DB>, conversationId: number, userEmails: string[]) {
-  return authorizedSliceAnchorQuery(db, userEmails)
+function accessibleGroupAnchorQuery(db: Kysely<DB>, conversationId: number, userPrincipals: AccessPrincipal[]) {
+  return authorizedSliceAnchorQuery(db, userPrincipals)
     .where("conversation_slices.conversation_id", "=", conversationId)
     .where("conversation_slices.salience_verdict", "=", "kept");
 }
@@ -308,10 +306,10 @@ function mergeMessageWindows(windows: AuthorizedMessageWindow[]): AuthorizedMess
 async function loadGroupWindowAuthorization(
   db: Kysely<DB>,
   conversationId: number,
-  userEmails: string[],
+  userPrincipals: AccessPrincipal[],
   window: WhatsAppGroupHistoryWindow,
 ): Promise<GroupWindowAuthorization | null> {
-  const overlappingRows = await accessibleGroupAnchorQuery(db, conversationId, userEmails)
+  const overlappingRows = await accessibleGroupAnchorQuery(db, conversationId, userPrincipals)
     .where("conversation_slices.started_at", "<=", window.end)
     .where("conversation_slices.ended_at", ">=", window.start)
     .orderBy("conversation_slices.started_at", "asc")
@@ -568,8 +566,8 @@ export async function handleWhatsAppGroupHistory(
 ): Promise<ToolResult> {
   if (!deps.db) return deniedResult();
 
-  const userEmails = normalizeEmails(await resolveUserEmails(deps));
-  if (userEmails.length === 0) return deniedResult();
+  const userPrincipals = await resolveUserPrincipals(deps);
+  if (userPrincipals.length === 0) return deniedResult();
 
   const limit = normalizeWhatsAppGroupHistoryLimit(args.limit);
 
@@ -578,7 +576,7 @@ export async function handleWhatsAppGroupHistory(
   let messageWindows: AuthorizedMessageWindow[] = [];
 
   if (args.sliceId) {
-    anchor = await loadAuthorizedSliceAnchor(deps.db, args.sliceId, userEmails);
+    anchor = await loadAuthorizedSliceAnchor(deps.db, args.sliceId, userPrincipals);
     if (!anchor) return deniedResult();
     window = buildWhatsAppGroupHistoryWindow(anchor.startedAt, anchor.endedAt, args.expandMinutes);
     if (window) messageWindows = [{ start: window.start, end: window.end }];
@@ -588,7 +586,7 @@ export async function handleWhatsAppGroupHistory(
       maxWindowMinutes: MAX_WHATSAPP_GROUP_HISTORY_WINDOW_MINUTES,
     });
     if (!window) return textResult(INVALID_INPUT_TEXT);
-    const authorization = await loadGroupWindowAuthorization(deps.db, conversationId, userEmails, window);
+    const authorization = await loadGroupWindowAuthorization(deps.db, conversationId, userPrincipals, window);
     if (!authorization) return deniedResult();
     anchor = authorization.anchor;
     window = authorization.window;

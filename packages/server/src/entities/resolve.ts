@@ -294,14 +294,14 @@ async function insertHeldMention(
 }
 
 /**
- * Ensure (file, email) is in file_access. UNIQUE INDEX (indexed_file_id,
- * email) from migration 021 makes the ON CONFLICT path safe.
+ * Ensure an email principal is in file_access. The typed unique index makes
+ * the ON CONFLICT path safe.
  */
 async function ensureFileAccess(ctx: ResolveTxnCtx, indexedFileId: string, email: string): Promise<void> {
   await sql`
-    INSERT INTO file_access (indexed_file_id, email)
-    VALUES (${indexedFileId}, ${email})
-    ON CONFLICT (indexed_file_id, email) DO NOTHING
+    INSERT INTO file_access (indexed_file_id, principal_type, principal_value)
+    VALUES (${indexedFileId}, 'email', ${email})
+    ON CONFLICT (indexed_file_id, principal_type, principal_value) DO NOTHING
   `.execute(ctx.db);
 }
 

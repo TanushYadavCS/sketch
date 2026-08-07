@@ -278,11 +278,12 @@ export async function buildConversationSummaryRuntimeContext(
       now: params.now.toISOString(),
     });
     const identityEmails = [
-      ...new Set(
-        [params.user.email, ...(params.contentUserEmails ?? [])].filter(
-          (email): email is string => typeof email === "string" && email.length > 0,
+      ...new Set([
+        ...(params.user.email ? [params.user.email] : []),
+        ...(params.contentUserPrincipals ?? []).flatMap((principal) =>
+          typeof principal === "string" ? [principal] : principal.type === "email" ? [principal.value] : [],
         ),
-      ),
+      ]),
     ];
     const peopleByEmail = await resolvePersonEntitiesForUser(params.db, params.user.id, identityEmails).catch(
       () => new Map(),

@@ -12,8 +12,16 @@ import { sql } from "kysely";
 import { decodeSecretField, encodeSecretField } from "../../auth/secret-fields";
 import { getSyncIdentity, syncIdentityKey } from "../../connectors/sync-identity";
 import { forEachChunk } from "../../connectors/sync-utils";
-import type { ConnectorType, ContentCategory, SyncStatus } from "../../connectors/types";
+import {
+  type AccessPrincipal,
+  type AccessPrincipalInput,
+  type ConnectorType,
+  type ContentCategory,
+  type SyncStatus,
+  normalizeAccessPrincipals,
+} from "../../connectors/types";
 import { normalizeSourceTimestampForStorage } from "../../timestamps";
+import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../../whatsapp/identity-resolution";
 import type { DB } from "../schema";
 
 /**
@@ -24,8 +32,128 @@ import type { DB } from "../schema";
  */
 export interface FileViewer {
   email: string | null;
+  emails?: string[];
+  phone?: string | null;
+  slackUserId?: string | null;
+  whatsappLid?: string | null;
   isAdmin: boolean;
   slackEntitySyncEnabled?: boolean;
+}
+
+export function viewerPrincipals(viewer: FileViewer): AccessPrincipal[] {
+  const principals: AccessPrincipal[] = [];
+  const emails = new Set([viewer.email, ...(viewer.emails ?? [])]);
+  for (const email of emails) {
+    const value = email?.trim().toLowerCase();
+    if (value) principals.push({ type: "email", value });
+  }
+  const phone = normalizeWhatsAppIdentityPhone(viewer.phone);
+  if (phone) principals.push({ type: "phone", value: phone });
+  const slackUserId = viewer.slackUserId?.trim();
+  if (slackUserId) principals.push({ type: "slack_user", value: slackUserId });
+  const whatsappLid = normalizeWhatsAppIdentityLid(viewer.whatsappLid);
+  if (whatsappLid) principals.push({ type: "whatsapp_lid", value: whatsappLid });
+  return [...new Map(principals.map((principal) => [`${principal.type}\u0000${principal.value}`, principal])).values()];
+}
+
+export function accessPrincipalPredicateSql(alias: string, principals: AccessPrincipal[]) {
+  if (principals.length === 0) return sql<boolean>`0 = 1`;
+  const column = sql.raw(alias);
+  return sql<boolean>`(${sql.join(
+    principals.map(
+      (principal) =>
+        sql`${column}.principal_type = ${principal.type} AND ${column}.principal_value = ${principal.value}`,
+    ),
+    sql` OR `,
+  )})`;
+}
+
+function emailValuesForPrincipals(principals: AccessPrincipal[]): string[] {
+  return principals.filter((principal) => principal.type === "email").map((principal) => principal.value);
+}
+
+type ResolvedPrincipal = { userId: string; userName: string | null; email: string | null };
+
+function principalLookupKey(type: string, value: string): string {
+  const normalized =
+    type === "email"
+      ? value.trim().toLowerCase()
+      : type === "phone"
+        ? (normalizeWhatsAppIdentityPhone(value) ?? value.trim())
+        : type === "whatsapp_lid"
+          ? (normalizeWhatsAppIdentityLid(value) ?? value.trim())
+          : value.trim();
+  return `${type}\u0000${normalized}`;
+}
+
+function maskPrincipalValue(type: string, value: string): string {
+  const trimmed = value.trim();
+  if (type !== "phone" && type !== "whatsapp_lid") return trimmed;
+  if (trimmed.length <= 4) return "…";
+  return `${trimmed.slice(0, 4)}…${trimmed.slice(-2)}`;
+}
+
+async function loadPrincipalResolution(
+  db: Kysely<DB>,
+  principals: AccessPrincipal[],
+): Promise<Map<string, ResolvedPrincipal>> {
+  if (principals.length === 0) return new Map();
+
+  const valuesByType = new Map<AccessPrincipal["type"], string[]>();
+  for (const principal of principals) {
+    const values = valuesByType.get(principal.type) ?? [];
+    values.push(principal.value);
+    valuesByType.set(principal.type, values);
+  }
+  const emailValues = valuesByType.get("email") ?? [];
+  const providerIdentities =
+    emailValues.length > 0
+      ? await db
+          .selectFrom("user_provider_identities")
+          .select(["user_id", "provider_email"])
+          .where("provider_email", "in", emailValues)
+          .execute()
+      : [];
+  const providerUserIds = providerIdentities.map((identity) => identity.user_id);
+  const users = await db
+    .selectFrom("users")
+    .select(["id", "name", "email", "whatsapp_number", "whatsapp_lid", "slack_user_id"])
+    .where((eb) =>
+      eb.or([
+        ...(emailValues.length > 0 ? [eb("email", "in", emailValues)] : []),
+        ...((valuesByType.get("phone") ?? []).length > 0
+          ? [eb("whatsapp_number", "in", valuesByType.get("phone") ?? [])]
+          : []),
+        ...((valuesByType.get("whatsapp_lid") ?? []).length > 0
+          ? [eb("whatsapp_lid", "in", valuesByType.get("whatsapp_lid") ?? [])]
+          : []),
+        ...((valuesByType.get("slack_user") ?? []).length > 0
+          ? [eb("slack_user_id", "in", valuesByType.get("slack_user") ?? [])]
+          : []),
+        ...(providerUserIds.length > 0 ? [eb("id", "in", providerUserIds)] : []),
+      ]),
+    )
+    .execute();
+  const resolved = new Map<string, ResolvedPrincipal>();
+  const usersById = new Map(users.map((user) => [user.id, user]));
+  for (const user of users) {
+    const identity = { userId: user.id, userName: user.name, email: user.email };
+    if (user.email) resolved.set(principalLookupKey("email", user.email), identity);
+    if (user.whatsapp_number) resolved.set(principalLookupKey("phone", user.whatsapp_number), identity);
+    if (user.whatsapp_lid) resolved.set(principalLookupKey("whatsapp_lid", user.whatsapp_lid), identity);
+    if (user.slack_user_id) resolved.set(principalLookupKey("slack_user", user.slack_user_id), identity);
+  }
+  for (const identity of providerIdentities) {
+    const user = usersById.get(identity.user_id);
+    if (user && identity.provider_email) {
+      resolved.set(principalLookupKey("email", identity.provider_email), {
+        userId: user.id,
+        userName: user.name,
+        email: user.email,
+      });
+    }
+  }
+  return resolved;
 }
 
 /**
@@ -57,36 +185,49 @@ export function fileVisibilityPredicate(viewer: FileViewer, alias = "indexed_fil
     throw new Error(`fileVisibilityPredicate: invalid table alias "${alias}"`);
   }
   const t = sql.raw(alias);
-  const email = viewer.email ?? "";
+  const principals = viewerPrincipals(viewer);
+  const emailValues = emailValuesForPrincipals(principals);
+  const emailSql =
+    emailValues.length > 0
+      ? sql.join(
+          emailValues.map((email) => sql`${email}`),
+          sql`,`,
+        )
+      : null;
   const accessDoor =
     (viewer.slackEntitySyncEnabled ?? true)
       ? sql`(${t}.source IS NULL OR ${t}.source NOT IN ('slack', 'whatsapp'))`
       : sql`1 = 1`;
+  const scopeDoor = sql`EXISTS (SELECT 1 FROM access_scope_members asm
+               WHERE asm.access_scope_id = ${t}.access_scope_id
+                 AND ${accessPrincipalPredicateSql("asm", principals)})`;
+  const fileDoor = sql`EXISTS (SELECT 1 FROM file_access fa
+                   WHERE fa.indexed_file_id = ${t}.id
+                     AND ${accessPrincipalPredicateSql("fa", principals)})`;
+  const shareDoor = emailSql
+    ? sql`EXISTS (SELECT 1 FROM file_share_emails fse
+               WHERE fse.indexed_file_id = ${t}.id
+                 AND fse.email IN (${emailSql}))`
+    : sql`0 = 1`;
+  const entityShareDoor = sql`EXISTS (
+      SELECT 1 FROM entity_mentions em_shared
+      INNER JOIN entities ent_shared ON ent_shared.id = em_shared.entity_id
+      LEFT JOIN entity_share_emails ese
+        ON ese.entity_id = ent_shared.id ${emailSql ? sql`AND ese.email IN (${emailSql})` : sql``}
+      WHERE em_shared.indexed_file_id = ${t}.id
+        AND ent_shared.deleted_at IS NULL
+        AND ent_shared.merged_into_entity_id IS NULL
+        AND (ent_shared.share_with_everyone = 1 OR ${emailSql ? sql`ese.email IS NOT NULL` : sql`0 = 1`})
+    )`;
   return sql<boolean>`(
     (${accessDoor}
       AND ${t}.access_scope_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM file_access fa WHERE fa.indexed_file_id = ${t}.id))
-    OR EXISTS (SELECT 1 FROM access_scope_members asm
-               WHERE asm.access_scope_id = ${t}.access_scope_id
-                 AND asm.email = ${email})
-    OR (${accessDoor}
-        AND EXISTS (SELECT 1 FROM file_access fa
-                   WHERE fa.indexed_file_id = ${t}.id
-                     AND fa.email = ${email}))
-    OR EXISTS (SELECT 1 FROM file_share_emails fse
-               WHERE fse.indexed_file_id = ${t}.id
-                 AND fse.email = ${email})
+    OR ${scopeDoor}
+    OR (${accessDoor} AND ${fileDoor})
+    OR ${shareDoor}
     OR ${t}.share_with_everyone = 1
-    OR EXISTS (
-      SELECT 1 FROM entity_mentions em_shared
-      INNER JOIN entities ent_shared ON ent_shared.id = em_shared.entity_id
-      LEFT JOIN entity_share_emails ese
-        ON ese.entity_id = ent_shared.id AND ese.email = ${email}
-      WHERE em_shared.indexed_file_id = ${t}.id
-        AND ent_shared.deleted_at IS NULL
-        AND ent_shared.merged_into_entity_id IS NULL
-        AND (ent_shared.share_with_everyone = 1 OR ese.email IS NOT NULL)
-    )
+    OR ${entityShareDoor}
   )`;
 }
 
@@ -513,7 +654,7 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
      */
     async upsertAccessScope(
       connectorConfigId: string,
-      scope: { scopeType: string; providerScopeId: string; label: string; memberEmails: string[] },
+      scope: { scopeType: string; providerScopeId: string; label: string; members: AccessPrincipalInput[] },
     ): Promise<string> {
       const existing = await db
         .selectFrom("access_scopes")
@@ -546,10 +687,17 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
 
       // Replace members
       await db.deleteFrom("access_scope_members").where("access_scope_id", "=", scopeId).execute();
-      if (scope.memberEmails.length > 0) {
+      const uniqueMembers = normalizeAccessPrincipals(scope.members);
+      if (uniqueMembers.length > 0) {
         await db
           .insertInto("access_scope_members")
-          .values(scope.memberEmails.map((email) => ({ access_scope_id: scopeId, email })))
+          .values(
+            uniqueMembers.map((principal) => ({
+              access_scope_id: scopeId,
+              principal_type: principal.type,
+              principal_value: principal.value,
+            })),
+          )
           .execute();
       }
 
@@ -613,26 +761,32 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
      * Replace per-file access emails for an indexed file.
      * Used for Google Drive My Drive files with individual sharing.
      */
-    async syncFileAccessEmails(indexedFileId: string, emails: string[]) {
+    async syncFileAccessEmails(indexedFileId: string, principalInput: AccessPrincipalInput[]) {
       await db.deleteFrom("file_access").where("indexed_file_id", "=", indexedFileId).execute();
 
-      const unique = [...new Set(emails)];
+      const unique = normalizeAccessPrincipals(principalInput);
       if (unique.length === 0) return;
 
       await db
         .insertInto("file_access")
-        .values(unique.map((email) => ({ indexed_file_id: indexedFileId, email })))
+        .values(
+          unique.map((principal) => ({
+            indexed_file_id: indexedFileId,
+            principal_type: principal.type,
+            principal_value: principal.value,
+          })),
+        )
         .execute();
     },
 
     /** Add per-file email stamps without revoking existing stamps. */
-    async grantFileAccessEmails(indexedFileId: string, emails: string[]) {
-      const unique = [...new Set(emails)];
+    async grantFileAccessEmails(indexedFileId: string, principalInput: AccessPrincipalInput[]) {
+      const unique = normalizeAccessPrincipals(principalInput);
       if (unique.length === 0) return;
 
       await sql`
-        INSERT INTO file_access (indexed_file_id, email)
-        VALUES ${sql.join(unique.map((email) => sql`(${indexedFileId}, ${email})`))}
+        INSERT INTO file_access (indexed_file_id, principal_type, principal_value)
+        VALUES ${sql.join(unique.map((principal) => sql`(${indexedFileId}, ${principal.type}, ${principal.value})`))}
         ON CONFLICT DO NOTHING
       `.execute(db);
     },
@@ -650,35 +804,64 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
       // Check scope-based access
       const scopeFiles = await db
         .selectFrom("indexed_files")
-        .select([
-          "indexed_files.id",
-          "indexed_files.access_scope_id",
-          sql<number>`(SELECT count(*) FROM access_scope_members WHERE access_scope_id = indexed_files.access_scope_id)`.as(
-            "member_count",
-          ),
-        ])
+        .select(["indexed_files.id", "indexed_files.access_scope_id"])
         .where("indexed_files.id", "in", fileIds)
         .where("indexed_files.access_scope_id", "is not", null)
         .execute();
 
+      const scopeIds = scopeFiles
+        .map((row) => row.access_scope_id)
+        .filter((scopeId): scopeId is string => scopeId !== null);
+      const [scopeMembers, fileAccessRows] = await Promise.all([
+        scopeIds.length > 0
+          ? db
+              .selectFrom("access_scope_members")
+              .select(["access_scope_id", "principal_type", "principal_value"])
+              .where("access_scope_id", "in", scopeIds)
+              .execute()
+          : Promise.resolve([]),
+        db
+          .selectFrom("file_access")
+          .select(["indexed_file_id", "principal_type", "principal_value"])
+          .where("indexed_file_id", "in", fileIds)
+          .execute(),
+      ]);
+      const accessRows = [...scopeMembers, ...fileAccessRows];
+      const resolution = await loadPrincipalResolution(
+        db,
+        accessRows.map((row) => ({ type: row.principal_type as AccessPrincipal["type"], value: row.principal_value })),
+      );
+      const scopeMembersByScope = new Map<string, typeof scopeMembers>();
+      for (const member of scopeMembers) {
+        const members = scopeMembersByScope.get(member.access_scope_id) ?? [];
+        members.push(member);
+        scopeMembersByScope.set(member.access_scope_id, members);
+      }
       for (const row of scopeFiles) {
-        map.set(row.id, { type: "scope", count: Number(row.member_count) });
+        const members = scopeMembersByScope.get(row.access_scope_id as string) ?? [];
+        const uniqueMembers = new Set(
+          members.map((member) => {
+            const resolved = resolution.get(principalLookupKey(member.principal_type, member.principal_value));
+            return resolved
+              ? `user:${resolved.userId}`
+              : `principal:${member.principal_type}\u0000${member.principal_value}`;
+          }),
+        );
+        map.set(row.id, { type: "scope", count: uniqueMembers.size });
       }
 
-      // Check per-file access
-      const fileAccessRows = await sql<{ indexed_file_id: string; cnt: number }>`
-				SELECT indexed_file_id, count(*) as cnt
-				FROM file_access
-				WHERE indexed_file_id IN (${sql.join(
-          fileIds.map((id) => sql`${id}`),
-          sql`,`,
-        )})
-				GROUP BY indexed_file_id
-			`.execute(db);
-
-      for (const row of fileAccessRows.rows) {
-        if (!map.has(row.indexed_file_id)) {
-          map.set(row.indexed_file_id, { type: "file", count: Number(row.cnt) });
+      const membersByFile = new Map<string, Set<string>>();
+      for (const row of fileAccessRows) {
+        const members = membersByFile.get(row.indexed_file_id) ?? new Set<string>();
+        const resolved = resolution.get(principalLookupKey(row.principal_type, row.principal_value));
+        members.add(
+          resolved ? `user:${resolved.userId}` : `principal:${row.principal_type}\u0000${row.principal_value}`,
+        );
+        membersByFile.set(row.indexed_file_id, members);
+      }
+      for (const [indexedFileId, members] of membersByFile) {
+        if (!map.has(indexedFileId)) {
+          map.set(indexedFileId, { type: "file", count: members.size });
         }
       }
 
@@ -700,57 +883,46 @@ export function createConnectorRepository(db: Kysely<DB>, encryptionKey?: string
 
       if (!file) return [];
 
-      if (file.access_scope_id) {
-        const rows = await sql<{
-          email: string;
-          user_name: string | null;
-          user_id: string | null;
-        }>`
-					SELECT
-						asm.email,
-						u.name AS user_name,
-						u.id AS user_id
-					FROM access_scope_members asm
-					LEFT JOIN user_provider_identities upi
-						ON upi.provider_email = asm.email
-					LEFT JOIN users u
-						ON u.id = upi.user_id
-					WHERE asm.access_scope_id = ${file.access_scope_id}
-					ORDER BY u.name IS NULL, u.name, asm.email
-				`.execute(db);
-
-        return rows.rows.map((r) => ({
-          email: r.email,
-          userName: r.user_name,
-          userId: r.user_id,
-          source: "scope" as const,
-        }));
-      }
-
-      const rows = await sql<{
-        email: string;
-        user_name: string | null;
-        user_id: string | null;
-      }>`
-				SELECT
-					fa.email,
-					u.name AS user_name,
-					u.id AS user_id
-				FROM file_access fa
-				LEFT JOIN user_provider_identities upi
-					ON upi.provider_email = fa.email
-				LEFT JOIN users u
-					ON u.id = upi.user_id
-				WHERE fa.indexed_file_id = ${fileId}
-				ORDER BY u.name IS NULL, u.name, fa.email
-			`.execute(db);
-
-      return rows.rows.map((r) => ({
-        email: r.email,
-        userName: r.user_name,
-        userId: r.user_id,
-        source: "file" as const,
-      }));
+      const rows = file.access_scope_id
+        ? await db
+            .selectFrom("access_scope_members")
+            .select(["principal_type", "principal_value"])
+            .where("access_scope_id", "=", file.access_scope_id)
+            .execute()
+        : await db
+            .selectFrom("file_access")
+            .select(["principal_type", "principal_value"])
+            .where("indexed_file_id", "=", fileId)
+            .execute();
+      const source = file.access_scope_id ? ("scope" as const) : ("file" as const);
+      const resolution = await loadPrincipalResolution(
+        db,
+        rows.map((row) => ({ type: row.principal_type as AccessPrincipal["type"], value: row.principal_value })),
+      );
+      const seen = new Set<string>();
+      return rows
+        .flatMap((row) => {
+          const resolved = resolution.get(principalLookupKey(row.principal_type, row.principal_value));
+          const dedupeKey = resolved
+            ? `user:${resolved.userId}`
+            : `principal:${row.principal_type}\u0000${row.principal_value}`;
+          if (seen.has(dedupeKey)) return [];
+          seen.add(dedupeKey);
+          return [
+            {
+              email: resolved?.email ?? maskPrincipalValue(row.principal_type, row.principal_value),
+              userName: resolved?.userName ?? null,
+              userId: resolved?.userId ?? null,
+              source,
+            },
+          ];
+        })
+        .sort(
+          (left, right) =>
+            Number(left.userName === null) - Number(right.userName === null) ||
+            (left.userName ?? "").localeCompare(right.userName ?? "") ||
+            left.email.localeCompare(right.email),
+        );
     },
 
     /**

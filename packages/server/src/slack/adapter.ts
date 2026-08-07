@@ -53,6 +53,7 @@ import type { createConversationRepository } from "../db/repositories/conversati
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
 import { createSlackChannelParticipantsRepository } from "../db/repositories/slack-channel-participants";
+import { isInternalSlackUser } from "../db/repositories/slack-entity-sync";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadSlackFile } from "../files";
@@ -76,7 +77,7 @@ import { SlackBot, type SlackFile, type SlackMessage, type SlackMessageHandler }
 import type { SlackEntitySyncService } from "./entity-sync";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
-import { SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
+import { SlackExternalUserError, SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
 import { isSlackStopCommand } from "./stop";
 import type { UserCache } from "./user-cache";
 
@@ -181,6 +182,7 @@ export interface SlackAdapterDeps {
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
   slackEntitySync?: SlackEntitySyncService;
+  isInternalSlackUser?: (slackUserId: string, email: string | null) => Promise<boolean>;
   onSlackChannelDiscovered?: () => void;
   recordSlackChannelParticipantJoined?: (channelId: string, slackUserId: string) => Promise<void>;
   recordSlackChannelParticipantObserved?: (channelId: string, slackUserId: string) => Promise<void>;
@@ -412,6 +414,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     resolveSlackUser(slackUserId, {
       users: repos.users,
       getUserInfo: (id) => slackDeps.userCache.resolve(id, (uid) => slackBot.getUserInfo(uid)),
+      isInternalSender: (id, userInfo) =>
+        deps.isInternalSlackUser
+          ? deps.isInternalSlackUser(id, userInfo.email)
+          : isInternalSlackUser(db, id, userInfo.email, userInfo),
       logger,
     });
 
@@ -643,6 +649,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     try {
       user = await resolveUser(message.userId);
     } catch (err) {
+      if (err instanceof SlackExternalUserError) {
+        await replyToUser("Sketch is only available to internal workspace members.");
+        return;
+      }
       if (err instanceof SlackIdentityConflictError) {
         logger.warn(
           {
@@ -1463,6 +1473,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
                 message.channelId,
                 threadTs,
                 "I can't reply right now because your Slack account mapping conflicts with an existing Sketch identity. Please ask your admin to reconnect Slack for your workspace.",
+              );
+              return;
+            }
+            if (err instanceof SlackExternalUserError) {
+              await slackBot.postThreadReply(
+                message.channelId,
+                threadTs,
+                "Sketch is only available to internal workspace members.",
               );
               return;
             }

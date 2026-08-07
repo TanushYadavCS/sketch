@@ -21,6 +21,7 @@ function makeUser(overrides: Record<string, unknown> = {}) {
     auth_role: "member",
     slack_user_id: null,
     whatsapp_number: "+1234567890",
+    whatsapp_lid: null,
     created_at: "2025-01-01",
     email_verified_at: null,
     description: null,
@@ -414,6 +415,7 @@ describe("whatsapp/adapter", () => {
         name: "External user",
         type: "external",
         whatsapp_number: "+1234567890",
+        whatsapp_lid: null,
         email: null,
       });
       vi.mocked(deps.repos.users.create).mockResolvedValue(externalUser);
@@ -1386,7 +1388,12 @@ describe("whatsapp/adapter", () => {
     });
 
     it("hydrates users.timezone from the phone number's country code on first message (+91 → Asia/Kolkata)", async () => {
-      const existing = makeUser({ id: "u-india", whatsapp_number: "+919876543210", timezone: null });
+      const existing = makeUser({
+        id: "u-india",
+        whatsapp_number: "+919876543210",
+        whatsapp_lid: null,
+        timezone: null,
+      });
       const deps = makeDeps();
       vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(existing);
       vi.mocked(deps.repos.users.update).mockImplementation(async (_id, data) => makeUser({ ...existing, ...data }));
@@ -1411,7 +1418,7 @@ describe("whatsapp/adapter", () => {
     });
 
     it("uses the documented +1 default (America/New_York) when hydrating from a US/CA number", async () => {
-      const existing = makeUser({ id: "u-na", whatsapp_number: "+14155551234", timezone: null });
+      const existing = makeUser({ id: "u-na", whatsapp_number: "+14155551234", whatsapp_lid: null, timezone: null });
       const deps = makeDeps();
       vi.mocked(deps.repos.users.findByWhatsappNumber).mockResolvedValue(existing);
       vi.mocked(deps.repos.users.update).mockImplementation(async (_id, data) => makeUser({ ...existing, ...data }));
@@ -1437,6 +1444,7 @@ describe("whatsapp/adapter", () => {
       const existing = makeUser({
         id: "u-existing",
         whatsapp_number: "+14155551234",
+        whatsapp_lid: null,
         timezone: "America/Los_Angeles",
       });
       const deps = makeDeps();
