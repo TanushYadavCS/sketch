@@ -5,6 +5,7 @@ import {
   googleConnectorFromQuery,
   googleScopesFor,
   initialGoogleScopeConfig,
+  initialMicrosoftSyncStatus,
   oauthRoutes,
   resolveOrigin,
   shouldRunGoogleFirstSync,
@@ -177,6 +178,8 @@ describe("Microsoft OAuth callback", () => {
     expect(shouldRunMicrosoftFirstSync("outlook_calendar")).toBe(false);
     expect(shouldRunMicrosoftFirstSync("outlook")).toBe(true);
     expect(shouldRunMicrosoftFirstSync("teams")).toBe(true);
+    expect(initialMicrosoftSyncStatus("outlook_calendar")).toBe("paused");
+    expect(initialMicrosoftSyncStatus("outlook")).toBeUndefined();
   });
 });
 

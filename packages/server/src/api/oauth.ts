@@ -31,7 +31,7 @@ import { OUTLOOK_CALENDAR_MICROSOFT_SCOPE } from "../connectors/outlook-calendar
 import { getConnector } from "../connectors/registry";
 import { runConnectorSync } from "../connectors/sync";
 import { TEAMS_MICROSOFT_SCOPE } from "../connectors/teams";
-import type { ConnectorType, OAuthCredentials } from "../connectors/types";
+import type { ConnectorType, OAuthCredentials, SyncStatus } from "../connectors/types";
 import { validateZohoCrmCredentials } from "../connectors/zoho-crm";
 import type { createConnectorRepository } from "../db/repositories/connectors";
 import type { createProviderIdentityRepository } from "../db/repositories/provider-identities";
@@ -181,6 +181,10 @@ function initialMicrosoftScopeConfig(connectorType: ConnectorType): Record<strin
 
 export function shouldRunMicrosoftFirstSync(connectorType: ConnectorType): boolean {
   return connectorType !== "outlook_calendar";
+}
+
+export function initialMicrosoftSyncStatus(connectorType: ConnectorType): SyncStatus | undefined {
+  return connectorType === "outlook_calendar" ? "paused" : undefined;
 }
 
 function extractMicrosoftConsentRequiredCode(errorDescription: string | undefined): string | undefined {
@@ -838,6 +842,7 @@ export function oauthRoutes(
         authType: "oauth",
         credentials: JSON.stringify(oauthCreds),
         scopeConfig: JSON.stringify(initialMicrosoftScopeConfig(connectorType)),
+        syncStatus: initialMicrosoftSyncStatus(connectorType),
         createdBy: userId,
         credentialHint: providerEmail,
       });
