@@ -38,6 +38,7 @@ function makeDeps(overrides: Partial<ResolveSlackUserDeps> = {}): ResolveSlackUs
         ),
     },
     getUserInfo: vi.fn().mockResolvedValue({ name: "alice", realName: "Alice", email: "alice@example.com", tz: null }),
+    isInternalSender: vi.fn().mockResolvedValue(true),
     logger: {
       info: vi.fn(),
       debug: vi.fn(),
@@ -200,5 +201,24 @@ describe("resolveSlackUser", () => {
       emailVerified: false,
     });
     expect(result).toBe(created);
+  });
+
+  it("does not create a user for an external sender", async () => {
+    const deps = makeDeps({ isInternalSender: vi.fn().mockResolvedValue(false) });
+
+    await expect(resolveSlackUser("U001", deps)).rejects.toMatchObject({
+      name: "SlackExternalUserError",
+    });
+    expect(deps.users.findByEmail).not.toHaveBeenCalled();
+    expect(deps.users.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps resolving an existing user even when the sender is external", async () => {
+    const existing = makeUser({ id: "u-existing", slack_user_id: "U001", email: "external@example.com" });
+    const deps = makeDeps({ isInternalSender: vi.fn().mockResolvedValue(false) });
+    vi.mocked(deps.users.findBySlackId).mockResolvedValue(existing);
+
+    await expect(resolveSlackUser("U001", deps)).resolves.toBe(existing);
+    expect(deps.isInternalSender).not.toHaveBeenCalled();
   });
 });

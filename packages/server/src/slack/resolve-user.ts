@@ -7,8 +7,16 @@
  * When linking by email, only links if the matched user doesn't already have
  * a different Slack ID to avoid accidental identity merging.
  */
+import type { SlackUserClassificationSignals } from "../db/repositories/slack-entity-sync";
 import type { Logger } from "../logger";
 import { upsertSlackIdentity } from "./upsert-identity";
+
+type SlackUserInfo = SlackUserClassificationSignals & {
+  name: string;
+  realName: string;
+  email: string | null;
+  tz: string | null;
+};
 
 type UserRow = {
   id: string;
@@ -45,10 +53,16 @@ export interface ResolveSlackUserDeps {
       },
     ): Promise<UserRow>;
   };
-  getUserInfo(
-    slackUserId: string,
-  ): Promise<{ name: string; realName: string; email: string | null; tz: string | null }>;
+  getUserInfo(slackUserId: string): Promise<SlackUserInfo>;
+  isInternalSender(slackUserId: string, userInfo: SlackUserInfo): Promise<boolean>;
   logger: Logger;
+}
+
+export class SlackExternalUserError extends Error {
+  constructor() {
+    super("Sketch is only available to internal workspace members");
+    this.name = "SlackExternalUserError";
+  }
 }
 
 export class SlackIdentityConflictError extends Error {
@@ -84,6 +98,10 @@ export async function resolveSlackUser(slackUserId: string, deps: ResolveSlackUs
       { slackUserId, email: userInfo.email, realName: userInfo.realName },
       "resolveSlackUser: Slack profile",
     );
+
+    if (!(await deps.isInternalSender(slackUserId, userInfo))) {
+      throw new SlackExternalUserError();
+    }
 
     if (userInfo.email) {
       const result = await upsertSlackIdentity(users, {

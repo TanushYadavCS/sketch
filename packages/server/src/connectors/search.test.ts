@@ -354,6 +354,22 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
     expect(accessible).toEqual(new Set(["file-scope-a"]));
   });
 
+  it("filters scope members by the viewer principals in SQL", async () => {
+    const queries: string[] = [];
+    const executor = db.getExecutor();
+    const executeQuery = executor.executeQuery.bind(executor);
+    vi.spyOn(executor, "executeQuery").mockImplementation((query) => {
+      queries.push(query.sql);
+      return executeQuery(query);
+    });
+
+    await filterAccessibleFileIds(db, ["file-scope-a", "file-scope-b"], ["alice@example.com"]);
+
+    const scopeMemberQuery = queries.find((query) => query.includes("access_scope_members"));
+    expect(scopeMemberQuery).toContain("principal_type");
+    expect(scopeMemberQuery).toContain("principal_value");
+  });
+
   it("per-file access: only the explicit email allows access", async () => {
     const accessibleForCharlie = await filterAccessibleFileIds(db, ["file-per-file"], ["charlie@example.com"]);
     expect(accessibleForCharlie.has("file-per-file")).toBe(true);

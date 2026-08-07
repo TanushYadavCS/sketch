@@ -44,6 +44,13 @@ export interface SlackRosterProof {
   usersBySlackId?: ReadonlyMap<string, Selectable<UsersTable>>;
 }
 
+export type SlackUserClassificationSignals = {
+  isGuest?: boolean;
+  isStranger?: boolean;
+  isRestricted?: boolean;
+  isUltraRestricted?: boolean;
+};
+
 export type SlackEntitySyncResult = {
   entity: Selectable<EntitiesTable> | null;
   state: Selectable<SlackUserSyncStateTable>;
@@ -279,6 +286,64 @@ export async function loadSlackRosterProof(db: Kysely<DB>): Promise<SlackRosterP
       users.filter((user) => user.slack_user_id).map((user) => [user.slack_user_id as string, user]),
     ),
   };
+}
+
+export async function isInternalSlackUser(
+  db: Kysely<DB>,
+  slackUserId: string,
+  email: string | null,
+  signals?: SlackUserClassificationSignals,
+): Promise<boolean> {
+  if (signals?.isGuest || signals?.isStranger || signals?.isRestricted || signals?.isUltraRestricted) return false;
+
+  const state = await db
+    .selectFrom("slack_user_sync_state")
+    .select([
+      "classification",
+      "classification_source",
+      "entity_id",
+      "is_guest",
+      "is_stranger",
+      "is_restricted",
+      "is_ultra_restricted",
+    ])
+    .where("slack_user_id", "=", slackUserId)
+    .where("inactive_at", "is", null)
+    .orderBy("updated_at", "desc")
+    .executeTakeFirst();
+
+  if (state) {
+    if (state.is_guest || state.is_stranger || state.is_restricted || state.is_ultra_restricted) return false;
+    if (state.classification === "external") return false;
+    if (
+      state.classification === "internal" &&
+      (state.classification_source === "organization_domain" || state.classification_source === "team_roster")
+    ) {
+      return true;
+    }
+    if (state.entity_id) {
+      const entity = await db
+        .selectFrom("entities")
+        .select("subtype")
+        .where("id", "=", state.entity_id)
+        .executeTakeFirst();
+      if (entity?.subtype === "internal") return true;
+    }
+  }
+
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return false;
+  const domain = normalizedEmail.split("@").at(-1);
+  if (!domain) return false;
+
+  const [organizationDomains, roster] = await Promise.all([
+    db.selectFrom("organization_domains").select("domain").execute(),
+    loadSlackRosterProof(db),
+  ]);
+  return Boolean(
+    organizationDomains.some((organizationDomain) => organizationDomain.domain.toLowerCase() === domain) ||
+      roster.emails.has(normalizedEmail),
+  );
 }
 
 async function findSlackConnectorAdmin(trx: Kysely<DB>): Promise<{ id: string; createdBy: string } | null> {

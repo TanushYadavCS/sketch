@@ -4,7 +4,7 @@ import { normalizeName } from "../../connectors/name-normalize";
 import { createTestPgDb } from "../../test-utils";
 import type { DB } from "../schema";
 import { createEntityRepository } from "./entities";
-import { upsertSlackPersonEntity } from "./slack-entity-sync";
+import { isInternalSlackUser, upsertSlackPersonEntity } from "./slack-entity-sync";
 
 type SlackProfile = Parameters<typeof upsertSlackPersonEntity>[1];
 
@@ -83,6 +83,28 @@ describe("upsertSlackPersonEntity", () => {
     await expect(
       db.selectFrom("entity_source_refs").selectAll().where("source", "=", "slack_user").execute(),
     ).resolves.toHaveLength(1);
+  });
+
+  it("requires lifecycle evidence before allowing Slack provisioning", async () => {
+    await expect(isInternalSlackUser(db, "U-DOMAIN", "alice@example.com")).resolves.toBe(true);
+    await expect(isInternalSlackUser(db, "U-UNKNOWN", "alice@outside.example")).resolves.toBe(false);
+
+    await db
+      .insertInto("slack_user_sync_state")
+      .values({
+        team_id: "T123",
+        slack_user_id: "U-ROSTER",
+        classification: "internal",
+        classification_source: "team_roster",
+      })
+      .execute();
+    await expect(isInternalSlackUser(db, "U-ROSTER", null)).resolves.toBe(true);
+
+    await db
+      .insertInto("slack_user_sync_state")
+      .values({ team_id: "T123", slack_user_id: "U-GUEST", is_guest: 1, classification: "external" })
+      .execute();
+    await expect(isInternalSlackUser(db, "U-GUEST", "guest@example.com")).resolves.toBe(false);
   });
 
   it("creates a source-owned person and review row for duplicate email matches", async () => {

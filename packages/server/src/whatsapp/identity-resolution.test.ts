@@ -124,6 +124,27 @@ describe("WhatsApp identity resolution", () => {
     );
   });
 
+  it("treats a concurrent LID capture race as a benign conflict", async () => {
+    await seedUser("lid-race-a", "Race A", "+15550000021");
+    await seedUser("lid-race-b", "Race B", "+15550000022");
+    const warn = vi.fn();
+
+    await expect(
+      Promise.all([
+        captureWhatsAppLidForPhone(db, "+15550000021", "race@lid", { warn }),
+        captureWhatsAppLidForPhone(db, "+15550000022", "race@lid", { warn }),
+      ]),
+    ).resolves.toEqual([undefined, undefined]);
+
+    const owners = await db
+      .selectFrom("users")
+      .select(["id", "whatsapp_lid"])
+      .where("whatsapp_lid", "=", "race@lid")
+      .execute();
+    expect(owners).toHaveLength(1);
+    expect(warn).toHaveBeenCalledWith(expect.any(Object), "Skipped conflicting WhatsApp LID capture");
+  });
+
   it("resolves rungs in teammate, entity, label, unresolved order", async () => {
     const groupJid = "120363000000001@g.us";
     const groups = await seedGroup(groupJid);

@@ -240,6 +240,7 @@ function makeDeps(overrides: Partial<SlackAdapterDeps> = {}): SlackAdapterDeps {
     }),
     buildMcpServers: vi.fn().mockResolvedValue({}),
     loadIntegrationProvider: vi.fn().mockResolvedValue(null),
+    isInternalSlackUser: vi.fn().mockResolvedValue(true),
     inboxMessagesRepo: {
       listPendingForRecipient: vi.fn().mockResolvedValue([]),
       markConsumed: vi.fn().mockResolvedValue(undefined),
@@ -552,6 +553,22 @@ describe("slack/adapter", () => {
   });
 
   describe("DM handler", () => {
+    it("declines external senders without creating a user or running the agent", async () => {
+      const deps = makeDeps({ isInternalSlackUser: vi.fn().mockResolvedValue(false) });
+      vi.mocked(deps.repos.users.findBySlackId).mockResolvedValue(undefined);
+      createConfiguredSlackBot({ botToken: "xoxb-test", appToken: "xapp-test" }, deps);
+      const { dm } = getHandlers();
+
+      await dm({ text: "hello", userId: "S1", channelId: "D1", ts: "1", type: "dm" });
+
+      expect(deps.repos.users.create).not.toHaveBeenCalled();
+      expect(deps.runAgent).not.toHaveBeenCalled();
+      expect(mockBotInstance.postMessage).toHaveBeenCalledExactlyOnceWith(
+        "D1",
+        "Sketch is only available to internal workspace members.",
+      );
+    });
+
     it("intercepts stop before enqueue, aborts the DM run, clears backlog, and reacts once", async () => {
       const queue = new QueueManager();
       const running = heldWork();

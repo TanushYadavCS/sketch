@@ -507,23 +507,6 @@ export function connectorRoutes(
     return { message: String(err) };
   }
 
-  async function getUserPrincipals(c: Context) {
-    if (!userRepo) return [];
-    const userId = c.get("sub");
-    if (typeof userId !== "string" || !userId) return [];
-    const user = await userRepo.findById(userId);
-    if (!user) return [];
-    return viewerPrincipals({
-      email: user.email,
-      emails: await userRepo.getAllEmailsForUser(userId),
-      phone: user.whatsapp_number,
-      slackUserId: user.slack_user_id,
-      whatsappLid: user.whatsapp_lid,
-      isAdmin: false,
-      slackEntitySyncEnabled: appConfig?.SLACK_ENTITY_SYNC,
-    });
-  }
-
   async function getOwnerEmail(createdBy: string): Promise<string | null> {
     if (!userRepo) return null;
     const owner = await userRepo.findById(createdBy);
@@ -1076,7 +1059,7 @@ export function connectorRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    const userPrincipals = await getUserPrincipals(c);
+    const userPrincipals = viewerPrincipals(getContentViewer(c));
     const results = await search(db, parsed.data.query, {
       source: parsed.data.source,
       category: parsed.data.category,

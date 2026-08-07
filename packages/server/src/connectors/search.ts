@@ -400,6 +400,7 @@ export async function filterAccessibleFileIds(
         .selectFrom("access_scope_members")
         .select(["access_scope_id", "principal_type", "principal_value"])
         .where("access_scope_id", "in", scopeIds)
+        .where(accessPrincipalPredicateSql("access_scope_members", principals))
         .execute();
     })(),
     emailValues.length === 0

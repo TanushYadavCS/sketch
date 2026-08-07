@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { type Kysely, sql } from "kysely";
+import { type Kysely, type Transaction, sql } from "kysely";
 import type { Logger } from "pino";
 import { normalizeContactPointValue } from "../db/repositories/entities";
+import { isUniqueConstraintError } from "../db/repositories/sub-entities";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
@@ -81,8 +82,18 @@ export function normalizeWhatsAppIdentityLid(value: string | null | undefined): 
   return bare.length > 0 ? `${bare}@lid` : null;
 }
 
+type WhatsAppIdentityDb = Kysely<DB> | Transaction<DB>;
+
+async function runIdentityMutation<T>(
+  db: WhatsAppIdentityDb,
+  callback: (trx: WhatsAppIdentityDb) => Promise<T>,
+): Promise<T> {
+  if (db.isTransaction) return callback(db);
+  return db.transaction().execute((trx) => callback(trx));
+}
+
 export async function captureWhatsAppLidForPhone(
-  db: Kysely<DB>,
+  db: WhatsAppIdentityDb,
   phoneE164: string | null | undefined,
   lid: string | null | undefined,
   logger?: Pick<Logger, "warn">,
@@ -91,28 +102,35 @@ export async function captureWhatsAppLidForPhone(
   const normalizedLid = normalizeWhatsAppIdentityLid(lid);
   if (!phone || !normalizedLid) return;
 
-  const user = await db
-    .selectFrom("users")
-    .select(["id", "whatsapp_lid"])
-    .where("whatsapp_number", "=", phone)
-    .executeTakeFirst();
-  if (!user || user.whatsapp_lid === normalizedLid) return;
+  try {
+    await runIdentityMutation(db, async (trx) => {
+      const user = await trx
+        .selectFrom("users")
+        .select(["id", "whatsapp_lid"])
+        .where("whatsapp_number", "=", phone)
+        .executeTakeFirst();
+      if (!user || user.whatsapp_lid === normalizedLid) return;
 
-  const conflictingUser = await db
-    .selectFrom("users")
-    .select("id")
-    .where("whatsapp_lid", "=", normalizedLid)
-    .where("id", "!=", user.id)
-    .executeTakeFirst();
-  if (conflictingUser) {
-    logger?.warn(
-      { userId: user.id, conflictingUserId: conflictingUser.id },
-      "Skipped conflicting WhatsApp LID capture",
-    );
-    return;
+      const conflictingUser = await trx
+        .selectFrom("users")
+        .select("id")
+        .where("whatsapp_lid", "=", normalizedLid)
+        .where("id", "!=", user.id)
+        .executeTakeFirst();
+      if (conflictingUser) {
+        logger?.warn(
+          { userId: user.id, conflictingUserId: conflictingUser.id },
+          "Skipped conflicting WhatsApp LID capture",
+        );
+        return;
+      }
+
+      await trx.updateTable("users").set({ whatsapp_lid: normalizedLid }).where("id", "=", user.id).execute();
+    });
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) throw error;
+    logger?.warn({ phone }, "Skipped conflicting WhatsApp LID capture");
   }
-
-  await db.updateTable("users").set({ whatsapp_lid: normalizedLid }).where("id", "=", user.id).execute();
 }
 
 export function stableWhatsAppParticipantJidRef(jid: string): string {
