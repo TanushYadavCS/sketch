@@ -20,8 +20,12 @@ import {
   type SyncStatus,
   normalizeAccessPrincipals,
 } from "../../connectors/types";
+import {
+  normalizeSlackIdentityUserId,
+  normalizeWhatsAppIdentityLid,
+  normalizeWhatsAppIdentityPhone,
+} from "../../identity-normalization";
 import { normalizeSourceTimestampForStorage } from "../../timestamps";
-import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../../whatsapp/identity-resolution";
 import type { DB } from "../schema";
 import { fileVisibilityRuleSql } from "./file-visibility-rule";
 
@@ -44,19 +48,17 @@ export interface FileViewer {
 }
 
 export function viewerPrincipals(viewer: FileViewer): AccessPrincipal[] {
-  const principals: AccessPrincipal[] = [];
-  const emails = new Set([viewer.email, ...(viewer.emails ?? [])]);
-  for (const email of emails) {
-    const value = email?.trim().toLowerCase();
-    if (value) principals.push({ type: "email", value });
+  const principals: AccessPrincipalInput[] = [];
+  if (viewer.email !== null) principals.push(viewer.email);
+  principals.push(...(viewer.emails ?? []));
+  if (viewer.phone !== null && viewer.phone !== undefined) principals.push({ type: "phone", value: viewer.phone });
+  if (viewer.slackUserId !== null && viewer.slackUserId !== undefined) {
+    principals.push({ type: "slack_user", value: viewer.slackUserId });
   }
-  const phone = normalizeWhatsAppIdentityPhone(viewer.phone);
-  if (phone) principals.push({ type: "phone", value: phone });
-  const slackUserId = viewer.slackUserId?.trim();
-  if (slackUserId) principals.push({ type: "slack_user", value: slackUserId });
-  const whatsappLid = normalizeWhatsAppIdentityLid(viewer.whatsappLid);
-  if (whatsappLid) principals.push({ type: "whatsapp_lid", value: whatsappLid });
-  return [...new Map(principals.map((principal) => [`${principal.type}\u0000${principal.value}`, principal])).values()];
+  if (viewer.whatsappLid !== null && viewer.whatsappLid !== undefined) {
+    principals.push({ type: "whatsapp_lid", value: viewer.whatsappLid });
+  }
+  return normalizeAccessPrincipals(principals);
 }
 
 type ResolvedPrincipal = { userId: string; userName: string | null; email: string | null };
@@ -69,7 +71,7 @@ function principalLookupKey(type: string, value: string): string {
         ? (normalizeWhatsAppIdentityPhone(value) ?? value.trim())
         : type === "whatsapp_lid"
           ? (normalizeWhatsAppIdentityLid(value) ?? value.trim())
-          : value.trim();
+          : (normalizeSlackIdentityUserId(value) ?? "");
   return `${type}\u0000${normalized}`;
 }
 

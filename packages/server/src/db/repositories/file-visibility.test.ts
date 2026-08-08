@@ -916,6 +916,108 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
     );
   });
 
+  it("normalizes a raw phone consistently across all four entry points", async () => {
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-rule-raw-phone",
+        connector_config_id: "cfg",
+        scope_type: "whatsapp_group",
+        provider_scope_id: "raw-phone",
+      })
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({
+        access_scope_id: "scope-rule-raw-phone",
+        principal_type: "phone",
+        principal_value: "+919101299347",
+      })
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "f-rule-raw-phone",
+        connector_config_id: "cfg",
+        provider_file_id: "rule-raw-phone",
+        file_name: "raw phone",
+        file_type: "doc",
+        content_category: "document",
+        source: "google_drive",
+        content: "raw phone content",
+        content_hash: "rule-raw-phone-hash",
+        is_archived: 0,
+        synced_at: new Date().toISOString(),
+        access_scope_id: "scope-rule-raw-phone",
+      })
+      .execute();
+
+    const rawPhone = "+91 9101299347";
+    await expect(
+      accessByEntryPoint("f-rule-raw-phone", [{ type: "phone", value: rawPhone }], {
+        email: null,
+        phone: rawPhone,
+        isAdmin: false,
+      }),
+    ).resolves.toEqual({
+      fileVisibilityPredicate: true,
+      fileAccessFilterSql: true,
+      getFileContent: true,
+      filterAccessibleFileIds: true,
+    });
+  });
+
+  it("normalizes an untrimmed Slack user ID consistently across all four entry points", async () => {
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-rule-raw-slack-user",
+        connector_config_id: "cfg",
+        scope_type: "slack_channel",
+        provider_scope_id: "raw-slack-user",
+      })
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({
+        access_scope_id: "scope-rule-raw-slack-user",
+        principal_type: "slack_user",
+        principal_value: "U-RAW",
+      })
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "f-rule-raw-slack-user",
+        connector_config_id: "cfg",
+        provider_file_id: "rule-raw-slack-user",
+        file_name: "raw Slack user",
+        file_type: "doc",
+        content_category: "document",
+        source: "google_drive",
+        content: "raw Slack user content",
+        content_hash: "rule-raw-slack-user-hash",
+        is_archived: 0,
+        synced_at: new Date().toISOString(),
+        access_scope_id: "scope-rule-raw-slack-user",
+      })
+      .execute();
+
+    const rawSlackUserId = "  U-RAW  ";
+    await expect(
+      accessByEntryPoint("f-rule-raw-slack-user", [{ type: "slack_user", value: rawSlackUserId }], {
+        email: null,
+        slackUserId: rawSlackUserId,
+        isAdmin: false,
+      }),
+    ).resolves.toEqual({
+      fileVisibilityPredicate: true,
+      fileAccessFilterSql: true,
+      getFileContent: true,
+      filterAccessibleFileIds: true,
+    });
+  });
+
   it("deduplicates multiple principals that resolve to one user in access summaries", async () => {
     const repo = createConnectorRepository(db);
     await db
