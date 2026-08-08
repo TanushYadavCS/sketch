@@ -227,6 +227,46 @@ describe("chat automation authoring orchestration", () => {
     expect(refreshTaskSchedule).not.toHaveBeenCalled();
   });
 
+  it("does not persist a trigger outside the configured authoring capabilities", async () => {
+    const unsupported = definition({
+      scheduleType: "external",
+      scheduleValue: "canvas",
+      steps: definition().steps.map((step) =>
+        step.type === "trigger"
+          ? {
+              ...step,
+              triggerConfig: {
+                type: "canvas" as const,
+                app: "gmail",
+                eventDescription: "new invoice email",
+                componentKey: "gmail.new_invoice_email",
+              },
+            }
+          : step,
+      ),
+    });
+    const refreshTaskSchedule = vi.fn();
+    const service = createChatAutomationAuthoring({
+      db,
+      authoring: {
+        create: vi.fn(async () => ({ kind: "definition" as const, definition: unsupported })),
+        edit: vi.fn(),
+      },
+      scheduler: { refreshTaskSchedule, getTaskById: vi.fn() },
+      loadIntegrationProvider: async () => null,
+      createId: () => "unsupported-trigger-task",
+    });
+
+    await expect(
+      service.author({ action: "create", request: "Poll Gmail for invoices", taskContext: taskContext() }),
+    ).resolves.toMatchObject({
+      kind: "error",
+      message: "Automation trigger is not supported. No changes were saved.",
+    });
+    await expect(createScheduledTaskRepository(db).getById("unsupported-trigger-task")).resolves.toBeUndefined();
+    expect(refreshTaskSchedule).not.toHaveBeenCalled();
+  });
+
   it("loads the complete owned definition for edit and reports revision conflicts without refreshing", async () => {
     await createAutomationDefinition({
       db,

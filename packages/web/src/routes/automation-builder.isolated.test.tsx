@@ -1,10 +1,11 @@
 import type { AutomationDefinition } from "@/lib/api";
 import { ApiRequestError } from "@/lib/api";
+import { AUTOMATION_REFRESH_INTERVAL_MS } from "@/lib/automation-refresh";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AutomationBuilderPage } from "./automation-builder";
 
 const mocks = vi.hoisted(() => ({
@@ -299,6 +300,10 @@ function renderBuilder() {
 }
 
 describe("AutomationBuilderPage", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     mocks.getAutomation.mockClear();
     mocks.getAutomation.mockResolvedValue(automation);
@@ -346,18 +351,20 @@ describe("AutomationBuilderPage", () => {
       created: true,
     });
     mocks.selectConversation.mockClear();
-    mocks.selectConversation.mockImplementation(async (_taskId: string, conversationId: string) => ({
-      conversation: {
-        conversationId,
-        kinds: ["builder"],
-        createdAt: "2026-06-01T00:00:00.000Z",
-        updatedAt: "2026-06-03T00:00:00.000Z",
-        lastActiveAt: "2026-06-03T00:00:00.000Z",
-        archivedAt: null,
-        state: "active",
-      },
-      created: false,
-    }));
+    mocks.selectConversation.mockImplementation(
+      async (_taskId: string, conversationId: string, kind: "builder" | "web_chat" = "builder") => ({
+        conversation: {
+          conversationId,
+          kinds: [kind],
+          createdAt: "2026-06-01T00:00:00.000Z",
+          updatedAt: "2026-06-03T00:00:00.000Z",
+          lastActiveAt: "2026-06-03T00:00:00.000Z",
+          archivedAt: null,
+          state: "active",
+        },
+        created: false,
+      }),
+    );
     mocks.archiveConversation.mockClear();
     mocks.archiveConversation.mockImplementation(
       async (_taskId: string, conversationId: string, archived: boolean) => ({
@@ -451,6 +458,47 @@ describe("AutomationBuilderPage", () => {
     await waitFor(() => expect(mocks.loadMessages).toHaveBeenCalledWith("chat-alpha", expect.any(Object)));
   });
 
+  it("refreshes the graph and latest run after an external automation update", async () => {
+    vi.useFakeTimers();
+    const refreshedAutomation = automationWithStepOutput("fresh run output");
+    refreshedAutomation.steps = [
+      ...refreshedAutomation.steps,
+      {
+        id: "notify",
+        type: "action",
+        label: "Notify Slack",
+        icon: "slack",
+        position: { x: 460, y: 0 },
+      },
+    ];
+    refreshedAutomation.edges = [...refreshedAutomation.edges, { id: "check-notify", from: "check", to: "notify" }];
+    refreshedAutomation.stepContent.notify = {
+      taskId: automation.id,
+      stepId: "notify",
+      contentType: "script",
+      content: "return input;",
+      apps: ["Slack"],
+      updatedAt: null,
+    };
+    mocks.getAutomation.mockReset().mockResolvedValueOnce(automation).mockResolvedValue(refreshedAutomation);
+
+    renderBuilder();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.getByRole("button", { name: "Check rating" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Notify Slack" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOMATION_REFRESH_INTERVAL_MS);
+    });
+
+    expect(screen.getByRole("button", { name: "Notify Slack" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Viewing/ })).toBeInTheDocument();
+    expect(mocks.getAutomation).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps the active run label constrained inside the builder toolbar", async () => {
     mocks.getAutomation.mockResolvedValue(automationWithStepOutput("latest step output"));
 
@@ -467,7 +515,7 @@ describe("AutomationBuilderPage", () => {
 
     await screen.findByLabelText("Message Sketch");
     expect(screen.getByText("Create an automation")).toBeInTheDocument();
-    expect(screen.getByText("Source")).toBeInTheDocument();
+    expect(await screen.findByText("Source")).toBeInTheDocument();
     expect(await screen.findByText("What should change?")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Add a step" }));
@@ -957,7 +1005,7 @@ describe("AutomationBuilderPage", () => {
 
     await user.click(await screen.findByLabelText("Pause Sketch"));
 
-    expect(mocks.interruptChat).toHaveBeenCalledWith("chat-alpha");
+    expect(mocks.interruptChat).toHaveBeenCalledWith("chat-alpha", "task-123");
     expect(mocks.interruptChat).not.toHaveBeenCalledWith("42");
   });
 
@@ -1147,6 +1195,7 @@ describe("AutomationBuilderPage", () => {
   });
 
   it("serializes prompt and drag saves against the latest accepted revision", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const user = userEvent.setup();
     const firstSave = deferred<AutomationDefinition>();
     mocks.saveAutomation
@@ -1170,6 +1219,9 @@ describe("AutomationBuilderPage", () => {
     await user.click(screen.getByRole("button", { name: "Save prompt" }));
 
     await waitFor(() => expect(mocks.saveAutomation).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      vi.advanceTimersByTime(AUTOMATION_REFRESH_INTERVAL_MS);
+    });
     await user.click(screen.getByRole("button", { name: "Move Check rating" }));
     expect(mocks.saveAutomation).toHaveBeenCalledTimes(1);
 

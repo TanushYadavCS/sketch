@@ -156,6 +156,13 @@ export interface ScheduledTaskOriginChatMessage {
 
 export type ScheduledTaskConversationKind = "builder" | "web_chat";
 
+export interface ScheduledTaskConversationLock {
+  state: "available" | "held";
+  conversationId: string | null;
+  owner: "self" | "other" | null;
+  expiresAt: string | null;
+}
+
 export interface ScheduledTaskConversationSummary {
   conversationId: string;
   kinds: ScheduledTaskConversationKind[];
@@ -169,6 +176,7 @@ export interface ScheduledTaskConversationSummary {
 export interface ScheduledTaskConversationsResponse {
   taskId: string;
   conversations: ScheduledTaskConversationSummary[];
+  builderLock: ScheduledTaskConversationLock;
   transcriptAccess: "viewer";
 }
 
@@ -1561,9 +1569,11 @@ export const api = {
         method: "DELETE",
       });
     },
-    interrupt(conversationId: string) {
+    interrupt(conversationId: string, automationTaskId?: string) {
+      const query = new URLSearchParams({ conversationId });
+      if (automationTaskId) query.set("automationTaskId", automationTaskId);
       return request<{ success: boolean; interrupted: boolean }>(
-        `/api/web-chat/conversations/${encodeURIComponent(conversationId)}/interruptions`,
+        `/api/web-chat/conversations/${encodeURIComponent(conversationId)}/interruptions?${query.toString()}`,
         { method: "POST" },
       );
     },
@@ -2332,13 +2342,14 @@ export const api = {
       return request<{
         conversation: ScheduledTaskConversationSummary;
         created: boolean;
+        builderLock: ScheduledTaskConversationLock;
       }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations`, {
         method: "POST",
         body: JSON.stringify(body),
       });
     },
     getConversation(taskId: string, conversationId: string) {
-      return request<{ conversation: ScheduledTaskConversationSummary }>(
+      return request<{ conversation: ScheduledTaskConversationSummary; builderLock: ScheduledTaskConversationLock }>(
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}`,
       );
     },
@@ -2346,13 +2357,14 @@ export const api = {
       return request<{
         conversation: ScheduledTaskConversationSummary;
         created: false;
+        builderLock: ScheduledTaskConversationLock;
       }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}`, {
         method: "PUT",
         body: JSON.stringify(kind ? { kind } : {}),
       });
     },
     archiveConversation(taskId: string, conversationId: string, archived: boolean) {
-      return request<{ conversation: ScheduledTaskConversationSummary }>(
+      return request<{ conversation: ScheduledTaskConversationSummary; builderLock: ScheduledTaskConversationLock }>(
         `/api/scheduled-tasks/${encodeURIComponent(taskId)}/conversations/${encodeURIComponent(conversationId)}`,
         {
           method: "PATCH",

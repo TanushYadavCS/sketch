@@ -31,6 +31,7 @@ import {
   type WorkspaceSummary,
   api,
 } from "@/lib/api";
+import { invalidateAutomationQueries } from "@/lib/automation-refresh";
 import {
   createWebChatConversationId,
   hasPendingWebChatSubmission,
@@ -889,6 +890,19 @@ export function ChatPage() {
   const chatTitle = titleFromChatMessages(chat.messages);
   const hasBackgroundRun = hasPendingAssistantProgress(chat.messages);
   const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun || stoppingRun;
+  const latestAutomationRefresh = useMemo(() => {
+    const latestMessage = chat.messages.at(-1);
+    if (!latestMessage || latestMessage.role !== "assistant") return { key: "", taskIds: [] as string[] };
+    const taskIds = [...new Set(automationsFromMessage(latestMessage).map((automation) => automation.taskId))];
+    return { key: `${latestMessage.id}:${taskIds.join(",")}`, taskIds };
+  }, [chat.messages]);
+  const lastAutomationRefreshKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (!historyReady || !latestAutomationRefresh.key) return;
+    if (lastAutomationRefreshKey.current === latestAutomationRefresh.key) return;
+    lastAutomationRefreshKey.current = latestAutomationRefresh.key;
+    void invalidateAutomationQueries(queryClient, latestAutomationRefresh.taskIds);
+  }, [historyReady, latestAutomationRefresh, queryClient]);
   const rawThreadMessages = useMemo(() => buildChatThreadMessages(chat.messages), [chat.messages]);
   const threadMessages = useSmoothedChatThreadMessages(rawThreadMessages, chatBusy, conversationId);
   const integrationConnectionCards = useMemo(

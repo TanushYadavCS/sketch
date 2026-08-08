@@ -1,7 +1,8 @@
-import type { ScheduledTaskListItem } from "@/lib/api";
+import type { AutomationRunItem, ScheduledTaskListItem } from "@/lib/api";
+import { AUTOMATION_REFRESH_INTERVAL_MS } from "@/lib/automation-refresh";
 import { server } from "@/test/msw";
 import { renderWithProviders } from "@/test/utils";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -27,6 +28,7 @@ vi.mock("@tanstack/react-router", async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   mockAuth = { role: "admin", email: "admin@test.com" };
   mockNavigate.mockReset();
 });
@@ -163,6 +165,75 @@ describe("ScheduledTasksPage", () => {
         "Create an automation by asking the assistant to set up a recurring task or multi-step workflow.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("refreshes the list graph and run history after an external run starts", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const initialTask = buildTask({
+      title: "Stale workflow",
+      steps: JSON.stringify([
+        { id: "trigger", type: "trigger", label: "Schedule", icon: "clock" },
+        { id: "check", type: "agent", label: "Check rating", icon: "robot" },
+      ]),
+      stepCount: 2,
+    });
+    const freshRun: AutomationRunItem = {
+      id: "run-fresh",
+      task_id: initialTask.id,
+      trigger_data: null,
+      status: "completed",
+      step_outputs: JSON.stringify({
+        check: { output: "fresh output", status: "completed", duration_ms: 10 },
+      }),
+      error_message: null,
+      started_at: "2026-03-15T03:30:00.000Z",
+      completed_at: "2026-03-15T03:30:01.000Z",
+    };
+    const freshTask = buildTask({
+      ...initialTask,
+      title: "Fresh workflow",
+      steps: JSON.stringify([
+        { id: "trigger", type: "trigger", label: "Schedule", icon: "clock" },
+        { id: "check", type: "agent", label: "Check rating", icon: "robot" },
+        { id: "notify", type: "action", label: "Notify Slack", icon: "slack" },
+      ]),
+      stepCount: 3,
+      runCount: 1,
+      lastRunStatus: "completed",
+      lastRunAt: freshRun.completed_at,
+    });
+    let taskRequests = 0;
+    let runRequests = 0;
+    server.use(
+      http.get("/api/scheduled-tasks", () => {
+        taskRequests += 1;
+        return HttpResponse.json({ tasks: [taskRequests === 1 ? initialTask : freshTask] });
+      }),
+      http.get("/api/scheduled-tasks/:id/runs", () => {
+        runRequests += 1;
+        return HttpResponse.json({ runs: runRequests === 1 ? [] : [freshRun] });
+      }),
+      http.get("/api/scheduled-tasks/:id/step-content", () => HttpResponse.json({ stepContent: [] })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledTasksPage />);
+
+    await waitFor(() => expect(screen.getByText("Stale workflow")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /Show details for Stale workflow/i }));
+    expect(screen.getByText("Recent Runs")).toBeInTheDocument();
+    expect(screen.queryByText(/Mar 1[45]/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(AUTOMATION_REFRESH_INTERVAL_MS);
+    });
+
+    await waitFor(() => expect(screen.getByText("Fresh workflow")).toBeInTheDocument());
+    expect(screen.getByText("Notify Slack")).toBeInTheDocument();
+    expect(screen.getByText("Recent Runs")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Mar 15, 2026/ })).toBeInTheDocument();
+    expect(taskRequests).toBeGreaterThanOrEqual(2);
+    expect(runRequests).toBeGreaterThanOrEqual(2);
   });
 
   it("renders the workspace subtitle", async () => {

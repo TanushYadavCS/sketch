@@ -8,8 +8,8 @@ import type { IntegrationProvider } from "../integrations/types";
 import { resolveScheduledTaskAccess } from "../scheduler/access";
 import type { TaskScheduler } from "../scheduler/service";
 import type { CurrentAutomation, ScheduledTask, TaskContext } from "../scheduler/types";
-import type { AutomationAuthoringService } from "./authoring/service";
-import { buildAutomationDefinition } from "./definition";
+import { AUTOMATION_AUTHORING_TRIGGER_TYPES, type AutomationAuthoringService } from "./authoring/service";
+import { AutomationValidationError, buildAutomationDefinition } from "./definition";
 import { createAutomationDefinition, replaceAutomationDefinition } from "./persistence";
 import { webChatTaskConversationAssociation } from "./task-conversations";
 
@@ -51,6 +51,12 @@ function artifactFromDefinition(definition: AutomationBuilderSaveRequest) {
     scheduleValue: definition.scheduleValue,
     timezone: definition.timezone,
   };
+}
+
+function persistenceValidationMessage(error: AutomationValidationError): string {
+  return error.issues.some((issue) => issue.code === "UNSUPPORTED_TRIGGER")
+    ? "Automation trigger is not supported. No changes were saved."
+    : "Automation definition is invalid. No changes were saved.";
 }
 
 async function brokerCapable(
@@ -128,24 +134,32 @@ export function createChatAutomationAuthoring(deps: {
       return { kind: "clarification", message: result.question };
     }
 
-    await createAutomationDefinition({
-      db: deps.db,
-      request: result.definition,
-      context: {
-        id: taskId,
-        platform: input.taskContext.platform,
-        contextType: input.taskContext.contextType,
-        deliveryTarget: input.taskContext.deliveryTarget,
-        threadTs: input.taskContext.threadTs ?? null,
-        createdBy: input.taskContext.createdBy,
-        originPlatform: input.taskContext.origin?.platform ?? null,
-        originConversationId: input.taskContext.origin?.conversationId ?? null,
-        originProviderThreadId: input.taskContext.origin?.providerThreadId ?? null,
-        originMessageId: input.taskContext.origin?.currentMessageId ?? null,
-      },
-      brokerCapable: canUseBroker,
-      ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
-    });
+    try {
+      await createAutomationDefinition({
+        db: deps.db,
+        request: result.definition,
+        context: {
+          id: taskId,
+          platform: input.taskContext.platform,
+          contextType: input.taskContext.contextType,
+          deliveryTarget: input.taskContext.deliveryTarget,
+          threadTs: input.taskContext.threadTs ?? null,
+          createdBy: input.taskContext.createdBy,
+          originPlatform: input.taskContext.origin?.platform ?? null,
+          originConversationId: input.taskContext.origin?.conversationId ?? null,
+          originProviderThreadId: input.taskContext.origin?.providerThreadId ?? null,
+          originMessageId: input.taskContext.origin?.currentMessageId ?? null,
+        },
+        brokerCapable: canUseBroker,
+        supportedTriggerTypes: AUTOMATION_AUTHORING_TRIGGER_TYPES,
+        ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
+      });
+    } catch (error) {
+      if (error instanceof AutomationValidationError) {
+        return { kind: "error", message: persistenceValidationMessage(error) };
+      }
+      throw error;
+    }
     return refreshOrError(taskId, artifactFromDefinition(result.definition));
   }
 
@@ -182,17 +196,26 @@ export function createChatAutomationAuthoring(deps: {
       return { kind: "clarification", message: result.question };
     }
 
-    const saved = await replaceAutomationDefinition({
-      db: deps.db,
-      taskId: accessibleRow.id,
-      request: result.definition,
-      actor: {
-        userId: input.taskContext.createdBy,
-        canManageAnyTask: input.taskContext.canManageAnyTask ?? false,
-      },
-      brokerCapable: canUseBroker,
-      ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
-    });
+    let saved: Awaited<ReturnType<typeof replaceAutomationDefinition>>;
+    try {
+      saved = await replaceAutomationDefinition({
+        db: deps.db,
+        taskId: accessibleRow.id,
+        request: result.definition,
+        actor: {
+          userId: input.taskContext.createdBy,
+          canManageAnyTask: input.taskContext.canManageAnyTask ?? false,
+        },
+        brokerCapable: canUseBroker,
+        supportedTriggerTypes: AUTOMATION_AUTHORING_TRIGGER_TYPES,
+        ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
+      });
+    } catch (error) {
+      if (error instanceof AutomationValidationError) {
+        return { kind: "error", message: persistenceValidationMessage(error) };
+      }
+      throw error;
+    }
     if (saved.kind === "not_found") return { kind: "error", message: "Automation not found." };
     if (saved.kind === "revision_conflict") {
       return {

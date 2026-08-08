@@ -609,7 +609,8 @@ export function scheduledTaskRoutes(
     const id = c.req.param("id");
     const access = await loadAccessibleTask(c, id);
     if ("response" in access) return access.response;
-    if (!scheduler.removeTaskRuntime) {
+    const removeTaskRuntime = scheduler.removeTaskRuntime;
+    if (!removeTaskRuntime) {
       return c.json(
         { error: { code: "SCHEDULER_UNAVAILABLE", message: "Scheduler runtime cleanup is unavailable" } },
         503,
@@ -620,7 +621,7 @@ export function scheduledTaskRoutes(
       db,
       taskId: id,
       actor: { userId, canManageAnyTask: c.get("role") === "admin" },
-      scheduler: { removeTaskRuntime: scheduler.removeTaskRuntime },
+      scheduler: { removeTaskRuntime: removeTaskRuntime.bind(scheduler) },
     });
     if (deletion.kind === "not_found" || deletion.kind === "access_denied") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);

@@ -1,3 +1,4 @@
+import { AUTOMATION_QUERY_KEY, automationRunsQueryKey, automationStepContentQueryKey } from "@/lib/automation-refresh";
 import { setPendingWebChatSubmission, takePendingWebChatSubmission } from "@/lib/chat-target";
 import { WEB_CHAT_CONVERSATIONS_QUERY_KEY } from "@/lib/web-chat-conversations";
 import { renderWithProviders } from "@/test/utils";
@@ -334,6 +335,60 @@ describe("chat route", () => {
         automations: [artifact],
       },
     ]);
+  });
+
+  it("invalidates automation caches when a streamed automation card arrives", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false },
+        queries: { retry: false },
+      },
+    });
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    mocks.search = {};
+    mockChatMessages = [
+      { id: "u-automation", role: "user", parts: [{ type: "text", text: "Update the automation" }] },
+      {
+        id: "a-automation",
+        role: "assistant",
+        parts: [
+          {
+            type: "data-automation",
+            id: "automation-0",
+            data: {
+              taskId: "task-123",
+              kind: "Updated automation",
+              title: "Daily account brief",
+              description: "Summarizes account updates.",
+              tags: ["Scheduled"],
+              scheduleLabel: "Daily at 9:00 AM",
+              deliveryLabel: "Slack DM",
+              builderUrl: "/scheduled-tasks/task-123/edit",
+              status: "active",
+            },
+          },
+        ],
+      },
+    ];
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatPage />
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() =>
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: AUTOMATION_QUERY_KEY, exact: true }),
+    );
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["scheduled-tasks", "task-123", "builder"],
+      exact: true,
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: automationRunsQueryKey("task-123"), exact: true });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: automationStepContentQueryKey("task-123"),
+      exact: true,
+    });
   });
 
   it("extracts structured assistant progress from AI SDK data parts before final text arrives", () => {

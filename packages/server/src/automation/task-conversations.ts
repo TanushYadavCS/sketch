@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, sql } from "kysely";
 import {
+  type ScheduledTaskBuilderLockRow,
   type ScheduledTaskConversationKind,
   type ScheduledTaskConversationRow,
   type UpsertScheduledTaskConversationInput,
@@ -10,6 +11,16 @@ import type { DB } from "../db/schema";
 import type { TaskContext } from "../scheduler/types";
 
 export type { ScheduledTaskConversationKind } from "../db/repositories/scheduled-task-conversations";
+
+export const BUILDER_CHAT_LOCK_LEASE_MS = 5 * 60 * 1000;
+export const BUILDER_CHAT_LOCK_RENEWAL_INTERVAL_MS = 60 * 1000;
+
+export interface AutomationTaskConversationLockSummary {
+  state: "available" | "held";
+  conversationId: string | null;
+  owner: "self" | "other" | null;
+  expiresAt: string | null;
+}
 
 export interface AutomationTaskConversationSummary {
   conversationId: string;
@@ -102,6 +113,63 @@ function generatedBuilderConversationId(): string {
   return `builder-${randomUUID()}`;
 }
 
+function availableBuilderLock(): AutomationTaskConversationLockSummary {
+  return { state: "available", conversationId: null, owner: null, expiresAt: null };
+}
+
+function summarizeBuilderLock(
+  row: ScheduledTaskBuilderLockRow | undefined,
+  transcriptUserId: string,
+  nowMs = Date.now(),
+): AutomationTaskConversationLockSummary {
+  if (!row || row.expires_at <= nowMs) return availableBuilderLock();
+  return {
+    state: "held",
+    conversationId: row.conversation_id,
+    owner: row.transcript_user_id === transcriptUserId ? "self" : "other",
+    expiresAt: new Date(row.expires_at).toISOString(),
+  };
+}
+
+async function claimBuilderLock(
+  repo: ReturnType<typeof createScheduledTaskConversationRepository>,
+  taskId: string,
+  conversationId: string,
+  transcriptUserId: string,
+): Promise<{ acquired: boolean; lock: AutomationTaskConversationLockSummary }> {
+  const nowMs = Date.now();
+  const result = await repo.acquireBuilderLock({
+    taskId,
+    conversationId,
+    transcriptUserId,
+    nowMs,
+    nowIso: new Date(nowMs).toISOString(),
+    expiresAt: nowMs + BUILDER_CHAT_LOCK_LEASE_MS,
+  });
+  return { acquired: result.acquired, lock: summarizeBuilderLock(result.lock, transcriptUserId, nowMs) };
+}
+
+export type BuilderConversationAccessResult =
+  | {
+      kind: "active";
+      association: ScheduledTaskConversationRow;
+      lock: AutomationTaskConversationLockSummary;
+      created: false;
+    }
+  | { kind: "locked"; lock: AutomationTaskConversationLockSummary }
+  | { kind: "not_found" | "archived" | "unavailable" };
+
+/**
+ * Builder transcripts remain scoped to the authenticated transcript user. A task
+ * may have historical associations for several users, but it has at most one
+ * non-expired builder lease. The lease owner may renew it through builder
+ * requests or the client heartbeat; archiving the leased conversation releases
+ * it, and an idle lease becomes available after five minutes. Another user may
+ * inspect and edit the task definition while the lease is held, but cannot read
+ * or mutate the leased transcript until the owner releases it or the lease
+ * expires.
+ */
+
 export function createAutomationTaskConversationService(db: Kysely<DB>) {
   const repo = createScheduledTaskConversationRepository(db);
 
@@ -134,6 +202,10 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
       return summarizeRows(rows);
     },
 
+    async getBuilderLock(taskId: string, transcriptUserId: string): Promise<AutomationTaskConversationLockSummary> {
+      return summarizeBuilderLock(await repo.getBuilderLock(taskId), transcriptUserId);
+    },
+
     async hasAnyAssociation(taskId: string, conversationId: string): Promise<boolean> {
       return (await repo.listByTaskConversation(taskId, conversationId)).length > 0;
     },
@@ -144,7 +216,17 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
       transcriptUserId: string,
       archived: boolean,
     ): Promise<AutomationTaskConversationSummary | undefined> {
-      const changed = await repo.setArchivedForTaskConversation(taskId, conversationId, transcriptUserId, archived);
+      const changed = await db.transaction().execute(async (trx) => {
+        const trxRepo = createScheduledTaskConversationRepository(trx);
+        const updated = await trxRepo.setArchivedForTaskConversation(
+          taskId,
+          conversationId,
+          transcriptUserId,
+          archived,
+        );
+        if (updated && archived) await trxRepo.releaseBuilderLock(taskId, conversationId, transcriptUserId);
+        return updated;
+      });
       if (!changed) return undefined;
       return this.getForTranscriptUser(taskId, conversationId, transcriptUserId, { includeArchived: true });
     },
@@ -154,32 +236,86 @@ export function createAutomationTaskConversationService(db: Kysely<DB>) {
         kind: "builder",
       });
       if (existing.length > 0) {
-        const association = await repo.upsert({
-          taskId,
-          conversationId: existing[0].conversation_id,
-          transcriptUserId,
-          kind: "builder",
-        });
-        return { association, created: false };
+        return this.selectBuilderConversation(taskId, existing[0].conversation_id, transcriptUserId, "builder");
       }
 
-      const association = await repo.upsert({
-        taskId,
-        conversationId: generatedBuilderConversationId(),
-        transcriptUserId,
-        kind: "builder",
-      });
-      return { association, created: true };
+      return this.createBuilderConversation(taskId, transcriptUserId);
     },
 
     async createBuilderConversation(taskId: string, transcriptUserId: string, conversationId?: string) {
-      const association = await repo.upsert({
-        taskId,
-        conversationId: conversationId ?? generatedBuilderConversationId(),
-        transcriptUserId,
-        kind: "builder",
+      return db.transaction().execute(async (trx) => {
+        const trxRepo = createScheduledTaskConversationRepository(trx);
+        const builderConversationId = conversationId ?? generatedBuilderConversationId();
+        const claimed = await claimBuilderLock(trxRepo, taskId, builderConversationId, transcriptUserId);
+        if (!claimed.acquired) return { kind: "locked" as const, lock: claimed.lock };
+
+        const association = await trxRepo.upsert({
+          taskId,
+          conversationId: builderConversationId,
+          transcriptUserId,
+          kind: "builder",
+        });
+        return { kind: "created" as const, association, created: true as const, lock: claimed.lock };
       });
-      return { association, created: true };
+    },
+
+    async selectBuilderConversation(
+      taskId: string,
+      conversationId: string,
+      transcriptUserId: string,
+      kind?: ScheduledTaskConversationKind,
+    ): Promise<BuilderConversationAccessResult> {
+      return db.transaction().execute(async (trx) => {
+        const trxRepo = createScheduledTaskConversationRepository(trx);
+        const rows = await trxRepo.listByTaskConversationForTranscriptUser(taskId, conversationId, transcriptUserId, {
+          includeArchived: true,
+        });
+        if (rows.length === 0) return { kind: "not_found" as const };
+
+        const activeRows = rows.filter((row) => row.archived_at === null);
+        if (activeRows.length === 0) return { kind: "archived" as const };
+        const selectedKind = kind ?? (activeRows[0]?.kind as ScheduledTaskConversationKind | undefined);
+        if (!selectedKind || !activeRows.some((row) => row.kind === selectedKind)) {
+          return { kind: "not_found" as const };
+        }
+
+        const claimed = await claimBuilderLock(trxRepo, taskId, conversationId, transcriptUserId);
+        if (!claimed.acquired) return { kind: "locked" as const, lock: claimed.lock };
+        const touchedRows = await touchActiveAutomationTaskConversationAssociations(trx, {
+          taskId,
+          conversationId,
+          transcriptUserId,
+        });
+        if (touchedRows === 0) return { kind: "unavailable" as const };
+        const association = activeRows.find((row) => row.kind === selectedKind) ?? activeRows[0];
+        return { kind: "active" as const, association, lock: claimed.lock, created: false };
+      });
+    },
+
+    async acquireBuilderConversationLock(
+      taskId: string,
+      conversationId: string,
+      transcriptUserId: string,
+    ): Promise<BuilderConversationAccessResult> {
+      return db.transaction().execute(async (trx) => {
+        const trxRepo = createScheduledTaskConversationRepository(trx);
+        const rows = await trxRepo.listByTaskConversationForTranscriptUser(taskId, conversationId, transcriptUserId, {
+          includeArchived: true,
+        });
+        if (rows.length === 0) return { kind: "not_found" as const };
+        const activeRows = rows.filter((row) => row.archived_at === null);
+        if (activeRows.length === 0) return { kind: "archived" as const };
+
+        const claimed = await claimBuilderLock(trxRepo, taskId, conversationId, transcriptUserId);
+        if (!claimed.acquired) return { kind: "locked" as const, lock: claimed.lock };
+        const touchedRows = await touchActiveAutomationTaskConversationAssociations(trx, {
+          taskId,
+          conversationId,
+          transcriptUserId,
+        });
+        if (touchedRows === 0) return { kind: "unavailable" as const };
+        return { kind: "active" as const, association: activeRows[0], lock: claimed.lock, created: false };
+      });
     },
   };
 }
