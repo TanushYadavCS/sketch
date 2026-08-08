@@ -332,7 +332,10 @@ export async function getFileContent(
             .where("entity_mentions.indexed_file_id", "=", fileId)
             .where(whereLiveEntity())
             .where((eb) =>
-              eb.or([eb("entities.share_with_everyone", "=", 1), eb("entity_share_emails.email", "is not", null)]),
+              eb.or([
+                eb("entities.share_with_everyone", "=", 1),
+                ...(emailValues.length > 0 ? [eb("entity_share_emails.email", "is not", null)] : []),
+              ]),
             )
             .limit(1)
             .execute();

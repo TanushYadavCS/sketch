@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fileAccessFilterSql, filterAccessibleFileIds, getFileContent } from "../../connectors/search";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import { type FileViewer, createConnectorRepository } from "./connectors";
+import { type FileViewer, createConnectorRepository, fileVisibilityPredicate } from "./connectors";
 import { createEntityRepository } from "./entities";
 
 describe("file-visibility predicate (RBAC for file list/count)", () => {
@@ -325,73 +325,155 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
     ).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: "f-lid" })]));
   });
 
-  it("keeps entity share_with_everyone visible across every read gate without email", async () => {
+  it("denies another user's entity share without email while preserving org-wide entity shares", async () => {
     const now = new Date().toISOString();
+    await db.insertInto("users").values({ id: "u-admin", name: "Admin", email: "admin@example.com" }).execute();
     await db
       .insertInto("entities")
-      .values({
-        id: "ent-shared-everyone",
-        name: "Shared Entity",
-        source_type: "manual",
-        subtype: null,
-        aliases: null,
-        metadata: null,
-        source_ref_id: null,
-        status: "confirmed",
-        hotness: 0,
-        created_at: now,
-        updated_at: now,
-        share_with_everyone: 1,
-      })
+      .values([
+        {
+          id: "ent-shared-individually",
+          name: "Individually Shared Entity",
+          source_type: "manual",
+          subtype: null,
+          aliases: null,
+          metadata: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+          share_with_everyone: 0,
+          deleted_at: null,
+          merged_into_entity_id: null,
+        },
+        {
+          id: "ent-shared-everyone",
+          name: "Shared Entity",
+          source_type: "manual",
+          subtype: null,
+          aliases: null,
+          metadata: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+          share_with_everyone: 1,
+          deleted_at: null,
+          merged_into_entity_id: null,
+        },
+      ])
       .execute();
     await db
       .insertInto("indexed_files")
-      .values({
-        id: "f-entity-share-everyone",
-        connector_config_id: "cfg",
-        provider_file_id: "entity-share-everyone",
-        file_name: "entity-share-everyone.txt",
-        file_type: "doc",
-        content_category: "document",
-        source: "google_drive",
-        content: "shared content",
-        content_hash: "entity-share-everyone-hash",
-        synced_at: now,
-        access_scope_id: "scope-a",
-      })
+      .values([
+        {
+          id: "f-entity-share-individual",
+          connector_config_id: "cfg",
+          provider_file_id: "entity-share-individual",
+          file_name: "entity-share-individual.txt",
+          file_type: "doc",
+          content_category: "document",
+          source: "google_drive",
+          content: "individually shared content",
+          content_hash: "entity-share-individual-hash",
+          synced_at: now,
+          access_scope_id: "scope-a",
+          is_archived: 0,
+          share_with_everyone: 0,
+        },
+        {
+          id: "f-entity-share-everyone",
+          connector_config_id: "cfg",
+          provider_file_id: "entity-share-everyone",
+          file_name: "entity-share-everyone.txt",
+          file_type: "doc",
+          content_category: "document",
+          source: "google_drive",
+          content: "shared content",
+          content_hash: "entity-share-everyone-hash",
+          synced_at: now,
+          access_scope_id: "scope-a",
+          is_archived: 0,
+          share_with_everyone: 0,
+        },
+      ])
       .execute();
     await db
       .insertInto("entity_mentions")
+      .values([
+        {
+          id: "mention-shared-individually",
+          entity_id: "ent-shared-individually",
+          indexed_file_id: "f-entity-share-individual",
+          chunk_index: null,
+          context_snippet: null,
+          confidence: "EXTRACTED",
+          source: "test",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "mention-shared-everyone",
+          entity_id: "ent-shared-everyone",
+          indexed_file_id: "f-entity-share-everyone",
+          chunk_index: null,
+          context_snippet: null,
+          confidence: "EXTRACTED",
+          source: "test",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("entity_share_emails")
       .values({
-        id: "mention-shared-everyone",
-        entity_id: "ent-shared-everyone",
-        indexed_file_id: "f-entity-share-everyone",
-        chunk_index: null,
-        context_snippet: null,
-        confidence: "EXTRACTED",
-        source: "test",
-        relation: "mentioned",
-        mentioned_at: now,
+        entity_id: "ent-shared-individually",
+        email: "somebody-else@example.com",
+        granted_by_user_id: "u-admin",
       })
       .execute();
 
-    const phoneOnly = [{ type: "phone" as const, value: "+15550000009" }];
-    const nullEmailWebViewer: FileViewer = { email: null, phone: "+15550000009", isAdmin: false };
-    const repo = createConnectorRepository(db);
-    const filterSqlVisible = await db
-      .selectFrom("indexed_files")
-      .select("id")
-      .where(fileAccessFilterSql(phoneOnly))
-      .where("id", "=", "f-entity-share-everyone")
-      .execute();
-    const visibleByList = await repo.listAllFiles({ limit: 50, offset: 0, viewer: nullEmailWebViewer });
-    const visibleByIds = await filterAccessibleFileIds(db, ["f-entity-share-everyone"], phoneOnly);
-    const visibleByContent = await getFileContent(db, "f-entity-share-everyone", phoneOnly);
+    const slackOnly = [{ type: "slack_user" as const, value: "U-NO-EMAIL" }];
+    const nullEmailWebViewer: FileViewer = { email: null, slackUserId: "U-NO-EMAIL", isAdmin: false };
+    const accessByEntryPoint = async (fileId: string) => {
+      const predicateVisible = await db
+        .selectFrom("indexed_files")
+        .select("id")
+        .where(fileVisibilityPredicate(nullEmailWebViewer))
+        .where("id", "=", fileId)
+        .executeTakeFirst();
+      const filterSqlVisible = await db
+        .selectFrom("indexed_files")
+        .select("id")
+        .where(fileAccessFilterSql(slackOnly))
+        .where("id", "=", fileId)
+        .executeTakeFirst();
+      const visibleByIds = await filterAccessibleFileIds(db, [fileId], slackOnly);
+      const visibleByContent = await getFileContent(db, fileId, slackOnly);
 
-    expect(filterSqlVisible.map((file) => file.id)).toEqual(["f-entity-share-everyone"]);
-    expect(visibleByList.map((file) => file.id)).toContain("f-entity-share-everyone");
-    expect(visibleByIds).toEqual(new Set(["f-entity-share-everyone"]));
-    expect(visibleByContent?.id).toBe("f-entity-share-everyone");
+      return {
+        fileVisibilityPredicate: predicateVisible !== undefined,
+        fileAccessFilterSql: filterSqlVisible !== undefined,
+        getFileContent: visibleByContent !== null,
+        filterAccessibleFileIds: visibleByIds.has(fileId),
+      };
+    };
+
+    expect(await accessByEntryPoint("f-entity-share-individual")).toEqual({
+      fileVisibilityPredicate: false,
+      fileAccessFilterSql: false,
+      getFileContent: false,
+      filterAccessibleFileIds: false,
+    });
+    expect(await accessByEntryPoint("f-entity-share-everyone")).toEqual({
+      fileVisibilityPredicate: true,
+      fileAccessFilterSql: true,
+      getFileContent: true,
+      filterAccessibleFileIds: true,
+    });
   });
 
   it("deduplicates multiple principals that resolve to one user in access summaries", async () => {
