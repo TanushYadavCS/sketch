@@ -36,6 +36,7 @@ import {
   CheckCircleIcon,
   CircleIcon,
   CodeIcon,
+  CopySimpleIcon,
   EnvelopeSimpleIcon,
   EyeIcon,
   GitBranchIcon,
@@ -2513,7 +2514,12 @@ function NodeInputPanel({
 function TriggerFields({ draft }: { draft: DraftAutomation }) {
   const triggerStep = draft.steps.find((step) => step.type === "trigger");
   const config = triggerStep?.triggerConfig ?? { type: "schedule" as const };
-  const triggerLabel = config.type === "slack_channel_message" ? "Slack channel message" : config.type;
+  const isCanvasWebhook = config.type === "canvas" && config.componentKey === "webhook-trigger";
+  const triggerLabel = isCanvasWebhook
+    ? "Canvas webhook"
+    : config.type === "slack_channel_message"
+      ? "Slack channel message"
+      : config.type;
   return (
     <>
       <Field label="Trigger type">
@@ -2524,6 +2530,7 @@ function TriggerFields({ draft }: { draft: DraftAutomation }) {
           <Input value={config.channelId ?? ""} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
         </Field>
       ) : null}
+      {isCanvasWebhook ? <CanvasWebhookFields endpoint={config.canvasEndpoint} /> : null}
       {config.type === "schedule" ? (
         <>
           <Field label="Schedule type">
@@ -2543,6 +2550,89 @@ function TriggerFields({ draft }: { draft: DraftAutomation }) {
         </>
       ) : null}
     </>
+  );
+}
+
+function CanvasWebhookFields({
+  endpoint,
+}: {
+  endpoint?: {
+    url: string;
+    method: "POST";
+    authentication: "none";
+    contentType: "application/json";
+    payload: string;
+  };
+}) {
+  const handleCopy = async () => {
+    if (!endpoint?.url) return;
+    try {
+      await navigator.clipboard.writeText(endpoint.url);
+      toast.success("Canvas webhook URL copied");
+    } catch {
+      toast.error("Unable to copy Canvas webhook URL");
+    }
+  };
+
+  return (
+    <div className="space-y-3 rounded-[8px] border border-brand-accent/25 bg-brand-accent/5 p-3">
+      <div className="space-y-1">
+        <p className="text-[12px] font-medium text-foreground">Send data to this Canvas webhook</p>
+        <p className="text-[11px] leading-4 text-muted-foreground">
+          Canvas receives the request and forwards the payload to this automation.
+        </p>
+      </div>
+      <Field label="Webhook URL">
+        <div className="flex gap-2">
+          <Input
+            value={endpoint?.url ?? "Canvas endpoint is not available yet"}
+            className={cn(builderReadOnlyInputClass, "min-w-0 flex-1")}
+            readOnly
+            aria-readonly="true"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="size-10 shrink-0 rounded-[8px]"
+            aria-label="Copy Canvas webhook URL"
+            disabled={!endpoint?.url}
+            onClick={() => void handleCopy()}
+          >
+            <CopySimpleIcon size={15} />
+          </Button>
+        </div>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Method">
+          <Input
+            value={endpoint?.method ?? "POST"}
+            className={builderReadOnlyInputClass}
+            readOnly
+            aria-readonly="true"
+          />
+        </Field>
+        <Field label="Content type">
+          <Input
+            value={endpoint?.contentType ?? "application/json"}
+            className={builderReadOnlyInputClass}
+            readOnly
+            aria-readonly="true"
+          />
+        </Field>
+      </div>
+      <Field label="Authentication">
+        <Input
+          value={endpoint?.authentication === "none" ? "None required" : "Not configured"}
+          className={builderReadOnlyInputClass}
+          readOnly
+          aria-readonly="true"
+        />
+      </Field>
+      <p className="text-[11px] leading-4 text-muted-foreground">
+        Payload: {endpoint?.payload ?? "Any JSON value"}. Use a stable event ID in your payload if the sender may retry.
+      </p>
+    </div>
   );
 }
 

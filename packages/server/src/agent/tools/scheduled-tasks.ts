@@ -2,6 +2,7 @@ import { tool } from "@anthropic-ai/claude-agent-sdk";
 import {
   type AutomationBuilderSaveRequest,
   automationActionCapabilitiesSchema,
+  canvasWebhookEndpointSchema,
   workflowStepUsesIntegrationActions,
 } from "@sketch/shared";
 import type { Kysely } from "kysely";
@@ -17,6 +18,7 @@ import {
   updateAutomationDefinition,
 } from "../../automation/persistence";
 import { webChatTaskConversationAssociation } from "../../automation/task-conversations";
+import { buildAutomationWebhookUrl } from "../../automation/webhook";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import type { DB } from "../../db/schema";
@@ -82,6 +84,7 @@ const workflowStepSchema = z.object({
       canvasWorkflowId: z.string().optional(),
       canvasTriggerNodeId: z.string().optional(),
       canvasActionNodeId: z.string().optional(),
+      canvasEndpoint: canvasWebhookEndpointSchema.optional(),
       errorMessage: z.string().optional(),
     })
     .describe(
@@ -1025,8 +1028,10 @@ export async function handleManageScheduledTasks(
       const triggerStep = steps.find((s) => s.triggerConfig?.type === "webhook");
       let webhookUrl: string | undefined;
       if (triggerStep && deps.config) {
-        const baseUrl = deps.config.BASE_URL ?? `http://localhost:${deps.config.PORT}`;
-        webhookUrl = `${baseUrl}/api/webhooks/wf/${refreshedTask.id}`;
+        webhookUrl = buildAutomationWebhookUrl(refreshedTask.id, {
+          baseUrl: deps.config.BASE_URL,
+          port: deps.config.PORT,
+        });
       }
 
       collectAutomationArtifact({

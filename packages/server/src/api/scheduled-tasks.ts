@@ -42,6 +42,8 @@ interface ScheduledTaskMutationDeps {
 interface ScheduledTaskRouteOptions {
   logger?: Logger;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
+  baseUrl?: string | null;
+  port?: number;
 }
 
 interface ScheduledTaskListItem {
@@ -408,6 +410,8 @@ export function scheduledTaskRoutes(
       runRows,
       createdByName: owner?.name ?? null,
       lastEditedByName: editor?.name ?? null,
+      webhookBaseUrl: options.baseUrl,
+      webhookPort: options.port,
     });
   }
 

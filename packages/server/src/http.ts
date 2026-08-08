@@ -44,6 +44,7 @@ import { usageRoutes } from "./api/usage";
 import { userRoutes } from "./api/users";
 import { watiWebhookRoutes } from "./api/wati-webhook";
 import { webChatRoutes } from "./api/web-chat";
+import { automationWebhookRoutes } from "./api/webhooks";
 import { whatsappRoutes } from "./api/whatsapp";
 import { workflowRoutes } from "./api/workflows";
 import { createWorkspaceApi } from "./api/workspace";
@@ -115,6 +116,7 @@ interface AppDeps {
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
   scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById"> &
+    Partial<Pick<TaskScheduler, "enqueueTaskById">> &
     Partial<Pick<TaskScheduler, "removeTaskRuntime">> &
     Partial<Pick<TaskScheduler, "refreshTaskSchedule" | "executeStepById" | "getTaskById">>;
   runAgent?: (params: RunAgentParams) => Promise<RunAgentResult>;
@@ -315,6 +317,17 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
 
   if (deps?.watiWebhook && deps.queueManager) {
     app.route("/whatsapp/wati", watiWebhookRoutes(deps.watiWebhook, deps.queueManager, logger));
+  }
+
+  if (deps?.scheduler?.enqueueTaskById) {
+    app.route(
+      "/api/webhooks",
+      automationWebhookRoutes({
+        db,
+        logger,
+        scheduler: { enqueueTaskById: deps.scheduler.enqueueTaskById },
+      }),
+    );
   }
 
   app.use(
@@ -560,6 +573,8 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       scheduledTaskRoutes(db, deps.scheduler, {
         logger,
         loadIntegrationProvider: deps.loadIntegrationProvider,
+        baseUrl: config.BASE_URL,
+        port: config.PORT,
       }),
     );
   }

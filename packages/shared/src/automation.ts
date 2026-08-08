@@ -1,5 +1,17 @@
 import { z } from "zod";
 
+export const canvasWebhookEndpointSchema = z
+  .object({
+    url: z.string().url(),
+    method: z.literal("POST"),
+    authentication: z.literal("none"),
+    contentType: z.literal("application/json"),
+    payload: z.string().default("Any JSON value"),
+  })
+  .strict();
+
+export type CanvasWebhookEndpoint = z.infer<typeof canvasWebhookEndpointSchema>;
+
 export const workflowTriggerConfigSchema = z
   .object({
     type: z.enum(["webhook", "schedule", "canvas", "slack_channel_message"]),
@@ -10,6 +22,10 @@ export const workflowTriggerConfigSchema = z
     app: z.string().optional(),
     eventDescription: z.string().optional(),
     componentKey: z.string().optional(),
+    webhookUrl: z.string().url().optional(),
+    webhookMethod: z.literal("POST").optional(),
+    webhookContentType: z.literal("application/json").optional(),
+    canvasEndpoint: canvasWebhookEndpointSchema.optional(),
     configuredProps: z.record(z.string(), z.unknown()).optional(),
     status: z.enum(["pending_canvas_setup", "active", "error"]).optional(),
     canvasWorkflowId: z.string().optional(),

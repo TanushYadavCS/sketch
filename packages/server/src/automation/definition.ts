@@ -22,6 +22,7 @@ import { parseOnceSchedule } from "../scheduler/parse-once";
 import { formatIntervalScheduleLabel, normalizeScheduleTriggerSteps } from "../scheduler/trigger-metadata";
 import { resolveWorkflowDelivery } from "../workflows/delivery";
 import { hasInvalidAutomationSketchToolNamespace, undeclaredAutomationSketchTools } from "./action-script";
+import { addWebhookMetadata } from "./webhook";
 
 export type BuilderValidationIssue = { code: string; message: string; path?: string };
 
@@ -169,8 +170,19 @@ export function buildAutomationDefinition(params: {
   normalizeScheduleTriggers?: boolean;
   createdByName?: string | null;
   lastEditedByName?: string | null;
+  webhookBaseUrl?: string | null;
+  webhookPort?: number;
 }): AutomationDefinition {
-  const steps = safeSteps(params.row, params.normalizeScheduleTriggers);
+  const steps = safeSteps(params.row, params.normalizeScheduleTriggers).map((step) => {
+    if (step.type !== "trigger" || !step.triggerConfig || params.webhookBaseUrl === undefined) return step;
+    return {
+      ...step,
+      triggerConfig: addWebhookMetadata(step.triggerConfig, params.row.id, {
+        baseUrl: params.webhookBaseUrl,
+        port: params.webhookPort,
+      }),
+    };
+  });
   const edges = safeEdges(params.row, steps);
   const delivery = resolveWorkflowDelivery(params.row);
   const recentRuns = params.runRows.map(parseRun);
