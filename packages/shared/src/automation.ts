@@ -121,15 +121,15 @@ export const automationExecutionModeSchema = z.enum(["deterministic", "hybrid", 
 export type AutomationExecutionMode = z.infer<typeof automationExecutionModeSchema>;
 
 export const automationExecutionModeLabels = {
-  deterministic: "Fixed recipe",
-  hybrid: "Recipe + AI",
-  "agent-led": "Agent-led",
+  deterministic: "Follow exact steps",
+  hybrid: "Exact steps with smart help",
+  "agent-led": "Let Sketch handle the details",
 } as const satisfies Record<AutomationExecutionMode, string>;
 
 export const automationExecutionModeDescriptions = {
-  deterministic: "Runs the saved steps exactly as written. It cannot use AI steps.",
-  hybrid: "Runs the saved recipe and uses AI only where you include it.",
-  "agent-led": "Lets AI carry out the work. It cannot use code or action steps.",
+  deterministic: "Runs the saved steps exactly as written. It will not use AI to make decisions.",
+  hybrid: "Runs the steps you choose and uses AI only for the parts you include.",
+  "agent-led": "Sketch uses AI to decide how to complete the work. It will not run code steps.",
 } as const satisfies Record<AutomationExecutionMode, string>;
 
 export const automationExecutionModeRecommendations = {
