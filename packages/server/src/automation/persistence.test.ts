@@ -174,6 +174,44 @@ describe("automation persistence", () => {
     expect(saved).toMatchObject({ kind: "saved", row: { execution_mode: "hybrid", revision: 1 } });
   });
 
+  it("includes the native webhook endpoint when a caller supplies its public base URL", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition({
+        scheduleType: "external",
+        scheduleValue: "webhook",
+        steps: [
+          {
+            ...makeDefinition().steps[0],
+            triggerConfig: { type: "webhook" },
+          },
+          ...makeDefinition().steps.slice(1),
+        ],
+      }),
+      context: createContext("automation-webhook"),
+      brokerCapable: true,
+    });
+
+    await expect(
+      getAutomationDefinition({
+        db,
+        taskId: "automation-webhook",
+        webhookBaseUrl: "https://sketch.example/",
+      }),
+    ).resolves.toMatchObject({
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          triggerConfig: {
+            type: "webhook",
+            webhookUrl: "https://sketch.example/api/webhooks/wf/automation-webhook",
+            webhookMethod: "POST",
+            webhookContentType: "application/json",
+          },
+        }),
+      ]),
+    });
+  });
+
   it("validates the complete definition before creating a task row", async () => {
     await expect(
       createAutomationDefinition({

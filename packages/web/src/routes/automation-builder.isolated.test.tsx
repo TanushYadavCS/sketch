@@ -407,9 +407,9 @@ describe("AutomationBuilderPage", () => {
     renderBuilder();
 
     expect(await screen.findByTestId("automation-mode-panel")).toBeInTheDocument();
-    expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Fixed recipe");
-    expect(screen.getByTestId("automation-mode-hybrid")).toHaveTextContent("Recipe + AI");
-    expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Agent-led");
+    expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Follow exact steps");
+    expect(screen.getByTestId("automation-mode-hybrid")).toHaveTextContent("Exact steps with smart help");
+    expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Let Sketch handle the details");
     expect(
       screen.getByText("Suggested because: Best when the work needs AI judgment from start to finish."),
     ).toBeVisible();

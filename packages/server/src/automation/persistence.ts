@@ -315,6 +315,8 @@ function applyDefinitionPatch(
 export async function getAutomationDefinition(params: {
   db: Kysely<DB>;
   taskId: string;
+  webhookBaseUrl?: string | null;
+  webhookPort?: number;
 }): Promise<AutomationDefinition | null> {
   const row = await createScheduledTaskRepository(params.db).getById(params.taskId);
   if (!row) return null;
@@ -322,7 +324,13 @@ export async function getAutomationDefinition(params: {
     createAutomationStepContentRepository(params.db).getByTask(params.taskId),
     createAutomationRunsRepository(params.db).list(params.taskId),
   ]);
-  return buildAutomationDefinition({ row, stepContentRows, runRows });
+  return buildAutomationDefinition({
+    row,
+    stepContentRows,
+    runRows,
+    webhookBaseUrl: params.webhookBaseUrl,
+    webhookPort: params.webhookPort,
+  });
 }
 
 /**

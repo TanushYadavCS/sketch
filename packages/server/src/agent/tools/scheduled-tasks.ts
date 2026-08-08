@@ -129,7 +129,7 @@ const manageScheduledTasksSchema = {
   execution_mode: automationExecutionModeSchema
     .optional()
     .describe(
-      "How the automation runs: deterministic 'Fixed recipe' allows action steps but no agent steps; hybrid 'Recipe + AI' allows both; agent-led allows agent steps but no code or action steps. This is a user choice, not a forced recommendation.",
+      "How the automation runs: 'Follow exact steps' (deterministic) allows action steps but no agent steps; 'Exact steps with smart help' (hybrid) allows both; 'Let Sketch handle the details' (agent-led) allows agent steps but no code or action steps. This is a user choice, not a forced recommendation.",
     ),
   schedule_type: z
     .enum(["cron", "interval", "once"])
@@ -1136,7 +1136,12 @@ export async function handleManageScheduledTasks(
       if (!deps.db) {
         return text("Error: canonical automation persistence is not available in this context.");
       }
-      const definition = await getAutomationDefinition({ db: deps.db, taskId: task_id });
+      const definition = await getAutomationDefinition({
+        db: deps.db,
+        taskId: task_id,
+        webhookBaseUrl: deps.config?.BASE_URL,
+        webhookPort: deps.config?.PORT,
+      });
       if (!definition) return text(`Error: task ${task_id} not found.`);
       return text(JSON.stringify(definition, null, 2));
     }

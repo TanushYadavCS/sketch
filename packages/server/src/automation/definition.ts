@@ -543,14 +543,14 @@ export function validateAutomationExecutionMode(
       addIssue(
         issues,
         "DETERMINISTIC_MODE_AGENT_STEP",
-        `Fixed recipe mode cannot include agent step "${step.label}"`,
+        `Follow exact steps cannot include AI step "${step.label}"`,
         `steps.${step.id}`,
       );
     } else if (mode === "agent-led" && step.type === "action") {
       addIssue(
         issues,
         "AGENT_LED_MODE_ACTION_STEP",
-        `Agent-led mode cannot include code or action step "${step.label}"`,
+        `Let Sketch handle the details cannot include code or action step "${step.label}"`,
         `steps.${step.id}`,
       );
     }
