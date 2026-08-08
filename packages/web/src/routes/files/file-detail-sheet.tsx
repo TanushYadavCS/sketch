@@ -9,10 +9,12 @@ import type { ConnectorConfig, EmailAddr, EmailThreadMessage, FileAccess, FileCo
 import { ApiRequestError, api } from "@/lib/api";
 import { type IntegrationType, getIntegration } from "@/lib/integrations";
 import { useDashboardAuth } from "@/routes/dashboard";
+import { MintTasksDialog } from "@/routes/files/mint-tasks-dialog";
 import {
   ArrowSquareOutIcon,
   GlobeIcon,
   LinkIcon,
+  ListChecksIcon,
   LockSimpleIcon,
   ShareNetworkIcon,
   SparkleIcon,
@@ -447,6 +449,14 @@ function FileDetailFooter({
   const canManageShares = connector?.canManage === true;
   const canEnrich = connector?.canEnrich === true;
   const [shareOpen, setShareOpen] = useState(false);
+  const [mintOpen, setMintOpen] = useState(false);
+
+  /**
+   * Provisional: minting rides on the enrichment capability because both are per-file
+   * debug surfaces on the same connector. Minting writes tasks where enrichment writes
+   * summaries, so this deserves its own capability once the audience model lands.
+   */
+  const canMint = canEnrich;
 
   const enrichMutation = useMutation({
     mutationFn: () => api.integrations.enrichFile(fileId),
@@ -457,7 +467,7 @@ function FileDetailFooter({
     onError: (err: Error) => toast.error(err.message),
   });
 
-  if (!canManageShares && !canEnrich) return null;
+  if (!canManageShares && !canEnrich && !canMint) return null;
 
   return (
     <div className="border-t border-border px-4 py-3 flex gap-2">
@@ -488,6 +498,19 @@ function FileDetailFooter({
           )}
         </Button>
       )}
+      {canMint && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="flex-1 gap-1.5 text-xs"
+          onClick={() => setMintOpen(true)}
+          disabled={mintOpen}
+        >
+          <ListChecksIcon size={12} />
+          Mint tasks
+        </Button>
+      )}
+      {canMint && <MintTasksDialog fileId={fileId} fileName={fileName} open={mintOpen} onOpenChange={setMintOpen} />}
       {canManageShares && (
         <FileShareDialog
           fileId={fileId}

@@ -1141,6 +1141,33 @@ export interface DevTraceRunHeader {
   truncated: boolean;
 }
 
+export interface MintedTaskCandidate {
+  title: string;
+  owner?: { name?: string | null; email?: string | null } | null;
+  dueDate?: string | null;
+  /** The model's own claim that the source named an owner, a concrete verb and an object. */
+  hasOwnerVerbObject: boolean;
+  sourceExcerpt?: string | null;
+  /** Null when the candidate resolved to no project. */
+  projectName?: string | null;
+  /** Present once the candidate was written through the fact pipeline. */
+  taskId?: string | null;
+}
+
+export interface MintTasksResult {
+  fileId: string;
+  fileName: string;
+  model: string;
+  contentLength: number;
+  /** True when the file was cut to fit the model window — the tail was never seen. */
+  truncated: boolean;
+  context: MintContextBlock[];
+  candidates: MintedTaskCandidate[];
+  written: number;
+  /** Server-side directory holding the raw prompt and response for this run. */
+  dumpDir?: string | null;
+}
+
 export interface EmailAddr {
   name?: string | null;
   email: string;
@@ -2250,6 +2277,17 @@ export const api = {
           method: "POST",
         },
       );
+    },
+    /**
+     * Runs task extraction against one file and waits for the result.
+     *
+     * Unlike enrichFile this is synchronous: the response body is the review surface, so
+     * there is nothing to poll for and nothing useful to return early.
+     */
+    mintTasks(fileId: string) {
+      return request<MintTasksResult>(`/api/connectors/files/${fileId}/tasks`, {
+        method: "POST",
+      });
     },
     browseGoogleDrive(credentials: { client_id: string; client_secret: string; refresh_token: string }) {
       return request<{
