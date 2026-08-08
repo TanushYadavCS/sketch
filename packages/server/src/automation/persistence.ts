@@ -511,6 +511,59 @@ export async function createAutomationDefinition(params: {
   return { kind: "saved", row };
 }
 
+export async function createAutomationDraft(params: {
+  db: Kysely<DB>;
+  context: AutomationCreateContext;
+  timezone: string;
+  taskConversationAssociation?: AutomationTaskConversationAssociation;
+}): Promise<AutomationCreateResult> {
+  const id = params.context.id ?? randomUUID();
+  const deliveryTarget = params.context.deliveryTarget.trim();
+  if (!deliveryTarget) throw new Error("Draft automation requires a delivery target");
+
+  const task: NewScheduledTask = {
+    id,
+    platform: params.context.platform,
+    context_type: params.context.contextType,
+    delivery_target: deliveryTarget,
+    thread_ts: params.context.threadTs,
+    prompt: "Describe the automation.",
+    schedule_type: "interval",
+    schedule_value: "3600",
+    timezone: params.timezone.trim() || "UTC",
+    session_mode: "fresh",
+    next_run_at: null,
+    status: "paused",
+    created_by: params.context.createdBy,
+    title: "New automation",
+    description: null,
+    steps: null,
+    edges: null,
+    output_target: deliveryTarget,
+    output_platform: params.context.platform,
+    output_thread_ts: params.context.threadTs,
+    output_mode: "deliver",
+    origin_platform: params.context.originPlatform,
+    origin_conversation_id: params.context.originConversationId,
+    origin_provider_thread_id: params.context.originProviderThreadId,
+    origin_message_id: params.context.originMessageId,
+    last_edited_by: params.context.createdBy,
+  };
+
+  const row = await params.db.transaction().execute(async (trx) => {
+    const created = await createScheduledTaskRepository(trx).add(task);
+    if (params.taskConversationAssociation) {
+      await upsertAutomationTaskConversationAssociation(trx, {
+        taskId: id,
+        ...params.taskConversationAssociation,
+      });
+    }
+    return created;
+  });
+
+  return { kind: "saved", row };
+}
+
 export async function replaceAutomationDefinition(params: {
   db: Kysely<DB>;
   taskId: string;

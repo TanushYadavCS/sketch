@@ -3,12 +3,18 @@ import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/p
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 import {
   type AutomationArtifact,
+  type AutomationDraftHandoff,
   type WebChatIntegrationConnectionData,
   type WebChatProgressData,
+  type WebChatQuestion,
+  type WebChatQuestionAnswer,
   type WebProgressItem,
   type WorkflowEdge,
   type WorkflowStep,
   automationArtifactSchema,
+  automationDraftHandoffSchema,
+  webChatQuestionAnswerSchema,
+  webChatQuestionSchema,
   workflowEdgeSchema,
   workflowStepSchema,
 } from "@sketch/shared";
@@ -27,6 +33,7 @@ import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } f
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
+import { type AutomationCreateContext, createAutomationDraft } from "../automation/persistence";
 import {
   type AutomationTaskConversationLockSummary,
   BUILDER_CHAT_LOCK_RENEWAL_INTERVAL_MS,
@@ -157,7 +164,10 @@ type WebChatTranscriptPart =
   | { type: "text"; text: string }
   | { type: "data-file"; id: string; data: WebChatFile }
   | { type: "data-automation"; id: string; data: AutomationArtifact }
+  | { type: "data-automation-handoff"; id: string; data: AutomationDraftHandoff }
   | { type: "data-integration-connection"; id: string; data: WebChatIntegrationConnectionData }
+  | { type: "data-question"; id: string; data: WebChatQuestion }
+  | { type: "data-question-answer"; id: string; data: WebChatQuestionAnswer }
   | { type: "data-interruption"; id: string; data: WebChatInterruptionData };
 type WebChatProgressTranscriptPart = { type: "data-progress"; id: string; data: WebChatProgressData };
 type WebChatStoredPart = WebChatTranscriptPart | WebChatProgressTranscriptPart;
@@ -186,6 +196,11 @@ interface LatestUserMessage {
   text: string;
 }
 
+interface ExtractedQuestionAnswer {
+  present: boolean;
+  answer: WebChatQuestionAnswer | null;
+}
+
 interface ParsedWebChatAttachment {
   attachment: Attachment;
   file: WebChatFile;
@@ -203,7 +218,9 @@ type WebChatUiChunk =
   | { type: "data-progress"; id: string; data: WebChatProgressData }
   | { type: "data-file"; id: string; data: WebChatFile }
   | { type: "data-automation"; id: string; data: AutomationArtifact }
+  | { type: "data-automation-handoff"; id: string; data: AutomationDraftHandoff }
   | { type: "data-integration-connection"; id: string; data: WebChatIntegrationConnectionData }
+  | { type: "data-question"; id: string; data: WebChatQuestion }
   | { type: "data-interruption"; id: string; data: WebChatInterruptionData }
   | { type: "text-start"; id: string }
   | { type: "text-delta"; id: string; delta: string }
@@ -262,6 +279,30 @@ function extractMessageId(message: unknown): string | null {
   return typeof message.id === "string" && message.id.trim() ? message.id : null;
 }
 
+function extractQuestionAnswerFromMessage(message: unknown): ExtractedQuestionAnswer {
+  if (!isRecord(message) || !Array.isArray(message.parts)) return { present: false, answer: null };
+  for (let index = message.parts.length - 1; index >= 0; index -= 1) {
+    const part = message.parts[index];
+    if (!isRecord(part) || part.type !== "data-question-answer") continue;
+    const parsed = webChatQuestionAnswerSchema.safeParse(part.data);
+    return { present: true, answer: parsed.success ? parsed.data : null };
+  }
+  return { present: false, answer: null };
+}
+
+function extractLatestQuestionAnswer(body: unknown): ExtractedQuestionAnswer {
+  if (!isRecord(body)) return { present: false, answer: null };
+  if (isRecord(body.message)) return extractQuestionAnswerFromMessage(body.message);
+  if (!Array.isArray(body.messages)) return { present: false, answer: null };
+
+  for (let index = body.messages.length - 1; index >= 0; index -= 1) {
+    const message = body.messages[index];
+    if (!isRecord(message) || message.role !== "user") continue;
+    return extractQuestionAnswerFromMessage(message);
+  }
+  return { present: false, answer: null };
+}
+
 function extractLatestUserMessage(body: unknown): LatestUserMessage | null {
   if (!isRecord(body)) return null;
   if (typeof body.message === "string") {
@@ -287,6 +328,18 @@ function extractAutomationTaskId(body: unknown): string | null {
   if (!isRecord(body)) return null;
   const taskId = typeof body.automationTaskId === "string" ? body.automationTaskId.trim() : "";
   return /^[A-Za-z0-9_-]{1,120}$/.test(taskId) ? taskId : null;
+}
+
+const AUTOMATION_DRAFT_INTENT_PATTERN =
+  /\b(?:create|make|build|set\s+up|setup|draft|design|automate)\b[\s\S]{0,120}\b(?:an?\s+)?(?:automation|workflow|scheduled\s+task)\b|\b(?:automation|workflow|scheduled\s+task)\b[\s\S]{0,120}\b(?:create|make|build|set\s+up|setup|draft|design)\b/i;
+
+export function isAutomationDraftRequest(message: string): boolean {
+  return AUTOMATION_DRAFT_INTENT_PATTERN.test(message.trim());
+}
+
+function automationBuilderUrl(config: Config, taskId: string, conversationId: string): string {
+  const base = config.BASE_URL?.replace(/\/$/, "") ?? `http://localhost:${config.PORT}`;
+  return `${base}/scheduled-tasks/${encodeURIComponent(taskId)}/edit?conversationId=${encodeURIComponent(conversationId)}`;
 }
 
 async function resolveAutomationBuilderContext(params: {
@@ -907,6 +960,18 @@ function sanitizeTranscriptPart(part: unknown): WebChatStoredPart | null {
     const artifact = automationArtifactSchema.safeParse(part.data);
     return artifact.success ? { type: "data-automation", id: part.id, data: artifact.data } : null;
   }
+  if (part.type === "data-automation-handoff" && typeof part.id === "string") {
+    const handoff = automationDraftHandoffSchema.safeParse(part.data);
+    return handoff.success ? { type: "data-automation-handoff", id: part.id, data: handoff.data } : null;
+  }
+  if (part.type === "data-question" && typeof part.id === "string") {
+    const question = webChatQuestionSchema.safeParse(part.data);
+    return question.success ? { type: "data-question", id: part.id, data: question.data } : null;
+  }
+  if (part.type === "data-question-answer" && typeof part.id === "string") {
+    const answer = webChatQuestionAnswerSchema.safeParse(part.data);
+    return answer.success ? { type: "data-question-answer", id: part.id, data: answer.data } : null;
+  }
   if (part.type !== "data-file" || typeof part.id !== "string" || !isRecord(part.data)) return null;
 
   const { name, url, mediaType, sizeBytes } = part.data;
@@ -1041,6 +1106,16 @@ async function readWebChatTranscript(
   }
 }
 
+function latestPendingWebChatQuestion(messages: WebChatTranscriptMessage[]): WebChatQuestion | null {
+  const latest = messages.at(-1);
+  if (!latest || latest.role !== "assistant") return null;
+  for (let index = latest.parts.length - 1; index >= 0; index -= 1) {
+    const part = latest.parts[index];
+    if (part.type === "data-question") return part.data;
+  }
+  return null;
+}
+
 async function readWebChatTranscriptUpdatedAt(
   config: Config,
   workspaceDir: string,
@@ -1073,8 +1148,16 @@ async function writeWebChatTranscript(
 function createUserTranscriptMessage(
   message: LatestUserMessage,
   files: Array<{ id: string; data: WebChatFile }> = [],
+  questionAnswer?: WebChatQuestionAnswer,
 ): WebChatTranscriptMessage {
   const parts: WebChatTranscriptPart[] = [{ type: "text", text: message.text }];
+  if (questionAnswer) {
+    parts.push({
+      type: "data-question-answer",
+      id: `question-answer-${questionAnswer.questionId}`,
+      data: questionAnswer,
+    });
+  }
   for (const file of files) {
     parts.push({ type: "data-file", id: file.id, data: file.data });
   }
@@ -1112,6 +1195,7 @@ function createAssistantTranscriptMessage(
   files: Array<{ id: string; data: WebChatFile }>,
   automations: Array<{ id: string; data: AutomationArtifact }> = [],
   integrationConnections: Array<{ id: string; data: WebChatIntegrationConnectionData }> = [],
+  question?: { id: string; data: WebChatQuestion },
 ): WebChatTranscriptMessage | null {
   const parts: WebChatTranscriptPart[] = [];
   if (finalText) parts.push({ type: "text", text: finalText });
@@ -1124,8 +1208,100 @@ function createAssistantTranscriptMessage(
   for (const connection of integrationConnections) {
     parts.push({ type: "data-integration-connection", id: connection.id, data: connection.data });
   }
+  if (question) parts.push({ type: "data-question", id: question.id, data: question.data });
   if (parts.length === 0) return null;
   return { id: `assistant-${randomUUID()}`, role: "assistant", createdAt: new Date().toISOString(), parts };
+}
+
+function createAutomationDraftAssistantTranscriptMessage(
+  finalText: string,
+  handoff: { id: string; data: AutomationDraftHandoff },
+): WebChatTranscriptMessage {
+  return {
+    id: `assistant-${randomUUID()}`,
+    role: "assistant",
+    createdAt: new Date().toISOString(),
+    parts: [
+      ...(finalText ? [{ type: "text" as const, text: finalText }] : []),
+      { type: "data-automation-handoff" as const, id: handoff.id, data: handoff.data },
+    ],
+  };
+}
+
+async function createAutomationDraftHandoffResponse(params: {
+  deps: WebChatRouteDeps;
+  currentUser: NonNullable<Awaited<ReturnType<UserRepo["findById"]>>>;
+  workspaceDir: string;
+  conversationId: string;
+  latestUserMessage: LatestUserMessage;
+  transcriptUserFiles: Array<{ id: string; data: WebChatFile }>;
+  dmContext: { platform: "slack" | "whatsapp"; deliveryTarget: string } | null;
+}): Promise<Response> {
+  const delivery = params.dmContext ?? {
+    platform: "slack" as const,
+    deliveryTarget: params.currentUser.slack_user_id ?? params.currentUser.id,
+  };
+  const context: AutomationCreateContext = {
+    platform: delivery.platform,
+    contextType: "dm",
+    deliveryTarget: delivery.deliveryTarget,
+    threadTs: null,
+    createdBy: params.currentUser.id,
+    originPlatform: "web",
+    originConversationId: params.conversationId,
+    originProviderThreadId: null,
+    originMessageId: null,
+  };
+  const result = await createAutomationDraft({
+    db: params.deps.db,
+    context,
+    timezone: params.currentUser.timezone ?? "UTC",
+    taskConversationAssociation: {
+      conversationId: params.conversationId,
+      transcriptUserId: params.currentUser.id,
+      kind: "web_chat",
+    },
+  });
+  const handoff = automationDraftHandoffSchema.parse({
+    kind: "automation-draft",
+    taskId: result.row.id,
+    sourceConversationId: params.conversationId,
+    builderUrl: automationBuilderUrl(params.deps.config, result.row.id, params.conversationId),
+    status: "paused",
+  });
+  const transcriptUserMessage = createUserTranscriptMessage(params.latestUserMessage, params.transcriptUserFiles);
+  const progressMessageId = `assistant-progress-${transcriptUserMessage.id}`;
+  const handoffPart = { id: "automation-handoff-0", data: handoff };
+  const finalText = "I started a paused automation draft. Continue in the builder to configure and save it.";
+  await appendWebChatPendingTurn(
+    params.deps.config,
+    params.workspaceDir,
+    params.currentUser.id,
+    params.deps.logger,
+    params.conversationId,
+    transcriptUserMessage,
+    createProgressTranscriptMessage(progressMessageId),
+  );
+
+  return webChatUiStreamResponse(async (write) => {
+    write({ type: "start", messageMetadata: { createdAt: new Date().toISOString() } });
+    write({ type: "start-step" });
+    write({ type: "text-start", id: "text-0" });
+    write({ type: "text-delta", id: "text-0", delta: finalText });
+    write({ type: "text-end", id: "text-0" });
+    write({ type: "data-automation-handoff", id: handoffPart.id, data: handoffPart.data });
+    await completeWebChatProgressMessage(
+      params.deps.config,
+      params.workspaceDir,
+      params.currentUser.id,
+      params.deps.logger,
+      params.conversationId,
+      progressMessageId,
+      createAutomationDraftAssistantTranscriptMessage(finalText, handoffPart),
+    );
+    write({ type: "finish-step" });
+    write({ type: "finish" });
+  });
 }
 
 function createInterruptedAssistantTranscriptMessage(finalText: string): WebChatTranscriptMessage {
@@ -1695,11 +1871,11 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
 
   routes.post("/", async (c) => {
     const body = await c.req.json().catch(() => ({}));
-    const latestUserMessage = extractLatestUserMessage(body);
-    if (!latestUserMessage) {
+    const incomingQuestionAnswer = extractLatestQuestionAnswer(body);
+    let latestUserMessage = extractLatestUserMessage(body);
+    if (!latestUserMessage && !incomingQuestionAnswer.present) {
       return c.json(badRequest("VALIDATION_ERROR", "Message is required"), 400);
     }
-    const message = latestUserMessage.text;
 
     const currentUser = await deps.users.findById(c.get("sub"));
     if (!currentUser) {
@@ -1711,8 +1887,38 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     }
 
     const settingsRow = await deps.settings.get();
-    const integrationMcpServers = deps.buildMcpServers ? await deps.buildMcpServers(currentUser.email) : {};
     const workspaceDir = await ensureWorkspace(deps.config, currentUser.id);
+    let questionAnswer: WebChatQuestionAnswer | undefined;
+    if (incomingQuestionAnswer.present) {
+      if (!incomingQuestionAnswer.answer) {
+        return c.json(badRequest("QUESTION_ANSWER_INVALID", "Question answer is invalid"), 400);
+      }
+      const existingTranscript = await withWebChatTranscriptLock(currentUser.id, conversationId, () =>
+        readWebChatTranscript(deps.config, workspaceDir, currentUser.id, deps.logger, conversationId),
+      );
+      const pendingQuestion = latestPendingWebChatQuestion(existingTranscript);
+      if (!pendingQuestion) {
+        return c.json(badRequest("QUESTION_NOT_PENDING", "There is no pending question to answer"), 409);
+      }
+      if (incomingQuestionAnswer.answer.questionId !== pendingQuestion.id) {
+        return c.json(badRequest("QUESTION_STALE", "That question is no longer pending"), 409);
+      }
+      const selectedOption = pendingQuestion.options.find(
+        (option) => option.id === incomingQuestionAnswer.answer?.optionId,
+      );
+      if (!selectedOption) {
+        return c.json(
+          badRequest("QUESTION_OPTION_INVALID", "That option is not available for the pending question"),
+          400,
+        );
+      }
+      questionAnswer = incomingQuestionAnswer.answer;
+      latestUserMessage = { id: latestUserMessage?.id ?? null, text: selectedOption.label };
+    }
+    if (!latestUserMessage) {
+      return c.json(badRequest("VALIDATION_ERROR", "Message is required"), 400);
+    }
+    const message = latestUserMessage.text;
     const automationTaskId = extractAutomationTaskId(body);
     const rawAttachments = isRecord(body) && Array.isArray(body.attachments) ? body.attachments : [];
     let parsedAttachments: ParsedWebChatAttachment[];
@@ -1776,6 +1982,23 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     }
     await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
     const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
+    if (
+      !incomingQuestionAnswer.present &&
+      !automationTaskId &&
+      !automationBuilderContext &&
+      isAutomationDraftRequest(message)
+    ) {
+      return createAutomationDraftHandoffResponse({
+        deps,
+        currentUser,
+        workspaceDir,
+        conversationId,
+        latestUserMessage,
+        transcriptUserFiles,
+        dmContext,
+      });
+    }
+    const integrationMcpServers = deps.buildMcpServers ? await deps.buildMcpServers(currentUser.email) : {};
     const taskContext = automationBuilderContext
       ? automationBuilderTaskContext({
           context: automationBuilderContext,
@@ -1810,7 +2033,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     );
     const progressSettings = progressDisplaySettingsForWebChatMode(baseProgressSettings, progressMode);
     const progressRenderer = createProgressRenderer(progressSettings);
-    const transcriptUserMessage = createUserTranscriptMessage(latestUserMessage, transcriptUserFiles);
+    const transcriptUserMessage = createUserTranscriptMessage(latestUserMessage, transcriptUserFiles, questionAnswer);
     const progressMessageId = `assistant-progress-${transcriptUserMessage.id}`;
     await appendWebChatPendingTurn(
       deps.config,
@@ -2039,6 +2262,9 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             : bufferedTextDeltas;
         const automationText = normalizeAutomationAssistantText(rawFinalText, automationArtifacts);
         const finalText = sanitizeIntegrationConnectionText(automationText, integrationCards) ?? "";
+        const questionPart = result.pendingQuestion
+          ? { id: `question-${result.pendingQuestion.id}`, data: result.pendingQuestion }
+          : undefined;
         if (integrationCards.length === 0 && automationArtifacts.length === 0) {
           writeBufferedTextDeltas();
         } else {
@@ -2059,6 +2285,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           write({ type: "data-automation", id, data: artifact });
           return { id, data: artifact };
         });
+        if (questionPart) write({ type: "data-question", id: questionPart.id, data: questionPart.data });
         await completeWebChatProgressMessage(
           deps.config,
           workspaceDir,
@@ -2066,7 +2293,13 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           deps.logger,
           conversationId,
           progressMessageId,
-          createAssistantTranscriptMessage(finalText, fileParts, automationParts, integrationConnectionParts),
+          createAssistantTranscriptMessage(
+            finalText,
+            fileParts,
+            automationParts,
+            integrationConnectionParts,
+            questionPart,
+          ),
         );
       } catch (err) {
         if (abortController.signal.aborted) {

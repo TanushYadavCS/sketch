@@ -379,6 +379,12 @@ describe("buildSystemContext", () => {
       expect(result).toContain("fenced code blocks");
     });
 
+    it("teaches web agents to ask bounded choice questions", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("use AskUserQuestion with two to four concrete options");
+      expect(result).toContain("stop after the tool call");
+    });
+
     it("tells the agent to resolve integration status without UI-render side effects", () => {
       const result = buildSystemContext({ platform: "web" });
       expect(result).toContain("use the integration search-apps capability");

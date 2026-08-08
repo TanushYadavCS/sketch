@@ -11,6 +11,7 @@ import { createLocalClaudeSessionTool } from "./tools/local-claude-session";
 import { createLocalRunCommandTool } from "./tools/local-command";
 import { createMessagingTools } from "./tools/messaging";
 import { createProviderConfigTool } from "./tools/provider-config";
+import { createAskUserQuestionTool } from "./tools/questions";
 import { createManageScheduledTasksTool } from "./tools/scheduled-tasks";
 import { createSearchTools } from "./tools/search";
 import { createTeamTools } from "./tools/team";
@@ -18,6 +19,7 @@ import { createTranscribeAudioTool } from "./tools/transcribe-audio";
 import {
   AutomationArtifactCollector,
   IntegrationConnectionCollector,
+  QuestionCollector,
   type SketchMcpDeps,
   UploadCollector,
 } from "./tools/types";
@@ -31,6 +33,7 @@ export { handleGetTeamDirectory, handleSetUserTimezone } from "./tools/team";
 export { UploadCollector };
 export { IntegrationConnectionCollector };
 export { AutomationArtifactCollector };
+export { QuestionCollector };
 export type { SketchMcpDeps };
 
 export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
@@ -86,6 +89,9 @@ export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {
     ...createSearchTools(deps),
     createListFollowupsTool(deps),
     createListTasksTool(deps),
+    ...(deps.responseSurface === "web" && deps.questionCollector
+      ? [createAskUserQuestionTool(deps)]
+      : ([] as ReturnType<typeof createAskUserQuestionTool>[])),
   ];
 }
 

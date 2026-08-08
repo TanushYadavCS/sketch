@@ -27,6 +27,7 @@ import {
   WarningCircleIcon,
   WrenchIcon,
 } from "@phosphor-icons/react";
+import type { WebChatQuestion, WebChatQuestionOption } from "@sketch/shared";
 import { cn } from "@sketch/ui/lib/utils";
 import { Collapsible as CollapsiblePrimitive } from "radix-ui";
 import {
@@ -92,6 +93,8 @@ export interface ChatThreadInterruption {
   detail?: string;
 }
 
+export type ChatThreadQuestion = WebChatQuestion;
+
 export type ChatThreadTimelineEntry =
   | { id?: string; type: "text"; text: string }
   | {
@@ -113,6 +116,7 @@ export interface ChatThreadMessage {
   progressItems?: ChatThreadProgressItem[];
   progressLines?: string[];
   interruption?: ChatThreadInterruption;
+  question?: ChatThreadQuestion;
 }
 
 export interface ChatThreadProps {
@@ -122,6 +126,7 @@ export interface ChatThreadProps {
   className?: string;
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  onSelectQuestion?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
   conversationId?: string;
 }
 
@@ -632,10 +637,14 @@ export function ChatThread({
   className,
   integrationConnectionStatuses = {},
   onConnectIntegration,
+  onSelectQuestion,
   conversationId,
 }: ChatThreadProps) {
   if (messages.length === 0 && !busy && !error) return null;
   const showBusy = busy && messages.at(-1)?.role !== "assistant";
+  const activeQuestionMessageId = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.question)?.id;
 
   return (
     <section aria-label="Chat thread" className={cn("flex flex-col gap-[24px]", className)}>
@@ -646,6 +655,8 @@ export function ChatThread({
           active={busy && index === messages.length - 1}
           integrationConnectionStatuses={integrationConnectionStatuses}
           onConnectIntegration={onConnectIntegration}
+          onSelectQuestion={onSelectQuestion}
+          questionAnswerable={message.id === activeQuestionMessageId && !busy}
           conversationId={conversationId}
         />
       ))}
@@ -673,12 +684,16 @@ function MessageRow({
   active,
   integrationConnectionStatuses,
   onConnectIntegration,
+  onSelectQuestion,
+  questionAnswerable,
   conversationId,
 }: {
   message: ChatThreadMessage;
   active: boolean;
   integrationConnectionStatuses: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  onSelectQuestion?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
+  questionAnswerable: boolean;
   conversationId?: string;
 }) {
   if (message.role === "user") {
@@ -698,14 +713,23 @@ function MessageRow({
         onConnectIntegration={onConnectIntegration}
         conversationId={conversationId}
       />
+      {message.question ? (
+        <QuestionCard question={message.question} disabled={!questionAnswerable} onSelect={onSelectQuestion} />
+      ) : null}
     </SketchMessage>
-  ) : message.text || message.files?.length || message.automations?.length || message.integrationConnections?.length ? (
+  ) : message.text ||
+    message.files?.length ||
+    message.automations?.length ||
+    message.integrationConnections?.length ||
+    message.question ? (
     <SketchMessage streaming={active} footer={<AssistantMessageFooter message={message} active={active} />}>
       <MessageContent
         message={message}
         inProgress={active}
         integrationConnectionStatuses={integrationConnectionStatuses}
         onConnectIntegration={onConnectIntegration}
+        onSelectQuestion={onSelectQuestion}
+        questionAnswerable={questionAnswerable}
         conversationId={conversationId}
       />
     </SketchMessage>
@@ -791,18 +815,23 @@ function MessageContent({
   inProgress = false,
   integrationConnectionStatuses = {},
   onConnectIntegration,
+  onSelectQuestion,
+  questionAnswerable = false,
   conversationId,
 }: {
   message: ChatThreadMessage;
   inProgress?: boolean;
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  onSelectQuestion?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
+  questionAnswerable?: boolean;
   conversationId?: string;
 }) {
   const copyBlocks = message.role === "assistant";
   const hasConnections = Boolean(message.integrationConnections?.length);
   const hasAutomations = Boolean(message.automations?.length);
-  if (!message.files?.length && !hasAutomations && !hasConnections) {
+  const hasQuestion = Boolean(message.question);
+  if (!message.files?.length && !hasAutomations && !hasConnections && !hasQuestion) {
     return message.text ? (
       <MarkdownMessage text={message.text} inProgress={inProgress} copyBlocks={copyBlocks} />
     ) : null;
@@ -822,7 +851,48 @@ function MessageContent({
           onConnect={onConnectIntegration}
         />
       ) : null}
+      {message.question ? (
+        <QuestionCard question={message.question} disabled={!questionAnswerable} onSelect={onSelectQuestion} />
+      ) : null}
     </div>
+  );
+}
+
+function QuestionCard({
+  question,
+  disabled,
+  onSelect,
+}: {
+  question: ChatThreadQuestion;
+  disabled: boolean;
+  onSelect?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
+}) {
+  return (
+    <fieldset
+      data-question-card
+      data-question-id={question.id}
+      disabled={disabled}
+      className="w-full max-w-[640px] rounded-[12px] border border-brand-accent/35 bg-brand-accent/[0.045] p-3"
+    >
+      <legend className="px-1 text-[13px] font-semibold leading-5 text-foreground">{question.prompt}</legend>
+      <div className="mt-2 grid gap-2">
+        {question.options.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            data-question-option-id={option.id}
+            className="rounded-[9px] border border-border/80 bg-background/70 px-3 py-2 text-left transition hover:border-brand-accent/60 hover:bg-brand-accent/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-accent/55 disabled:cursor-not-allowed disabled:opacity-55"
+            disabled={disabled || !onSelect}
+            onClick={() => onSelect?.(question, option)}
+          >
+            <span className="block text-[13px] font-medium text-foreground">{option.label}</span>
+            {option.description ? (
+              <span className="mt-0.5 block text-[12px] leading-4 text-muted-foreground">{option.description}</span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+    </fieldset>
   );
 }
 

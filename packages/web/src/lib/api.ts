@@ -10,6 +10,7 @@ import type {
   AutomationArtifact,
   AutomationBuilderSaveRequest,
   AutomationDefinition,
+  AutomationDraftHandoff,
   AutomationRun,
   AutomationStepContent,
   CanvasWebhookEndpoint,
@@ -21,12 +22,15 @@ import type {
   PageInfo,
   StepOutput,
   WebChatIntegrationConnectionData,
+  WebChatQuestion,
+  WebChatQuestionAnswer,
   WorkflowEdge,
   WorkflowStep,
 } from "@sketch/shared";
 
 export type {
   AutomationArtifact,
+  AutomationDraftHandoff,
   AutomationBuilderSaveRequest,
   AutomationDefinition,
   AutomationRun,
@@ -1429,11 +1433,14 @@ export type WebChatMessagePart =
       };
     }
   | { type: "data-automation"; id: string; data: AutomationArtifact }
+  | { type: "data-automation-handoff"; id: string; data: AutomationDraftHandoff }
   | {
       type: "data-integration-connection";
       id: string;
       data: WebChatIntegrationConnectionData;
     }
+  | { type: "data-question"; id: string; data: WebChatQuestion }
+  | { type: "data-question-answer"; id: string; data: WebChatQuestionAnswer }
   | {
       type: "data-interruption";
       id: string;

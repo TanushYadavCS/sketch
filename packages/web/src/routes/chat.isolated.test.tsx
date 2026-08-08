@@ -337,6 +337,85 @@ describe("chat route", () => {
     ]);
   });
 
+  it("turns a typed automation handoff into a builder continuation card", () => {
+    const messages = buildChatThreadMessages([
+      {
+        id: "a-draft",
+        role: "assistant",
+        parts: [
+          { type: "text", text: "I started a draft." },
+          {
+            type: "data-automation-handoff",
+            id: "automation-handoff-0",
+            data: {
+              kind: "automation-draft",
+              taskId: "task-draft-1",
+              sourceConversationId: "chat-source-1",
+              builderUrl: "/scheduled-tasks/task-draft-1/edit",
+              status: "paused",
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: "a-draft",
+        role: "assistant",
+        text: "I started a draft.",
+        automations: [
+          {
+            taskId: "task-draft-1",
+            kind: "Automation draft",
+            title: "New automation",
+            description: "Continue configuring this paused draft in the automation builder.",
+            tags: ["Draft"],
+            scheduleLabel: "Not configured",
+            deliveryLabel: "Not configured",
+            builderUrl: "/scheduled-tasks/task-draft-1/edit?conversationId=chat-source-1",
+            status: "paused",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("automatically transports a newly-created draft into the builder with its source chat", async () => {
+    mocks.search = { new: true };
+    mocks.navigate.mockClear();
+    mockChatMessages = [
+      {
+        id: "a-draft-live",
+        role: "assistant",
+        parts: [
+          {
+            type: "data-automation-handoff",
+            id: "automation-handoff-0",
+            data: {
+              kind: "automation-draft",
+              taskId: "task-draft-live",
+              sourceConversationId: "chat-alpha",
+              builderUrl: "/scheduled-tasks/task-draft-live/edit?conversationId=chat-alpha",
+              status: "paused",
+            },
+          },
+        ],
+      },
+    ];
+
+    renderWithProviders(<ChatPage />);
+
+    await waitFor(() =>
+      expect(mocks.navigate).toHaveBeenCalledWith({
+        to: "/scheduled-tasks/$taskId/edit",
+        params: { taskId: "task-draft-live" },
+        search: { conversationId: "chat-alpha" },
+        viewTransition: true,
+      }),
+    );
+  });
+
   it("invalidates automation caches when a streamed automation card arrives", async () => {
     const queryClient = new QueryClient({
       defaultOptions: {

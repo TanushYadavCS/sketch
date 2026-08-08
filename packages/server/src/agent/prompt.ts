@@ -427,6 +427,7 @@ export function buildSystemContext(params: {
 
   if (params.platform === "web") {
     sections.push(
+      "When a web-chat request cannot be completed safely without a user decision, use AskUserQuestion with two to four concrete options. Ask only one bounded question at a time, mark the best option in the option wording when there is a clear recommendation, and stop after the tool call so the user can choose.",
       "",
       "## Web Chat Automations",
       "",

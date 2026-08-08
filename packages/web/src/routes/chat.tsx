@@ -25,6 +25,7 @@ import { DEFAULT_TILES, type TileDef } from "@/components/sketch/tile-grid";
 import { useWebChatReconciliation } from "@/hooks/use-web-chat-reconciliation";
 import {
   type AutomationArtifact,
+  type AutomationDraftHandoff,
   type WebChatMessagesResponse,
   type WebChatToolProgress,
   type WebChatUploadedAttachment,
@@ -41,7 +42,7 @@ import {
 import { WEB_CHAT_CONVERSATIONS_QUERY_KEY, buildWebChatRecents } from "@/lib/web-chat-conversations";
 import { useChat } from "@ai-sdk/react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
-import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
+import type { IntegrationApp, IntegrationConnection, WebChatQuestion, WebChatQuestionOption } from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { type QueryClient, isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -68,6 +69,12 @@ type WebChatDataParts = {
     sizeBytes?: number;
   };
   automation: AutomationArtifact;
+  "automation-handoff": AutomationDraftHandoff;
+  question: WebChatQuestion;
+  "question-answer": {
+    questionId: string;
+    optionId: string;
+  };
   "integration-connection": {
     requestId: string;
     appId: string;
@@ -222,7 +229,12 @@ function latestFileIndex(parts: WebChatPart[]): number {
 }
 
 function latestAutomationIndex(parts: WebChatPart[]): number {
-  return findLastPartIndex(parts, (part) => part.type === "data-automation" && part.data.taskId.trim().length > 0);
+  return findLastPartIndex(
+    parts,
+    (part) =>
+      (part.type === "data-automation" || part.type === "data-automation-handoff") &&
+      part.data.taskId.trim().length > 0,
+  );
 }
 
 function latestInterruptionIndex(parts: WebChatPart[]): number {
@@ -231,6 +243,10 @@ function latestInterruptionIndex(parts: WebChatPart[]): number {
     (part) =>
       part.type === "data-interruption" && typeof part.data.label === "string" && part.data.label.trim().length > 0,
   );
+}
+
+function latestQuestionIndex(parts: WebChatPart[]): number {
+  return findLastPartIndex(parts, (part) => part.type === "data-question");
 }
 
 const progressIconTypes = new Set<ChatThreadProgressIconType>(["tool", "skill", "canvas", "generic"]);
@@ -311,6 +327,7 @@ function latestProgressWins(message: WebChatMessage): boolean {
       latestTextIndex(parts),
       latestFileIndex(parts),
       latestAutomationIndex(parts),
+      latestQuestionIndex(parts),
       latestInterruptionIndex(parts),
     )
   );
@@ -340,14 +357,48 @@ function filesFromMessage(message: WebChatMessage): ChatThreadFile[] {
 }
 
 function automationsFromParts(parts: WebChatPart[]): AutomationArtifact[] {
-  return parts
-    .filter((part) => part.type === "data-automation")
-    .map((part) => part.data)
-    .filter((artifact) => artifact.taskId.trim().length > 0 && artifact.title.trim().length > 0);
+  return parts.flatMap((part) => {
+    if (part.type === "data-automation") {
+      return part.data.taskId.trim().length > 0 && part.data.title.trim().length > 0 ? [part.data] : [];
+    }
+    if (part.type !== "data-automation-handoff") return [];
+    return [automationArtifactFromDraftHandoff(part.data)];
+  });
+}
+
+export function automationArtifactFromDraftHandoff(handoff: AutomationDraftHandoff): AutomationArtifact {
+  const builderUrl = handoff.builderUrl.includes("conversationId=")
+    ? handoff.builderUrl
+    : `${handoff.builderUrl}${handoff.builderUrl.includes("?") ? "&" : "?"}conversationId=${encodeURIComponent(handoff.sourceConversationId)}`;
+  return {
+    taskId: handoff.taskId,
+    kind: "Automation draft",
+    title: "New automation",
+    description: "Continue configuring this paused draft in the automation builder.",
+    tags: ["Draft"],
+    scheduleLabel: "Not configured",
+    deliveryLabel: "Not configured",
+    builderUrl,
+    status: handoff.status,
+  };
 }
 
 function automationsFromMessage(message: WebChatMessage): AutomationArtifact[] {
   return automationsFromParts(visibleMessageParts(message));
+}
+
+function automationHandoffsFromMessages(messages: WebChatMessage[]): AutomationDraftHandoff[] {
+  return messages.flatMap((message) =>
+    visibleMessageParts(message)
+      .filter((part): part is Extract<WebChatPart, { type: "data-automation-handoff" }> =>
+        part.type === "data-automation-handoff",
+      )
+      .map((part) => part.data),
+  );
+}
+
+function automationHandoffKey(handoff: AutomationDraftHandoff): string {
+  return `${handoff.taskId}:${handoff.sourceConversationId}`;
 }
 
 function integrationConnectionsFromParts(parts: WebChatPart[]): ChatThreadIntegrationConnection[] {
@@ -381,6 +432,16 @@ function interruptionFromParts(parts: WebChatPart[]): ChatThreadMessage["interru
 
 function interruptionFromMessage(message: WebChatMessage): ChatThreadMessage["interruption"] | undefined {
   return interruptionFromParts(visibleMessageParts(message));
+}
+
+function questionFromParts(parts: WebChatPart[]): WebChatQuestion | undefined {
+  const index = findLastPartIndex(parts, (part) => part.type === "data-question");
+  const part = index === -1 ? undefined : parts[index];
+  return part?.type === "data-question" ? part.data : undefined;
+}
+
+function questionFromMessage(message: WebChatMessage): WebChatQuestion | undefined {
+  return questionFromParts(visibleMessageParts(message));
 }
 
 function appendTimelineText(entries: ChatThreadTimelineEntry[], id: string | undefined, text: string): void {
@@ -718,6 +779,20 @@ export function outgoingRequestOptions(attachments: WebChatUploadedAttachment[])
   return attachments.length > 0 ? { body: { attachments } } : undefined;
 }
 
+export function outgoingQuestionAnswerMessage(question: WebChatQuestion, option: WebChatQuestionOption) {
+  return {
+    metadata: { createdAt: new Date().toISOString() },
+    parts: [
+      { type: "text" as const, text: option.label },
+      {
+        type: "data-question-answer" as const,
+        id: `question-answer-${question.id}`,
+        data: { questionId: question.id, optionId: option.id },
+      },
+    ],
+  };
+}
+
 export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadMessage[] {
   return messages.flatMap<ChatThreadMessage>((message) => {
     if (message.role !== "user" && message.role !== "assistant") return [];
@@ -725,6 +800,7 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
     if (message.role === "assistant") {
       const timeline = assistantTimelineFromMessage(message);
       const interruption = interruptionFromMessage(message);
+      const question = questionFromMessage(message);
       if (hasTimelineProgress(timeline)) {
         const files = filesFromMessage(message);
         const automations = automationsFromMessage(message);
@@ -738,6 +814,7 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
             files: files.length > 0 ? files : undefined,
             automations: automations.length > 0 ? automations : undefined,
             integrationConnections: integrationConnections.length > 0 ? integrationConnections : undefined,
+            ...(question ? { question } : {}),
             ...(interruption ? { interruption } : {}),
           },
         ];
@@ -748,7 +825,15 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
     const automations = message.role === "assistant" ? automationsFromMessage(message) : [];
     const integrationConnections = message.role === "assistant" ? integrationConnectionsFromMessage(message) : [];
     const interruption = message.role === "assistant" ? interruptionFromMessage(message) : undefined;
-    if (text || files.length > 0 || automations.length > 0 || integrationConnections.length > 0 || interruption) {
+    const question = message.role === "assistant" ? questionFromMessage(message) : undefined;
+    if (
+      text ||
+      files.length > 0 ||
+      automations.length > 0 ||
+      integrationConnections.length > 0 ||
+      interruption ||
+      question
+    ) {
       return [
         {
           id: message.id,
@@ -758,6 +843,7 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
           files: files.length > 0 ? files : undefined,
           automations: automations.length > 0 ? automations : undefined,
           integrationConnections: integrationConnections.length > 0 ? integrationConnections : undefined,
+          ...(question ? { question } : {}),
           ...(interruption ? { interruption } : {}),
         },
       ];
@@ -823,6 +909,8 @@ export function ChatPage() {
   const recoveryResponsesRef = useRef(new WeakMap<WebChatMessage[], WebChatLoadedMessagesResponse>());
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
   const toolProgressMutationId = useRef(0);
+  const handoffBaselineConversationId = useRef<string | null>(null);
+  const seenAutomationHandoffs = useRef<Set<string>>(new Set());
   const queryClient = useQueryClient();
   const hasNewConversationIntent = Boolean(
     search.new || search.message || search.prefill || hasPendingWebChatSubmission(conversationId),
@@ -984,6 +1072,9 @@ export function ChatPage() {
         latestThreadMessage.progressLines?.join("\n").length ?? 0,
         latestThreadMessage.files?.length ?? 0,
         latestThreadMessage.integrationConnections?.length ?? 0,
+        latestThreadMessage.question
+          ? `${latestThreadMessage.question.id}:${latestThreadMessage.question.options.map((option) => option.id).join(",")}`
+          : "",
         chat.status,
       ].join(":")
     : "";
@@ -1029,6 +1120,16 @@ export function ChatPage() {
       .catch(() => undefined)
       .finally(() => setStoppingRun(false));
   }, [conversationId, stoppingRun]);
+
+  const handleSelectQuestion = useCallback(
+    (question: WebChatQuestion, option: WebChatQuestionOption) => {
+      queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
+      void Promise.resolve(chat.sendMessage(outgoingQuestionAnswerMessage(question, option))).then(() =>
+        queryClient.invalidateQueries({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }),
+      );
+    },
+    [chat.sendMessage, conversationId, queryClient],
+  );
 
   const handleIntegrationConnectionStatusChange = useCallback(
     (requestId: string, status: ChatThreadIntegrationConnectionStatus) => {
@@ -1096,14 +1197,22 @@ export function ChatPage() {
     const queryKey = webChatMessagesQueryKey(conversationId);
     setHistoryLoadError((error) => (error?.conversationId === conversationId ? null : error));
     if (knownNewConversation) {
+      handoffBaselineConversationId.current = conversationId;
+      seenAutomationHandoffs.current = new Set();
       setLoadedConversationId(conversationId);
       return;
     }
     const cachedHistory = freshCachedWebChatMessages(queryClient, conversationId);
     if (cachedHistory) {
+      handoffBaselineConversationId.current = conversationId;
+      seenAutomationHandoffs.current = new Set(
+        automationHandoffsFromMessages(cachedHistory.messages).map(automationHandoffKey),
+      );
       chat.setMessages(cachedHistory.messages);
       setLoadedConversationId(conversationId);
     } else {
+      handoffBaselineConversationId.current = null;
+      seenAutomationHandoffs.current = new Set();
       chat.setMessages([]);
       setLoadedConversationId(null);
     }
@@ -1115,6 +1224,8 @@ export function ChatPage() {
       })
       .then(({ messages }) => {
         if (!active) return;
+        handoffBaselineConversationId.current = conversationId;
+        seenAutomationHandoffs.current = new Set(automationHandoffsFromMessages(messages).map(automationHandoffKey));
         chat.setMessages(messages as WebChatMessage[]);
         setLoadedConversationId(conversationId);
       })
@@ -1130,6 +1241,21 @@ export function ChatPage() {
       void queryClient.cancelQueries({ queryKey, exact: true });
     };
   }, [chat.setMessages, conversationId, historyLoadAttempt, knownNewConversation, queryClient]);
+
+  useEffect(() => {
+    if (!historyReady || handoffBaselineConversationId.current !== conversationId) return;
+    const handoffs = automationHandoffsFromMessages(chat.messages);
+    const freshHandoff = handoffs.find((handoff) => !seenAutomationHandoffs.current.has(automationHandoffKey(handoff)));
+    for (const handoff of handoffs) seenAutomationHandoffs.current.add(automationHandoffKey(handoff));
+    if (!freshHandoff) return;
+
+    void navigate({
+      to: "/scheduled-tasks/$taskId/edit",
+      params: { taskId: freshHandoff.taskId },
+      search: { conversationId: freshHandoff.sourceConversationId },
+      viewTransition: shouldUseChatViewTransition(),
+    });
+  }, [chat.messages, conversationId, historyReady, navigate]);
 
   useEffect(() => {
     if (!historyReady || !threadScrollKey) return;
@@ -1195,6 +1321,7 @@ export function ChatPage() {
               error={recovery.suppressError ? null : (chat.error?.message ?? null)}
               integrationConnectionStatuses={integrationConnectionStatuses}
               onConnectIntegration={handleConnectIntegration}
+              onSelectQuestion={handleSelectQuestion}
               conversationId={conversationId}
             />
           ) : historyLoadFailed ? (

@@ -1,4 +1,4 @@
-import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
+import type { AutomationArtifact, WebChatIntegrationConnectionData, WebChatQuestion } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import type { ChatAutomationAuthoring } from "../../automation/chat-authoring";
 import type { AccessPrincipalInput } from "../../connectors/types";
@@ -86,10 +86,31 @@ export class AutomationArtifactCollector {
   }
 }
 
+export class QuestionCollector {
+  private pending: WebChatQuestion | null = null;
+
+  collect(question: WebChatQuestion): void {
+    if (this.pending) throw new Error("Only one pending question is allowed per agent run.");
+    this.pending = question;
+  }
+
+  hasPending(): boolean {
+    return this.pending !== null;
+  }
+
+  drain(): WebChatQuestion | null {
+    const question = this.pending;
+    this.pending = null;
+    return question;
+  }
+}
+
 export interface SketchMcpDeps {
   uploadCollector: UploadCollector;
   integrationConnectionCollector?: IntegrationConnectionCollector;
   automationArtifactCollector?: AutomationArtifactCollector;
+  questionCollector?: QuestionCollector;
+  responseSurface?: "web" | "slack" | "whatsapp";
   workspaceDir: string;
   db?: Kysely<DB>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;

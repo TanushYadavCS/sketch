@@ -191,8 +191,8 @@ const automation: AutomationDefinition = {
   prompt: "Daily account brief",
   executionMode: "hybrid",
   executionModeRecommendation: {
-    mode: "hybrid",
-    reason: "This automation predates execution modes, so it keeps the compatible hybrid behavior.",
+    mode: "agent-led",
+    reason: "Best when the work needs AI judgment from start to finish.",
   },
   scheduleType: "cron",
   scheduleValue: "0 9 * * *",
@@ -399,6 +399,29 @@ describe("AutomationBuilderPage", () => {
     mocks.search = { conversationId: "chat-alpha" };
     mocks.chatStatus = "ready";
     mocks.chatMessages = [];
+  });
+
+  it("shows the three execution modes and leaves the recommendation advisory", async () => {
+    const user = userEvent.setup();
+
+    renderBuilder();
+
+    expect(await screen.findByTestId("automation-mode-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Fixed recipe");
+    expect(screen.getByTestId("automation-mode-hybrid")).toHaveTextContent("Recipe + AI");
+    expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Agent-led");
+    expect(
+      screen.getByText("Suggested because: Best when the work needs AI judgment from start to finish."),
+    ).toBeVisible();
+
+    await user.click(screen.getByTestId("automation-mode-deterministic"));
+
+    await waitFor(() =>
+      expect(mocks.saveAutomation).toHaveBeenCalledWith(
+        "task-123",
+        expect.objectContaining({ executionMode: "deterministic" }),
+      ),
+    );
   });
 
   it("renders a Slack channel message trigger and its channel", async () => {

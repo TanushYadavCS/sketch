@@ -38,7 +38,6 @@ import {
   CheckCircleIcon,
   CircleIcon,
   CodeIcon,
-  CopySimpleIcon,
   EnvelopeSimpleIcon,
   EyeIcon,
   GitBranchIcon,
@@ -89,6 +88,13 @@ import {
   useReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import {
+  type AutomationExecutionMode,
+  type WebChatQuestion,
+  type WebChatQuestionOption,
+  automationExecutionModeMetadata,
+  recommendAutomationExecutionMode,
+} from "@sketch/shared";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import {
   type CSSProperties,
@@ -137,6 +143,11 @@ type BuilderWebChatDataParts = {
     sizeBytes?: number;
   };
   automation: AutomationArtifact;
+  question: WebChatQuestion;
+  "question-answer": {
+    questionId: string;
+    optionId: string;
+  };
   interruption: ChatThreadInterruption;
 };
 
@@ -201,6 +212,10 @@ export const automationBuilderRoute = createRoute({
 });
 
 function draftFromDefinition(automation: AutomationDefinition): DraftAutomation {
+  const executionMode = automation.executionMode ?? "hybrid";
+  const executionModeRecommendation =
+    automation.executionModeRecommendation ??
+    recommendAutomationExecutionMode(automation.steps, { legacy: automation.executionMode === undefined });
   return {
     title: automation.title,
     description: automation.description,
@@ -210,8 +225,8 @@ function draftFromDefinition(automation: AutomationDefinition): DraftAutomation 
     timezone: automation.timezone,
     status: automation.status,
     delivery: automation.delivery,
-    executionMode: automation.executionMode,
-    executionModeRecommendation: automation.executionModeRecommendation,
+    executionMode,
+    executionModeRecommendation,
     steps: automation.steps,
     edges: automation.edges,
     stepContent: automation.stepContent,
@@ -235,6 +250,78 @@ function saveRequestFromDraft(draft: DraftAutomation): AutomationBuilderSaveRequ
     edges: draft.edges,
     stepContent: draft.stepContent,
   };
+}
+
+function AutomationModePanel({
+  draft,
+  onSelect,
+}: {
+  draft: DraftAutomation;
+  onSelect: (mode: AutomationExecutionMode) => void;
+}) {
+  const recommendation =
+    draft.executionModeRecommendation ?? recommendAutomationExecutionMode(draft.steps, { legacy: false });
+  const modes: AutomationExecutionMode[] = ["deterministic", "hybrid", "agent-led"];
+
+  return (
+    <section
+      data-testid="automation-mode-panel"
+      aria-label="Automation execution mode"
+      className="w-full max-w-[380px] rounded-[10px] border border-border/75 bg-card/95 p-3 shadow-lg backdrop-blur"
+    >
+      <div className="mb-2.5">
+        <p className="text-[12px] font-semibold text-foreground">How should this automation run?</p>
+        <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+          Choose the style that fits. Sketch may suggest one, but you are in control.
+        </p>
+      </div>
+      <div className="space-y-1.5" role="radiogroup" aria-label="Execution mode">
+        {modes.map((mode) => {
+          const metadata = automationExecutionModeMetadata[mode];
+          const selected = draft.executionMode === mode;
+          const recommended = recommendation.mode === mode;
+          return (
+            <label
+              key={mode}
+              data-testid={`automation-mode-${mode}`}
+              className={cn(
+                "block w-full rounded-[8px] border px-2.5 py-2 text-left outline-none transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-brand-accent/55",
+                selected
+                  ? "border-brand-accent/65 bg-brand-accent/10"
+                  : "border-border/70 bg-background/40 hover:border-border hover:bg-muted/60",
+              )}
+            >
+              <input
+                type="radio"
+                name="automation-execution-mode"
+                value={mode}
+                checked={selected}
+                aria-label={metadata.label}
+                className="sr-only"
+                onChange={() => onSelect(mode)}
+              />
+              <span className="block">
+                <span className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold text-foreground">{metadata.label}</span>
+                  {recommended ? (
+                    <Badge className="rounded-[4px] border border-brand-accent/35 bg-brand-accent/12 px-1.5 py-0 text-[9px] font-medium text-brand-accent">
+                      Suggested
+                    </Badge>
+                  ) : null}
+                </span>
+                <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{metadata.description}</span>
+                {recommended ? (
+                  <span className="mt-1 block text-[10px] leading-4 text-brand-accent/85">
+                    Suggested because: {recommendation.reason}
+                  </span>
+                ) : null}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 function builderLoadErrorKind(error: unknown): "access" | "server" {
@@ -449,6 +536,13 @@ export function AutomationBuilderPage() {
     [saveDraftPatch],
   );
 
+  const updateExecutionMode = useCallback(
+    (executionMode: AutomationExecutionMode) => {
+      saveDraftPatch((current) => ({ ...current, executionMode }), { message: "Execution mode saved" });
+    },
+    [saveDraftPatch],
+  );
+
   if (automationQuery.isError) {
     return (
       <BuilderLoadError
@@ -484,6 +578,7 @@ export function AutomationBuilderPage() {
   const executionActivity: ExecutionActivity = testingStepId ? "test" : inferredRunStepId ? "run" : null;
   const selectedStepStatus = selectedStep ? outputStatus(selectedOutput, selectedStep.id === executingStepId) : "idle";
   const automationTitle = draft.title?.trim() || draft.prompt;
+  const canRunAutomation = automation.status === "active";
   const runStateMessage = runMutation.isPending
     ? "Starting run"
     : selectedRun?.status === "running"
@@ -550,16 +645,21 @@ export function AutomationBuilderPage() {
               size="sm"
               className="h-8 gap-1.5 rounded-[7px] bg-brand-accent text-[#161300] shadow-none hover:bg-brand-accent/90"
               onClick={() => runMutation.mutate()}
-              disabled={runMutation.isPending}
+              disabled={runMutation.isPending || !canRunAutomation}
+              title={canRunAutomation ? undefined : "Only active automations can be triggered"}
             >
               {runMutation.isPending ? (
                 <SpinnerGapIcon size={14} className="animate-spin" />
               ) : (
                 <PlayIcon size={14} weight="fill" />
               )}
-              {runMutation.isPending ? "Starting…" : "Run"}
+              {runMutation.isPending ? "Starting…" : canRunAutomation ? "Run" : "Paused"}
             </Button>
           </div>
+        </div>
+
+        <div className="pointer-events-auto absolute top-16 left-4 z-10 w-[min(380px,calc(100%-2rem))]">
+          <AutomationModePanel draft={draft} onSelect={updateExecutionMode} />
         </div>
 
         <AutomationCanvas
@@ -620,6 +720,11 @@ function interruptionFromBuilderMessage(message: BuilderWebChatMessage): ChatThr
   return part?.data;
 }
 
+function questionFromBuilderMessage(message: BuilderWebChatMessage): WebChatQuestion | undefined {
+  const part = message.parts.find((candidate) => candidate.type === "data-question");
+  return part?.data;
+}
+
 function createdAtFromBuilderMessage(message: BuilderWebChatMessage): string | undefined {
   const value = message.createdAt;
   if (typeof value === "string" && value.trim()) return value;
@@ -634,8 +739,9 @@ function builderChatThreadMessages(messages: BuilderWebChatMessage[]): ChatThrea
     const files = filesFromBuilderMessage(message);
     const automations = automationsFromBuilderMessage(message);
     const interruption = interruptionFromBuilderMessage(message);
+    const question = message.role === "assistant" ? questionFromBuilderMessage(message) : undefined;
     const createdAt = createdAtFromBuilderMessage(message);
-    if (text || files.length > 0 || automations.length > 0 || interruption) {
+    if (text || files.length > 0 || automations.length > 0 || interruption || question) {
       return [
         {
           id: message.id,
@@ -644,6 +750,7 @@ function builderChatThreadMessages(messages: BuilderWebChatMessage[]): ChatThrea
           createdAt,
           files: files.length > 0 ? files : undefined,
           automations: automations.length > 0 ? automations : undefined,
+          ...(question ? { question } : {}),
           interruption,
         },
       ];
@@ -664,7 +771,8 @@ function hasPendingBuilderAssistantProgress(messages: BuilderWebChatMessage[]): 
     !textFromBuilderMessage(latestMessage) &&
     !interruptionFromBuilderMessage(latestMessage) &&
     filesFromBuilderMessage(latestMessage).length === 0 &&
-    automationsFromBuilderMessage(latestMessage).length === 0
+    automationsFromBuilderMessage(latestMessage).length === 0 &&
+    !questionFromBuilderMessage(latestMessage)
   );
 }
 
@@ -688,6 +796,20 @@ function outgoingBuilderTextMessage(text: string, attachments: WebChatUploadedAt
           sizeBytes: attachment.sizeBytes,
         },
       })),
+    ],
+  };
+}
+
+export function outgoingBuilderQuestionAnswerMessage(question: WebChatQuestion, option: WebChatQuestionOption) {
+  return {
+    metadata: { createdAt: new Date().toISOString() },
+    parts: [
+      { type: "text" as const, text: option.label },
+      {
+        type: "data-question-answer" as const,
+        id: `question-answer-${question.id}`,
+        data: { questionId: question.id, optionId: option.id },
+      },
     ],
   };
 }
@@ -1311,6 +1433,7 @@ function BuilderChatTranscript({
         progressLinesFromBuilderMessage(latestMessage).join("\n").length,
         filesFromBuilderMessage(latestMessage).length,
         automationsFromBuilderMessage(latestMessage).length,
+        questionFromBuilderMessage(latestMessage)?.id ?? "",
         chat.status,
       ].join(":")
     : "";
@@ -1323,6 +1446,15 @@ function BuilderChatTranscript({
       void chat.sendMessage(
         outgoingBuilderTextMessage(value, attachments),
         outgoingBuilderRequestOptions(taskId, attachments),
+      );
+    },
+    [chat.sendMessage, taskId],
+  );
+  const selectBuilderQuestion = useCallback(
+    (question: WebChatQuestion, option: WebChatQuestionOption) => {
+      void chat.sendMessage(
+        outgoingBuilderQuestionAnswerMessage(question, option),
+        outgoingBuilderRequestOptions(taskId, []),
       );
     },
     [chat.sendMessage, taskId],
@@ -1464,6 +1596,7 @@ function BuilderChatTranscript({
             busy={chatBusy}
             error={chat.error?.message ?? null}
             conversationId={conversationId}
+            onSelectQuestion={selectBuilderQuestion}
           />
         )}
       </div>

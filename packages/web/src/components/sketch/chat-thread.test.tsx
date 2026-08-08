@@ -48,6 +48,27 @@ describe("ChatThread", () => {
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
   });
 
+  it("renders bounded choice questions and returns the selected stable ID", () => {
+    const onSelectQuestion = vi.fn();
+    const question = {
+      id: "delivery-mode",
+      prompt: "Where should Sketch send the result?",
+      options: [
+        { id: "slack", label: "Slack" },
+        { id: "email", label: "Email", description: "Send it to your inbox." },
+      ],
+    };
+
+    render(
+      <ChatThread messages={[{ id: "question-1", role: "assistant", question }]} onSelectQuestion={onSelectQuestion} />,
+    );
+
+    expect(screen.getByText(question.prompt)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Slack" }));
+    expect(onSelectQuestion).toHaveBeenCalledWith(question, question.options[0]);
+    expect(screen.getByRole("button", { name: /Email Send it to your inbox/ })).toBeEnabled();
+  });
+
   it("renders interrupted runs as guidance instead of a Sketch message", () => {
     render(
       <ChatThread

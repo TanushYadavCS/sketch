@@ -10,7 +10,7 @@
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import { AGENT_BUILT_IN_TOOL_NAMES, VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
-import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
+import type { AutomationArtifact, WebChatIntegrationConnectionData, WebChatQuestion } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import type { ChatAutomationAuthoring } from "../automation/chat-authoring";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
@@ -83,10 +83,12 @@ import {
 import {
   AutomationArtifactCollector,
   IntegrationConnectionCollector,
+  QuestionCollector,
   UploadCollector,
   createSketchMcpServer,
 } from "./sketch-tools";
 import { type AgentOutputWriter, recordRejectedWriteAgentOutputCall } from "./tools/agent-output";
+import { ASK_USER_QUESTION_TOOL_NAME } from "./tools/questions";
 
 /**
  * A single tool invocation with timing. `startedAt`/`endedAt` are epoch ms:
@@ -226,6 +228,7 @@ export interface AgentResult {
   auxCostUsd: number;
   pendingUploads: string[];
   pendingIntegrationConnections?: WebChatIntegrationConnectionData[];
+  pendingQuestion?: WebChatQuestion;
   trace: RunTrace;
 }
 
@@ -894,6 +897,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
         visionConfig,
       });
     const customTools = await customToolsProvider.createTools(params);
+    const questionToolName = `mcp__sketch__${ASK_USER_QUESTION_TOOL_NAME}`;
     const mcpToolsProvider = params.agentRuntimeExtensions?.mcpTools ?? createDefaultAgentRuntimeMcpToolProvider();
     const mcpTools = await mcpToolsProvider.createTools(params);
     const skillsProvider = params.agentRuntimeExtensions?.skills ?? createDefaultAgentRuntimeSkillsProvider();
@@ -960,6 +964,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
           systemPrompt: systemAppend,
           tools,
           maxTurns: params.maxTurns ?? 100,
+          stopAfterToolNames: customTools[questionToolName] ? [questionToolName] : undefined,
           persistSession: persistTranscript,
           sessionId,
           sessionStore,
@@ -1050,6 +1055,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
         pendingUploads: drainedToolEffects.pendingUploads.length,
         pendingIntegrationConnections: drainedToolEffects.pendingIntegrationConnections.length,
         automationArtifacts: drainedToolEffects.automationArtifacts.length,
+        pendingQuestion: drainedToolEffects.pendingQuestion !== null,
         runtime: "aisdk",
         ...heapStats(startHeapMb),
       },
@@ -1060,12 +1066,14 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
       messageSent:
         finalText !== null ||
         drainedToolEffects.pendingIntegrationConnections.length > 0 ||
-        drainedToolEffects.automationArtifacts.length > 0,
+        drainedToolEffects.automationArtifacts.length > 0 ||
+        drainedToolEffects.pendingQuestion !== null,
       sessionId,
       costUsd: runtimeResult.cost.totalUsd,
       auxCostUsd,
       pendingUploads: drainedToolEffects.pendingUploads,
       pendingIntegrationConnections: drainedToolEffects.pendingIntegrationConnections,
+      ...(drainedToolEffects.pendingQuestion ? { pendingQuestion: drainedToolEffects.pendingQuestion } : {}),
       trace: {
         progressEvents,
         finalText,
@@ -1199,11 +1207,14 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
   const uploadCollector = new UploadCollector();
   const integrationConnectionCollector = new IntegrationConnectionCollector();
   const automationArtifactCollector = new AutomationArtifactCollector();
+  const questionCollector = new QuestionCollector();
   const auxCostCollector = new AuxCostCollector();
   const sketchServer = createSketchMcpServer({
     uploadCollector,
     integrationConnectionCollector,
     automationArtifactCollector,
+    questionCollector,
+    responseSurface: params.responseSurface ?? params.platform,
     auxCostCollector,
     workspaceDir: absWorkspace,
     db: params.db,
@@ -1363,6 +1374,8 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
           logger.warn({ err }, "Failed to deliver agent progress event");
         }
       }
+
+      if (questionCollector.hasPending()) break;
     }
   };
 
@@ -1444,6 +1457,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
       ? drainedIntegrationConnections
       : drainedIntegrationConnections.filter((card) => (card.state ?? "connect") === "connect");
   const automationArtifacts = automationArtifactCollector.drain();
+  const pendingQuestion = questionCollector.drain();
   const auxLlmCalls = [...(params.seedAuxCalls ?? []), ...auxCostCollector.drain()];
   const auxCostUsd = sumAuxCost(auxLlmCalls);
   logger.info(
@@ -1455,6 +1469,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
       pendingUploads: pendingUploads.length,
       pendingIntegrationConnections: pendingIntegrationConnections.length,
       automationArtifacts: automationArtifacts.length,
+      pendingQuestion: pendingQuestion !== null,
       ...heapStats(startHeapMb),
     },
     "Agent run completed",
@@ -1462,12 +1477,17 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
   const finalText = getSdkStreamFinalText(sdkStreamState);
 
   return {
-    messageSent: finalText !== null || pendingIntegrationConnections.length > 0 || automationArtifacts.length > 0,
+    messageSent:
+      finalText !== null ||
+      pendingIntegrationConnections.length > 0 ||
+      automationArtifacts.length > 0 ||
+      pendingQuestion !== null,
     sessionId,
     costUsd: sdkStreamState.sdkCostUsd,
     auxCostUsd,
     pendingUploads,
     pendingIntegrationConnections,
+    ...(pendingQuestion ? { pendingQuestion } : {}),
     trace: {
       progressEvents,
       finalText,

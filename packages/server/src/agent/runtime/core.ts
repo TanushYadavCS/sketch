@@ -6,6 +6,7 @@ import {
   ToolLoopAgent,
   type ToolSet,
   type UserContent,
+  hasToolCall,
   stepCountIs,
 } from "ai";
 import { reconstructCompactedHistory } from "./compaction";
@@ -33,6 +34,7 @@ export interface RunAgentRuntimeCoreParams {
   systemPrompt: string;
   tools?: ToolSet;
   maxTurns: number;
+  stopAfterToolNames?: readonly string[];
   abortSignal?: AbortSignal;
   events?: AgentRuntimeEvents;
   sessionId?: string;
@@ -242,7 +244,10 @@ export async function runAgentRuntimeCore(params: RunAgentRuntimeCoreParams): Pr
     model: params.provider.model,
     tools: params.tools ?? {},
     instructions: preparedPrompt.instructions,
-    stopWhen: stepCountIs(params.maxTurns),
+    stopWhen: [
+      stepCountIs(params.maxTurns),
+      ...(params.stopAfterToolNames?.length ? [hasToolCall(...params.stopAfterToolNames)] : []),
+    ],
     onToolExecutionStart: async (event) => {
       await params.events?.onToolStart?.({
         name: event.toolCall.toolName,

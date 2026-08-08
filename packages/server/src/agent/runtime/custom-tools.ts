@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { WebChatQuestion } from "@sketch/shared";
 import { type JSONValue, type Tool, type ToolSet, jsonSchema, tool } from "ai";
 import { z } from "zod/v4";
 import {
@@ -11,6 +12,7 @@ import type { RunAgentParams } from "../runner";
 import {
   AutomationArtifactCollector,
   IntegrationConnectionCollector,
+  QuestionCollector,
   UploadCollector,
   createSketchMcpToolDefinitions,
 } from "../sketch-tools";
@@ -33,6 +35,7 @@ export interface AgentRuntimeCustomToolEffects {
   uploadCollector: UploadCollector;
   integrationConnectionCollector: IntegrationConnectionCollector;
   automationArtifactCollector: AutomationArtifactCollector;
+  questionCollector: QuestionCollector;
   auxCostCollector: AuxCostCollector;
   integrationProgressEvents: IntegrationProgressEventLike[];
   onToolStart(event: AgentRuntimeToolStart): void;
@@ -42,6 +45,7 @@ export interface AgentRuntimeCustomToolEffects {
     pendingUploads: string[];
     pendingIntegrationConnections: ReturnType<IntegrationConnectionCollector["drain"]>;
     automationArtifacts: ReturnType<AutomationArtifactCollector["drain"]>;
+    pendingQuestion: WebChatQuestion | null;
     auxLlmCalls: ReturnType<AuxCostCollector["drain"]>;
     auxCostUsd: number;
   };
@@ -112,6 +116,7 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
   const uploadCollector = new UploadCollector();
   const integrationConnectionCollector = new IntegrationConnectionCollector();
   const automationArtifactCollector = new AutomationArtifactCollector();
+  const questionCollector = new QuestionCollector();
   const auxCostCollector = new AuxCostCollector();
   const integrationProgressEvents: IntegrationProgressEventLike[] = [];
 
@@ -119,6 +124,7 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
     uploadCollector,
     integrationConnectionCollector,
     automationArtifactCollector,
+    questionCollector,
     auxCostCollector,
     integrationProgressEvents,
     onToolStart(event) {
@@ -152,11 +158,13 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
           ? drainedIntegrationConnections
           : drainedIntegrationConnections.filter((card) => (card.state ?? "connect") === "connect");
       const automationArtifacts = automationArtifactCollector.drain();
+      const pendingQuestion = questionCollector.drain();
       const auxLlmCalls = auxCostCollector.drain();
       return {
         pendingUploads,
         pendingIntegrationConnections,
         automationArtifacts,
+        pendingQuestion,
         auxLlmCalls,
         auxCostUsd: sumAuxCost(auxLlmCalls),
       };
@@ -169,6 +177,8 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     uploadCollector: deps.effects.uploadCollector,
     integrationConnectionCollector: deps.effects.integrationConnectionCollector,
     automationArtifactCollector: deps.effects.automationArtifactCollector,
+    questionCollector: deps.effects.questionCollector,
+    responseSurface: params.responseSurface ?? params.platform,
     auxCostCollector: deps.effects.auxCostCollector,
     workspaceDir: resolve(params.workspaceDir),
     db: params.db,

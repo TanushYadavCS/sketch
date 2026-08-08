@@ -68,6 +68,33 @@ function textSequenceModel(texts: readonly string[]): MockLanguageModelV4 {
   });
 }
 
+function questionModel(): MockLanguageModelV4 {
+  return new MockLanguageModelV4({
+    provider: "mock-anthropic",
+    modelId: "claude-sonnet-4-6",
+    doStream: {
+      stream: simulateReadableStream({
+        chunks: [
+          {
+            type: "tool-call",
+            toolCallId: "question-tool-1",
+            toolName: "mcp__sketch__AskUserQuestion",
+            input: JSON.stringify({
+              questionId: "schedule-frequency",
+              question: "How often should this run?",
+              options: [
+                { id: "daily", label: "Daily" },
+                { id: "weekly", label: "Weekly" },
+              ],
+            }),
+          },
+          { type: "finish", finishReason: { unified: "tool-calls", raw: undefined }, usage: usage(10, 2) },
+        ],
+      }),
+    },
+  });
+}
+
 function errorModel(): MockLanguageModelV4 {
   return new MockLanguageModelV4({
     provider: "mock-anthropic",
@@ -208,6 +235,45 @@ describe("web-chat route on the AI SDK runtime", () => {
     expect(rows.map((row) => row.role)).toEqual(["user", "assistant"]);
     const assistant = rows.find((row) => row.role === "assistant");
     expect(JSON.stringify(assistant?.content)).toContain("hello from the aisdk runtime");
+  });
+
+  it("ends an aisdk run with a pending choice question", async () => {
+    const userId = await createUser();
+    const model = questionModel();
+    const app = buildApp(model, userId);
+
+    const body = await postMessage(app, "Ask me to choose", "question-chat");
+    const chunks = parseSse(body);
+
+    expect(chunks).toContainEqual({
+      type: "data-question",
+      id: "question-schedule-frequency",
+      data: {
+        id: "schedule-frequency",
+        prompt: "How often should this run?",
+        options: [
+          { id: "daily", label: "Daily" },
+          { id: "weekly", label: "Weekly" },
+        ],
+      },
+    });
+    expect(chunks.some((chunk) => chunk.type === "error")).toBe(false);
+    expect(model.doStreamCalls).toHaveLength(1);
+
+    const transcriptResponse = await app.request("/api/web-chat/messages?conversationId=question-chat");
+    const transcript = (await transcriptResponse.json()) as { messages: Array<{ parts: unknown[] }> };
+    expect(transcript.messages.at(-1)?.parts).toContainEqual({
+      type: "data-question",
+      id: "question-schedule-frequency",
+      data: {
+        id: "schedule-frequency",
+        prompt: "How often should this run?",
+        options: [
+          { id: "daily", label: "Daily" },
+          { id: "weekly", label: "Weekly" },
+        ],
+      },
+    });
   });
 
   it("resumes the persisted aisdk session on a second turn in the same conversation", async () => {
