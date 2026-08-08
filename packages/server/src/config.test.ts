@@ -119,6 +119,16 @@ describe("configSchema", () => {
       }
     });
 
+    it("parses a complete task minting model id and treats a blank value as disabled", () => {
+      const configured = configSchema.safeParse({ TASK_MINTING_MODEL: "  anthropic/claude-sonnet-4.6  " });
+      const blank = configSchema.safeParse({ TASK_MINTING_MODEL: "   " });
+
+      expect(configured.success).toBe(true);
+      expect(blank.success).toBe(true);
+      if (configured.success) expect(configured.data.TASK_MINTING_MODEL).toBe("anthropic/claude-sonnet-4.6");
+      if (blank.success) expect(blank.data.TASK_MINTING_MODEL).toBeUndefined();
+    });
+
     it("parses WhatsApp provider configuration", () => {
       const result = configSchema.safeParse({
         WHATSAPP_DM_PROVIDER: "wati",
@@ -408,6 +418,11 @@ describe("configSchema", () => {
 
     it("rejects an incomplete automation authoring model id", () => {
       const result = configSchema.safeParse({ AUTOMATION_AUTHORING_MODEL: "claude-sonnet-4.6" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects an incomplete task minting model id", () => {
+      const result = configSchema.safeParse({ TASK_MINTING_MODEL: "claude-sonnet-4.6" });
       expect(result.success).toBe(false);
     });
   });

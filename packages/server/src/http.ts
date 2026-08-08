@@ -155,6 +155,7 @@ interface AppDeps {
   reconcileManagedMembers?: () => Promise<ManagedMemberReconciliationResult>;
   /** Injected so the dev trace route, and its tests, can drive a specific model. */
   enrichmentGenerator?: GeminiGenerator;
+  taskMintingGenerator?: GeminiGenerator;
 }
 
 /**
@@ -638,6 +639,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       "/api/connectors",
       connectorRoutes(connectors, db, deps.logger, users, config, {
         enrichmentGenerator: deps.enrichmentGenerator,
+        taskMintingGenerator: deps.taskMintingGenerator,
       }),
     );
   }

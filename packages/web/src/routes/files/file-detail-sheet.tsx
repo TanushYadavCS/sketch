@@ -451,12 +451,7 @@ function FileDetailFooter({
   const [shareOpen, setShareOpen] = useState(false);
   const [mintOpen, setMintOpen] = useState(false);
 
-  /**
-   * Provisional: minting rides on the enrichment capability because both are per-file
-   * debug surfaces on the same connector. Minting writes tasks where enrichment writes
-   * summaries, so this deserves its own capability once the audience model lands.
-   */
-  const canMint = canEnrich;
+  const canMint = connector?.canMint === true;
 
   const enrichMutation = useMutation({
     mutationFn: () => api.integrations.enrichFile(fileId),

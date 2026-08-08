@@ -30,6 +30,8 @@ export interface ConnectorPermissions {
   canUpdateCredentials: boolean;
   canBrowseScope: boolean;
   canEnrich: boolean;
+  /** Minting reads already-indexed content, so files remain mintable when their connector is disabled. */
+  canMint: boolean;
 }
 
 export function connectorPermissions(
@@ -51,6 +53,7 @@ export function connectorPermissions(
     canUpdateCredentials: canManage && enabled,
     canBrowseScope: canManage,
     canEnrich: canManage && enabled,
+    canMint: canManage,
   };
 }
 

@@ -993,6 +993,12 @@ export interface ConnectorConfig {
   canUpdateCredentials?: boolean;
   canBrowseScope?: boolean;
   canEnrich?: boolean;
+  /**
+   * Minting reads content that is already indexed, so unlike canEnrich it does not
+   * require the connector to still be syncing — a disabled connector's files are exactly
+   * the ones worth minting from.
+   */
+  canMint?: boolean;
 }
 
 export interface ConnectorListResponse {
@@ -1166,6 +1172,18 @@ export interface MintTasksResult {
   written: number;
   /** Server-side directory holding the raw prompt and response for this run. */
   dumpDir?: string | null;
+  /**
+   * The nearest files by embedding, which decide which existing tasks the model is shown.
+   * Not sent to the model — it is here so the neighbourhood itself can be judged.
+   */
+  similarFiles?: MintSimilarFile[];
+}
+
+export interface MintSimilarFile {
+  fileId: string;
+  fileName: string;
+  /** Cosine similarity, 1.0 being identical. */
+  similarity: number;
 }
 
 export interface EmailAddr {

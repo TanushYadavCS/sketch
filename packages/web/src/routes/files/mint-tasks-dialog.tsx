@@ -6,7 +6,13 @@
  * two are indistinguishable from the output alone — so every block states the rule that
  * selected it and the count it matched before any cap.
  */
-import { type MintContextBlock, type MintTasksResult, type MintedTaskCandidate, api } from "@/lib/api";
+import {
+  type MintContextBlock,
+  type MintSimilarFile,
+  type MintTasksResult,
+  type MintedTaskCandidate,
+  api,
+} from "@/lib/api";
 import { CaretRightIcon, SparkleIcon, SpinnerGapIcon, WarningIcon } from "@phosphor-icons/react";
 import { Badge } from "@sketch/ui/components/badge";
 import { Button } from "@sketch/ui/components/button";
@@ -110,6 +116,9 @@ function MintResult({ result }: { result: MintTasksResult }) {
           {result.context.map((block) => (
             <ContextBlockRow key={block.key} block={block} />
           ))}
+          {result.similarFiles && result.similarFiles.length > 0 && (
+            <ContextBlockRow block={similarFilesBlock(result.similarFiles)} />
+          )}
         </div>
       </section>
 
@@ -133,6 +142,20 @@ function MintResult({ result }: { result: MintTasksResult }) {
       {result.dumpDir && <p className="font-mono text-[11px] text-muted-foreground">Raw call: {result.dumpDir}</p>}
     </div>
   );
+}
+
+/**
+ * The neighbourhood is not sent to the model, but it decides which existing tasks are.
+ * Rendering it through the same row keeps one collapsible implementation.
+ */
+function similarFilesBlock(files: MintSimilarFile[]): MintContextBlock {
+  return {
+    key: "similar_files",
+    label: "Nearest files",
+    selection: "Not sent to the model — these decide which existing tasks it sees.",
+    total: files.length,
+    items: files.map((file) => `${file.similarity.toFixed(3)}  ${file.fileName}`),
+  };
 }
 
 function ContextBlockRow({ block }: { block: MintContextBlock }) {

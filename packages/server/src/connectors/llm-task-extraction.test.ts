@@ -43,7 +43,7 @@ describe("extractLlmTaskCandidates", () => {
     expect(generateJSONCalls).toEqual([
       {
         prompt: expect.stringContaining("Alice will ship the Slack capture"),
-        opts: { maxTokens: 8192, label: "extractLlmTask", dumpDir: "tmp/dumps" },
+        opts: { maxTokens: 8192, label: "extractLlmTask", dumpDir: "tmp/dumps", thinkingBudget: null },
       },
     ]);
     expect(candidates).toEqual([

@@ -2,6 +2,18 @@ import type { GeminiGenerator } from "./gemini-generate";
 import type { LlmTaskCandidate } from "./types";
 
 export const LLM_TASK_PROMPT_VERSION = "llm-task-v1";
+export const LLM_TASK_CONTENT_LIMIT = 200_000;
+
+export interface LlmTaskProjectCandidate {
+  id: string;
+  shortId: string;
+  name: string;
+}
+
+export interface ExtractedLlmTaskCandidate extends LlmTaskCandidate {
+  parentEntityId?: string;
+  projectName?: string;
+}
 
 export interface ExtractLlmTaskCandidatesInput {
   content: string;
@@ -9,12 +21,16 @@ export interface ExtractLlmTaskCandidatesInput {
   attendees?: Array<{ name?: string; email?: string }>;
   parentRefs?: Array<{ source: string; sourceId: string }>;
   priorTitles?: string[];
+  projects?: LlmTaskProjectCandidate[];
+  existingTasks?: string[];
   generator: GeminiGenerator;
   promptVersion?: string;
   dumpDir?: string;
 }
 
-export async function extractLlmTaskCandidates(input: ExtractLlmTaskCandidatesInput): Promise<LlmTaskCandidate[]> {
+export async function extractLlmTaskCandidates(
+  input: ExtractLlmTaskCandidatesInput,
+): Promise<ExtractedLlmTaskCandidate[]> {
   const promptVersion = input.promptVersion ?? LLM_TASK_PROMPT_VERSION;
   const attendees =
     input.attendees && input.attendees.length > 0
@@ -35,6 +51,14 @@ Rules:
 - Omit an action only if the source no longer supports it.
 `
       : "";
+  const projects =
+    input.projects && input.projects.length > 0
+      ? input.projects.map((project) => `- ${project.shortId}: ${project.name}`).join("\n")
+      : "None provided";
+  const existingTasks =
+    input.existingTasks && input.existingTasks.length > 0
+      ? input.existingTasks.map((task) => `- ${task}`).join("\n")
+      : "None provided";
   const sourceDateLine = input.sourceDate ? `\nSource date: ${input.sourceDate}\n` : "";
   const prompt = `You extract concrete action-items from meeting, email, or chat content.
 
@@ -49,7 +73,8 @@ Return only JSON:
       "owner": { "name": "Jane Doe", "email": "jane@example.com" },
       "dueDate": "2025-04-30",
       "hasOwnerVerbObject": true,
-      "sourceExcerpt": "Jane will ship Slack capture by Friday."
+      "sourceExcerpt": "Jane will ship Slack capture by Friday.",
+      "projectId": "a P-id from Available projects, or null"
     }
   ]
 }
@@ -62,6 +87,9 @@ Rules:
 - Owner is optional. Include name or email only when explicitly supported.
 - dueDate: ISO date (YYYY-MM-DD) the action is due, resolved against the source date below; null if no due date is stated. Do not invent one.
 - sourceExcerpt should be a brief supporting quote from the source.
+- projectId must be one of the P-ids above, or null.
+- Do not emit an action already covered by Existing open tasks.
+- Existing open tasks take precedence over prior-title reuse: omit an action if an open task already covers it.
 - If no action-items are present, return { "tasks": [] }.
 
 Attendees:
@@ -71,21 +99,32 @@ Parent refs:
 ${parentRefs}
 ${priorTitleSection}
 
+Available projects:
+${projects}
+
+Existing open tasks:
+${existingTasks}
+
 Content:
 <content>
-${input.content.slice(0, 24000)}
+${input.content.slice(0, LLM_TASK_CONTENT_LIMIT)}
 </content>`;
 
   const parsed = await input.generator.generateJSON<{ tasks: unknown[] }>(prompt, {
     maxTokens: 8192,
     label: "extractLlmTask",
     dumpDir: input.dumpDir,
+    thinkingBudget: null,
   });
   const tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
-  return tasks.flatMap(readCandidate);
+  const projectsById = new Map((input.projects ?? []).map((project) => [project.shortId, project]));
+  return tasks.flatMap((task) => readCandidate(task, projectsById));
 }
 
-function readCandidate(value: unknown): LlmTaskCandidate[] {
+function readCandidate(
+  value: unknown,
+  projectsById: Map<string, LlmTaskProjectCandidate>,
+): ExtractedLlmTaskCandidate[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   const record = value as Record<string, unknown>;
   if (typeof record.title !== "string" || record.title.trim().length === 0) return [];
@@ -93,6 +132,7 @@ function readCandidate(value: unknown): LlmTaskCandidate[] {
   const owner = readOwner(record.owner);
   const dueDate =
     typeof record.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(record.dueDate) ? record.dueDate : undefined;
+  const project = typeof record.projectId === "string" ? projectsById.get(record.projectId) : undefined;
   return [
     {
       title: record.title.trim(),
@@ -100,6 +140,7 @@ function readCandidate(value: unknown): LlmTaskCandidate[] {
       dueDate,
       hasOwnerVerbObject: record.hasOwnerVerbObject,
       sourceExcerpt: typeof record.sourceExcerpt === "string" ? record.sourceExcerpt.trim() : undefined,
+      ...(project ? { parentEntityId: project.id, projectName: project.name } : {}),
     },
   ];
 }

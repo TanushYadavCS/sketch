@@ -58,6 +58,8 @@ export interface GenerateOptions {
   /** When set, write a JSON file capturing prompt + raw response under this dir.
    *  Used by the per-file "Enrich File" debug path. Never set in bulk runs. */
   dumpDir?: string;
+  /** Gemini thinking budget. Null omits thinkingConfig; existing callers default to zero. */
+  thinkingBudget?: number | null;
 }
 
 export function createGeminiGenerator(apiKey: string, options?: GeminiClientOptions) {
@@ -85,8 +87,9 @@ export function createGeminiGenerator(apiKey: string, options?: GeminiClientOpti
     const maxTokens = opts?.maxTokens ?? DEFAULT_MAX_TOKENS;
     const config: Record<string, unknown> = {
       maxOutputTokens: maxTokens,
-      thinkingConfig: { thinkingBudget: 0 },
     };
+    const thinkingBudget = opts?.thinkingBudget === undefined ? 0 : opts.thinkingBudget;
+    if (thinkingBudget !== null) config.thinkingConfig = { thinkingBudget };
 
     if (opts?.responseMimeType) {
       config.responseMimeType = opts.responseMimeType;
