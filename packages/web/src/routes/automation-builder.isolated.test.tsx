@@ -421,6 +421,124 @@ describe("AutomationBuilderPage", () => {
     expect(screen.getAllByDisplayValue("C123").length).toBeGreaterThan(0);
   });
 
+  it("renders the Canvas-managed webhook contract and active setup guidance", async () => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      scheduleType: "external",
+      scheduleValue: "canvas",
+      steps: [
+        {
+          ...automation.steps[0],
+          label: "Canvas webhook trigger",
+          icon: "webhooks",
+          triggerConfig: {
+            type: "canvas",
+            app: "Canvas",
+            eventDescription: "webhook received",
+            componentKey: "webhook-trigger",
+            status: "active",
+            canvasEndpoint: {
+              url: "https://sketch.example/api/webhooks/wf/task-123",
+              method: "POST",
+              authentication: "none",
+              contentType: "application/json",
+              payload: "JSON object",
+            },
+          },
+        },
+        ...automation.steps.slice(1),
+      ],
+    });
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Canvas webhook trigger" }));
+
+    expect(await screen.findByTestId("canvas-trigger-details")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("https://sketch.example/api/webhooks/wf/task-123")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("POST")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("None required")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("application/json")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("JSON object")).toBeInTheDocument();
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.getByTestId("canvas-trigger-setup-guidance")).toHaveTextContent(
+      "Canvas setup is complete. Send POST requests with JSON to the canonical URL above; no authentication is required.",
+    );
+  });
+
+  it.each([
+    [
+      "pending_canvas_setup",
+      "Setup pending",
+      "Canvas is still setting up this trigger. Complete setup in Canvas before sending requests.",
+    ],
+    [
+      "error",
+      "Setup error",
+      "Canvas could not finish setting up this trigger. Fix the trigger in Canvas and retry setup.",
+    ],
+  ] as const)("shows explicit Canvas %s guidance", async (status, statusLabel, guidance) => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      scheduleType: "external",
+      scheduleValue: "canvas",
+      steps: [
+        {
+          ...automation.steps[0],
+          label: "Canvas trigger",
+          icon: "webhooks",
+          triggerConfig: {
+            type: "canvas",
+            componentKey: "webhook-trigger",
+            status,
+            ...(status === "error" ? { errorMessage: "Canvas setup failed" } : {}),
+          },
+        },
+        ...automation.steps.slice(1),
+      ],
+    });
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Canvas trigger" }));
+
+    expect(await screen.findByText(statusLabel)).toBeInTheDocument();
+    const guidanceRegion = screen.getByTestId("canvas-trigger-setup-guidance");
+    expect(guidanceRegion).toHaveTextContent(guidance);
+    if (status === "error") {
+      expect(guidanceRegion).toHaveAttribute("role", "alert");
+      expect(guidanceRegion).toHaveTextContent("Canvas error: Canvas setup failed");
+    }
+  });
+
+  it("keeps the native Sketch webhook trigger out of the Canvas setup panel", async () => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      scheduleType: "external",
+      scheduleValue: "webhook",
+      steps: [
+        {
+          ...automation.steps[0],
+          label: "Sketch webhook",
+          triggerConfig: {
+            type: "webhook",
+            webhookUrl: "https://sketch.example/api/webhooks/wf/task-123",
+            webhookMethod: "POST",
+            webhookContentType: "application/json",
+          },
+        },
+        ...automation.steps.slice(1),
+      ],
+    });
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Sketch webhook" }));
+
+    expect(await screen.findByDisplayValue("webhook")).toBeInTheDocument();
+    expect(screen.queryByTestId("canvas-trigger-details")).not.toBeInTheDocument();
+  });
+
   it("opens the selected associated chat and sends the active automation id", async () => {
     const user = userEvent.setup();
     renderBuilder();

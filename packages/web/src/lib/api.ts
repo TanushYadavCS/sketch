@@ -12,6 +12,7 @@ import type {
   AutomationDefinition,
   AutomationRun,
   AutomationStepContent,
+  CanvasWebhookEndpoint,
   FileMetadata,
   IntegrationApp,
   IntegrationConnection,
@@ -30,6 +31,7 @@ export type {
   AutomationDefinition,
   AutomationRun,
   AutomationStepContent,
+  CanvasWebhookEndpoint,
   StepOutput,
   WorkflowEdge,
   WorkflowStep,
@@ -189,6 +191,10 @@ export interface WorkflowTriggerConfig {
   app?: string;
   eventDescription?: string;
   componentKey?: string;
+  webhookUrl?: string;
+  webhookMethod?: "POST";
+  webhookContentType?: "application/json";
+  canvasEndpoint?: CanvasWebhookEndpoint;
   configuredProps?: Record<string, unknown>;
   status?: "pending_canvas_setup" | "active" | "error";
   canvasWorkflowId?: string;

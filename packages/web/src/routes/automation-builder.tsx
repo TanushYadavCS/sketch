@@ -7,6 +7,7 @@ import {
   type AutomationBuilderSaveRequest,
   type AutomationDefinition,
   type AutomationStepContent,
+  type CanvasWebhookEndpoint,
   type ScheduledTaskConversationKind,
   type ScheduledTaskConversationLock,
   type ScheduledTaskConversationSummary,
@@ -16,6 +17,7 @@ import {
   type WebChatUploadedAttachment,
   type WorkflowEdge,
   type WorkflowStep,
+  type WorkflowTriggerConfig,
   api,
 } from "@/lib/api";
 import {
@@ -2514,9 +2516,11 @@ function NodeInputPanel({
 function TriggerFields({ draft }: { draft: DraftAutomation }) {
   const triggerStep = draft.steps.find((step) => step.type === "trigger");
   const config = triggerStep?.triggerConfig ?? { type: "schedule" as const };
-  const isCanvasWebhook = config.type === "canvas" && config.componentKey === "webhook-trigger";
-  const triggerLabel = isCanvasWebhook
-    ? "Canvas webhook"
+  const canvasConfig = config.type === "canvas" ? config : undefined;
+  const triggerLabel = canvasConfig
+    ? canvasConfig.componentKey === "webhook-trigger"
+      ? "Canvas webhook"
+      : "Canvas trigger"
     : config.type === "slack_channel_message"
       ? "Slack channel message"
       : config.type;
@@ -2530,7 +2534,13 @@ function TriggerFields({ draft }: { draft: DraftAutomation }) {
           <Input value={config.channelId ?? ""} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
         </Field>
       ) : null}
-      {isCanvasWebhook ? <CanvasWebhookFields endpoint={config.canvasEndpoint} /> : null}
+      {canvasConfig ? (
+        <CanvasWebhookFields
+          endpoint={canvasConfig.canvasEndpoint}
+          status={canvasConfig.status}
+          errorMessage={canvasConfig.errorMessage}
+        />
+      ) : null}
       {config.type === "schedule" ? (
         <>
           <Field label="Schedule type">
@@ -2555,15 +2565,14 @@ function TriggerFields({ draft }: { draft: DraftAutomation }) {
 
 function CanvasWebhookFields({
   endpoint,
+  status,
+  errorMessage,
 }: {
-  endpoint?: {
-    url: string;
-    method: "POST";
-    authentication: "none";
-    contentType: "application/json";
-    payload: string;
-  };
+  endpoint?: CanvasWebhookEndpoint;
+  status?: WorkflowTriggerConfig["status"];
+  errorMessage?: string;
 }) {
+  const statusDetails = getCanvasWebhookStatusDetails(status, endpoint);
   const handleCopy = async () => {
     if (!endpoint?.url) return;
     try {
@@ -2575,14 +2584,40 @@ function CanvasWebhookFields({
   };
 
   return (
-    <div className="space-y-3 rounded-[8px] border border-brand-accent/25 bg-brand-accent/5 p-3">
-      <div className="space-y-1">
-        <p className="text-[12px] font-medium text-foreground">Send data to this Canvas webhook</p>
-        <p className="text-[11px] leading-4 text-muted-foreground">
-          Canvas receives the request and forwards the payload to this automation.
-        </p>
+    <div
+      data-testid="canvas-trigger-details"
+      className="space-y-3 rounded-[8px] border border-brand-accent/25 bg-brand-accent/5 p-3"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <p className="text-[12px] font-medium text-foreground">Canvas-managed trigger</p>
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            Canvas owns this trigger setup and sends JSON events to Sketch.
+          </p>
+        </div>
+        <Badge
+          className={cn(
+            "shrink-0 rounded-[5px] border px-1.5 py-0.5 text-[10px] font-semibold",
+            statusDetails.toneClass,
+          )}
+        >
+          {statusDetails.label}
+        </Badge>
       </div>
-      <Field label="Webhook URL">
+      <div
+        data-testid="canvas-trigger-setup-guidance"
+        role={statusDetails.isError ? "alert" : "status"}
+        className={cn(
+          "rounded-[6px] border px-2.5 py-2 text-[11px] leading-4",
+          statusDetails.isError
+            ? "border-destructive/25 bg-destructive/10 text-destructive"
+            : "border-border/70 bg-background/55 text-muted-foreground",
+        )}
+      >
+        <p>{statusDetails.guidance}</p>
+        {errorMessage ? <p className="mt-1 text-destructive">Canvas error: {errorMessage}</p> : null}
+      </div>
+      <Field label="Canonical URL">
         <div className="flex gap-2">
           <Input
             value={endpoint?.url ?? "Canvas endpoint is not available yet"}
@@ -2595,7 +2630,7 @@ function CanvasWebhookFields({
             variant="outline"
             size="icon"
             className="size-10 shrink-0 rounded-[8px]"
-            aria-label="Copy Canvas webhook URL"
+            aria-label="Copy canonical Canvas webhook URL"
             disabled={!endpoint?.url}
             onClick={() => void handleCopy()}
           >
@@ -2621,19 +2656,64 @@ function CanvasWebhookFields({
           />
         </Field>
       </div>
-      <Field label="Authentication">
-        <Input
-          value={endpoint?.authentication === "none" ? "None required" : "Not configured"}
-          className={builderReadOnlyInputClass}
-          readOnly
-          aria-readonly="true"
-        />
-      </Field>
-      <p className="text-[11px] leading-4 text-muted-foreground">
-        Payload: {endpoint?.payload ?? "Any JSON value"}. Use a stable event ID in your payload if the sender may retry.
-      </p>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Authentication mode">
+          <Input
+            value={endpoint?.authentication === "none" ? "None required" : "Not configured"}
+            className={builderReadOnlyInputClass}
+            readOnly
+            aria-readonly="true"
+          />
+        </Field>
+        <Field label="Payload shape">
+          <Input
+            value={endpoint?.payload ?? "Any JSON value"}
+            className={builderReadOnlyInputClass}
+            readOnly
+            aria-readonly="true"
+          />
+        </Field>
+      </div>
     </div>
   );
+}
+
+function getCanvasWebhookStatusDetails(
+  status: WorkflowTriggerConfig["status"],
+  endpoint: CanvasWebhookEndpoint | undefined,
+): { label: string; guidance: string; isError: boolean; toneClass: string } {
+  if (status === "error") {
+    return {
+      label: "Setup error",
+      guidance: "Canvas could not finish setting up this trigger. Fix the trigger in Canvas and retry setup.",
+      isError: true,
+      toneClass: "border-destructive/30 bg-destructive/10 text-destructive",
+    };
+  }
+  if (status === "pending_canvas_setup" || (!status && !endpoint)) {
+    return {
+      label: "Setup pending",
+      guidance: "Canvas is still setting up this trigger. Complete setup in Canvas before sending requests.",
+      isError: false,
+      toneClass: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+    };
+  }
+  if (status === "active" && !endpoint) {
+    return {
+      label: "Active",
+      guidance:
+        "Canvas reports this trigger as active, but its canonical URL is not available yet. Refresh after setup completes.",
+      isError: false,
+      toneClass: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+    };
+  }
+  return {
+    label: "Active",
+    guidance:
+      "Canvas setup is complete. Send POST requests with JSON to the canonical URL above; no authentication is required.",
+    isError: false,
+    toneClass: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  };
 }
 
 function Field({ label, children, grow = false }: { label: string; children: ReactNode; grow?: boolean }) {
