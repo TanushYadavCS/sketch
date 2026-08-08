@@ -116,6 +116,8 @@ interface DraftAutomation {
   timezone: string;
   status: AutomationDefinition["status"];
   delivery: AutomationDefinition["delivery"];
+  executionMode: AutomationDefinition["executionMode"];
+  executionModeRecommendation: AutomationDefinition["executionModeRecommendation"];
   steps: WorkflowStep[];
   edges: WorkflowEdge[];
   stepContent: Record<string, AutomationStepContent>;
@@ -208,6 +210,8 @@ function draftFromDefinition(automation: AutomationDefinition): DraftAutomation 
     timezone: automation.timezone,
     status: automation.status,
     delivery: automation.delivery,
+    executionMode: automation.executionMode,
+    executionModeRecommendation: automation.executionModeRecommendation,
     steps: automation.steps,
     edges: automation.edges,
     stepContent: automation.stepContent,
@@ -226,6 +230,7 @@ function saveRequestFromDraft(draft: DraftAutomation): AutomationBuilderSaveRequ
     timezone: draft.timezone,
     status: draft.status,
     delivery: draft.delivery,
+    executionMode: draft.executionMode,
     steps: draft.steps,
     edges: draft.edges,
     stepContent: draft.stepContent,

@@ -11,6 +11,7 @@ import { createSettingsRepository } from "../db/repositories/settings";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
+import { MAX_QUEUE_DEPTH, QueueManager } from "../queue";
 import type { SlackBot } from "../slack/bot";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
 import { WHATSAPP_TEXT_LIMIT } from "../whatsapp/chunking";
@@ -176,6 +177,40 @@ describe("workflow invoke API", () => {
       body: JSON.stringify({ requesterUserId: requester.id }),
     });
     expect(runRes.status).toBe(401);
+  });
+
+  it("returns a bounded error when the workflow queue is saturated", async () => {
+    const { requester } = await seedTenant(db);
+    const task = await createWorkflow(db, { createdBy: requester.id });
+    const queueManager = new QueueManager();
+    const queue = queueManager.getQueue(`workflow-${task.id}`);
+    let releaseActiveRun!: () => void;
+    const activeRun = new Promise<void>((resolve) => {
+      releaseActiveRun = resolve;
+    });
+
+    expect(queue.enqueue(async () => activeRun)).toBe(true);
+    for (let index = 0; index < MAX_QUEUE_DEPTH; index++) {
+      expect(queue.enqueue(async () => {})).toBe(true);
+    }
+
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      queueManager,
+    });
+    const res = await app.request(`/api/workflows/${task.id}/runs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+      body: JSON.stringify({ responseMode: "json", requesterUserId: requester.id }),
+    });
+
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({
+      error: { code: "QUEUE_SATURATED", message: "Workflow queue is full; try again later." },
+    });
+
+    releaseActiveRun();
+    await vi.waitFor(() => expect(queue.isIdle()).toBe(true));
   });
 
   it("lists active workflows with safe metadata", async () => {

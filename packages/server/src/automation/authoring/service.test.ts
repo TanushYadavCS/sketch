@@ -174,6 +174,8 @@ describe("automation authoring service", () => {
     expect(generate.mock.calls[0]?.[0].instructions).toContain("ctx.integrations.executeAction");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("fetch Slack urlPrivate without authentication");
     expect(generate.mock.calls[0]?.[0].instructions).toContain("Do not implement this as polling");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("fixed recipe");
+    expect(generate.mock.calls[0]?.[0].instructions).toContain("user-visible recommendation");
   });
 
   it("returns one concise clarification without validating or drafting", async () => {
@@ -405,6 +407,25 @@ describe("automation authoring service", () => {
       kind: "definition",
       definition: { status: "paused" },
     });
+  });
+
+  it("preserves an existing mode unless the edit explicitly requests another one", async () => {
+    const { service } = createHarness([{ kind: "definition", definition: validAuthoringDefinition }]);
+
+    const preserved = await service.edit({
+      request: "Shorten the description",
+      existing: { ...existingAutomationDefinition, executionMode: "agent-led" },
+      brokerCapable: true,
+    });
+    expect(preserved).toMatchObject({ kind: "definition", definition: { executionMode: "agent-led" } });
+
+    const { service: explicitService } = createHarness([{ kind: "definition", definition: validAuthoringDefinition }]);
+    const explicit = await explicitService.edit({
+      request: "Use the hybrid Recipe + AI mode",
+      existing: { ...existingAutomationDefinition, executionMode: "agent-led" },
+      brokerCapable: true,
+    });
+    expect(explicit).toMatchObject({ kind: "definition", definition: { executionMode: "hybrid" } });
   });
 
   it("fails closed when a generated edit drops the stable ID of a model-pinned step", async () => {

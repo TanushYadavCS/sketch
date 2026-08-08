@@ -189,6 +189,11 @@ const automation: AutomationDefinition = {
   deliveryTarget: "D123",
   threadTs: null,
   prompt: "Daily account brief",
+  executionMode: "hybrid",
+  executionModeRecommendation: {
+    mode: "hybrid",
+    reason: "This automation predates execution modes, so it keeps the compatible hybrid behavior.",
+  },
   scheduleType: "cron",
   scheduleValue: "0 9 * * *",
   timezone: "UTC",

@@ -10,6 +10,7 @@ function makeTask(overrides: Partial<ScheduledTaskRow> = {}): ScheduledTaskRow {
     delivery_target: "C_SOURCE",
     thread_ts: null,
     prompt: "Do it",
+    execution_mode: "hybrid",
     schedule_type: "cron",
     schedule_value: "0 9 * * 1",
     timezone: "UTC",

@@ -1,6 +1,10 @@
 import type { AutomationBuilderSaveRequest } from "@sketch/shared";
 import { describe, expect, it } from "vitest";
-import { AutomationValidationError, validateAutomationBuilderSaveRequest } from "./definition";
+import {
+  AutomationValidationError,
+  parseAutomationBuilderSaveRequest,
+  validateAutomationBuilderSaveRequest,
+} from "./definition";
 
 function requestForAction(
   actionCapabilities?: AutomationBuilderSaveRequest["steps"][number]["actionCapabilities"],
@@ -9,6 +13,7 @@ function requestForAction(
     title: "Search workflow",
     description: null,
     prompt: "Search the knowledge graph",
+    executionMode: "deterministic",
     scheduleType: "cron",
     scheduleValue: "0 9 * * 1-5",
     timezone: "UTC",
@@ -111,5 +116,95 @@ describe("automation action capability validation", () => {
         issues: expect.arrayContaining([expect.objectContaining({ code: "SKETCH_TOOL_NOT_DECLARED" })]),
       }),
     );
+  });
+
+  it("deduplicates identical validation issues from repeated persisted step ids", () => {
+    const request = requestForAction({ sketchTools: [], usesIntegrationActions: false });
+    request.steps.push({ ...request.steps[1] });
+
+    let error: unknown;
+    try {
+      validateAutomationBuilderSaveRequest({ request, brokerCapable: false });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(AutomationValidationError);
+    const issues = (error as AutomationValidationError).issues.filter(
+      (issue) => issue.code === "ACTION_CAPABILITIES_REQUIRED",
+    );
+    expect(issues).toHaveLength(1);
+  });
+});
+
+describe("automation execution mode validation", () => {
+  it("rejects agent steps in fixed recipe mode", () => {
+    const request = requestForAction();
+    request.executionMode = "deterministic";
+    request.steps.push({
+      id: "agent",
+      type: "agent",
+      label: "Summarize",
+      icon: "robot",
+      position: { x: 520, y: 0 },
+    });
+    request.edges.push({ id: "action-agent", from: "action", to: "agent" });
+    request.stepContent.agent = {
+      taskId: "task-1",
+      stepId: "agent",
+      contentType: "prompt",
+      content: "Summarize the result.",
+      apps: null,
+    };
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([
+          expect.objectContaining({ code: "DETERMINISTIC_MODE_AGENT_STEP", path: "steps.agent" }),
+        ]),
+      }),
+    );
+  });
+
+  it("rejects action steps in agent-led mode", () => {
+    const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
+    request.executionMode = "agent-led";
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([
+          expect.objectContaining({ code: "AGENT_LED_MODE_ACTION_STEP", path: "steps.action" }),
+        ]),
+      }),
+    );
+  });
+
+  it("keeps mixed steps valid in hybrid mode", () => {
+    const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
+    request.executionMode = "hybrid";
+    request.steps.push({
+      id: "agent",
+      type: "agent",
+      label: "Summarize",
+      icon: "robot",
+      position: { x: 520, y: 0 },
+    });
+    request.edges.push({ id: "action-agent", from: "action", to: "agent" });
+    request.stepContent.agent = {
+      taskId: "task-1",
+      stepId: "agent",
+      contentType: "prompt",
+      content: "Summarize the result.",
+      apps: null,
+    };
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).not.toThrow();
+  });
+
+  it("backfills the hybrid mode for a legacy save payload", () => {
+    const request = requestForAction({ sketchTools: ["search"], usesIntegrationActions: false });
+    const { executionMode: _executionMode, ...legacyPayload } = request;
+
+    expect(parseAutomationBuilderSaveRequest(legacyPayload).executionMode).toBe("hybrid");
   });
 });

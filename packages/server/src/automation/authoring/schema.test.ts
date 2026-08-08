@@ -11,6 +11,7 @@ const completeDraft = {
   title: "Weekday digest",
   description: "Summarize updates every weekday",
   prompt: "Summarize the completed workflow",
+  executionMode: "hybrid" as const,
   scheduleType: "cron" as const,
   scheduleValue: "0 9 * * 1-5",
   timezone: "Asia/Kolkata",

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type {
   AutomationBuilderSaveRequest,
   AutomationDefinition,
+  AutomationExecutionMode,
   WorkflowDelivery,
   WorkflowEdge,
   WorkflowStep,
@@ -64,6 +65,7 @@ export interface AutomationStepContentPatch {
 export interface AutomationDefinitionPatch {
   expectedRevision?: number;
   prompt?: string;
+  executionMode?: AutomationExecutionMode;
   scheduleType?: "cron" | "interval" | "once" | "external";
   scheduleValue?: string;
   timezone?: string;
@@ -147,6 +149,7 @@ function saveRequestFromDefinition(
     title: definition.title,
     description: definition.description,
     prompt: definition.prompt,
+    executionMode: definition.executionMode,
     scheduleType: definition.scheduleType,
     scheduleValue: definition.scheduleValue,
     timezone: definition.timezone,
@@ -297,6 +300,7 @@ function applyDefinitionPatch(
     title: hasTitle ? (patch.title ?? null) : definition.title,
     description: hasDescription ? (patch.description ?? null) : definition.description,
     prompt: patch.prompt ?? definition.prompt,
+    executionMode: patch.executionMode ?? definition.executionMode,
     scheduleType,
     scheduleValue,
     timezone,
@@ -480,6 +484,7 @@ export async function createAutomationDefinition(params: {
       created_by: params.context.createdBy,
       title: request.title,
       description: request.description,
+      execution_mode: request.executionMode,
       steps: fields.steps ?? null,
       edges: fields.edges ?? null,
       output_target: request.delivery.targetId,

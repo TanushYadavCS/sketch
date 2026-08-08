@@ -1,12 +1,16 @@
 import {
   type AutomationBuilderSaveRequest,
   type AutomationDefinition,
+  type AutomationExecutionMode,
   type AutomationRun,
   type AutomationStepContent,
   type WorkflowEdge,
   type WorkflowStep,
   type WorkflowTriggerConfig,
   automationBuilderSaveRequestSchema,
+  automationExecutionModeAllowsStep,
+  automationExecutionModeSchema,
+  recommendAutomationExecutionMode,
   stepOutputSchema,
   workflowEdgeSchema,
   workflowStepSchema,
@@ -34,6 +38,19 @@ export class AutomationValidationError extends Error {
     this.name = "AutomationValidationError";
     this.issues = issues;
   }
+}
+
+export function resolveStoredAutomationExecutionMode(value: string | null | undefined): AutomationExecutionMode {
+  if (value === null || value === undefined || value.trim() === "") return "hybrid";
+  const parsed = automationExecutionModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new AutomationValidationError([
+    {
+      code: "EXECUTION_MODE_INVALID",
+      message: `Unsupported automation execution mode "${value}"`,
+      path: "executionMode",
+    },
+  ]);
 }
 
 const DEFAULT_SUPPORTED_TRIGGER_TYPES: readonly WorkflowTriggerConfig["type"][] = [
@@ -90,11 +107,17 @@ function safeSteps(row: ScheduledTaskRow, normalizeScheduleTriggers = true): Wor
 
 function normalizeTaskTriggerStep(row: ScheduledTaskRow, steps: WorkflowStep[]): WorkflowStep[] {
   if (row.schedule_type !== "cron" && row.schedule_type !== "interval" && row.schedule_type !== "once") return steps;
-  return normalizeScheduleTriggerSteps(steps, {
-    scheduleType: row.schedule_type,
+  const schedule = {
+    scheduleType: row.schedule_type as "cron" | "interval" | "once",
     scheduleValue: row.schedule_value,
     timezone: row.timezone,
-  });
+  } as const;
+  const withLegacyTriggerConfig = steps.map((step) =>
+    step.type === "trigger" && !step.triggerConfig
+      ? { ...step, triggerConfig: { type: "schedule" as const, ...schedule } }
+      : step,
+  );
+  return normalizeScheduleTriggerSteps(withLegacyTriggerConfig, schedule);
 }
 
 function safeEdges(row: ScheduledTaskRow, steps: WorkflowStep[]): WorkflowEdge[] {
@@ -185,6 +208,7 @@ export function buildAutomationDefinition(params: {
   });
   const edges = safeEdges(params.row, steps);
   const delivery = resolveWorkflowDelivery(params.row);
+  const executionMode = resolveStoredAutomationExecutionMode(params.row.execution_mode);
   const recentRuns = params.runRows.map(parseRun);
   return {
     id: params.row.id,
@@ -194,6 +218,8 @@ export function buildAutomationDefinition(params: {
     deliveryTarget: params.row.delivery_target,
     threadTs: params.row.thread_ts,
     prompt: params.row.prompt,
+    executionMode,
+    executionModeRecommendation: recommendAutomationExecutionMode(steps, { legacy: !params.row.steps }),
     scheduleType:
       params.row.schedule_type === "interval" ||
       params.row.schedule_type === "once" ||
@@ -264,8 +290,139 @@ export function parseAutomationBuilderSaveRequest(value: unknown): AutomationBui
   return automationBuilderSaveRequestSchema.parse(value);
 }
 
+function parsePersistedSteps(row: ScheduledTaskRow, issues: BuilderValidationIssue[]): WorkflowStep[] {
+  if (row.steps === null) return safeSteps(row);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.steps) as unknown;
+  } catch {
+    addIssue(issues, "PERSISTED_STEPS_INVALID", "Stored automation steps are not valid JSON", "steps");
+    return [];
+  }
+
+  const result = workflowStepSchema.array().safeParse(parsed);
+  if (!result.success) {
+    addIssue(
+      issues,
+      "PERSISTED_STEPS_INVALID",
+      `Stored automation steps are invalid: ${result.error.issues[0]?.message ?? "invalid step"}`,
+      "steps",
+    );
+    return [];
+  }
+  return normalizeTaskTriggerStep(row, result.data);
+}
+
+function parsePersistedEdges(
+  row: ScheduledTaskRow,
+  steps: WorkflowStep[],
+  issues: BuilderValidationIssue[],
+): WorkflowEdge[] {
+  if (row.edges === null) return safeEdges(row, steps);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.edges) as unknown;
+  } catch {
+    addIssue(issues, "PERSISTED_EDGES_INVALID", "Stored automation edges are not valid JSON", "edges");
+    return [];
+  }
+
+  const result = workflowEdgeSchema.array().safeParse(parsed);
+  if (!result.success) {
+    addIssue(
+      issues,
+      "PERSISTED_EDGES_INVALID",
+      `Stored automation edges are invalid: ${result.error.issues[0]?.message ?? "invalid edge"}`,
+      "edges",
+    );
+    return [];
+  }
+  return result.data;
+}
+
+export interface ValidatedPersistedAutomationDefinition {
+  steps: WorkflowStep[];
+  edges: WorkflowEdge[];
+}
+
+export function validatePersistedAutomationDefinition(params: {
+  task: ScheduledTaskRow;
+  stepContentRows: StepContentRow[];
+}): ValidatedPersistedAutomationDefinition {
+  const { task, stepContentRows } = params;
+  const issues: BuilderValidationIssue[] = [];
+  const steps = parsePersistedSteps(task, issues);
+  const edges = parsePersistedEdges(task, steps, issues);
+  const stepContent = contentFromRows(task, steps, stepContentRows);
+
+  for (const row of stepContentRows) {
+    if (row.content_type !== "prompt" && row.content_type !== "script") {
+      addIssue(
+        issues,
+        "PERSISTED_CONTENT_INVALID",
+        `Stored content for step "${row.step_id}" has an unsupported content type`,
+        `stepContent.${row.step_id}`,
+      );
+    }
+  }
+
+  const storedExecutionModeValue = (task as ScheduledTaskRow & { execution_mode?: unknown }).execution_mode;
+  const storedExecutionMode =
+    typeof storedExecutionModeValue === "string" && storedExecutionModeValue.trim().length > 0
+      ? { executionMode: storedExecutionModeValue }
+      : {};
+
+  const parsedRequest = automationBuilderSaveRequestSchema.safeParse({
+    title: task.title,
+    description: task.description,
+    prompt: task.prompt,
+    ...storedExecutionMode,
+    scheduleType: task.schedule_type,
+    scheduleValue: task.schedule_value,
+    timezone: task.timezone,
+    status: task.status,
+    delivery: resolveWorkflowDelivery(task),
+    steps,
+    edges,
+    stepContent,
+  });
+
+  if (!parsedRequest.success) {
+    for (const issue of parsedRequest.error.issues) {
+      addIssue(
+        issues,
+        "PERSISTED_DEFINITION_INVALID",
+        issue.message,
+        issue.path.length > 0 ? issue.path.map(String).join(".") : undefined,
+      );
+    }
+  } else {
+    try {
+      validateAutomationBuilderSaveRequest({ request: parsedRequest.data, brokerCapable: true });
+    } catch (error) {
+      if (error instanceof AutomationValidationError) {
+        for (const issue of error.issues) addIssue(issues, issue.code, issue.message, issue.path);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  if (issues.length > 0) throw new AutomationValidationError(issues);
+  return {
+    steps: parsedRequest.success ? parsedRequest.data.steps : steps,
+    edges: parsedRequest.success ? parsedRequest.data.edges : edges,
+  };
+}
+
 function addIssue(issues: BuilderValidationIssue[], code: string, message: string, path?: string): void {
-  issues.push(path ? { code, message, path } : { code, message });
+  const issue = path ? { code, message, path } : { code, message };
+  if (issues.some((existing) => existing.code === code && existing.message === message && existing.path === path)) {
+    return;
+  }
+  issues.push(issue);
 }
 
 export function validateAutomationBuilderSaveRequest(params: {
@@ -275,6 +432,9 @@ export function validateAutomationBuilderSaveRequest(params: {
 }): void {
   const { request } = params;
   const issues = validateWorkflowGraph(request.steps, request.edges);
+  for (const issue of validateAutomationExecutionMode(request.executionMode, request.steps)) {
+    addIssue(issues, issue.code, issue.message, issue.path);
+  }
 
   for (const step of request.steps) {
     const content = request.stepContent[step.id];
@@ -325,9 +485,9 @@ export function validateAutomationBuilderSaveRequest(params: {
             `steps.${step.id}.actionCapabilities`,
           );
         }
-        const duplicateTools = step.actionCapabilities.sketchTools.filter(
-          (tool, index, tools) => tools.indexOf(tool) !== index,
-        );
+        const duplicateTools = [
+          ...new Set(step.actionCapabilities.sketchTools.filter((tool, index, tools) => tools.indexOf(tool) !== index)),
+        ];
         if (duplicateTools.length > 0) {
           addIssue(
             issues,
@@ -370,6 +530,32 @@ export function validateAutomationBuilderSaveRequest(params: {
   validateScheduleValue(request, issues);
 
   if (issues.length > 0) throw new AutomationValidationError(issues);
+}
+
+export function validateAutomationExecutionMode(
+  mode: AutomationExecutionMode,
+  steps: readonly Pick<WorkflowStep, "id" | "type" | "label">[],
+): BuilderValidationIssue[] {
+  const issues: BuilderValidationIssue[] = [];
+  for (const step of steps) {
+    if (automationExecutionModeAllowsStep(mode, step.type)) continue;
+    if (mode === "deterministic" && step.type === "agent") {
+      addIssue(
+        issues,
+        "DETERMINISTIC_MODE_AGENT_STEP",
+        `Fixed recipe mode cannot include agent step "${step.label}"`,
+        `steps.${step.id}`,
+      );
+    } else if (mode === "agent-led" && step.type === "action") {
+      addIssue(
+        issues,
+        "AGENT_LED_MODE_ACTION_STEP",
+        `Agent-led mode cannot include code or action step "${step.label}"`,
+        `steps.${step.id}`,
+      );
+    }
+  }
+  return issues;
 }
 
 function validateTriggerCapability(
@@ -571,6 +757,7 @@ export function scheduledTaskFieldsFromSaveRequest(
   const isSlackChannelMessage = trigger?.type === "slack_channel_message";
   return {
     prompt: request.prompt,
+    execution_mode: request.executionMode,
     schedule_type: isSlackChannelMessage ? "external" : request.scheduleType,
     schedule_value: isSlackChannelMessage ? "slack_channel_message" : request.scheduleValue,
     timezone: request.timezone,

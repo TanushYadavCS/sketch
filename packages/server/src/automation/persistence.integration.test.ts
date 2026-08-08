@@ -18,6 +18,7 @@ function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): Auto
     title: "Portable automation",
     description: null,
     prompt: "Run the portable automation.",
+    executionMode: "hybrid",
     scheduleType: "interval",
     scheduleValue: "120",
     timezone: "UTC",

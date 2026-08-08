@@ -16,6 +16,7 @@ function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): Auto
     title: "Daily account brief",
     description: "Summarize account activity.",
     prompt: "Summarize account activity.",
+    executionMode: "hybrid",
     scheduleType: "interval",
     scheduleValue: "120",
     timezone: "UTC",

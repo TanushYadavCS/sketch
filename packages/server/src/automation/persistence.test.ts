@@ -9,6 +9,7 @@ import { createTestDb } from "../test-utils";
 import {
   createAutomationDefinition,
   deleteAutomation,
+  getAutomationDefinition,
   replaceAutomationDefinition,
   updateAutomationDefinition,
 } from "./persistence";
@@ -18,6 +19,7 @@ function makeDefinition(overrides: Partial<AutomationBuilderSaveRequest> = {}): 
     title: "Daily account brief",
     description: "Summarize account activity.",
     prompt: "Summarize account activity.",
+    executionMode: "hybrid",
     scheduleType: "interval",
     scheduleValue: "120",
     timezone: "UTC",
@@ -143,6 +145,33 @@ describe("automation persistence", () => {
       }),
     ).rejects.toThrow("content rejected");
     await expect(createScheduledTaskRepository(db).getById("automation-rollback")).resolves.toBeUndefined();
+  });
+
+  it("persists and reloads the selected execution mode", async () => {
+    await createAutomationDefinition({
+      db,
+      request: makeDefinition({ executionMode: "agent-led" }),
+      context: createContext("automation-mode"),
+      brokerCapable: true,
+    });
+
+    await expect(createScheduledTaskRepository(db).getById("automation-mode")).resolves.toMatchObject({
+      execution_mode: "agent-led",
+    });
+    await expect(getAutomationDefinition({ db, taskId: "automation-mode" })).resolves.toMatchObject({
+      executionMode: "agent-led",
+      executionModeRecommendation: { mode: "agent-led" },
+    });
+
+    const saved = await updateAutomationDefinition({
+      db,
+      taskId: "automation-mode",
+      patch: { expectedRevision: 0, executionMode: "hybrid" },
+      actor: { userId: "user-1", canManageAnyTask: false },
+      brokerCapable: true,
+    });
+
+    expect(saved).toMatchObject({ kind: "saved", row: { execution_mode: "hybrid", revision: 1 } });
   });
 
   it("validates the complete definition before creating a task row", async () => {

@@ -116,6 +116,87 @@ export const automationStepContentSchema = z.object({
 
 export type AutomationStepContent = z.infer<typeof automationStepContentSchema>;
 
+export const automationExecutionModeSchema = z.enum(["deterministic", "hybrid", "agent-led"]);
+
+export type AutomationExecutionMode = z.infer<typeof automationExecutionModeSchema>;
+
+export const automationExecutionModeLabels = {
+  deterministic: "Fixed recipe",
+  hybrid: "Recipe + AI",
+  "agent-led": "Agent-led",
+} as const satisfies Record<AutomationExecutionMode, string>;
+
+export const automationExecutionModeDescriptions = {
+  deterministic: "Runs the saved steps exactly as written. It cannot use AI steps.",
+  hybrid: "Runs the saved recipe and uses AI only where you include it.",
+  "agent-led": "Lets AI carry out the work. It cannot use code or action steps.",
+} as const satisfies Record<AutomationExecutionMode, string>;
+
+export const automationExecutionModeRecommendations = {
+  deterministic: "Best when every step is a repeatable lookup, transformation, or action.",
+  hybrid: "Best when a repeatable recipe needs AI for a bounded summary, decision, or rewrite.",
+  "agent-led": "Best when the work needs AI judgment from start to finish.",
+} as const satisfies Record<AutomationExecutionMode, string>;
+
+export const AUTOMATION_EXECUTION_MODE_LABELS = automationExecutionModeLabels;
+
+export const automationExecutionModeMetadata = {
+  deterministic: {
+    label: automationExecutionModeLabels.deterministic,
+    description: automationExecutionModeDescriptions.deterministic,
+    recommendation: automationExecutionModeRecommendations.deterministic,
+  },
+  hybrid: {
+    label: automationExecutionModeLabels.hybrid,
+    description: automationExecutionModeDescriptions.hybrid,
+    recommendation: automationExecutionModeRecommendations.hybrid,
+  },
+  "agent-led": {
+    label: automationExecutionModeLabels["agent-led"],
+    description: automationExecutionModeDescriptions["agent-led"],
+    recommendation: automationExecutionModeRecommendations["agent-led"],
+  },
+} as const satisfies Record<AutomationExecutionMode, { label: string; description: string; recommendation: string }>;
+
+export const AUTOMATION_EXECUTION_MODE_METADATA = automationExecutionModeMetadata;
+
+export const automationModeRecommendationSchema = z
+  .object({
+    mode: automationExecutionModeSchema,
+    reason: z.string().trim().min(1).max(240),
+  })
+  .strict();
+
+export type AutomationModeRecommendation = z.infer<typeof automationModeRecommendationSchema>;
+
+export type AutomationExecutionModeRecommendation = AutomationModeRecommendation;
+
+export function automationExecutionModeAllowsStep(
+  mode: AutomationExecutionMode,
+  stepType: WorkflowStep["type"],
+): boolean {
+  if (stepType === "trigger" || mode === "hybrid") return true;
+  if (mode === "deterministic") return stepType === "action";
+  return stepType === "agent";
+}
+
+export function recommendAutomationExecutionMode(
+  steps: readonly Pick<WorkflowStep, "type">[],
+  options: { legacy?: boolean } = {},
+): AutomationModeRecommendation {
+  if (options.legacy) {
+    return {
+      mode: "hybrid",
+      reason: "This automation predates execution modes, so it keeps the compatible hybrid behavior.",
+    };
+  }
+
+  const hasAgentStep = steps.some((step) => step.type === "agent");
+  const hasActionStep = steps.some((step) => step.type === "action");
+  const mode = hasAgentStep && hasActionStep ? "hybrid" : hasAgentStep ? "agent-led" : "deterministic";
+  return { mode, reason: automationExecutionModeMetadata[mode].recommendation };
+}
+
 export const stepOutputSchema = z.object({
   output: z.unknown(),
   status: z.enum(["completed", "failed", "skipped"]),
@@ -145,6 +226,11 @@ export const automationDefinitionSchema = z.object({
   deliveryTarget: z.string(),
   threadTs: z.string().nullable(),
   prompt: z.string(),
+  executionMode: automationExecutionModeSchema.default("hybrid"),
+  executionModeRecommendation: automationModeRecommendationSchema.default({
+    mode: "hybrid",
+    reason: "This automation predates execution modes, so it keeps the compatible hybrid behavior.",
+  }),
   scheduleType: z.enum(["cron", "interval", "once", "external"]),
   scheduleValue: z.string(),
   timezone: z.string(),
@@ -191,6 +277,7 @@ export const automationBuilderSaveRequestSchema = z.object({
   title: z.string().trim().min(1).nullable(),
   description: z.string().nullable(),
   prompt: z.string().trim().min(1),
+  executionMode: automationExecutionModeSchema.default("hybrid"),
   scheduleType: z.enum(["cron", "interval", "once", "external"]),
   scheduleValue: z.string().trim().min(1),
   timezone: z.string().trim().min(1),

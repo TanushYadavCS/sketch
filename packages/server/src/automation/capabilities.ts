@@ -19,12 +19,16 @@ import type { Logger } from "../logger";
 
 const MAX_SEARCH_QUERY_LENGTH = 1000;
 const MAX_SEARCH_LIMIT = 50;
+const MAX_ENTITY_IDS = 100;
+const MAX_ENTITY_ID_LENGTH = 200;
 const MAX_ENTITY_QUERIES = 8;
 const MAX_ENTITY_QUERY_LENGTH = 200;
 const MAX_ENTITY_RESULTS = 100;
 const MAX_TEAMMATE_QUERIES = 10;
 const MAX_TEAMMATE_QUERY_LENGTH = 200;
+const MAX_TEAMMATE_MATCHES = 20;
 const MAX_TEXT_RESULT_LENGTH = 24_000;
+export const MAX_AUTOMATION_OUTPUT_BYTES = 256 * 1024;
 
 const automationSearchEntitySchema = z
   .object({
@@ -123,6 +127,9 @@ function parseJsonResult<T>(
 ): T {
   const text = resultText(result);
   if (fallback && text === fallback.text) return fallback.value;
+  if (Buffer.byteLength(text, "utf8") > MAX_AUTOMATION_OUTPUT_BYTES) {
+    throw new Error(`Sketch capability output exceeds ${MAX_AUTOMATION_OUTPUT_BYTES} bytes`);
+  }
 
   let parsed: unknown;
   try {
@@ -156,9 +163,17 @@ function parseSearchArgs(value: SearchArgs): SearchArgs {
   if (args.limit !== undefined && (!Number.isFinite(args.limit) || args.limit < 1)) {
     throw new Error("Search limit must be a positive number");
   }
+  const entityId = args.entityId?.trim();
+  if (entityId !== undefined && (!entityId || entityId.length > MAX_ENTITY_ID_LENGTH)) {
+    throw new Error(`Entity id cannot be empty or exceed ${MAX_ENTITY_ID_LENGTH} characters`);
+  }
   return {
     ...args,
     ...(args.query ? { query: args.query.trim() } : {}),
+    ...(entityId ? { entityId } : {}),
+    ...(args.entityIds
+      ? { entityIds: validateTextList(args.entityIds, "Entity ids", MAX_ENTITY_IDS, MAX_ENTITY_ID_LENGTH) }
+      : {}),
     ...(args.limit !== undefined ? { limit: Math.min(Math.floor(args.limit), MAX_SEARCH_LIMIT) } : {}),
   };
 }
@@ -177,9 +192,13 @@ function parseGetEntityContextArgs(value: GetEntityContextArgs): GetEntityContex
   if (args.limit !== undefined && (!Number.isFinite(args.limit) || args.limit < 1)) {
     throw new Error("Entity context limit must be a positive number");
   }
+  const entityId = args.entityId.trim();
+  if (!entityId || entityId.length > MAX_ENTITY_ID_LENGTH) {
+    throw new Error(`Entity id cannot be empty or exceed ${MAX_ENTITY_ID_LENGTH} characters`);
+  }
   return {
     ...args,
-    entityId: args.entityId.trim(),
+    entityId,
     ...(args.limit !== undefined ? { limit: Math.min(Math.floor(args.limit), MAX_SEARCH_LIMIT) } : {}),
   };
 }
@@ -283,12 +302,18 @@ export function createAutomationCapabilityRegistry(): AutomationCapabilityRegist
       }
       if (allowed.has("findTeammate")) {
         tools.findTeammate = (value) =>
-          invoke(context, "findTeammate", async () =>
-            parseJsonResult<AutomationFindTeammateResult>(
+          invoke(context, "findTeammate", async () => {
+            const result = parseJsonResult<AutomationFindTeammateResult>(
               await handleSearchUsers(parseSearchUsersArgs(value), deps),
               automationFindTeammateResultSchema,
-            ),
-          );
+            );
+            return {
+              results: result.results.slice(0, MAX_TEAMMATE_QUERIES).map((entry) => ({
+                query: entry.query,
+                matches: entry.matches.slice(0, MAX_TEAMMATE_MATCHES),
+              })),
+            };
+          });
       }
 
       return Object.freeze(tools);

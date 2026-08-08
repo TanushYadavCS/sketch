@@ -11,7 +11,15 @@
  */
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
-import { type AutomationSketchToolName, workflowStepUsesIntegrationActions } from "@sketch/shared";
+import {
+  type AutomationExecutionMode,
+  type AutomationSketchToolName,
+  automationExecutionModeAllowsStep,
+  automationExecutionModeSchema,
+  workflowEdgeSchema,
+  workflowStepSchema,
+  workflowStepUsesIntegrationActions,
+} from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { createChildAbortController } from "../agent/active-runs";
 import { removeReservedAgentEnv } from "../agent/environment";
@@ -27,11 +35,17 @@ import {
   type AutomationCapabilityCallEvent,
   type AutomationCapabilityRegistry,
   type AutomationSketchTools,
+  MAX_AUTOMATION_OUTPUT_BYTES,
   createAutomationCapabilityRegistry,
 } from "../automation/capabilities";
+import {
+  AutomationValidationError,
+  type ValidatedPersistedAutomationDefinition,
+  validatePersistedAutomationDefinition,
+} from "../automation/definition";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
-import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import type { StepContentRow, createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
@@ -121,6 +135,31 @@ export class AutomationRunAbortedError extends Error {
   }
 }
 
+function resolveRuntimeExecutionMode(value: string | null | undefined): AutomationExecutionMode {
+  if (value === null || value === undefined || value.trim() === "") return "hybrid";
+  const parsed = automationExecutionModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new Error(`Automation has unsupported execution mode "${value}"`);
+}
+
+function persistedDefinitionErrorMessage(error: unknown): string {
+  if (error instanceof AutomationValidationError) {
+    return `${error.message}: ${error.issues.map((issue) => issue.message).join("; ")}`;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return `Automation definition could not be loaded: ${message}`;
+}
+
+export function validateRuntimeAutomationExecutionMode(
+  mode: AutomationExecutionMode,
+  steps: readonly WorkflowStep[],
+): void {
+  const invalidStep = steps.find((step) => !automationExecutionModeAllowsStep(mode, step.type));
+  if (!invalidStep) return;
+  const restriction = mode === "deterministic" ? "agent" : "code or action";
+  throw new Error(`Automation mode "${mode}" cannot run ${restriction} step "${invalidStep.label}"`);
+}
+
 export async function executeAutomation(params: ExecuteAutomationParams): Promise<AutomationExecutionResult> {
   const { task, triggerData, logger, runsRepo, stepContentRepo, sendMessage, onEvent } = params;
 
@@ -146,16 +185,30 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     creatorEmail = creator.email;
   }
 
-  const steps = parseWorkflowSteps(task);
-  const edges = parseWorkflowEdges(task);
-  const executionSteps = resolveExecutionOrder(steps, edges);
-
-  // 3. Load step content
-  const contentRows = await stepContentRepo.getByTask(task.id);
-  const contentMap = new Map(contentRows.map((r) => [r.step_id, r]));
-
-  // 4. Create run record
   const runId = await runsRepo.create({ taskId: task.id, triggerData });
+  let persistedDefinition: ValidatedPersistedAutomationDefinition;
+  let contentRows: StepContentRow[];
+  try {
+    contentRows = await stepContentRepo.getByTask(task.id);
+    persistedDefinition = validatePersistedAutomationDefinition({ task, stepContentRows: contentRows });
+  } catch (error) {
+    const definitionError = new Error(persistedDefinitionErrorMessage(error));
+    await runsRepo.update(runId, {
+      status: "failed",
+      stepOutputs: {},
+      completedAt: new Date().toISOString(),
+      errorMessage: definitionError.message,
+    });
+    logger.error({ err: error, taskId: task.id, runId }, "Automation: persisted definition validation failed");
+    if (sendMessage) {
+      await sendMessage(`Automation '${task.title ?? task.prompt}' failed: ${definitionError.message}`);
+    }
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {} };
+  }
+
+  const { steps, edges } = persistedDefinition;
+  const executionSteps = resolveExecutionOrder(steps, edges);
+  const contentMap = new Map(contentRows.map((r) => [r.step_id, r]));
   const workspaceDir = resolveAutomationWorkspaceDir(params.config.DATA_DIR, task);
   await mkdir(workspaceDir, { recursive: true });
   const emitEvent = async (event: AutomationExecutionEvent) => {
@@ -169,6 +222,37 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     }
   };
   await emitEvent({ type: "run.started", runId, workflowId: task.id });
+
+  let executionMode: AutomationExecutionMode = "hybrid";
+  let executionModeError: Error | undefined;
+  try {
+    executionMode = resolveRuntimeExecutionMode(task.execution_mode);
+    validateRuntimeAutomationExecutionMode(executionMode, steps);
+  } catch (error) {
+    executionModeError = error instanceof Error ? error : new Error(String(error));
+  }
+
+  if (executionModeError) {
+    await runsRepo.update(runId, {
+      status: "failed",
+      stepOutputs: {},
+      completedAt: new Date().toISOString(),
+      errorMessage: executionModeError.message,
+    });
+    logger.error({ err: executionModeError, taskId: task.id, runId }, "Automation: invalid execution mode");
+    if (sendMessage) {
+      await sendMessage(`Automation '${task.title ?? task.prompt}' failed: ${executionModeError.message}`);
+    }
+    await emitEvent({
+      type: "completed",
+      runId,
+      workflowId: task.id,
+      status: "failed",
+      finalOutput: null,
+      stepOutputs: {},
+    });
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {} };
+  }
 
   logger.info(
     {
@@ -206,6 +290,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     });
 
     try {
+      validateRuntimeAutomationExecutionMode(executionMode, [step]);
       const output = await executeWorkflowStep({
         params,
         step,
@@ -381,6 +466,25 @@ export async function testAutomationStep(
   const workspaceDir = resolveAutomationWorkspaceDir(params.config.DATA_DIR, task);
   await mkdir(workspaceDir, { recursive: true });
 
+  let executionMode: AutomationExecutionMode = "hybrid";
+  try {
+    executionMode = resolveRuntimeExecutionMode(task.execution_mode);
+    validateRuntimeAutomationExecutionMode(executionMode, steps);
+  } catch (error) {
+    const modeError = error instanceof Error ? error : new Error(String(error));
+    await runsRepo.update(runId, {
+      status: "failed",
+      stepOutputs,
+      completedAt: new Date().toISOString(),
+      errorMessage: modeError.message,
+    });
+    logger.error(
+      { err: modeError, taskId: task.id, runId, stepId },
+      "Automation: invalid execution mode for step test",
+    );
+    return { runId, status: "failed", finalOutput: null, stepOutputs };
+  }
+
   if (step.type === "trigger") {
     const output = buildTriggerSamplePayload(task, step);
     stepOutputs[step.id] = { output, status: "completed", duration_ms: 0 };
@@ -398,6 +502,7 @@ export async function testAutomationStep(
   const startTime = Date.now();
 
   try {
+    validateRuntimeAutomationExecutionMode(executionMode, [step]);
     const input = params.useLatestUpstreamOutput
       ? await resolveLatestUpstreamOutput({ params, stepId, edges, currentRunId: runId })
       : (params.input ?? null);
@@ -523,7 +628,11 @@ async function executeWorkflowStep(params: {
 }
 
 function parseWorkflowSteps(task: ScheduledTaskRow): WorkflowStep[] {
-  if (task.steps) return JSON.parse(task.steps) as WorkflowStep[];
+  if (task.steps) {
+    const parsed = workflowStepSchema.array().safeParse(JSON.parse(task.steps) as unknown);
+    if (!parsed.success) throw new Error("Stored automation steps are invalid");
+    return parsed.data;
+  }
   return [
     { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
     {
@@ -540,7 +649,9 @@ function parseWorkflowSteps(task: ScheduledTaskRow): WorkflowStep[] {
 function parseWorkflowEdges(task: ScheduledTaskRow): WorkflowEdge[] {
   if (!task.edges) return [];
   const parsed = JSON.parse(task.edges) as unknown;
-  return Array.isArray(parsed) ? (parsed as WorkflowEdge[]) : [];
+  const result = workflowEdgeSchema.array().safeParse(parsed);
+  if (!result.success) throw new Error("Stored automation edges are invalid");
+  return result.data;
 }
 
 function resolveExecutionOrder(steps: WorkflowStep[], edges: WorkflowEdge[]): WorkflowStep[] {
@@ -729,6 +840,12 @@ type AsyncFunctionConstructor = (
   ...args: string[]
 ) => (input: unknown, ctx: ScriptContext, signal: AbortSignal) => Promise<unknown>;
 
+/**
+ * Action scripts currently execute in the server's Node.js realm. The exposed context is capability-scoped,
+ * but AsyncFunction is not a security sandbox: a script can potentially reach process globals, built-in modules,
+ * or network APIs. This slice keeps the existing first-party-authored-script trust boundary; isolating scripts in
+ * a worker or subprocess with an explicit IPC protocol is a separate hardening project.
+ */
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as AsyncFunctionConstructor;
 
 export interface ScriptIntegrationFile {
@@ -978,15 +1095,24 @@ function buildScriptContext(params: {
 
 function normalizeStepOutput(output: unknown): unknown {
   if (output === undefined) return null;
+  let serialized: string;
   try {
-    const serialized = JSON.stringify(output);
+    serialized = JSON.stringify(output);
     if (serialized === undefined) {
-      throw new Error("Action output is not JSON-serializable");
+      throw new Error("Workflow step output is not JSON-serializable");
     }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Workflow step output is not JSON-serializable: ${message}`);
+  }
+  if (Buffer.byteLength(serialized, "utf8") > MAX_AUTOMATION_OUTPUT_BYTES) {
+    throw new Error(`Workflow step output exceeds ${MAX_AUTOMATION_OUTPUT_BYTES} bytes`);
+  }
+  try {
     return JSON.parse(serialized);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Action output is not JSON-serializable: ${message}`);
+    throw new Error(`Workflow step output is not JSON-serializable: ${message}`);
   }
 }
 
@@ -1342,39 +1468,37 @@ async function writeAutomationContext(params: {
   const contextDir = join(params.workspaceDir, ".workflow-context");
   try {
     await mkdir(contextDir, { recursive: true });
-  } catch {
-    params.logger.warn({ contextDir }, "Automation: could not create context directory");
-    return;
-  }
+    const statusIcon = (s: string) => (s === "completed" ? "\u2713" : s === "failed" ? "\u2717" : "\u2014");
 
-  const statusIcon = (s: string) => (s === "completed" ? "\u2713" : s === "failed" ? "\u2717" : "\u2014");
+    const lines = [
+      `# Automation: ${params.title}`,
+      `**Run:** ${new Date().toISOString()}`,
+      `**Trigger:** ${params.triggerSummary}`,
+      "",
+      "## Steps Executed",
+    ];
 
-  const lines = [
-    `# Automation: ${params.title}`,
-    `**Run:** ${new Date().toISOString()}`,
-    `**Trigger:** ${params.triggerSummary}`,
-    "",
-    "## Steps Executed",
-  ];
-
-  for (let i = 0; i < params.steps.length; i++) {
-    const step = params.steps[i];
-    const duration = (step.duration_ms / 1000).toFixed(1);
-    lines.push(`${i + 1}. ${statusIcon(step.status)} ${step.label} (${duration}s)`);
-    if (step.outputSummary) {
-      lines.push(`   ${step.outputSummary}`);
+    for (let i = 0; i < params.steps.length; i++) {
+      const step = params.steps[i];
+      const duration = (step.duration_ms / 1000).toFixed(1);
+      lines.push(`${i + 1}. ${statusIcon(step.status)} ${step.label} (${duration}s)`);
+      if (step.outputSummary) {
+        lines.push(`   ${step.outputSummary}`);
+      }
     }
-  }
 
-  const fileName = `${params.taskId}-${params.runId}.md`;
-  await writeFile(join(contextDir, fileName), lines.join("\n"), "utf-8");
+    const fileName = `${params.taskId}-${params.runId}.md`;
+    await writeFile(join(contextDir, fileName), lines.join("\n"), "utf-8");
 
-  const files = await readdir(contextDir);
-  const taskFiles = files.filter((f) => f.startsWith(params.taskId)).sort();
-  if (taskFiles.length > 5) {
-    const toDelete = taskFiles.slice(0, taskFiles.length - 5);
-    for (const file of toDelete) {
-      await rm(join(contextDir, file), { force: true }).catch(() => {});
+    const files = await readdir(contextDir);
+    const taskFiles = files.filter((f) => f.startsWith(params.taskId)).sort();
+    if (taskFiles.length > 5) {
+      const toDelete = taskFiles.slice(0, taskFiles.length - 5);
+      for (const file of toDelete) {
+        await rm(join(contextDir, file), { force: true }).catch(() => {});
+      }
     }
+  } catch (err) {
+    params.logger.warn({ err, contextDir }, "Automation: context maintenance failed");
   }
 }

@@ -11,6 +11,7 @@
  * at creation time.
  */
 import { randomUUID } from "node:crypto";
+import type { AutomationExecutionMode } from "@sketch/shared";
 import type { Insertable, Kysely, Selectable } from "kysely";
 import { sql } from "kysely";
 import type { DB, ScheduledTasksTable } from "../schema";
@@ -21,6 +22,7 @@ export type NewScheduledTask = Omit<Insertable<ScheduledTasksTable>, "id"> & { i
 
 export interface UpdatableFields {
   prompt: string;
+  execution_mode: AutomationExecutionMode;
   schedule_type: string;
   schedule_value: string;
   timezone: string;

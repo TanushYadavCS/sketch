@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAutomationCapabilityRegistry } from "./capabilities";
+import { MAX_AUTOMATION_OUTPUT_BYTES, createAutomationCapabilityRegistry } from "./capabilities";
 
 function createContext(overrides: Record<string, unknown> = {}) {
   return {
@@ -75,6 +75,39 @@ describe("automation Sketch capability registry", () => {
 
     await expect(tools.findTeammate?.({ queries: [" "] })).rejects.toThrow("values cannot be empty");
     await expect(tools.findTeammate?.({ queries: ["x".repeat(201)] })).rejects.toThrow("cannot exceed 200 characters");
+  });
+
+  it("rejects unbounded entity id filters before invoking a handler", async () => {
+    const tools = createAutomationCapabilityRegistry().createTools({
+      context: createContext() as never,
+      allowedTools: ["search"],
+    });
+
+    await expect(
+      tools.search?.({ query: "Acme", entityIds: Array.from({ length: 101 }, (_, index) => `entity-${index}`) }),
+    ).rejects.toThrow("Entity ids supports at most 100 values");
+    await expect(tools.search?.({ query: "Acme", entityIds: ["x".repeat(201)] })).rejects.toThrow(
+      "cannot exceed 200 characters",
+    );
+  });
+
+  it("rejects oversized structured capability output", async () => {
+    const context = createContext();
+    context.userRepo.findByExactName.mockResolvedValue({
+      id: "user-2",
+      name: "x".repeat(MAX_AUTOMATION_OUTPUT_BYTES),
+      email: "alice@example.com",
+      slack_user_id: "U123",
+      whatsapp_number: null,
+    });
+    const tools = createAutomationCapabilityRegistry().createTools({
+      context: context as never,
+      allowedTools: ["findTeammate"],
+    });
+
+    await expect(tools.findTeammate?.({ queries: ["Alice"] })).rejects.toThrow(
+      `Sketch capability output exceeds ${MAX_AUTOMATION_OUTPUT_BYTES} bytes`,
+    );
   });
 
   it("fails when a structured capability is unavailable instead of returning an empty result", async () => {

@@ -60,6 +60,7 @@ function makeBuilderSaveRequest(overrides: Partial<AutomationBuilderSaveRequest>
     title: "Daily account brief",
     description: "Summarize account activity every two minutes.",
     prompt: "Summarize account activity.",
+    executionMode: "hybrid",
     scheduleType: "interval",
     scheduleValue: "120",
     timezone: "UTC",

@@ -1,7 +1,9 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import {
   type AutomationBuilderSaveRequest,
+  type AutomationExecutionMode,
   automationActionCapabilitiesSchema,
+  automationExecutionModeSchema,
   canvasWebhookEndpointSchema,
   workflowStepUsesIntegrationActions,
 } from "@sketch/shared";
@@ -123,6 +125,11 @@ const manageScheduledTasksSchema = {
     .optional()
     .describe(
       "Legacy/simple automation prompt. When used without steps, Sketch expands it to one Sketch-mode agent step. Keep it for agent-driven or legacy automations; for deterministic work, pass an explicit steps array with action script content.",
+    ),
+  execution_mode: automationExecutionModeSchema
+    .optional()
+    .describe(
+      "How the automation runs: deterministic 'Fixed recipe' allows action steps but no agent steps; hybrid 'Recipe + AI' allows both; agent-led allows agent steps but no code or action steps. This is a user choice, not a forced recommendation.",
     ),
   schedule_type: z
     .enum(["cron", "interval", "once"])
@@ -249,6 +256,7 @@ type ManageScheduledTasksParams = {
     | "updateStepContent";
   request?: string;
   prompt?: string;
+  execution_mode?: AutomationExecutionMode;
   schedule_type?: "cron" | "interval" | "once" | "external";
   schedule_value?: string;
   timezone?: string;
@@ -363,6 +371,7 @@ function stepContentPatchForSteps(steps: WorkflowStepInput[]): AutomationDefinit
 function definitionPatchFromParams(params: ManageScheduledTasksParams, ctx: TaskContext): AutomationDefinitionPatch {
   const patch: AutomationDefinitionPatch = {};
   if (params.prompt !== undefined) patch.prompt = params.prompt;
+  if (params.execution_mode !== undefined) patch.executionMode = params.execution_mode;
   if (params.schedule_type !== undefined) patch.scheduleType = params.schedule_type;
   if (params.schedule_value !== undefined) patch.scheduleValue = params.schedule_value;
   if (params.timezone !== undefined) patch.timezone = params.timezone;
@@ -636,6 +645,7 @@ function collectAutomationArtifact(params: {
 
 const LEGACY_AUTHORING_FIELDS = [
   "prompt",
+  "execution_mode",
   "schedule_type",
   "schedule_value",
   "timezone",
@@ -972,6 +982,7 @@ export async function handleManageScheduledTasks(
             title,
             description: params.description ?? null,
             prompt,
+            executionMode: params.execution_mode ?? "hybrid",
             scheduleType: scheduleType as "cron" | "interval" | "once" | "external",
             scheduleValue,
             timezone: resolvedTimezone,

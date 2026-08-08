@@ -1,3 +1,4 @@
+import type { AutomationExecutionMode } from "@sketch/shared";
 import type { Generated } from "kysely";
 
 export interface UsersTable {
@@ -782,6 +783,7 @@ export interface ScheduledTasksTable {
   delivery_target: string;
   thread_ts: string | null;
   prompt: string;
+  execution_mode: Generated<AutomationExecutionMode>;
   schedule_type: string;
   schedule_value: string;
   timezone: Generated<string>;
