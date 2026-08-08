@@ -390,8 +390,9 @@ function automationsFromMessage(message: WebChatMessage): AutomationArtifact[] {
 function automationHandoffsFromMessages(messages: WebChatMessage[]): AutomationDraftHandoff[] {
   return messages.flatMap((message) =>
     visibleMessageParts(message)
-      .filter((part): part is Extract<WebChatPart, { type: "data-automation-handoff" }> =>
-        part.type === "data-automation-handoff",
+      .filter(
+        (part): part is Extract<WebChatPart, { type: "data-automation-handoff" }> =>
+          part.type === "data-automation-handoff",
       )
       .map((part) => part.data),
   );
