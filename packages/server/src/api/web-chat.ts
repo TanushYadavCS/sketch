@@ -330,11 +330,11 @@ function extractAutomationTaskId(body: unknown): string | null {
   return /^[A-Za-z0-9_-]{1,120}$/.test(taskId) ? taskId : null;
 }
 
-const AUTOMATION_DRAFT_INTENT_PATTERN =
-  /\b(?:create|make|build|set\s+up|setup|draft|design|automate)\b[\s\S]{0,120}\b(?:an?\s+)?(?:automation|workflow|scheduled\s+task)\b|\b(?:automation|workflow|scheduled\s+task)\b[\s\S]{0,120}\b(?:create|make|build|set\s+up|setup|draft|design)\b/i;
+const AUTOMATION_DRAFT_IMPERATIVE_PATTERN =
+  /^(?:please\s+)?(?:create|make|build|set\s+up|setup|draft|design|automate)\b[\s\S]{0,120}\b(?:an?\s+)?(?:automation|workflow|scheduled\s+task)\b/i;
 
 export function isAutomationDraftRequest(message: string): boolean {
-  return AUTOMATION_DRAFT_INTENT_PATTERN.test(message.trim());
+  return AUTOMATION_DRAFT_IMPERATIVE_PATTERN.test(message.trim());
 }
 
 function automationBuilderUrl(config: Config, taskId: string, conversationId: string): string {
@@ -1116,6 +1116,41 @@ function latestPendingWebChatQuestion(messages: WebChatTranscriptMessage[]): Web
   return null;
 }
 
+type WebChatQuestionAnswerValidation =
+  | { ok: true; selectedOption: WebChatQuestion["options"][number] }
+  | { ok: false; code: string; message: string; status: 400 | 409 };
+
+function validateWebChatQuestionAnswer(
+  messages: WebChatTranscriptMessage[],
+  answer: WebChatQuestionAnswer,
+): WebChatQuestionAnswerValidation {
+  const alreadyAnswered = messages.some((message) =>
+    message.parts.some((part) => part.type === "data-question-answer" && part.data.questionId === answer.questionId),
+  );
+  if (alreadyAnswered) {
+    return { ok: false, code: "QUESTION_STALE", message: "That question is no longer pending", status: 409 };
+  }
+
+  const pendingQuestion = latestPendingWebChatQuestion(messages);
+  if (!pendingQuestion) {
+    return { ok: false, code: "QUESTION_NOT_PENDING", message: "There is no pending question to answer", status: 409 };
+  }
+  if (answer.questionId !== pendingQuestion.id) {
+    return { ok: false, code: "QUESTION_STALE", message: "That question is no longer pending", status: 409 };
+  }
+
+  const selectedOption = pendingQuestion.options.find((option) => option.id === answer.optionId);
+  if (!selectedOption) {
+    return {
+      ok: false,
+      code: "QUESTION_OPTION_INVALID",
+      message: "That option is not available for the pending question",
+      status: 400,
+    };
+  }
+  return { ok: true, selectedOption };
+}
+
 async function readWebChatTranscriptUpdatedAt(
   config: Config,
   workspaceDir: string,
@@ -1359,17 +1394,55 @@ async function appendWebChatPendingTurn(
 ): Promise<void> {
   await withWebChatTranscriptLock(userId, conversationId, async () => {
     const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
-    const next = [...existing];
-    if (!next.some((message) => message.id === userMessage.id)) {
-      next.push(userMessage);
-    }
-    const progressIndex = next.findIndex((message) => message.id === progressMessage.id);
-    if (progressIndex === -1) {
-      next.push(progressMessage);
-    } else {
-      next[progressIndex] = progressMessage;
-    }
-    await writeWebChatTranscript(config, userId, conversationId, next);
+    await writeWebChatTranscript(
+      config,
+      userId,
+      conversationId,
+      appendWebChatPendingTurnMessages(existing, userMessage, progressMessage),
+    );
+  });
+}
+
+function appendWebChatPendingTurnMessages(
+  existing: WebChatTranscriptMessage[],
+  userMessage: WebChatTranscriptMessage,
+  progressMessage: WebChatTranscriptMessage,
+): WebChatTranscriptMessage[] {
+  const next = [...existing];
+  if (!next.some((message) => message.id === userMessage.id)) {
+    next.push(userMessage);
+  }
+  const progressIndex = next.findIndex((message) => message.id === progressMessage.id);
+  if (progressIndex === -1) {
+    next.push(progressMessage);
+  } else {
+    next[progressIndex] = progressMessage;
+  }
+  return next;
+}
+
+async function consumeWebChatQuestionAnswer(
+  config: Config,
+  workspaceDir: string,
+  userId: string,
+  logger: Logger,
+  conversationId: string,
+  answer: WebChatQuestionAnswer,
+  userMessage: WebChatTranscriptMessage,
+  progressMessage: WebChatTranscriptMessage,
+): Promise<WebChatQuestionAnswerValidation> {
+  return withWebChatTranscriptLock(userId, conversationId, async () => {
+    const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
+    const validation = validateWebChatQuestionAnswer(existing, answer);
+    if (!validation.ok) return validation;
+
+    await writeWebChatTranscript(
+      config,
+      userId,
+      conversationId,
+      appendWebChatPendingTurnMessages(existing, userMessage, progressMessage),
+    );
+    return validation;
   });
 }
 
@@ -1890,30 +1963,25 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const workspaceDir = await ensureWorkspace(deps.config, currentUser.id);
     let questionAnswer: WebChatQuestionAnswer | undefined;
     if (incomingQuestionAnswer.present) {
-      if (!incomingQuestionAnswer.answer) {
+      const incomingAnswer = incomingQuestionAnswer.answer;
+      if (!incomingAnswer) {
         return c.json(badRequest("QUESTION_ANSWER_INVALID", "Question answer is invalid"), 400);
       }
-      const existingTranscript = await withWebChatTranscriptLock(currentUser.id, conversationId, () =>
-        readWebChatTranscript(deps.config, workspaceDir, currentUser.id, deps.logger, conversationId),
-      );
-      const pendingQuestion = latestPendingWebChatQuestion(existingTranscript);
-      if (!pendingQuestion) {
-        return c.json(badRequest("QUESTION_NOT_PENDING", "There is no pending question to answer"), 409);
-      }
-      if (incomingQuestionAnswer.answer.questionId !== pendingQuestion.id) {
-        return c.json(badRequest("QUESTION_STALE", "That question is no longer pending"), 409);
-      }
-      const selectedOption = pendingQuestion.options.find(
-        (option) => option.id === incomingQuestionAnswer.answer?.optionId,
-      );
-      if (!selectedOption) {
-        return c.json(
-          badRequest("QUESTION_OPTION_INVALID", "That option is not available for the pending question"),
-          400,
+      const validation = await withWebChatTranscriptLock(currentUser.id, conversationId, async () => {
+        const existingTranscript = await readWebChatTranscript(
+          deps.config,
+          workspaceDir,
+          currentUser.id,
+          deps.logger,
+          conversationId,
         );
+        return validateWebChatQuestionAnswer(existingTranscript, incomingAnswer);
+      });
+      if (!validation.ok) {
+        return c.json(badRequest(validation.code, validation.message), validation.status);
       }
-      questionAnswer = incomingQuestionAnswer.answer;
-      latestUserMessage = { id: latestUserMessage?.id ?? null, text: selectedOption.label };
+      questionAnswer = incomingAnswer;
+      latestUserMessage = { id: latestUserMessage?.id ?? null, text: validation.selectedOption.label };
     }
     if (!latestUserMessage) {
       return c.json(badRequest("VALIDATION_ERROR", "Message is required"), 400);
@@ -2035,15 +2103,32 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     const progressRenderer = createProgressRenderer(progressSettings);
     const transcriptUserMessage = createUserTranscriptMessage(latestUserMessage, transcriptUserFiles, questionAnswer);
     const progressMessageId = `assistant-progress-${transcriptUserMessage.id}`;
-    await appendWebChatPendingTurn(
-      deps.config,
-      workspaceDir,
-      currentUser.id,
-      deps.logger,
-      conversationId,
-      transcriptUserMessage,
-      createProgressTranscriptMessage(progressMessageId),
-    );
+    const progressMessage = createProgressTranscriptMessage(progressMessageId);
+    if (questionAnswer) {
+      const answerResult = await consumeWebChatQuestionAnswer(
+        deps.config,
+        workspaceDir,
+        currentUser.id,
+        deps.logger,
+        conversationId,
+        questionAnswer,
+        transcriptUserMessage,
+        progressMessage,
+      );
+      if (!answerResult.ok) {
+        return c.json(badRequest(answerResult.code, answerResult.message), answerResult.status);
+      }
+    } else {
+      await appendWebChatPendingTurn(
+        deps.config,
+        workspaceDir,
+        currentUser.id,
+        deps.logger,
+        conversationId,
+        transcriptUserMessage,
+        progressMessage,
+      );
+    }
 
     const userMessage = buildSketchContext({
       messages: [],

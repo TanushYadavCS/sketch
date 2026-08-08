@@ -17,6 +17,7 @@ import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
+import { isAutomationDraftRequest } from "./web-chat";
 
 function makeAgentResult(finalText = "Hello from Sketch", pendingUploads: string[] = []) {
   return {
@@ -291,6 +292,17 @@ describe("web chat API", () => {
     });
   });
 
+  it.each([
+    ["How do I create an automation?", false],
+    ["What is a workflow?", false],
+    ["Should I build an automation?", false],
+    ["Do not create an automation for this.", false],
+    ["Create an automation for a daily brief.", true],
+    ["Set up a workflow for our weekly customer brief.", true],
+  ])("classifies %j as an automation draft request: %s", (message, expected) => {
+    expect(isAutomationDraftRequest(message)).toBe(expected);
+  });
+
   it("streams assistant text deltas before the web chat agent run finishes", async () => {
     await seedAdmin(db);
     const deltaWritten = deferred<void>();
@@ -491,6 +503,93 @@ describe("web chat API", () => {
       id: "question-answer-schedule-frequency",
       data: { questionId: "schedule-frequency", optionId: "weekly" },
     });
+  });
+
+  it("consumes a question answer only once when duplicate requests arrive concurrently", async () => {
+    const admin = await seedAdmin(db);
+    const question: WebChatQuestion = {
+      id: "schedule-frequency",
+      prompt: "How often should Sketch run this automation?",
+      options: [
+        { id: "daily", label: "Daily" },
+        { id: "weekly", label: "Weekly" },
+      ],
+    };
+    const buildMcpServersReleased = deferred<void>();
+    const duplicateBuildsReached = deferred<void>();
+    let buildMcpServersCalls = 0;
+    const buildMcpServers = vi.fn().mockImplementation(async () => {
+      buildMcpServersCalls += 1;
+      if (buildMcpServersCalls > 1) {
+        if (buildMcpServersCalls === 3) duplicateBuildsReached.resolve();
+        await buildMcpServersReleased.promise;
+      }
+      return {};
+    });
+    const runAgent = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ...makeAgentResult(""),
+        pendingQuestion: question,
+        trace: { progressEvents: [], finalText: null, automationArtifacts: [] },
+      })
+      .mockResolvedValue(makeAgentResult("Got it — daily."));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers,
+    });
+    const cookie = await login(app);
+
+    const firstResponse = await app.request("/api/web-chat?conversationId=concurrent-choice", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Which cadence should I use?" }),
+    });
+    expect(firstResponse.status).toBe(200);
+    await firstResponse.text();
+
+    const answerBody = JSON.stringify({
+      message: {
+        id: "concurrent-choice-answer",
+        role: "user",
+        parts: [
+          { type: "text", text: "Daily" },
+          {
+            type: "data-question-answer",
+            id: "question-answer-schedule-frequency",
+            data: { questionId: "schedule-frequency", optionId: "daily" },
+          },
+        ],
+      },
+    });
+    const request = () =>
+      app.request("/api/web-chat?conversationId=concurrent-choice", {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: answerBody,
+      });
+    const responsesPromise = Promise.all([request(), request()]);
+    await duplicateBuildsReached.promise;
+    buildMcpServersReleased.resolve();
+    const responses = await responsesPromise;
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    await Promise.all(responses.map((response) => response.text()));
+
+    expect(runAgent).toHaveBeenCalledTimes(2);
+    const transcript = JSON.parse(
+      await readFile(webChatTranscriptPath(dataDir, admin.id, "concurrent-choice"), "utf-8"),
+    ) as { messages: Array<{ role: string; parts: unknown[] }> };
+    const answerParts = transcript.messages.flatMap((message) =>
+      message.parts.filter(
+        (part): part is { type: "data-question-answer"; data: { questionId: string } } =>
+          typeof part === "object" && part !== null && "type" in part && part.type === "data-question-answer",
+      ),
+    );
+    expect(answerParts).toHaveLength(1);
+    expect(answerParts[0]?.data.questionId).toBe("schedule-frequency");
+    expect(transcript.messages.filter((message) => message.role === "user")).toHaveLength(2);
   });
 
   it("rejects a choice that is not part of the pending question", async () => {
