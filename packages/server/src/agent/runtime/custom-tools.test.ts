@@ -80,6 +80,36 @@ describe("AI SDK custom Sketch tool provider", () => {
     expect(tools.mcp__sketch__VisualAnalysis).toBeDefined();
   });
 
+  it("exposes the bounded question tool only on the web response surface", async () => {
+    const effects = createAgentRuntimeCustomToolEffects();
+    const provider = createDefaultAgentRuntimeCustomToolProvider({
+      effects,
+      transcriptionEnabled: false,
+      visionAnalysisEnabled: false,
+      visionConfig: null,
+    });
+    const webTools = await provider.createTools(params({ responseSurface: "web" }));
+    const slackTools = await provider.createTools(params({ responseSurface: "slack" }));
+    const questionTool = webTools.mcp__sketch__AskUserQuestion as SmokeTool;
+    const input = {
+      questionId: "delivery-mode",
+      question: "Where should the result go?",
+      options: [
+        { id: "slack", label: "Slack" },
+        { id: "email", label: "Email" },
+      ],
+    };
+
+    expect(questionTool).toBeDefined();
+    expect(slackTools.mcp__sketch__AskUserQuestion).toBeUndefined();
+    await questionTool.execute?.(input, {} as never);
+    expect(effects.drain(params({ responseSurface: "web" })).pendingQuestion).toEqual({
+      id: "delivery-mode",
+      prompt: "Where should the result go?",
+      options: input.options,
+    });
+  });
+
   it("passes malformed agent output calls to the handler for rejection tracking", async () => {
     const effects = createAgentRuntimeCustomToolEffects();
     const provider = createDefaultAgentRuntimeCustomToolProvider({
