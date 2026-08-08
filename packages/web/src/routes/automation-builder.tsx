@@ -38,6 +38,7 @@ import {
   CheckCircleIcon,
   CircleIcon,
   CodeIcon,
+  CopySimpleIcon,
   EnvelopeSimpleIcon,
   EyeIcon,
   GitBranchIcon,
