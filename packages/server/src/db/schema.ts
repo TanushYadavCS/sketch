@@ -9,6 +9,7 @@ export interface UsersTable {
   auth_role: Generated<string>;
   slack_user_id: string | null;
   whatsapp_number: string | null;
+  whatsapp_lid: Generated<string | null>;
   description: string | null;
   type: Generated<string>;
   role: string | null;
@@ -65,6 +66,7 @@ export interface SettingsTable {
   bot_name: Generated<string>;
   slack_bot_token: string | null;
   slack_app_token: string | null;
+  slack_team_id: Generated<string | null>;
   llm_provider: string | null;
   anthropic_api_key: string | null;
   aws_access_key_id: string | null;
@@ -233,7 +235,8 @@ export interface AccessScopesTable {
 
 export interface AccessScopeMembersTable {
   access_scope_id: string;
-  email: string;
+  principal_type: string;
+  principal_value: string;
 }
 
 export interface ConnectorFilesTable {
@@ -255,7 +258,8 @@ export interface UserProviderIdentitiesTable {
 
 export interface FileAccessTable {
   indexed_file_id: string;
-  email: string;
+  principal_type: string;
+  principal_value: string;
 }
 
 export interface FileShareEmailsTable {
@@ -664,6 +668,62 @@ export interface SlackChannelParticipantsTable {
   last_seen_at: Generated<string>;
 }
 
+export interface OrganizationDomainsTable {
+  id: string;
+  domain: string;
+  source: string;
+  verified_at: string;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface SlackUserSyncStateTable {
+  team_id: string;
+  slack_user_id: string;
+  name: string | null;
+  real_name: string | null;
+  display_name: string | null;
+  email: string | null;
+  profile_team_id: string | null;
+  profile_json: string | null;
+  is_bot: Generated<number>;
+  is_guest: Generated<number>;
+  is_stranger: Generated<number>;
+  is_restricted: Generated<number>;
+  is_ultra_restricted: Generated<number>;
+  deleted: Generated<number>;
+  classification: string | null;
+  classification_source: string | null;
+  provider_updated_at: string | null;
+  fetched_at: string | null;
+  entity_id: string | null;
+  entity_created_by_sync: Generated<number>;
+  inactive_at: string | null;
+  last_roster_seen_at: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface SlackSyncRunsTable {
+  id: string;
+  team_id: string;
+  run_type: string;
+  trigger_key: string;
+  pinned_team_id: string;
+  status: string;
+  stage: string | null;
+  heartbeat_at: string | null;
+  users_cursor: string | null;
+  conversations_cursor: string | null;
+  members_cursor: string | null;
+  current_channel_id: string | null;
+  started_at: Generated<string>;
+  completed_at: string | null;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface WhatsAppBackfillCheckpointsTable {
   group_jid: string;
   last_fetched_key: string | null;
@@ -777,6 +837,15 @@ export interface ScheduledTaskConversationsTable {
   updated_at: Generated<string>;
   last_active_at: Generated<string>;
   archived_at: string | null;
+}
+
+export interface ScheduledTaskBuilderLocksTable {
+  task_id: string;
+  conversation_id: string;
+  transcript_user_id: string;
+  acquired_at: Generated<string>;
+  renewed_at: Generated<string>;
+  expires_at: number;
 }
 
 export interface AgentOutputsTable {
@@ -970,6 +1039,37 @@ export interface EntityContactPointsTable {
   updated_at: Generated<string>;
 }
 
+export interface UserEntityLinksTable {
+  id: string;
+  user_id: string;
+  entity_id: string;
+  matched_via: string;
+  confirmed_by_user_id: string | null;
+  created_at: Generated<string>;
+}
+
+export interface UserEntityLinkSweepRunsTable {
+  id: string;
+  run_key: string;
+  lease_token: string | null;
+  status: string;
+  stage: string;
+  entity_cursor: string | null;
+  user_cursor: string | null;
+  heartbeat_at: string | null;
+  linked_by_email: Generated<number>;
+  linked_by_phone: Generated<number>;
+  linked_by_user_creation: Generated<number>;
+  provisioned: Generated<number>;
+  review_queued: Generated<number>;
+  skipped: Generated<number>;
+  started_at: Generated<string>;
+  completed_at: string | null;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface EntityMentionsTable {
   id: string;
   entity_id: string;
@@ -1108,6 +1208,8 @@ export interface EntityReviewQueueTable {
   source_id: string | null;
   proposed_email: string | null;
   candidate_entity_id: string | null;
+  candidate_entity_ids: string | null;
+  candidate_user_ids: string | null;
   candidate_score: number | null;
   candidate_reason: string | null;
   candidate_generated_at: string | null;
@@ -1405,6 +1507,9 @@ export interface DB {
   whatsapp_connection_transitions: WhatsAppConnectionTransitionsTable;
   whatsapp_groups: WhatsAppGroupsTable;
   settings: SettingsTable;
+  organization_domains: OrganizationDomainsTable;
+  slack_user_sync_state: SlackUserSyncStateTable;
+  slack_sync_runs: SlackSyncRunsTable;
   connector_configs: ConnectorConfigsTable;
   indexed_files: IndexedFilesTable;
   email_message_envelopes: EmailMessageEnvelopesTable;
@@ -1455,6 +1560,7 @@ export interface DB {
   automation_runs: AutomationRunsTable;
   automation_step_content: AutomationStepContentTable;
   scheduled_task_conversations: ScheduledTaskConversationsTable;
+  scheduled_task_builder_locks: ScheduledTaskBuilderLocksTable;
   agent_outputs: AgentOutputsTable;
   agent_output_items: AgentOutputItemsTable;
   agent_output_deliveries: AgentOutputDeliveriesTable;
@@ -1467,6 +1573,8 @@ export interface DB {
   entity_share_emails: EntityShareEmailsTable;
   entity_source_refs: EntitySourceRefsTable;
   entity_contact_points: EntityContactPointsTable;
+  user_entity_links: UserEntityLinksTable;
+  user_entity_link_sweep_runs: UserEntityLinkSweepRunsTable;
   entity_mentions: EntityMentionsTable;
   agent_runs: AgentRunsTable;
   tool_calls: ToolCallsTable;

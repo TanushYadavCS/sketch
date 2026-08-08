@@ -201,7 +201,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     }),
   );
   const settings = createSettingsRepository(db, config.ENCRYPTION_KEY);
-  const users = createUserRepository(db);
+  const users = createUserRepository(db, { slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC });
   const channels = createChannelRepository(db);
   const whatsappGroups = createWhatsAppGroupRepository(db);
   const conversations = createConversationRepository(db);
@@ -320,6 +320,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   app.use(
     "/api/*",
     createAuthMiddleware(settings, {
+      slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC,
       managedAuthSecret: config.MANAGED_AUTH_SECRET,
       managedUrl: config.MANAGED_URL,
       hasSetupAdmin: async () =>
@@ -330,13 +331,29 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
           user = await users.findByEmail(sub);
         }
         if (!user) return null;
-        return { id: user.id, authRole: user.auth_role, email: user.email };
+        return {
+          id: user.id,
+          authRole: user.auth_role,
+          email: user.email,
+          emails: await users.getAllEmailsForUser(user.id),
+          whatsappNumber: user.whatsapp_number,
+          slackUserId: user.slack_user_id,
+          whatsappLid: user.whatsapp_lid,
+        };
       },
       findUserByEmail: config.MANAGED_AUTH_SECRET
         ? async (email) => {
             const user = await users.findByEmail(email);
             if (!user) return null;
-            return { id: user.id, authRole: user.auth_role, email: user.email };
+            return {
+              id: user.id,
+              authRole: user.auth_role,
+              email: user.email,
+              emails: await users.getAllEmailsForUser(user.id),
+              whatsappNumber: user.whatsapp_number,
+              slackUserId: user.slack_user_id,
+              whatsappLid: user.whatsapp_lid,
+            };
           }
         : undefined,
       verifySketchApiKey: async (token) => {

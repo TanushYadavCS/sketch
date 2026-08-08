@@ -213,7 +213,14 @@ async function syncItemAccess(
   if (item.accessScope) {
     const scopeId = await repo.upsertAccessScope(connectorConfigId, item.accessScope);
     await repo.setFileAccessScope(indexedFileId, scopeId);
-  } else if (item.accessEmails && item.accessEmails.length > 0) {
-    await repo.syncFileAccessEmails(indexedFileId, item.accessEmails);
+    if (item.accessPrincipals !== undefined && item.accessPrincipals !== null) {
+      if (item.accessPrincipals.length === 0) {
+        await repo.syncFileAccessEmails(indexedFileId, []);
+      } else {
+        await repo.grantFileAccessEmails(indexedFileId, item.accessPrincipals);
+      }
+    }
+  } else if (item.accessPrincipals && item.accessPrincipals.length > 0) {
+    await repo.syncFileAccessEmails(indexedFileId, item.accessPrincipals);
   }
 }

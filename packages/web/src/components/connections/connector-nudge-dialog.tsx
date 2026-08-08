@@ -115,7 +115,7 @@ export function ConnectorNudgeDialog({
 function connectorItemCopy(definition: IntegrationDefinition): string {
   if (definition.type === "gmail" || definition.type === "outlook") return "your mailbox";
   if (definition.type === "teams") return "your meetings";
-  if (definition.type === "google_calendar") return "your calendars";
+  if (definition.type === "google_calendar" || definition.type === "outlook_calendar") return "your calendars";
   if (definition.type === "google_drive") return "your selected files";
   return `your ${definition.itemNoun}`;
 }

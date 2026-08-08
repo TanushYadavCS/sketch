@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { createChildAbortController, getActiveRunContext } from "../../agent/active-runs";
 import { AgentRunAdmissionCancelledError } from "../../agent/concurrency-limiter";
 import { buildSketchContext } from "../../agent/prompt";
 import type { RunAgentParams, RunAgentResult } from "../../agent/runner";
@@ -17,6 +18,7 @@ import type {
   AgentSourceConfig,
   PersistedAgentOutputItemRef,
 } from "../../db/repositories/agent-outputs";
+import { viewerPrincipals } from "../../db/repositories/connectors";
 import { requireAgentDefinition } from "../registry";
 import type { AgentDefinition } from "../types";
 import { AgentDeliveryTargetError } from "./contracts";
@@ -119,10 +121,18 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
       const now = new Date();
       const settings = await this.deps.settings.get();
       const adminCanReadAllFiles = settings?.admin_can_read_all_files === 1;
-      const contentUserEmails =
+      const contentUserPrincipals =
         user.auth_role === "admin" && adminCanReadAllFiles
           ? undefined
-          : await this.deps.users.getAllEmailsForUser(user.id);
+          : viewerPrincipals({
+              email: user.email,
+              emails: await this.deps.users.getAllEmailsForUser(user.id),
+              phone: user.whatsapp_number,
+              slackUserId: user.slack_user_id,
+              whatsappLid: user.whatsapp_lid,
+              isAdmin: false,
+              slackEntitySyncEnabled: this.deps.config.SLACK_ENTITY_SYNC,
+            });
       const [sameDayPrevious, previousDay, definitionContext] = await Promise.all([
         this.getPreviousOutputForContext(def, user, output.output_date, scope),
         this.getPreviousOutputForContext(def, user, addDays(output.output_date, -1), scope),
@@ -134,7 +144,8 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
               timezone: output.timezone,
               now,
               adminCanReadAllFiles,
-              contentUserEmails,
+              contentUserPrincipals,
+              slackEntitySyncEnabled: this.deps.config.SLACK_ENTITY_SYNC,
               agentConfig: {
                 enabledSections: routeSections,
                 maxItemsPerSection: routeMaxItemsPerSection,
@@ -251,7 +262,15 @@ export class AgentRunGenerationLayer extends AgentRunOutputLayer {
           },
         });
       } else {
-        result = await this.deps.runAgent(agentParams);
+        const parentContext = getActiveRunContext();
+        const abortController =
+          parentContext?.metadata?.platform === "slack"
+            ? createChildAbortController(parentContext.controller.signal)
+            : undefined;
+        result = await this.deps.runAgent({
+          ...agentParams,
+          ...(abortController ? { abortController } : {}),
+        });
       }
       if (!saved) {
         if (writeAttempted) {

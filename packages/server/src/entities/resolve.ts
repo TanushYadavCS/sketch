@@ -32,6 +32,7 @@ import {
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
 import { type EvidenceRow, type QueueRow, createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createIndexedFileFactRepository } from "../db/repositories/indexed-file-facts";
+import { confirmUserEntityLink } from "../db/repositories/user-entity-linking";
 import type { DB, EntitiesTable, EntityContactPointsTable } from "../db/schema";
 import { inferAffiliationFromEmail } from "./affiliations";
 import { finalizeLinkedDomainCandidates } from "./domain-promotion";
@@ -100,6 +101,7 @@ export interface ConfirmOptions {
    * still resolves. Ignored on a merge into an existing target.
    */
   nameOverride?: string;
+  linkUserId?: string;
 }
 
 export interface RejectOptions {
@@ -292,14 +294,14 @@ async function insertHeldMention(
 }
 
 /**
- * Ensure (file, email) is in file_access. UNIQUE INDEX (indexed_file_id,
- * email) from migration 021 makes the ON CONFLICT path safe.
+ * Ensure an email principal is in file_access. The typed unique index makes
+ * the ON CONFLICT path safe.
  */
 async function ensureFileAccess(ctx: ResolveTxnCtx, indexedFileId: string, email: string): Promise<void> {
   await sql`
-    INSERT INTO file_access (indexed_file_id, email)
-    VALUES (${indexedFileId}, ${email})
-    ON CONFLICT (indexed_file_id, email) DO NOTHING
+    INSERT INTO file_access (indexed_file_id, principal_type, principal_value)
+    VALUES (${indexedFileId}, 'email', ${email})
+    ON CONFLICT (indexed_file_id, principal_type, principal_value) DO NOTHING
   `.execute(ctx.db);
 }
 
@@ -710,6 +712,30 @@ export async function confirmReview(ctx: ResolveCtx, reviewId: string, opts: Con
         provided: opts.candidateGeneratedAt,
         currentRow: row,
       });
+    }
+
+    if (row.source === "user_entity_link") {
+      try {
+        const result = await confirmUserEntityLink(trx, {
+          reviewId,
+          confirmingUserId: ctx.userId,
+          linkUserId: opts.linkUserId,
+          candidateGeneratedAt: opts.candidateGeneratedAt,
+        });
+        return {
+          row: result.row,
+          targetEntityId: result.targetEntityId,
+          shortCircuited: false,
+          mergedStaleEntityId: null,
+          idempotent: result.idempotent,
+        };
+      } catch (error) {
+        throw new ResolveError(
+          "CANDIDATE_DRIFT",
+          error instanceof Error ? error.message : "identity-link confirmation failed",
+          { currentRow: row },
+        );
+      }
     }
 
     // Target selection.

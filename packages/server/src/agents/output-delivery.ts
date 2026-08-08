@@ -2,9 +2,9 @@ import type { Kysely } from "kysely";
 import { createAgentOutputDeliveryRepository } from "../db/repositories/agent-output-deliveries";
 import type { AgentDeliveryConfig } from "../db/repositories/agent-outputs";
 import { createConversationRepository } from "../db/repositories/conversations";
-import { createEntityRepository } from "../db/repositories/entities";
 import { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { createSettingsRepository } from "../db/repositories/settings";
+import { resolvePersonEntitiesForUser } from "../db/repositories/user-entity-resolver";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { chunkText } from "../formatting/chunking";
@@ -55,7 +55,6 @@ export interface AgentOutputDeliveryDeps {
 export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps): AgentOutputDeliveryPublisher {
   const repo = createAgentOutputDeliveryRepository(deps.db);
   const conversations = createConversationRepository(deps.db);
-  const entities = createEntityRepository(deps.db);
   const inboxMessages = createInboxMessagesRepository(deps.db);
   const users = createUserRepository(deps.db);
   const capture = createWorkflowDeliveryCapture({
@@ -216,7 +215,7 @@ export function createAgentOutputDeliveryService(deps: AgentOutputDeliveryDeps):
         if (recommendationIds.length > 0) {
           try {
             const verifiedEmails = await users.getVerifiedEmailsForUser(params.output.userId);
-            const peopleByEmail = await entities.getPersonEntitiesByEmails(verifiedEmails);
+            const peopleByEmail = await resolvePersonEntitiesForUser(deps.db, params.output.userId, verifiedEmails);
             assigneeEntityIds = [...new Set([...peopleByEmail.values()].flat().map((person) => person.id))];
           } catch (err) {
             deps.logger.warn(

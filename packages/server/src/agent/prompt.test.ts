@@ -221,6 +221,10 @@ describe("buildSystemContext", () => {
     it("routes semantic authoring through natural-language ManageScheduledTasks requests when configured", () => {
       const result = buildSystemContext({ platform: "slack", automationAuthoringEnabled: true });
 
+      expect(result).toContain("use only the admitted schedule, webhook, or Slack channel-message trigger types");
+      expect(result).toContain("Do not invent a Canvas-managed app trigger or component key");
+      expect(result).toContain("if polling versus a native event is unclear, ask the user to choose");
+      expect(result).not.toContain("prefer a Canvas-managed trigger only when a Canvas skill/MCP is available");
       expect(result).toContain("pass the user's requested change as a natural-language request");
       expect(result).toContain("Do not construct or pass automation definition fields");
       expect(result).toContain("Never use updateStepContent");
@@ -233,6 +237,8 @@ describe("buildSystemContext", () => {
     it("preserves legacy structured authoring guidance when authoring is not configured", () => {
       const result = buildSystemContext({ platform: "slack" });
 
+      expect(result).toContain("prefer a Canvas-managed trigger only when a Canvas skill/MCP is available");
+      expect(result).not.toContain("use only the admitted schedule, webhook, or Slack channel-message trigger types");
       expect(result).not.toContain("Do not construct or pass automation definition fields");
       expect(result).not.toContain("Never use updateStepContent");
       expect(result).toContain("pass the resolved target ID in ManageScheduledTasks delivery");

@@ -29,6 +29,7 @@ import type {
   OAuthCredentials,
   SyncedItem,
 } from "./types";
+import { toEmailPrincipals } from "./types";
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -399,7 +400,7 @@ export function fileToSyncedItem(
     sourceUpdatedAt: file.modifiedTime ?? null,
     mimeType: file.mimeType,
     accessScope: access.scope,
-    accessEmails: access.emails,
+    accessPrincipals: access.emails ? toEmailPrincipals(access.emails) : access.emails,
     authorEmail: file.owners?.find((owner) => owner.emailAddress)?.emailAddress,
     authorName: file.owners?.find((owner) => owner.emailAddress)?.displayName,
     authorSourceId: file.owners?.find((owner) => owner.emailAddress)?.permissionId,
@@ -782,9 +783,14 @@ async function* syncSharedDrive(
   // Get drive members for scope-level access control (may fail with readonly scope — non-fatal)
   let driveScope: SyncedItem["accessScope"] | undefined;
   try {
-    const memberEmails = await fetchDriveMemberEmails(driveId, accessToken, logger);
-    if (memberEmails.length > 0) {
-      driveScope = { scopeType: "drive", providerScopeId: driveId, label: driveName, memberEmails };
+    const memberValues = await fetchDriveMemberEmails(driveId, accessToken, logger);
+    if (memberValues.length > 0) {
+      driveScope = {
+        scopeType: "drive",
+        providerScopeId: driveId,
+        label: driveName,
+        members: toEmailPrincipals(memberValues),
+      };
     }
   } catch (err) {
     logger.warn(
@@ -792,7 +798,7 @@ async function* syncSharedDrive(
       "Could not fetch drive members (permissions API may require full drive scope) — continuing without access metadata",
     );
   }
-  logger.info({ driveId, driveName, memberCount: driveScope?.memberEmails.length ?? 0 }, "Syncing shared drive");
+  logger.info({ driveId, driveName, memberCount: driveScope?.members.length ?? 0 }, "Syncing shared drive");
 
   // Cache for folder path resolution
   const folderCache = new Map<string, string>();
@@ -853,9 +859,14 @@ async function* syncIncrementalDrive(
   const driveName = driveInfo.name;
   let driveScope: SyncedItem["accessScope"] | undefined;
   try {
-    const memberEmails = await fetchDriveMemberEmails(driveId, accessToken, logger);
-    if (memberEmails.length > 0) {
-      driveScope = { scopeType: "drive", providerScopeId: driveId, label: driveName, memberEmails };
+    const memberValues = await fetchDriveMemberEmails(driveId, accessToken, logger);
+    if (memberValues.length > 0) {
+      driveScope = {
+        scopeType: "drive",
+        providerScopeId: driveId,
+        label: driveName,
+        members: toEmailPrincipals(memberValues),
+      };
     }
   } catch (err) {
     logger.warn({ driveId, err }, "Could not fetch drive members — continuing without access metadata");

@@ -5,6 +5,7 @@ import {
   type AutomationStepContent,
   type WorkflowEdge,
   type WorkflowStep,
+  type WorkflowTriggerConfig,
   automationBuilderSaveRequestSchema,
   stepOutputSchema,
   workflowEdgeSchema,
@@ -33,6 +34,13 @@ export class AutomationValidationError extends Error {
     this.issues = issues;
   }
 }
+
+const DEFAULT_SUPPORTED_TRIGGER_TYPES: readonly WorkflowTriggerConfig["type"][] = [
+  "webhook",
+  "schedule",
+  "canvas",
+  "slack_channel_message",
+];
 
 function parseJson<T>(value: string | null, fallback: T): T {
   if (!value) return fallback;
@@ -251,6 +259,7 @@ function addIssue(issues: BuilderValidationIssue[], code: string, message: strin
 export function validateAutomationBuilderSaveRequest(params: {
   request: AutomationBuilderSaveRequest;
   brokerCapable: boolean;
+  supportedTriggerTypes?: readonly WorkflowTriggerConfig["type"][];
 }): void {
   const { request } = params;
   const issues = validateWorkflowGraph(request.steps, request.edges);
@@ -335,6 +344,12 @@ export function validateAutomationBuilderSaveRequest(params: {
     }
   }
 
+  validateTriggerCapability(
+    request.steps.find((step) => step.type === "trigger"),
+    params.supportedTriggerTypes ?? DEFAULT_SUPPORTED_TRIGGER_TYPES,
+    issues,
+  );
+
   validateTriggerSchedule(
     request,
     request.steps.find((step) => step.type === "trigger"),
@@ -343,6 +358,21 @@ export function validateAutomationBuilderSaveRequest(params: {
   validateScheduleValue(request, issues);
 
   if (issues.length > 0) throw new AutomationValidationError(issues);
+}
+
+function validateTriggerCapability(
+  trigger: WorkflowStep | undefined,
+  supportedTriggerTypes: readonly WorkflowTriggerConfig["type"][],
+  issues: BuilderValidationIssue[],
+): void {
+  const type = trigger?.triggerConfig?.type;
+  if (!type || supportedTriggerTypes.includes(type)) return;
+  addIssue(
+    issues,
+    "UNSUPPORTED_TRIGGER",
+    `Trigger type "${type}" is not supported by the current automation capability set`,
+    `steps.${trigger?.id ?? "trigger"}.triggerConfig.type`,
+  );
 }
 
 export function validateWorkflowGraph(steps: WorkflowStep[], edges: WorkflowEdge[]): BuilderValidationIssue[] {

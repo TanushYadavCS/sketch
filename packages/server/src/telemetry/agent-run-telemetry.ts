@@ -97,6 +97,7 @@ export async function instrumentAgentRun(
   providerCtx: ProviderContext,
   params: RunAgentParams,
   exec: () => Promise<RunAgentResult>,
+  watchdogMs = 900_000,
 ): Promise<RunAgentResult> {
   const runId = randomUUID();
   const span = tracer.startSpan("chat sketch");
@@ -111,6 +112,21 @@ export async function instrumentAgentRun(
     },
     runId,
   );
+  const startedAt = Date.now();
+  const watchdogTimer = setTimeout(() => {
+    params.logger.error(
+      {
+        event: "agent_run_watchdog",
+        runId,
+        workspaceKey: params.workspaceKey,
+        platform: params.platform,
+        contextType: params.contextType ?? "unknown",
+        elapsedMs: Date.now() - startedAt,
+      },
+      "Agent run watchdog fired",
+    );
+  }, watchdogMs);
+  watchdogTimer.unref();
 
   try {
     const result = await exec();
@@ -139,5 +155,7 @@ export async function instrumentAgentRun(
     span.setStatus({ code: SpanStatusCode.ERROR });
     span.end();
     throw err;
+  } finally {
+    clearTimeout(watchdogTimer);
   }
 }

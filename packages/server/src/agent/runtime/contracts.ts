@@ -198,6 +198,8 @@ export interface AgentRuntimeProviderFactoryConfig {
   headers?: Record<string, string>;
   providerOptions?: Record<string, unknown>;
   costTable: AgentRuntimeCostTable;
+  /** Wall-clock deadline applied to each model HTTP request. Unset falls back to the factory default. */
+  modelRequestTimeoutMs?: number;
 }
 
 /** The two roots that can satisfy a realpath containment check for workspace-owned tools. */

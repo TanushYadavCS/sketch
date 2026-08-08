@@ -5,6 +5,7 @@ import type {
   WorkflowDelivery,
   WorkflowEdge,
   WorkflowStep,
+  WorkflowTriggerConfig,
 } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
@@ -97,9 +98,13 @@ class AutomationDeletionRaceError extends Error {
   }
 }
 
-function validatedRequest(request: AutomationBuilderSaveRequest, brokerCapable: boolean): AutomationBuilderSaveRequest {
+function validatedRequest(
+  request: AutomationBuilderSaveRequest,
+  brokerCapable: boolean,
+  supportedTriggerTypes?: readonly WorkflowTriggerConfig["type"][],
+): AutomationBuilderSaveRequest {
   const parsed = parseAutomationBuilderSaveRequest(request);
-  validateAutomationBuilderSaveRequest({ request: parsed, brokerCapable });
+  validateAutomationBuilderSaveRequest({ request: parsed, brokerCapable, supportedTriggerTypes });
   return parsed;
 }
 
@@ -378,6 +383,7 @@ export async function updateAutomationDefinition(params: {
   patch: AutomationDefinitionPatch;
   actor: AutomationEditActor;
   brokerCapable: boolean;
+  supportedTriggerTypes?: readonly WorkflowTriggerConfig["type"][];
   taskConversationAssociation?: AutomationTaskConversationAssociation;
 }): Promise<AutomationMutationResult> {
   return params.db.transaction().execute(async (trx) => {
@@ -405,6 +411,7 @@ export async function updateAutomationDefinition(params: {
     const request = validatedRequest(
       applyDefinitionPatch(currentDefinition, params.patch, expectedRevision),
       params.brokerCapable,
+      params.supportedTriggerTypes,
     );
 
     const updateResult = await trx
@@ -449,9 +456,10 @@ export async function createAutomationDefinition(params: {
   request: AutomationBuilderSaveRequest;
   context: AutomationCreateContext;
   brokerCapable: boolean;
+  supportedTriggerTypes?: readonly WorkflowTriggerConfig["type"][];
   taskConversationAssociation?: AutomationTaskConversationAssociation;
 }): Promise<AutomationCreateResult> {
-  const request = validatedRequest(params.request, params.brokerCapable);
+  const request = validatedRequest(params.request, params.brokerCapable, params.supportedTriggerTypes);
   const id = params.context.id ?? randomUUID();
 
   const row = await params.db.transaction().execute(async (trx) => {
@@ -504,9 +512,10 @@ export async function replaceAutomationDefinition(params: {
   request: AutomationBuilderSaveRequest;
   actor: AutomationEditActor;
   brokerCapable: boolean;
+  supportedTriggerTypes?: readonly WorkflowTriggerConfig["type"][];
   taskConversationAssociation?: AutomationTaskConversationAssociation;
 }): Promise<AutomationReplaceResult> {
-  const request = validatedRequest(params.request, params.brokerCapable);
+  const request = validatedRequest(params.request, params.brokerCapable, params.supportedTriggerTypes);
 
   return params.db.transaction().execute(async (trx) => {
     const current = await trx

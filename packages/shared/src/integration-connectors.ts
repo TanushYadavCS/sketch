@@ -3,6 +3,7 @@ export type PersonalCanvasConnectorType =
   | "google_calendar"
   | "gmail"
   | "outlook"
+  | "outlook_calendar"
   | "teams"
   | "fireflies";
 
@@ -50,6 +51,18 @@ const PERSONAL_CANVAS_CONNECTOR_MAPPING_VALUES: PersonalCanvasConnectorMapping[]
     connectorType: "outlook",
     appSlug: "microsoft-outlook-oauth",
     aliases: ["microsoft-outlook-oauth", "microsoft-outlook", "outlook"],
+    credentialScope: "personal",
+  },
+  {
+    connectorType: "outlook_calendar",
+    appSlug: "microsoft-outlook-calendar-oauth",
+    aliases: [
+      "microsoft-outlook-calendar-oauth",
+      "microsoft-outlook-calendar",
+      "microsoft-calendar-oauth",
+      "outlook_calendar",
+      "outlook-calendar",
+    ],
     credentialScope: "personal",
   },
   {

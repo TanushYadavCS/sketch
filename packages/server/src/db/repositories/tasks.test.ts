@@ -110,7 +110,7 @@ describe("createTaskRepository sqlite", () => {
     const durable = rows.filter((row) => row.title === "Ship Slack capture").sort((a, b) => a.id.localeCompare(b.id));
     const u1Visible = await repo.loadOpenDurableTasksForBrief({
       userId: "brief-u1",
-      userEmails: ["u1@example.com", "alias-u1@example.com"],
+      userPrincipals: ["u1@example.com", "alias-u1@example.com"],
     });
     const u1Listed = await repo.listTasksByParent("project-x", {
       viewer: { email: "u1@example.com", isAdmin: false },
@@ -988,7 +988,7 @@ describe("createTaskRepository sqlite", () => {
       .execute();
     const personal = await repo.loadOpenDurableTasksForBrief({
       userId: "summary-u1",
-      userEmails: ["summary@example.com"],
+      userPrincipals: ["summary@example.com"],
       activeSummarySourceKeys: ["route:inactive"],
       activeSummaryConversationIds: [],
     });
@@ -1270,7 +1270,7 @@ describe("createTaskRepository sqlite", () => {
 
     const durable = await repo.loadOpenDurableTasksForBrief({
       userId: "summary-u1",
-      userEmails: ["summary@example.com"],
+      userPrincipals: ["summary@example.com"],
     });
     const updated = await repo.updateLocalTaskStatus({ taskId: local.taskId, userId: "summary-u1", status: "done" });
     const otherUserUpdate = await repo.updateLocalTaskStatus({

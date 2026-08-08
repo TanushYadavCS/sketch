@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
+import { withActiveRun } from "../agent/active-runs";
 import { runAgentRuntimeCore } from "../agent/runtime/core";
 import { DEFAULT_AGENT_RUNTIME_COST_TABLE } from "../agent/runtime/pricing";
 import { executeAutomation, testAutomationStep } from "./runtime";
@@ -193,7 +194,153 @@ function makeStepContent(rows: Array<{ stepId: string; content: string }>) {
   };
 }
 
+describe("executeAutomation stopped Sketch agent steps", () => {
+  it.each([
+    {
+      outcome: "returned an aborted result",
+      runAgent: vi.fn().mockResolvedValue({
+        pendingUploads: [],
+        trace: { finalText: "partial output" },
+        rawUsage: { stopReason: "aborted", toolCalls: [] },
+      }),
+    },
+    {
+      outcome: "threw after its abort controller fired",
+      runAgent: vi.fn().mockImplementation(async (agentParams) => {
+        agentParams.abortController?.abort();
+        throw new Error("Claude SDK aborted");
+      }),
+    },
+  ])("stops later steps when the Sketch agent $outcome on both runtimes", async ({ runAgent }) => {
+    const logger = { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const params = makeParams({
+      logger,
+      runAgent,
+      propagateParentAbort: true,
+      parentAbortSignal: new AbortController().signal,
+      task: makeActionTask([
+        {
+          id: "agent1",
+          type: "agent",
+          label: "Research",
+          icon: "sketch-ai",
+          position: { x: 0, y: 100 },
+          agentMode: "sketch",
+        },
+        { id: "later", type: "action", label: "Send ticket", icon: "code", position: { x: 0, y: 200 } },
+      ]),
+      stepContentRepo: makeStepContent([
+        { stepId: "agent1", content: "Research the issue." },
+        { stepId: "later", content: "return { sent: true };" },
+      ]),
+    });
+
+    for (const runtime of ["sdk", "aisdk"] as const) {
+      params.config.AGENT_RUNTIME = runtime;
+      const result = await executeAutomation(params as never);
+
+      expect(result.status).toBe("failed");
+      expect(result.stepOutputs.agent1?.status).toBe("failed");
+      expect(result.stepOutputs.later?.status).toBe("skipped");
+      expect(params.sendMessage).not.toHaveBeenCalled();
+      expect(params._runsRepo.update).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          status: "failed",
+          errorMessage: expect.stringContaining("aborted"),
+          completedAt: expect.any(String),
+        }),
+      );
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ stepId: "agent1" }),
+        "Automation: execution stopped by user",
+      );
+      expect(logger.error).not.toHaveBeenCalled();
+    }
+  });
+});
+
 describe("executeAutomation agent steps", () => {
+  it("links an interactive workflow child to its Slack parent without sharing its controller", async () => {
+    const parentController = new AbortController();
+    let childController: AbortController | undefined;
+    const runAgent = vi.fn().mockImplementation(async (params) => {
+      childController = params.abortController;
+      return {
+        pendingUploads: [],
+        trace: { finalText: "sketch result" },
+        rawUsage: { toolCalls: [] },
+      };
+    });
+    const params = makeParams({
+      runAgent,
+      propagateParentAbort: true,
+      parentAbortSignal: parentController.signal,
+    });
+
+    await withActiveRun("workflow-parent", parentController, () => executeAutomation(params as never), {
+      platform: "slack",
+      channelId: "D123",
+      threadTs: null,
+    });
+
+    expect(childController).toBeInstanceOf(AbortController);
+    expect(childController).not.toBe(parentController);
+    parentController.abort();
+    expect(childController?.signal.aborted).toBe(true);
+  });
+
+  /**
+   * "Run my automation now" from a thread is reentrant under that run, but the automation's own
+   * delivery target is configured at creation time and often points elsewhere. Linking must follow
+   * causation, or a user could start work from a thread and then be unable to stop it.
+   */
+  it("links a child whose automation delivers somewhere other than the triggering thread", async () => {
+    const parentController = new AbortController();
+    let childController: AbortController | undefined;
+    const runAgent = vi.fn().mockImplementation(async (params) => {
+      childController = params.abortController;
+      return {
+        pendingUploads: [],
+        trace: { finalText: "sketch result" },
+        rawUsage: { toolCalls: [] },
+      };
+    });
+    const params = makeParams({
+      runAgent,
+      propagateParentAbort: true,
+      parentAbortSignal: parentController.signal,
+    });
+
+    await withActiveRun("workflow-parent", parentController, () => executeAutomation(params as never), {
+      platform: "slack",
+      channelId: "C_SOMEWHERE_ELSE",
+      threadTs: "9999.0000",
+    });
+
+    expect(childController).toBeInstanceOf(AbortController);
+    parentController.abort();
+    expect(childController?.signal.aborted).toBe(true);
+  });
+
+  it("does not link scheduled workflow execution to an interactive parent", async () => {
+    const parentController = new AbortController();
+    const runAgent = vi.fn().mockResolvedValue({
+      pendingUploads: [],
+      trace: { finalText: "sketch result" },
+      rawUsage: { toolCalls: [] },
+    });
+    const params = makeParams({ runAgent, propagateParentAbort: false });
+
+    await withActiveRun("scheduled-parent", parentController, () => executeAutomation(params as never), {
+      platform: "slack",
+      channelId: "D123",
+      threadTs: null,
+    });
+
+    expect(runAgent.mock.calls[0]?.[0].abortController).toBeUndefined();
+  });
+
   it("defaults scheduled agent steps without an explicit mode to the Sketch runtime", async () => {
     const runAgent = vi.fn().mockResolvedValue({
       pendingUploads: [],

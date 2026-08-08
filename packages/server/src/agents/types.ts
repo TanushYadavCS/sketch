@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import type { Selectable } from "kysely";
 import type { Config } from "../config";
+import type { AccessPrincipalInput } from "../connectors/types";
 import type {
   AgentDeliveryConfig,
   AgentKnowledgeRefs,
@@ -98,7 +99,8 @@ export interface AgentRuntimeContextParams {
   timezone: string;
   now: Date;
   adminCanReadAllFiles: boolean;
-  contentUserEmails: string[] | undefined;
+  contentUserPrincipals: AccessPrincipalInput[] | undefined;
+  slackEntitySyncEnabled?: boolean;
   agentConfig?: {
     enabledSections: Record<string, boolean>;
     maxItemsPerSection: number;

@@ -79,6 +79,7 @@ const CANVAS_CONNECTOR_TYPE_VALUES = [
   "google_calendar",
   "gmail",
   "outlook",
+  "outlook_calendar",
   "teams",
   "fireflies",
   "clickup",
@@ -93,6 +94,7 @@ export const CANVAS_OAUTH_CONNECTOR_TYPES = [
   "google_calendar",
   "gmail",
   "outlook",
+  "outlook_calendar",
   "teams",
 ] as const satisfies readonly ConnectorType[];
 

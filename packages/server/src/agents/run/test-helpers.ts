@@ -263,7 +263,10 @@ async function seedIndexedFile(
     .execute();
 
   if (params.restrictedTo) {
-    await db.insertInto("file_access").values({ indexed_file_id: params.id, email: params.restrictedTo }).execute();
+    await db
+      .insertInto("file_access")
+      .values({ indexed_file_id: params.id, principal_type: "email", principal_value: params.restrictedTo })
+      .execute();
   }
 }
 

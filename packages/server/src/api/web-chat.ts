@@ -14,14 +14,23 @@ import {
 } from "@sketch/shared";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
+import {
+  builderWebChatRunKey,
+  interruptActiveBuilderWebChatRun,
+  interruptActiveWebChatRun,
+  webChatRunKey,
+  withActiveBuilderWebChatRun,
+  withActiveWebChatRun,
+} from "../agent/active-runs";
 import { buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } from "../agent/runner";
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
 import {
+  type AutomationTaskConversationLockSummary,
+  BUILDER_CHAT_LOCK_RENEWAL_INTERVAL_MS,
   createAutomationTaskConversationService,
-  touchActiveAutomationTaskConversationAssociations,
 } from "../automation/task-conversations";
 import { TOOL_PROGRESS_OPTIONS, type ToolProgressCommand } from "../commands";
 import type { Config } from "../config";
@@ -325,6 +334,8 @@ type AutomationBuilderConversationAccess =
   | { kind: "active" }
   | { kind: "not_found" }
   | { kind: "archived" }
+  | { kind: "locked"; lock: AutomationTaskConversationLockSummary }
+  | { kind: "unavailable" }
   | { kind: "error" };
 
 async function resolveAutomationBuilderConversationAccess(params: {
@@ -335,46 +346,15 @@ async function resolveAutomationBuilderConversationAccess(params: {
   logger: Logger;
 }): Promise<AutomationBuilderConversationAccess> {
   try {
-    return await params.deps.db.transaction().execute(async (trx) => {
-      const conversationService = createAutomationTaskConversationService(trx);
-      const existing = await conversationService.getForTranscriptUser(
-        params.taskId,
-        params.conversationId,
-        params.transcriptUserId,
-        { includeArchived: true },
-      );
-      if (!existing) return { kind: "not_found" as const };
-
-      const active = await conversationService.getForTranscriptUser(
-        params.taskId,
-        params.conversationId,
-        params.transcriptUserId,
-      );
-      if (!active) return { kind: "archived" as const };
-
-      const touchedRows = await touchActiveAutomationTaskConversationAssociations(trx, {
-        taskId: params.taskId,
-        conversationId: params.conversationId,
-        transcriptUserId: params.transcriptUserId,
-      });
-      if (touchedRows === 0) {
-        const latest = await conversationService.getForTranscriptUser(
-          params.taskId,
-          params.conversationId,
-          params.transcriptUserId,
-          { includeArchived: true },
-        );
-        if (!latest) return { kind: "not_found" as const };
-        const latestActive = await conversationService.getForTranscriptUser(
-          params.taskId,
-          params.conversationId,
-          params.transcriptUserId,
-        );
-        if (!latestActive) return { kind: "archived" as const };
-        return { kind: "error" as const };
-      }
-      return { kind: "active" as const };
-    });
+    const access = await createAutomationTaskConversationService(params.deps.db).acquireBuilderConversationLock(
+      params.taskId,
+      params.conversationId,
+      params.transcriptUserId,
+    );
+    if (access.kind === "locked") return access;
+    if (access.kind === "active") return { kind: "active" as const };
+    if (access.kind === "not_found" || access.kind === "archived") return access;
+    return { kind: "error" as const };
   } catch (err) {
     params.logger.warn(
       {
@@ -774,11 +754,6 @@ const DEFAULT_WEB_CHAT_CONVERSATION_ID = "default";
 const WEB_CHAT_CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
 const webChatTranscriptLocks = new Map<string, Promise<void>>();
 const webChatAgentRunLocks = new Map<string, Promise<void>>();
-const activeWebChatRuns = new Map<string, AbortController>();
-
-function webChatRunKey(userId: string, conversationId: string): string {
-  return `${userId}:${conversationId}`;
-}
 
 function normalizeWebChatConversationId(value: string | null | undefined): string | null {
   const id = (value ?? DEFAULT_WEB_CHAT_CONVERSATION_ID).trim();
@@ -806,8 +781,7 @@ async function withWebChatTranscriptLock<T>(userId: string, conversationId: stri
   }
 }
 
-async function withWebChatAgentRunLock<T>(userId: string, conversationId: string, fn: () => Promise<T>): Promise<T> {
-  const key = webChatRunKey(userId, conversationId);
+async function withWebChatAgentRunLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const previous = webChatAgentRunLocks.get(key) ?? Promise.resolve();
   let release: () => void = () => {};
   const current = new Promise<void>((resolveLock) => {
@@ -825,30 +799,6 @@ async function withWebChatAgentRunLock<T>(userId: string, conversationId: string
       webChatAgentRunLocks.delete(key);
     }
   }
-}
-
-async function withActiveWebChatRun<T>(
-  userId: string,
-  conversationId: string,
-  abortController: AbortController,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const key = webChatRunKey(userId, conversationId);
-  activeWebChatRuns.set(key, abortController);
-  try {
-    return await fn();
-  } finally {
-    if (activeWebChatRuns.get(key) === abortController) {
-      activeWebChatRuns.delete(key);
-    }
-  }
-}
-
-function interruptActiveWebChatRun(userId: string, conversationId: string): boolean {
-  const activeRun = activeWebChatRuns.get(webChatRunKey(userId, conversationId));
-  if (!activeRun || activeRun.signal.aborted) return false;
-  activeRun.abort();
-  return true;
 }
 
 function webChatTranscriptDir(config: Config, userId: string): string {
@@ -1505,7 +1455,63 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       return c.json(badRequest("VALIDATION_ERROR", "Conversation id is invalid"), 400);
     }
 
-    const interruptedActiveRun = interruptActiveWebChatRun(currentUser.id, conversationId);
+    const automationTaskId = extractAutomationTaskId({ automationTaskId: c.req.query("automationTaskId") });
+    let builderInterruption = false;
+    let builderConversationRequest = false;
+    if (automationTaskId && deps.scheduler?.getTaskById) {
+      const task = await deps.scheduler.getTaskById(automationTaskId).catch((err) => {
+        deps.logger.warn({ err, taskId: automationTaskId }, "Failed to resolve builder interruption task");
+        return null;
+      });
+      const accessibleTask = resolveScheduledTaskAccess(task, task?.createdBy, {
+        userId: currentUser.id,
+        role: c.get("role"),
+      });
+      if (!accessibleTask) {
+        return c.json(badRequest("AUTOMATION_NOT_FOUND", "Automation not found"), 404);
+      }
+
+      const conversationAccess = await createAutomationTaskConversationService(deps.db)
+        .acquireBuilderConversationLock(accessibleTask.id, conversationId, currentUser.id)
+        .catch((err) => {
+          deps.logger.warn(
+            { err, taskId: accessibleTask.id, conversationId, userId: currentUser.id },
+            "Failed to resolve builder interruption conversation",
+          );
+          return { kind: "unavailable" as const };
+        });
+      if (conversationAccess.kind === "not_found") {
+        return c.json(badRequest("CONVERSATION_NOT_FOUND", "Conversation is not associated with this task"), 404);
+      }
+      if (conversationAccess.kind === "archived") {
+        return c.json(
+          badRequest("CONVERSATION_ARCHIVED", "Conversation is archived; restore it before selecting"),
+          409,
+        );
+      }
+      if (conversationAccess.kind === "locked") {
+        return c.json(
+          {
+            error: {
+              code: "BUILDER_CHAT_LOCKED",
+              message: "This automation's builder chat is in use by another session",
+              builderLock: conversationAccess.lock,
+            },
+          },
+          409,
+        );
+      }
+      if (conversationAccess.kind === "unavailable") {
+        return c.json(badRequest("CONVERSATION_UNAVAILABLE", "Conversation is temporarily unavailable"), 503);
+      }
+
+      builderConversationRequest = true;
+      builderInterruption = interruptActiveBuilderWebChatRun(accessibleTask.id);
+    }
+
+    const interruptedActiveRun = builderConversationRequest
+      ? builderInterruption
+      : interruptActiveWebChatRun(currentUser.id, conversationId);
     if (interruptedActiveRun) {
       return c.json({ success: true, interrupted: true });
     }
@@ -1752,6 +1758,18 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           409,
         );
       }
+      if (conversationAccess.kind === "locked") {
+        return c.json(
+          {
+            error: {
+              code: "BUILDER_CHAT_LOCKED",
+              message: "This automation's builder chat is in use by another session",
+              builderLock: conversationAccess.lock,
+            },
+          },
+          409,
+        );
+      }
       if (conversationAccess.kind === "error") {
         return c.json(badRequest("CONVERSATION_UNAVAILABLE", "Conversation is temporarily unavailable"), 503);
       }
@@ -1894,80 +1912,103 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       };
 
       try {
-        const result = await withWebChatAgentRunLock(currentUser.id, conversationId, () =>
-          withActiveWebChatRun(currentUser.id, conversationId, abortController, () =>
-            deps.runAgent({
-              db: deps.db,
-              workspaceKey: currentUser.id,
-              threadTs: conversationId,
-              userMessage,
-              workspaceDir,
-              claudeConfigDir: deps.config.CLAUDE_CONFIG_DIR,
-              userName: currentUser.name,
-              userEmail: currentUser.email,
-              userPhone: currentUser.whatsapp_number,
-              logger: deps.logger,
-              getSlack: deps.getSlack,
-              platform: deliveryPlatform,
-              responseSurface: "web",
-              contextType: "dm",
-              onProgressEvent: async (event) => {
-                if (shouldBufferWebChatTextAfterProgress(event)) bufferTextDeltas = true;
-                if (event.kind === "tool_use" && event.toolName === "ManageScheduledTasks") {
-                  sawAutomationTool = true;
-                  closeTextPart();
-                }
-                progressRenderer.renderEvent(event);
-                const lines = progressRenderer.getLines();
-                const progressData = createWebProgressData(event, progressSettings, progressMode, lines);
-                if (progressMode === "off" && wroteOffProgress) return;
-                if (progressData) {
-                  if (progressMode === "off") wroteOffProgress = true;
-                  closeTextPart();
-                  await updateWebChatProgressMessage(
-                    deps.config,
-                    workspaceDir,
-                    currentUser.id,
-                    deps.logger,
-                    conversationId,
-                    progressMessageId,
-                    progressData,
-                  );
-                  const progressPartId = `progress-${progressPartIndex}`;
-                  progressPartIndex += 1;
-                  write({ type: "data-progress", id: progressPartId, data: progressData });
-                }
-              },
-              onTextDelta: async (delta) => {
-                if (sawAutomationTool) {
-                  bufferedTextAfterAutomationTool += delta;
-                  return;
-                }
-                writeOrBufferTextDelta(delta);
-              },
-              onSessionId: async () => {},
-              abortController,
-              sessionMode: "chat",
-              persistSession: true,
-              orgName: settingsRow?.org_name,
-              botName: settingsRow?.bot_name,
-              integrationMcpServers,
-              loadIntegrationProvider: deps.loadIntegrationProvider,
-              scheduler: deps.scheduler,
-              stepContentRepo: deps.stepContentRepo,
-              automationRunsRepo: deps.automationRunsRepo,
-              queueManager: deps.queueManager,
-              toolConfig,
-              inboxMessagesRepo: deps.inboxMessagesRepo,
-              userRepo: deps.users,
-              currentUserId: currentUser.id,
-              sendDm: deps.sendDm,
-              ...(attachments.length > 0 ? { attachments } : {}),
-              ...(taskContext ? { taskContext } : {}),
-              ...(taskContext?.currentAutomation ? { currentAutomation: taskContext.currentAutomation } : {}),
-            }),
-          ),
-        );
+        const activeBuilderTaskId = automationBuilderContext?.task.id;
+        const runKey = activeBuilderTaskId
+          ? builderWebChatRunKey(activeBuilderTaskId)
+          : webChatRunKey(currentUser.id, conversationId);
+        const runAgent = () =>
+          deps.runAgent({
+            db: deps.db,
+            workspaceKey: currentUser.id,
+            threadTs: conversationId,
+            userMessage,
+            workspaceDir,
+            claudeConfigDir: deps.config.CLAUDE_CONFIG_DIR,
+            userName: currentUser.name,
+            userEmail: currentUser.email,
+            userPhone: currentUser.whatsapp_number,
+            logger: deps.logger,
+            getSlack: deps.getSlack,
+            platform: deliveryPlatform,
+            responseSurface: "web",
+            contextType: "dm",
+            onProgressEvent: async (event) => {
+              if (shouldBufferWebChatTextAfterProgress(event)) bufferTextDeltas = true;
+              if (event.kind === "tool_use" && event.toolName === "ManageScheduledTasks") {
+                sawAutomationTool = true;
+                closeTextPart();
+              }
+              progressRenderer.renderEvent(event);
+              const lines = progressRenderer.getLines();
+              const progressData = createWebProgressData(event, progressSettings, progressMode, lines);
+              if (progressMode === "off" && wroteOffProgress) return;
+              if (progressData) {
+                if (progressMode === "off") wroteOffProgress = true;
+                closeTextPart();
+                await updateWebChatProgressMessage(
+                  deps.config,
+                  workspaceDir,
+                  currentUser.id,
+                  deps.logger,
+                  conversationId,
+                  progressMessageId,
+                  progressData,
+                );
+                const progressPartId = `progress-${progressPartIndex}`;
+                progressPartIndex += 1;
+                write({ type: "data-progress", id: progressPartId, data: progressData });
+              }
+            },
+            onTextDelta: async (delta) => {
+              if (sawAutomationTool) {
+                bufferedTextAfterAutomationTool += delta;
+                return;
+              }
+              writeOrBufferTextDelta(delta);
+            },
+            onSessionId: async () => {},
+            abortController,
+            sessionMode: "chat",
+            persistSession: true,
+            orgName: settingsRow?.org_name,
+            botName: settingsRow?.bot_name,
+            integrationMcpServers,
+            loadIntegrationProvider: deps.loadIntegrationProvider,
+            scheduler: deps.scheduler,
+            stepContentRepo: deps.stepContentRepo,
+            automationRunsRepo: deps.automationRunsRepo,
+            queueManager: deps.queueManager,
+            toolConfig,
+            inboxMessagesRepo: deps.inboxMessagesRepo,
+            userRepo: deps.users,
+            currentUserId: currentUser.id,
+            sendDm: deps.sendDm,
+            ...(attachments.length > 0 ? { attachments } : {}),
+            ...(taskContext ? { taskContext } : {}),
+            ...(taskContext?.currentAutomation ? { currentAutomation: taskContext.currentAutomation } : {}),
+          });
+        let leaseRenewalTimer: ReturnType<typeof setInterval> | undefined;
+        if (activeBuilderTaskId) {
+          leaseRenewalTimer = setInterval(() => {
+            void createAutomationTaskConversationService(deps.db)
+              .acquireBuilderConversationLock(activeBuilderTaskId, conversationId, currentUser.id)
+              .then((access) => {
+                if (access.kind !== "active") abortController.abort();
+              })
+              .catch(() => abortController.abort());
+          }, BUILDER_CHAT_LOCK_RENEWAL_INTERVAL_MS);
+        }
+
+        let result: RunAgentResult;
+        try {
+          result = await withWebChatAgentRunLock(runKey, () =>
+            activeBuilderTaskId
+              ? withActiveBuilderWebChatRun(activeBuilderTaskId, abortController, runAgent)
+              : withActiveWebChatRun(currentUser.id, conversationId, abortController, runAgent),
+          );
+        } finally {
+          if (leaseRenewalTimer) clearInterval(leaseRenewalTimer);
+        }
 
         const fileParts: Array<{ id: string; data: WebChatFile }> = [];
         for (const [index, filePath] of result.pendingUploads.entries()) {

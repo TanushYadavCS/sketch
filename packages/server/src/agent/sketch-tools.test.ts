@@ -28,6 +28,7 @@ function makeUser(overrides: Partial<Selectable<UsersTable>> = {}): Selectable<U
     auth_role: "member",
     slack_user_id: "S001",
     whatsapp_number: null,
+    whatsapp_lid: null,
     description: "Product manager",
     type: "human",
     role: null,

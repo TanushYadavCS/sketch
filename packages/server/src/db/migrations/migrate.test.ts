@@ -24,8 +24,11 @@ import * as m120 from "./120-agent-output-period-key";
 import * as chatSessionRuntimeMigration from "./133-chat-session-runtime";
 import * as chatSessionArchiveMigration from "./134-chat-session-archived-at";
 import * as combinedDurabilityReseedMigration from "./152-reseed-combined-durability-routes";
+import * as slackEntityLifecycleMigration from "./160-slack-entity-lifecycle-sync";
+import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
+import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calendar-provider-file-scope";
 
-const EXPECTED_MIGRATION_COUNT = 155;
+const EXPECTED_MIGRATION_COUNT = 162;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -224,6 +227,13 @@ describe("runMigrations — full sequence", () => {
     expect(names[152]).toBe("157-task-activity-events");
     expect(names[153]).toBe("158-slack-channel-participants");
     expect(names[154]).toBe("159-scheduled-task-conversations");
+    expect(names[155]).toBe("160-slack-entity-lifecycle-sync");
+    expect(names[156]).toBe("161-slack-roster-evidence");
+    expect(names[157]).toBe("162-user-entity-links");
+    expect(names[158]).toBe("163-slack-file-access-backfill-cleanup");
+    expect(names[159]).toBe("164-outlook-calendar-provider-file-scope");
+    expect(names[160]).toBe("165-typed-access-principals");
+    expect(names[161]).toBe("166-scheduled-task-builder-locks");
   });
 
   it("backfills only exact web origin task conversations", async () => {
@@ -278,6 +288,367 @@ describe("runMigrations — full sequence", () => {
         kind: "web_chat",
       },
     ]);
+  });
+
+  it("migration 164 down restores Google Calendar and Teams scoped provider indexes", async () => {
+    await runMigrations(db, { quiet: true });
+
+    await outlookCalendarProviderFileScopeMigration.down(db as unknown as Kysely<unknown>);
+
+    const indexes = await sql<{ name: string; sql: string }>`
+      SELECT name, sql
+      FROM sqlite_master
+      WHERE type = 'index'
+        AND name IN ('idx_indexed_files_source_provider', 'uq_indexed_files_scoped_provider')
+      ORDER BY name ASC
+    `.execute(db);
+
+    expect(indexes.rows).toEqual([
+      {
+        name: "idx_indexed_files_source_provider",
+        sql: expect.stringContaining("source NOT IN ('teams', 'google_calendar')"),
+      },
+      {
+        name: "uq_indexed_files_scoped_provider",
+        sql: expect.stringContaining("source IN ('teams', 'google_calendar')"),
+      },
+    ]);
+  });
+
+  it("creates the Slack entity lifecycle schema and allows source-scoped review rows", async () => {
+    await runMigrations(db, { quiet: true });
+
+    const tables = await sql<{ name: string }>`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table'
+        AND name IN ('organization_domains', 'scheduled_task_builder_locks', 'slack_user_sync_state', 'slack_sync_runs')
+      ORDER BY name
+    `.execute(db);
+    expect(tables.rows.map((row) => row.name)).toEqual([
+      "organization_domains",
+      "scheduled_task_builder_locks",
+      "slack_sync_runs",
+      "slack_user_sync_state",
+    ]);
+
+    const columns = await sql<{ name: string }>`
+      SELECT name FROM pragma_table_info('entity_review_queue')
+      WHERE name = 'candidate_entity_ids'
+    `.execute(db);
+    expect(columns.rows).toEqual([{ name: "candidate_entity_ids" }]);
+
+    const index = await sql<{ name: string; sql: string }>`
+      SELECT name, sql FROM sqlite_master
+      WHERE type = 'index' AND name = 'entity_review_queue_normalized_partial_unique'
+    `.execute(db);
+    expect(index.rows).toHaveLength(1);
+    expect(index.rows[0]?.sql).toContain("WHERE source IS NULL");
+
+    const queueRow = {
+      id: "review-source-a",
+      proposed_name: "Same Name",
+      normalized_name: "same name",
+      entity_type: "person",
+      source: "slack_user",
+      source_id: "T123:U1",
+      proposed_email: null,
+      candidate_entity_id: null,
+      candidate_entity_ids: null,
+      candidate_score: null,
+      candidate_reason: "exact-name-match",
+      candidate_generated_at: null,
+      triggered_by_user_id: "admin",
+    };
+    await db.insertInto("entity_review_queue").values(queueRow).execute();
+    await db
+      .insertInto("entity_review_queue")
+      .values({ ...queueRow, id: "review-source-b", source_id: "T123:U2" })
+      .execute();
+    await expect(
+      db.selectFrom("entity_review_queue").select("id").where("normalized_name", "=", "same name").execute(),
+    ).resolves.toHaveLength(2);
+  });
+
+  it("upgrades schema 158 with existing rows through the roster evidence migration", async () => {
+    const legacyDb = createBlankDb();
+    try {
+      const migrationResult = await createMigrator(legacyDb).migrateTo("158-slack-channel-participants");
+      expect(migrationResult.error).toBeUndefined();
+      await legacyDb
+        .insertInto("slack_channel_participants")
+        .values({ channel_id: "C-existing", slack_user_id: "U-existing", last_seen_at: "2026-08-07T00:00:00.000Z" })
+        .execute();
+
+      await runMigrations(legacyDb, { quiet: true });
+      await slackRosterEvidenceMigration.up(legacyDb as unknown as Kysely<unknown>);
+
+      const tables = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
+        ORDER BY name
+      `.execute(legacyDb);
+      expect(tables.rows.map((row) => row.name)).toEqual([
+        "organization_domains",
+        "slack_sync_runs",
+        "slack_user_sync_state",
+      ]);
+
+      const stateColumns = await sql<{ name: string }>`
+        SELECT name FROM pragma_table_info('slack_user_sync_state')
+      `.execute(legacyDb);
+      expect(stateColumns.rows.map((row) => row.name)).toEqual(
+        expect.arrayContaining(["team_id", "slack_user_id", "entity_created_by_sync", "last_roster_seen_at"]),
+      );
+      const settingsColumns = await sql<{ name: string }>`
+        SELECT name FROM pragma_table_info('settings') WHERE name = 'slack_team_id'
+      `.execute(legacyDb);
+      expect(settingsColumns.rows).toEqual([{ name: "slack_team_id" }]);
+
+      const indexes = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'index'
+          AND name IN ('idx_slack_user_sync_state_entity', 'idx_slack_sync_runs_status_heartbeat')
+        ORDER BY name
+      `.execute(legacyDb);
+      expect(indexes.rows.map((row) => row.name)).toEqual([
+        "idx_slack_sync_runs_status_heartbeat",
+        "idx_slack_user_sync_state_entity",
+      ]);
+
+      const definitions = await sql<{ name: string; sql: string }>`
+        SELECT name, sql FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN ('organization_domains', 'slack_user_sync_state', 'slack_sync_runs')
+      `.execute(legacyDb);
+      expect(definitions.rows.find((row) => row.name === "slack_user_sync_state")?.sql).toContain("primary key");
+      expect(definitions.rows.find((row) => row.name === "organization_domains")?.sql).toContain(
+        'constraint "organization_domains_domain_unique"',
+      );
+      expect(definitions.rows.find((row) => row.name === "slack_sync_runs")?.sql).toContain(
+        'constraint "slack_sync_runs_team_trigger_unique"',
+      );
+      await expect(
+        legacyDb.selectFrom("slack_channel_participants").select(["channel_id", "slack_user_id"]).execute(),
+      ).resolves.toEqual([{ channel_id: "C-existing", slack_user_id: "U-existing" }]);
+    } finally {
+      await legacyDb.destroy();
+    }
+  });
+
+  it("upgrades schema 161 with existing rows through the user entity link migration", async () => {
+    const legacyDb = createBlankDb();
+    try {
+      const migrationResult = await createMigrator(legacyDb).migrateTo("161-slack-roster-evidence");
+      expect(migrationResult.error).toBeUndefined();
+      await legacyDb.insertInto("users").values({ id: "migration-user", name: "Migration User" }).execute();
+      const now = "2026-08-07T00:00:00.000Z";
+      await legacyDb
+        .insertInto("entities")
+        .values([
+          {
+            id: "migration-entity",
+            name: "Migration User",
+            source_type: "person",
+            status: "confirmed",
+            hotness: 0,
+            created_at: now,
+            updated_at: now,
+          },
+          {
+            id: "migration-entity-2",
+            name: "Migration User 2",
+            source_type: "person",
+            status: "confirmed",
+            hotness: 0,
+            created_at: now,
+            updated_at: now,
+          },
+        ])
+        .execute();
+      await legacyDb
+        .insertInto("entity_review_queue")
+        .values({
+          id: "migration-review",
+          proposed_name: "Migration User",
+          normalized_name: "migration user",
+          entity_type: "person",
+          triggered_by_user_id: "migration-user",
+        })
+        .execute();
+
+      await runMigrations(legacyDb, { quiet: true });
+
+      const tables = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN ('user_entity_links', 'user_entity_link_sweep_runs')
+        ORDER BY name
+      `.execute(legacyDb);
+      expect(tables.rows.map((row) => row.name)).toEqual(["user_entity_link_sweep_runs", "user_entity_links"]);
+      const reviewColumns = await sql<{ name: string }>`
+        SELECT name FROM pragma_table_info('entity_review_queue') WHERE name = 'candidate_user_ids'
+      `.execute(legacyDb);
+      expect(reviewColumns.rows).toEqual([{ name: "candidate_user_ids" }]);
+      const indexes = await sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'index' AND name = 'idx_entity_review_queue_source_source_id'
+      `.execute(legacyDb);
+      expect(indexes.rows).toEqual([{ name: "idx_entity_review_queue_source_source_id" }]);
+      const definitions = await sql<{ name: string; sql: string }>`
+        SELECT name, sql FROM sqlite_master
+        WHERE type = 'table' AND name IN ('user_entity_links', 'user_entity_link_sweep_runs')
+      `.execute(legacyDb);
+      expect(definitions.rows.find((row) => row.name === "user_entity_links")?.sql).toContain(
+        'constraint "user_entity_links_user_unique"',
+      );
+      expect(definitions.rows.find((row) => row.name === "user_entity_links")?.sql).toContain(
+        'constraint "user_entity_links_entity_unique"',
+      );
+      expect(definitions.rows.find((row) => row.name === "user_entity_link_sweep_runs")?.sql).toContain(
+        'constraint "user_entity_link_sweep_runs_key_unique"',
+      );
+      await expect(
+        legacyDb.selectFrom("entity_review_queue").select("id").where("id", "=", "migration-review").execute(),
+      ).resolves.toEqual([{ id: "migration-review" }]);
+      await legacyDb
+        .insertInto("user_entity_links")
+        .values({
+          id: "migration-link",
+          user_id: "migration-user",
+          entity_id: "migration-entity",
+          matched_via: "email",
+        })
+        .execute();
+      await expect(
+        legacyDb
+          .insertInto("user_entity_links")
+          .values({
+            id: "migration-link-2",
+            user_id: "migration-user",
+            entity_id: "migration-entity-2",
+            matched_via: "phone",
+          })
+          .execute(),
+      ).rejects.toThrow();
+    } finally {
+      await legacyDb.destroy();
+    }
+  });
+
+  it("preserves review queue, evidence, and domain candidates across the SQLite rebuild", async () => {
+    const legacyDb = createBlankDb();
+    try {
+      const migrationResult = await createMigrator(legacyDb).migrateTo("158-slack-channel-participants");
+      expect(migrationResult.error).toBeUndefined();
+      await legacyDb
+        .insertInto("connector_configs")
+        .values({
+          id: "migration-connector",
+          connector_type: "slack",
+          auth_type: "system",
+          credentials: "{}",
+          created_by: "migration-owner",
+        })
+        .execute();
+      await legacyDb
+        .insertInto("indexed_files")
+        .values({
+          id: "migration-file",
+          connector_config_id: "migration-connector",
+          provider_file_id: "migration-provider-file",
+          provider_url: null,
+          file_name: "migration-file.txt",
+          file_type: "document",
+          content_category: "document",
+          content: "review evidence",
+          summary: null,
+          source: "slack",
+          source_path: null,
+          content_hash: null,
+          synced_at: "2026-08-05T00:00:00.000Z",
+        })
+        .execute();
+      await legacyDb
+        .insertInto("entity_review_queue")
+        .values({
+          id: "migration-review",
+          proposed_name: "Migration Review",
+          normalized_name: "migration review",
+          entity_type: "person",
+          source: null,
+          source_id: null,
+          proposed_email: null,
+          candidate_entity_id: null,
+          candidate_score: null,
+          candidate_reason: "migration-fixture",
+          candidate_generated_at: null,
+          triggered_by_user_id: "migration-owner",
+        })
+        .execute();
+      await legacyDb
+        .insertInto("entity_review_evidence")
+        .values({
+          id: "migration-evidence",
+          review_id: "migration-review",
+          indexed_file_id: "migration-file",
+          source: "slack",
+          note: "preserve me",
+        })
+        .execute();
+      await legacyDb
+        .insertInto("entity_candidates")
+        .values({
+          id: "migration-domain-candidate",
+          name: "migration.example.com",
+          type: "domain_observation",
+          variations: null,
+          first_seen_file_id: "migration-file",
+          seen_file_ids: JSON.stringify(["migration-file"]),
+          seen_count: 1,
+          promoted_entity_id: null,
+          created_at: "2026-08-05T00:00:00.000Z",
+          updated_at: "2026-08-05T00:00:00.000Z",
+          domain: "migration.example.com",
+          proposed_company_name: null,
+          first_observed_by_user_id: null,
+          observed_person_entity_ids: null,
+          evidence_file_ids: JSON.stringify(["migration-file"]),
+        })
+        .execute();
+      await legacyDb
+        .insertInto("entity_review_domain_candidates")
+        .values({
+          review_id: "migration-review",
+          domain_candidate_id: "migration-domain-candidate",
+        })
+        .execute();
+
+      await slackEntityLifecycleMigration.up(legacyDb as unknown as Kysely<unknown>);
+      await slackEntityLifecycleMigration.up(legacyDb as unknown as Kysely<unknown>);
+
+      await expect(
+        legacyDb.selectFrom("entity_review_queue").select("id").where("id", "=", "migration-review").execute(),
+      ).resolves.toHaveLength(1);
+      await expect(
+        legacyDb.selectFrom("entity_review_evidence").select("id").where("id", "=", "migration-evidence").execute(),
+      ).resolves.toHaveLength(1);
+      await expect(
+        legacyDb
+          .selectFrom("entity_review_domain_candidates")
+          .selectAll()
+          .where("review_id", "=", "migration-review")
+          .execute(),
+      ).resolves.toEqual([
+        {
+          review_id: "migration-review",
+          domain_candidate_id: "migration-domain-candidate",
+          created_at: expect.any(String),
+        },
+      ]);
+    } finally {
+      await legacyDb.destroy();
+    }
   });
 
   it("resets reviewed combined durability routes for member-source reseeding", async () => {

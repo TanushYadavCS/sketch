@@ -3,6 +3,7 @@ import type { Kysely, Transaction } from "kysely";
 import { sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import { filterAccessibleFileIds } from "../../connectors/search";
+import type { AccessPrincipalInput } from "../../connectors/types";
 import {
   type AgentKnowledgeRefs,
   type AgentOutputItemInput,
@@ -12,14 +13,16 @@ import {
   type AgentUserConfig,
   createAgentOutputRepository,
 } from "../../db/repositories/agent-outputs";
+import { viewerPrincipals } from "../../db/repositories/connectors";
 import { createConversationFollowupsRepository } from "../../db/repositories/conversation-followups";
-import { createEntityRepository, whereLiveEntity } from "../../db/repositories/entities";
+import { whereLiveEntity } from "../../db/repositories/entities";
 import { createTaskActivityRepository } from "../../db/repositories/task-activity";
 import {
   type ActiveTaskDurabilityRoute,
   createTaskDurabilityTransitionRepository,
 } from "../../db/repositories/task-durability-transition";
 import { type PromoteBriefTaskResult, createTaskRepository } from "../../db/repositories/tasks";
+import { resolvePersonEntitiesForUser } from "../../db/repositories/user-entity-resolver";
 import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { createLogger } from "../../logger";
@@ -141,7 +144,7 @@ export type DailyBriefCandidateContext = {
 
 export const DAILY_BRIEF_MEETING_ATTENDEE_LIMIT = 12;
 
-const CALENDAR_SOURCE = "google_calendar";
+const CALENDAR_SOURCES = ["google_calendar", "outlook_calendar"] as const;
 const CALENDAR_EVENT_FILE_TYPE = "calendar_event";
 
 export type TodaysMeetingAttendee = {
@@ -235,13 +238,14 @@ function toCandidate(group: CandidateAccumulator, reason: DailyBriefCandidateRea
 async function filterVisibleCandidateFileIds(
   db: Kysely<DB>,
   fileIds: string[],
-  contentUserEmails: string[] | undefined,
+  contentUserPrincipals: AccessPrincipalInput[] | undefined,
+  slackEntitySyncEnabled: boolean,
 ): Promise<Set<string>> {
   const uniqueFileIds = [...new Set(fileIds)];
   const visibleFileIds = new Set<string>();
   for (let i = 0; i < uniqueFileIds.length; i += FILE_ACCESS_FILTER_CHUNK_SIZE) {
     const chunk = uniqueFileIds.slice(i, i + FILE_ACCESS_FILTER_CHUNK_SIZE);
-    const visibleChunk = await filterAccessibleFileIds(db, chunk, contentUserEmails);
+    const visibleChunk = await filterAccessibleFileIds(db, chunk, contentUserPrincipals, slackEntitySyncEnabled);
     for (const fileId of visibleChunk) visibleFileIds.add(fileId);
   }
   return visibleFileIds;
@@ -291,6 +295,7 @@ export async function buildTodaysMeetings({
   user,
   outputDate,
   timezone,
+  slackEntitySyncEnabled = true,
 }: AgentRuntimeContextParams): Promise<TodaysMeeting[]> {
   const dayStart = new Date(outputDateWindowStartMs(outputDate, timezone)).toISOString();
   const dayEnd = new Date(outputDateWindowEndMs(outputDate, timezone)).toISOString();
@@ -298,7 +303,7 @@ export async function buildTodaysMeetings({
   const files = await db
     .selectFrom("indexed_files")
     .select(["id", "file_name", "source_created_at", "provider_url", "source_path", "thread_id", "connector_config_id"])
-    .where("source", "=", CALENDAR_SOURCE)
+    .where("source", "in", [...CALENDAR_SOURCES])
     .where("file_type", "=", CALENDAR_EVENT_FILE_TYPE)
     .where("is_archived", "=", 0)
     .where("is_all_day", "=", 0)
@@ -307,11 +312,23 @@ export async function buildTodaysMeetings({
     .execute();
   if (files.length === 0) return [];
 
-  const readerEmails = await createUserRepository(db).getAllEmailsForUser(user.id);
+  const reader = await createUserRepository(db).findById(user.id);
+  const readerPrincipals = reader
+    ? viewerPrincipals({
+        email: reader.email,
+        emails: await createUserRepository(db).getAllEmailsForUser(user.id),
+        phone: reader.whatsapp_number,
+        slackUserId: reader.slack_user_id,
+        whatsappLid: reader.whatsapp_lid,
+        isAdmin: false,
+        slackEntitySyncEnabled,
+      })
+    : [];
   const visibleFileIds = await filterVisibleCandidateFileIds(
     db,
     files.map((file) => file.id),
-    readerEmails,
+    readerPrincipals,
+    slackEntitySyncEnabled,
   );
   const visibleFiles = files.filter((file) => visibleFileIds.has(file.id) && file.source_created_at);
   if (visibleFiles.length === 0) return [];
@@ -366,12 +383,12 @@ type CalendarCopyFile = {
   connector_config_id: string;
 };
 
-/** The google_calendar connector configs the reader owns (created). */
+/** The calendar connector configs the reader owns (created). */
 async function readerOwnedCalendarConnectorIds(db: Kysely<DB>, userId: string): Promise<Set<string>> {
   const rows = await db
     .selectFrom("connector_configs")
     .select("id")
-    .where("connector_type", "=", CALENDAR_SOURCE)
+    .where("connector_type", "in", [...CALENDAR_SOURCES])
     .where("created_by", "=", userId)
     .execute();
   return new Set(rows.map((row) => row.id));
@@ -388,7 +405,7 @@ async function readerOwnedCalendarConnectorIds(db: Kysely<DB>, userId: string): 
  * owner-declined filter, since a declined event's reader-owned copy is archived
  * and only coworker copies would remain (those must not resurface the meeting).
  *
- * Deduped by `thread_id` (the event's iCalUID); the lowest id wins when the
+ * Deduped by `thread_id` (the event's provider calendar identity); the lowest id wins when the
  * reader holds multiple copies, so the result is stable regardless of query order.
  */
 function readerOwnedMeetingCopies<T extends CalendarCopyFile>(files: T[], readerConnectorIds: Set<string>): T[] {
@@ -431,7 +448,8 @@ export async function buildDailyBriefCandidateContext({
   outputDate,
   timezone,
   adminCanReadAllFiles,
-  contentUserEmails,
+  contentUserPrincipals,
+  slackEntitySyncEnabled = true,
   user,
 }: AgentRuntimeContextParams): Promise<DailyBriefCandidateContext> {
   const windowEndMs = outputDateWindowEndMs(outputDate, timezone);
@@ -440,7 +458,8 @@ export async function buildDailyBriefCandidateContext({
   const windowEnd = new Date(windowEndMs).toISOString();
   const evidenceSince = new Date(evidenceSinceMs).toISOString();
   const entitySince = new Date(entitySinceMs).toISOString();
-  const candidateUserEmails = user.auth_role === "admin" && adminCanReadAllFiles ? undefined : contentUserEmails;
+  const candidateUserPrincipals =
+    user.auth_role === "admin" && adminCanReadAllFiles ? undefined : contentUserPrincipals;
 
   const query = db
     .selectFrom("entity_mentions")
@@ -474,7 +493,8 @@ export async function buildDailyBriefCandidateContext({
   const visibleFileIds = await filterVisibleCandidateFileIds(
     db,
     rows.map((row) => row.indexed_file_id),
-    candidateUserEmails,
+    candidateUserPrincipals,
+    slackEntitySyncEnabled,
   );
   const byEntity = new Map<string, CandidateAccumulator>();
   for (const row of rows as CandidateMentionRow[]) {
@@ -1476,9 +1496,18 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
   const outputRepo = createAgentOutputRepository(args.db);
   const followups = createConversationFollowupsRepository(args.db);
   const transitionRepo = createTaskDurabilityTransitionRepository(args.db);
-  const entities = createEntityRepository(args.db);
   const summarySince = dailyBriefSummarySince(args.baseContext);
-  const userEmails = await args.users.getAllEmailsForUser(args.userId);
+  const user = await args.users.findById(args.userId);
+  if (!user) return {};
+  const userPrincipals = viewerPrincipals({
+    email: user.email,
+    emails: await args.users.getAllEmailsForUser(args.userId),
+    phone: user.whatsapp_number,
+    slackUserId: user.slack_user_id,
+    whatsappLid: user.whatsapp_lid,
+    isAdmin: false,
+    slackEntitySyncEnabled: args.config.SLACK_ENTITY_SYNC,
+  });
   const verifiedEmails = await args.users.getVerifiedEmailsForUser(args.userId);
   const summaryConfig = await outputRepo.getConfig(CONVERSATION_SUMMARY_AGENT_KEY, args.userId);
   const durabilityEnabled = summaryConfig.enabled && summaryConfig.prefs?.createTasks === true;
@@ -1497,8 +1526,7 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
     typeof args.baseContext.maxItemsPerSection === "number"
       ? args.baseContext.maxItemsPerSection
       : args.maxItemsPerSection;
-  const peopleResult = await entities
-    .getPersonEntitiesByEmails(verifiedEmails)
+  const peopleResult = await resolvePersonEntitiesForUser(args.db, args.userId, verifiedEmails)
     .then((value) => ({ status: "ok" as const, value }))
     .catch(() => ({ status: "error" as const }));
   const assigneeEntityIds =
@@ -1508,7 +1536,8 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
   const [openDurableTasks, recentSummaries, summaryTasks, transitionResult] = await Promise.all([
     taskRepo.loadOpenDurableTasksForBrief({
       userId: args.userId,
-      userEmails,
+      userPrincipals,
+      slackEntitySyncEnabled: args.config.SLACK_ENTITY_SYNC,
       assigneeEntityIds,
       limit: maxItemsPerSection * 4,
     }),
@@ -1546,12 +1575,13 @@ async function augmentRuntimeContext(args: AgentRuntimeContextArgs): Promise<Rec
   const taskAttention = await resolveDailyBriefTaskAttention({
     db: args.db,
     userId: args.userId,
-    userEmails,
+    userPrincipals,
     assigneeEntityIds,
     outputDate: readString(args.baseContext.outputDate) ?? new Date().toISOString().slice(0, 10),
     timezone: readString(args.baseContext.timezone) ?? "UTC",
     generatedAt: readString(args.baseContext.generationStartedAt) ?? new Date().toISOString(),
     maxItemsPerSection,
+    slackEntitySyncEnabled: args.config.SLACK_ENTITY_SYNC,
     initialPartial: peopleResult.status === "error",
     logger: createLogger(args.config),
   });

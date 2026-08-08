@@ -77,6 +77,7 @@ export interface SlackMessage {
   files?: SlackFile[];
   /** Slack event channel_type ("channel" | "group" | "mpim" | "im"); lets capture distinguish group DMs from channels. */
   channelType?: string;
+  teamId?: string;
 }
 
 export type SlackMessageHandler = (message: SlackMessage) => Promise<void>;
@@ -98,9 +99,18 @@ export type HomeActionHandler = (event: HomeActionEvent) => Promise<void>;
 export interface SlackChannelMembershipEvent {
   channelId: string;
   slackUserId: string;
+  teamId?: string;
+  isBot?: boolean;
 }
 
 export type SlackChannelMembershipHandler = (event: SlackChannelMembershipEvent) => Promise<void>;
+
+export interface SlackUserLifecycleEvent {
+  teamId?: string;
+  slackUserId: string;
+}
+
+export type SlackUserLifecycleHandler = (event: SlackUserLifecycleEvent) => Promise<void>;
 
 export interface SlackBotConfig {
   mode: "socket" | "http";
@@ -108,6 +118,9 @@ export interface SlackBotConfig {
   logger: Logger;
   appToken?: string; // Required for socket mode
   signingSecret?: string; // Required for http mode
+  onTeamIdResolved?: (teamId: string) => Promise<void>;
+  eventSilenceThresholdMs?: number;
+  lifecycleEventsEnabled?: boolean;
 }
 
 /**
@@ -132,6 +145,9 @@ export class SlackBot {
   private logger: Logger;
   private mode: "socket" | "http";
   private signingSecret: string | undefined;
+  private onTeamIdResolved: ((teamId: string) => Promise<void>) | undefined;
+  private eventSilenceThresholdMs: number;
+  private lifecycleEventsEnabled: boolean;
   private handler: SlackMessageHandler | null = null;
   private channelMessageHandler: SlackMessageHandler | null = null;
   private mentionHandler: SlackMessageHandler | null = null;
@@ -139,17 +155,26 @@ export class SlackBot {
   private channelRenamedHandler: ((channelId: string) => Promise<void>) | null = null;
   private memberJoinedChannelHandler: SlackChannelMembershipHandler | null = null;
   private memberLeftChannelHandler: SlackChannelMembershipHandler | null = null;
+  private teamJoinHandler: SlackUserLifecycleHandler | null = null;
+  private userChangeHandler: SlackUserLifecycleHandler | null = null;
   private appHomeOpenedHandler: AppHomeOpenedHandler | null = null;
   private homeActionHandler: HomeActionHandler | null = null;
   private botUserId: string | null = null;
   private botId: string | null = null;
+  private teamId: string | null = null;
   private seenEvents = new Map<string, number>();
   private seenEventsTimer: ReturnType<typeof setInterval> | null = null;
+  private lifecycleEventLastSeen = new Map<"team_join" | "user_change", number>();
+  private lifecycleEventWarnings = new Set<"team_join" | "user_change">();
+  private lifecycleEventTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: SlackBotConfig) {
     this.logger = config.logger;
     this.mode = config.mode;
     this.signingSecret = config.signingSecret;
+    this.onTeamIdResolved = config.onTeamIdResolved;
+    this.eventSilenceThresholdMs = config.eventSilenceThresholdMs ?? 7 * 24 * 60 * 60 * 1000;
+    this.lifecycleEventsEnabled = config.lifecycleEventsEnabled ?? true;
 
     if (config.mode === "socket") {
       if (!config.appToken) {
@@ -215,6 +240,14 @@ export class SlackBot {
     this.memberLeftChannelHandler = handler;
   }
 
+  onTeamJoin(handler: SlackUserLifecycleHandler): void {
+    this.teamJoinHandler = handler;
+  }
+
+  onUserChange(handler: SlackUserLifecycleHandler): void {
+    this.userChangeHandler = handler;
+  }
+
   onAppHomeOpened(handler: AppHomeOpenedHandler): void {
     this.appHomeOpenedHandler = handler;
   }
@@ -225,15 +258,32 @@ export class SlackBot {
 
   async start(): Promise<void> {
     const auth = await this.app.client.auth.test();
+    if (!auth.team_id) throw new Error("Slack auth.test did not return a team id");
+    this.teamId = auth.team_id;
+    await this.onTeamIdResolved?.(this.teamId);
     this.botUserId = auth.user_id ?? null;
     this.botId = "bot_id" in auth && typeof auth.bot_id === "string" ? auth.bot_id : null;
     this.logger.info({ botUserId: this.botUserId, botId: this.botId }, "Resolved bot IDs");
+    const startedAt = Date.now();
+    if (this.lifecycleEventsEnabled) {
+      this.lifecycleEventLastSeen = new Map([
+        ["team_join", startedAt],
+        ["user_change", startedAt],
+      ]);
+      this.lifecycleEventWarnings.clear();
+      this.lifecycleEventTimer = setInterval(
+        () => this.warnOnSilentLifecycleEvents(),
+        Math.min(this.eventSilenceThresholdMs, 60_000),
+      );
+      this.lifecycleEventTimer.unref?.();
+    }
 
     this.app.message(async ({ message }) => {
       const userId = "user" in message && typeof message.user === "string" ? message.user : undefined;
       const botId = "bot_id" in message && typeof message.bot_id === "string" ? message.bot_id : undefined;
       const appId = "app_id" in message && typeof message.app_id === "string" ? message.app_id : undefined;
       const subtype = "subtype" in message && typeof message.subtype === "string" ? message.subtype : undefined;
+      const teamId = "team" in message && typeof message.team === "string" ? message.team : (this.teamId ?? undefined);
       if (!userId && !botId) return;
       if (userId === this.botUserId || botId === this.botId) return;
 
@@ -270,6 +320,7 @@ export class SlackBot {
           ts: message.ts,
           ...(threadTs ? { threadTs } : {}),
           ...(files.length > 0 && { files }),
+          ...(teamId ? { teamId } : {}),
         });
         return;
       }
@@ -318,6 +369,7 @@ export class SlackBot {
           threadTs,
           ...(channelType ? { channelType } : {}),
           ...(files.length > 0 && { files }),
+          ...(teamId ? { teamId } : {}),
         });
         return;
       }
@@ -346,6 +398,7 @@ export class SlackBot {
           channelId: message.channel,
           ts: message.ts,
           ...(files.length > 0 && { files }),
+          ...(teamId ? { teamId } : {}),
         });
       }
     });
@@ -354,7 +407,12 @@ export class SlackBot {
       if (!this.mentionHandler) return;
       if (!event.user) return;
 
+      const mentionTeamId = (event as { team_id?: string }).team_id ?? this.teamId ?? undefined;
+      if (!this.isEventForActiveTeam(mentionTeamId)) return;
+
       const hasText = event.text;
+      const botId = "bot_id" in event && typeof event.bot_id === "string" ? event.bot_id : undefined;
+      const subtype = "subtype" in event && typeof event.subtype === "string" ? event.subtype : undefined;
       const rawFiles = "files" in event && Array.isArray(event.files) ? event.files : [];
       const hasFiles = rawFiles.length > 0;
 
@@ -372,9 +430,12 @@ export class SlackBot {
         type: "channel_mention",
         text: cleanText,
         userId: event.user,
+        ...(botId ? { botId } : {}),
+        ...(subtype ? { subtype } : {}),
         channelId: event.channel,
         ts: event.ts,
         threadTs: event.thread_ts,
+        ...(mentionTeamId ? { teamId: mentionTeamId } : {}),
         ...(files.length > 0 && { files }),
       });
     });
@@ -394,12 +455,16 @@ export class SlackBot {
 
     this.app.event("member_joined_channel", async ({ event }) => {
       if (!this.memberJoinedChannelHandler) return;
-      const membership = event as { channel?: string; user?: string };
+      const membership = event as { channel?: string; user?: string; team_id?: string };
       if (!membership.channel || !membership.user) return;
+      const teamId = membership.team_id ?? this.teamId ?? undefined;
+      if (!this.isEventForActiveTeam(teamId)) return;
       try {
         await this.memberJoinedChannelHandler({
           channelId: membership.channel,
           slackUserId: membership.user,
+          ...(teamId ? { teamId } : {}),
+          ...(membership.user === this.botUserId ? { isBot: true } : {}),
         });
       } catch (err) {
         this.logger.warn(
@@ -411,18 +476,56 @@ export class SlackBot {
 
     this.app.event("member_left_channel", async ({ event }) => {
       if (!this.memberLeftChannelHandler) return;
-      const membership = event as { channel?: string; user?: string };
+      const membership = event as { channel?: string; user?: string; team_id?: string };
       if (!membership.channel || !membership.user) return;
+      const teamId = membership.team_id ?? this.teamId ?? undefined;
+      if (!this.isEventForActiveTeam(teamId)) return;
       try {
         await this.memberLeftChannelHandler({
           channelId: membership.channel,
           slackUserId: membership.user,
+          ...(teamId ? { teamId } : {}),
         });
       } catch (err) {
         this.logger.warn(
           { err, channelId: membership.channel, slackUserId: membership.user },
           "Slack member leave persistence failed",
         );
+      }
+    });
+
+    this.app.event("team_join", async ({ event }) => {
+      const payload = event as { team_id?: string; user?: { id?: string } | string };
+      const teamId = payload.team_id ?? this.teamId ?? undefined;
+      if (!this.isEventForActiveTeam(teamId)) return;
+      this.markLifecycleEventSeen("team_join");
+      const slackUserId = typeof payload.user === "string" ? payload.user : payload.user?.id;
+      if (!slackUserId || !this.teamJoinHandler) return;
+      try {
+        await this.teamJoinHandler({
+          slackUserId,
+          ...(teamId ? { teamId } : {}),
+        });
+      } catch (err) {
+        this.logger.warn({ err, slackUserId }, "Slack team_join entity sync failed");
+      }
+    });
+
+    this.app.event("user_change", async ({ event }) => {
+      const payload = event as { team_id?: string; user?: { id?: string; team_id?: string } | string };
+      const nestedUser = typeof payload.user === "object" && payload.user ? payload.user : null;
+      const teamId = payload.team_id ?? nestedUser?.team_id ?? this.teamId ?? undefined;
+      if (!this.isEventForActiveTeam(teamId)) return;
+      this.markLifecycleEventSeen("user_change");
+      const slackUserId = typeof payload.user === "string" ? payload.user : nestedUser?.id;
+      if (!slackUserId || !this.userChangeHandler) return;
+      try {
+        await this.userChangeHandler({
+          slackUserId,
+          ...(teamId ? { teamId } : {}),
+        });
+      } catch (err) {
+        this.logger.warn({ err, slackUserId }, "Slack user_change entity sync failed");
       }
     });
 
@@ -570,9 +673,17 @@ export class SlackBot {
     }
   }
 
-  async getUserInfo(
-    userId: string,
-  ): Promise<{ name: string; realName: string; email: string | null; tz: string | null; isBot: boolean }> {
+  async getUserInfo(userId: string): Promise<{
+    name: string;
+    realName: string;
+    email: string | null;
+    tz: string | null;
+    isBot: boolean;
+    isGuest?: boolean;
+    isStranger?: boolean;
+    isRestricted?: boolean;
+    isUltraRestricted?: boolean;
+  }> {
     const result = await this.app.client.users.info({ user: userId });
     return {
       name: result.user?.name ?? "unknown",
@@ -580,6 +691,9 @@ export class SlackBot {
       email: result.user?.profile?.email ?? null,
       tz: result.user?.tz ?? null,
       isBot: result.user?.is_bot === true || userId === "USLACKBOT",
+      isStranger: result.user?.is_stranger === true,
+      isRestricted: result.user?.is_restricted === true,
+      isUltraRestricted: result.user?.is_ultra_restricted === true,
     };
   }
 
@@ -698,6 +812,38 @@ export class SlackBot {
 
   async stop(): Promise<void> {
     if (this.seenEventsTimer) clearInterval(this.seenEventsTimer);
+    if (this.lifecycleEventTimer) clearInterval(this.lifecycleEventTimer);
+    this.seenEventsTimer = null;
+    this.lifecycleEventTimer = null;
     await this.app.stop();
+  }
+
+  private isEventForActiveTeam(teamId: string | undefined): boolean {
+    if (!teamId || !this.teamId || teamId === this.teamId) return true;
+    this.logger.warn({ eventTeamId: teamId, activeTeamId: this.teamId }, "Dropped Slack event from another team");
+    return false;
+  }
+
+  private markLifecycleEventSeen(eventType: "team_join" | "user_change"): void {
+    this.lifecycleEventLastSeen.set(eventType, Date.now());
+    this.lifecycleEventWarnings.delete(eventType);
+  }
+
+  private warnOnSilentLifecycleEvents(): void {
+    const now = Date.now();
+    for (const eventType of ["team_join", "user_change"] as const) {
+      const lastSeen = this.lifecycleEventLastSeen.get(eventType) ?? now;
+      if (now - lastSeen < this.eventSilenceThresholdMs || this.lifecycleEventWarnings.has(eventType)) continue;
+      this.lifecycleEventWarnings.add(eventType);
+      this.logger.warn(
+        {
+          eventType,
+          teamId: this.teamId,
+          silentForMs: now - lastSeen,
+          thresholdMs: this.eventSilenceThresholdMs,
+        },
+        "Slack lifecycle event has been silent; update the Slack app manifest",
+      );
+    }
   }
 }

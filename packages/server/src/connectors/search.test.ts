@@ -185,8 +185,8 @@ describe("searchFiles — FTS5 query sanitization", () => {
     expect(results[0].fileName).toBe("planning.txt");
   });
 
-  it("returns no results when userEmails is []", async () => {
-    await expect(searchFiles(db, "planning", { userEmails: [] })).resolves.toEqual([]);
+  it("returns no results when userPrincipals is []", async () => {
+    await expect(searchFiles(db, "planning", { userPrincipals: [] })).resolves.toEqual([]);
   });
 
   it("search results include providerFileId (needed for integration handoff)", async () => {
@@ -249,7 +249,10 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
       })
       .execute();
     for (const email of opts.fileAccessEmails ?? []) {
-      await db.insertInto("file_access").values({ indexed_file_id: id, email }).execute();
+      await db
+        .insertInto("file_access")
+        .values({ indexed_file_id: id, principal_type: "email", principal_value: email })
+        .execute();
     }
   }
 
@@ -286,11 +289,11 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
       .execute();
     await db
       .insertInto("access_scope_members")
-      .values({ access_scope_id: "scope-a", email: "alice@example.com" })
+      .values({ access_scope_id: "scope-a", principal_type: "email", principal_value: "alice@example.com" })
       .execute();
     await db
       .insertInto("access_scope_members")
-      .values({ access_scope_id: "scope-b", email: "bob@example.com" })
+      .values({ access_scope_id: "scope-b", principal_type: "email", principal_value: "bob@example.com" })
       .execute();
 
     // File 1: unrestricted (no scope, no file_access)
@@ -311,7 +314,7 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
     }
   });
 
-  it("returns all files when userEmails is undefined (trusted bypass)", async () => {
+  it("returns all files when userPrincipals is undefined (trusted bypass)", async () => {
     const accessible = await filterAccessibleFileIds(db, [
       "file-unrestricted",
       "file-scope-a",
@@ -321,7 +324,7 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
     expect(accessible.size).toBe(4);
   });
 
-  it("returns empty set when userEmails is [] (fail closed)", async () => {
+  it("returns empty set when userPrincipals is [] (fail closed)", async () => {
     const accessible = await filterAccessibleFileIds(
       db,
       ["file-unrestricted", "file-scope-a", "file-scope-b", "file-per-file"],
@@ -339,6 +342,32 @@ describe("filterAccessibleFileIds — 3-tier RBAC", () => {
     const accessible = await filterAccessibleFileIds(db, ["file-scope-a", "file-scope-b"], ["alice@example.com"]);
     expect(accessible.has("file-scope-a")).toBe(true);
     expect(accessible.has("file-scope-b")).toBe(false);
+  });
+
+  it("scope-level access matches a phone principal", async () => {
+    await db
+      .insertInto("access_scope_members")
+      .values({ access_scope_id: "scope-a", principal_type: "phone", principal_value: "+15550000001" })
+      .execute();
+
+    const accessible = await filterAccessibleFileIds(db, ["file-scope-a"], [{ type: "phone", value: "+15550000001" }]);
+    expect(accessible).toEqual(new Set(["file-scope-a"]));
+  });
+
+  it("filters scope members by the viewer principals in SQL", async () => {
+    const queries: string[] = [];
+    const executor = db.getExecutor();
+    const executeQuery = executor.executeQuery.bind(executor);
+    vi.spyOn(executor, "executeQuery").mockImplementation((query) => {
+      queries.push(query.sql);
+      return executeQuery(query);
+    });
+
+    await filterAccessibleFileIds(db, ["file-scope-a", "file-scope-b"], ["alice@example.com"]);
+
+    const scopeMemberQuery = queries.find((query) => query.includes("access_scope_members"));
+    expect(scopeMemberQuery).toContain("principal_type");
+    expect(scopeMemberQuery).toContain("principal_value");
   });
 
   it("per-file access: only the explicit email allows access", async () => {
@@ -400,7 +429,10 @@ describe("search — recency browse applies RBAC before limit", () => {
       .execute();
 
     for (const email of opts.fileAccessEmails ?? []) {
-      await db.insertInto("file_access").values({ indexed_file_id: id, email }).execute();
+      await db
+        .insertInto("file_access")
+        .values({ indexed_file_id: id, principal_type: "email", principal_value: email })
+        .execute();
     }
     if ((opts.manualShareEmails ?? []).length > 0) {
       await db
@@ -453,7 +485,7 @@ describe("search — recency browse applies RBAC before limit", () => {
       kindRules: KIND_TO_RULES.meeting,
       sortBy: "recency",
       limit: 1,
-      userEmails: ["alice@example.com"],
+      userPrincipals: ["alice@example.com"],
     });
 
     expect(results.map((r) => r.id)).toEqual(["accessible"]);
@@ -478,26 +510,26 @@ describe("search — recency browse applies RBAC before limit", () => {
     const results = await search(db, "shared", {
       source: "fireflies",
       limit: 10,
-      userEmails: ["alice@example.com"],
+      userPrincipals: ["alice@example.com"],
     });
 
     expect(results.map((r) => r.id).sort()).toEqual(["manual-shared", "org-shared"]);
   });
 
-  it("returns no recency results when userEmails is []", async () => {
+  it("returns no recency results when userPrincipals is []", async () => {
     await insertMeeting("accessible", "2026-04-30T07:00:00.000Z");
 
     const results = await search(db, "", {
       kindRules: KIND_TO_RULES.meeting,
       sortBy: "recency",
       limit: 1,
-      userEmails: [],
+      userPrincipals: [],
     });
 
     expect(results).toEqual([]);
   });
 
-  it("returns no hybrid results when userEmails is []", async () => {
+  it("returns no hybrid results when userPrincipals is []", async () => {
     await insertMeeting("planning-meeting", "2026-04-30T07:00:00.000Z");
     await db
       .updateTable("indexed_files")
@@ -505,7 +537,7 @@ describe("search — recency browse applies RBAC before limit", () => {
       .where("id", "=", "planning-meeting")
       .execute();
 
-    const results = await search(db, "planning", { userEmails: [] });
+    const results = await search(db, "planning", { userPrincipals: [] });
 
     expect(results).toEqual([]);
   });
@@ -540,7 +572,7 @@ describe("hybridSearch — email thread collapse", () => {
     sentAt: string;
     body: string;
     from?: { name: string; email: string };
-    accessEmails?: string[];
+    accessPrincipals?: string[];
   }) {
     const from = input.from ?? { name: "Jane Doe", email: "jane@example.com" };
     await db
@@ -585,8 +617,11 @@ describe("hybridSearch — email thread collapse", () => {
       })
       .execute();
 
-    for (const email of input.accessEmails ?? []) {
-      await db.insertInto("file_access").values({ indexed_file_id: input.id, email }).execute();
+    for (const email of input.accessPrincipals ?? []) {
+      await db
+        .insertInto("file_access")
+        .values({ indexed_file_id: input.id, principal_type: "email", principal_value: email })
+        .execute();
     }
   }
 
@@ -626,7 +661,7 @@ describe("hybridSearch — email thread collapse", () => {
       subject: "Pricing question",
       sentAt: "2026-05-01T10:00:00.000Z",
       body: "Can we discuss pricing?",
-      accessEmails: ["bob@example.com"],
+      accessPrincipals: ["bob@example.com"],
     });
     await insertEmailMessage({
       id: "email-new",
@@ -635,10 +670,10 @@ describe("hybridSearch — email thread collapse", () => {
       sentAt: "2026-05-01T12:00:00.000Z",
       body: "Tuesday works.",
       from: { name: "Secret Sender", email: "secret@example.com" },
-      accessEmails: ["owner@example.com"],
+      accessPrincipals: ["owner@example.com"],
     });
 
-    const results = await hybridSearch(db, "pricing", { limit: 10, userEmails: ["bob@example.com"] });
+    const results = await hybridSearch(db, "pricing", { limit: 10, userPrincipals: ["bob@example.com"] });
     const thread = results.find((result) => result.resultKind === "email_thread");
 
     expect(thread).toMatchObject({
@@ -708,7 +743,7 @@ describe("getFileContent — RBAC", () => {
       .execute();
     await db
       .insertInto("access_scope_members")
-      .values({ access_scope_id: "scope-c", email: "member@example.com" })
+      .values({ access_scope_id: "scope-c", principal_type: "email", principal_value: "member@example.com" })
       .execute();
     await db
       .insertInto("indexed_files")
@@ -740,13 +775,13 @@ describe("getFileContent — RBAC", () => {
     }
   });
 
-  it("returns file when userEmails is undefined (trusted bypass)", async () => {
+  it("returns file when userPrincipals is undefined (trusted bypass)", async () => {
     const file = await getFileContent(db, "file-restricted");
     expect(file).toBeTruthy();
     expect(file?.content).toBe("top secret content");
   });
 
-  it("returns null when userEmails is [] (fail closed)", async () => {
+  it("returns null when userPrincipals is [] (fail closed)", async () => {
     const file = await getFileContent(db, "file-restricted", []);
     expect(file).toBeNull();
   });
@@ -754,6 +789,16 @@ describe("getFileContent — RBAC", () => {
   it("returns file when user is in the scope", async () => {
     const file = await getFileContent(db, "file-restricted", ["member@example.com"]);
     expect(file).toBeTruthy();
+    expect(file?.fileName).toBe("secret.txt");
+  });
+
+  it("returns file when a phone principal is in the scope", async () => {
+    await db
+      .insertInto("access_scope_members")
+      .values({ access_scope_id: "scope-c", principal_type: "phone", principal_value: "+15550000001" })
+      .execute();
+
+    const file = await getFileContent(db, "file-restricted", [{ type: "phone", value: "+15550000001" }]);
     expect(file?.fileName).toBe("secret.txt");
   });
 

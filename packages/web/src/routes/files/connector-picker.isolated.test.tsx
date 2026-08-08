@@ -105,6 +105,51 @@ function connectorRowByDescription(description: string): HTMLElement {
 }
 
 describe("ConnectorPicker connector capabilities", () => {
+  it("shows Outlook Calendar in Canvas credential mode", async () => {
+    const user = userEvent.setup();
+    setupStatus();
+    server.use(
+      http.get("/api/connectors/credential-source", () =>
+        HttpResponse.json({
+          mode: "canvas",
+          canvasConfigured: true,
+          canvasCredentialImportConfigured: true,
+          publicKeyId: "key-1",
+        }),
+      ),
+    );
+    renderPicker([]);
+
+    await user.click(await screen.findByRole("button", { name: /Browse all/i }));
+    expect(await screen.findByText("Calendar events and meetings")).toBeInTheDocument();
+    expect(await screen.findByText("Microsoft 365 calendar events and meetings")).toBeInTheDocument();
+  });
+
+  it("keeps Outlook Calendar visible while credential mode resolves", async () => {
+    const user = userEvent.setup();
+    let releaseCredentialSource: () => void = () => {};
+    const credentialSource = new Promise<Response>((resolve) => {
+      releaseCredentialSource = () =>
+        resolve(
+          HttpResponse.json({
+            mode: "local",
+            canvasConfigured: false,
+            canvasCredentialImportConfigured: false,
+            publicKeyId: null,
+          }),
+        );
+    });
+    setupStatus();
+    server.use(http.get("/api/connectors/credential-source", () => credentialSource));
+    renderPicker([]);
+
+    await user.click(await screen.findByRole("button", { name: /Browse all/i }));
+    expect(await screen.findByText("Microsoft 365 calendar events and meetings")).toBeInTheDocument();
+
+    releaseCredentialSource();
+    await waitFor(() => expect(screen.getByText("Microsoft 365 calendar events and meetings")).toBeInTheDocument());
+  });
+
   it.each(INTEGRATIONS.filter((def) => def.perUserAuth).map((def) => [def.name, def] as const))(
     "applies the visible account pattern to %s",
     async (_name, def) => {

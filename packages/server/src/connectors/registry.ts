@@ -21,6 +21,7 @@ import { createLinearConnector } from "./linear";
 import { createNotionConnector } from "./notion";
 import { createOtterConnector } from "./otter";
 import { createOutlookConnector } from "./outlook";
+import { createOutlookCalendarConnector } from "./outlook-calendar";
 import { createSlackIndexingConnector } from "./slack-indexing";
 import { createTeamsConnector } from "./teams";
 import { createWhatsAppConnector } from "./whatsapp";
@@ -31,6 +32,7 @@ export const connectorFactories: Record<ConnectorType, () => Connector> = {
   google_calendar: createGoogleCalendarConnector,
   gmail: createGmailConnector,
   outlook: createOutlookConnector,
+  outlook_calendar: createOutlookCalendarConnector,
   teams: createTeamsConnector,
   clickup: createClickUpConnector,
   notion: createNotionConnector,

@@ -74,7 +74,7 @@ export async function seedTeamDirectoryEntities(db: Kysely<DB>, logger: Logger):
   try {
     const entityRepo = createEntityRepository(db);
     const domainsRepo = createEntityDomainsRepository(db);
-    const users = await db.selectFrom("users").selectAll().execute();
+    const users = await db.selectFrom("users").selectAll().where("type", "!=", "external").execute();
     for (const user of users) {
       const entity = await entityRepo.upsertPersonEntity({
         name: user.name,
@@ -143,6 +143,7 @@ export async function runConnectorSync(
       | "WHATSAPP_SLICE_GAP_MINUTES"
       | "WHATSAPP_SLICE_MAX_AGE_MINUTES"
       | "WHATSAPP_SLICE_MAX_MESSAGES"
+      | "SLACK_ENTITY_SYNC"
       | "WHATSAPP_SALIENCE_BATCH_LIMIT"
       | "WHATSAPP_EMISSION_REFRESH_DAYS"
       | "WHATSAPP_BACKFILL_GRAPH_PAGE_MESSAGES"
@@ -322,6 +323,9 @@ export async function runConnectorSync(
       resolveNameToEmail,
       salienceGenerator,
       slackIndexing: options.slackIndexingFacade ?? null,
+      appConfig: {
+        SLACK_ENTITY_SYNC: appConfig?.SLACK_ENTITY_SYNC,
+      },
       onEntitySeed: async (seed) => {
         await factRepo.upsertFact({
           ...factContext,
@@ -647,7 +651,12 @@ async function resolveConnectorCredentialsForSync(params: {
     Pick<Config, "ENCRYPTION_KEY" | "MICROSOFT_CLIENT_ID" | "MICROSOFT_CLIENT_SECRET" | "MICROSOFT_TENANT">
   >;
 }): Promise<ConnectorCredentials> {
-  if (params.credentials.type !== "oauth" || (params.connectorType !== "outlook" && params.connectorType !== "teams")) {
+  if (
+    params.credentials.type !== "oauth" ||
+    (params.connectorType !== "outlook" &&
+      params.connectorType !== "outlook_calendar" &&
+      params.connectorType !== "teams")
+  ) {
     return params.credentials;
   }
 

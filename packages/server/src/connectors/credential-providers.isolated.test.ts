@@ -77,7 +77,7 @@ describe("connector credential providers", () => {
     vi.unstubAllGlobals();
   });
 
-  it.each(["google_drive", "google_calendar", "gmail", "outlook", "teams"] as ConnectorType[])(
+  it.each(["google_drive", "google_calendar", "gmail", "outlook", "outlook_calendar", "teams"] as ConnectorType[])(
     "treats %s as Canvas OAuth",
     (connectorType) => {
       expect(credentialProviders.isCanvasOAuthConnector(connectorType)).toBe(true);

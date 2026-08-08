@@ -158,7 +158,7 @@ describe("SlackBot.processHttpRequest", () => {
       const bot = makeBot();
       const eventHandlers = new Map<string, (args: { event: Record<string, unknown> }) => Promise<void>>();
       const app = {
-        client: { auth: { test: async () => ({ user_id: "U-BOT", bot_id: "B-BOT" }) } },
+        client: { auth: { test: async () => ({ user_id: "U-BOT", bot_id: "B-BOT", team_id: "T-BOT" }) } },
         message: () => undefined,
         event: (name: string, handler: (args: { event: Record<string, unknown> }) => Promise<void>) => {
           eventHandlers.set(name, handler);
@@ -185,15 +185,51 @@ describe("SlackBot.processHttpRequest", () => {
         const body = JSON.stringify({
           type: "event_callback",
           event_id: eventId,
-          event: { type: eventType, channel: "C123", user: "U123" },
+          event: { type: eventType, channel: "C123", user: "U123", team: "T-WRONG", team_id: "T-BOT" },
         });
         await expect(bot.processHttpRequest(body, makeHeaders(body))).resolves.toEqual({});
       }
 
       await vi.waitFor(() => {
-        expect(joined).toHaveBeenCalledWith({ channelId: "C123", slackUserId: "U123" });
-        expect(left).toHaveBeenCalledWith({ channelId: "C123", slackUserId: "U123" });
+        expect(joined).toHaveBeenCalledWith({ channelId: "C123", slackUserId: "U123", teamId: "T-BOT" });
+        expect(left).toHaveBeenCalledWith({ channelId: "C123", slackUserId: "U123", teamId: "T-BOT" });
       });
+      await bot.stop();
+    });
+
+    it("drops a foreign-team member join using team_id", async () => {
+      const bot = makeBot();
+      const eventHandlers = new Map<string, (args: { event: Record<string, unknown> }) => Promise<void>>();
+      const app = {
+        client: { auth: { test: async () => ({ user_id: "U-BOT", bot_id: "B-BOT", team_id: "T-BOT" }) } },
+        message: () => undefined,
+        event: (name: string, handler: (args: { event: Record<string, unknown> }) => Promise<void>) => {
+          eventHandlers.set(name, handler);
+        },
+        action: () => undefined,
+        processEvent: async ({ body }: { body: { event?: Record<string, unknown> } }) => {
+          const event = body.event;
+          const type = event?.type;
+          if (event && typeof type === "string") await eventHandlers.get(type)?.({ event });
+        },
+        stop: async () => undefined,
+      };
+      (bot as unknown as { app: typeof app }).app = app;
+      const joined = vi.fn(async () => undefined);
+      bot.onMemberJoinedChannel(joined);
+      await bot.start();
+
+      await eventHandlers.get("member_joined_channel")?.({
+        event: {
+          type: "member_joined_channel",
+          channel: "C123",
+          user: "U-FOREIGN",
+          team: "T-USER-HOME",
+          team_id: "T-WRONG",
+        },
+      });
+
+      expect(joined).not.toHaveBeenCalled();
       await bot.stop();
     });
   });

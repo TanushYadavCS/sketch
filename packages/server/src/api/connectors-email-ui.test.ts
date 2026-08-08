@@ -192,7 +192,7 @@ async function insertEmailMessage(
     subject: string;
     sentAt: string;
     body: string;
-    accessEmails: string[];
+    accessPrincipals: string[];
     from?: { name: string; email: string };
   },
 ) {
@@ -238,8 +238,11 @@ async function insertEmailMessage(
     })
     .execute();
 
-  for (const email of opts.accessEmails) {
-    await db.insertInto("file_access").values({ indexed_file_id: opts.id, email }).execute();
+  for (const email of opts.accessPrincipals) {
+    await db
+      .insertInto("file_access")
+      .values({ indexed_file_id: opts.id, principal_type: "email", principal_value: email })
+      .execute();
   }
 }
 
@@ -267,7 +270,7 @@ describe("GET /:id/email-threads (U4)", () => {
     } catch {}
   });
 
-  async function seedThread(connectorConfigId: string, accessEmails = [OWNER_EMAIL]) {
+  async function seedThread(connectorConfigId: string, accessPrincipals = [OWNER_EMAIL]) {
     await insertEmailMessage(db, {
       connectorConfigId,
       id: "msg-1",
@@ -275,7 +278,7 @@ describe("GET /:id/email-threads (U4)", () => {
       subject: "Kickoff",
       sentAt: "2026-05-01T10:00:00.000Z",
       body: "Let's kick off.",
-      accessEmails,
+      accessPrincipals,
     });
     await insertEmailMessage(db, {
       connectorConfigId,
@@ -284,7 +287,7 @@ describe("GET /:id/email-threads (U4)", () => {
       subject: "Re: Kickoff",
       sentAt: "2026-05-01T11:00:00.000Z",
       body: "Sounds good.",
-      accessEmails,
+      accessPrincipals,
     });
     await insertEmailMessage(db, {
       connectorConfigId,
@@ -293,7 +296,7 @@ describe("GET /:id/email-threads (U4)", () => {
       subject: "Re: Re: Kickoff — final",
       sentAt: "2026-05-01T12:00:00.000Z",
       body: "Tuesday works.",
-      accessEmails,
+      accessPrincipals,
     });
     await insertEmailMessage(db, {
       connectorConfigId,
@@ -302,7 +305,7 @@ describe("GET /:id/email-threads (U4)", () => {
       subject: "Standalone note",
       sentAt: "2026-05-01T09:00:00.000Z",
       body: "No thread here.",
-      accessEmails,
+      accessPrincipals,
     });
   }
 
@@ -402,7 +405,10 @@ describe("GET /:id/email-threads (U4)", () => {
       sourceUpdatedAt: null,
       connectorConfigId: cfg.id,
     });
-    await db.insertInto("file_access").values({ indexed_file_id: doc.id, email: OWNER_EMAIL }).execute();
+    await db
+      .insertInto("file_access")
+      .values({ indexed_file_id: doc.id, principal_type: "email", principal_value: OWNER_EMAIL })
+      .execute();
     const docRes = await (
       await app.request(`/api/connectors/files/${doc.id}/content`, { headers: { Cookie: ownerCookie } })
     ).json();

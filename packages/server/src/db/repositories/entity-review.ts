@@ -49,10 +49,12 @@ export interface UpsertQueueRowInput {
   entityType: string;
   source?: string | null;
   sourceId?: string | null;
+  sourceScoped?: boolean;
   seedSource?: string | null;
   seedSourceId?: string | null;
   proposedEmail?: string | null;
   candidateEntityId: string | null;
+  candidateEntityIds?: string[] | null;
   candidateScore: number | null;
   candidateReason: string | null;
   triggeredByUserId: string;
@@ -67,6 +69,10 @@ export interface UpsertQueueRowResult {
    * accumulate junk evidence rows from late-arriving syncs.
    */
   skipEvidence: boolean;
+}
+
+export interface UpsertUserEntityLinkReviewResult extends UpsertQueueRowResult {
+  wrote: boolean;
 }
 
 export interface UpsertSeedReviewRowInput {
@@ -87,6 +93,15 @@ export interface UpsertEvidenceInput {
   source: string;
   note?: string | null;
   seenAt?: string;
+}
+
+export interface UpsertUserEntityLinkReviewInput {
+  entityId: string;
+  proposedName: string;
+  candidateUserIds: string[];
+  candidateEntityIds: string[];
+  candidateReason: string;
+  triggeredByUserId: string;
 }
 
 const TERMINAL_STATUSES = new Set(["confirmed", "rejected", "confirming", "dismissed"]);
@@ -196,7 +211,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       const freezeMs = readReviewFreezeMs();
 
       const existingBySource =
-        input.source && input.sourceId
+        input.sourceScoped && input.source && input.sourceId
           ? await db
               .selectFrom("entity_review_queue")
               .selectAll()
@@ -206,12 +221,14 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
           : undefined;
       const existing =
         existingBySource ??
-        (await db
-          .selectFrom("entity_review_queue")
-          .selectAll()
-          .where("normalized_name", "=", input.normalizedName)
-          .where("entity_type", "=", input.entityType)
-          .executeTakeFirst());
+        (!input.sourceScoped
+          ? await db
+              .selectFrom("entity_review_queue")
+              .selectAll()
+              .where("normalized_name", "=", input.normalizedName)
+              .where("entity_type", "=", input.entityType)
+              .executeTakeFirst()
+          : undefined);
 
       if (!existing) {
         const id = randomUUID();
@@ -226,6 +243,10 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
             source_id: input.sourceId ?? null,
             proposed_email: input.proposedEmail ?? null,
             candidate_entity_id: input.candidateEntityId,
+            candidate_entity_ids:
+              input.candidateEntityIds && input.candidateEntityIds.length > 0
+                ? JSON.stringify(input.candidateEntityIds)
+                : null,
             candidate_score: input.candidateScore,
             candidate_reason: input.candidateReason,
             candidate_generated_at: now,
@@ -252,7 +273,7 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
       const reviewStartedAt = existing.review_started_at;
       const midReview = reviewStartedAt !== null && Date.now() - new Date(reviewStartedAt).getTime() < freezeMs;
       const sourcePatch =
-        existing.source === null && existing.source_id === null && input.source && input.sourceId
+        !input.sourceScoped && existing.source === null && existing.source_id === null && input.source && input.sourceId
           ? { source: input.source, source_id: input.sourceId }
           : {};
 
@@ -273,6 +294,10 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
             proposed_name: input.proposedName,
             proposed_email: input.proposedEmail ?? existing.proposed_email,
             candidate_entity_id: input.candidateEntityId,
+            candidate_entity_ids:
+              input.candidateEntityIds && input.candidateEntityIds.length > 0
+                ? JSON.stringify(input.candidateEntityIds)
+                : null,
             candidate_score: input.candidateScore,
             candidate_reason: input.candidateReason,
             candidate_generated_at: now,
@@ -293,6 +318,71 @@ export function createEntityReviewRepo(db: Kysely<DB>) {
         .where("id", "=", existing.id)
         .executeTakeFirstOrThrow();
       return { row: refreshed, skipEvidence: false };
+    },
+
+    async upsertUserEntityLinkReview(
+      input: UpsertUserEntityLinkReviewInput,
+    ): Promise<UpsertUserEntityLinkReviewResult> {
+      const now = new Date().toISOString();
+      const existing = await db
+        .selectFrom("entity_review_queue")
+        .selectAll()
+        .where("source", "=", "user_entity_link")
+        .where("source_id", "=", input.entityId)
+        .executeTakeFirst();
+      if (existing && TERMINAL_STATUSES.has(existing.status))
+        return { row: existing, skipEvidence: true, wrote: false };
+      if (!existing) {
+        const id = randomUUID();
+        await db
+          .insertInto("entity_review_queue")
+          .values({
+            id,
+            proposed_name: input.proposedName,
+            normalized_name: normalizeName(input.proposedName),
+            entity_type: "person",
+            source: "user_entity_link",
+            source_id: input.entityId,
+            proposed_email: null,
+            candidate_entity_id: input.candidateEntityIds[0] ?? null,
+            candidate_entity_ids: input.candidateEntityIds.length > 0 ? JSON.stringify(input.candidateEntityIds) : null,
+            candidate_user_ids: input.candidateUserIds.length > 0 ? JSON.stringify(input.candidateUserIds) : null,
+            candidate_score: null,
+            candidate_reason: input.candidateReason,
+            candidate_generated_at: now,
+            first_seen_at: now,
+            last_seen_at: now,
+            occurrence_count: 1,
+            status: "pending",
+            triggered_by_user_id: input.triggeredByUserId,
+          })
+          .execute();
+        const row = await db
+          .selectFrom("entity_review_queue")
+          .selectAll()
+          .where("id", "=", id)
+          .executeTakeFirstOrThrow();
+        return { row, skipEvidence: false, wrote: true };
+      }
+      await db
+        .updateTable("entity_review_queue")
+        .set({
+          candidate_entity_id: input.candidateEntityIds[0] ?? null,
+          candidate_entity_ids: input.candidateEntityIds.length > 0 ? JSON.stringify(input.candidateEntityIds) : null,
+          candidate_user_ids: input.candidateUserIds.length > 0 ? JSON.stringify(input.candidateUserIds) : null,
+          candidate_reason: input.candidateReason,
+          candidate_generated_at: now,
+          last_seen_at: now,
+          occurrence_count: sql<number>`occurrence_count + 1`,
+        })
+        .where("id", "=", existing.id)
+        .execute();
+      const row = await db
+        .selectFrom("entity_review_queue")
+        .selectAll()
+        .where("id", "=", existing.id)
+        .executeTakeFirstOrThrow();
+      return { row, skipEvidence: false, wrote: true };
     },
 
     findSeedReviewRow,

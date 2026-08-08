@@ -12,7 +12,7 @@
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFirefliesConnector } from "./fireflies";
-import type { NameResolver, SyncedItem } from "./types";
+import { type NameResolver, type SyncedItem, toEmailPrincipals } from "./types";
 
 const silentLogger = pino({ level: "silent" });
 
@@ -289,7 +289,9 @@ describe("Fireflies attendee/email matching", () => {
       speakers: [{ id: 1, name: "John Smith" }],
     });
     expect(item?.attendees).toEqual([{ name: "John Smith" }]);
-    expect(item?.accessEmails).toEqual(expect.arrayContaining(["john.smith@a.com", "j.smith@b.com"]));
+    expect(item?.accessPrincipals).toEqual(
+      expect.arrayContaining(toEmailPrincipals(["john.smith@a.com", "j.smith@b.com"])),
+    );
   });
 
   it("drops ambiguous contact-name matches so the speaker stays name-only", async () => {
@@ -306,7 +308,7 @@ describe("Fireflies attendee/email matching", () => {
     expect(item?.attendees).toEqual([{ name: "John Smith" }]);
   });
 
-  it("always includes the connector owner's email in accessEmails, even when only a bot is rostered", async () => {
+  it("always includes the connector owner's email in accessPrincipals, even when only a bot is rostered", async () => {
     const item = await runFirefliesOnce(
       {
         id: "t-owner",
@@ -316,8 +318,10 @@ describe("Fireflies attendee/email matching", () => {
       },
       "alice@x.com",
     );
-    expect(item?.accessEmails).toEqual(expect.arrayContaining(["alice@x.com", "meetingbot@x.com"]));
-    expect(item?.accessEmails).toHaveLength(2);
+    expect(item?.accessPrincipals).toEqual(
+      expect.arrayContaining(toEmailPrincipals(["alice@x.com", "meetingbot@x.com"])),
+    );
+    expect(item?.accessPrincipals).toHaveLength(2);
   });
 
   it("deduplicates mixed-case email values into a single canonical entry", async () => {
@@ -327,7 +331,7 @@ describe("Fireflies attendee/email matching", () => {
       participants: ["alice@acme.com"],
       meeting_attendees: [{ name: "Alice", email: "ALICE@acme.com", displayName: null }],
     });
-    expect(item?.accessEmails).toEqual(["alice@acme.com"]);
+    expect(item?.accessPrincipals).toEqual(toEmailPrincipals(["alice@acme.com"]));
   });
 
   it("still resolves via local-part substring when meeting_attendees is empty (regression)", async () => {
@@ -371,7 +375,7 @@ describe("Fireflies speaker resolution via Sketch-side resolver", () => {
       resolver,
     );
     expect(item?.attendees).toEqual([{ name: "Himanshu Kalra", email: "himanshu@team.com" }]);
-    expect(item?.accessEmails).toEqual(expect.arrayContaining(["himanshu@team.com"]));
+    expect(item?.accessPrincipals).toEqual(expect.arrayContaining(toEmailPrincipals(["himanshu@team.com"])));
   });
 
   it("resolves a speaker via the entities-table side of the resolver", async () => {
@@ -388,7 +392,7 @@ describe("Fireflies speaker resolution via Sketch-side resolver", () => {
       resolver,
     );
     expect(item?.attendees).toEqual([{ name: "Aryaman Soni", email: "vishal.soni99@icloud.com" }]);
-    expect(item?.accessEmails).toEqual(expect.arrayContaining(["vishal.soni99@icloud.com"]));
+    expect(item?.accessPrincipals).toEqual(expect.arrayContaining(toEmailPrincipals(["vishal.soni99@icloud.com"])));
   });
 
   it("falls through when the resolver returns null", async () => {
@@ -424,14 +428,14 @@ describe("Fireflies speaker resolution via Sketch-side resolver", () => {
   it("yields the same shape as the no-resolver path when resolver is undefined and nothing matches", async () => {
     // Equivalent to the predecessor PR's behavior — a speaker with no
     // meeting_attendees roster, no participants, no contacts, and no resolver
-    // stays name-only with just the owner in accessEmails.
+    // stays name-only with just the owner in accessPrincipals.
     const item = await runFirefliesOnce(
       { id: "t-undef", meeting_attendees: [], speakers: [{ id: 1, name: "Solo" }] },
       "owner@x.com",
       undefined,
     );
     expect(item?.attendees).toEqual([{ name: "Solo" }]);
-    expect(item?.accessEmails).toEqual(["owner@x.com"]);
+    expect(item?.accessPrincipals).toEqual(toEmailPrincipals(["owner@x.com"]));
   });
 
   it("preserves owner-email injection alongside resolver-recovered ACL", async () => {
@@ -447,7 +451,9 @@ describe("Fireflies speaker resolution via Sketch-side resolver", () => {
       "alice@x.com",
       resolver,
     );
-    expect(item?.accessEmails).toEqual(expect.arrayContaining(["alice@x.com", "meetingbot@x.com", "recovered@x.com"]));
+    expect(item?.accessPrincipals).toEqual(
+      expect.arrayContaining(toEmailPrincipals(["alice@x.com", "meetingbot@x.com", "recovered@x.com"])),
+    );
   }, 15000);
 });
 

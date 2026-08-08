@@ -2,7 +2,11 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
-import { createAutomationTaskConversationService } from "../automation/task-conversations";
+import {
+  type AutomationTaskConversationLockSummary,
+  type BuilderConversationAccessResult,
+  createAutomationTaskConversationService,
+} from "../automation/task-conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -15,8 +19,27 @@ interface ScheduledTaskConversationRouteOptions {
   logger?: Logger;
 }
 
-function errorResponse(c: Context, code: string, message: string, status: 400 | 403 | 404 | 409) {
-  return c.json({ error: { code, message } }, status);
+function errorResponse(
+  c: Context,
+  code: string,
+  message: string,
+  status: 400 | 403 | 404 | 409,
+  details: Record<string, unknown> = {},
+) {
+  return c.json({ error: { code, message, ...details } }, status);
+}
+
+function builderLockError(c: Context, lock: AutomationTaskConversationLockSummary) {
+  return c.json(
+    {
+      error: {
+        code: "BUILDER_CHAT_LOCKED",
+        message: "This automation's builder chat is in use by another session",
+        builderLock: lock,
+      },
+    },
+    409,
+  );
 }
 
 function parseConversationId(value: unknown): string | null {
@@ -83,7 +106,8 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
 
     const includeArchived = c.req.query("includeArchived") === "true";
     const taskConversations = await conversations.listForTranscriptUser(taskId, access.userId, { includeArchived });
-    return c.json({ taskId, conversations: taskConversations, transcriptAccess: "viewer" as const });
+    const builderLock = await conversations.getBuilderLock(taskId, access.userId);
+    return c.json({ taskId, conversations: taskConversations, builderLock, transcriptAccess: "viewer" as const });
   });
 
   routes.post("/:id/conversations", async (c) => {
@@ -105,13 +129,22 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
       return errorResponse(c, "VALIDATION_ERROR", "A web chat conversation id is required", 400);
     }
 
-    let result: { association: Awaited<ReturnType<typeof conversations.associate>>; created: boolean };
+    let result:
+      | {
+          kind: "created";
+          association: Awaited<ReturnType<typeof conversations.associate>>;
+          created: true;
+          lock: AutomationTaskConversationLockSummary;
+        }
+      | BuilderConversationAccessResult;
     if (kind === "builder" && !requestedConversationId && body.createNew === true) {
       result = await conversations.createBuilderConversation(taskId, access.userId);
     } else if (!requestedConversationId) {
       const activeBuilder = await conversations.listForTranscriptUser(taskId, access.userId, { kind: "builder" });
       const existingConversationId = activeBuilder[0]?.conversationId;
       if (!existingConversationId) {
+        const builderLock = await conversations.getBuilderLock(taskId, access.userId);
+        if (builderLock.state === "held") return builderLockError(c, builderLock);
         return errorResponse(
           c,
           "CONVERSATION_NOT_FOUND",
@@ -119,15 +152,7 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
           404,
         );
       }
-      result = {
-        association: await conversations.associate({
-          taskId,
-          conversationId: existingConversationId,
-          transcriptUserId: access.userId,
-          kind: "builder",
-        }),
-        created: false,
-      };
+      result = await conversations.selectBuilderConversation(taskId, existingConversationId, access.userId, "builder");
     } else {
       const existing = await conversations.getForTranscriptUser(taskId, requestedConversationId, access.userId, {
         includeArchived: true,
@@ -144,15 +169,25 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
         return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation kind is not associated with this task", 404);
       }
 
-      result = {
-        association: await conversations.associate({
-          taskId,
-          conversationId: requestedConversationId,
-          transcriptUserId: access.userId,
-          kind,
-        }),
-        created: false,
-      };
+      result =
+        kind === "builder"
+          ? await conversations.selectBuilderConversation(taskId, requestedConversationId, access.userId, kind)
+          : {
+              kind: "active" as const,
+              association: await conversations.associate({
+                taskId,
+                conversationId: requestedConversationId,
+                transcriptUserId: access.userId,
+                kind,
+              }),
+              lock: await conversations.getBuilderLock(taskId, access.userId),
+              created: false as const,
+            };
+    }
+
+    if (result.kind === "locked") return builderLockError(c, result.lock);
+    if (result.kind !== "active" && result.kind !== "created") {
+      return errorResponse(c, "CONVERSATION_UNAVAILABLE", "Conversation is temporarily unavailable", 409);
     }
 
     const summary = await conversations.getForTranscriptUser(
@@ -165,7 +200,11 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
       return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation association was not persisted", 409);
     }
 
-    const response = { conversation: summary, created: result.created };
+    const response = {
+      conversation: summary,
+      created: result.kind === "created",
+      builderLock: result.lock,
+    };
     return result.created ? c.json(response, 201) : c.json(response);
   });
 
@@ -183,7 +222,10 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     });
     if (!summary)
       return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation is not associated with this task", 404);
-    return c.json({ conversation: summary });
+    return c.json({
+      conversation: summary,
+      builderLock: await conversations.getBuilderLock(taskId, access.userId),
+    });
   });
 
   routes.put("/:id/conversations/:conversationId", async (c) => {
@@ -216,18 +258,33 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     if (!selectedKind) {
       return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation association is unavailable", 404);
     }
-    await conversations.associate({
-      taskId,
-      conversationId,
-      transcriptUserId: access.userId,
-      kind: selectedKind,
-    });
+    let lock = await conversations.getBuilderLock(taskId, access.userId);
+    if (selectedKind === "builder") {
+      const selection = await conversations.selectBuilderConversation(
+        taskId,
+        conversationId,
+        access.userId,
+        selectedKind,
+      );
+      if (selection.kind === "locked") return builderLockError(c, selection.lock);
+      if (selection.kind !== "active") {
+        return errorResponse(c, "CONVERSATION_UNAVAILABLE", "Conversation is temporarily unavailable", 409);
+      }
+      lock = selection.lock;
+    } else {
+      await conversations.associate({
+        taskId,
+        conversationId,
+        transcriptUserId: access.userId,
+        kind: selectedKind,
+      });
+    }
     const summary = await conversations.getForTranscriptUser(taskId, conversationId, access.userId, {
       includeArchived: true,
     });
     if (!summary) return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation association was not persisted", 409);
 
-    const response = { conversation: summary, created: false };
+    const response = { conversation: summary, created: false, builderLock: lock };
     return c.json(response);
   });
 
@@ -248,7 +305,10 @@ export function scheduledTaskConversationRoutes(db: Kysely<DB>, options: Schedul
     const summary = await conversations.archiveForTranscriptUser(taskId, conversationId, access.userId, body.archived);
     if (!summary)
       return errorResponse(c, "CONVERSATION_NOT_FOUND", "Conversation is not associated with this task", 404);
-    return c.json({ conversation: summary });
+    return c.json({
+      conversation: summary,
+      builderLock: await conversations.getBuilderLock(taskId, access.userId),
+    });
   });
 
   return routes;

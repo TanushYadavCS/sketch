@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { SyncedItem } from "../types";
+import { type SyncedItem, toEmailPrincipals } from "../types";
 import { cleanEmailBody } from "./body-text";
 import {
   type NormalizedEmail,
@@ -30,7 +30,7 @@ export function emailToSyncedItem(
   const content = [subject, body].filter(Boolean).join("\n\n");
   const visibleEmails = visibleParticipantEmails(email);
   const owner = normalizeEmailValue(email.ownerEmail);
-  const accessEmails = Array.from(new Set([...visibleEmails, ...(owner ? [owner] : [])]));
+  const accessPrincipals = toEmailPrincipals([...visibleEmails, ...(owner ? [owner] : [])]);
   const seedableRecipients = normalizeEmailAddrs([...email.to, ...email.cc]).filter((participant) =>
     applySeedGate(participant, gate),
   );
@@ -50,7 +50,7 @@ export function emailToSyncedItem(
     contentHash: createHash("sha256").update(content).digest("hex"),
     sourceCreatedAt: email.sentAt,
     sourceUpdatedAt: email.sentAt,
-    accessEmails,
+    accessPrincipals,
     attendees: seedableRecipients.length > 0 ? seedableRecipients : undefined,
     authorEmail: seedableFrom?.email,
     authorName: seedableFrom?.name,

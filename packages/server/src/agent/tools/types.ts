@@ -1,6 +1,7 @@
 import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import type { ChatAutomationAuthoring } from "../../automation/chat-authoring";
+import type { AccessPrincipalInput } from "../../connectors/types";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import type { createConversationRepository } from "../../db/repositories/conversations";
@@ -109,6 +110,7 @@ export interface SketchMcpDeps {
   currentUserId?: string;
   currentUserEmail?: string | null;
   currentUserName?: string | null;
+  slackEntitySyncEnabled?: boolean;
   localDeviceInvoker?: Pick<LocalDeviceGateway, "invoke">;
   localClaudeSessionService?: LocalClaudeSessionService;
   workspaceKey?: string;
@@ -147,7 +149,7 @@ export interface SketchMcpDeps {
   agentOutputWriter?: AgentOutputWriter;
   originOrgContextEnabled?: boolean;
   publicMcp?: {
-    userEmails?: string[];
+    userPrincipals?: AccessPrincipalInput[];
     filterEntityMetadata?: boolean;
     maxFileContentChars?: number;
   };

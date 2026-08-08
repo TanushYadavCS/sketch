@@ -1323,6 +1323,62 @@ describe("Scheduled Tasks API", () => {
     expect(scheduler.removeTaskRuntime).toHaveBeenCalledWith("task-delete");
   });
 
+  it("allows an admin to delete a foreign-owned task without detaching scheduler cleanup", async () => {
+    await seedAdmin(db);
+    const users = createUserRepository(db);
+    const tasks = createScheduledTaskRepository(db);
+    const owner = await users.create({ name: "Owner", email: "owner-delete@test.com" });
+    const member = await users.create({ name: "Member", email: "member-delete@test.com" });
+
+    await tasks.add({
+      id: "task-delete-foreign",
+      platform: "whatsapp",
+      context_type: "dm",
+      delivery_target: "owner@s.whatsapp.net",
+      thread_ts: null,
+      prompt: "Delete a foreign task",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: owner.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    class InstanceBoundScheduler {
+      removedTaskIds: string[] = [];
+      pauseTask = vi.fn();
+      resumeTask = vi.fn();
+      removeTask = vi.fn();
+      executeTaskById = vi.fn();
+
+      removeTaskRuntime(id: string) {
+        this.removedTaskIds.push(id);
+        return Promise.resolve(true);
+      }
+    }
+
+    const scheduler = new InstanceBoundScheduler();
+    const app = createApp(db, config, { scheduler });
+    const memberResponse = await app.request("/api/scheduled-tasks/task-delete-foreign", {
+      method: "DELETE",
+      headers: { Cookie: await getMemberCookie(db, member.id) },
+    });
+    expect(memberResponse.status).toBe(404);
+    expect(scheduler.removedTaskIds).toEqual([]);
+    await expect(tasks.getById("task-delete-foreign")).resolves.toBeDefined();
+
+    const adminResponse = await app.request("/api/scheduled-tasks/task-delete-foreign", {
+      method: "DELETE",
+      headers: { Cookie: await loginAdmin(app) },
+    });
+    expect(adminResponse.status).toBe(200);
+    expect(await adminResponse.json()).toEqual({ success: true });
+    expect(scheduler.removedTaskIds).toEqual(["task-delete-foreign"]);
+    await expect(tasks.getById("task-delete-foreign")).resolves.toBeUndefined();
+  });
+
   it("surfaces runtime cleanup failure after committing API deletion", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);

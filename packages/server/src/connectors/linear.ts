@@ -477,7 +477,7 @@ query TeamMembers($teamId: String!, $first: Int!, $after: String) {
 }`;
 
 /**
- * Linear does not currently emit accessScope/accessEmails, so seeded Linear
+ * Linear does not currently emit accessScope/accessPrincipals, so seeded Linear
  * entities inherit org-wide visibility until Linear connector hardening lands.
  */
 async function emitLinearProjectSeed(project: LinearProject, onEntitySeed: EntitySeedCallback): Promise<void> {

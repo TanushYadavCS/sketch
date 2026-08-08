@@ -103,7 +103,10 @@ async function seedIndexedFile(
     .execute();
 
   if (params.restrictedTo) {
-    await db.insertInto("file_access").values({ indexed_file_id: params.id, email: params.restrictedTo }).execute();
+    await db
+      .insertInto("file_access")
+      .values({ indexed_file_id: params.id, principal_type: "email", principal_value: params.restrictedTo })
+      .execute();
   }
 }
 
@@ -510,7 +513,7 @@ describe("buildDailyBriefCandidateContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["agent@example.com"],
+      contentUserPrincipals: ["agent@example.com"],
     });
 
     expect(context.entityWindowDays).toBe(DAILY_BRIEF_ENTITY_WINDOW_DAYS);
@@ -561,7 +564,7 @@ describe("buildDailyBriefCandidateContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["agent@example.com"],
+      contentUserPrincipals: ["agent@example.com"],
     });
 
     expect(context.recentEntities).toHaveLength(30);
@@ -586,7 +589,7 @@ describe("buildDailyBriefCandidateContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["admin@example.com"],
+      contentUserPrincipals: ["admin@example.com"],
     });
 
     const bypassContext = await buildDailyBriefCandidateContext({
@@ -596,7 +599,7 @@ describe("buildDailyBriefCandidateContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: true,
-      contentUserEmails: undefined,
+      contentUserPrincipals: undefined,
     });
 
     expect(defaultContext.recentEntities).toEqual([]);
@@ -624,7 +627,7 @@ describe("buildDailyBriefCandidateContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["agent@example.com"],
+      contentUserPrincipals: ["agent@example.com"],
     });
 
     const linkedEmailContext = await buildDailyBriefCandidateContext({
@@ -634,7 +637,7 @@ describe("buildDailyBriefCandidateContext", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["agent@example.com", "provider@example.com"],
+      contentUserPrincipals: ["agent@example.com", "provider@example.com"],
     });
 
     expect(primaryOnlyContext.recentEntities).toEqual([]);
@@ -656,7 +659,7 @@ describe("buildDailyBriefCandidateContext", () => {
       timezone: "Asia/Kolkata",
       now: NOW,
       adminCanReadAllFiles: false,
-      contentUserEmails: ["agent@example.com"],
+      contentUserPrincipals: ["agent@example.com"],
     });
 
     expect(context.windowEnd).toBe("2026-06-15T18:29:59.999Z");
@@ -706,7 +709,10 @@ async function seedCalendarEvent(
     .execute();
 
   if (params.restrictedTo) {
-    await db.insertInto("file_access").values({ indexed_file_id: params.id, email: params.restrictedTo }).execute();
+    await db
+      .insertInto("file_access")
+      .values({ indexed_file_id: params.id, principal_type: "email", principal_value: params.restrictedTo })
+      .execute();
   }
 }
 
@@ -773,7 +779,7 @@ const MEETINGS_RUNTIME_PARAMS = {
   timezone: "UTC",
   now: NOW,
   adminCanReadAllFiles: false,
-  contentUserEmails: ["agent@example.com"],
+  contentUserPrincipals: ["agent@example.com"],
 };
 
 describe("buildTodaysMeetings", () => {
@@ -922,7 +928,7 @@ describe("buildTodaysMeetings", () => {
       timezone: "UTC",
       now: NOW,
       adminCanReadAllFiles: true,
-      contentUserEmails: undefined,
+      contentUserPrincipals: undefined,
     });
 
     expect(meetings.map((meeting) => meeting.fileId)).toEqual(["evt-mine"]);

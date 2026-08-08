@@ -7,11 +7,14 @@ import {
   eventToSyncedItem,
   providerFileIdForEvent,
 } from "./google-calendar";
-import type { OAuthCredentials, SourceItemRemovalRecord, SyncedItem } from "./types";
+import { type OAuthCredentials, type SourceItemRemovalRecord, type SyncedItem, toEmailPrincipals } from "./types";
 
 const logger = createTestLogger();
 
 const primaryCalendar = { id: "primary", summary: "Work", accessRole: "owner" as const };
+
+const sortedEmailPrincipals = (emails: string[]) =>
+  toEmailPrincipals(emails).sort((left, right) => left.value.localeCompare(right.value));
 
 function calendarEvent(id: string, overrides: Partial<GoogleCalendarEvent> = {}): GoogleCalendarEvent {
   return {
@@ -62,7 +65,7 @@ describe("Google Calendar connector", () => {
     });
     expect(item?.content).toContain("Calendar: Work");
     expect(item?.content).toContain("Discuss launch readiness");
-    expect(item?.accessEmails?.sort()).toEqual(["jane@example.com", "owner@canvasx.ai"]);
+    expect(item?.accessPrincipals).toEqual(sortedEmailPrincipals(["jane@example.com", "owner@canvasx.ai"]));
     expect(item?.attendees).toEqual([
       { name: "Owner", email: "owner@canvasx.ai" },
       { name: "Jane Doe", email: "jane@example.com" },
@@ -110,12 +113,9 @@ describe("Google Calendar connector", () => {
       "owner@canvasx.ai",
     );
 
-    expect(item?.accessEmails?.sort()).toEqual([
-      "alice@example.com",
-      "bob@example.com",
-      "carol@example.com",
-      "owner@canvasx.ai",
-    ]);
+    expect(item?.accessPrincipals).toEqual(
+      sortedEmailPrincipals(["alice@example.com", "bob@example.com", "carol@example.com", "owner@canvasx.ai"]),
+    );
     expect(item?.attendees).toEqual([
       { name: "Owner", email: "owner@canvasx.ai" },
       { name: "Alice Buyer", email: "alice@example.com" },
@@ -163,7 +163,7 @@ describe("Google Calendar connector", () => {
       "owner@canvasx.ai",
     );
 
-    expect(item?.accessEmails?.sort()).toEqual(["morgan@example.com", "owner@canvasx.ai"]);
+    expect(item?.accessPrincipals).toEqual(sortedEmailPrincipals(["morgan@example.com", "owner@canvasx.ai"]));
     expect(item?.attendees).toEqual([
       { name: "Owner", email: "owner@canvasx.ai" },
       { name: "Morgan Lead", email: "morgan@example.com" },
@@ -190,7 +190,7 @@ describe("Google Calendar connector", () => {
       { name: "Owner", email: "owner@canvasx.ai" },
       { name: "Jane Doe", email: "jane@example.com" },
     ]);
-    expect(item?.accessEmails?.sort()).toEqual(["jane@example.com", "owner@canvasx.ai"]);
+    expect(item?.accessPrincipals).toEqual(sortedEmailPrincipals(["jane@example.com", "owner@canvasx.ai"]));
   });
 
   it("extracts attendees and description contacts from private calendar events", () => {
@@ -211,7 +211,9 @@ describe("Google Calendar connector", () => {
     );
 
     expect(item?.content).toContain("Attendees: Owner <owner@canvasx.ai>, Jane Doe <jane@example.com>");
-    expect(item?.accessEmails?.sort()).toEqual(["alice@example.com", "jane@example.com", "owner@canvasx.ai"]);
+    expect(item?.accessPrincipals).toEqual(
+      sortedEmailPrincipals(["alice@example.com", "jane@example.com", "owner@canvasx.ai"]),
+    );
     expect(item?.attendees).toEqual([
       { name: "Owner", email: "owner@canvasx.ai" },
       { name: "Jane Doe", email: "jane@example.com" },
@@ -235,7 +237,7 @@ describe("Google Calendar connector", () => {
 
     expect(item?.content).not.toContain("calendar.google.com");
     expect(item?.content).not.toContain("c_room");
-    expect(item?.accessEmails?.sort()).toEqual(["jane@example.com", "owner@canvasx.ai"]);
+    expect(item?.accessPrincipals).toEqual(sortedEmailPrincipals(["jane@example.com", "owner@canvasx.ai"]));
     expect(item?.attendees).toEqual([
       { name: "Owner", email: "owner@canvasx.ai" },
       { name: "Jane Doe", email: "jane@example.com" },
@@ -269,7 +271,7 @@ describe("Google Calendar connector", () => {
       "owner@canvasx.ai",
     );
 
-    expect(item?.accessEmails).toEqual(["owner@canvasx.ai"]);
+    expect(item?.accessPrincipals).toEqual(sortedEmailPrincipals(["owner@canvasx.ai"]));
     expect(item?.attendees).toEqual([{ name: "Owner", email: "owner@canvasx.ai" }]);
   });
 

@@ -9,6 +9,7 @@
  * test that catches this.
  */
 import type { Context } from "hono";
+import type { FileViewer as RepositoryFileViewer } from "../db/repositories/connectors";
 
 export function isAdmin(c: Context): boolean {
   return c.get("role") === "admin";
@@ -59,14 +60,27 @@ export function denyUnless(c: Context, allowed: boolean): Response | null {
 }
 
 /** File-list viewer descriptor — passed to repo helpers for RBAC. Admins bypass; others filter by email. */
-export interface FileViewer {
-  email: string | null;
-  isAdmin: boolean;
+export interface FileViewer extends RepositoryFileViewer {}
+
+function viewerIdentity(c: Context) {
+  return (
+    c.get("viewerIdentity") ?? {
+      emails: c.get("email") ? [c.get("email")] : [],
+      phone: null,
+      slackUserId: null,
+      whatsappLid: null,
+    }
+  );
 }
 
 /** Build a FileViewer from the request context. */
 export function getFileViewer(c: Context): FileViewer {
-  return { email: c.get("email") ?? null, isAdmin: isAdmin(c) };
+  return {
+    email: c.get("email") ?? null,
+    ...viewerIdentity(c),
+    isAdmin: isAdmin(c),
+    slackEntitySyncEnabled: c.get("slackEntitySyncEnabled"),
+  };
 }
 
 /**
@@ -78,5 +92,10 @@ export function getFileViewer(c: Context): FileViewer {
  */
 export function getContentViewer(c: Context): FileViewer {
   const bypass = c.get("adminCanReadAllFiles") === true;
-  return { email: c.get("email") ?? null, isAdmin: isAdmin(c) && bypass };
+  return {
+    email: c.get("email") ?? null,
+    ...viewerIdentity(c),
+    isAdmin: isAdmin(c) && bypass,
+    slackEntitySyncEnabled: c.get("slackEntitySyncEnabled"),
+  };
 }

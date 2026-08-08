@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import { fileAccessFilterSql } from "../../connectors/search";
+import type { AccessPrincipalInput } from "../../connectors/types";
 import type { DB, EntitiesTable, TasksTable } from "../schema";
 import type { AgentKnowledgeRefs, AgentOutputItemInput } from "./agent-outputs";
 import type { FileViewer } from "./connectors";
@@ -107,7 +108,8 @@ export interface ReanchorNullParentTasksResult {
 
 export interface LoadOpenDurableTasksForBriefOptions {
   userId: string;
-  userEmails: string[];
+  userPrincipals: AccessPrincipalInput[];
+  slackEntitySyncEnabled?: boolean;
   assigneeEntityIds?: string[];
   activeSummarySourceKeys?: string[];
   activeSummaryConversationIds?: number[];
@@ -402,14 +404,14 @@ export function createTaskRepository(db: Kysely<DB>) {
 
     async loadOpenDurableTasksForBrief(opts: LoadOpenDurableTasksForBriefOptions): Promise<Selectable<TasksTable>[]> {
       const visibleFileEvidence =
-        opts.userEmails.length === 0
+        opts.userPrincipals.length === 0
           ? sql<boolean>`false`
           : sql<boolean>`EXISTS (
             SELECT 1 FROM task_evidence
             INNER JOIN indexed_files ON indexed_files.id = task_evidence.ref_id
             WHERE task_evidence.task_id = tasks.id
               AND task_evidence.kind = 'file'
-              AND ${fileAccessFilterSql(opts.userEmails)}
+              AND ${fileAccessFilterSql(opts.userPrincipals, opts.slackEntitySyncEnabled ?? true)}
           )`;
       const assigneeEntityIds = [...new Set(opts.assigneeEntityIds ?? [])].filter(Boolean);
       return db

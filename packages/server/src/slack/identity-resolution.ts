@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import { type AccessPrincipal, toEmailPrincipals } from "../connectors/types";
 import { normalizeContactPointValue } from "../db/repositories/entities";
 import type { DB } from "../db/schema";
 import type { SlackIndexingFacade } from "./indexing-facade";
@@ -128,6 +129,19 @@ export function teammateEmailsFromRoster(snapshot: SlackRosterSnapshot): string[
     .filter((participant) => participant.kind === "teammate" && participant.email)
     .map((participant) => (participant.email as string).toLowerCase());
   return [...new Set(emails)];
+}
+
+export function accessPrincipalsFromRoster(snapshot: SlackRosterSnapshot): AccessPrincipal[] {
+  const principals = snapshot.participants.map((participant) => ({
+    type: "slack_user" as const,
+    value: participant.slackUserId,
+  }));
+  const emails = toEmailPrincipals(teammateEmailsFromRoster(snapshot));
+  return [
+    ...new Map(
+      [...principals, ...emails].map((principal) => [`${principal.type}\u0000${principal.value}`, principal]),
+    ).values(),
+  ];
 }
 
 export function parseSlackRosterSnapshot(raw: string | null): SlackRosterSnapshot | null {

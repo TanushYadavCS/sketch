@@ -1,4 +1,9 @@
-import type { AutomationBuilderSaveRequest, AutomationDefinition, WorkflowStep } from "@sketch/shared";
+import type {
+  AutomationBuilderSaveRequest,
+  AutomationDefinition,
+  WorkflowStep,
+  WorkflowTriggerConfig,
+} from "@sketch/shared";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
 import type { CurrentAutomation } from "../../scheduler/types";
@@ -19,6 +24,12 @@ import type {
 const MAX_GENERATION_ATTEMPTS = 2;
 const GENERATION_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_TOKENS = 8192;
+
+export const AUTOMATION_AUTHORING_TRIGGER_TYPES = [
+  "schedule",
+  "webhook",
+  "slack_channel_message",
+] as const satisfies readonly WorkflowTriggerConfig["type"][];
 
 export interface AutomationAuthoringProvider {
   provider: "openrouter";
@@ -149,14 +160,44 @@ function isRetryableProviderFailure(error: unknown): boolean {
   return /(?:fetch|network|socket|connection|reset|temporarily unavailable)/i.test(error.message);
 }
 
-function authoringInstructions(operation: AutomationAuthoringOperation): string {
-  return `You design Sketch automations. Return a complete ${operation === "create" ? "new" : "replacement"} definition or one concise clarification question only when essential information is missing. Preserve every unspecified property and every stable step ID during edits. Never choose or emit an execution model or operational status. Keep the returned top-level schedule fields identical to the returned trigger step configuration. Every non-trigger step needs matching step content, and the graph must be connected and acyclic. For edits, the existingDefinition and its persisted revision are authoritative; currentAutomation is alignment metadata only, and neither prompt history nor an older builder snapshot may override the reloaded definition. Action steps may use creator-scoped, read-only Sketch capabilities. When an action needs internal search or teammate lookup, set actionCapabilities to { sketchTools: ["search", "searchEntities", "getEntityContext", or "findTeammate"], usesIntegrationActions: false } and call the corresponding ctx.tools method directly. The only valid Sketch capability namespace is ctx.tools; ctx.sketch and ctx.sketchTools are invalid, and do not shell out to a CLI or call MCP. Declare every ctx.tools capability used by a script in that action's actionCapabilities.sketchTools. When an action calls ctx.integrations.executeAction, set usesIntegrationActions to true; legacy action steps without actionCapabilities are integration-backed. Sketch-only actions do not require a Canvas broker. For Slack or WhatsApp message deliveries, the terminal step must return only a concise, human-readable message string. Intermediate steps may pass structured JSON, but the delivered step must not return an object or array, JSON.stringify output, code-fenced JSON, raw tool payloads, schema fields, debug output, or stack traces. Use short headings and bullet lists, write links in the target platform's native format, and state plainly when no matching data exists. For requests to run when a message is posted in a Slack channel, use the native Slack channel message trigger: set the trigger config type to "slack_channel_message", include the stable Slack channel ID in channelId, set scheduleType to "external" and scheduleValue to "slack_channel_message", and pass the message text and attachments through trigger data to the workflow. Trigger files can include a server-authenticated localPath inside the automation workspace. When an integration action needs those bytes, call ctx.integrations.executeAction with localFiles entries containing path and configuredProp; do not read or base64-encode the file in the script, put file bytes in CLI arguments, or fetch Slack urlPrivate without authentication. Do not implement this as polling or a scheduled Slack history check. Use the automation's native delivery configuration for the reply rather than adding a Slack send-message action solely for delivery.`;
+function triggerIntentClarification(request: string): string | undefined {
+  const normalized = request.toLowerCase();
+  const mentionsEventSource = /\b(?:gmail|email|emails|inbox|outlook|slack|linear|clickup|notion)\b/.test(normalized);
+  const mentionsEventObject =
+    /\b(?:invoice|invoices|email|emails|message|messages|attachment|attachments|issue|issues)\b/.test(normalized);
+  if (!mentionsEventSource || !mentionsEventObject) return undefined;
+
+  const explicitlyPolling =
+    /\b(?:poll(?:ing)?|schedule(?:d)?|cron|interval|daily|hourly|weekly)\b/.test(normalized) ||
+    /\bevery\s+(?:\d+|one|two|three|four|five|ten|fifteen|thirty|few)\s+(?:second|seconds|minute|minutes|hour|hours|day|days)\b/.test(
+      normalized,
+    );
+  if (explicitlyPolling) return undefined;
+
+  const explicitlyTriggered =
+    /\b(?:trigger|event|when(?:ever)?|as soon as|incoming)\b/.test(normalized) ||
+    /\bnew\s+(?:invoice|invoices|email|emails|message|messages|attachment|attachments|issue|issues)\b/.test(normalized);
+  if (!explicitlyTriggered) {
+    return "Should this use polling on a schedule (for example, every five minutes) or a native event trigger?";
+  }
+
+  if (/\bslack\s+channel\b/.test(normalized) || /\bwebhook\b/.test(normalized)) return undefined;
+  const source = normalized.match(/\b(?:gmail|outlook|linear|clickup|notion)\b/)?.[0] ?? "that app";
+  return `${source[0].toUpperCase()}${source.slice(1)} event triggers are not available in this authoring path. Should I poll it on a schedule instead?`;
+}
+
+function authoringInstructions(
+  operation: AutomationAuthoringOperation,
+  supportedTriggerTypes: readonly WorkflowTriggerConfig["type"][],
+): string {
+  return `You design Sketch automations. Return a complete ${operation === "create" ? "new" : "replacement"} definition or one concise clarification question only when essential information is missing. Preserve every unspecified property and every stable step ID during edits. Never choose or emit an execution model or operational status. Keep the returned top-level schedule fields identical to the returned trigger step configuration. Every non-trigger step needs matching step content, and the graph must be connected and acyclic. For edits, the existingDefinition and its persisted revision are authoritative; currentAutomation is alignment metadata only, and neither prompt history nor an older builder snapshot may override the reloaded definition. The current authoring capability set supports only these trigger types: ${supportedTriggerTypes.join(", ")}. Treat that list as authoritative. Never emit a Canvas-managed app trigger, invent a provider app, or invent a component key; an app event without an admitted capability must become a clarification question or be rejected. If the request does not explicitly choose polling/cadence versus an event trigger, ask which one it means instead of guessing. Action steps may use creator-scoped, read-only Sketch capabilities. When an action needs internal search or teammate lookup, set actionCapabilities to { sketchTools: ["search", "searchEntities", "getEntityContext", or "findTeammate"], usesIntegrationActions: false } and call the corresponding ctx.tools method directly. The only valid Sketch capability namespace is ctx.tools; ctx.sketch and ctx.sketchTools are invalid, and do not shell out to a CLI or call MCP. Declare every ctx.tools capability used by a script in that action's actionCapabilities.sketchTools. When an action calls ctx.integrations.executeAction, set usesIntegrationActions to true; legacy action steps without actionCapabilities are integration-backed. Sketch-only actions do not require a Canvas broker. For Slack or WhatsApp message deliveries, the terminal step must return only a concise, human-readable message string. Intermediate steps may pass structured JSON, but the delivered step must not return an object or array, JSON.stringify output, code-fenced JSON, raw tool payloads, schema fields, debug output, or stack traces. Use short headings and bullet lists, write links in the target platform's native format, and state plainly when no matching data exists. For requests to run when a message is posted in a Slack channel, use the native Slack channel message trigger: set the trigger config type to "slack_channel_message", include the stable Slack channel ID in channelId, set scheduleType to "external" and scheduleValue to "slack_channel_message", and pass the message text and attachments through trigger data to the workflow. Trigger files can include a server-authenticated localPath inside the automation workspace. When an integration action needs those bytes, call ctx.integrations.executeAction with localFiles entries containing path and configuredProp; do not read or base64-encode the file in the script, put file bytes in CLI arguments, or fetch Slack urlPrivate without authentication. Do not implement this as polling or a scheduled Slack history check. Use the automation's native delivery configuration for the reply rather than adding a Slack send-message action solely for delivery.`;
 }
 
 function createPrompt(input: {
   request: string;
   serverContext: AutomationAuthoringServerContext;
   brokerCapable: boolean;
+  supportedTriggerTypes: readonly WorkflowTriggerConfig["type"][];
   repair?: string;
   priorDraft?: unknown;
 }): string {
@@ -165,6 +206,7 @@ function createPrompt(input: {
     request: input.request,
     serverContext: input.serverContext,
     brokerCapable: input.brokerCapable,
+    supportedTriggerTypes: input.supportedTriggerTypes,
     ...(input.priorDraft !== undefined ? { priorDraft: input.priorDraft } : {}),
     ...(input.repair ? { priorValidationFailure: input.repair } : {}),
   });
@@ -177,6 +219,7 @@ function editPrompt(input: {
   currentAutomation?: CurrentAutomation;
   timezone?: string;
   currentTime?: string;
+  supportedTriggerTypes: readonly WorkflowTriggerConfig["type"][];
   repair?: string;
   priorDraft?: unknown;
 }): string {
@@ -192,6 +235,7 @@ function editPrompt(input: {
       ...(input.timezone ? { timezone: input.timezone } : {}),
       ...(input.currentTime ? { currentTime: input.currentTime } : {}),
     },
+    supportedTriggerTypes: input.supportedTriggerTypes,
     ...(input.priorDraft !== undefined ? { priorDraft: input.priorDraft } : {}),
     ...(input.repair ? { priorValidationFailure: input.repair } : {}),
   });
@@ -236,9 +280,11 @@ export function createAutomationAuthoringService(deps: {
   generator: StructuredAutomationAuthoringGenerator;
   telemetry: AutomationAuthoringTelemetry;
   configuredModelId: string;
+  supportedTriggerTypes?: readonly WorkflowTriggerConfig["type"][];
   now?: () => number;
 }): AutomationAuthoringService {
   const now = deps.now ?? Date.now;
+  const supportedTriggerTypes = deps.supportedTriggerTypes ?? AUTOMATION_AUTHORING_TRIGGER_TYPES;
 
   async function author(params: {
     operation: AutomationAuthoringOperation;
@@ -253,6 +299,23 @@ export function createAutomationAuthoringService(deps: {
     brokerCapable: boolean;
   }): Promise<AutomationAuthoringResult> {
     const operationStartedAt = now();
+    const clarification = triggerIntentClarification(params.request);
+    if (clarification) {
+      await deps.telemetry.recordAttempt({
+        operation: params.operation,
+        provider: "openrouter",
+        configuredModel: deps.configuredModelId,
+        responseModel: null,
+        attempt: 1,
+        latencyMs: Math.max(0, now() - operationStartedAt),
+        totalLatencyMs: Math.max(0, now() - operationStartedAt),
+        usage: emptyUsage(),
+        sdkCostUsd: 0,
+        validationOutcome: "clarification",
+        validationIssueCodes: ["TRIGGER_INTENT"],
+      });
+      return { kind: "clarification", question: clarification };
+    }
     let provider: AutomationAuthoringProvider;
     try {
       provider = await deps.loadProvider();
@@ -306,13 +369,14 @@ export function createAutomationAuthoringService(deps: {
         generation = await deps.generator.generate({
           operation: params.operation,
           provider,
-          instructions: authoringInstructions(params.operation),
+          instructions: authoringInstructions(params.operation, supportedTriggerTypes),
           prompt:
             params.operation === "create"
               ? createPrompt({
                   request: params.request,
                   serverContext: params.serverContext as AutomationAuthoringServerContext,
                   brokerCapable: params.brokerCapable,
+                  supportedTriggerTypes,
                   repair,
                   priorDraft,
                 })
@@ -323,6 +387,7 @@ export function createAutomationAuthoringService(deps: {
                   currentAutomation: params.currentAutomation,
                   timezone: params.timezone,
                   currentTime: params.currentTime,
+                  supportedTriggerTypes,
                   repair,
                   priorDraft,
                 }),
@@ -347,6 +412,7 @@ export function createAutomationAuthoringService(deps: {
         validateAutomationBuilderSaveRequest({
           request: definition,
           brokerCapable: params.brokerCapable,
+          supportedTriggerTypes,
         });
         validationOutcome = "valid";
         return { kind: "definition", definition };

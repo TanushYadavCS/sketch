@@ -12,9 +12,9 @@ import {
   createConversationFollowupsRepository,
 } from "../../db/repositories/conversation-followups";
 import { type StoredConversationMessage, createConversationRepository } from "../../db/repositories/conversations";
-import { createEntityRepository } from "../../db/repositories/entities";
 import { createTaskDurabilityTransitionRepository } from "../../db/repositories/task-durability-transition";
 import { createTaskRepository } from "../../db/repositories/tasks";
+import { resolvePersonEntitiesForUser } from "../../db/repositories/user-entity-resolver";
 import type { DB } from "../../db/schema";
 import type {
   AgentApiItem,
@@ -278,15 +278,16 @@ export async function buildConversationSummaryRuntimeContext(
       now: params.now.toISOString(),
     });
     const identityEmails = [
-      ...new Set(
-        [params.user.email, ...(params.contentUserEmails ?? [])].filter(
-          (email): email is string => typeof email === "string" && email.length > 0,
+      ...new Set([
+        ...(params.user.email ? [params.user.email] : []),
+        ...(params.contentUserPrincipals ?? []).flatMap((principal) =>
+          typeof principal === "string" ? [principal] : principal.type === "email" ? [principal.value] : [],
         ),
-      ),
+      ]),
     ];
-    const peopleByEmail = await createEntityRepository(params.db)
-      .getPersonEntitiesByEmails(identityEmails)
-      .catch(() => new Map());
+    const peopleByEmail = await resolvePersonEntitiesForUser(params.db, params.user.id, identityEmails).catch(
+      () => new Map(),
+    );
     assigneeEntityIds = [...new Set([...peopleByEmail.values()].flat().map((person) => person.id))];
     taskMemory = await createConversationFollowupsRepository(params.db).loadTaskMemory({
       userId: params.user.id,

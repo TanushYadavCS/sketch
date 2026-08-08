@@ -3,9 +3,11 @@
  * Extracted from index.ts for testability. All handler logic lives here; index.ts only calls
  * createConfiguredSlackBot() and passes the result to the startup manager.
  */
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
+import { abortActiveRuns, withActiveRun } from "../agent/active-runs";
 import type { AuxLlmCall } from "../agent/aux-cost";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import {
@@ -21,6 +23,7 @@ import {
   type RunAgentResult,
   canUseVisualAnalysisTool,
 } from "../agent/runner";
+import { isRuntimeAbortError } from "../agent/runtime/errors";
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer } from "../agent/tool-progress";
 import { ensureAgentSubWorkspace, ensureChannelWorkspace, ensureWorkspace } from "../agent/workspace";
@@ -50,6 +53,7 @@ import type { createConversationRepository } from "../db/repositories/conversati
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import { type createSettingsRepository, parseOrgContext } from "../db/repositories/settings";
 import { createSlackChannelParticipantsRepository } from "../db/repositories/slack-channel-participants";
+import { isInternalSlackUser } from "../db/repositories/slack-entity-sync";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { type Attachment, downloadSlackFile } from "../files";
@@ -70,9 +74,11 @@ import { transcribeEagerAttachments } from "../transcription/service";
 import { resolveVisionConfigFromAppConfig } from "../vision/service";
 import { slackApiCall } from "./api";
 import { SlackBot, type SlackFile, type SlackMessage, type SlackMessageHandler } from "./bot";
+import type { SlackEntitySyncService } from "./entity-sync";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
-import { SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
+import { SlackExternalUserError, SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
+import { isSlackStopCommand } from "./stop";
 import type { UserCache } from "./user-cache";
 
 type UserRepository = ReturnType<typeof createUserRepository>;
@@ -85,6 +91,25 @@ type SlackChannelParticipantsRepository = ReturnType<typeof createSlackChannelPa
 const INLINE_BACKLOG_LIMIT = 10;
 const SLACK_THREAD_CURSOR_SCOPE = "slack_thread";
 const SLACK_AGENT_ERROR_MESSAGE = "_Something went wrong, try again_";
+const SLACK_STOP_REACTION = "white_check_mark";
+
+function isAbortedRunResult(result: RunAgentResult): boolean {
+  const legacyResult = result as RunAgentResult & { stopReason?: string | null };
+  return result.rawUsage?.stopReason === "aborted" || legacyResult.stopReason === "aborted";
+}
+
+function abortSlackRunsForScope(channelId: string, threadTs: string | null, isDm: boolean): number {
+  return abortActiveRuns((entry) => {
+    const metadata = entry.metadata;
+    return (
+      metadata?.platform === "slack" && metadata.channelId === channelId && (isDm || metadata.threadTs === threadTs)
+    );
+  });
+}
+
+function isBotAuthoredSlackMessage(message: SlackMessage): boolean {
+  return Boolean(message.botId) || message.subtype === "bot_message";
+}
 
 function parseInboxMetadata(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
@@ -156,6 +181,8 @@ export interface SlackAdapterDeps {
   stepContentRepo?: ReturnType<typeof createAutomationStepContentRepository>;
   automationRunsRepo?: ReturnType<typeof createAutomationRunsRepository>;
   inboxMessagesRepo?: InboxMessagesRepository;
+  slackEntitySync?: SlackEntitySyncService;
+  isInternalSlackUser?: (slackUserId: string, email: string | null) => Promise<boolean>;
   onSlackChannelDiscovered?: () => void;
   recordSlackChannelParticipantJoined?: (channelId: string, slackUserId: string) => Promise<void>;
   recordSlackChannelParticipantObserved?: (channelId: string, slackUserId: string) => Promise<void>;
@@ -167,9 +194,11 @@ export interface SlackAdapterDeps {
   followupReviewHandler?: FollowupReviewCommandHandler;
 }
 
-export async function validateSlackTokens(botToken: string, appToken?: string) {
+export async function validateSlackTokens(botToken: string, appToken?: string): Promise<{ teamId: string }> {
   void appToken;
-  await slackApiCall(botToken, "auth.test");
+  const auth = await slackApiCall(botToken, "auth.test");
+  if (!auth.team_id) throw new Error("Slack auth.test did not return a team id");
+  return { teamId: auth.team_id };
 }
 
 interface DownloadedSlackAttachment extends Attachment {
@@ -305,6 +334,13 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     botToken: tokens.botToken,
     ...(mode === "socket" ? { appToken: tokens.appToken } : { signingSecret: config.SLACK_SIGNING_SECRET }),
     logger,
+    eventSilenceThresholdMs: config.SLACK_ENTITY_SYNC
+      ? config.SLACK_ENTITY_EVENT_SILENCE_THRESHOLD_MS
+      : Number.MAX_SAFE_INTEGER,
+    lifecycleEventsEnabled: config.SLACK_ENTITY_SYNC,
+    onTeamIdResolved: async (teamId) => {
+      await deps.repos.settings.update({ slackTeamId: teamId });
+    },
   });
   const slackChannelParticipants = repos.slackChannelParticipants ?? createSlackChannelParticipantsRepository(db);
   const recordSlackChannelParticipantJoined =
@@ -317,15 +353,60 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     deps.recordSlackChannelParticipantLeft ??
     ((channelId: string, slackUserId: string) => slackChannelParticipants.remove(channelId, slackUserId));
 
-  slackBot.onMemberJoinedChannel(({ channelId, slackUserId }) =>
-    recordSlackChannelParticipantJoined(channelId, slackUserId),
-  );
-  slackBot.onMemberLeftChannel(({ channelId, slackUserId }) =>
-    recordSlackChannelParticipantLeft(channelId, slackUserId),
-  );
+  slackBot.onMemberJoinedChannel(async ({ channelId, slackUserId, isBot, teamId }) => {
+    await recordSlackChannelParticipantJoined(channelId, slackUserId);
+    if (deps.slackEntitySync) {
+      const refresh = isBot
+        ? deps.slackEntitySync.handleBotJoinedChannel({
+            channelId,
+            ...(teamId ? { teamId } : {}),
+          })
+        : deps.slackEntitySync.handleMemberJoinedChannel({
+            channelId,
+            slackUserId,
+            ...(teamId ? { teamId } : {}),
+          });
+      void refresh.catch((error) => {
+        logger.warn({ error, teamId, channelId }, "Slack channel member entity sync failed");
+      });
+    }
+  });
+  slackBot.onMemberLeftChannel(async ({ channelId, slackUserId, teamId }) => {
+    await recordSlackChannelParticipantLeft(channelId, slackUserId);
+    await deps.slackEntitySync?.handleMemberLeftChannel({
+      channelId,
+      slackUserId,
+      ...(teamId ? { teamId } : {}),
+    });
+  });
+  slackBot.onTeamJoin?.(async ({ teamId, slackUserId }) => {
+    await deps.slackEntitySync?.handleUserEvent({
+      eventType: "team_join",
+      slackUserId,
+      ...(teamId ? { teamId } : {}),
+    });
+  });
+  slackBot.onUserChange?.(async ({ teamId, slackUserId }) => {
+    await deps.slackEntitySync?.handleUserEvent({
+      eventType: "user_change",
+      slackUserId,
+      ...(teamId ? { teamId } : {}),
+    });
+  });
   const recordObservedChannelParticipant = async (message: SlackMessage) => {
     if (message.userId && message.channelType !== "mpim") {
       await recordSlackChannelParticipantObserved(message.channelId, message.userId);
+    }
+    if (message.userId && deps.slackEntitySync) {
+      try {
+        await deps.slackEntitySync.observeMessage({
+          channelId: message.channelId,
+          slackUserId: message.userId,
+          ...(message.teamId ? { teamId: message.teamId } : {}),
+        });
+      } catch (err) {
+        logger.warn({ err, slackUserId: message.userId }, "Slack observe-on-message entity sync failed");
+      }
     }
   };
 
@@ -333,6 +414,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     resolveSlackUser(slackUserId, {
       users: repos.users,
       getUserInfo: (id) => slackDeps.userCache.resolve(id, (uid) => slackBot.getUserInfo(uid)),
+      isInternalSender: (id, userInfo) =>
+        deps.isInternalSlackUser
+          ? deps.isInternalSlackUser(id, userInfo.email)
+          : isInternalSlackUser(db, id, userInfo.email, userInfo),
       logger,
     });
 
@@ -564,6 +649,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     try {
       user = await resolveUser(message.userId);
     } catch (err) {
+      if (err instanceof SlackExternalUserError) {
+        await replyToUser("Sketch is only available to internal workspace members.");
+        return;
+      }
       if (err instanceof SlackIdentityConflictError) {
         logger.warn(
           {
@@ -582,244 +671,283 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       throw err;
     }
     const activeQueueKey = user.id;
+    if (!isBotAuthoredSlackMessage(message) && isSlackStopCommand(message.text)) {
+      abortSlackRunsForScope(message.channelId, null, true);
+      queue.clear(activeQueueKey);
+      await slackBot.addReaction(message.channelId, message.ts, SLACK_STOP_REACTION);
+      return;
+    }
     const userQueue = queue.getQueue(activeQueueKey);
 
     userQueue.enqueue(async () => {
-      logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing message");
-
-      const command = parseSketchCommand(message.text);
-      const dmConversation = await repos.conversations.getOrCreate(slackConversationRefForMessage(message), user.name);
-      const followupReview = await handleFollowupReviewCommand({
-        text: message.text,
-        userId: user.id,
-        surface: "slack",
-      });
-      if (followupReview.handled) {
-        await captureSlackMessage({
-          message,
-          senderName: user.name,
-          senderUserId: user.id,
-          addressedToSketch: true,
-          attachments: [],
-          displayName: user.name,
-        });
-        await replyToUser(followupReview.message);
-        return;
-      }
-      if (command === "new_session") {
-        await archiveRuntimeSessions(db, user.id);
-        await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
-        await replyToUser(getNewSessionConfirmation());
-        return;
-      }
-
-      if (!command && isToolProgressCommand(message.text)) {
-        await replyToUser(getUnknownToolProgressMessage(message.text));
-        return;
-      }
-
-      if (!command && isReasoningTextCommand(message.text)) {
-        await replyToUser(getUnknownReasoningTextMessage(message.text));
-        return;
-      }
-
-      const currentProgressSettings = resolveProgressDisplaySettings(user);
-      if (command === "tool_progress_query") {
-        await replyToUser(getToolProgressCurrent(currentProgressSettings));
-        return;
-      }
-
-      if (command === "reasoning_text_query") {
-        await replyToUser(getReasoningTextCurrent(currentProgressSettings));
-        return;
-      }
-
-      const requestedToolProgress = resolveCommandToolProgress(command);
-      if (requestedToolProgress) {
-        await repos.users.update(user.id, { toolProgress: requestedToolProgress });
-        await replyToUser(getToolProgressConfirmation(requestedToolProgress, currentProgressSettings.reasoningText));
-        return;
-      }
-
-      const requestedReasoningText = resolveCommandReasoningText(command);
-      if (requestedReasoningText) {
-        const enabled = requestedReasoningText === "on";
-        await repos.users.update(user.id, { reasoningText: enabled });
-        await replyToUser(getReasoningTextConfirmation(enabled));
-        return;
-      }
-
-      const workspaceDir = await ensureWorkspace(config, user.id);
-      const settingsRow = await repos.settings.get();
-
-      let attachments = await downloadMessageAttachments({
-        files: message.files,
-        workspaceDir,
-        botToken: settingsRow?.slack_bot_token,
-        maxBytes: maxFileBytes,
-        logger,
-      });
-      const eagerAuxCalls: AuxLlmCall[] = [];
-      attachments = await transcribeEagerAttachments(attachments, {
-        loadSettings: () => repos.settings.get(),
-        logger,
-        onUsage: (call) => eagerAuxCalls.push(call),
-      });
-      const capture = await captureSlackMessage({
-        message,
-        senderName: user.name,
-        senderUserId: user.id,
-        addressedToSketch: true,
-        attachments,
-        displayName: user.name,
-      });
-      if (!capture.captured) return;
-
-      const backlog = await repos.conversations.listBacklog({
-        conversationId: capture.conversation.id,
-        afterMessageId: dmConversation.last_seen_message_id,
-        beforeMessageId: capture.captured.id,
-        limit: INLINE_BACKLOG_LIMIT,
-      });
-      const conversationBacklog =
-        backlog.messages.length > 0 || backlog.hasMore
-          ? {
-              messages: backlog.messages,
-              afterMessageId: dmConversation.last_seen_message_id,
-              beforeMessageId: capture.captured.id,
-              hasMore: backlog.hasMore,
-              nextCursor: backlog.nextCursor,
-            }
-          : undefined;
-
-      const assistantThreadTs = message.threadTs;
-      const shimmerThreadTs = message.threadTs ?? message.ts;
-
-      const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, assistantThreadTs);
+      const abortController = new AbortController();
+      let capture: Awaited<ReturnType<typeof captureSlackMessage>> | undefined;
       let clearAssistantStatus: (() => Promise<void>) | null = null;
       let pendingInbox: Awaited<ReturnType<typeof loadPendingInboxMessages>> | null = null;
+      await withActiveRun(
+        `slack:${randomUUID()}`,
+        abortController,
+        async () => {
+          logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing message");
 
-      try {
-        const shimmer = createShimmer(
-          slackBot,
-          message.channelId,
-          shimmerThreadTs,
-          resolveProgressDisplaySettings(user),
-        );
-        clearAssistantStatus = shimmer.clear;
-        const { onProgressEvent } = shimmer;
-
-        const integrationMcpServers = await buildMcpServers(user.email);
-        pendingInbox = await loadPendingInboxMessages(user.id);
-
-        const visionConfig = resolveVisionConfigFromAppConfig(config, settingsRow);
-        const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, null);
-        const sketchContext: SketchContextParams = {
-          messages: [],
-          currentUserName: user.name,
-          currentMessage: message.text || "See attached files.",
-          currentUserEmail: user.email,
-          workspaceDir,
-          orgDir: config.CLAUDE_CONFIG_DIR,
-          timezone: user.timezone,
-          isSharedContext: false,
-          inboxMessages: pendingInbox.messages,
-          conversationBacklog,
-          visionAnalysisEnabled: visualAnalysisAllowed,
-        };
-        const userMessage = buildSketchContext(sketchContext);
-
-        const result = await runAgent({
-          db,
-          workspaceKey: user.id,
-          seedAuxCalls: eagerAuxCalls,
-          userMessage,
-          workspaceDir,
-          claudeConfigDir: config.CLAUDE_CONFIG_DIR,
-          userName: user.name,
-          userEmail: user.email,
-          logger,
-          platform: "slack",
-          getSlack: () => slackBot,
-          onProgressEvent,
-          ...(assistantThreadTs ? { threadTs: assistantThreadTs } : {}),
-          orgName: settingsRow?.org_name,
-          orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
-          botName: settingsRow?.bot_name,
-          visionConfig,
-          blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
-          attachments: attachments.length > 0 ? attachments : undefined,
-          integrationMcpServers,
-          loadIntegrationProvider,
-          contextType: "dm",
-          taskContext: {
-            platform: "slack" as const,
-            contextType: "dm" as const,
-            deliveryTarget: message.channelId,
-            createdBy: user.id,
-            canManageAnyTask: user.auth_role === "admin",
-            creatorTimezone: user.timezone,
-            origin: {
-              platform: "slack" as const,
-              conversationId: String(capture.conversation.id),
-              providerThreadId: null,
-              currentMessageId: capture.captured.id,
-            },
-          },
-          scheduler,
-          stepContentRepo,
-          automationRunsRepo,
-          queueManager: queue,
-          activeQueueKey,
-          toolConfig,
-          inboxMessagesRepo,
-          userRepo: repos.users,
-          currentUserId: user.id,
-          sendDm,
-          conversationRepo: repos.conversations,
-          conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
-        });
-
-        const finalText = appendIntegrationConnectionLinks(
-          appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
-          result.pendingIntegrationConnections,
-          "slack",
-          toolConfig,
-        );
-        if (finalText) {
-          const sent = await onFinalMessage(finalText);
-          await captureSlackBotReplies({
-            conversationId: capture.conversation.id,
-            sent,
-            channelId: message.channelId,
-            threadTs: assistantThreadTs,
-            botName: settingsRow?.bot_name,
+          const command = parseSketchCommand(message.text);
+          const dmConversation = await repos.conversations.getOrCreate(
+            slackConversationRefForMessage(message),
+            user.name,
+          );
+          const followupReview = await handleFollowupReviewCommand({
+            text: message.text,
+            userId: user.id,
+            surface: "slack",
           });
-        }
-
-        for (const filePath of result.pendingUploads) {
-          try {
-            await slackBot.uploadFile(message.channelId, filePath, assistantThreadTs);
-          } catch (err) {
-            logger.warn({ err, filePath }, "Failed to upload file to Slack");
+          if (followupReview.handled) {
+            await captureSlackMessage({
+              message,
+              senderName: user.name,
+              senderUserId: user.id,
+              addressedToSketch: true,
+              attachments: [],
+              displayName: user.name,
+            });
+            await replyToUser(followupReview.message);
+            return;
           }
-        }
+          if (command === "new_session") {
+            await archiveRuntimeSessions(db, user.id);
+            await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
+            await replyToUser(getNewSessionConfirmation());
+            return;
+          }
 
-        await clearAssistantStatus();
-        if (pendingInbox && pendingInbox.ids.length > 0 && inboxMessagesRepo) {
-          await inboxMessagesRepo.markConsumed(pendingInbox.ids);
-        }
-        if (result.messageSent || result.pendingUploads.length > 0) {
-          await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
-        }
-        if (!finalText) {
-          await replyToUser("_No response_");
-        }
-      } catch (err) {
-        logger.error({ err, userId: user.id }, "Agent run failed");
-        await clearAssistantStatus?.();
-        await replyToUser(agentFailureMessage(err, SLACK_AGENT_ERROR_MESSAGE));
-      }
+          if (!command && isToolProgressCommand(message.text)) {
+            await replyToUser(getUnknownToolProgressMessage(message.text));
+            return;
+          }
+
+          if (!command && isReasoningTextCommand(message.text)) {
+            await replyToUser(getUnknownReasoningTextMessage(message.text));
+            return;
+          }
+
+          const currentProgressSettings = resolveProgressDisplaySettings(user);
+          if (command === "tool_progress_query") {
+            await replyToUser(getToolProgressCurrent(currentProgressSettings));
+            return;
+          }
+
+          if (command === "reasoning_text_query") {
+            await replyToUser(getReasoningTextCurrent(currentProgressSettings));
+            return;
+          }
+
+          const requestedToolProgress = resolveCommandToolProgress(command);
+          if (requestedToolProgress) {
+            await repos.users.update(user.id, { toolProgress: requestedToolProgress });
+            await replyToUser(
+              getToolProgressConfirmation(requestedToolProgress, currentProgressSettings.reasoningText),
+            );
+            return;
+          }
+
+          const requestedReasoningText = resolveCommandReasoningText(command);
+          if (requestedReasoningText) {
+            const enabled = requestedReasoningText === "on";
+            await repos.users.update(user.id, { reasoningText: enabled });
+            await replyToUser(getReasoningTextConfirmation(enabled));
+            return;
+          }
+
+          try {
+            const workspaceDir = await ensureWorkspace(config, user.id);
+            const settingsRow = await repos.settings.get();
+
+            let attachments = await downloadMessageAttachments({
+              files: message.files,
+              workspaceDir,
+              botToken: settingsRow?.slack_bot_token,
+              maxBytes: maxFileBytes,
+              logger,
+            });
+            const eagerAuxCalls: AuxLlmCall[] = [];
+            attachments = await transcribeEagerAttachments(attachments, {
+              loadSettings: () => repos.settings.get(),
+              logger,
+              onUsage: (call) => eagerAuxCalls.push(call),
+            });
+            capture = await captureSlackMessage({
+              message,
+              senderName: user.name,
+              senderUserId: user.id,
+              addressedToSketch: true,
+              attachments,
+              displayName: user.name,
+            });
+            if (!capture.captured) return;
+
+            const backlog = await repos.conversations.listBacklog({
+              conversationId: capture.conversation.id,
+              afterMessageId: dmConversation.last_seen_message_id,
+              beforeMessageId: capture.captured.id,
+              limit: INLINE_BACKLOG_LIMIT,
+            });
+            const conversationBacklog =
+              backlog.messages.length > 0 || backlog.hasMore
+                ? {
+                    messages: backlog.messages,
+                    afterMessageId: dmConversation.last_seen_message_id,
+                    beforeMessageId: capture.captured.id,
+                    hasMore: backlog.hasMore,
+                    nextCursor: backlog.nextCursor,
+                  }
+                : undefined;
+
+            const assistantThreadTs = message.threadTs;
+            const shimmerThreadTs = message.threadTs ?? message.ts;
+
+            const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, assistantThreadTs);
+
+            const shimmer = createShimmer(
+              slackBot,
+              message.channelId,
+              shimmerThreadTs,
+              resolveProgressDisplaySettings(user),
+            );
+            clearAssistantStatus = shimmer.clear;
+            const { onProgressEvent } = shimmer;
+
+            const integrationMcpServers = await buildMcpServers(user.email);
+            pendingInbox = await loadPendingInboxMessages(user.id);
+
+            const visionConfig = resolveVisionConfigFromAppConfig(config, settingsRow);
+            const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, null);
+            const sketchContext: SketchContextParams = {
+              messages: [],
+              currentUserName: user.name,
+              currentMessage: message.text || "See attached files.",
+              currentUserEmail: user.email,
+              workspaceDir,
+              orgDir: config.CLAUDE_CONFIG_DIR,
+              timezone: user.timezone,
+              isSharedContext: false,
+              inboxMessages: pendingInbox.messages,
+              conversationBacklog,
+              visionAnalysisEnabled: visualAnalysisAllowed,
+            };
+            const userMessage = buildSketchContext(sketchContext);
+
+            if (abortController.signal.aborted) {
+              await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
+              return;
+            }
+
+            const result = await runAgent({
+              db,
+              workspaceKey: user.id,
+              seedAuxCalls: eagerAuxCalls,
+              userMessage,
+              workspaceDir,
+              claudeConfigDir: config.CLAUDE_CONFIG_DIR,
+              userName: user.name,
+              userEmail: user.email,
+              logger,
+              platform: "slack",
+              getSlack: () => slackBot,
+              onProgressEvent,
+              ...(assistantThreadTs ? { threadTs: assistantThreadTs } : {}),
+              orgName: settingsRow?.org_name,
+              orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
+              botName: settingsRow?.bot_name,
+              visionConfig,
+              blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
+              attachments: attachments.length > 0 ? attachments : undefined,
+              integrationMcpServers,
+              loadIntegrationProvider,
+              contextType: "dm",
+              taskContext: {
+                platform: "slack" as const,
+                contextType: "dm" as const,
+                deliveryTarget: message.channelId,
+                createdBy: user.id,
+                canManageAnyTask: user.auth_role === "admin",
+                creatorTimezone: user.timezone,
+                origin: {
+                  platform: "slack" as const,
+                  conversationId: String(capture.conversation.id),
+                  providerThreadId: null,
+                  currentMessageId: capture.captured.id,
+                },
+              },
+              scheduler,
+              stepContentRepo,
+              automationRunsRepo,
+              queueManager: queue,
+              activeQueueKey,
+              abortController,
+              toolConfig,
+              inboxMessagesRepo,
+              userRepo: repos.users,
+              currentUserId: user.id,
+              sendDm,
+              conversationRepo: repos.conversations,
+              conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
+            });
+
+            if (isAbortedRunResult(result)) {
+              await clearAssistantStatus();
+              await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
+              return;
+            }
+
+            const finalText = appendIntegrationConnectionLinks(
+              appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
+              result.pendingIntegrationConnections,
+              "slack",
+              toolConfig,
+            );
+            if (finalText) {
+              const sent = await onFinalMessage(finalText);
+              await captureSlackBotReplies({
+                conversationId: capture.conversation.id,
+                sent,
+                channelId: message.channelId,
+                threadTs: assistantThreadTs,
+                botName: settingsRow?.bot_name,
+              });
+            }
+
+            for (const filePath of result.pendingUploads) {
+              try {
+                await slackBot.uploadFile(message.channelId, filePath, assistantThreadTs);
+              } catch (err) {
+                logger.warn({ err, filePath }, "Failed to upload file to Slack");
+              }
+            }
+
+            await clearAssistantStatus();
+            if (pendingInbox && pendingInbox.ids.length > 0 && inboxMessagesRepo) {
+              await inboxMessagesRepo.markConsumed(pendingInbox.ids);
+            }
+            if (result.messageSent || result.pendingUploads.length > 0) {
+              await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
+            }
+            if (!finalText) {
+              await replyToUser("_No response_");
+            }
+          } catch (err) {
+            if (isRuntimeAbortError(err, abortController.signal)) {
+              await clearAssistantStatus?.();
+              if (capture?.captured) {
+                await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
+              }
+              return;
+            }
+            logger.error({ err, userId: user.id }, "Agent run failed");
+            await clearAssistantStatus?.();
+            await replyToUser(agentFailureMessage(err, SLACK_AGENT_ERROR_MESSAGE));
+          }
+        },
+        { platform: "slack", channelId: message.channelId, threadTs: message.threadTs ?? null },
+      );
     });
   });
 
@@ -954,341 +1082,419 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     void participantObservation.catch(() => undefined);
     const threadTs = message.threadTs ?? message.ts;
     const activeQueueKey = `${message.channelId}:${threadTs}`;
+    if (!isBotAuthoredSlackMessage(message) && isSlackStopCommand(message.text)) {
+      abortSlackRunsForScope(message.channelId, threadTs, false);
+      queue.clear(activeQueueKey);
+      await slackBot.addReaction(message.channelId, message.ts, SLACK_STOP_REACTION);
+      return;
+    }
     const mentionQueue = queue.getQueue(activeQueueKey);
 
     mentionQueue.enqueue(async () => {
-      logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing channel mention");
+      const abortController = new AbortController();
+      let consumedMessageId: number | undefined;
+      let consumedConversationId: number | undefined;
+      await withActiveRun(
+        `slack:${randomUUID()}`,
+        abortController,
+        async () => {
+          logger.info({ slackUserId: message.userId, channelId: message.channelId }, "Processing channel mention");
 
-      let user: Awaited<ReturnType<typeof resolveUser>> | undefined;
-      let clearAssistantStatus: (() => Promise<void>) | null = null;
+          let user: Awaited<ReturnType<typeof resolveUser>> | undefined;
+          let clearAssistantStatus: (() => Promise<void>) | null = null;
 
-      try {
-        await participantObservation;
-        user = await resolveUser(userId);
-
-        let channel = await ensureChannelRow(message.channelId);
-
-        const boundAgent = channel.agent_user_id ? await repos.users.findById(channel.agent_user_id) : null;
-        if (channel.agent_user_id && !boundAgent) {
-          logger.warn(
-            { channelId: channel.id, agentUserId: channel.agent_user_id },
-            "Channel binding references missing agent; running with default behaviour",
-          );
-        }
-
-        /**
-         * Workspace key must include the agent prefix when the channel is
-         * bound to an agent — otherwise /new clears the wrong session and
-         * the next mention resumes stale context.
-         */
-        const channelWorkspaceKey = boundAgent
-          ? `agent-${boundAgent.id}/channel-${message.channelId}`
-          : `channel-${message.channelId}`;
-
-        const command = parseSketchCommand(message.text);
-        const channelConversation = await repos.conversations.getOrCreate(
-          slackConversationRefForMessage(message),
-          channel.name,
-        );
-        const followupReview = await handleFollowupReviewCommand({
-          text: message.text,
-          userId: user.id,
-          surface: "slack",
-        });
-        if (followupReview.handled) {
-          await captureSlackMessage({
-            message,
-            senderName: user.name,
-            senderUserId: user.id,
-            addressedToSketch: true,
-            attachments: [],
-            displayName: channel.name,
-          });
-          await slackBot.postThreadReply(message.channelId, threadTs, followupReview.message);
-          return;
-        }
-        if (command === "new_session") {
-          await archiveRuntimeSessions(db, channelWorkspaceKey, threadTs);
-          await repos.conversations.advanceCursorToCurrentMax({
-            conversationId: channelConversation.id,
-            scopeType: SLACK_THREAD_CURSOR_SCOPE,
-            scopeKey: threadTs,
-            providerThreadId: threadTs,
-          });
-          await slackBot.postThreadReply(message.channelId, threadTs, getNewSessionConfirmation());
-          return;
-        }
-
-        if (!command && isToolProgressCommand(message.text)) {
-          await slackBot.postThreadReply(message.channelId, threadTs, getUnknownToolProgressMessage(message.text));
-          return;
-        }
-
-        if (!command && isReasoningTextCommand(message.text)) {
-          await slackBot.postThreadReply(message.channelId, threadTs, getUnknownReasoningTextMessage(message.text));
-          return;
-        }
-
-        const currentProgressSettings = resolveProgressDisplaySettings(channel);
-        if (command === "tool_progress_query") {
-          await slackBot.postThreadReply(message.channelId, threadTs, getToolProgressCurrent(currentProgressSettings));
-          return;
-        }
-
-        if (command === "reasoning_text_query") {
-          await slackBot.postThreadReply(message.channelId, threadTs, getReasoningTextCurrent(currentProgressSettings));
-          return;
-        }
-
-        const requestedToolProgress = resolveCommandToolProgress(command);
-        if (requestedToolProgress) {
-          channel = await repos.channels.update(channel.id, { toolProgress: requestedToolProgress });
-          await slackBot.postThreadReply(
-            message.channelId,
-            threadTs,
-            getToolProgressConfirmation(requestedToolProgress, currentProgressSettings.reasoningText),
-          );
-          return;
-        }
-
-        const requestedReasoningText = resolveCommandReasoningText(command);
-        if (requestedReasoningText) {
-          const enabled = requestedReasoningText === "on";
-          channel = await repos.channels.update(channel.id, { reasoningText: enabled });
-          await slackBot.postThreadReply(message.channelId, threadTs, getReasoningTextConfirmation(enabled));
-          return;
-        }
-
-        const workspaceDir = boundAgent
-          ? await ensureAgentSubWorkspace(config, boundAgent.id, `channel-${message.channelId}`)
-          : await ensureChannelWorkspace(config, message.channelId);
-        const settingsRow = await repos.settings.get();
-
-        let attachments = await downloadMessageAttachments({
-          files: message.files,
-          workspaceDir,
-          botToken: settingsRow?.slack_bot_token,
-          maxBytes: maxFileBytes,
-          logger,
-        });
-        const eagerAuxCalls: AuxLlmCall[] = [];
-        attachments = await transcribeEagerAttachments(attachments, {
-          loadSettings: () => repos.settings.get(),
-          logger,
-          onUsage: (call) => eagerAuxCalls.push(call),
-        });
-        const capture = await captureSlackMessage({
-          message: channel.type === "mpim" ? { ...message, channelType: "mpim" } : message,
-          senderName: user.name,
-          senderUserId: user.id,
-          addressedToSketch: true,
-          attachments,
-          displayName: channel.name,
-        });
-        if (!capture.captured) return;
-        if (capture.inserted && !message.threadTs && channel.type !== "mpim" && scheduler) {
-          await scheduler.dispatchSlackChannelMessage(
-            message.channelId,
-            {
-              type: "slack_channel_message",
-              channelId: message.channelId,
-              messageTs: message.ts,
-              text: message.text,
-              userId: message.userId ?? null,
-              botId: message.botId ?? null,
-              appId: message.appId ?? null,
-              subtype: message.subtype ?? null,
-              files: filesForAutomationTrigger(message.files, attachments),
-              capturedMessageId: capture.captured.id,
-              conversationId: capture.conversation.id,
-            },
-            { sourceWorkspaceDir: workspaceDir },
-          );
-        }
-
-        const cursor = await repos.conversations.getCursor({
-          conversationId: capture.conversation.id,
-          scopeType: SLACK_THREAD_CURSOR_SCOPE,
-          scopeKey: threadTs,
-        });
-        const backlog = await repos.conversations.listBacklog({
-          conversationId: capture.conversation.id,
-          afterMessageId: cursor?.last_seen_message_id,
-          beforeMessageId: capture.captured.id,
-          limit: INLINE_BACKLOG_LIMIT,
-          providerThreadId: message.threadTs ? threadTs : undefined,
-          isThreadReply: message.threadTs ? undefined : false,
-        });
-        const conversationBacklog =
-          backlog.messages.length > 0 || backlog.hasMore
-            ? {
-                messages: backlog.messages,
-                afterMessageId: cursor?.last_seen_message_id,
-                beforeMessageId: capture.captured.id,
-                hasMore: backlog.hasMore,
-                nextCursor: backlog.nextCursor,
-              }
-            : undefined;
-        const bootstrapMessages = !conversationBacklog
-          ? await loadSlackBootstrapMessages({
-              channelId: message.channelId,
-              currentMessageTs: message.ts,
-              ...(message.threadTs ? { threadTs } : {}),
-            })
-          : [];
-        const threadTag = message.threadTs ? "thread" : "channel_history";
-
-        const rawText = message.text || "See attached files.";
-        const visionConfig = resolveVisionConfigFromAppConfig(config, settingsRow);
-        const agentInstructions = boundAgent?.description ?? null;
-        const agentAllowedTools = boundAgent ? parseAllowedTools(boundAgent.allowed_tools) : null;
-        const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, agentAllowedTools);
-        const sketchContext: SketchContextParams = {
-          messages: bootstrapMessages,
-          currentUserName: user.name,
-          currentMessage: rawText,
-          currentUserEmail: user.email,
-          workspaceDir,
-          orgDir: config.CLAUDE_CONFIG_DIR,
-          timezone: user.timezone,
-          isSharedContext: true,
-          threadTag,
-          channelContext: { channelName: channel.name },
-          conversationBacklog,
-          visionAnalysisEnabled: visualAnalysisAllowed,
-        };
-        const userMessage = buildSketchContext(sketchContext);
-
-        const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, threadTs);
-        const shimmer = createShimmer(slackBot, message.channelId, threadTs, resolveProgressDisplaySettings(channel));
-        clearAssistantStatus = shimmer.clear;
-        const onProgressEvent = shimmer.onProgressEvent;
-
-        const integrationMcpServers = await buildMcpServers(user.email);
-
-        const result = await runAgent({
-          db,
-          workspaceKey: channelWorkspaceKey,
-          seedAuxCalls: eagerAuxCalls,
-          userMessage,
-          workspaceDir,
-          claudeConfigDir: config.CLAUDE_CONFIG_DIR,
-          userName: user.name,
-          userEmail: user.email,
-          logger,
-          platform: "slack",
-          getSlack: () => slackBot,
-          onProgressEvent,
-          threadTs,
-          orgName: settingsRow?.org_name,
-          orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
-          botName: settingsRow?.bot_name,
-          visionConfig,
-          blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
-          attachments: attachments.length > 0 ? attachments : undefined,
-          integrationMcpServers,
-          loadIntegrationProvider,
-          contextType: "channel_mention",
-          currentUserId: user.id,
-          taskContext: {
-            platform: "slack" as const,
-            contextType: "channel" as const,
-            deliveryTarget: message.channelId,
-            createdBy: user.id,
-            canManageAnyTask: user.auth_role === "admin",
-            creatorTimezone: user.timezone,
-            threadTs: message.threadTs ? threadTs : undefined,
-            origin: {
-              platform: "slack" as const,
-              conversationId: String(capture.conversation.id),
-              providerThreadId: threadTs,
-              currentMessageId: capture.captured.id,
-            },
-          },
-          scheduler,
-          stepContentRepo,
-          automationRunsRepo,
-          queueManager: queue,
-          activeQueueKey,
-          toolConfig,
-          inboxMessagesRepo,
-          userRepo: repos.users,
-          sendDm,
-          agentInstructions,
-          agentAllowedTools,
-          conversationRepo: repos.conversations,
-          conversationContext: {
-            conversationId: capture.conversation.id,
-            currentMessageId: capture.captured.id,
-            providerThreadId: message.threadTs ? threadTs : undefined,
-            ...(message.threadTs ? {} : { isThreadReply: false }),
-          },
-        });
-
-        const finalText = appendIntegrationConnectionLinks(
-          appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
-          result.pendingIntegrationConnections,
-          "slack",
-          toolConfig,
-        );
-        if (finalText) {
-          const sent = await onFinalMessage(finalText);
-          await captureSlackBotReplies({
-            conversationId: capture.conversation.id,
-            sent,
-            channelId: message.channelId,
-            threadTs,
-            botName: settingsRow?.bot_name,
-          });
-        }
-
-        for (const filePath of result.pendingUploads) {
           try {
-            await slackBot.uploadFile(message.channelId, filePath, threadTs);
-          } catch (err) {
-            logger.warn({ err, filePath }, "Failed to upload file to Slack");
-          }
-        }
+            await participantObservation;
+            user = await resolveUser(userId);
 
-        await clearAssistantStatus?.();
-        if (result.messageSent || result.pendingUploads.length > 0) {
-          await repos.conversations.updateCursor({
-            conversationId: capture.conversation.id,
-            scopeType: SLACK_THREAD_CURSOR_SCOPE,
-            scopeKey: threadTs,
-            messageId: capture.captured.id,
-          });
-        }
-        if (!finalText) {
-          await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
-        }
-      } catch (err) {
-        if (err instanceof SlackIdentityConflictError) {
-          logger.warn(
-            {
-              slackUserId: message.userId,
-              channelId: message.channelId,
-              email: err.conflict.email,
-              existingUserId: err.conflict.existingUserId,
-              existingSlackUserId: err.conflict.existingSlackUserId,
-            },
-            "Skipping channel mention because Slack identity conflicts with an existing user",
-          );
-          await slackBot.postThreadReply(
-            message.channelId,
-            threadTs,
-            "I can't reply right now because your Slack account mapping conflicts with an existing Sketch identity. Please ask your admin to reconnect Slack for your workspace.",
-          );
-          return;
-        }
-        logger.error({ err, channelId: message.channelId }, "Channel mention handler failed");
-        await clearAssistantStatus?.();
-        await slackBot.postThreadReply(
-          message.channelId,
-          threadTs,
-          agentFailureMessage(err, SLACK_AGENT_ERROR_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE),
-        );
-      }
+            let channel = await ensureChannelRow(message.channelId);
+
+            const boundAgent = channel.agent_user_id ? await repos.users.findById(channel.agent_user_id) : null;
+            if (channel.agent_user_id && !boundAgent) {
+              logger.warn(
+                { channelId: channel.id, agentUserId: channel.agent_user_id },
+                "Channel binding references missing agent; running with default behaviour",
+              );
+            }
+
+            /**
+             * Workspace key must include the agent prefix when the channel is
+             * bound to an agent — otherwise /new clears the wrong session and
+             * the next mention resumes stale context.
+             */
+            const channelWorkspaceKey = boundAgent
+              ? `agent-${boundAgent.id}/channel-${message.channelId}`
+              : `channel-${message.channelId}`;
+
+            const command = parseSketchCommand(message.text);
+            const channelConversation = await repos.conversations.getOrCreate(
+              slackConversationRefForMessage(message),
+              channel.name,
+            );
+            const followupReview = await handleFollowupReviewCommand({
+              text: message.text,
+              userId: user.id,
+              surface: "slack",
+            });
+            if (followupReview.handled) {
+              await captureSlackMessage({
+                message,
+                senderName: user.name,
+                senderUserId: user.id,
+                addressedToSketch: true,
+                attachments: [],
+                displayName: channel.name,
+              });
+              await slackBot.postThreadReply(message.channelId, threadTs, followupReview.message);
+              return;
+            }
+            if (command === "new_session") {
+              await archiveRuntimeSessions(db, channelWorkspaceKey, threadTs);
+              await repos.conversations.advanceCursorToCurrentMax({
+                conversationId: channelConversation.id,
+                scopeType: SLACK_THREAD_CURSOR_SCOPE,
+                scopeKey: threadTs,
+                providerThreadId: threadTs,
+              });
+              await slackBot.postThreadReply(message.channelId, threadTs, getNewSessionConfirmation());
+              return;
+            }
+
+            if (!command && isToolProgressCommand(message.text)) {
+              await slackBot.postThreadReply(message.channelId, threadTs, getUnknownToolProgressMessage(message.text));
+              return;
+            }
+
+            if (!command && isReasoningTextCommand(message.text)) {
+              await slackBot.postThreadReply(message.channelId, threadTs, getUnknownReasoningTextMessage(message.text));
+              return;
+            }
+
+            const currentProgressSettings = resolveProgressDisplaySettings(channel);
+            if (command === "tool_progress_query") {
+              await slackBot.postThreadReply(
+                message.channelId,
+                threadTs,
+                getToolProgressCurrent(currentProgressSettings),
+              );
+              return;
+            }
+
+            if (command === "reasoning_text_query") {
+              await slackBot.postThreadReply(
+                message.channelId,
+                threadTs,
+                getReasoningTextCurrent(currentProgressSettings),
+              );
+              return;
+            }
+
+            const requestedToolProgress = resolveCommandToolProgress(command);
+            if (requestedToolProgress) {
+              channel = await repos.channels.update(channel.id, { toolProgress: requestedToolProgress });
+              await slackBot.postThreadReply(
+                message.channelId,
+                threadTs,
+                getToolProgressConfirmation(requestedToolProgress, currentProgressSettings.reasoningText),
+              );
+              return;
+            }
+
+            const requestedReasoningText = resolveCommandReasoningText(command);
+            if (requestedReasoningText) {
+              const enabled = requestedReasoningText === "on";
+              channel = await repos.channels.update(channel.id, { reasoningText: enabled });
+              await slackBot.postThreadReply(message.channelId, threadTs, getReasoningTextConfirmation(enabled));
+              return;
+            }
+
+            const workspaceDir = boundAgent
+              ? await ensureAgentSubWorkspace(config, boundAgent.id, `channel-${message.channelId}`)
+              : await ensureChannelWorkspace(config, message.channelId);
+            const settingsRow = await repos.settings.get();
+
+            let attachments = await downloadMessageAttachments({
+              files: message.files,
+              workspaceDir,
+              botToken: settingsRow?.slack_bot_token,
+              maxBytes: maxFileBytes,
+              logger,
+            });
+            const eagerAuxCalls: AuxLlmCall[] = [];
+            attachments = await transcribeEagerAttachments(attachments, {
+              loadSettings: () => repos.settings.get(),
+              logger,
+              onUsage: (call) => eagerAuxCalls.push(call),
+            });
+            const capture = await captureSlackMessage({
+              message: channel.type === "mpim" ? { ...message, channelType: "mpim" } : message,
+              senderName: user.name,
+              senderUserId: user.id,
+              addressedToSketch: true,
+              attachments,
+              displayName: channel.name,
+            });
+            consumedMessageId = capture.captured?.id;
+            consumedConversationId = capture.conversation.id;
+            if (!capture.captured) return;
+            if (capture.inserted && !message.threadTs && channel.type !== "mpim" && scheduler) {
+              await scheduler.dispatchSlackChannelMessage(
+                message.channelId,
+                {
+                  type: "slack_channel_message",
+                  channelId: message.channelId,
+                  messageTs: message.ts,
+                  text: message.text,
+                  userId: message.userId ?? null,
+                  botId: message.botId ?? null,
+                  appId: message.appId ?? null,
+                  subtype: message.subtype ?? null,
+                  files: filesForAutomationTrigger(message.files, attachments),
+                  capturedMessageId: capture.captured.id,
+                  conversationId: capture.conversation.id,
+                },
+                { sourceWorkspaceDir: workspaceDir },
+              );
+            }
+
+            const cursor = await repos.conversations.getCursor({
+              conversationId: capture.conversation.id,
+              scopeType: SLACK_THREAD_CURSOR_SCOPE,
+              scopeKey: threadTs,
+            });
+            const backlog = await repos.conversations.listBacklog({
+              conversationId: capture.conversation.id,
+              afterMessageId: cursor?.last_seen_message_id,
+              beforeMessageId: capture.captured.id,
+              limit: INLINE_BACKLOG_LIMIT,
+              providerThreadId: message.threadTs ? threadTs : undefined,
+              isThreadReply: message.threadTs ? undefined : false,
+            });
+            const conversationBacklog =
+              backlog.messages.length > 0 || backlog.hasMore
+                ? {
+                    messages: backlog.messages,
+                    afterMessageId: cursor?.last_seen_message_id,
+                    beforeMessageId: capture.captured.id,
+                    hasMore: backlog.hasMore,
+                    nextCursor: backlog.nextCursor,
+                  }
+                : undefined;
+            const bootstrapMessages = !conversationBacklog
+              ? await loadSlackBootstrapMessages({
+                  channelId: message.channelId,
+                  currentMessageTs: message.ts,
+                  ...(message.threadTs ? { threadTs } : {}),
+                })
+              : [];
+            const threadTag = message.threadTs ? "thread" : "channel_history";
+
+            const rawText = message.text || "See attached files.";
+            const visionConfig = resolveVisionConfigFromAppConfig(config, settingsRow);
+            const agentInstructions = boundAgent?.description ?? null;
+            const agentAllowedTools = boundAgent ? parseAllowedTools(boundAgent.allowed_tools) : null;
+            const visualAnalysisAllowed = canUseVisualAnalysisTool(visionConfig, agentAllowedTools);
+            const sketchContext: SketchContextParams = {
+              messages: bootstrapMessages,
+              currentUserName: user.name,
+              currentMessage: rawText,
+              currentUserEmail: user.email,
+              workspaceDir,
+              orgDir: config.CLAUDE_CONFIG_DIR,
+              timezone: user.timezone,
+              isSharedContext: true,
+              threadTag,
+              channelContext: { channelName: channel.name },
+              conversationBacklog,
+              visionAnalysisEnabled: visualAnalysisAllowed,
+            };
+            const userMessage = buildSketchContext(sketchContext);
+
+            const onFinalMessage = createSlackMessageHandler(slackBot, message.channelId, threadTs);
+            const shimmer = createShimmer(
+              slackBot,
+              message.channelId,
+              threadTs,
+              resolveProgressDisplaySettings(channel),
+            );
+            clearAssistantStatus = shimmer.clear;
+            const onProgressEvent = shimmer.onProgressEvent;
+
+            const integrationMcpServers = await buildMcpServers(user.email);
+            const activeUser = user;
+
+            if (abortController.signal.aborted) {
+              if (consumedConversationId !== undefined && consumedMessageId !== undefined) {
+                await repos.conversations.updateCursor({
+                  conversationId: consumedConversationId,
+                  scopeType: SLACK_THREAD_CURSOR_SCOPE,
+                  scopeKey: threadTs,
+                  messageId: consumedMessageId,
+                });
+              }
+              return;
+            }
+
+            const result = await runAgent({
+              db,
+              workspaceKey: channelWorkspaceKey,
+              seedAuxCalls: eagerAuxCalls,
+              userMessage,
+              workspaceDir,
+              claudeConfigDir: config.CLAUDE_CONFIG_DIR,
+              userName: activeUser.name,
+              userEmail: activeUser.email,
+              logger,
+              platform: "slack",
+              getSlack: () => slackBot,
+              onProgressEvent,
+              threadTs,
+              orgName: settingsRow?.org_name,
+              orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
+              botName: settingsRow?.bot_name,
+              visionConfig,
+              blockedReadPaths: getImageAttachmentPathsFromSketchContext(sketchContext),
+              attachments: attachments.length > 0 ? attachments : undefined,
+              integrationMcpServers,
+              loadIntegrationProvider,
+              contextType: "channel_mention",
+              currentUserId: activeUser.id,
+              taskContext: {
+                platform: "slack" as const,
+                contextType: "channel" as const,
+                deliveryTarget: message.channelId,
+                createdBy: activeUser.id,
+                canManageAnyTask: activeUser.auth_role === "admin",
+                creatorTimezone: activeUser.timezone,
+                threadTs: message.threadTs ? threadTs : undefined,
+                origin: {
+                  platform: "slack" as const,
+                  conversationId: String(capture.conversation.id),
+                  providerThreadId: threadTs,
+                  currentMessageId: capture.captured.id,
+                },
+              },
+              scheduler,
+              stepContentRepo,
+              automationRunsRepo,
+              queueManager: queue,
+              activeQueueKey,
+              abortController,
+              toolConfig,
+              inboxMessagesRepo,
+              userRepo: repos.users,
+              sendDm,
+              agentInstructions,
+              agentAllowedTools,
+              conversationRepo: repos.conversations,
+              conversationContext: {
+                conversationId: capture.conversation.id,
+                currentMessageId: capture.captured.id,
+                providerThreadId: message.threadTs ? threadTs : undefined,
+                ...(message.threadTs ? {} : { isThreadReply: false }),
+              },
+            });
+
+            if (isAbortedRunResult(result)) {
+              await clearAssistantStatus?.();
+              if (consumedConversationId !== undefined && consumedMessageId !== undefined) {
+                await repos.conversations.updateCursor({
+                  conversationId: consumedConversationId,
+                  scopeType: SLACK_THREAD_CURSOR_SCOPE,
+                  scopeKey: threadTs,
+                  messageId: consumedMessageId,
+                });
+              }
+              return;
+            }
+
+            const finalText = appendIntegrationConnectionLinks(
+              appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
+              result.pendingIntegrationConnections,
+              "slack",
+              toolConfig,
+            );
+            if (finalText) {
+              const sent = await onFinalMessage(finalText);
+              await captureSlackBotReplies({
+                conversationId: capture.conversation.id,
+                sent,
+                channelId: message.channelId,
+                threadTs,
+                botName: settingsRow?.bot_name,
+              });
+            }
+
+            for (const filePath of result.pendingUploads) {
+              try {
+                await slackBot.uploadFile(message.channelId, filePath, threadTs);
+              } catch (err) {
+                logger.warn({ err, filePath }, "Failed to upload file to Slack");
+              }
+            }
+
+            await clearAssistantStatus?.();
+            if (result.messageSent || result.pendingUploads.length > 0) {
+              await repos.conversations.updateCursor({
+                conversationId: capture.conversation.id,
+                scopeType: SLACK_THREAD_CURSOR_SCOPE,
+                scopeKey: threadTs,
+                messageId: capture.captured.id,
+              });
+            }
+            if (!finalText) {
+              await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
+            }
+          } catch (err) {
+            if (isRuntimeAbortError(err, abortController.signal)) {
+              await clearAssistantStatus?.();
+              if (consumedConversationId !== undefined && consumedMessageId !== undefined) {
+                await repos.conversations.updateCursor({
+                  conversationId: consumedConversationId,
+                  scopeType: SLACK_THREAD_CURSOR_SCOPE,
+                  scopeKey: threadTs,
+                  messageId: consumedMessageId,
+                });
+              }
+              return;
+            }
+            if (err instanceof SlackIdentityConflictError) {
+              logger.warn(
+                {
+                  slackUserId: message.userId,
+                  channelId: message.channelId,
+                  email: err.conflict.email,
+                  existingUserId: err.conflict.existingUserId,
+                  existingSlackUserId: err.conflict.existingSlackUserId,
+                },
+                "Skipping channel mention because Slack identity conflicts with an existing user",
+              );
+              await slackBot.postThreadReply(
+                message.channelId,
+                threadTs,
+                "I can't reply right now because your Slack account mapping conflicts with an existing Sketch identity. Please ask your admin to reconnect Slack for your workspace.",
+              );
+              return;
+            }
+            if (err instanceof SlackExternalUserError) {
+              await slackBot.postThreadReply(
+                message.channelId,
+                threadTs,
+                "Sketch is only available to internal workspace members.",
+              );
+              return;
+            }
+            logger.error({ err, channelId: message.channelId }, "Channel mention handler failed");
+            await clearAssistantStatus?.();
+            await slackBot.postThreadReply(
+              message.channelId,
+              threadTs,
+              agentFailureMessage(err, SLACK_AGENT_ERROR_MESSAGE, PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE),
+            );
+          }
+        },
+        { platform: "slack", channelId: message.channelId, threadTs },
+      );
     });
   });
 

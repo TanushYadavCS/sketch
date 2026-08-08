@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 /**
  * Server bootstrap — wires config, DB, repos, platform adapters, and HTTP into a
@@ -45,6 +46,7 @@ import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createOperationalAlertsRepository } from "./db/repositories/operational-alerts";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createSlackChannelParticipantsRepository } from "./db/repositories/slack-channel-participants";
+import { createUserEntityLinkSweepService } from "./db/repositories/user-entity-link-sweep";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
 import { createWhatsAppInboundEventsRepository } from "./db/repositories/whatsapp-inbound-events";
@@ -53,6 +55,7 @@ import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whats
 import type { DB } from "./db/schema";
 import { configureMaterializeDefaults } from "./entities/materialize";
 import { startNormalizationBackfill } from "./entities/normalization-backfill";
+import { isPersonalOrSharedDomain } from "./entities/personal-domains";
 import type { ProposeEntityType } from "./entities/propose";
 import { createApp } from "./http";
 import { buildMcpConfig, createProvider } from "./integrations/factory";
@@ -60,6 +63,7 @@ import type { IntegrationProvider, IntegrationStatus } from "./integrations/type
 import { LocalClaudeSessionService } from "./local-devices/claude-sessions";
 import { LocalDeviceGateway } from "./local-devices/gateway";
 import { createLogger } from "./logger";
+import type { Logger } from "./logger";
 import { reconcileManagedTenantMembers } from "./managed-members";
 import { runManagedSeed } from "./managed-seed";
 import { channelsReconnectUrl, createOperationalAlertDefinitions } from "./operational-alerts/definitions";
@@ -71,6 +75,7 @@ import { TaskScheduler } from "./scheduler/service";
 import { syncFeaturedSkills } from "./skills/sync";
 import { createConfiguredSlackBot, validateSlackTokens } from "./slack/adapter";
 import type { SlackBot } from "./slack/bot";
+import { createSlackEntitySync } from "./slack/entity-sync";
 import { createSettingsBackedSlackIndexingFacade } from "./slack/indexing-facade";
 import { SlackMembershipReconciler } from "./slack/membership-reconciler";
 import { createSlackStartupManager } from "./slack/startup";
@@ -116,6 +121,58 @@ export interface CreateServerOptions {
   connect?: boolean;
   externalStartup?: boolean;
   backgroundWork?: boolean;
+}
+
+export async function seedSlackOrganizationDomain(
+  db: Kysely<DB>,
+  logger?: Pick<Logger, "warn">,
+): Promise<string | null> {
+  const admins = await db
+    .selectFrom("users")
+    .select(["email", "email_verified_at"])
+    .where("auth_role", "=", "admin")
+    .where("email_verified_at", "is not", null)
+    .where("email", "is not", null)
+    .orderBy("created_at", "asc")
+    .orderBy("id", "asc")
+    .execute();
+  const domains = new Map<string, string>();
+  for (const admin of admins) {
+    const rawVerifiedAt: unknown = admin.email_verified_at;
+    const verifiedAt =
+      rawVerifiedAt instanceof Date
+        ? rawVerifiedAt.toISOString()
+        : typeof rawVerifiedAt === "string"
+          ? rawVerifiedAt
+          : null;
+    if (!verifiedAt) continue;
+    const email = admin.email?.trim().toLowerCase() ?? "";
+    const at = email.lastIndexOf("@");
+    const domain = at > 0 ? email.slice(at + 1).trim() : "";
+    if (!domain || isPersonalOrSharedDomain(domain)) continue;
+    domains.set(domain, verifiedAt);
+  }
+
+  if (domains.size === 0) {
+    logger?.warn(
+      "No corporate admin email domains could be seeded; classification defaults to external without domain or roster evidence",
+    );
+    return null;
+  }
+
+  for (const [domain, verifiedAt] of domains) {
+    await db
+      .insertInto("organization_domains")
+      .values({
+        id: randomUUID(),
+        domain,
+        source: "admin_email_seed",
+        verified_at: verifiedAt,
+      })
+      .onConflict((oc) => oc.column("domain").doNothing())
+      .execute();
+  }
+  return domains.keys().next().value ?? null;
 }
 
 export async function createServer(config: Config, options?: CreateServerOptions): Promise<ServerHandle> {
@@ -167,7 +224,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   if (externalStartup) await syncFeaturedSkills(config, logger);
 
   // 3. Repositories
-  const users = createUserRepository(db);
+  const users = createUserRepository(db, { slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC });
   const channels = createChannelRepository(db);
   const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const operationalAlertsRepo = createOperationalAlertsRepository(db);
@@ -175,6 +232,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const agentEnvironmentVariables = createAgentEnvironmentVariableRepository(db, config.ENCRYPTION_KEY);
   await backfillFilesConnectorCredentialEncryption(db, config.ENCRYPTION_KEY, logger);
   await runManagedSeed(config, settingsRepo, users);
+  await seedSlackOrganizationDomain(db, logger);
   if (externalStartup) await migrateManagedConnectorCredentialsToCanvas({ db, appConfig: config, logger });
   const mcpServersRepo = createMcpServerRepository(db);
   const whatsappGroupsRepo = createWhatsAppGroupRepository(db);
@@ -253,6 +311,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       openRouterApiKey: params.openRouterApiKey ?? config.OPENROUTER_API_KEY,
       maxAttachmentTotalBytes: params.maxAttachmentTotalBytes ?? config.MAX_ATTACHMENT_TOTAL_MB * 1024 * 1024,
       settingsEncryptionKey: params.settingsEncryptionKey ?? config.ENCRYPTION_KEY,
+      slackEntitySyncEnabled: params.slackEntitySyncEnabled ?? config.SLACK_ENTITY_SYNC,
       localDeviceInvoker: params.localDeviceInvoker ?? localDeviceGateway,
       localClaudeSessionService: params.localClaudeSessionService ?? localClaudeSessionService,
       agentRuntime: params.agentRuntime ?? config.AGENT_RUNTIME,
@@ -269,7 +328,14 @@ export async function createServer(config: Config, options?: CreateServerOptions
         : {}),
     };
     return limitExecution(() =>
-      instrumentAgentRun(tracer, pricing, providerCtx, enrichedParams, () => runAgent(enrichedParams)),
+      instrumentAgentRun(
+        tracer,
+        pricing,
+        providerCtx,
+        enrichedParams,
+        () => runAgent(enrichedParams),
+        config.AGENT_RUN_WATCHDOG_MS,
+      ),
     );
   };
   const trackedRunAgent = (params: RunAgentParams): Promise<RunAgentResult> =>
@@ -698,7 +764,50 @@ export async function createServer(config: Config, options?: CreateServerOptions
     db,
     encryptionKey: config.ENCRYPTION_KEY,
     userCache,
+    onOAuthScopes: (scopes) => {
+      if (!scopes) {
+        logger.warn(
+          { requiredScope: "users:read.email" },
+          "Slack OAuth scopes were not returned; users:read.email status is indeterminate",
+        );
+        return;
+      }
+      if (!scopes.includes("users:read.email")) {
+        logger.warn(
+          { requiredScope: "users:read.email", grantedScopes: scopes },
+          "Slack OAuth token is missing users:read.email; Slack entity classification will degrade",
+        );
+      }
+    },
   });
+  const slackEntitySync = createSlackEntitySync({
+    db,
+    logger,
+    enabled: config.SLACK_ENTITY_SYNC && backgroundWork && externalStartup,
+    publicChannelsEnabled: config.SLACK_ENTITY_SYNC_PUBLIC_CHANNELS,
+    userInfoCap: config.SLACK_ENTITY_SYNC_USER_INFO_CAP,
+    sweepIntervalMs: config.SLACK_ENTITY_SWEEP_INTERVAL_MS,
+    getActiveConnection: async () => {
+      const settings = await settingsRepo.get();
+      if (!settings?.slack_bot_token || !settings.slack_team_id) return null;
+      return { botToken: settings.slack_bot_token, teamId: settings.slack_team_id };
+    },
+    createFacade: (botToken) => {
+      const pinned = slackIndexingFacade.withToken?.(botToken, { isolatedLimiter: true });
+      if (!pinned || !pinned.listUsersPage || !pinned.listChannelsPage || !pinned.listChannelMembersPage) {
+        throw new Error("Slack indexing facade cannot pin a connection token");
+      }
+      return {
+        listUsersPage: pinned.listUsersPage,
+        listChannelsPage: pinned.listChannelsPage,
+        listChannelMembersPage: pinned.listChannelMembersPage,
+        getUserInfo: pinned.getUserInfo,
+      };
+    },
+  });
+  if (backgroundWork && externalStartup) slackEntitySync.start();
+  const userEntityLinkSweep = createUserEntityLinkSweepService({ db, users, logger });
+  if (config.SLACK_ENTITY_SYNC && backgroundWork && externalStartup) userEntityLinkSweep.start();
   const syncScheduler = backgroundWork
     ? startSyncScheduler(db, logger, 30 * 60 * 1000, { appConfig: config, slackIndexingFacade })
     : null;
@@ -765,6 +874,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
+    slackEntitySync,
     recordSlackChannelParticipantJoined: (channelId: string, slackUserId: string) =>
       slackMembershipReconciler.recordParticipantJoined(channelId, slackUserId),
     recordSlackChannelParticipantObserved: (channelId: string, slackUserId: string) =>
@@ -786,15 +896,61 @@ export async function createServer(config: Config, options?: CreateServerOptions
       return {
         botToken: settingsRow?.slack_bot_token,
         appToken: settingsRow?.slack_app_token,
+        teamId: settingsRow?.slack_team_id,
       };
     },
     validateTokens: validateSlackTokens,
+    onConnectionActivated: (connection) => slackEntitySync.onConnectionActivated(connection),
+    getCurrentTeamId: async () => (await settingsRepo.get())?.slack_team_id ?? null,
     getCurrentBot: () => slack,
     setCurrentBot: (bot) => {
       slack = bot;
     },
     createBot: (tokens) => createConfiguredSlackBot(tokens, slackAdapterDeps),
-    beforeExplicitTokenReplacement: () => slackMembershipReconciler.clearAllParticipants(),
+    beforeExplicitTokenReplacement: async (replacement) => {
+      const previousTeamId = replacement?.previousTeamId ?? null;
+      const nextTeamId = replacement?.nextTeamId ?? null;
+      if (previousTeamId && previousTeamId === nextTeamId) return;
+
+      const participantsBefore = await db
+        .selectFrom("slack_channel_participants")
+        .select(({ fn }) => fn.countAll<number>().as("count"))
+        .executeTakeFirstOrThrow();
+      await slackMembershipReconciler.clearAllParticipants();
+
+      const slackConnector = await db
+        .selectFrom("connector_configs")
+        .select("id")
+        .where("connector_type", "=", "slack")
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
+        .executeTakeFirst();
+      let filesArchived = 0;
+      if (slackConnector) {
+        filesArchived = await archiveAllSlackChannelFiles({
+          db,
+          logger,
+          connectorConfigId: slackConnector.id,
+          slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC,
+        });
+      }
+      let syncRowsFenced = 0;
+      if (previousTeamId) {
+        const result = await db
+          .updateTable("slack_user_sync_state")
+          .set({ inactive_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+          .where("team_id", "=", previousTeamId)
+          .where("inactive_at", "is", null)
+          .executeTakeFirst();
+        syncRowsFenced = Number(result.numUpdatedRows ?? 0);
+      }
+      if (Number(participantsBefore.count) > 0 || filesArchived > 0 || syncRowsFenced > 0) {
+        logger.warn(
+          { previousTeamId, nextTeamId, filesArchived, syncRowsFenced },
+          "Slack team changed; old-team participants and indexed files were fenced",
+        );
+      }
+    },
   });
 
   const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, {
@@ -927,9 +1083,16 @@ export async function createServer(config: Config, options?: CreateServerOptions
           .selectFrom("connector_configs")
           .select("id")
           .where("connector_type", "=", "slack")
+          .orderBy("created_at", "asc")
+          .orderBy("id", "asc")
           .executeTakeFirst();
         if (slackConnector) {
-          await archiveAllSlackChannelFiles({ db, logger, connectorConfigId: slackConnector.id });
+          await archiveAllSlackChannelFiles({
+            db,
+            logger,
+            connectorConfigId: slackConnector.id,
+            slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC,
+          });
         }
       } catch (err) {
         logger.warn({ err }, "Failed to archive Slack files on disconnect; next sync will archive");
@@ -1012,6 +1175,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
     await managedMemberReconciliationPromise?.catch(() => undefined);
     await telemetry.shutdown();
     await syncScheduler?.stop();
+    await slackEntitySync.stop();
+    await userEntityLinkSweep.stop();
     whatsappWindowKeepAliveJob?.stop();
     if (backgroundWork) {
       agentScheduler.stop();
