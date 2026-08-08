@@ -247,6 +247,8 @@ export interface ChannelStatus {
   platform: "slack" | "whatsapp" | "email";
   configured: boolean;
   connected: boolean | null;
+  /** WhatsApp only. Distinguishes a socket that is recovering from one that was never paired. */
+  state?: "needs-pairing" | "connected" | "reconnecting" | "paused";
   phoneNumber?: string | null;
   fromAddress?: string | null;
   outboundOnly?: boolean;
