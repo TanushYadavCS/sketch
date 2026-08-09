@@ -6,9 +6,22 @@ const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL = "google/gemini-2.5-flash";
 const DEFAULT_MAX_TOKENS = 8192;
 
+/** Effort applied when we discover mid-flight that the model is reasoning-tier.
+ *  Matches the cap project minting already uses: at the endpoint's default
+ *  effort the tenant model spends its whole token budget reasoning and returns
+ *  no content. */
+const FALLBACK_REASONING_EFFORT = "medium" as const;
+
 interface OpenRouterGeneratorOptions {
   model?: string | null;
   timeoutMs?: number;
+  /** Reasoning effort forwarded to OpenRouter. Project minting caps this at
+   *  "medium" because at default effort the tenant model spent its whole token
+   *  budget on reasoning and emitted nothing. When set, `temperature` is
+   *  omitted up front. Callers that don't know the model's tier can leave this
+   *  unset: a rejected `temperature` is detected from the response and retried
+   *  without it (see `isParameterRejection`). */
+  reasoningEffort?: "low" | "medium" | "high";
 }
 
 interface OpenRouterChatResponse {
@@ -21,10 +34,20 @@ interface OpenRouterChatResponse {
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
+    cost?: number;
   };
   error?: {
     message?: string;
   };
+}
+
+/** Reasoning-tier endpoints reject `temperature`, and with `require_parameters`
+ *  that rejection filters out every endpoint, so OpenRouter answers 404 "No
+ *  endpoints found that can handle the requested parameters" instead of naming
+ *  the offending field. Model IDs give nothing to match on (the tenant routes
+ *  through a preset alias), so we detect it from the response and retry. */
+function isParameterRejection(status: number, message: string | undefined): boolean {
+  return status === 404 && /no endpoints found/i.test(message ?? "");
 }
 
 function extractTextContent(content: unknown): string | null {
@@ -58,6 +81,7 @@ async function dumpCall(
     finishReason: string | undefined;
     promptTokens: number | undefined;
     completionTokens: number | undefined;
+    costUsd: number | undefined;
   },
 ): Promise<void> {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -70,6 +94,10 @@ async function dumpCall(
 
 export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGeneratorOptions = {}): GeminiGenerator {
   const model = options.model?.trim() || DEFAULT_MODEL;
+  /** Set once dropping `temperature` has been *confirmed* to fix a rejection,
+   *  so later calls skip the wasted first attempt for the lifetime of this
+   *  generator. A retry that also fails proves nothing and leaves this unset. */
+  let temperatureRejected = false;
 
   async function generate(prompt: string, opts?: GenerateOptions): Promise<string> {
     const controller = new AbortController();
@@ -77,8 +105,10 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
     const maxTokens = opts?.maxTokens ?? DEFAULT_MAX_TOKENS;
     const requestedModel = opts?.model?.trim();
     const modelForCall = requestedModel || model;
+    const requiresParameters = opts?.responseMimeType === "application/json";
 
-    try {
+    async function postChat(withTemperature: boolean) {
+      const effort = opts?.reasoningEffort ?? options.reasoningEffort ?? (withTemperature ? undefined : FALLBACK_REASONING_EFFORT);
       const response = await fetch(OPENROUTER_CHAT_URL, {
         method: "POST",
         signal: controller.signal,
@@ -94,9 +124,9 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
             { role: "user", content: prompt },
           ],
           max_tokens: maxTokens,
-          temperature: 0,
-          ...(opts?.reasoningEffort ? { reasoning: { effort: opts.reasoningEffort } } : {}),
-          ...(opts?.responseMimeType === "application/json"
+          ...(withTemperature ? { temperature: 0 } : {}),
+          ...(effort ? { reasoning: { effort } } : {}),
+          ...(requiresParameters
             ? {
                 provider: { require_parameters: true },
                 response_format: { type: "json_object" },
@@ -104,8 +134,36 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
             : {}),
         }),
       });
-
       const body = (await response.json().catch(() => ({}))) as OpenRouterChatResponse;
+      return { response, body };
+    }
+
+    try {
+      const withTemperature = !opts?.reasoningEffort && !options.reasoningEffort && !temperatureRejected;
+      let { response, body } = await postChat(withTemperature);
+
+      /** Only `require_parameters` turns an unsupported parameter into a 404 —
+       *  without it OpenRouter silently drops what the endpoint can't take — so
+       *  a rejection is only attributable to `temperature` on JSON calls. If
+       *  dropping it doesn't help, the parameter wasn't the problem: keep the
+       *  first response's error, which describes the real failure, and don't
+       *  make the fallback sticky. */
+      if (
+        !response.ok &&
+        withTemperature &&
+        requiresParameters &&
+        isParameterRejection(response.status, body.error?.message)
+      ) {
+        const first = { response, body };
+        const retry = await postChat(false).catch(() => null);
+        if (retry?.response.ok) {
+          temperatureRejected = true;
+          ({ response, body } = retry);
+        } else {
+          ({ response, body } = first);
+        }
+      }
+
       if (!response.ok) {
         throw new Error(body.error?.message ?? `OpenRouter generation failed with HTTP ${response.status}`);
       }
@@ -123,6 +181,7 @@ export function createOpenRouterGenerator(apiKey: string, options: OpenRouterGen
           finishReason: choice?.finish_reason,
           promptTokens: body.usage?.prompt_tokens,
           completionTokens: body.usage?.completion_tokens,
+          costUsd: body.usage?.cost,
         });
       }
 
