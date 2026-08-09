@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
-import { normalizeEntityMatchName } from "../../entities/match-normalize";
+import { compactEntityNameKey } from "../../entities/match-normalize";
 import { isPersonalOrSharedDomain } from "../../entities/personal-domains";
 import { isPg } from "../dialect";
 import type { DB, EntitiesTable } from "../schema";
@@ -203,7 +203,7 @@ function parseJsonArray(raw: string | null): string[] {
 }
 
 function compactNameKey(value: string): string {
-  return normalizeEntityMatchName("company", value.replace(/[._-]+/g, " ")).replace(/\s+/g, "");
+  return compactEntityNameKey("company", value);
 }
 
 function domainMatchesName(domain: string, name: string): boolean {
