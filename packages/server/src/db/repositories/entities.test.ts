@@ -847,3 +847,73 @@ describe("createEntityRepository contact points", () => {
     );
   });
 });
+
+describe("createEntityRepository findEntitiesByExactNameOrAlias", () => {
+  let db: Kysely<DB>;
+  let repo: ReturnType<typeof createEntityRepository>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    repo = createEntityRepository(db);
+    const now = new Date().toISOString();
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "oliverwyman",
+          name: "Oliverwyman",
+          source_type: "company",
+          aliases: JSON.stringify(["OW", "Oliver Wyman"]),
+          status: "confirmed",
+          hotness: 5,
+          created_at: now,
+          updated_at: now,
+        },
+        {
+          id: "now-corp",
+          name: "NOW Corp",
+          source_type: "company",
+          aliases: JSON.stringify(["NOW"]),
+          status: "confirmed",
+          hotness: 9,
+          created_at: now,
+          updated_at: now,
+        },
+        {
+          id: "powerhouse",
+          name: "Powerhouse",
+          source_type: "company",
+          aliases: null,
+          status: "confirmed",
+          hotness: 9,
+          created_at: now,
+          updated_at: now,
+        },
+      ])
+      .execute();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it("matches a two-character committed alias exactly", async () => {
+    await expect(repo.findEntitiesByExactNameOrAlias("OW")).resolves.toMatchObject([{ id: "oliverwyman" }]);
+    await expect(repo.findEntitiesByExactNameOrAlias(" ow ")).resolves.toMatchObject([{ id: "oliverwyman" }]);
+  });
+
+  it("never matches a short value inside a longer name or alias", async () => {
+    const hits = await repo.findEntitiesByExactNameOrAlias("OW");
+    const ids = hits.map((row) => row.id);
+    expect(ids).not.toContain("now-corp");
+    expect(ids).not.toContain("powerhouse");
+  });
+
+  it("rejects a short value that is nobody's name or alias", async () => {
+    await expect(repo.findEntitiesByExactNameOrAlias("of")).resolves.toEqual([]);
+  });
+
+  it("still finds entities by their own exact name", async () => {
+    await expect(repo.findEntitiesByExactNameOrAlias("powerhouse")).resolves.toMatchObject([{ id: "powerhouse" }]);
+  });
+});

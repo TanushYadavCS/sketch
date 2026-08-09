@@ -801,12 +801,21 @@ export async function matchEntities(
     let found = false;
 
     for (const name of allNames) {
-      if (name.length < MIN_ENTITY_NAME_LENGTH) continue;
+      const trimmed = name.trim();
+      if (!trimmed) continue;
+      const sourceTypes = MATCHABLE_ENTITY_TYPES.filter((type) => !HIDDEN_ENTITY_SOURCE_TYPES.has(type));
 
-      const results = await entityRepo.searchEntities(name, {
-        sourceTypes: MATCHABLE_ENTITY_TYPES.filter((type) => !HIDDEN_ENTITY_SOURCE_TYPES.has(type)),
-        limit: 5,
-      });
+      /**
+       * Below the minimum length only exact whole-string equality is allowed.
+       * The guard exists because `searchEntities` matches substrings, where a
+       * short value is nearly always a false positive ("OW" inside "power").
+       * Equality against a committed alias carries no such risk, so a real
+       * two-letter alias like "OW" resolves instead of being dropped.
+       */
+      const results =
+        trimmed.length < MIN_ENTITY_NAME_LENGTH
+          ? await entityRepo.findEntitiesByExactNameOrAlias(trimmed, { sourceTypes, limit: 5 })
+          : await entityRepo.searchEntities(trimmed, { sourceTypes, limit: 5 });
       if (results.length > 0) {
         // Take the best match (first result from substring search)
         const entity = results[0];

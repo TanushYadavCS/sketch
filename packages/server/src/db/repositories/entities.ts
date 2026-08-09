@@ -3,7 +3,7 @@ import type { Kysely, RawBuilder, Selectable } from "kysely";
 import { sql } from "kysely";
 import { deleteNameEmbedding } from "../../connectors/embeddings/trunk-name-embeddings";
 import { normalizeName } from "../../connectors/name-normalize";
-import { normalizeEntityMatchName } from "../../entities/match-normalize";
+import { matchesNameOrAliasExactly, normalizeEntityMatchName } from "../../entities/match-normalize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../../entities/profile-facts";
 import type { ProvenanceTier } from "../../entities/provenance";
 import { resolveLiveEntity, resolveLiveEntityId, resolveSourceRefToLiveEntityId } from "../../entities/redirect";
@@ -1107,6 +1107,47 @@ export function createEntityRepository(db: Kysely<DB>) {
 
       q = q.limit(opts?.limit ?? 50);
       return q.execute();
+    },
+
+    /**
+     * Entities whose own name, or one of whose committed aliases, equals
+     * `query` exactly (case-insensitive, trimmed). Unlike `searchEntities` this
+     * never matches a fragment, so it stays correct for values shorter than the
+     * substring matcher's minimum length: "OW" finds the entity that committed
+     * "OW" as an alias, and nothing else.
+     *
+     * The SQL is a prefilter only. Aliases live in a JSON string column, so an
+     * exact alias always appears quoted (`"ow"`) inside it — a portable LIKE on
+     * the lowercased column narrows the scan, and the authoritative check is the
+     * parsed comparison in `matchesNameOrAliasExactly`.
+     */
+    async findEntitiesByExactNameOrAlias(query: string, opts?: { sourceTypes?: string[]; limit?: number }) {
+      const needle = query.trim().toLowerCase();
+      if (!needle) return [];
+      const aliasPattern = `%${JSON.stringify(needle)}%`;
+
+      let q = db
+        .selectFrom("entities")
+        .selectAll()
+        .where(whereLiveEntity())
+        .where((eb) =>
+          eb.or([
+            eb(sql<string>`lower(trim(entities.name))`, "=", needle),
+            eb(sql<string>`lower(entities.aliases)`, "like", aliasPattern),
+          ]),
+        );
+
+      if (opts?.sourceTypes && opts.sourceTypes.length > 0) {
+        q = q.where("source_type", "in", opts.sourceTypes);
+      } else {
+        const hiddenTypes = Array.from(HIDDEN_ENTITY_SOURCE_TYPES);
+        if (hiddenTypes.length > 0) q = q.where("source_type", "not in", hiddenTypes);
+      }
+
+      const rows = await q.orderBy("hotness", "desc").orderBy("id", "asc").execute();
+      return rows
+        .filter((row) => matchesNameOrAliasExactly(query, { name: row.name, aliases: parseAliasesString(row.aliases) }))
+        .slice(0, opts?.limit ?? 50);
     },
 
     // ── Hotness ──
