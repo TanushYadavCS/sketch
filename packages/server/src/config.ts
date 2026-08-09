@@ -84,6 +84,14 @@ export const configSchema = z.object({
       .regex(/^[^\s/]+\/\S+$/, "Expected a complete OpenRouter model ID")
       .optional(),
   ),
+  PROJECT_MINTING_MODEL: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z
+      .string()
+      .trim()
+      .regex(/^[^\s/]+\/\S+$/, "Expected a complete OpenRouter model ID")
+      .optional(),
+  ),
 
   // Entity materialization
   LLM_PROMOTION_THRESHOLD: z.coerce.number().int().min(1).default(2),

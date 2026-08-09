@@ -129,6 +129,16 @@ describe("configSchema", () => {
       if (blank.success) expect(blank.data.TASK_MINTING_MODEL).toBeUndefined();
     });
 
+    it("parses a complete project minting model id and treats a blank value as disabled", () => {
+      const configured = configSchema.safeParse({ PROJECT_MINTING_MODEL: "  openai/gpt-5.6-luna  " });
+      const blank = configSchema.safeParse({ PROJECT_MINTING_MODEL: "   " });
+
+      expect(configured.success).toBe(true);
+      expect(blank.success).toBe(true);
+      if (configured.success) expect(configured.data.PROJECT_MINTING_MODEL).toBe("openai/gpt-5.6-luna");
+      if (blank.success) expect(blank.data.PROJECT_MINTING_MODEL).toBeUndefined();
+    });
+
     it("parses WhatsApp provider configuration", () => {
       const result = configSchema.safeParse({
         WHATSAPP_DM_PROVIDER: "wati",
@@ -423,6 +433,11 @@ describe("configSchema", () => {
 
     it("rejects an incomplete task minting model id", () => {
       const result = configSchema.safeParse({ TASK_MINTING_MODEL: "claude-sonnet-4.6" });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects an incomplete project minting model id", () => {
+      const result = configSchema.safeParse({ PROJECT_MINTING_MODEL: "gpt-5.6-luna" });
       expect(result.success).toBe(false);
     });
   });
