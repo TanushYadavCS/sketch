@@ -72,30 +72,47 @@ async function requeueKeptSlicesForJids(db: Kysely<DB>, jids: string[]): Promise
   await requeueKeptSlicesCore(db, jids);
 }
 
-/**
- * Replaces the index-enabled selection and requeues newly enabled groups on
- * the given executor WITHOUT opening a transaction. Callers already inside a
- * transaction (the connector scope route) must use this directly — a nested
- * db.transaction() fails on SQLite and COMMITs the outer per-test
- * transaction on shared PGlite.
- */
-export async function applyIndexEnabledSelection(db: Kysely<DB>, jids: string[]): Promise<void> {
-  const selected = [...new Set(jids)];
-  const previouslyEnabled = await db
-    .selectFrom("whatsapp_groups")
-    .select("jid")
-    .where("index_enabled", "=", 1)
-    .execute();
-  const previous = new Set(previouslyEnabled.map((row) => row.jid));
-  const newlyEnabled = selected.filter((jid) => !previous.has(jid));
-  if (newlyEnabled.length > 0) {
-    await requeueKeptSlicesCore(db, newlyEnabled);
+export type WhatsAppGroupIndexSelection = Record<string, boolean>;
+
+function enabledJidsFromSelection(selection: WhatsAppGroupIndexSelection): string[] {
+  return Object.entries(selection)
+    .filter(([, enabled]) => enabled)
+    .map(([jid]) => jid);
+}
+
+/** Applies only JIDs present in the delta without opening a transaction. */
+export async function applyIndexSelection(db: Kysely<DB>, selection: WhatsAppGroupIndexSelection): Promise<void> {
+  const enable = enabledJidsFromSelection(selection);
+  const disable = Object.entries(selection)
+    .filter(([, enabled]) => !enabled)
+    .map(([jid]) => jid);
+
+  if (enable.length > 0) {
+    const previouslyEnabled = await db
+      .selectFrom("whatsapp_groups")
+      .select("jid")
+      .where("index_enabled", "=", 1)
+      .where("jid", "in", enable)
+      .execute();
+    const previous = new Set(previouslyEnabled.map((row) => row.jid));
+    const newlyEnabled = enable.filter((jid) => !previous.has(jid));
+    if (newlyEnabled.length > 0) {
+      await requeueKeptSlicesCore(db, newlyEnabled);
+      await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", newlyEnabled).execute();
+    }
   }
-  await db.updateTable("whatsapp_groups").set({ index_enabled: 0 }).execute();
-  if (selected.length > 0) {
-    await db.updateTable("whatsapp_groups").set({ index_enabled: 1 }).where("jid", "in", selected).execute();
+
+  if (disable.length > 0) {
+    await db
+      .updateTable("whatsapp_groups")
+      .set({ index_enabled: 0 })
+      .where("index_enabled", "=", 1)
+      .where("jid", "in", disable)
+      .execute();
   }
 }
+
+export const WHATSAPP_GROUP_INDEXING_KEY = "groupIndexing";
 
 async function requeueKeptSlicesCore(db: Kysely<DB>, jids: string[]): Promise<void> {
   if (jids.length === 0) return;
@@ -145,23 +162,11 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       return rows.map(toIndexingConfig);
     },
 
-    async replaceIndexEnabledJids(jids: string[]): Promise<WhatsAppGroupIndexingConfig[]> {
-      await db.transaction().execute(async (trx) => {
-        await applyIndexEnabledSelection(trx, jids);
-      });
-      const rows = await db
-        .selectFrom("whatsapp_groups")
-        .selectAll()
-        .where("index_enabled", "=", 1)
-        .orderBy("updated_at", "desc")
-        .execute();
-      return rows.map(toIndexingConfig);
-    },
-
+    /** Defaults new groups on without changing an existing group's choice. */
     async upsert(group: NewWhatsAppGroup): Promise<WhatsAppGroupRow> {
       await db
         .insertInto("whatsapp_groups")
-        .values(group)
+        .values({ ...group, index_enabled: group.index_enabled ?? 1 })
         .onConflict((oc) =>
           oc.column("jid").doUpdateSet({
             name: group.name,
@@ -351,6 +356,28 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
               "Skipped empty WhatsApp group participant refresh",
             );
           }
+          return;
+        }
+
+        /**
+         * Rejects a payload older than what is already stored, inside the same
+         * transaction that does the delete — the only place the check is
+         * actually atomic with the write. A caller that resolved participants
+         * against a socket which then died can otherwise resume here and
+         * delete members a newer roster already committed. Checking in the
+         * caller narrows that window but cannot close it, and this roster
+         * feeds access decisions, so a lost member is a real access bug.
+         */
+        const newest = await trx
+          .selectFrom("whatsapp_group_participants")
+          .select((eb) => eb.fn.max("last_seen_at").as("last_seen_at"))
+          .where("group_jid", "=", groupJid)
+          .executeTakeFirst();
+        if (newest?.last_seen_at && newest.last_seen_at > lastSeenAt) {
+          logger?.warn(
+            { groupJid, storedCount: participantJids.length, incomingCount: participants.length },
+            "Skipped stale WhatsApp group participant refresh",
+          );
           return;
         }
 

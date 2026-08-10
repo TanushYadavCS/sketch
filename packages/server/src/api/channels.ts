@@ -8,6 +8,9 @@ import type { createWhatsAppTemplateMappingRepository } from "../db/repositories
 import { createEmailTransport, verifyEmailTransport } from "../email";
 import type { SlackBot } from "../slack/bot";
 import type { WhatsAppSocketFacade } from "../whatsapp/facade-contract";
+
+/** What the channels card shows. `reconnecting` and `paused` both mean paired but not live. */
+export type WhatsAppChannelState = "needs-pairing" | "connected" | "reconnecting" | "paused";
 import type { WatiWhatsAppProvider } from "../whatsapp/providers/wati";
 import { denyIfNotAdmin } from "./auth-helpers";
 
@@ -87,6 +90,20 @@ export function channelRoutes(deps: ChannelDeps) {
     const slackBot = deps.getSlack?.() ?? null;
     const slackConfigured = !!slackBot;
     const whatsappStatus = await deps.whatsapp?.pairing.status();
+    /** `paired` is absent on a gateway predating the field, where `connected` was the best answer available. */
+    const whatsappPaired = whatsappStatus ? (whatsappStatus.paired ?? whatsappStatus.connected) : false;
+    const whatsappPausedUntil = whatsappStatus?.pausedUntil ?? null;
+    /**
+     * Paired-but-not-live is reconnecting, not broken — Sketch recovers on its own. Only a live
+     * pause is worth telling the admin about, and even that self-resumes.
+     */
+    const whatsappState: WhatsAppChannelState = !whatsappPaired
+      ? "needs-pairing"
+      : whatsappStatus?.connected
+        ? "connected"
+        : whatsappPausedUntil && Date.parse(whatsappPausedUntil) > Date.now()
+          ? "paused"
+          : "reconnecting";
 
     const settingsRow = await deps.settings.get();
     const emailConfigured = !!(settingsRow?.smtp_host && settingsRow?.smtp_from);
@@ -101,8 +118,14 @@ export function channelRoutes(deps: ChannelDeps) {
       },
       {
         platform: "whatsapp" as const,
-        configured: whatsappStatus?.connected ?? false,
+        /**
+         * Pairedness, not liveness. Keying this to `connected` offered "Pair a number" to an
+         * already-paired tenant in the middle of an outage — and hid Disconnect exactly when an
+         * admin needs it.
+         */
+        configured: whatsappPaired,
         connected: whatsappStatus?.connected ? true : null,
+        state: whatsappState,
         phoneNumber: whatsappStatus?.phoneNumber ?? null,
         fromAddress: null,
       },
