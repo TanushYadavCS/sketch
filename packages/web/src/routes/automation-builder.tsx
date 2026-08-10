@@ -1053,6 +1053,11 @@ function textFromBuilderMessage(message: BuilderWebChatMessage): string {
 
 function normalizeBuilderDisplayText(text: string): string {
   if (!text.startsWith(BUILDER_MODE_SELECTION_MARKER)) return text;
+  const modeMatch = text.match(/I chose the "(deterministic|hybrid|agent-led)" execution mode/);
+  const mode = modeMatch?.[1];
+  if (mode === "deterministic" || mode === "hybrid" || mode === "agent-led") {
+    return `${automationExecutionModeMetadata[mode].label} selected.`;
+  }
   const metadata = Object.values(automationExecutionModeMetadata).find((candidate) =>
     text.includes(`(${candidate.label})`),
   );

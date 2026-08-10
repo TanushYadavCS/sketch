@@ -48,13 +48,14 @@ describe("WhatsApp text question interactions", () => {
   it("renders the current question as numbered plain text", () => {
     expect(renderWhatsAppTextQuestionInteraction(interaction)).toBe(
       [
-        "How often?",
+        "*How often?*",
         "",
-        "1. Daily",
-        "   Run every day",
-        "2. Weekly",
+        "*1. Daily*",
+        "_Run every day_",
         "",
-        "Reply with a number from 1 to 2, or type your own answer.",
+        "*2. Weekly*",
+        "",
+        "_Reply with a number from 1 to 2, or type your own answer._",
       ].join("\n"),
     );
     expect(renderWhatsAppTextQuestionInteraction(interaction)).not.toContain(interaction.publicCode);

@@ -432,7 +432,11 @@ describe("AutomationBuilderPage", () => {
     mocks.getRun.mockClear();
     mocks.getRun.mockResolvedValue({ run: null });
     mocks.saveAutomation.mockClear();
-    mocks.saveAutomation.mockResolvedValue({ ...automation, revision: automation.revision + 1 });
+    mocks.saveAutomation.mockImplementation(async (_taskId, request) => ({
+      ...automation,
+      revision: automation.revision + 1,
+      executionMode: request.executionMode,
+    }));
     mocks.selectSetupExecutionMode.mockClear();
     mocks.selectSetupExecutionMode.mockResolvedValue({ ...automation, isPlaceholderDraft: true });
     mocks.removeAutomation.mockClear();
@@ -449,19 +453,23 @@ describe("AutomationBuilderPage", () => {
   it("keeps a strict placeholder empty and leaves its compatibility mode unanswered until selection", async () => {
     const user = userEvent.setup();
     const placeholder = { ...automation, isPlaceholderDraft: true };
+    const updatedPlaceholder = { ...placeholder, executionMode: "deterministic" as const };
     mocks.getAutomation.mockReset().mockResolvedValue(placeholder);
-    mocks.selectSetupExecutionMode.mockResolvedValue({ ...placeholder, executionMode: "deterministic" });
+    mocks.selectSetupExecutionMode.mockImplementation(async () => {
+      mocks.getAutomation.mockResolvedValue(updatedPlaceholder);
+      return updatedPlaceholder;
+    });
 
     renderBuilder();
 
     expect(await screen.findByTestId("automation-builder-empty-canvas")).toBeInTheDocument();
+    expect(await screen.findByTestId("automation-setup-card")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Check rating" })).not.toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Recipe + AI" })).not.toBeChecked();
+    expect(screen.getByRole("radio", { name: "Exact steps with smart help" })).not.toBeChecked();
 
-    await user.click(screen.getByRole("radio", { name: "Fixed recipe" }));
+    await user.click(screen.getByRole("radio", { name: "Follow exact steps" }));
     await waitFor(() => expect(mocks.selectSetupExecutionMode).toHaveBeenCalledWith("task-123", "deterministic"));
     expect(mocks.saveAutomation).not.toHaveBeenCalled();
-    expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Selected");
     expect(screen.queryByRole("button", { name: "Check rating" })).not.toBeInTheDocument();
   });
 
@@ -558,10 +566,10 @@ describe("AutomationBuilderPage", () => {
     renderBuilder();
 
     expect(await screen.findByTestId("automation-setup-card")).toBeInTheDocument();
-    expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Fixed recipe");
-    expect(screen.getByTestId("automation-mode-hybrid")).toHaveTextContent("Recipe + AI");
-    expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Agent-led");
-    expect(screen.getByText("Sketch initially suggested Agent-led.")).toBeVisible();
+    expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Follow exact steps");
+    expect(screen.getByTestId("automation-mode-hybrid")).toHaveTextContent("Exact steps with smart help");
+    expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Let Sketch handle the details");
+    expect(screen.getByText(/Sketch recommended Let Sketch handle the details/)).toBeVisible();
 
     await user.click(screen.getByTestId("automation-mode-deterministic"));
 
@@ -574,18 +582,17 @@ describe("AutomationBuilderPage", () => {
     await waitFor(() =>
       expect(mocks.sendMessage).toHaveBeenCalledWith(
         expect.objectContaining({
-          text: '[automation-setup-mode-selection] I chose the "deterministic" execution mode (Fixed recipe) for this automation. Please continue by asking the next relevant automation questions.',
+          text: '[automation-setup-mode-selection] I chose the "deterministic" execution mode (Follow exact steps) for this automation. Please continue by asking the next relevant automation questions.',
         }),
         { body: { automationTaskId: "task-123" } },
       ),
     );
     expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Selected");
   });
 
   it.each([
-    ["hybrid", "Recipe + AI"],
-    ["agent-led", "Agent-led"],
+    ["hybrid", "Exact steps with smart help"],
+    ["agent-led", "Let Sketch handle the details"],
   ] as const)("saves and sends the %s execution mode choice", async (mode, label) => {
     const user = userEvent.setup();
     mocks.getAutomation.mockResolvedValue({ ...automation, executionMode: "deterministic" });
@@ -608,21 +615,14 @@ describe("AutomationBuilderPage", () => {
     expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("saves a mode choice without sending while the chat list is open", async () => {
-    const user = userEvent.setup();
+  it("only asks for an execution mode after a builder chat is open", async () => {
     mocks.search = {};
 
     renderBuilder();
 
     expect(await screen.findByText("Chats")).toBeInTheDocument();
-    await user.click(screen.getByRole("radio", { name: "Agent-led" }));
-
-    await waitFor(() =>
-      expect(mocks.saveAutomation).toHaveBeenCalledWith(
-        "task-123",
-        expect.objectContaining({ executionMode: "agent-led" }),
-      ),
-    );
+    expect(screen.queryByRole("radio", { name: "Let Sketch handle the details" })).not.toBeInTheDocument();
+    expect(mocks.saveAutomation).not.toHaveBeenCalled();
     expect(mocks.sendMessage).not.toHaveBeenCalled();
   });
 
@@ -1178,7 +1178,7 @@ describe("AutomationBuilderPage", () => {
           ],
         },
       ]),
-    ).toMatchObject([{ role: "user", text: "Recipe + AI selected." }]);
+    ).toMatchObject([{ role: "user", text: "Exact steps with smart help selected." }]);
   });
 
   it("auto-arranges generated vertical workflow positions", async () => {
@@ -1217,7 +1217,7 @@ describe("AutomationBuilderPage", () => {
     );
   });
 
-  it("uses viewer-scoped transcript summaries for source and builder chat labels", async () => {
+  it("uses viewer-scoped transcript summaries for builder chat labels and hides source chats", async () => {
     mocks.search = {};
     mocks.listConversations.mockResolvedValue({
       taskId: "task-123",
@@ -1262,13 +1262,11 @@ describe("AutomationBuilderPage", () => {
 
     renderBuilder();
 
-    expect(await screen.findByText("Review the source thread")).toBeInTheDocument();
-    expect(screen.getByText("Continue the builder plan")).toBeInTheDocument();
+    expect(await screen.findByText("Continue the builder plan")).toBeInTheDocument();
+    expect(screen.queryByText("Review the source thread")).not.toBeInTheDocument();
     expect(screen.queryByText("chat-source")).not.toBeInTheDocument();
     expect(screen.queryByText("chat-builder")).not.toBeInTheDocument();
-    expect(screen.getAllByText("Source").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Automation").length).toBeGreaterThan(0);
-    expect(screen.getByText(/(?:Jun 3|3 Jun)/)).toBeInTheDocument();
     expect(screen.getByText(/(?:Jun 4|4 Jun)/)).toBeInTheDocument();
   });
 

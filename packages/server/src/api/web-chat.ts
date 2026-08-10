@@ -2114,7 +2114,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
       }
 
       if ("batchId" in pendingInteraction) {
-        const answer = incomingQuestionAnswer.answer;
+        const answer = incomingAnswer;
         if (!("answers" in answer) || answer.batchId !== pendingInteraction.batchId) {
           return c.json(badRequest("QUESTION_STALE", "That question batch is no longer pending"), 409);
         }
@@ -2146,7 +2146,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
         questionAnswer = answer;
         latestUserMessage = { id: latestUserMessage?.id ?? null, text: selectedLabels.join(", ") };
       } else {
-        const answer = incomingQuestionAnswer.answer;
+        const answer = incomingAnswer;
         if ("answers" in answer || answer.questionId !== pendingInteraction.id) {
           return c.json(badRequest("QUESTION_STALE", "That question is no longer pending"), 409);
         }

@@ -9,6 +9,11 @@ import type { AuxLlmCall } from "../agent/aux-cost";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import type { QuestionInteractionService } from "../agent/interactions/service";
 import { parseNumberedQuestionAnswer, renderNumberedQuestionStep } from "../agent/interactions/text";
+import type {
+  PendingQuestionInteractionStep,
+  QuestionInteractionAnswerOutcome,
+  QuestionInteractionCancelByCodeOutcome,
+} from "../agent/interactions/types";
 import type { InboxMessageContext, QuotedMessageContext, SketchContextParams } from "../agent/prompt";
 import { buildSketchContext, getImageAttachmentPathsFromSketchContext } from "../agent/prompt";
 import {
@@ -290,17 +295,32 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     });
   };
 
+  type QuestionAnswerWithNext = Extract<QuestionInteractionAnswerOutcome, { kind: "accepted_pending" }> & {
+    nextQuestion: PendingQuestionInteractionStep;
+  };
+
+  type WhatsAppQuestionReplyOutcome =
+    | QuestionInteractionAnswerOutcome
+    | QuestionInteractionCancelByCodeOutcome
+    | QuestionAnswerWithNext
+    | { kind: "invalid_number"; step: PendingQuestionInteractionStep }
+    | { kind: "unauthorized" }
+    | null;
+
   const appendNextPendingQuestion = async (
     message: WhatsAppInboundMessage,
     responderPrincipalId: string,
     outcome: Awaited<ReturnType<QuestionInteractionService["submitAnswer"]>>,
-  ) => {
+  ): Promise<QuestionInteractionAnswerOutcome | QuestionAnswerWithNext> => {
     if (outcome.kind !== "accepted_pending") return outcome;
     const next = await findPendingQuestion(message, responderPrincipalId);
     return next.kind === "found" ? { ...outcome, nextQuestion: next } : outcome;
   };
 
-  const claimQuestionReply = async (message: WhatsAppInboundMessage, responderPrincipalId: string | null) => {
+  const claimQuestionReply = async (
+    message: WhatsAppInboundMessage,
+    responderPrincipalId: string | null,
+  ): Promise<WhatsAppQuestionReplyOutcome> => {
     if (!deps.questionInteractions) return null;
     const legacySubmission = parseWhatsAppTextQuestionSubmission(message.text);
     if (legacySubmission.kind === "cancel") {

@@ -52,7 +52,7 @@ import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { type QueryClient, isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { DefaultChatTransport, type UIMessage } from "ai";
+import { type CreateUIMessage, DefaultChatTransport, type UIMessage } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
@@ -78,10 +78,7 @@ type WebChatDataParts = {
   "automation-handoff": AutomationDraftHandoff;
   question: WebChatQuestion;
   "question-batch": WebChatQuestionBatch;
-  "question-answer": {
-    questionId: string;
-    optionId: string;
-  };
+  "question-answer": WebChatQuestionAnswer;
   "question-batch-answer": WebChatQuestionBatchAnswer;
   "integration-connection": {
     requestId: string;
@@ -842,7 +839,7 @@ export function outgoingRequestOptions(attachments: WebChatUploadedAttachment[])
 export function outgoingQuestionAnswerMessage(
   question: WebChatQuestion,
   answer: WebChatQuestionAnswer | WebChatQuestionOption,
-) {
+): CreateUIMessage<WebChatMessage> {
   const structuredAnswer: WebChatQuestionAnswer =
     "label" in answer ? { questionId: question.id, optionId: answer.id } : answer;
   const text =
@@ -866,7 +863,7 @@ export function outgoingQuestionAnswerMessage(
 export function outgoingQuestionBatchAnswerMessage(
   batch: WebChatQuestionBatch,
   answer: WebChatQuestionBatchAnswer | WebChatQuestionBatchAnswer["answers"],
-) {
+): CreateUIMessage<WebChatMessage> {
   const payload: WebChatQuestionBatchAnswer = Array.isArray(answer)
     ? { batchId: batch.batchId, answers: answer }
     : answer;
@@ -1017,8 +1014,6 @@ export function ChatPage() {
   const recoveryResponsesRef = useRef(new WeakMap<WebChatMessage[], WebChatLoadedMessagesResponse>());
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
   const toolProgressMutationId = useRef(0);
-  const handoffBaselineConversationId = useRef<string | null>(null);
-  const seenAutomationHandoffs = useRef<Set<string>>(new Set());
   const queryClient = useQueryClient();
   const hasNewConversationIntent = Boolean(
     search.new || search.message || search.prefill || hasPendingWebChatSubmission(conversationId),
@@ -1366,22 +1361,14 @@ export function ChatPage() {
     const queryKey = webChatMessagesQueryKey(conversationId);
     setHistoryLoadError((error) => (error?.conversationId === conversationId ? null : error));
     if (knownNewConversation) {
-      handoffBaselineConversationId.current = conversationId;
-      seenAutomationHandoffs.current = new Set();
       setLoadedConversationId(conversationId);
       return;
     }
     const cachedHistory = freshCachedWebChatMessages(queryClient, conversationId);
     if (cachedHistory) {
-      handoffBaselineConversationId.current = conversationId;
-      seenAutomationHandoffs.current = new Set(
-        automationHandoffsFromMessages(cachedHistory.messages).map(automationHandoffKey),
-      );
       chat.setMessages(cachedHistory.messages);
       setLoadedConversationId(conversationId);
     } else {
-      handoffBaselineConversationId.current = null;
-      seenAutomationHandoffs.current = new Set();
       chat.setMessages([]);
       setLoadedConversationId(null);
     }
@@ -1393,8 +1380,6 @@ export function ChatPage() {
       })
       .then(({ messages }) => {
         if (!active) return;
-        handoffBaselineConversationId.current = conversationId;
-        seenAutomationHandoffs.current = new Set(automationHandoffsFromMessages(messages).map(automationHandoffKey));
         chat.setMessages(messages as WebChatMessage[]);
         setLoadedConversationId(conversationId);
       })
@@ -1410,21 +1395,6 @@ export function ChatPage() {
       void queryClient.cancelQueries({ queryKey, exact: true });
     };
   }, [chat.setMessages, conversationId, historyLoadAttempt, knownNewConversation, queryClient]);
-
-  useEffect(() => {
-    if (!historyReady || handoffBaselineConversationId.current !== conversationId) return;
-    const handoffs = automationHandoffsFromMessages(chat.messages);
-    const freshHandoff = handoffs.find((handoff) => !seenAutomationHandoffs.current.has(automationHandoffKey(handoff)));
-    for (const handoff of handoffs) seenAutomationHandoffs.current.add(automationHandoffKey(handoff));
-    if (!freshHandoff) return;
-
-    void navigate({
-      to: "/scheduled-tasks/$taskId/edit",
-      params: { taskId: freshHandoff.taskId },
-      search: { conversationId: freshHandoff.sourceConversationId },
-      viewTransition: shouldUseChatViewTransition(),
-    });
-  }, [chat.messages, conversationId, historyReady, navigate]);
 
   useEffect(() => {
     if (!historyReady || !threadScrollKey) return;

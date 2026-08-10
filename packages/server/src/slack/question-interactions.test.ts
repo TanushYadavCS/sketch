@@ -63,7 +63,7 @@ describe("Slack question interactions", () => {
     if (!question) throw new Error("Expected a question fixture");
 
     expect(renderSlackNumberedQuestion(question)).toBe(
-      "How often?\n\n1. Daily\n   Run once every day\n2. Weekly\n\nReply with a number from 1 to 2, or type your own answer.",
+      "*How often?*\n\n*1. Daily*\n_Run once every day_\n\n*2. Weekly*\n\n_Reply with a number from 1 to 2, or type your own answer._",
     );
   });
 
@@ -100,7 +100,7 @@ describe("Slack question interactions", () => {
     });
     const delivered = post.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(delivered).not.toHaveProperty("blocks");
-    expect(delivered.text).toContain("1. Option 1\n   Description 1");
+    expect(delivered.text).toContain("*1. Option 1*\n_Description 1_");
     expect(delivered.text).not.toContain("Question prompt 2");
     expect(delivered.text).not.toMatch(/Reply:|#\w+|custom:|cancel/i);
   });

@@ -15,6 +15,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 
 const artifact: AutomationArtifact = {
   taskId: "task-123",
+  requiresBuilder: true,
   kind: "New automation",
   title: "Daily account brief",
   description: "Summarizes account updates and posts the highlights.",

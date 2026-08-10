@@ -261,7 +261,7 @@ describe("executeAutomation stopped Sketch agent steps", () => {
       ]),
       stepContentRepo: makeStepContent([
         { stepId: "agent1", content: "Research the issue.", contentType: "prompt" },
-        { stepId: "later", content: "return { sent: true };" },
+        { stepId: "later", content: 'return "sent";' },
       ]),
     });
 
@@ -864,16 +864,19 @@ describe("executeAutomation action steps", () => {
     const automationCapabilityRegistry = { createTools: vi.fn() };
     const loadIntegrationProvider = vi.fn().mockResolvedValue(null);
     const params = makeParams({
-      task: makeActionTask([
-        {
-          id: "act1",
-          type: "action",
-          label: "Find Acme",
-          icon: "magnifying-glass",
-          position: { x: 0, y: 100 },
-          actionCapabilities: { sketchTools: ["search"], usesIntegrationActions: false },
-        },
-      ]),
+      task: makeActionTask(
+        [
+          {
+            id: "act1",
+            type: "action",
+            label: "Find Acme",
+            icon: "magnifying-glass",
+            position: { x: 0, y: 100 },
+            actionCapabilities: { sketchTools: ["search"], usesIntegrationActions: false },
+          },
+        ],
+        { output_mode: "silent" },
+      ),
       stepContentRepo: makeStepContent([
         { stepId: "act1", content: "return await ctx.sketch.search({ query: 'Acme' });" },
       ]),
@@ -926,7 +929,7 @@ describe("executeAutomation action steps", () => {
             try {
               await ctx.tools.search({ query: "Acme" });
             } catch {
-              return { items: [] };
+              return "No items";
             }
           `,
         },
@@ -948,7 +951,9 @@ describe("executeAutomation action steps", () => {
   it("fails message delivery instead of JSON-stringifying structured final output", async () => {
     const params = makeParams({
       task: makeActionTask([{ id: "act1", type: "action", label: "Report", icon: "code", position: { x: 0, y: 100 } }]),
-      stepContentRepo: makeStepContent([{ stepId: "act1", content: 'return { summary: "done" };' }]),
+      stepContentRepo: makeStepContent([
+        { stepId: "act1", content: 'const result = { summary: "done" }; return result;' },
+      ]),
       loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
     });
 
@@ -965,7 +970,10 @@ describe("executeAutomation action steps", () => {
       runMode: "test",
       task: makeActionTask([{ id: "act1", type: "action", label: "Report", icon: "code", position: { x: 0, y: 100 } }]),
       stepContentRepo: makeStepContent([
-        { stepId: "act1", content: 'return { message: "Reminder: message Vedant on Slack." };' },
+        {
+          stepId: "act1",
+          content: 'const result = { message: "Reminder: message Vedant on Slack." }; return result;',
+        },
       ]),
       loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
     });
@@ -1267,7 +1275,9 @@ describe("executeAutomation action steps", () => {
       task: makeActionTask([
         { id: "act1", type: "action", label: "Bad output", icon: "code", position: { x: 0, y: 100 } },
       ]),
-      stepContentRepo: makeStepContent([{ stepId: "act1", content: "return { value: BigInt(1) };" }]),
+      stepContentRepo: makeStepContent([
+        { stepId: "act1", content: "const result = { value: BigInt(1) }; return result;" },
+      ]),
       loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
     });
 

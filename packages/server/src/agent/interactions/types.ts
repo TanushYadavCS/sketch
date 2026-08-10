@@ -156,7 +156,7 @@ export type QuestionInteractionStepLookupOutcome =
 export type QuestionInteractionTerminalOutcome =
   | { kind: "cancelled"; interaction: PendingQuestionInteraction }
   | { kind: "expired"; interaction: PendingQuestionInteraction }
-  | { kind: "not_pending"; interactionId: string; state: Exclude<QuestionInteractionState, "pending"> }
+  | { kind: "not_pending"; interactionId: string; state: QuestionInteractionState }
   | { kind: "unauthorized"; interactionId: string };
 
 export type QuestionInteractionCancelByCodeOutcome =

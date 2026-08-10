@@ -108,15 +108,6 @@ export interface SlackQuestionActionEvent {
 
 export type SlackQuestionActionHandler = (event: SlackQuestionActionEvent) => Promise<void>;
 
-export interface SlackQuestionViewSubmissionEvent {
-  slackUserId: string;
-  value: string;
-  eventId: string;
-  values: Record<string, Record<string, { selected_option?: { value?: string }; value?: string }>>;
-}
-
-export type SlackQuestionViewSubmissionHandler = (event: SlackQuestionViewSubmissionEvent) => Promise<void>;
-
 export interface SlackChannelMembershipEvent {
   channelId: string;
   slackUserId: string;
@@ -181,7 +172,6 @@ export class SlackBot {
   private appHomeOpenedHandler: AppHomeOpenedHandler | null = null;
   private homeActionHandler: HomeActionHandler | null = null;
   private questionActionHandler: SlackQuestionActionHandler | null = null;
-  private questionViewSubmissionHandler: SlackQuestionViewSubmissionHandler | null = null;
   private botUserId: string | null = null;
   private botId: string | null = null;
   private teamId: string | null = null;
@@ -281,10 +271,6 @@ export class SlackBot {
 
   onQuestionAction(handler: SlackQuestionActionHandler): void {
     this.questionActionHandler = handler;
-  }
-
-  onQuestionViewSubmission(handler: SlackQuestionViewSubmissionHandler): void {
-    this.questionViewSubmissionHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -575,7 +561,7 @@ export class SlackBot {
       }
     });
 
-    this.app.action(/^question_(?:option|other|batch_open|cancel)$/, async ({ body, action, ack }) => {
+    this.app.action(/^question_option$/, async ({ body, action, ack }) => {
       await ack();
       if (!this.questionActionHandler) return;
       const payload = body as {
@@ -601,25 +587,6 @@ export class SlackBot {
         });
       } catch (err) {
         this.logger.warn({ err, slackUserId, channelId, actionId }, "question action handler failed");
-      }
-    });
-
-    this.app.view("question_batch_submit", async ({ body, view, ack }) => {
-      await ack();
-      if (!this.questionViewSubmissionHandler) return;
-      const payload = body as { user?: { id?: string }; view?: { id?: string } };
-      const slackUserId = payload.user?.id;
-      const value = (view as { private_metadata?: string }).private_metadata;
-      if (!slackUserId || !value) return;
-      try {
-        await this.questionViewSubmissionHandler({
-          slackUserId,
-          value,
-          eventId: `slack-view:${payload.view?.id ?? "unknown"}:${slackUserId}`,
-          values: (view as { state?: { values?: SlackQuestionViewSubmissionEvent["values"] } }).state?.values ?? {},
-        });
-      } catch (err) {
-        this.logger.warn({ err, slackUserId }, "question view submission handler failed");
       }
     });
 
@@ -708,15 +675,11 @@ export class SlackBot {
     channelId: string;
     threadTs: string | null;
     text: string;
-    blocks?: Record<string, unknown>[];
   }): Promise<string> {
     const result = await this.app.client.chat.postMessage({
       channel: input.channelId,
       text: input.text,
       ...(input.threadTs ? { thread_ts: input.threadTs } : {}),
-      ...(input.blocks
-        ? { blocks: input.blocks as Parameters<typeof this.app.client.chat.postMessage>[0]["blocks"] }
-        : {}),
     });
     return result.ts ?? "";
   }
@@ -724,7 +687,7 @@ export class SlackBot {
   async openModal(triggerId: string, view: Record<string, unknown>): Promise<void> {
     await this.app.client.views.open({
       trigger_id: triggerId,
-      view: view as Parameters<typeof this.app.client.views.open>[0]["view"],
+      view: view as unknown as Parameters<typeof this.app.client.views.open>[0]["view"],
     });
   }
 

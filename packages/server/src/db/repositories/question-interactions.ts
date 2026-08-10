@@ -533,17 +533,18 @@ export function createQuestionInteractionsRepository(db: Kysely<DB>) {
         const parsedAnswers = input.answers.map((answer) => webChatQuestionAnswerSchema.safeParse(answer));
         for (const [index, parsed] of parsedAnswers.entries()) {
           const item = items.find((candidate) => candidate.question_id === input.answers[index]?.questionId);
-          if (
-            !item ||
-            !parsed.success ||
-            item.answered_at ||
-            ("optionId" in parsed.data &&
-              !parseJson<Array<{ id: string }>>(item.options_json).some(
-                (option) => option.id === parsed.data.optionId,
-              )) ||
-            ("customResponse" in parsed.data && !item.allows_custom_response)
-          )
+          if (!item || !parsed.success || item.answered_at) {
             return { kind: "invalid" as const, state: interaction.state };
+          }
+          if ("optionId" in parsed.data) {
+            const optionId = parsed.data.optionId;
+            if (!parseJson<Array<{ id: string }>>(item.options_json).some((option) => option.id === optionId)) {
+              return { kind: "invalid" as const, state: interaction.state };
+            }
+          }
+          if ("customResponse" in parsed.data && !item.allows_custom_response) {
+            return { kind: "invalid" as const, state: interaction.state };
+          }
         }
         for (const [index, parsed] of parsedAnswers.entries()) {
           if (!parsed.success) continue;

@@ -1,6 +1,5 @@
 import { renderNumberedQuestionStep } from "../agent/interactions/text";
 import type {
-  PendingQuestionInteraction,
   QuestionInteractionCapabilities,
   QuestionInteractionDeliveryAttempt,
   QuestionInteractionQuestion,
@@ -35,52 +34,8 @@ export function decodeSlackQuestionActionValue(value: string): SlackQuestionActi
   }
 }
 
-function plainText(text: string): { type: "plain_text"; text: string } {
-  return { type: "plain_text", text: text.slice(0, 3_000) };
-}
-
 export function renderSlackNumberedQuestion(question: QuestionInteractionQuestion): string {
   return renderNumberedQuestionStep({ question, questionNumber: 1, questionCount: 1 });
-}
-
-export function buildSlackQuestionModal(interaction: PendingQuestionInteraction): Record<string, unknown> {
-  return {
-    type: "modal",
-    callback_id: "question_batch_submit",
-    private_metadata: encodeSlackQuestionActionValue({ interactionId: interaction.id, version: 1 }),
-    title: plainText("Questions"),
-    submit: plainText("Submit"),
-    close: plainText("Cancel"),
-    blocks: interaction.questions.flatMap((question) => [
-      {
-        type: "input",
-        block_id: `question:${question.questionId}`,
-        optional: question.allowsCustomResponse,
-        label: plainText(question.prompt),
-        element: {
-          type: "static_select",
-          action_id: "answer",
-          placeholder: plainText("Choose an answer"),
-          options: question.options.map((option) => ({ text: plainText(option.label), value: option.id })),
-        },
-      },
-      ...(question.allowsCustomResponse
-        ? [
-            {
-              type: "input",
-              block_id: `custom:${question.questionId}`,
-              optional: true,
-              label: plainText("Or write your own answer"),
-              element: {
-                type: "plain_text_input",
-                action_id: "custom",
-                max_length: 2_000,
-              },
-            },
-          ]
-        : []),
-    ]),
-  };
 }
 
 export function createSlackQuestionTransport(deps: {

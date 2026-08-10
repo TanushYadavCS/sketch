@@ -12,11 +12,7 @@ import type { AuxLlmCall } from "../agent/aux-cost";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import type { QuestionInteractionService } from "../agent/interactions/service";
 import { parseNumberedQuestionAnswer, renderNumberedQuestionStep } from "../agent/interactions/text";
-import type {
-  QuestionInteractionAnswerOutcome,
-  QuestionInteractionCapabilities,
-  SubmittedQuestionBatchAnswer,
-} from "../agent/interactions/types";
+import type { QuestionInteractionAnswerOutcome, QuestionInteractionCapabilities } from "../agent/interactions/types";
 import {
   type BufferedMessage,
   type InboxMessageContext,
@@ -84,11 +80,7 @@ import { SlackBot, type SlackFile, type SlackMessage, type SlackMessageHandler }
 import type { SlackEntitySyncService } from "./entity-sync";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
-import {
-  buildSlackQuestionModal,
-  createSlackQuestionTransport,
-  decodeSlackQuestionActionValue,
-} from "./question-interactions";
+import { createSlackQuestionTransport, decodeSlackQuestionActionValue } from "./question-interactions";
 import { SlackExternalUserError, SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
 import { isSlackStopCommand } from "./stop";
 import type { UserCache } from "./user-cache";
@@ -443,161 +435,81 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       logger,
     });
 
-  slackBot.onQuestionAction(async (event) => {
-    const service = deps.questionInteractions;
-    if (!service) return;
-    const value = decodeSlackQuestionActionValue(event.value);
-    if (!value) return;
-    let user: Awaited<ReturnType<typeof resolveUser>>;
-    try {
-      user = await resolveUser(event.slackUserId);
-    } catch (err) {
-      logger.warn({ err, slackUserId: event.slackUserId }, "Ignoring question action from unresolved Slack user");
-      return;
-    }
-    const pending = await service.getPending(value.interactionId);
-    if (pending.kind !== "found") return;
-    const interaction = pending.interaction;
-    if (
-      interaction.target.platform !== "slack" ||
-      interaction.target.conversationId !== event.channelId ||
-      interaction.target.threadId !== event.threadTs
-    ) {
-      return;
-    }
-    if (!interaction.target.eligibleResponderPrincipalIds.includes(user.id)) {
-      await slackBot.postInteractiveMessage({
-        channelId: event.channelId,
-        threadTs: event.threadTs,
-        text: "That question is no longer available.",
-      });
-      return;
-    }
-    if (event.actionId === "question_cancel") {
-      const outcome = await service.cancel({
-        interactionId: interaction.id,
-        requesterPrincipalId: user.id,
-        inboundEventId: event.eventId,
-      });
-      await slackBot.postInteractiveMessage({
-        channelId: event.channelId,
-        threadTs: event.threadTs,
-        text: outcome.kind === "cancelled" ? "Question cancelled." : "That question is no longer available.",
-      });
-      return;
-    }
-    if (event.actionId === "question_other" || event.actionId === "question_batch_open") {
-      if (!event.triggerId) return;
-      await slackBot.openModal(event.triggerId, buildSlackQuestionModal(interaction));
-      return;
-    }
-    if (event.actionId !== "question_option" || !value.questionId || !value.optionId) return;
-    const activeQueueKey =
-      interaction.target.conversationKind === "dm" ? user.id : `${event.channelId}:${event.threadTs ?? ""}`;
-    queue.getQueue(activeQueueKey).enqueue(async () => {
-      const outcome = await service.submitAnswer({
-        interactionId: value.interactionId,
-        questionId: value.questionId,
-        optionId: value.optionId,
-        responderPrincipalId: user.id,
-        inboundEventId: event.eventId,
-        receivedAt: new Date().toISOString(),
-      });
-      if (outcome.kind === "accepted_pending") {
-        const next = await service.findPendingForTarget({
-          platform: "slack",
-          conversationId: event.channelId,
-          threadId: event.threadTs,
+  if (deps.questionInteractions) {
+    slackBot.onQuestionAction(async (event) => {
+      const service = deps.questionInteractions;
+      if (!service) return;
+      const value = decodeSlackQuestionActionValue(event.value);
+      if (!value) return;
+      let user: Awaited<ReturnType<typeof resolveUser>>;
+      try {
+        user = await resolveUser(event.slackUserId);
+      } catch (err) {
+        logger.warn({ err, slackUserId: event.slackUserId }, "Ignoring question action from unresolved Slack user");
+        return;
+      }
+      const pending = await service.getPending(value.interactionId);
+      if (pending.kind !== "found") return;
+      const interaction = pending.interaction;
+      if (
+        interaction.target.platform !== "slack" ||
+        interaction.target.conversationId !== event.channelId ||
+        interaction.target.threadId !== event.threadTs
+      ) {
+        return;
+      }
+      if (!interaction.target.eligibleResponderPrincipalIds.includes(user.id)) {
+        await slackBot.postInteractiveMessage({
+          channelId: event.channelId,
+          threadTs: event.threadTs,
+          text: "That question is no longer available.",
+        });
+        return;
+      }
+      if (event.actionId !== "question_option" || !value.questionId || !value.optionId) return;
+      const interactionId = value.interactionId;
+      const questionId = value.questionId;
+      const optionId = value.optionId;
+      const activeQueueKey =
+        interaction.target.conversationKind === "dm" ? user.id : `${event.channelId}:${event.threadTs ?? ""}`;
+      queue.getQueue(activeQueueKey).enqueue(async () => {
+        const outcome = await service.submitAnswer({
+          interactionId,
+          questionId,
+          optionId,
           responderPrincipalId: user.id,
+          inboundEventId: event.eventId,
+          receivedAt: new Date().toISOString(),
         });
-        await slackBot.postInteractiveMessage({
-          channelId: event.channelId,
-          threadTs: event.threadTs,
-          text:
-            next.kind === "found"
-              ? renderNumberedQuestionStep(next)
-              : "Your answer was saved, but I couldn't load the next question. Please try again.",
-        });
-      } else if (outcome.kind === "completed") {
-        await service.resumeQuestionInteraction(outcome.resumeWork, async (claimedResumeWork) => {
-          await executeSlackQuestionResume(claimedResumeWork);
-        });
-      } else if (outcome.kind !== "duplicate") {
-        await slackBot.postInteractiveMessage({
-          channelId: event.channelId,
-          threadTs: event.threadTs,
-          text: "That response could not be accepted. Please use the current question.",
-        });
-      }
-    });
-  });
-
-  slackBot.onQuestionViewSubmission(async (event) => {
-    const service = deps.questionInteractions;
-    if (!service) return;
-    const value = decodeSlackQuestionActionValue(event.value);
-    if (!value) return;
-    let user: Awaited<ReturnType<typeof resolveUser>>;
-    try {
-      user = await resolveUser(event.slackUserId);
-    } catch (err) {
-      logger.warn({ err, slackUserId: event.slackUserId }, "Ignoring question view from unresolved Slack user");
-      return;
-    }
-    const pending = await service.getPending(value.interactionId);
-    if (pending.kind !== "found" || pending.interaction.target.platform !== "slack") return;
-    const interaction = pending.interaction;
-    if (!interaction.target.eligibleResponderPrincipalIds.includes(user.id)) {
-      await slackBot.postInteractiveMessage({
-        channelId: interaction.target.conversationId,
-        threadTs: interaction.target.threadId,
-        text: "That question is no longer available.",
-      });
-      return;
-    }
-    const queueKey =
-      interaction.target.conversationKind === "dm"
-        ? user.id
-        : `${interaction.target.conversationId}:${interaction.target.threadId ?? ""}`;
-    queue.getQueue(queueKey).enqueue(async () => {
-      const answers: SubmittedQuestionBatchAnswer["answers"] = [];
-      for (const question of interaction.questions) {
-        const optionId = event.values[`question:${question.questionId}`]?.answer?.selected_option?.value;
-        const customResponse = event.values[`custom:${question.questionId}`]?.custom?.value?.trim();
-        if ((!optionId && !customResponse) || (optionId && customResponse)) {
-          await slackBot.postInteractiveMessage({
-            channelId: interaction.target.conversationId,
-            threadTs: interaction.target.threadId,
-            text: "Please choose one answer for every question.",
+        if (outcome.kind === "accepted_pending") {
+          const next = await service.findPendingForTarget({
+            platform: "slack",
+            conversationId: event.channelId,
+            threadId: event.threadTs,
+            responderPrincipalId: user.id,
           });
-          return;
+          await slackBot.postInteractiveMessage({
+            channelId: event.channelId,
+            threadTs: event.threadTs,
+            text:
+              next.kind === "found"
+                ? renderNumberedQuestionStep(next)
+                : "Your answer was saved, but I couldn't load the next question. Please try again.",
+          });
+        } else if (outcome.kind === "completed") {
+          await service.resumeQuestionInteraction(outcome.resumeWork, async (claimedResumeWork) => {
+            await executeSlackQuestionResume(claimedResumeWork);
+          });
+        } else if (outcome.kind !== "duplicate") {
+          await slackBot.postInteractiveMessage({
+            channelId: event.channelId,
+            threadTs: event.threadTs,
+            text: "That response could not be accepted. Please use the current question.",
+          });
         }
-        answers.push(
-          optionId
-            ? { questionId: question.questionId, optionId }
-            : { questionId: question.questionId, customResponse: customResponse as string },
-        );
-      }
-      const outcome = await service.submitBatchAnswer({
-        interactionId: interaction.id,
-        answers,
-        responderPrincipalId: user.id,
-        inboundEventId: event.eventId,
-        receivedAt: new Date().toISOString(),
       });
-      if (outcome.kind === "completed") {
-        await service.resumeQuestionInteraction(outcome.resumeWork, async (claimedResumeWork) => {
-          await executeSlackQuestionResume(claimedResumeWork);
-        });
-      } else if (outcome.kind !== "duplicate") {
-        await slackBot.postInteractiveMessage({
-          channelId: interaction.target.conversationId,
-          threadTs: interaction.target.threadId,
-          text: "Those answers could not be accepted. Please use the current question.",
-        });
-      }
     });
-  });
+  }
 
   const processSlackTextQuestionAnswer = async (
     message: SlackMessage,

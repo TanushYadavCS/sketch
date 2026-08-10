@@ -151,7 +151,7 @@ describe("createQuestionInteractionService", () => {
     expect(outcome).toMatchObject({
       kind: "completed",
       resumeWork: {
-        continuationText: "Question source: Webhook\nQuestion schedule: daily",
+        continuationText: "source: Webhook\nschedule: daily",
       },
     });
   });
