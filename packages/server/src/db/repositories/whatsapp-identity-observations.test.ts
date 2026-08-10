@@ -93,6 +93,34 @@ describe("WhatsApp identity observations", () => {
     ]);
   });
 
+  it("projects the current phone and every retained LID onto the linked person", async () => {
+    await createUserRepository(db).create({ id: "projected", name: "Projected", whatsappNumber: "+14155550400" });
+    const lids = createUserWhatsAppLidRepository(db);
+
+    await lids.attachIfPhoneUnchanged("projected", "+14155550400", "older@lid", "2026-08-10T01:00:00Z");
+    await lids.attachIfPhoneUnchanged("projected", "+14155550400", "latest@lid", "2026-08-10T02:00:00Z");
+
+    const link = await db
+      .selectFrom("user_entity_links")
+      .select("entity_id")
+      .where("user_id", "=", "projected")
+      .executeTakeFirstOrThrow();
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select(["kind", "value", "is_primary", "verified_at"])
+        .where("entity_id", "=", link.entity_id)
+        .where("kind", "in", ["phone", "whatsapp_lid"])
+        .orderBy("kind")
+        .orderBy("value")
+        .execute(),
+    ).resolves.toEqual([
+      { kind: "phone", value: "+14155550400", is_primary: 1, verified_at: null },
+      { kind: "whatsapp_lid", value: "latest@lid", is_primary: 1, verified_at: null },
+      { kind: "whatsapp_lid", value: "older@lid", is_primary: 0, verified_at: null },
+    ]);
+  });
+
   it("does not regress aliases, legacy latest identity, or refresh timestamps", async () => {
     await createUserRepository(db).create({ id: "monotonic", name: "Monotonic", whatsappNumber: "+14155550300" });
     const lids = createUserWhatsAppLidRepository(db);

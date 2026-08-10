@@ -1,5 +1,6 @@
 import { type Kysely, type Selectable, sql } from "kysely";
 import type { DB, UserWhatsAppLidsTable, UsersTable } from "../schema";
+import { projectUserWhatsAppIdentityToEntity } from "./user-whatsapp-entity-projection";
 
 export type UserWhatsAppLidRow = Selectable<UserWhatsAppLidsTable>;
 export type WhatsAppLidRefreshUser = Pick<
@@ -86,6 +87,7 @@ export function createUserWhatsAppLidRepository(db: Kysely<DB>) {
             })
             .where("id", "=", userId)
             .execute();
+          await projectUserWhatsAppIdentityToEntity(trx, userId);
           return previousOwner ? "already-owned" : "attached";
         });
       } catch (error) {

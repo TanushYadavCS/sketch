@@ -15,9 +15,43 @@ async function addUserIdentityTables(db: Kysely<unknown>): Promise<void> {
     .execute();
   await sql`
     INSERT INTO user_whatsapp_lids (user_id, lid, first_seen_at, last_seen_at)
-    SELECT id, whatsapp_lid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+    SELECT id, whatsapp_lid, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'
     FROM users
     WHERE whatsapp_lid IS NOT NULL
+  `.execute(db);
+  await sql`
+    INSERT INTO entity_contact_points
+      (id, entity_id, kind, value, display_value, label, is_primary, source,
+       connector_config_id, created_by_user_id, verified_at, last_contacted_at, created_at, updated_at)
+    SELECT
+      'whatsapp-phone:' || links.entity_id || ':' || users.id,
+      links.entity_id, 'phone', users.whatsapp_number, users.whatsapp_number, NULL,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM entity_contact_points existing
+        WHERE existing.entity_id = links.entity_id AND existing.kind = 'phone' AND existing.is_primary = 1
+      ) THEN 0 ELSE 1 END,
+      'whatsapp_identity',
+      NULL, users.id, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+    FROM users
+    JOIN user_entity_links links ON links.user_id = users.id
+    WHERE users.whatsapp_number IS NOT NULL
+    ON CONFLICT (entity_id, kind, value) DO NOTHING
+  `.execute(db);
+  await sql`
+    INSERT INTO entity_contact_points
+      (id, entity_id, kind, value, display_value, label, is_primary, source,
+       connector_config_id, created_by_user_id, verified_at, last_contacted_at, created_at, updated_at)
+    SELECT
+      'whatsapp-lid:' || links.entity_id || ':' || lids.lid,
+      links.entity_id, 'whatsapp_lid', lids.lid, lids.lid, NULL,
+      CASE WHEN ROW_NUMBER() OVER (
+        PARTITION BY lids.user_id ORDER BY lids.last_seen_at DESC, lids.lid ASC
+      ) = 1 THEN 1 ELSE 0 END,
+      'whatsapp_identity', NULL, lids.user_id, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+    FROM user_whatsapp_lids lids
+    JOIN user_entity_links links ON links.user_id = lids.user_id
+    WHERE 1 = 1
+    ON CONFLICT (entity_id, kind, value) DO NOTHING
   `.execute(db);
 }
 
@@ -169,6 +203,10 @@ export async function down(db: Kysely<unknown>): Promise<void> {
     .on("whatsapp_group_participants")
     .columns(["group_jid", "phone_e164"])
     .execute();
+  await sql`
+    DELETE FROM entity_contact_points
+    WHERE source = 'whatsapp_identity' AND kind IN ('phone', 'whatsapp_lid')
+  `.execute(db);
   await db.schema.dropTable("user_whatsapp_lids").execute();
   await db.schema.alterTable("users").dropColumn("whatsapp_lid_checked_at").execute();
   await db.schema.alterTable("users").dropColumn("whatsapp_lid_attempted_at").execute();

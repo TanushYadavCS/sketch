@@ -4,6 +4,7 @@ import { normalizeName } from "../../connectors/name-normalize";
 import type { DB, EntitiesTable, UsersTable } from "../schema";
 import { isHumanSubtypeOverride, normalizeContactPointValue } from "./entities";
 import { createEntityReviewRepo } from "./entity-review";
+import { projectUserWhatsAppIdentityToEntity } from "./user-whatsapp-entity-projection";
 
 type LinkDb = Kysely<DB> | Transaction<DB>;
 type Entity = Selectable<EntitiesTable>;
@@ -140,7 +141,7 @@ async function findActorUserId(db: LinkDb): Promise<string> {
   return user?.id ?? "system";
 }
 
-async function writeLink(
+async function writeLinkInTransaction(
   db: LinkDb,
   input: {
     userId: string;
@@ -149,6 +150,7 @@ async function writeLink(
     confirmedByUserId?: string | null;
   },
 ): Promise<{ winner: boolean; existingUserEntityId: string | null; existingEntityUserId: string | null }> {
+  await db.updateTable("users").set({ name: sql`name` }).where("id", "=", input.userId).executeTakeFirst();
   await db
     .insertInto("user_entity_links")
     .values({
@@ -170,11 +172,26 @@ async function writeLink(
     .select("user_id")
     .where("entity_id", "=", input.entityId)
     .executeTakeFirst();
+  const winner = byUser?.entity_id === input.entityId && byEntity?.user_id === input.userId;
+  if (winner) await projectUserWhatsAppIdentityToEntity(db, input.userId, input.entityId);
   return {
-    winner: byUser?.entity_id === input.entityId && byEntity?.user_id === input.userId,
+    winner,
     existingUserEntityId: byUser?.entity_id ?? null,
     existingEntityUserId: byEntity?.user_id ?? null,
   };
+}
+
+async function writeLink(
+  db: LinkDb,
+  input: {
+    userId: string;
+    entityId: string;
+    matchedVia: "email" | "phone" | "review" | "provisioning" | "user_creation";
+    confirmedByUserId?: string | null;
+  },
+): Promise<{ winner: boolean; existingUserEntityId: string | null; existingEntityUserId: string | null }> {
+  if (db.isTransaction) return writeLinkInTransaction(db, input);
+  return db.transaction().execute((trx) => writeLinkInTransaction(trx, input));
 }
 
 async function queueIdentityReview(
@@ -759,6 +776,7 @@ export async function ensureEntitiesForUsersWithOutcomes(
     }
     const existingLink = existingLinkByUser.get(user.id);
     if (existingLink) {
+      await projectUserWhatsAppIdentityToEntity(db, user.id, existingLink.entity_id);
       result.set(user.id, {
         entity: null,
         outcome: { outcome: "already_linked", userId: user.id, entityId: existingLink.entity_id },

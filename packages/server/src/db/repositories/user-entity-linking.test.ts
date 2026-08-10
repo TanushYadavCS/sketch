@@ -88,6 +88,41 @@ describe("ensureUserEntityLinkForEntity", () => {
     ).resolves.toEqual([]);
   });
 
+  it("backfills retained WhatsApp aliases when an unlinked user later gets a person entity", async () => {
+    const users = createUserRepository(db);
+    await users.create({
+      id: "late-whatsapp-link",
+      name: "Late WhatsApp Link",
+      whatsappNumber: "+14155550500",
+      skipEntityLinking: true,
+    });
+    await db
+      .insertInto("user_whatsapp_lids")
+      .values({
+        user_id: "late-whatsapp-link",
+        lid: "late@lid",
+        first_seen_at: "2026-08-10T01:00:00Z",
+        last_seen_at: "2026-08-10T02:00:00Z",
+      })
+      .execute();
+
+    const entity = await ensureEntityForUser(db, "late-whatsapp-link");
+
+    expect(entity).not.toBeNull();
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select(["kind", "value"])
+        .where("entity_id", "=", entity?.id ?? "missing")
+        .where("kind", "in", ["phone", "whatsapp_lid"])
+        .orderBy("kind")
+        .execute(),
+    ).resolves.toEqual([
+      { kind: "phone", value: "+14155550500" },
+      { kind: "whatsapp_lid", value: "late@lid" },
+    ]);
+  });
+
   async function addEntity(input: {
     id: string;
     name?: string;
@@ -113,7 +148,11 @@ describe("ensureUserEntityLinkForEntity", () => {
       .execute();
   }
 
-  async function addContactPoint(entityId: string, kind: "email" | "phone" | "whatsapp", value: string): Promise<void> {
+  async function addContactPoint(
+    entityId: string,
+    kind: "email" | "phone" | "whatsapp" | "whatsapp_lid",
+    value: string,
+  ): Promise<void> {
     await db
       .insertInto("entity_contact_points")
       .values({
@@ -132,6 +171,114 @@ describe("ensureUserEntityLinkForEntity", () => {
       })
       .execute();
   }
+
+  it("does not use a person entity LID as an automatic user-linking key", async () => {
+    await db.insertInto("users").values({ id: "lid-only-user", name: "LID Only", type: "human" }).execute();
+    await db.insertInto("user_whatsapp_lids").values({ user_id: "lid-only-user", lid: "shared@lid" }).execute();
+    await addEntity({ id: "lid-only-person", name: "LID Only Person" });
+    await addContactPoint("lid-only-person", "whatsapp_lid", "shared@lid");
+
+    await expect(ensureUserEntityLinkForEntity(db, "lid-only-person")).resolves.toEqual({
+      outcome: "skipped",
+      entityId: "lid-only-person",
+      reason: "no_identifier_match",
+    });
+    await expect(
+      db.selectFrom("user_entity_links").selectAll().where("user_id", "=", "lid-only-user").execute(),
+    ).resolves.toEqual([]);
+  });
+
+  it("replaces or removes only the user-owned current entity phone while retaining LIDs", async () => {
+    const users = createUserRepository(db);
+    await users.create({ id: "phone-lifecycle", name: "Phone Lifecycle", whatsappNumber: "+14155550600" });
+    await db.insertInto("user_whatsapp_lids").values({ user_id: "phone-lifecycle", lid: "retained@lid" }).execute();
+    const link = await db
+      .selectFrom("user_entity_links")
+      .select("entity_id")
+      .where("user_id", "=", "phone-lifecycle")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("entity_contact_points")
+      .values({
+        id: "foreign-phone",
+        entity_id: link.entity_id,
+        kind: "phone",
+        value: "+14155550699",
+        is_primary: 1,
+        source: "whatsapp_identity",
+        created_by_user_id: "admin",
+      })
+      .execute();
+
+    await users.update("phone-lifecycle", { whatsappNumber: "+14155550601" });
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select(["kind", "value", "is_primary"])
+        .where("entity_id", "=", link.entity_id)
+        .where("kind", "in", ["phone", "whatsapp_lid"])
+        .orderBy("kind")
+        .orderBy("value")
+        .execute(),
+    ).resolves.toEqual([
+      { kind: "phone", value: "+14155550601", is_primary: 0 },
+      { kind: "phone", value: "+14155550699", is_primary: 1 },
+      { kind: "whatsapp_lid", value: "retained@lid", is_primary: 1 },
+    ]);
+
+    await users.update("phone-lifecycle", { whatsappNumber: null });
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select(["kind", "value", "is_primary"])
+        .where("entity_id", "=", link.entity_id)
+        .where("kind", "in", ["phone", "whatsapp_lid"])
+        .orderBy("kind")
+        .orderBy("value")
+        .execute(),
+    ).resolves.toEqual([
+      { kind: "phone", value: "+14155550699", is_primary: 1 },
+      { kind: "whatsapp_lid", value: "retained@lid", is_primary: 1 },
+    ]);
+  });
+
+  it("does not promote or delete a foreign contact point that matches the user's temporary phone", async () => {
+    const users = createUserRepository(db);
+    await users.create({ id: "foreign-phone-conflict", name: "Foreign Phone Conflict" });
+    const link = await db
+      .selectFrom("user_entity_links")
+      .select("entity_id")
+      .where("user_id", "=", "foreign-phone-conflict")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("entity_contact_points")
+      .values({
+        id: "foreign-same-phone",
+        entity_id: link.entity_id,
+        kind: "phone",
+        value: "+14155550700",
+        is_primary: 0,
+        source: "crm",
+        created_by_user_id: "admin",
+      })
+      .execute();
+
+    await users.update("foreign-phone-conflict", { whatsappNumber: "+14155550700" });
+    await users.update("foreign-phone-conflict", { whatsappNumber: null });
+
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select(["id", "source", "created_by_user_id", "is_primary"])
+        .where("id", "=", "foreign-same-phone")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      id: "foreign-same-phone",
+      source: "crm",
+      created_by_user_id: "admin",
+      is_primary: 0,
+    });
+  });
 
   async function addSlackEvidence(entityId: string, source: "organization_domain" | "team_roster"): Promise<void> {
     await db
