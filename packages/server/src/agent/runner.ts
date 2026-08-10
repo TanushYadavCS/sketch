@@ -321,7 +321,6 @@ export interface RunAgentParams {
   logger: Logger;
   platform: "slack" | "whatsapp";
   responseSurface?: ResponseSurface;
-  experimentalChannelQuestionInteractionsEnabled?: boolean;
   questionInteractionCapabilities?: QuestionInteractionCapabilities;
   onProgressEvent: (event: ProgressEvent) => Promise<void>;
   onTextDelta?: (delta: string) => Promise<void>;
@@ -1259,7 +1258,6 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
     automationArtifactCollector,
     questionCollector,
     responseSurface: params.responseSurface ?? params.platform,
-    experimentalChannelQuestionInteractionsEnabled: params.experimentalChannelQuestionInteractionsEnabled,
     questionInteractionCapabilities: params.questionInteractionCapabilities,
     auxCostCollector,
     workspaceDir: absWorkspace,

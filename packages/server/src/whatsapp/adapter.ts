@@ -182,7 +182,6 @@ export interface WhatsAppAdapterDeps {
   }>;
   followupReviewHandler?: FollowupReviewCommandHandler;
   questionInteractions?: QuestionInteractionService;
-  experimentalChannelQuestionInteractionsEnabled?: boolean;
 }
 
 function isConversationControlMessage(text: string): boolean {
@@ -280,11 +279,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     message.kind === "dm" ? whatsappDeliveryTargetFromTarget(message.target) : message.target.groupId;
 
   const findPendingQuestion = async (message: WhatsAppInboundMessage, responderPrincipalId: string | null) => {
-    if (
-      !deps.experimentalChannelQuestionInteractionsEnabled ||
-      !deps.questionInteractions ||
-      !responderPrincipalId
-    ) {
+    if (!deps.questionInteractions || !responderPrincipalId) {
       return { kind: "not_found" as const };
     }
     return deps.questionInteractions.findPendingForTarget({
@@ -323,7 +318,6 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       });
     }
     if (legacySubmission.kind === "answer") {
-      if (!deps.experimentalChannelQuestionInteractionsEnabled) return null;
       if (!responderPrincipalId) return { kind: "unauthorized" as const };
       const outcome = await deps.questionInteractions.submitTextAnswer({
         platform: "whatsapp",
@@ -368,7 +362,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     sessionId: string;
     sourceConversationId: string;
   }): Promise<boolean> => {
-    if (!deps.experimentalChannelQuestionInteractionsEnabled || !deps.questionInteractions) return false;
+    if (!deps.questionInteractions) return false;
     const pending = await deps.questionInteractions.createFromInteraction({
       interaction: params.interaction,
       target: {
@@ -471,9 +465,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         userPhone: params.user.whatsapp_number ?? null,
         logger,
         platform: "whatsapp",
-        ...(deps.experimentalChannelQuestionInteractionsEnabled
-          ? { questionInteractionCapabilities: WHATSAPP_TEXT_QUESTION_CAPABILITIES }
-          : {}),
+        questionInteractionCapabilities: deps.questionInteractions
+          ? WHATSAPP_TEXT_QUESTION_CAPABILITIES
+          : undefined,
         onProgressEvent: async () => {},
         orgName: params.settingsRow?.org_name,
         orgDescription: parseOrgContext(params.settingsRow?.org_context)?.description ?? null,
@@ -1232,9 +1226,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             userPhone: user.whatsapp_number ?? message.senderPhoneE164,
             logger,
             platform: "whatsapp",
-            ...(deps.experimentalChannelQuestionInteractionsEnabled
-              ? { questionInteractionCapabilities: WHATSAPP_TEXT_QUESTION_CAPABILITIES }
-              : {}),
+            questionInteractionCapabilities: deps.questionInteractions
+              ? WHATSAPP_TEXT_QUESTION_CAPABILITIES
+              : undefined,
             onProgressEvent,
             orgName: settingsRow?.org_name,
             orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
@@ -1339,8 +1333,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     const isQuestionReply =
       pendingQuestionReply.kind === "found" ||
       (Boolean(deps.questionInteractions) &&
-        (questionSubmission.kind === "cancel" ||
-          (deps.experimentalChannelQuestionInteractionsEnabled && questionSubmission.kind === "answer")));
+        (questionSubmission.kind === "cancel" || questionSubmission.kind === "answer"));
 
     if (!message.isMentioned && !isQuestionReply) {
       await hooks?.onRunStart();
@@ -1565,9 +1558,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           userPhone: user?.whatsapp_number ?? null,
           logger,
           platform: "whatsapp",
-          ...(deps.experimentalChannelQuestionInteractionsEnabled
-            ? { questionInteractionCapabilities: WHATSAPP_TEXT_QUESTION_CAPABILITIES }
-            : {}),
+          questionInteractionCapabilities: deps.questionInteractions
+            ? WHATSAPP_TEXT_QUESTION_CAPABILITIES
+            : undefined,
           onProgressEvent,
           orgName: settingsRow?.org_name,
           orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,

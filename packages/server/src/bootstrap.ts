@@ -325,8 +325,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
       automationAuthoringEnabled:
         params.contextType !== "scheduled_task" && config.AUTOMATION_AUTHORING_MODEL !== undefined,
       chatAutomationAuthoring: params.contextType !== "scheduled_task" ? chatAutomationAuthoring : undefined,
-      experimentalChannelQuestionInteractionsEnabled:
-        params.experimentalChannelQuestionInteractionsEnabled ?? config.EXPERIMENTAL_CHANNEL_QUESTION_INTERACTIONS,
       ...(Object.keys(resolvedAgentEnv).length > 0
         ? {
             agentEnv: resolvedAgentEnv,
@@ -871,7 +869,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
       slackChannelParticipants: slackChannelParticipantsRepo,
     },
     queue: queueManager,
-    experimentalChannelQuestionInteractionsEnabled: config.EXPERIMENTAL_CHANNEL_QUESTION_INTERACTIONS,
     questionInteractions,
     slack: { userCache },
     runAgent: trackedRunAgent,
@@ -967,7 +964,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger,
     repos: { users, settings: settingsRepo, whatsappGroups: whatsappGroupsRepo, conversations: conversationsRepo },
     queue: queueManager,
-    experimentalChannelQuestionInteractionsEnabled: config.EXPERIMENTAL_CHANNEL_QUESTION_INTERACTIONS,
     questionInteractions,
     runAgent: trackedRunAgent,
     buildMcpServers,

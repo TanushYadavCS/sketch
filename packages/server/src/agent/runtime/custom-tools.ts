@@ -182,7 +182,6 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     automationArtifactCollector: deps.effects.automationArtifactCollector,
     questionCollector: deps.effects.questionCollector,
     responseSurface: params.responseSurface ?? params.platform,
-    experimentalChannelQuestionInteractionsEnabled: params.experimentalChannelQuestionInteractionsEnabled,
     questionInteractionCapabilities: params.questionInteractionCapabilities,
     auxCostCollector: deps.effects.auxCostCollector,
     workspaceDir: resolve(params.workspaceDir),

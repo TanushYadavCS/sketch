@@ -80,7 +80,7 @@ describe("AI SDK custom Sketch tool provider", () => {
     expect(tools.mcp__sketch__VisualAnalysis).toBeDefined();
   });
 
-  it("keeps bounded question tools on web and gates channel exposure on an enabled registered capability", async () => {
+  it("keeps bounded question tools on web and exposes channels with a registered capability", async () => {
     const effects = createAgentRuntimeCustomToolEffects();
     const provider = createDefaultAgentRuntimeCustomToolProvider({
       effects,
@@ -93,7 +93,6 @@ describe("AI SDK custom Sketch tool provider", () => {
     const enabledSlackTools = await provider.createTools(
       params({
         responseSurface: "slack",
-        experimentalChannelQuestionInteractionsEnabled: true,
         questionInteractionCapabilities: {
           available: true,
           interactiveSingleSelect: false,

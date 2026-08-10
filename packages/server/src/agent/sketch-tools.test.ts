@@ -128,19 +128,10 @@ describe("createSketchMcpServer", () => {
       responseSurface: "web",
       workspaceDir: tmpDir,
     });
-    const disabledSlackTools = registeredTools({
+    const slackTools = registeredTools({
       uploadCollector: new UploadCollector(),
       questionCollector: new QuestionCollector(),
       responseSurface: "slack",
-      experimentalChannelQuestionInteractionsEnabled: false,
-      questionInteractionCapabilities: capabilities,
-      workspaceDir: tmpDir,
-    });
-    const enabledSlackTools = registeredTools({
-      uploadCollector: new UploadCollector(),
-      questionCollector: new QuestionCollector(),
-      responseSurface: "slack",
-      experimentalChannelQuestionInteractionsEnabled: true,
       questionInteractionCapabilities: capabilities,
       workspaceDir: tmpDir,
     });
@@ -148,17 +139,14 @@ describe("createSketchMcpServer", () => {
       uploadCollector: new UploadCollector(),
       questionCollector: new QuestionCollector(),
       responseSurface: "whatsapp",
-      experimentalChannelQuestionInteractionsEnabled: true,
       questionInteractionCapabilities: { ...capabilities, available: false },
       workspaceDir: tmpDir,
     });
 
     expect(webTools.AskUserQuestion).toBeDefined();
     expect(webTools.AskUserQuestions).toBeDefined();
-    expect(disabledSlackTools.AskUserQuestion).toBeUndefined();
-    expect(disabledSlackTools.AskUserQuestions).toBeUndefined();
-    expect(enabledSlackTools.AskUserQuestion).toBeDefined();
-    expect(enabledSlackTools.AskUserQuestions).toBeDefined();
+    expect(slackTools.AskUserQuestion).toBeDefined();
+    expect(slackTools.AskUserQuestions).toBeDefined();
     expect(unavailableWhatsAppTools.AskUserQuestion).toBeUndefined();
     expect(unavailableWhatsAppTools.AskUserQuestions).toBeUndefined();
   });

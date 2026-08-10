@@ -93,6 +93,15 @@ import { SlackExternalUserError, SlackIdentityConflictError, resolveSlackUser } 
 import { isSlackStopCommand } from "./stop";
 import type { UserCache } from "./user-cache";
 
+const SLACK_TEXT_QUESTION_CAPABILITIES: QuestionInteractionCapabilities = {
+  available: true,
+  interactiveSingleSelect: false,
+  interactiveBatch: false,
+  nativeCustomResponse: true,
+  textFallback: true,
+  cancelControl: false,
+};
+
 type UserRepository = ReturnType<typeof createUserRepository>;
 type ChannelRepository = ReturnType<typeof createChannelRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
@@ -204,7 +213,6 @@ export interface SlackAdapterDeps {
     messageRef: string;
   }>;
   followupReviewHandler?: FollowupReviewCommandHandler;
-  experimentalChannelQuestionInteractionsEnabled?: boolean;
   questionInteractions?: QuestionInteractionService;
 }
 
@@ -478,14 +486,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       });
       return;
     }
-    if (!deps.experimentalChannelQuestionInteractionsEnabled) {
-      await slackBot.postInteractiveMessage({
-        channelId: event.channelId,
-        threadTs: event.threadTs,
-        text: "Question responses are unavailable right now.",
-      });
-      return;
-    }
     if (event.actionId === "question_other" || event.actionId === "question_batch_open") {
       if (!event.triggerId) return;
       await slackBot.openModal(event.triggerId, buildSlackQuestionModal(interaction));
@@ -548,10 +548,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       await slackBot.postInteractiveMessage({ channelId: interaction.target.conversationId, threadTs: interaction.target.threadId, text: "That question is no longer available." });
       return;
     }
-    if (!deps.experimentalChannelQuestionInteractionsEnabled) {
-      await slackBot.postInteractiveMessage({ channelId: interaction.target.conversationId, threadTs: interaction.target.threadId, text: "Question responses are unavailable right now." });
-      return;
-    }
     const queueKey = interaction.target.conversationKind === "dm"
       ? user.id
       : `${interaction.target.conversationId}:${interaction.target.threadId ?? ""}`;
@@ -594,7 +590,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     const service = deps.questionInteractions;
     if (
       !service ||
-      !deps.experimentalChannelQuestionInteractionsEnabled ||
       (message.type !== "dm" && message.type !== "channel_mention") ||
       isConversationControlMessage(message.text) ||
       isSlackStopCommand(message.text) ||
@@ -681,7 +676,6 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     const service = deps.questionInteractions;
     if (
       !service ||
-      !deps.experimentalChannelQuestionInteractionsEnabled ||
       (message.type !== "dm" && message.type !== "channel_mention") ||
       isConversationControlMessage(message.text) ||
       isSlackStopCommand(message.text) ||
@@ -724,7 +718,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         text: "I couldn't ask the next question right now. Please try again.",
       });
     };
-    if (!service || !deps.experimentalChannelQuestionInteractionsEnabled) {
+    if (!service) {
       await reportDeliveryFailure();
       return true;
     }
@@ -756,20 +750,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         await reportDeliveryFailure();
         return true;
       }
-      const capabilities: QuestionInteractionCapabilities = {
-        available: true,
-        interactiveSingleSelect: false,
-        interactiveBatch: false,
-        nativeCustomResponse: true,
-        textFallback: true,
-        cancelControl: false,
-      };
       const receipt = await service.deliver({
         interactionId: pending.id,
         requestKey: input.requestKey,
         transportName: "slack",
         capabilityName: "plain_text",
-        capabilities,
+        capabilities: SLACK_TEXT_QUESTION_CAPABILITIES,
         transport: createSlackQuestionTransport({ post: (message) => slackBot.postInteractiveMessage(message) }),
       });
       if (receipt.status !== "sent" && receipt.status !== "already_sent") await reportDeliveryFailure();
@@ -811,10 +797,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       logger,
       platform: "slack",
       responseSurface: "slack",
-      experimentalChannelQuestionInteractionsEnabled: deps.experimentalChannelQuestionInteractionsEnabled,
-      questionInteractionCapabilities: deps.experimentalChannelQuestionInteractionsEnabled
-        ? { available: true, interactiveSingleSelect: false, interactiveBatch: false, nativeCustomResponse: true, textFallback: true, cancelControl: false }
-        : undefined,
+      questionInteractionCapabilities: deps.questionInteractions ? SLACK_TEXT_QUESTION_CAPABILITIES : undefined,
       userMessage: resumeWork.continuationText,
       resumeSessionId: resumeWork.context.sessionId,
       onProgressEvent,
@@ -1311,9 +1294,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               userEmail: user.email,
               logger,
               platform: "slack",
-              experimentalChannelQuestionInteractionsEnabled: deps.experimentalChannelQuestionInteractionsEnabled,
-              questionInteractionCapabilities: deps.experimentalChannelQuestionInteractionsEnabled
-                ? { available: true, interactiveSingleSelect: false, interactiveBatch: false, nativeCustomResponse: true, textFallback: true, cancelControl: false }
+              questionInteractionCapabilities: deps.questionInteractions
+                ? SLACK_TEXT_QUESTION_CAPABILITIES
                 : undefined,
               getSlack: () => slackBot,
               onProgressEvent,
@@ -1826,9 +1808,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               userEmail: activeUser.email,
               logger,
               platform: "slack",
-              experimentalChannelQuestionInteractionsEnabled: deps.experimentalChannelQuestionInteractionsEnabled,
-              questionInteractionCapabilities: deps.experimentalChannelQuestionInteractionsEnabled
-                ? { available: true, interactiveSingleSelect: false, interactiveBatch: false, nativeCustomResponse: true, textFallback: true, cancelControl: false }
+              questionInteractionCapabilities: deps.questionInteractions
+                ? SLACK_TEXT_QUESTION_CAPABILITIES
                 : undefined,
               getSlack: () => slackBot,
               onProgressEvent,

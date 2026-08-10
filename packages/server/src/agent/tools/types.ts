@@ -125,7 +125,6 @@ export interface SketchMcpDeps {
   integrationConnectionCollector?: IntegrationConnectionCollector;
   automationArtifactCollector?: AutomationArtifactCollector;
   questionCollector?: QuestionCollector;
-  experimentalChannelQuestionInteractionsEnabled?: boolean;
   questionInteractionCapabilities?: QuestionInteractionCapabilities;
   responseSurface?: "web" | "slack" | "whatsapp";
   workspaceDir: string;

@@ -65,17 +65,7 @@ describe("configSchema", () => {
         expect(result.data.MAX_CONCURRENT_SCHEDULED_AGENT_RUNS).toBe(4);
         expect(result.data.MAX_FILE_SIZE_MB).toBe(20);
         expect(result.data.VISION_ENABLED).toBe(false);
-        expect(result.data.EXPERIMENTAL_CHANNEL_QUESTION_INTERACTIONS).toBe(false);
         expect(result.data.AGENT_RUNTIME).toBe("aisdk");
-      }
-    });
-
-    it("parses the experimental channel question interaction flag", () => {
-      const result = configSchema.safeParse({ EXPERIMENTAL_CHANNEL_QUESTION_INTERACTIONS: "true" });
-
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.data.EXPERIMENTAL_CHANNEL_QUESTION_INTERACTIONS).toBe(true);
       }
     });
 

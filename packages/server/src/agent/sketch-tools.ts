@@ -39,9 +39,7 @@ export type { SketchMcpDeps };
 function channelQuestionInteractionsAvailable(deps: SketchMcpDeps): boolean {
   const capabilities = deps.questionInteractionCapabilities;
   return Boolean(
-    deps.experimentalChannelQuestionInteractionsEnabled &&
-      capabilities?.available &&
-      (capabilities.interactiveSingleSelect || capabilities.textFallback),
+    capabilities?.available && (capabilities.interactiveSingleSelect || capabilities.textFallback),
   );
 }
 
