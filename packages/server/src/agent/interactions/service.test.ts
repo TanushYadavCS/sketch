@@ -1,11 +1,7 @@
 import type { WebChatQuestion } from "@sketch/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createQuestionInteractionService } from "./service";
-import type {
-  PendingQuestionInteraction,
-  QuestionInteractionRepository,
-  QuestionInteractionTarget,
-} from "./types";
+import type { PendingQuestionInteraction, QuestionInteractionRepository, QuestionInteractionTarget } from "./types";
 
 const target: QuestionInteractionTarget = {
   platform: "slack",
@@ -31,7 +27,9 @@ function pending(): PendingQuestionInteraction {
     publicCode: "A1B2C3D4E5",
     state: "pending",
     target,
-    questions: [{ questionId: question.id, prompt: question.prompt, options: question.options, allowsCustomResponse: true }],
+    questions: [
+      { questionId: question.id, prompt: question.prompt, options: question.options, allowsCustomResponse: true },
+    ],
     resumeContext: {
       sessionId: "session-1",
       taskId: null,
@@ -52,8 +50,14 @@ function repository(overrides: Partial<QuestionInteractionRepository> = {}): Que
     claimQuestionInteractionDelivery: vi.fn(async () => ({ kind: "not_pending" as const })),
     recordQuestionInteractionDeliveryResult: vi.fn(),
     markQuestionInteractionDeliveryFailed: vi.fn(async () => undefined),
-    submitQuestionInteractionAnswer: vi.fn(async () => ({ kind: "duplicate" as const, interactionId: "interaction-1" })),
-    submitQuestionInteractionBatchAnswer: vi.fn(async () => ({ kind: "duplicate" as const, interactionId: "interaction-1" })),
+    submitQuestionInteractionAnswer: vi.fn(async () => ({
+      kind: "duplicate" as const,
+      interactionId: "interaction-1",
+    })),
+    submitQuestionInteractionBatchAnswer: vi.fn(async () => ({
+      kind: "duplicate" as const,
+      interactionId: "interaction-1",
+    })),
     claimQuestionInteractionResume: vi.fn(async () => ({ kind: "not_ready" as const })),
     recordQuestionInteractionResumeResult: vi.fn(async () => undefined),
     cancelQuestionInteraction: vi.fn(),
@@ -222,13 +226,21 @@ describe("createQuestionInteractionService", () => {
       answers: [{ questionId: "delivery-mode", optionId: "slack" }],
       continuationText: "Question delivery-mode: slack",
     };
-    const repo = repository({ claimQuestionInteractionResume: vi.fn(async () => ({ kind: "claimed" as const, resumeWork: work })) });
+    const repo = repository({
+      claimQuestionInteractionResume: vi.fn(async () => ({ kind: "claimed" as const, resumeWork: work })),
+    });
     const service = createQuestionInteractionService({ repository: repo });
     const execute = vi.fn(async () => undefined);
 
-    await expect(service.resumeQuestionInteraction(work, execute)).resolves.toEqual({ kind: "executed", interactionId: "interaction-1" });
+    await expect(service.resumeQuestionInteraction(work, execute)).resolves.toEqual({
+      kind: "executed",
+      interactionId: "interaction-1",
+    });
     expect(execute).toHaveBeenCalledWith(work);
-    expect(repo.recordQuestionInteractionResumeResult).toHaveBeenCalledWith({ interactionId: "interaction-1", status: "completed" });
+    expect(repo.recordQuestionInteractionResumeResult).toHaveBeenCalledWith({
+      interactionId: "interaction-1",
+      status: "completed",
+    });
   });
 
   it("cancels only a target-scoped public-code interaction without returning its prompt", async () => {

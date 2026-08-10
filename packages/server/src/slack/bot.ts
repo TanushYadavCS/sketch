@@ -714,7 +714,9 @@ export class SlackBot {
       channel: input.channelId,
       text: input.text,
       ...(input.threadTs ? { thread_ts: input.threadTs } : {}),
-      ...(input.blocks ? { blocks: input.blocks as Parameters<typeof this.app.client.chat.postMessage>[0]["blocks"] } : {}),
+      ...(input.blocks
+        ? { blocks: input.blocks as Parameters<typeof this.app.client.chat.postMessage>[0]["blocks"] }
+        : {}),
     });
     return result.ts ?? "";
   }

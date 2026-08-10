@@ -1,4 +1,9 @@
-import type { AutomationDefinition, WebChatQuestion, WebChatQuestionBatch, WebChatQuestionBatchAnswer } from "@/lib/api";
+import type {
+  AutomationDefinition,
+  WebChatQuestion,
+  WebChatQuestionBatch,
+  WebChatQuestionBatchAnswer,
+} from "@/lib/api";
 import { ApiRequestError } from "@/lib/api";
 import { AUTOMATION_REFRESH_INTERVAL_MS } from "@/lib/automation-refresh";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -556,9 +561,7 @@ describe("AutomationBuilderPage", () => {
     expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Fixed recipe");
     expect(screen.getByTestId("automation-mode-hybrid")).toHaveTextContent("Recipe + AI");
     expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Agent-led");
-    expect(
-      screen.getByText("Sketch initially suggested Agent-led."),
-    ).toBeVisible();
+    expect(screen.getByText("Sketch initially suggested Agent-led.")).toBeVisible();
 
     await user.click(screen.getByTestId("automation-mode-deterministic"));
 
@@ -1149,9 +1152,14 @@ describe("AutomationBuilderPage", () => {
     const question: WebChatQuestion = {
       id: "goal",
       prompt: "What should this automate?",
-      options: [{ id: "brief", label: "Daily brief" }, { id: "alerts", label: "Alerts" }],
+      options: [
+        { id: "brief", label: "Daily brief" },
+        { id: "alerts", label: "Alerts" },
+      ],
     };
-    expect(outgoingBuilderQuestionAnswerMessage(question, { questionId: "goal", customResponse: "A weekly scorecard" })).toMatchObject({
+    expect(
+      outgoingBuilderQuestionAnswerMessage(question, { questionId: "goal", customResponse: "A weekly scorecard" }),
+    ).toMatchObject({
       parts: [
         { type: "text", text: "A weekly scorecard" },
         { type: "data-question-answer", data: { questionId: "goal", customResponse: "A weekly scorecard" } },

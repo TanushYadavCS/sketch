@@ -1,15 +1,14 @@
-import {
-  webChatQuestionAnswerSchema,
-  type WebChatQuestion,
-  type WebChatQuestionInteraction,
-} from "@sketch/shared";
-import type { QuestionInteractionSnapshot, QuestionInteractionsRepository } from "../../db/repositories/question-interactions";
+import { type WebChatQuestion, type WebChatQuestionInteraction, webChatQuestionAnswerSchema } from "@sketch/shared";
+import type {
+  QuestionInteractionSnapshot,
+  QuestionInteractionsRepository,
+} from "../../db/repositories/question-interactions";
 import type {
   CanonicalQuestionAnswer,
   PendingQuestionInteraction,
   QuestionInteractionAnswerOutcome,
-  QuestionInteractionCapabilities,
   QuestionInteractionCancelByCodeOutcome,
+  QuestionInteractionCapabilities,
   QuestionInteractionCollector,
   QuestionInteractionDeliveryReceipt,
   QuestionInteractionLookupOutcome,
@@ -37,7 +36,14 @@ function questionsFromInteraction(interaction: WebChatQuestionInteraction) {
 }
 
 function immutableResumeContext(input: QuestionInteractionResumeContext): QuestionInteractionResumeContext {
-  return Object.freeze({ ...input, threadId: input.threadId ?? null, taskId: input.taskId ?? null, agentRunId: input.agentRunId ?? null, workspaceId: input.workspaceId ?? null, sourceConversationId: input.sourceConversationId ?? null });
+  return Object.freeze({
+    ...input,
+    threadId: input.threadId ?? null,
+    taskId: input.taskId ?? null,
+    agentRunId: input.agentRunId ?? null,
+    workspaceId: input.workspaceId ?? null,
+    sourceConversationId: input.sourceConversationId ?? null,
+  });
 }
 
 function canonicalContinuationText(
@@ -45,7 +51,8 @@ function canonicalContinuationText(
   questions: readonly PendingQuestionInteraction["questions"][number][] = [],
 ): string {
   const answersByQuestionId = new Map(answers.map((answer) => [answer.questionId, answer]));
-  const orderedQuestions = questions.length > 0 ? questions : answers.map((answer) => ({ questionId: answer.questionId }));
+  const orderedQuestions =
+    questions.length > 0 ? questions : answers.map((answer) => ({ questionId: answer.questionId }));
   return orderedQuestions
     .flatMap((question) => {
       const answer = answersByQuestionId.get(question.questionId);
@@ -53,7 +60,8 @@ function canonicalContinuationText(
       if ("customResponse" in answer && answer.customResponse !== undefined) {
         return [`${"prompt" in question ? question.prompt : question.questionId}: ${answer.customResponse}`];
       }
-      const label = "options" in question ? question.options.find((option) => option.id === answer.optionId)?.label : undefined;
+      const label =
+        "options" in question ? question.options.find((option) => option.id === answer.optionId)?.label : undefined;
       return [`${"prompt" in question ? question.prompt : question.questionId}: ${label ?? answer.optionId ?? ""}`];
     })
     .join("\n");
@@ -70,7 +78,9 @@ function withCanonicalContinuation(
     resumeWork: {
       ...outcome.resumeWork,
       answers,
-      continuationText: questions ? canonicalContinuationText(answers, questions) : outcome.resumeWork.continuationText || canonicalContinuationText(answers),
+      continuationText: questions
+        ? canonicalContinuationText(answers, questions)
+        : outcome.resumeWork.continuationText || canonicalContinuationText(answers),
     },
   };
 }
@@ -82,8 +92,14 @@ function resumeContextFromSnapshot(snapshot: QuestionInteractionSnapshot): Quest
     sessionId: snapshot.sessionId,
     taskId: snapshot.taskId,
     agentRunId: snapshot.agentRunId,
-    workspaceId: typeof (record as { workspaceId?: unknown }).workspaceId === "string" ? (record as { workspaceId: string }).workspaceId : null,
-    sourceConversationId: typeof (record as { sourceConversationId?: unknown }).sourceConversationId === "string" ? (record as { sourceConversationId: string }).sourceConversationId : null,
+    workspaceId:
+      typeof (record as { workspaceId?: unknown }).workspaceId === "string"
+        ? (record as { workspaceId: string }).workspaceId
+        : null,
+    sourceConversationId:
+      typeof (record as { sourceConversationId?: unknown }).sourceConversationId === "string"
+        ? (record as { sourceConversationId: string }).sourceConversationId
+        : null,
     requesterPrincipalId: snapshot.target.requesterPrincipalId,
     platform: snapshot.target.platform,
     conversationKind: snapshot.target.conversationKind,
@@ -161,7 +177,13 @@ export function createQuestionInteractionService(deps: {
       });
       if (claimed.kind === "already_sent") return claimed.receipt;
       if (claimed.kind === "not_pending") {
-        return { interactionId: input.interactionId, deliveryId: "", requestKey: input.requestKey, status: "not_pending", providerMessageRefs: [] };
+        return {
+          interactionId: input.interactionId,
+          deliveryId: "",
+          requestKey: input.requestKey,
+          status: "not_pending",
+          providerMessageRefs: [],
+        };
       }
       try {
         const receipt = await input.transport.deliver(claimed.attempt, input.capabilities);
@@ -253,7 +275,13 @@ export function createQuestionInteractionService(deps: {
     ): Promise<QuestionInteractionAnswerOutcome | { kind: "not_found" }> {
       const interaction = await deps.repository.findPendingQuestionInteractionByPublicCode(input);
       if (!interaction) return { kind: "not_found" };
-      const { platform: _platform, conversationId: _conversationId, threadId: _threadId, publicCode: _publicCode, ...answer } = input;
+      const {
+        platform: _platform,
+        conversationId: _conversationId,
+        threadId: _threadId,
+        publicCode: _publicCode,
+        ...answer
+      } = input;
       const parsed = webChatQuestionAnswerSchema.safeParse(
         "optionId" in answer
           ? { questionId: answer.questionId, optionId: answer.optionId }
@@ -261,11 +289,19 @@ export function createQuestionInteractionService(deps: {
       );
       if (!parsed.success) return { kind: "invalid", interactionId: interaction.id, reason: "invalid_answer" };
       return withCanonicalContinuation(
-        await deps.repository.submitQuestionInteractionAnswer({ ...answer, ...parsed.data, interactionId: interaction.id }),
+        await deps.repository.submitQuestionInteractionAnswer({
+          ...answer,
+          ...parsed.data,
+          interactionId: interaction.id,
+        }),
       );
     },
 
-    async cancel(input: { interactionId: string; requesterPrincipalId: string; inboundEventId: string }): Promise<QuestionInteractionTerminalOutcome> {
+    async cancel(input: {
+      interactionId: string;
+      requesterPrincipalId: string;
+      inboundEventId: string;
+    }): Promise<QuestionInteractionTerminalOutcome> {
       return deps.repository.cancelQuestionInteraction({ ...input, cancelledAt: now().toISOString() });
     },
 
@@ -393,7 +429,8 @@ export function createQuestionInteractionServiceFromRepository(repository: Quest
         }
         if (result.kind === "answered" && result.resumeWork) {
           const snapshot = await repository.getQuestionInteractionSnapshot(input.interactionId);
-          if (!snapshot) return { kind: "not_pending" as const, interactionId: input.interactionId, state: "answered" as const };
+          if (!snapshot)
+            return { kind: "not_pending" as const, interactionId: input.interactionId, state: "answered" as const };
           return {
             kind: "completed" as const,
             interactionId: input.interactionId,
@@ -407,15 +444,22 @@ export function createQuestionInteractionServiceFromRepository(repository: Quest
         }
         if (result.kind === "duplicate") return { kind: "duplicate" as const, interactionId: input.interactionId };
         if (result.kind === "stale") return { kind: "stale" as const, interactionId: input.interactionId };
-        if (result.kind === "unauthorized") return { kind: "unauthorized" as const, interactionId: input.interactionId };
-        if (result.kind === "invalid") return { kind: "invalid" as const, interactionId: input.interactionId, reason: "invalid_answer" as const };
-        return { kind: "not_pending" as const, interactionId: input.interactionId, state: result.kind === "expired" ? "expired" : "delivery_failed" };
+        if (result.kind === "unauthorized")
+          return { kind: "unauthorized" as const, interactionId: input.interactionId };
+        if (result.kind === "invalid")
+          return { kind: "invalid" as const, interactionId: input.interactionId, reason: "invalid_answer" as const };
+        return {
+          kind: "not_pending" as const,
+          interactionId: input.interactionId,
+          state: result.kind === "expired" ? "expired" : "delivery_failed",
+        };
       },
       async submitQuestionInteractionBatchAnswer(input) {
         const result = await repository.submitQuestionInteractionBatchAnswer({ ...input, answers: [...input.answers] });
         if (result.kind === "answered" && result.resumeWork) {
           const snapshot = await repository.getQuestionInteractionSnapshot(input.interactionId);
-          if (!snapshot) return { kind: "not_pending" as const, interactionId: input.interactionId, state: "answered" as const };
+          if (!snapshot)
+            return { kind: "not_pending" as const, interactionId: input.interactionId, state: "answered" as const };
           return {
             kind: "completed" as const,
             interactionId: input.interactionId,
@@ -428,7 +472,8 @@ export function createQuestionInteractionServiceFromRepository(repository: Quest
           };
         }
         if (result.kind === "duplicate") return { kind: "duplicate" as const, interactionId: input.interactionId };
-        if (result.kind === "invalid") return { kind: "invalid" as const, interactionId: input.interactionId, reason: "invalid_answer" as const };
+        if (result.kind === "invalid")
+          return { kind: "invalid" as const, interactionId: input.interactionId, reason: "invalid_answer" as const };
         return { kind: "not_pending" as const, interactionId: input.interactionId, state: "delivery_failed" as const };
       },
       async claimQuestionInteractionResume(interactionId) {
@@ -451,8 +496,19 @@ export function createQuestionInteractionServiceFromRepository(repository: Quest
       },
       async cancelQuestionInteraction(input) {
         const before = await repository.getQuestionInteractionSnapshot(input.interactionId);
-        if (!before) return { kind: "not_pending" as const, interactionId: input.interactionId, state: "delivery_failed" as const };
-        if (!(await repository.cancelQuestionInteraction(input.interactionId, input.requesterPrincipalId, input.inboundEventId))) {
+        if (!before)
+          return {
+            kind: "not_pending" as const,
+            interactionId: input.interactionId,
+            state: "delivery_failed" as const,
+          };
+        if (
+          !(await repository.cancelQuestionInteraction(
+            input.interactionId,
+            input.requesterPrincipalId,
+            input.inboundEventId,
+          ))
+        ) {
           return before.state === "pending"
             ? { kind: "unauthorized" as const, interactionId: input.interactionId }
             : { kind: "not_pending" as const, interactionId: input.interactionId, state: before.state };
@@ -462,8 +518,13 @@ export function createQuestionInteractionServiceFromRepository(repository: Quest
       async expireQuestionInteraction(input) {
         await repository.expireDue(input.expiredAt);
         const snapshot = await repository.getQuestionInteractionSnapshot(input.interactionId);
-        if (snapshot?.state === "expired") return { kind: "expired" as const, interaction: pendingFromSnapshot(snapshot) };
-        return { kind: "not_pending" as const, interactionId: input.interactionId, state: snapshot?.state ?? "delivery_failed" };
+        if (snapshot?.state === "expired")
+          return { kind: "expired" as const, interaction: pendingFromSnapshot(snapshot) };
+        return {
+          kind: "not_pending" as const,
+          interactionId: input.interactionId,
+          state: snapshot?.state ?? "delivery_failed",
+        };
       },
       async getPendingQuestionInteraction(interactionId) {
         const snapshot = await repository.getQuestionInteractionSnapshot(interactionId);

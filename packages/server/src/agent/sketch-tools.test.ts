@@ -120,7 +120,8 @@ describe("createSketchMcpServer", () => {
       cancelControl: false,
     };
     const registeredTools = (deps: Parameters<typeof createSketchMcpServer>[0]) =>
-      (createSketchMcpServer(deps).instance as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
+      (createSketchMcpServer(deps).instance as unknown as { _registeredTools: Record<string, unknown> })
+        ._registeredTools;
 
     const webTools = registeredTools({
       uploadCollector: new UploadCollector(),

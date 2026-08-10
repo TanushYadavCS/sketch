@@ -404,10 +404,9 @@ async function createAutomationDraftHandoff(params: {
   });
   for (const discarded of result.discardedBuilderConversations ?? []) {
     try {
-      await rm(
-        webChatTranscriptPath(params.deps.config, discarded.transcriptUserId, discarded.conversationId),
-        { force: true },
-      );
+      await rm(webChatTranscriptPath(params.deps.config, discarded.transcriptUserId, discarded.conversationId), {
+        force: true,
+      });
       await archiveRuntimeSessions(params.deps.db, discarded.transcriptUserId, discarded.conversationId);
     } catch (error) {
       params.deps.logger.warn(
@@ -1365,12 +1364,19 @@ function questionAnswerMatchesPendingInteraction(
 ): boolean {
   if (!pending) return false;
   if ("batchId" in pending) {
-    if (!("answers" in answer) || answer.batchId !== pending.batchId || answer.answers.length !== pending.questions.length) {
+    if (
+      !("answers" in answer) ||
+      answer.batchId !== pending.batchId ||
+      answer.answers.length !== pending.questions.length
+    ) {
       return false;
     }
     return pending.questions.every((question) => {
       const selected = answer.answers.find((candidate) => candidate.questionId === question.id);
-      return Boolean(selected && ("customResponse" in selected || question.options.some((option) => option.id === selected.optionId)));
+      return Boolean(
+        selected &&
+          ("customResponse" in selected || question.options.some((option) => option.id === selected.optionId)),
+      );
     });
   }
   if ("answers" in answer || answer.questionId !== pending.id) return false;
@@ -1557,7 +1563,10 @@ async function appendWebChatPendingTurn(
 ): Promise<boolean> {
   return withWebChatTranscriptLock(userId, conversationId, async () => {
     const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
-    if (questionAnswer && !questionAnswerMatchesPendingInteraction(questionAnswer, latestPendingWebChatInteraction(existing))) {
+    if (
+      questionAnswer &&
+      !questionAnswerMatchesPendingInteraction(questionAnswer, latestPendingWebChatInteraction(existing))
+    ) {
       return false;
     }
     const next = [...existing];
@@ -2501,7 +2510,11 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           ...deterministicIntegrationCards,
         ]);
         const automationArtifacts = result.trace.automationArtifacts ?? [];
-        if (hasSuccessfulCreateAutomationSkill(result) && !automationBuilderContext && automationArtifacts.length === 0) {
+        if (
+          hasSuccessfulCreateAutomationSkill(result) &&
+          !automationBuilderContext &&
+          automationArtifacts.length === 0
+        ) {
           const handoff = await createAutomationDraftHandoff({
             deps,
             currentUser,

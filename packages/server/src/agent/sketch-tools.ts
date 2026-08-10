@@ -38,9 +38,7 @@ export type { SketchMcpDeps };
 
 function channelQuestionInteractionsAvailable(deps: SketchMcpDeps): boolean {
   const capabilities = deps.questionInteractionCapabilities;
-  return Boolean(
-    capabilities?.available && (capabilities.interactiveSingleSelect || capabilities.textFallback),
-  );
+  return Boolean(capabilities?.available && (capabilities.interactiveSingleSelect || capabilities.textFallback));
 }
 
 export function createSketchMcpToolDefinitions(deps: SketchMcpDeps) {

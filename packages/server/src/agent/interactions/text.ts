@@ -27,12 +27,7 @@ export function renderNumberedQuestionStep(
       return `*${index + 1}. ${option.label}*${description}`;
     })
     .join("\n\n");
-  return [
-    progress,
-    `*${step.question.prompt}*`,
-    options,
-    `_${numberedQuestionReplyInstruction(step.question)}_`,
-  ]
+  return [progress, `*${step.question.prompt}*`, options, `_${numberedQuestionReplyInstruction(step.question)}_`]
     .filter(Boolean)
     .join("\n\n");
 }

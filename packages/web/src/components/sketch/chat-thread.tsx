@@ -2,9 +2,9 @@ import { AppIcon } from "@/components/connections/app-icon";
 import type {
   AutomationArtifact,
   WebChatQuestion,
+  WebChatQuestionAnswer,
   WebChatQuestionBatch,
   WebChatQuestionBatchAnswer,
-  WebChatQuestionAnswer,
   WebChatQuestionOption,
 } from "@/lib/api";
 import {
@@ -52,7 +52,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AutomationArtifactCard } from "./automation-artifact-card";
 import { SketchMessage, UserMessage } from "./chat-message";
-import { QuestionFlowCard, type QuestionFlowAnswer, type QuestionFlowSubmission } from "./question-flow-card";
+import { type QuestionFlowAnswer, QuestionFlowCard, type QuestionFlowSubmission } from "./question-flow-card";
 
 export interface ChatThreadFile {
   name: string;
@@ -717,34 +717,38 @@ export function ChatThread({
           />
         );
       })}
-      {questionPortalTarget && activeQuestionInteractionKey ? (() => {
-        const message = [...messages].reverse().find((item) => questionInteractionKey(item) === activeQuestionInteractionKey);
-        if (!message) return null;
-        const canSubmit = message.questionBatch
-          ? Boolean(onSubmitQuestionBatch)
-          : Boolean(onAnswerQuestion || onSelectQuestion);
-        const disabled = answeredInteractionKey === activeQuestionInteractionKey || busy || !canSubmit;
-        return createPortal(
-          <QuestionFlowCard
-            key={activeQuestionInteractionKey}
-            question={message.question}
-            batch={message.questionBatch}
-            disabled={disabled}
-            onSubmit={(interaction, answer) => {
-              setAnsweredInteractionKey(activeQuestionInteractionKey);
-              if ("batchId" in interaction) {
-                onSubmitQuestionBatch?.(interaction, answer as ChatThreadQuestionBatchAnswer);
-              } else if (onAnswerQuestion) {
-                onAnswerQuestion(interaction, answer as QuestionFlowAnswer);
-              } else if ("optionId" in answer) {
-                const option = interaction.options.find((candidate) => candidate.id === answer.optionId);
-                if (option) onSelectQuestion?.(interaction, option);
-              }
-            }}
-          />,
-          questionPortalTarget,
-        );
-      })() : null}
+      {questionPortalTarget && activeQuestionInteractionKey
+        ? (() => {
+            const message = [...messages]
+              .reverse()
+              .find((item) => questionInteractionKey(item) === activeQuestionInteractionKey);
+            if (!message) return null;
+            const canSubmit = message.questionBatch
+              ? Boolean(onSubmitQuestionBatch)
+              : Boolean(onAnswerQuestion || onSelectQuestion);
+            const disabled = answeredInteractionKey === activeQuestionInteractionKey || busy || !canSubmit;
+            return createPortal(
+              <QuestionFlowCard
+                key={activeQuestionInteractionKey}
+                question={message.question}
+                batch={message.questionBatch}
+                disabled={disabled}
+                onSubmit={(interaction, answer) => {
+                  setAnsweredInteractionKey(activeQuestionInteractionKey);
+                  if ("batchId" in interaction) {
+                    onSubmitQuestionBatch?.(interaction, answer as ChatThreadQuestionBatchAnswer);
+                  } else if (onAnswerQuestion) {
+                    onAnswerQuestion(interaction, answer as QuestionFlowAnswer);
+                  } else if ("optionId" in answer) {
+                    const option = interaction.options.find((candidate) => candidate.id === answer.optionId);
+                    if (option) onSelectQuestion?.(interaction, option);
+                  }
+                }}
+              />,
+              questionPortalTarget,
+            );
+          })()
+        : null}
 
       {showBusy ? (
         <SketchMessage streaming>
@@ -789,7 +793,10 @@ function MessageRow({
   conversationId?: string;
   renderQuestions: boolean;
 }) {
-  const submitQuestion = (interaction: ChatThreadQuestion | ChatThreadQuestionBatch, answer: QuestionFlowSubmission) => {
+  const submitQuestion = (
+    interaction: ChatThreadQuestion | ChatThreadQuestionBatch,
+    answer: QuestionFlowSubmission,
+  ) => {
     onInteractionAnswered();
     if ("batchId" in interaction) onSubmitQuestionBatch?.(interaction, answer as ChatThreadQuestionBatchAnswer);
     else {
@@ -817,7 +824,15 @@ function MessageRow({
         onConnectIntegration={onConnectIntegration}
         conversationId={conversationId}
       />
-      {renderQuestions && (message.question || message.questionBatch) ? <QuestionFlowCard question={message.question} batch={message.questionBatch} disabled={!questionAnswerable} onSubmit={submitQuestion} /> : null}
+      {renderQuestions && (message.question || message.questionBatch) ? (
+        <QuestionFlowCard
+          key={message.questionBatch?.batchId ?? message.question?.id}
+          question={message.question}
+          batch={message.questionBatch}
+          disabled={!questionAnswerable}
+          onSubmit={submitQuestion}
+        />
+      ) : null}
     </SketchMessage>
   ) : message.text ||
     message.files?.length ||
@@ -929,7 +944,10 @@ function MessageContent({
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
   renderQuestions?: boolean;
-  onQuestionSubmit?: (interaction: ChatThreadQuestion | ChatThreadQuestionBatch, answer: QuestionFlowSubmission) => void;
+  onQuestionSubmit?: (
+    interaction: ChatThreadQuestion | ChatThreadQuestionBatch,
+    answer: QuestionFlowSubmission,
+  ) => void;
   questionAnswerable?: boolean;
   conversationId?: string;
 }) {
@@ -957,11 +975,18 @@ function MessageContent({
           onConnect={onConnectIntegration}
         />
       ) : null}
-      {renderQuestions && (message.question || message.questionBatch) ? <QuestionFlowCard question={message.question} batch={message.questionBatch} disabled={!questionAnswerable} onSubmit={onQuestionSubmit} /> : null}
+      {renderQuestions && (message.question || message.questionBatch) ? (
+        <QuestionFlowCard
+          key={message.questionBatch?.batchId ?? message.question?.id}
+          question={message.question}
+          batch={message.questionBatch}
+          disabled={!questionAnswerable}
+          onSubmit={onQuestionSubmit}
+        />
+      ) : null}
     </div>
   );
 }
-
 
 function AutomationArtifactCards({
   automations,

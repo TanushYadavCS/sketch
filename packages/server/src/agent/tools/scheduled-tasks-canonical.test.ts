@@ -328,7 +328,7 @@ describe("automation artifact presentation policy", () => {
         timezone: "UTC",
       },
     };
-    const dynamicScripts = ['return `Reminder: ${input.name}`;', 'return "Reminder: " + input.name;'];
+    const dynamicScripts = ["return `Reminder: ${input.name}`;", 'return "Reminder: " + input.name;'];
 
     for (const script of dynamicScripts) {
       expect(

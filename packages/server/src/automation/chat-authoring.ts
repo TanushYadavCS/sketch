@@ -28,7 +28,9 @@ export type ChatAutomationAuthoringResult =
       kind: "saved";
       task: ScheduledTask;
       artifact: {
-        steps: Array<AutomationBuilderSaveRequest["steps"][number] & { apps?: string[]; script?: string; agentPrompt?: string }>;
+        steps: Array<
+          AutomationBuilderSaveRequest["steps"][number] & { apps?: string[]; script?: string; agentPrompt?: string }
+        >;
         scheduleType: string;
         scheduleValue: string;
         timezone: string;

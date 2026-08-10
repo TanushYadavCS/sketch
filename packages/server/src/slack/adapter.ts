@@ -81,14 +81,14 @@ import { transcribeEagerAttachments } from "../transcription/service";
 import { resolveVisionConfigFromAppConfig } from "../vision/service";
 import { slackApiCall } from "./api";
 import { SlackBot, type SlackFile, type SlackMessage, type SlackMessageHandler } from "./bot";
+import type { SlackEntitySyncService } from "./entity-sync";
+import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
+import { createSlackMessageHandler } from "./message-handler";
 import {
   buildSlackQuestionModal,
   createSlackQuestionTransport,
   decodeSlackQuestionActionValue,
 } from "./question-interactions";
-import type { SlackEntitySyncService } from "./entity-sync";
-import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
-import { createSlackMessageHandler } from "./message-handler";
 import { SlackExternalUserError, SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
 import { isSlackStopCommand } from "./stop";
 import type { UserCache } from "./user-cache";
@@ -492,9 +492,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       return;
     }
     if (event.actionId !== "question_option" || !value.questionId || !value.optionId) return;
-    const activeQueueKey = interaction.target.conversationKind === "dm"
-      ? user.id
-      : `${event.channelId}:${event.threadTs ?? ""}`;
+    const activeQueueKey =
+      interaction.target.conversationKind === "dm" ? user.id : `${event.channelId}:${event.threadTs ?? ""}`;
     queue.getQueue(activeQueueKey).enqueue(async () => {
       const outcome = await service.submitAnswer({
         interactionId: value.interactionId,
@@ -524,7 +523,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           await executeSlackQuestionResume(claimedResumeWork);
         });
       } else if (outcome.kind !== "duplicate") {
-        await slackBot.postInteractiveMessage({ channelId: event.channelId, threadTs: event.threadTs, text: "That response could not be accepted. Please use the current question." });
+        await slackBot.postInteractiveMessage({
+          channelId: event.channelId,
+          threadTs: event.threadTs,
+          text: "That response could not be accepted. Please use the current question.",
+        });
       }
     });
   });
@@ -545,12 +548,17 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
     if (pending.kind !== "found" || pending.interaction.target.platform !== "slack") return;
     const interaction = pending.interaction;
     if (!interaction.target.eligibleResponderPrincipalIds.includes(user.id)) {
-      await slackBot.postInteractiveMessage({ channelId: interaction.target.conversationId, threadTs: interaction.target.threadId, text: "That question is no longer available." });
+      await slackBot.postInteractiveMessage({
+        channelId: interaction.target.conversationId,
+        threadTs: interaction.target.threadId,
+        text: "That question is no longer available.",
+      });
       return;
     }
-    const queueKey = interaction.target.conversationKind === "dm"
-      ? user.id
-      : `${interaction.target.conversationId}:${interaction.target.threadId ?? ""}`;
+    const queueKey =
+      interaction.target.conversationKind === "dm"
+        ? user.id
+        : `${interaction.target.conversationId}:${interaction.target.threadId ?? ""}`;
     queue.getQueue(queueKey).enqueue(async () => {
       const answers: SubmittedQuestionBatchAnswer["answers"] = [];
       for (const question of interaction.questions) {
@@ -564,7 +572,11 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           });
           return;
         }
-        answers.push(optionId ? { questionId: question.questionId, optionId } : { questionId: question.questionId, customResponse: customResponse as string });
+        answers.push(
+          optionId
+            ? { questionId: question.questionId, optionId }
+            : { questionId: question.questionId, customResponse: customResponse as string },
+        );
       }
       const outcome = await service.submitBatchAnswer({
         interactionId: interaction.id,
@@ -575,10 +587,14 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       });
       if (outcome.kind === "completed") {
         await service.resumeQuestionInteraction(outcome.resumeWork, async (claimedResumeWork) => {
-        await executeSlackQuestionResume(claimedResumeWork);
+          await executeSlackQuestionResume(claimedResumeWork);
         });
       } else if (outcome.kind !== "duplicate") {
-        await slackBot.postInteractiveMessage({ channelId: interaction.target.conversationId, threadTs: interaction.target.threadId, text: "Those answers could not be accepted. Please use the current question." });
+        await slackBot.postInteractiveMessage({
+          channelId: interaction.target.conversationId,
+          threadTs: interaction.target.threadId,
+          text: "Those answers could not be accepted. Please use the current question.",
+        });
       }
     });
   });
@@ -660,10 +676,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       await slackBot.postInteractiveMessage({
         channelId: message.channelId,
         threadTs: threadId,
-        text:
-          current.kind === "found"
-            ? renderNumberedQuestionStep(current)
-            : "That question is no longer available.",
+        text: current.kind === "found" ? renderNumberedQuestionStep(current) : "That question is no longer available.",
       });
     }
     return true;
@@ -768,7 +781,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
   };
 
   const executeSlackQuestionResume = async (
-    resumeWork: Extract<QuestionInteractionAnswerOutcome, { kind: "completed" }>['resumeWork'],
+    resumeWork: Extract<QuestionInteractionAnswerOutcome, { kind: "completed" }>["resumeWork"],
     onProgressEvent: RunAgentParams["onProgressEvent"] = async () => {},
   ): Promise<void> => {
     const requester = await repos.users.findById(resumeWork.context.requesterPrincipalId);
@@ -778,7 +791,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       (resumeWork.context.conversationKind === undefined && resumeWork.context.threadId === null);
     const channel = isDm ? null : await ensureChannelRow(resumeWork.context.conversationId);
     const boundAgent = channel?.agent_user_id ? await repos.users.findById(channel.agent_user_id) : null;
-    const workspaceKey = resumeWork.context.workspaceId ?? (isDm ? requester.id : `channel-${resumeWork.context.conversationId}`);
+    const workspaceKey =
+      resumeWork.context.workspaceId ?? (isDm ? requester.id : `channel-${resumeWork.context.conversationId}`);
     const workspaceDir = isDm
       ? await ensureWorkspace(config, workspaceKey)
       : boundAgent
@@ -820,7 +834,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
         canManageAnyTask: requester.auth_role === "admin",
         creatorTimezone: requester.timezone,
         ...(threadTs ? { threadTs } : {}),
-        origin: { platform: "slack", conversationId: resumeWork.context.sourceConversationId ?? resumeWork.context.conversationId, providerThreadId: threadTs ?? null, currentMessageId: null },
+        origin: {
+          platform: "slack",
+          conversationId: resumeWork.context.sourceConversationId ?? resumeWork.context.conversationId,
+          providerThreadId: threadTs ?? null,
+          currentMessageId: null,
+        },
       },
       scheduler,
       stepContentRepo,
@@ -850,11 +869,12 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       toolConfig,
     );
     if (finalText) await onFinalMessage(finalText);
-    else await slackBot.postInteractiveMessage({
-      channelId: resumeWork.context.conversationId,
-      threadTs: resumeWork.context.threadId,
-      text: "Your answer was saved, but I could not continue right now. Please try again shortly.",
-    });
+    else
+      await slackBot.postInteractiveMessage({
+        channelId: resumeWork.context.conversationId,
+        threadTs: resumeWork.context.threadId,
+        text: "Your answer was saved, but I could not continue right now. Please try again shortly.",
+      });
   };
 
   const resolveCommandToolProgress = (command: ReturnType<typeof parseSketchCommand>): ToolProgressCommand | null => {
@@ -1294,9 +1314,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               userEmail: user.email,
               logger,
               platform: "slack",
-              questionInteractionCapabilities: deps.questionInteractions
-                ? SLACK_TEXT_QUESTION_CAPABILITIES
-                : undefined,
+              questionInteractionCapabilities: deps.questionInteractions ? SLACK_TEXT_QUESTION_CAPABILITIES : undefined,
               getSlack: () => slackBot,
               onProgressEvent,
               ...(assistantThreadTs ? { threadTs: assistantThreadTs } : {}),
@@ -1808,9 +1826,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               userEmail: activeUser.email,
               logger,
               platform: "slack",
-              questionInteractionCapabilities: deps.questionInteractions
-                ? SLACK_TEXT_QUESTION_CAPABILITIES
-                : undefined,
+              questionInteractionCapabilities: deps.questionInteractions ? SLACK_TEXT_QUESTION_CAPABILITIES : undefined,
               getSlack: () => slackBot,
               onProgressEvent,
               threadTs,

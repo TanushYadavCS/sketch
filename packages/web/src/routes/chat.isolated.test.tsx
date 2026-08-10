@@ -424,7 +424,9 @@ describe("chat route", () => {
       ],
     });
 
-    expect(outgoingQuestionAnswerMessage(batch.questions[0], { questionId: "source", customResponse: "Folder A" })).toMatchObject({
+    expect(
+      outgoingQuestionAnswerMessage(batch.questions[0], { questionId: "source", customResponse: "Folder A" }),
+    ).toMatchObject({
       parts: [
         { type: "text", text: "Folder A" },
         { type: "data-question-answer", data: { questionId: "source", customResponse: "Folder A" } },
@@ -548,9 +550,12 @@ describe("chat route", () => {
     mockChatMessages = [userMessage, assistantMessage];
     rerender(<ChatPage />);
 
-    await waitFor(() => expect(mocks.createScheduledTaskConversation).toHaveBeenCalledWith("task-complex", { createNew: true }), {
-      timeout: AUTOMATION_BUILDER_NAVIGATION_DELAY_MS + 1000,
-    });
+    await waitFor(
+      () => expect(mocks.createScheduledTaskConversation).toHaveBeenCalledWith("task-complex", { createNew: true }),
+      {
+        timeout: AUTOMATION_BUILDER_NAVIGATION_DELAY_MS + 1000,
+      },
+    );
     expect(mocks.navigate).not.toHaveBeenCalledWith(
       expect.objectContaining({ search: { conversationId: "chat-alpha" } }),
     );

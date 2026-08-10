@@ -590,11 +590,9 @@ export async function createAutomationDraft(params: {
           runsRepo.list(candidate.id),
         ]);
         if (!isAutomationPlaceholderDraft({ row: candidate, stepContentRows, runRows })) continue;
-        const builderConversations = await conversationsRepo.listByTaskAndTranscriptUser(
-          candidate.id,
-          createdBy,
-          { kind: "builder" },
-        );
+        const builderConversations = await conversationsRepo.listByTaskAndTranscriptUser(candidate.id, createdBy, {
+          kind: "builder",
+        });
         discardedBuilderConversations.push(
           ...builderConversations.map((conversation) => ({
             conversationId: conversation.conversation_id,
@@ -656,7 +654,11 @@ export async function selectAutomationSetupExecutionMode(params: {
       .execute();
     return {
       kind: "saved" as const,
-      row: await trx.selectFrom("scheduled_tasks").selectAll().where("id", "=", params.taskId).executeTakeFirstOrThrow(),
+      row: await trx
+        .selectFrom("scheduled_tasks")
+        .selectAll()
+        .where("id", "=", params.taskId)
+        .executeTakeFirstOrThrow(),
     };
   });
 }

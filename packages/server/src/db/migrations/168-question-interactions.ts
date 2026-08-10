@@ -24,8 +24,16 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .addColumn("created_at", "text", (column) => column.notNull().defaultTo("CURRENT_TIMESTAMP"))
     .addColumn("updated_at", "text", (column) => column.notNull().defaultTo("CURRENT_TIMESTAMP"))
     .execute();
-  await db.schema.createIndex("question_interactions_state_expiry").on("question_interactions").columns(["state", "expires_at"]).execute();
-  await db.schema.createIndex("question_interactions_target_state").on("question_interactions").columns(["platform", "conversation_id", "thread_id", "state"]).execute();
+  await db.schema
+    .createIndex("question_interactions_state_expiry")
+    .on("question_interactions")
+    .columns(["state", "expires_at"])
+    .execute();
+  await db.schema
+    .createIndex("question_interactions_target_state")
+    .on("question_interactions")
+    .columns(["platform", "conversation_id", "thread_id", "state"])
+    .execute();
   await db.schema
     .createTable("question_interaction_items")
     .addColumn("interaction_id", "text", (column) => column.notNull())

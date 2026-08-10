@@ -1,4 +1,9 @@
-import type { WebChatQuestion, WebChatQuestionAnswer, WebChatQuestionBatch, WebChatQuestionBatchAnswer } from "@/lib/api";
+import type {
+  WebChatQuestion,
+  WebChatQuestionAnswer,
+  WebChatQuestionBatch,
+  WebChatQuestionBatchAnswer,
+} from "@/lib/api";
 import { cn } from "@sketch/ui/lib/utils";
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -22,13 +27,6 @@ export function QuestionFlowCard({ question, batch, disabled = false, onSubmit }
   const customInputId = useId();
   const current = questions[index];
   const currentAnswer = current ? answers[current.id] : undefined;
-
-  useEffect(() => {
-    setIndex(0);
-    setAnswers({});
-    setCustomResponse("");
-    finalSubmissionRef.current = false;
-  }, [batch?.batchId, question?.id]);
 
   useEffect(() => {
     setCustomResponse(currentAnswer && "customResponse" in currentAnswer ? currentAnswer.customResponse : "");
@@ -67,15 +65,12 @@ export function QuestionFlowCard({ question, batch, disabled = false, onSubmit }
       aria-live="polite"
       className="question-flow-card w-full max-w-[640px]"
     >
-      <div
-        key={current.id}
-        data-question-flow-step
-        data-transition="idle"
-        className="min-h-[256px]"
-      >
+      <div key={current.id} data-question-flow-step data-transition="idle" className="min-h-[256px]">
         <div className="mb-3 flex items-center justify-between gap-3">
           <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-brand-accent">Question</span>
-          <span aria-live="polite" className="text-[12px] tabular-nums text-muted-foreground">{index + 1} of {questions.length}</span>
+          <span aria-live="polite" className="text-[12px] tabular-nums text-muted-foreground">
+            {index + 1} of {questions.length}
+          </span>
         </div>
         <fieldset disabled={disabled || !onSubmit} className="border-0 p-0">
           <legend className="px-0 text-[15px] font-medium leading-6 text-foreground">{current.prompt}</legend>
@@ -87,7 +82,10 @@ export function QuestionFlowCard({ question, batch, disabled = false, onSubmit }
                 data-question-option-id={option.id}
                 className={cn(
                   "rounded-[9px] border border-border/80 bg-background px-3 py-2.5 text-left transition hover:border-brand-accent/60 hover:bg-brand-accent/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-accent/55 disabled:cursor-not-allowed disabled:opacity-55",
-                  currentAnswer && "optionId" in currentAnswer && currentAnswer.optionId === option.id && "border-brand-accent/70 bg-brand-accent/[0.08]",
+                  currentAnswer &&
+                    "optionId" in currentAnswer &&
+                    currentAnswer.optionId === option.id &&
+                    "border-brand-accent/70 bg-brand-accent/[0.08]",
                 )}
                 onClick={() => finishOrAdvance({ questionId: current.id, optionId: option.id })}
               >
@@ -103,20 +101,20 @@ export function QuestionFlowCard({ question, batch, disabled = false, onSubmit }
               Or type your own answer
             </label>
             <div className="mt-1.5 flex gap-2">
-            <input
-              ref={customInputRef}
-              id={customInputId}
-              value={customResponse}
-              onChange={(event) => setCustomResponse(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  submitCustom();
-                }
-              }}
-              className="min-w-0 flex-1 rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground focus:border-brand-accent/70 focus:ring-2 focus:ring-brand-accent/25"
-              placeholder="Write a short answer"
-            />
+              <input
+                ref={customInputRef}
+                id={customInputId}
+                value={customResponse}
+                onChange={(event) => setCustomResponse(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    submitCustom();
+                  }
+                }}
+                className="min-w-0 flex-1 rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground focus:border-brand-accent/70 focus:ring-2 focus:ring-brand-accent/25"
+                placeholder="Write a short answer"
+              />
               <button
                 type="button"
                 onClick={submitCustom}

@@ -19,7 +19,6 @@ import type {
 } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import type { ChatAutomationAuthoring } from "../automation/chat-authoring";
-import type { QuestionInteractionCapabilities } from "./interactions/types";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
@@ -52,6 +51,7 @@ import type { VisionConfig } from "../vision/service";
 import { resolveVisionConfig } from "../vision/service";
 import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
+import type { QuestionInteractionCapabilities } from "./interactions/types";
 import { createCanUseTool } from "./permissions";
 import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { createDefaultAgentRuntimeCompactionProvider } from "./runtime/compaction";

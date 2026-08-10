@@ -848,7 +848,8 @@ export function outgoingQuestionAnswerMessage(
   const text =
     "customResponse" in structuredAnswer
       ? structuredAnswer.customResponse
-      : question.options.find((option) => option.id === structuredAnswer.optionId)?.label ?? structuredAnswer.optionId;
+      : (question.options.find((option) => option.id === structuredAnswer.optionId)?.label ??
+        structuredAnswer.optionId);
   return {
     metadata: { createdAt: new Date().toISOString() },
     parts: [
@@ -879,7 +880,7 @@ export function outgoingQuestionBatchAnswerMessage(
     const question = batch.questions.find((candidate) => candidate.id === item.questionId);
     return "customResponse" in item
       ? item.customResponse
-      : question?.options.find((option) => option.id === item.optionId)?.label ?? item.optionId;
+      : (question?.options.find((option) => option.id === item.optionId)?.label ?? item.optionId);
   });
   return {
     metadata: { createdAt: new Date().toISOString() },

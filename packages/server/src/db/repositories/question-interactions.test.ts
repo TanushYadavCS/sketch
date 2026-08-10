@@ -28,7 +28,14 @@ describe("question interaction public codes", () => {
         requesterPrincipalId: "principal-1",
         eligibleResponderPrincipalIds: ["principal-1"],
       },
-      questions: [{ questionId: "question-1", prompt: "Choose", options: [{ id: "one", label: "One" }], allowsCustomResponse: false }],
+      questions: [
+        {
+          questionId: "question-1",
+          prompt: "Choose",
+          options: [{ id: "one", label: "One" }],
+          allowsCustomResponse: false,
+        },
+      ],
       resumeContext: {},
       expiresAt: "2030-01-01T00:00:00.000Z",
     });
@@ -70,7 +77,14 @@ describe("question interaction public codes", () => {
         requesterPrincipalId: "principal-1",
         eligibleResponderPrincipalIds: ["principal-1"],
       },
-      questions: [{ questionId: "question-1", prompt: "Choose", options: [{ id: "one", label: "One" }], allowsCustomResponse: false }],
+      questions: [
+        {
+          questionId: "question-1",
+          prompt: "Choose",
+          options: [{ id: "one", label: "One" }],
+          allowsCustomResponse: false,
+        },
+      ],
       resumeContext: {},
       expiresAt: "2030-01-01T00:00:00.000Z",
     };
@@ -83,32 +97,80 @@ describe("question interaction public codes", () => {
   it("claims a completed interaction resume once and releases a failed claim for retry", async () => {
     const interaction = await repository.createPendingQuestionInteraction({
       sessionId: "session-2",
-      target: { platform: "web", conversationKind: "dm", conversationId: "conversation-2", threadId: null, requesterPrincipalId: "principal-2", eligibleResponderPrincipalIds: ["principal-2"] },
-      questions: [{ questionId: "question-2", prompt: "Choose", options: [{ id: "two", label: "Two" }], allowsCustomResponse: false }],
+      target: {
+        platform: "web",
+        conversationKind: "dm",
+        conversationId: "conversation-2",
+        threadId: null,
+        requesterPrincipalId: "principal-2",
+        eligibleResponderPrincipalIds: ["principal-2"],
+      },
+      questions: [
+        {
+          questionId: "question-2",
+          prompt: "Choose",
+          options: [{ id: "two", label: "Two" }],
+          allowsCustomResponse: false,
+        },
+      ],
       resumeContext: {},
       expiresAt: "2030-01-01T00:00:00.000Z",
     });
     const interactionId = interaction?.id ?? "";
 
-    await repository.submitQuestionInteractionAnswer({ interactionId, questionId: "question-2", optionId: "two", responderPrincipalId: "principal-2", inboundEventId: "event-2", receivedAt: "2026-08-10T00:00:00.000Z" });
+    await repository.submitQuestionInteractionAnswer({
+      interactionId,
+      questionId: "question-2",
+      optionId: "two",
+      responderPrincipalId: "principal-2",
+      inboundEventId: "event-2",
+      receivedAt: "2026-08-10T00:00:00.000Z",
+    });
 
     await expect(repository.claimQuestionInteractionResume(interactionId)).resolves.toMatchObject({ kind: "claimed" });
-    await expect(repository.claimQuestionInteractionResume(interactionId)).resolves.toEqual({ kind: "already_claimed" });
-    await expect(repository.recordQuestionInteractionResumeResult({ interactionId, status: "failed" })).resolves.toBe(true);
+    await expect(repository.claimQuestionInteractionResume(interactionId)).resolves.toEqual({
+      kind: "already_claimed",
+    });
+    await expect(repository.recordQuestionInteractionResumeResult({ interactionId, status: "failed" })).resolves.toBe(
+      true,
+    );
     await expect(repository.claimQuestionInteractionResume(interactionId)).resolves.toMatchObject({ kind: "claimed" });
-    await expect(repository.recordQuestionInteractionResumeResult({ interactionId, status: "failed" })).resolves.toBe(true);
+    await expect(repository.recordQuestionInteractionResumeResult({ interactionId, status: "failed" })).resolves.toBe(
+      true,
+    );
     await expect(repository.claimQuestionInteractionResume(interactionId)).resolves.toMatchObject({ kind: "claimed" });
   });
 
   it("cancels only pending interactions owned by the target requester", async () => {
     const interaction = await repository.createPendingQuestionInteraction({
       sessionId: "session-3",
-      target: { platform: "slack", conversationKind: "dm", conversationId: "conversation-3", threadId: null, requesterPrincipalId: "principal-3", eligibleResponderPrincipalIds: ["principal-3"] },
-      questions: [{ questionId: "question-3", prompt: "Choose", options: [{ id: "three", label: "Three" }], allowsCustomResponse: false }],
+      target: {
+        platform: "slack",
+        conversationKind: "dm",
+        conversationId: "conversation-3",
+        threadId: null,
+        requesterPrincipalId: "principal-3",
+        eligibleResponderPrincipalIds: ["principal-3"],
+      },
+      questions: [
+        {
+          questionId: "question-3",
+          prompt: "Choose",
+          options: [{ id: "three", label: "Three" }],
+          allowsCustomResponse: false,
+        },
+      ],
       resumeContext: {},
       expiresAt: "2030-01-01T00:00:00.000Z",
     });
 
-    await expect(repository.cancelPendingQuestionInteractionsForTarget({ platform: "slack", conversationId: "conversation-3", threadId: null, requesterPrincipalId: "principal-3" })).resolves.toEqual({ cancelledIds: [interaction?.id], count: 1 });
+    await expect(
+      repository.cancelPendingQuestionInteractionsForTarget({
+        platform: "slack",
+        conversationId: "conversation-3",
+        threadId: null,
+        requesterPrincipalId: "principal-3",
+      }),
+    ).resolves.toEqual({ cancelledIds: [interaction?.id], count: 1 });
   });
 });

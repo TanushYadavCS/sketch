@@ -94,10 +94,7 @@ export type SubmittedTextQuestionAnswer =
 
 export interface SubmittedQuestionBatchAnswer {
   interactionId: string;
-  answers: readonly (
-    | { questionId: string; optionId: string }
-    | { questionId: string; customResponse: string }
-  )[];
+  answers: readonly ({ questionId: string; optionId: string } | { questionId: string; customResponse: string })[];
   responderPrincipalId: string;
   inboundEventId: string;
   receivedAt: string;
@@ -141,7 +138,11 @@ export type QuestionInteractionAnswerOutcome =
   | { kind: "duplicate"; interactionId: string }
   | { kind: "stale"; interactionId: string }
   | { kind: "unauthorized"; interactionId: string }
-  | { kind: "invalid"; interactionId: string; reason: "unknown_question" | "invalid_option" | "custom_not_allowed" | "invalid_answer" }
+  | {
+      kind: "invalid";
+      interactionId: string;
+      reason: "unknown_question" | "invalid_option" | "custom_not_allowed" | "invalid_answer";
+    }
   | { kind: "not_pending"; interactionId: string; state: Exclude<QuestionInteractionState, "pending"> };
 
 export type QuestionInteractionLookupOutcome =
@@ -176,7 +177,11 @@ export interface QuestionInteractionRepository {
     requestKey: string;
     transport: string;
     capability: string;
-  }): Promise<{ kind: "claimed"; attempt: QuestionInteractionDeliveryAttempt } | { kind: "already_sent"; receipt: QuestionInteractionDeliveryReceipt } | { kind: "not_pending" }>;
+  }): Promise<
+    | { kind: "claimed"; attempt: QuestionInteractionDeliveryAttempt }
+    | { kind: "already_sent"; receipt: QuestionInteractionDeliveryReceipt }
+    | { kind: "not_pending" }
+  >;
   recordQuestionInteractionDeliveryResult(input: {
     deliveryId: string;
     providerMessageRefs: readonly string[];
@@ -185,10 +190,10 @@ export interface QuestionInteractionRepository {
   markQuestionInteractionDeliveryFailed(interactionId: string): Promise<void>;
   submitQuestionInteractionAnswer(input: SubmittedQuestionAnswer): Promise<QuestionInteractionAnswerOutcome>;
   submitQuestionInteractionBatchAnswer(input: SubmittedQuestionBatchAnswer): Promise<QuestionInteractionAnswerOutcome>;
-  claimQuestionInteractionResume(interactionId: string): Promise<
-    | { kind: "claimed"; resumeWork: QuestionInteractionResumeWork }
-    | { kind: "already_claimed" }
-    | { kind: "not_ready" }
+  claimQuestionInteractionResume(
+    interactionId: string,
+  ): Promise<
+    { kind: "claimed"; resumeWork: QuestionInteractionResumeWork } | { kind: "already_claimed" } | { kind: "not_ready" }
   >;
   recordQuestionInteractionResumeResult(input: {
     interactionId: string;
@@ -200,7 +205,10 @@ export interface QuestionInteractionRepository {
     inboundEventId: string;
     cancelledAt: string;
   }): Promise<QuestionInteractionTerminalOutcome>;
-  expireQuestionInteraction(input: { interactionId: string; expiredAt: string }): Promise<QuestionInteractionTerminalOutcome>;
+  expireQuestionInteraction(input: {
+    interactionId: string;
+    expiredAt: string;
+  }): Promise<QuestionInteractionTerminalOutcome>;
   getPendingQuestionInteraction(interactionId: string): Promise<PendingQuestionInteraction | null>;
   findPendingQuestionInteractionByPublicCode(input: {
     platform: Extract<QuestionInteractionPlatform, "slack" | "whatsapp">;
@@ -222,7 +230,10 @@ export interface QuestionInteractionRepository {
 }
 
 export interface QuestionInteractionTransport {
-  deliver(input: QuestionInteractionDeliveryAttempt, capabilities: QuestionInteractionCapabilities): Promise<{
+  deliver(
+    input: QuestionInteractionDeliveryAttempt,
+    capabilities: QuestionInteractionCapabilities,
+  ): Promise<{
     providerMessageRefs: readonly string[];
   }>;
 }

@@ -202,7 +202,10 @@ export function isLegacyMaterializedAutomationPlaceholderRow(row: ScheduledTaskR
   if (!steps.success || !edges.success) return false;
   const expectedSteps = compatibilityPlaceholderSteps(row);
   const expectedEdges: WorkflowEdge[] = [{ id: "trigger-step1", from: "trigger", to: "step1" }];
-  return JSON.stringify(steps.data) === JSON.stringify(expectedSteps) && JSON.stringify(edges.data) === JSON.stringify(expectedEdges);
+  return (
+    JSON.stringify(steps.data) === JSON.stringify(expectedSteps) &&
+    JSON.stringify(edges.data) === JSON.stringify(expectedEdges)
+  );
 }
 
 export function isAutomationPlaceholderDraft(params: {

@@ -103,8 +103,6 @@ import {
 import "@xyflow/react/dist/style.css";
 import {
   type AutomationExecutionMode,
-  type WebChatQuestion,
-  type WebChatQuestionOption,
   automationExecutionModeMetadata,
   recommendAutomationExecutionMode,
 } from "@sketch/shared";
@@ -464,7 +462,9 @@ function AutomationSetupCard({
                         Recommended
                       </span>
                     ) : null}
-                    {selected ? <span className="ml-auto text-[11px] font-medium text-brand-accent">Selected</span> : null}
+                    {selected ? (
+                      <span className="ml-auto text-[11px] font-medium text-brand-accent">Selected</span>
+                    ) : null}
                   </span>
                   <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">
                     {metadata.description}
@@ -744,10 +744,10 @@ export function AutomationBuilderPage() {
   if (automationQuery.isLoading || !draft || !automationQuery.data) {
     return (
       <div className="automation-builder-loading flex min-h-[calc(100vh-3rem)] items-center justify-center bg-background px-6 md:min-h-screen">
-        <div className="flex items-center gap-3 text-sm text-muted-foreground" role="status">
+        <output className="flex items-center gap-3 text-sm text-muted-foreground">
           <SpinnerGapIcon size={18} className="animate-spin text-brand-accent" />
           <span>Loading automation…</span>
-        </div>
+        </output>
       </div>
     );
   }
@@ -884,7 +884,13 @@ export function AutomationBuilderPage() {
                 requestFailed={Boolean(runRequestError)}
               />
             ) : null}
-            <Button size="sm" variant="outline" className={canvasToolbarButtonClass} onClick={closeBuilder} disabled={discardingSetup}>
+            <Button
+              size="sm"
+              variant="outline"
+              className={canvasToolbarButtonClass}
+              onClick={closeBuilder}
+              disabled={discardingSetup}
+            >
               {discardingSetup ? "Discarding…" : placeholderSetup ? "Discard setup" : "Close"}
             </Button>
             <Button
@@ -1040,12 +1046,16 @@ function textFromBuilderMessage(message: BuilderWebChatMessage): string {
     .map((part) => part.text)
     .join("\n")
     .trim();
-  return normalizeBuilderDisplayText(text) || (questionBatchAnswerFromBuilderMessage(message) ? "Submitted answers" : "");
+  return (
+    normalizeBuilderDisplayText(text) || (questionBatchAnswerFromBuilderMessage(message) ? "Submitted answers" : "")
+  );
 }
 
 function normalizeBuilderDisplayText(text: string): string {
   if (!text.startsWith(BUILDER_MODE_SELECTION_MARKER)) return text;
-  const metadata = Object.values(automationExecutionModeMetadata).find((candidate) => text.includes(`(${candidate.label})`));
+  const metadata = Object.values(automationExecutionModeMetadata).find((candidate) =>
+    text.includes(`(${candidate.label})`),
+  );
   return metadata ? `${metadata.label} selected.` : "Execution mode selected.";
 }
 
@@ -1188,9 +1198,10 @@ export function outgoingBuilderQuestionAnswerMessage(
   answer: WebChatQuestionOption | WebChatQuestionAnswer,
 ) {
   const payload: WebChatQuestionAnswer = "id" in answer ? { questionId: question.id, optionId: answer.id } : answer;
-  const text = "optionId" in payload
-    ? question.options.find((option) => option.id === payload.optionId)?.label ?? payload.optionId
-    : payload.customResponse;
+  const text =
+    "optionId" in payload
+      ? (question.options.find((option) => option.id === payload.optionId)?.label ?? payload.optionId)
+      : payload.customResponse;
   return {
     metadata: { createdAt: new Date().toISOString() },
     parts: [
@@ -1220,7 +1231,7 @@ export function outgoingBuilderQuestionBatchAnswerMessage(
   const labels = orderedPayload.answers.map((item) => {
     const question = batch.questions.find((candidate) => candidate.id === item.questionId);
     return "optionId" in item
-      ? question?.options.find((option) => option.id === item.optionId)?.label ?? item.optionId
+      ? (question?.options.find((option) => option.id === item.optionId)?.label ?? item.optionId)
       : item.customResponse;
   });
   return {
@@ -2623,46 +2634,46 @@ function AutomationCanvasFlow({
 
   return (
     <div className="relative size-full">
-    <ReactFlow
-      nodes={nodes}
-      edges={initialEdges}
-      nodeTypes={nodeTypes}
-      onNodesChange={onNodesChange}
-      onNodeClick={(_, node) => onSelectStep(node.id)}
-      onNodeDragStop={(_, node) => {
-        onUpdateStepPositions(
-          Object.fromEntries(
-            nodes.map((currentNode) => [
-              currentNode.id,
-              currentNode.id === node.id ? node.position : currentNode.position,
-            ]),
-          ),
-        );
-      }}
-      onPaneClick={() => onSelectStep(null)}
-      nodesDraggable
-      nodesConnectable={false}
-      edgesReconnectable={false}
-      nodesFocusable
-      edgesFocusable={false}
-      deleteKeyCode={null}
-      multiSelectionKeyCode={null}
-      selectionKeyCode={null}
-      fitView
-      fitViewOptions={{ padding: 0.12, maxZoom: 1.1 }}
-      minZoom={0.3}
-      maxZoom={1.8}
-      snapToGrid
-      snapGrid={[18, 18]}
-      connectionLineStyle={connectionLineStyle}
-      connectionRadius={28}
-      proOptions={{ hideAttribution: true }}
-      className="automation-builder-flow"
-    >
-      <Background variant={BackgroundVariant.Dots} gap={18} size={1.1} color="var(--automation-builder-grid)" />
-      <Controls showInteractive={false} position="bottom-left" className="automation-builder-controls" />
-    </ReactFlow>
-    <QuestionDock onTarget={onQuestionPortalTarget} />
+      <ReactFlow
+        nodes={nodes}
+        edges={initialEdges}
+        nodeTypes={nodeTypes}
+        onNodesChange={onNodesChange}
+        onNodeClick={(_, node) => onSelectStep(node.id)}
+        onNodeDragStop={(_, node) => {
+          onUpdateStepPositions(
+            Object.fromEntries(
+              nodes.map((currentNode) => [
+                currentNode.id,
+                currentNode.id === node.id ? node.position : currentNode.position,
+              ]),
+            ),
+          );
+        }}
+        onPaneClick={() => onSelectStep(null)}
+        nodesDraggable
+        nodesConnectable={false}
+        edgesReconnectable={false}
+        nodesFocusable
+        edgesFocusable={false}
+        deleteKeyCode={null}
+        multiSelectionKeyCode={null}
+        selectionKeyCode={null}
+        fitView
+        fitViewOptions={{ padding: 0.12, maxZoom: 1.1 }}
+        minZoom={0.3}
+        maxZoom={1.8}
+        snapToGrid
+        snapGrid={[18, 18]}
+        connectionLineStyle={connectionLineStyle}
+        connectionRadius={28}
+        proOptions={{ hideAttribution: true }}
+        className="automation-builder-flow"
+      >
+        <Background variant={BackgroundVariant.Dots} gap={18} size={1.1} color="var(--automation-builder-grid)" />
+        <Controls showInteractive={false} position="bottom-left" className="automation-builder-controls" />
+      </ReactFlow>
+      <QuestionDock onTarget={onQuestionPortalTarget} />
     </div>
   );
 }

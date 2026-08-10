@@ -59,7 +59,10 @@ describe("Slack question interactions", () => {
   });
 
   it("renders a plain numbered question with descriptions and custom-answer guidance", () => {
-    expect(renderSlackNumberedQuestion(interaction.questions[0]!)).toBe(
+    const question = interaction.questions[0];
+    if (!question) throw new Error("Expected a question fixture");
+
+    expect(renderSlackNumberedQuestion(question)).toBe(
       "How often?\n\n1. Daily\n   Run once every day\n2. Weekly\n\nReply with a number from 1 to 2, or type your own answer.",
     );
   });

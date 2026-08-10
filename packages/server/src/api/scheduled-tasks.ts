@@ -498,7 +498,10 @@ export function scheduledTaskRoutes(
       await Promise.all(
         rows.map(async (row) => {
           if (!isStrictAutomationPlaceholderRow(row)) return row;
-          const [stepContentRows, runRows] = await Promise.all([stepContentRepo.getByTask(row.id), runsRepo.list(row.id)]);
+          const [stepContentRows, runRows] = await Promise.all([
+            stepContentRepo.getByTask(row.id),
+            runsRepo.list(row.id),
+          ]);
           return isAutomationPlaceholderDraft({ row, stepContentRows, runRows }) ? null : row;
         }),
       )

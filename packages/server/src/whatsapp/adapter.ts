@@ -6,9 +6,9 @@ import { basename } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import type { AuxLlmCall } from "../agent/aux-cost";
+import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import type { QuestionInteractionService } from "../agent/interactions/service";
 import { parseNumberedQuestionAnswer, renderNumberedQuestionStep } from "../agent/interactions/text";
-import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import type { InboxMessageContext, QuotedMessageContext, SketchContextParams } from "../agent/prompt";
 import { buildSketchContext, getImageAttachmentPathsFromSketchContext } from "../agent/prompt";
 import {
@@ -55,11 +55,6 @@ import { stableWhatsAppParticipantJidRef } from "./identity-resolution";
 import { createWhatsAppMessageHandler } from "./message-handler";
 import { maskPersonalNumberIdentifier } from "./privacy";
 import {
-  createWhatsAppTextQuestionTransport,
-  parseWhatsAppTextQuestionSubmission,
-  WHATSAPP_TEXT_QUESTION_CAPABILITIES,
-} from "./question-interactions";
-import {
   type WhatsAppHistoryBatchMetadata,
   type WhatsAppHistorySyncResult,
   type WhatsAppInboundMessage,
@@ -69,6 +64,11 @@ import {
   whatsappDeliveryTargetFromTarget,
 } from "./provider";
 import { validWhatsAppProviderTimestamp } from "./provider-timestamp";
+import {
+  WHATSAPP_TEXT_QUESTION_CAPABILITIES,
+  createWhatsAppTextQuestionTransport,
+  parseWhatsAppTextQuestionSubmission,
+} from "./question-interactions";
 import type { WhatsAppRuntime } from "./runtime";
 import type { WhatsAppTemplateRequest } from "./templates";
 import { phoneToTimezone } from "./timezone";
@@ -300,10 +300,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
     return next.kind === "found" ? { ...outcome, nextQuestion: next } : outcome;
   };
 
-  const claimQuestionReply = async (
-    message: WhatsAppInboundMessage,
-    responderPrincipalId: string | null,
-  ) => {
+  const claimQuestionReply = async (message: WhatsAppInboundMessage, responderPrincipalId: string | null) => {
     if (!deps.questionInteractions) return null;
     const legacySubmission = parseWhatsAppTextQuestionSubmission(message.text);
     if (legacySubmission.kind === "cancel") {
@@ -465,9 +462,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         userPhone: params.user.whatsapp_number ?? null,
         logger,
         platform: "whatsapp",
-        questionInteractionCapabilities: deps.questionInteractions
-          ? WHATSAPP_TEXT_QUESTION_CAPABILITIES
-          : undefined,
+        questionInteractionCapabilities: deps.questionInteractions ? WHATSAPP_TEXT_QUESTION_CAPABILITIES : undefined,
         onProgressEvent: async () => {},
         orgName: params.settingsRow?.org_name,
         orgDescription: parseOrgContext(params.settingsRow?.org_context)?.description ?? null,
@@ -1327,9 +1322,10 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
 
     const user = message.senderPhoneE164 ? await repos.users.findByWhatsappNumber(message.senderPhoneE164) : undefined;
     const questionSubmission = parseWhatsAppTextQuestionSubmission(message.text);
-    const pendingQuestionReply = message.isMentioned || message.text.trimStart().startsWith("/")
-      ? { kind: "not_found" as const }
-      : await findPendingQuestion(message, user?.id ?? null);
+    const pendingQuestionReply =
+      message.isMentioned || message.text.trimStart().startsWith("/")
+        ? { kind: "not_found" as const }
+        : await findPendingQuestion(message, user?.id ?? null);
     const isQuestionReply =
       pendingQuestionReply.kind === "found" ||
       (Boolean(deps.questionInteractions) &&
@@ -1558,9 +1554,7 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           userPhone: user?.whatsapp_number ?? null,
           logger,
           platform: "whatsapp",
-          questionInteractionCapabilities: deps.questionInteractions
-            ? WHATSAPP_TEXT_QUESTION_CAPABILITIES
-            : undefined,
+          questionInteractionCapabilities: deps.questionInteractions ? WHATSAPP_TEXT_QUESTION_CAPABILITIES : undefined,
           onProgressEvent,
           orgName: settingsRow?.org_name,
           orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,

@@ -7,7 +7,6 @@ import type {
 } from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import type { ChatAutomationAuthoring } from "../../automation/chat-authoring";
-import type { QuestionInteractionCapabilities } from "../interactions/types";
 import type { AccessPrincipalInput } from "../../connectors/types";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
@@ -26,6 +25,7 @@ import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
 import type { WhatsAppTemplateRequest } from "../../whatsapp/templates";
 import type { AuxCostCollector } from "../aux-cost";
+import type { QuestionInteractionCapabilities } from "../interactions/types";
 import type { AgentOutputWriter } from "./agent-output";
 
 export type SelectableUser = Selectable<UsersTable>;

@@ -9,8 +9,20 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   if (!columns.has("active_task_key")) {
     await db.schema.alterTable("question_interactions").addColumn("active_task_key", "text").execute();
   }
-  await db.schema.createIndex("question_interactions_active_scope").ifNotExists().unique().on("question_interactions").column("active_scope_key").execute();
-  await db.schema.createIndex("question_interactions_active_task").ifNotExists().unique().on("question_interactions").column("active_task_key").execute();
+  await db.schema
+    .createIndex("question_interactions_active_scope")
+    .ifNotExists()
+    .unique()
+    .on("question_interactions")
+    .column("active_scope_key")
+    .execute();
+  await db.schema
+    .createIndex("question_interactions_active_task")
+    .ifNotExists()
+    .unique()
+    .on("question_interactions")
+    .column("active_task_key")
+    .execute();
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {

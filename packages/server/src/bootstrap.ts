@@ -10,6 +10,7 @@ import { DisconnectReason } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { type AgentRunAdmissionOptions, createAgentRunLimiter } from "./agent/concurrency-limiter";
 import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/environment";
+import { createQuestionInteractionServiceFromRepository } from "./agent/interactions/service";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
@@ -53,7 +54,6 @@ import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups
 import { createWhatsAppInboundEventsRepository } from "./db/repositories/whatsapp-inbound-events";
 import { createWhatsAppProviderEventRepository } from "./db/repositories/whatsapp-provider-events";
 import { createWhatsAppTemplateMappingRepository } from "./db/repositories/whatsapp-template-mappings";
-import { createQuestionInteractionServiceFromRepository } from "./agent/interactions/service";
 import type { DB } from "./db/schema";
 import { configureMaterializeDefaults } from "./entities/materialize";
 import { startNormalizationBackfill } from "./entities/normalization-backfill";
@@ -1149,14 +1149,16 @@ export async function createServer(config: Config, options?: CreateServerOptions
     : null;
   managedMemberReconciliationTimer?.unref();
   if (managedMemberReconciliationEnabled) startManagedMemberReconciliation();
-  const questionInteractionExpiryTimer =
-    backgroundWork
-      ? setInterval(() => {
+  const questionInteractionExpiryTimer = backgroundWork
+    ? setInterval(
+        () => {
           void questionInteractionsRepo.expireDue().catch((err) => {
             logger.warn({ err }, "Question interaction expiry sweep failed");
           });
-        }, 5 * 60 * 1000)
-      : null;
+        },
+        5 * 60 * 1000,
+      )
+    : null;
   questionInteractionExpiryTimer?.unref();
   if (backgroundWork) {
     void questionInteractionsRepo.expireDue().catch((err) => {

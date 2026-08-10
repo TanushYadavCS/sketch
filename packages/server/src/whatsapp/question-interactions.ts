@@ -1,10 +1,10 @@
+import { parseNumberedQuestionAnswer, renderNumberedQuestionStep } from "../agent/interactions/text";
 import type {
   PendingQuestionInteraction,
   QuestionInteractionCapabilities,
   QuestionInteractionQuestion,
   SubmittedQuestionAnswer,
 } from "../agent/interactions/types";
-import { parseNumberedQuestionAnswer, renderNumberedQuestionStep } from "../agent/interactions/text";
 import type { WhatsAppInboundMessage, WhatsAppTarget } from "./provider";
 import type { WhatsAppRuntime } from "./runtime";
 
