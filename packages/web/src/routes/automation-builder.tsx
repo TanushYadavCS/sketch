@@ -1,11 +1,18 @@
 import { ChatInput } from "@/components/sketch/chat-input";
-import { ChatThread, type ChatThreadInterruption, type ChatThreadMessage } from "@/components/sketch/chat-thread";
+import { SketchMessage } from "@/components/sketch/chat-message";
+import {
+  ChatThread,
+  type ChatThreadInterruption,
+  type ChatThreadMessage,
+  questionBatchSignature,
+} from "@/components/sketch/chat-thread";
 import { useWebChatReconciliation } from "@/hooks/use-web-chat-reconciliation";
 import {
   ApiRequestError,
   type AutomationArtifact,
   type AutomationBuilderSaveRequest,
   type AutomationDefinition,
+  type AutomationRunRecord,
   type AutomationStepContent,
   type CanvasWebhookEndpoint,
   type ScheduledTaskConversationKind,
@@ -14,6 +21,11 @@ import {
   type ScheduledTaskConversationsResponse,
   type StepOutput,
   type WebChatConversationSummary,
+  type WebChatQuestion,
+  type WebChatQuestionAnswer,
+  type WebChatQuestionBatch,
+  type WebChatQuestionBatchAnswer,
+  type WebChatQuestionOption,
   type WebChatUploadedAttachment,
   type WorkflowEdge,
   type WorkflowStep,
@@ -112,6 +124,23 @@ import { dashboardRoute } from "./dashboard";
 
 interface BuilderSearch {
   conversationId?: string;
+  runId?: string;
+}
+
+const SAFE_AUTOMATION_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/;
+const BUILDER_MODE_SELECTION_MARKER = "[automation-setup-mode-selection]";
+
+export function validateAutomationBuilderSearch(search: Record<string, unknown>): BuilderSearch {
+  const conversationId = typeof search.conversationId === "string" ? search.conversationId.trim() : "";
+  const runId = typeof search.runId === "string" ? search.runId.trim() : "";
+  return {
+    ...(conversationId ? { conversationId } : {}),
+    ...(runId && SAFE_AUTOMATION_RUN_ID.test(runId) ? { runId } : {}),
+  };
+}
+
+function isPlaceholderDraft(automation: AutomationDefinition): boolean {
+  return automation.isPlaceholderDraft === true;
 }
 
 interface DraftAutomation {
@@ -131,7 +160,59 @@ interface DraftAutomation {
   revision: number;
 }
 
+interface ExecutionModeSelection {
+  id: number;
+  mode: AutomationExecutionMode;
+}
+
 type UiStatus = "idle" | "running" | "success" | "failed" | "skipped";
+export type AutomationRunLifecycleState = "pending" | "running" | "success" | "failure" | "aborted";
+
+type RunLifecycleInput = {
+  status?: string;
+  type?: string;
+  runType?: string;
+  errorMessage?: string | null;
+};
+
+export function automationRunLifecycleState(
+  run: RunLifecycleInput | null | undefined,
+): AutomationRunLifecycleState | null {
+  if (!run) return null;
+  const status = run.status?.trim().toLowerCase();
+  if (status === "pending" || status === "queued" || status === "starting") return "pending";
+  if (status === "running" || status === "in_progress") return "running";
+  if (status === "completed" || status === "success" || status === "succeeded") return "success";
+  if (status === "aborted" || status === "cancelled" || status === "canceled") return "aborted";
+
+  const persistedType = `${run.type ?? ""} ${run.runType ?? ""}`.toLowerCase();
+  if (/\b(?:abort(?:ed|ion)?|cancel(?:led|ed)?|interrupt(?:ed|ion)?)\b/.test(persistedType)) return "aborted";
+  if (status === "failed" || status === "failure" || status === "error") {
+    const persistedError = run.errorMessage?.toLowerCase() ?? "";
+    if (/\b(?:abort(?:ed|ion)?|cancel(?:led|ed)?|interrupt(?:ed|ion)?)\b/.test(persistedError)) return "aborted";
+    return "failure";
+  }
+  return null;
+}
+
+function isTerminalRunLifecycleState(state: AutomationRunLifecycleState | null): boolean {
+  return state === "success" || state === "failure" || state === "aborted";
+}
+
+function runStatusLabel(state: AutomationRunLifecycleState): string {
+  switch (state) {
+    case "pending":
+      return "Pending";
+    case "running":
+      return "Running";
+    case "success":
+      return "Success";
+    case "failure":
+      return "Failure";
+    case "aborted":
+      return "Aborted";
+  }
+}
 
 type BuilderWebChatDataParts = {
   progress: {
@@ -145,10 +226,9 @@ type BuilderWebChatDataParts = {
   };
   automation: AutomationArtifact;
   question: WebChatQuestion;
-  "question-answer": {
-    questionId: string;
-    optionId: string;
-  };
+  "question-batch": WebChatQuestionBatch;
+  "question-answer": WebChatQuestionAnswer;
+  "question-batch-answer": WebChatQuestionBatchAnswer;
   interruption: ChatThreadInterruption;
 };
 
@@ -205,10 +285,7 @@ const builderChatSuggestions: Array<{ label: string; prompt: string; icon: Compo
 export const automationBuilderRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: "/scheduled-tasks/$taskId/edit",
-  validateSearch: (search: Record<string, unknown>): BuilderSearch => {
-    const conversationId = typeof search.conversationId === "string" ? search.conversationId.trim() : "";
-    return conversationId ? { conversationId } : {};
-  },
+  validateSearch: validateAutomationBuilderSearch,
   component: AutomationBuilderPage,
 });
 
@@ -251,78 +328,6 @@ function saveRequestFromDraft(draft: DraftAutomation): AutomationBuilderSaveRequ
     edges: draft.edges,
     stepContent: draft.stepContent,
   };
-}
-
-function AutomationModePanel({
-  draft,
-  onSelect,
-}: {
-  draft: DraftAutomation;
-  onSelect: (mode: AutomationExecutionMode) => void;
-}) {
-  const recommendation =
-    draft.executionModeRecommendation ?? recommendAutomationExecutionMode(draft.steps, { legacy: false });
-  const modes: AutomationExecutionMode[] = ["deterministic", "hybrid", "agent-led"];
-
-  return (
-    <section
-      data-testid="automation-mode-panel"
-      aria-label="Automation execution mode"
-      className="w-full max-w-[380px] rounded-[10px] border border-border/75 bg-card/95 p-3 shadow-lg backdrop-blur"
-    >
-      <div className="mb-2.5">
-        <p className="text-[12px] font-semibold text-foreground">How should this automation run?</p>
-        <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-          Choose the style that fits. Sketch may suggest one, but you are in control.
-        </p>
-      </div>
-      <div className="space-y-1.5" role="radiogroup" aria-label="Execution mode">
-        {modes.map((mode) => {
-          const metadata = automationExecutionModeMetadata[mode];
-          const selected = draft.executionMode === mode;
-          const recommended = recommendation.mode === mode;
-          return (
-            <label
-              key={mode}
-              data-testid={`automation-mode-${mode}`}
-              className={cn(
-                "block w-full rounded-[8px] border px-2.5 py-2 text-left outline-none transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-brand-accent/55",
-                selected
-                  ? "border-brand-accent/65 bg-brand-accent/10"
-                  : "border-border/70 bg-background/40 hover:border-border hover:bg-muted/60",
-              )}
-            >
-              <input
-                type="radio"
-                name="automation-execution-mode"
-                value={mode}
-                checked={selected}
-                aria-label={metadata.label}
-                className="sr-only"
-                onChange={() => onSelect(mode)}
-              />
-              <span className="block">
-                <span className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] font-semibold text-foreground">{metadata.label}</span>
-                  {recommended ? (
-                    <Badge className="rounded-[4px] border border-brand-accent/35 bg-brand-accent/12 px-1.5 py-0 text-[9px] font-medium text-brand-accent">
-                      Suggested
-                    </Badge>
-                  ) : null}
-                </span>
-                <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{metadata.description}</span>
-                {recommended ? (
-                  <span className="mt-1 block text-[10px] leading-4 text-brand-accent/85">
-                    Suggested because: {recommendation.reason}
-                  </span>
-                ) : null}
-              </span>
-            </label>
-          );
-        })}
-      </div>
-    </section>
-  );
 }
 
 function builderLoadErrorKind(error: unknown): "access" | "server" {
@@ -400,25 +405,139 @@ function BuilderOwnership({ automation }: { automation: AutomationDefinition }) 
   );
 }
 
+function AutomationSetupCard({
+  mode,
+  recommendation,
+  onSelect,
+}: {
+  mode: AutomationExecutionMode | null;
+  recommendation?: AutomationDefinition["executionModeRecommendation"];
+  onSelect: (mode: AutomationExecutionMode) => void;
+}) {
+  const modes: AutomationExecutionMode[] = ["deterministic", "hybrid", "agent-led"];
+  const initialRecommendationDiffers = Boolean(mode && recommendation && recommendation.mode !== mode);
+  return (
+    <section data-testid="automation-setup-card" className="w-full pb-1">
+      <fieldset className="border-0 p-0">
+        <legend className="text-[15px] font-semibold leading-5 text-foreground">
+          How should Sketch run this automation?
+        </legend>
+        <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+          Choose how much of the workflow should be fixed and how much should use AI.
+        </p>
+        <div className="mt-3 grid gap-2">
+          {modes.map((option) => {
+            const metadata = automationExecutionModeMetadata[option];
+            const selected = mode === option;
+            const recommended = recommendation?.mode === option;
+            return (
+              <label
+                key={option}
+                data-testid={`automation-mode-${option}`}
+                className={cn(
+                  "flex cursor-pointer items-start gap-3 rounded-[10px] border px-3 py-2.5 transition-[border-color,background-color,box-shadow]",
+                  "border-border/70 bg-background/35 hover:border-border hover:bg-muted/45 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-brand-accent/55",
+                  selected && "border-brand-accent/60 bg-brand-accent/[0.09] shadow-sm",
+                )}
+              >
+                <input
+                  type="radio"
+                  name="automation-execution-mode"
+                  value={option}
+                  checked={selected}
+                  aria-label={metadata.label}
+                  className="sr-only"
+                  onChange={() => onSelect(option)}
+                />
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "mt-1 size-3 shrink-0 rounded-full border border-muted-foreground/50",
+                    selected && "border-brand-accent bg-brand-accent ring-[3px] ring-brand-accent/20",
+                  )}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="text-[13px] font-semibold leading-5 text-foreground">{metadata.label}</span>
+                    {recommended ? (
+                      <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                        Recommended
+                      </span>
+                    ) : null}
+                    {selected ? <span className="ml-auto text-[11px] font-medium text-brand-accent">Selected</span> : null}
+                  </span>
+                  <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">
+                    {metadata.description}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      </fieldset>
+      {initialRecommendationDiffers && recommendation && mode ? (
+        <p aria-live="polite" className="mt-2 text-[11px] leading-4 text-muted-foreground">
+          You selected{" "}
+          <span className="font-medium text-foreground">{automationExecutionModeMetadata[mode].label}</span>. Sketch
+          recommended {automationExecutionModeMetadata[recommendation.mode].label} because{" "}
+          {recommendation.reason.charAt(0).toLowerCase()}
+          {recommendation.reason.slice(1)}
+        </p>
+      ) : recommendation && mode ? (
+        <p aria-live="polite" className="mt-2 text-[11px] leading-4 text-muted-foreground">
+          This matches Sketch’s recommendation for the setup.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
 export function AutomationBuilderPage() {
   const { taskId } = useParams({ from: automationBuilderRoute.id });
-  const { conversationId: requestedConversationId } = useSearch({ from: automationBuilderRoute.id });
+  const builderSearch = useSearch({ from: automationBuilderRoute.id }) as BuilderSearch;
+  const requestedConversationId = builderSearch.conversationId;
+  const requestedRunId =
+    builderSearch.runId && SAFE_AUTOMATION_RUN_ID.test(builderSearch.runId) ? builderSearch.runId : undefined;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const queryKey = useMemo(() => automationDefinitionQueryKey(taskId), [taskId]);
   const [draft, setDraft] = useState<DraftAutomation | null>(null);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [triggeredRunId, setTriggeredRunId] = useState<string | null>(null);
+  const [runRequestError, setRunRequestError] = useState<unknown | null>(null);
   const [savingPromptStepId, setSavingPromptStepId] = useState<string | null>(null);
+  const [executionModeSelection, setExecutionModeSelection] = useState<ExecutionModeSelection | null>(null);
+  const [questionPortalTarget, setQuestionPortalTarget] = useState<Element | null>(null);
+  const [discardingSetup, setDiscardingSetup] = useState(false);
+  const executionModeSelectionIdRef = useRef(0);
+  const executionModeRequestIdRef = useRef(0);
   const latestDraftRef = useRef<DraftAutomation | null>(null);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingSaveCountRef = useRef(0);
+
+  const navigateRun = useCallback(
+    (runId: string | null) => {
+      void navigate({
+        to: "/scheduled-tasks/$taskId/edit",
+        params: { taskId },
+        search: {
+          ...(requestedConversationId ? { conversationId: requestedConversationId } : {}),
+          ...(runId ? { runId } : {}),
+        },
+        replace: true,
+      });
+    },
+    [navigate, requestedConversationId, taskId],
+  );
 
   const automationQuery = useQuery({
     queryKey,
     queryFn: () => api.scheduledTasks.get(taskId),
     refetchInterval: (query) =>
-      query.state.data?.recentRuns.some((run) => run.status === "running")
+      query.state.data?.recentRuns.some((run) => {
+        const state = automationRunLifecycleState(run);
+        return state === "pending" || state === "running";
+      })
         ? AUTOMATION_ACTIVE_RUN_REFRESH_INTERVAL_MS
         : AUTOMATION_REFRESH_INTERVAL_MS,
     refetchOnWindowFocus: true,
@@ -431,14 +550,54 @@ export function AutomationBuilderPage() {
     setDraft(nextDraft);
   }, [automationQuery.data]);
 
+  const displayDraft = useMemo(() => {
+    if (!draft || !automationQuery.data || !isPlaceholderDraft(automationQuery.data)) return draft;
+    return { ...draft, steps: [], edges: [], stepContent: {} };
+  }, [automationQuery.data, draft]);
+
+  useEffect(() => {
+    if (selectedStepId && displayDraft && !displayDraft.steps.some((step) => step.id === selectedStepId)) {
+      setSelectedStepId(null);
+    }
+  }, [displayDraft, selectedStepId]);
+
   const runMutation = useMutation({
     mutationFn: () => api.scheduledTasks.run(taskId),
-    onSuccess: async () => {
-      toast.success("Run requested");
+    onMutate: () => {
+      setRunRequestError(null);
+    },
+    onSuccess: async ({ runId }) => {
+      if (!runId || !SAFE_AUTOMATION_RUN_ID.test(runId)) {
+        setRunRequestError(new Error("The run response did not include a valid run ID."));
+        return;
+      }
+      setTriggeredRunId(runId);
+      navigateRun(runId);
       await invalidateAutomationQueries(queryClient, [taskId]);
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Could not start the run"),
+    onError: (error) => {
+      setRunRequestError(error);
+      toast.error("Could not start the automation run");
+    },
   });
+
+  const selectedRunId = triggeredRunId ?? requestedRunId ?? null;
+  const recentRunForSelection = automationQuery.data?.recentRuns.find((run) => run.id === selectedRunId) ?? null;
+  const exactRunQuery = useQuery({
+    queryKey: ["automation-run", taskId, selectedRunId],
+    queryFn: () => api.scheduledTasks.getRun(taskId, selectedRunId as string),
+    enabled: Boolean(selectedRunId && automationQuery.data),
+    retry: false,
+    refetchInterval: (query) => {
+      const state = automationRunLifecycleState(query.state.data?.run);
+      if (isTerminalRunLifecycleState(state)) return false;
+      return triggeredRunId !== null || state === "pending" || state === "running" ? 1_000 : false;
+    },
+  });
+
+  useEffect(() => {
+    if (triggeredRunId && requestedRunId && requestedRunId !== triggeredRunId) setTriggeredRunId(null);
+  }, [requestedRunId, triggeredRunId]);
 
   const testMutation = useMutation({
     mutationFn: (stepId: string) => api.scheduledTasks.testStep(taskId, stepId, { useLatestUpstreamOutput: true }),
@@ -452,7 +611,7 @@ export function AutomationBuilderPage() {
   const saveDraftPatch = useCallback(
     (
       patch: (current: DraftAutomation) => DraftAutomation,
-      options: { message?: string; promptStepId?: string } = {},
+      options: { message?: string; promptStepId?: string; onSaved?: () => void } = {},
     ) => {
       if (options.promptStepId) setSavingPromptStepId(options.promptStepId);
       pendingSaveCountRef.current += 1;
@@ -475,6 +634,7 @@ export function AutomationBuilderPage() {
             setDraft(updatedDraft);
             await invalidateAutomationQueries(queryClient, [taskId]);
             if (options.message) toast.success(options.message);
+            options.onSaved?.();
           } catch (error) {
             toast.error(error instanceof Error ? error.message : "Failed to save automation");
             try {
@@ -539,10 +699,37 @@ export function AutomationBuilderPage() {
 
   const updateExecutionMode = useCallback(
     (executionMode: AutomationExecutionMode) => {
-      saveDraftPatch((current) => ({ ...current, executionMode }), { message: "Execution mode saved" });
+      executionModeRequestIdRef.current += 1;
+      const requestId = executionModeRequestIdRef.current;
+      const selected = () => {
+        if (executionModeRequestIdRef.current !== requestId) return;
+        executionModeSelectionIdRef.current += 1;
+        setExecutionModeSelection({ id: executionModeSelectionIdRef.current, mode: executionMode });
+      };
+      if (automationQuery.data && isPlaceholderDraft(automationQuery.data)) {
+        void api.scheduledTasks
+          .selectSetupExecutionMode(taskId, executionMode)
+          .then(async (updatedAutomation) => {
+            if (executionModeRequestIdRef.current !== requestId) return;
+            const updatedDraft = draftFromDefinition(updatedAutomation);
+            latestDraftRef.current = updatedDraft;
+            queryClient.setQueryData(queryKey, updatedAutomation);
+            setDraft(updatedDraft);
+            await invalidateAutomationQueries(queryClient, [taskId]);
+            selected();
+          })
+          .catch((error) => toast.error(error instanceof Error ? error.message : "Failed to save automation setup"));
+        return;
+      }
+      saveDraftPatch((current) => ({ ...current, executionMode }), {
+        onSaved: selected,
+      });
     },
-    [saveDraftPatch],
+    [automationQuery.data, queryClient, queryKey, saveDraftPatch, taskId],
   );
+  const handleExecutionModeSelectionHandled = useCallback((selectionId: number) => {
+    setExecutionModeSelection((current) => (current?.id === selectionId ? null : current));
+  }, []);
 
   if (automationQuery.isError) {
     return (
@@ -556,66 +743,130 @@ export function AutomationBuilderPage() {
 
   if (automationQuery.isLoading || !draft || !automationQuery.data) {
     return (
-      <div className="flex min-h-[calc(100vh-3rem)] items-center justify-center text-sm text-muted-foreground md:min-h-screen">
-        Loading automation…
+      <div className="automation-builder-loading flex min-h-[calc(100vh-3rem)] items-center justify-center bg-background px-6 md:min-h-screen">
+        <div className="flex items-center gap-3 text-sm text-muted-foreground" role="status">
+          <SpinnerGapIcon size={18} className="animate-spin text-brand-accent" />
+          <span>Loading automation…</span>
+        </div>
       </div>
     );
   }
 
   const automation = automationQuery.data;
-  const selectedRun = selectedRunId
-    ? automation.recentRuns.find((run) => run.id === selectedRunId)
-    : automation.latestRun;
-  const selectedStep = draft.steps.find((step) => step.id === selectedStepId) ?? null;
+  const placeholderSetup = isPlaceholderDraft(automation);
+  const builderDraft = displayDraft ?? draft;
+  const exactRunCandidate = exactRunQuery.data?.run;
+  const exactRun = selectedRunId && exactRunCandidate?.id === selectedRunId ? exactRunCandidate : null;
+  const selectedRun: AutomationRunRecord | null = selectedRunId
+    ? (exactRun ?? (exactRunQuery.isPending ? recentRunForSelection : null))
+    : (automation.latestRun as AutomationRunRecord | null);
+  const selectedStep = builderDraft.steps.find((step) => step.id === selectedStepId) ?? null;
   const selectedOutput = selectedStep ? selectedRun?.stepOutputs[selectedStep.id] : undefined;
   const testingStepId = testMutation.isPending ? (testMutation.variables ?? null) : null;
   const inferredRunStepId = inferredRunningStepId(
-    draft.steps,
-    draft.edges,
+    builderDraft.steps,
+    builderDraft.edges,
     selectedRun?.stepOutputs ?? {},
     selectedRun?.status,
   );
   const executingStepId = testingStepId ?? inferredRunStepId;
   const executionActivity: ExecutionActivity = testingStepId ? "test" : inferredRunStepId ? "run" : null;
   const selectedStepStatus = selectedStep ? outputStatus(selectedOutput, selectedStep.id === executingStepId) : "idle";
-  const automationTitle = draft.title?.trim() || draft.prompt;
+  const automationTitle = placeholderSetup ? "Automation setup" : draft.title?.trim() || draft.prompt;
+  const selectedRunLifecycle = runMutation.isPending
+    ? "pending"
+    : triggeredRunId && !selectedRun
+      ? "pending"
+      : automationRunLifecycleState(selectedRun);
+  const exactRunUnavailable = Boolean(
+    selectedRunId && (exactRunQuery.isError || (exactRunQuery.isSuccess && !exactRun)),
+  );
+  const exactRunLoading = Boolean(selectedRunId && !exactRunUnavailable && exactRunQuery.isPending);
   const canRunAutomation = automation.status === "active";
+  const hasActiveAutomationRun = [automation.latestRun, ...automation.recentRuns].some((run) => {
+    const lifecycle = automationRunLifecycleState(run);
+    return lifecycle === "pending" || lifecycle === "running";
+  });
+  const runIsBusy =
+    runMutation.isPending ||
+    hasActiveAutomationRun ||
+    selectedRunLifecycle === "pending" ||
+    selectedRunLifecycle === "running";
+  const closeBuilder = () => {
+    const goToAutomations = () => {
+      void navigate({ to: "/scheduled-tasks" });
+    };
+    if (!placeholderSetup) {
+      goToAutomations();
+      return;
+    }
+    setDiscardingSetup(true);
+    void api.scheduledTasks
+      .remove(taskId)
+      .then(async () => {
+        if (requestedConversationId?.startsWith("builder-")) {
+          await api.webChat.removeConversation(requestedConversationId).catch((error: unknown) => {
+            if (error instanceof ApiRequestError && error.code === "CONVERSATION_NOT_FOUND") return;
+            toast.error("The setup was removed, but its chat history could not be cleaned up");
+          });
+        }
+        await invalidateAutomationQueries(queryClient, [taskId]);
+        goToAutomations();
+      })
+      .catch((error) => toast.error(error instanceof Error ? error.message : "Could not discard this setup"))
+      .finally(() => setDiscardingSetup(false));
+  };
   const runStateMessage = runMutation.isPending
-    ? "Starting run"
-    : selectedRun?.status === "running"
-      ? "Run in progress"
+    ? "Pending"
+    : selectedRunLifecycle
+      ? runStatusLabel(selectedRunLifecycle)
       : null;
   return (
-    <div className="relative flex h-[calc(100vh-3rem)] min-h-0 overflow-hidden bg-background md:h-screen">
+    <div className="automation-builder-enter relative flex h-[calc(100vh-3rem)] min-h-0 overflow-hidden bg-background md:h-screen">
       <BuilderChatSidecar
         requestedConversationId={requestedConversationId ?? null}
         taskId={taskId}
         title={automationTitle}
         queryKey={queryKey}
-        className="hidden lg:flex"
+        executionMode={draft.executionMode}
+        executionModeRecommendation={draft.executionModeRecommendation}
+        isSetupPlaceholder={isPlaceholderDraft(automation)}
+        executionModeSelection={executionModeSelection}
+        onExecutionModeSelect={updateExecutionMode}
+        onExecutionModeSelectionHandled={handleExecutionModeSelectionHandled}
+        questionPortalTarget={questionPortalTarget}
+        className="automation-builder-sidecar-enter hidden lg:flex"
       />
 
       <div
         data-testid="automation-builder-canvas"
-        className="relative min-h-0 min-w-0 flex-1 bg-background text-foreground"
+        className="automation-builder-canvas-enter relative min-h-0 min-w-0 flex-1 bg-background text-foreground"
         aria-busy={runMutation.isPending || selectedRun?.status === "running"}
       >
         <div className="pointer-events-none absolute top-4 left-4 right-4 z-10 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div
             data-testid="automation-builder-toolbar"
-            className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 rounded-[8px] border border-border/70 bg-card/90 p-1.5 shadow-md backdrop-blur"
+            className="automation-builder-toolbar-enter pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 rounded-[8px] border border-border/70 bg-card/90 p-1.5 shadow-md backdrop-blur"
           >
             <RunsMenu
               runs={automation.recentRuns}
               activeRunId={selectedRun?.id ?? null}
-              onSelectRun={(runId) => setSelectedRunId(runId)}
+              onSelectRun={(runId) => {
+                setTriggeredRunId(null);
+                setRunRequestError(null);
+                navigateRun(runId);
+              }}
             />
             {selectedRunId ? (
               <Button
                 size="sm"
                 variant="outline"
                 className={canvasToolbarButtonClass}
-                onClick={() => setSelectedRunId(null)}
+                onClick={() => {
+                  setTriggeredRunId(null);
+                  setRunRequestError(null);
+                  navigateRun(null);
+                }}
               >
                 Latest
               </Button>
@@ -624,59 +875,64 @@ export function AutomationBuilderPage() {
 
           <div className="pointer-events-auto ml-auto flex flex-wrap justify-end gap-2">
             <BuilderOwnership automation={automation} />
-            {runStateMessage ? (
-              <output
-                data-testid="automation-run-state"
-                aria-live="polite"
-                className="inline-flex h-8 items-center rounded-[7px] border border-border/70 bg-card/90 px-2.5 text-[11px] font-medium text-muted-foreground backdrop-blur"
-              >
-                {runMutation.isPending ? <SpinnerGapIcon size={13} className="mr-1.5 animate-spin" /> : null}
-                {runStateMessage}
-              </output>
+            {runStateMessage || exactRunUnavailable || exactRunLoading || runRequestError ? (
+              <AutomationRunStatusNotice
+                state={runRequestError ? "failure" : selectedRunLifecycle}
+                run={selectedRun}
+                loading={exactRunLoading}
+                unavailable={exactRunUnavailable}
+                requestFailed={Boolean(runRequestError)}
+              />
             ) : null}
-            <Button
-              size="sm"
-              variant="outline"
-              className={canvasToolbarButtonClass}
-              onClick={() => navigate({ to: "/scheduled-tasks" })}
-            >
-              Close
+            <Button size="sm" variant="outline" className={canvasToolbarButtonClass} onClick={closeBuilder} disabled={discardingSetup}>
+              {discardingSetup ? "Discarding…" : placeholderSetup ? "Discard setup" : "Close"}
             </Button>
             <Button
               size="sm"
               className="h-8 gap-1.5 rounded-[7px] bg-brand-accent text-[#161300] shadow-none hover:bg-brand-accent/90"
               onClick={() => runMutation.mutate()}
-              disabled={runMutation.isPending || !canRunAutomation}
-              title={canRunAutomation ? undefined : "Only active automations can be triggered"}
+              disabled={runIsBusy || !canRunAutomation}
+              title={
+                placeholderSetup
+                  ? "Finish setup before running this automation"
+                  : canRunAutomation
+                    ? undefined
+                    : "Only active automations can be triggered"
+              }
             >
               {runMutation.isPending ? (
                 <SpinnerGapIcon size={14} className="animate-spin" />
               ) : (
                 <PlayIcon size={14} weight="fill" />
               )}
-              {runMutation.isPending ? "Starting…" : canRunAutomation ? "Run" : "Paused"}
+              {runMutation.isPending
+                ? "Starting…"
+                : runIsBusy
+                  ? "Running"
+                  : placeholderSetup
+                    ? "Setting up"
+                    : canRunAutomation
+                      ? "Run"
+                      : "Paused"}
             </Button>
           </div>
         </div>
 
-        <div className="pointer-events-auto absolute top-16 left-4 z-10 w-[min(380px,calc(100%-2rem))]">
-          <AutomationModePanel draft={draft} onSelect={updateExecutionMode} />
-        </div>
-
         <AutomationCanvas
-          draft={draft}
+          draft={builderDraft}
           selectedStepId={selectedStepId}
           stepOutputs={selectedRun?.stepOutputs ?? {}}
           runStatus={selectedRun?.status}
           testingStepId={testingStepId}
           onSelectStep={setSelectedStepId}
           onUpdateStepPositions={updateStepPositions}
+          onQuestionPortalTarget={setQuestionPortalTarget}
         />
       </div>
 
       <NodeDrawer
         key={selectedStep?.id ?? "closed"}
-        draft={draft}
+        draft={builderDraft}
         step={selectedStep}
         output={selectedOutput}
         run={selectedRun ?? null}
@@ -692,12 +948,116 @@ export function AutomationBuilderPage() {
   );
 }
 
+function AutomationRunStatusNotice({
+  state,
+  run,
+  loading,
+  unavailable,
+  requestFailed,
+}: {
+  state: AutomationRunLifecycleState | null;
+  run: AutomationRunRecord | null;
+  loading: boolean;
+  unavailable: boolean;
+  requestFailed: boolean;
+}) {
+  if (unavailable) {
+    return (
+      <output
+        data-testid="automation-run-unavailable"
+        role="alert"
+        aria-live="assertive"
+        className="inline-flex min-h-8 items-center rounded-[7px] border border-destructive/40 bg-destructive/10 px-2.5 py-1 text-[11px] font-medium text-destructive backdrop-blur"
+      >
+        Run unavailable
+      </output>
+    );
+  }
+  if (loading) {
+    return (
+      <output
+        data-testid="automation-run-loading"
+        aria-live="polite"
+        className="inline-flex min-h-8 items-center rounded-[7px] border border-border/70 bg-card/90 px-2.5 py-1 text-[11px] font-medium text-muted-foreground backdrop-blur"
+      >
+        <SpinnerGapIcon size={13} className="mr-1.5 animate-spin" />
+        Loading run
+      </output>
+    );
+  }
+  if (!state) return null;
+
+  const label = runStatusLabel(state);
+  const copy = requestFailed
+    ? "Run could not be started."
+    : state === "pending"
+      ? "Run is queued."
+      : state === "running"
+        ? "Run is in progress."
+        : state === "success"
+          ? "Run completed successfully."
+          : state === "aborted"
+            ? "Run was aborted."
+            : "Run failed.";
+  const details = state === "failure" ? run?.errorMessage?.trim() : null;
+  return (
+    <output
+      data-testid="automation-run-state"
+      aria-live="polite"
+      className={cn(
+        "inline-flex min-h-8 max-w-[320px] items-center gap-1.5 rounded-[7px] border bg-card/90 px-2.5 py-1 text-[11px] font-medium backdrop-blur",
+        state === "success" && "border-success/35 text-success",
+        state === "failure" && "border-destructive/40 text-destructive",
+        state === "aborted" && "border-amber-500/40 text-amber-700 dark:text-amber-300",
+        (state === "pending" || state === "running") && "border-border/70 text-muted-foreground",
+      )}
+    >
+      {state === "pending" || state === "running" ? (
+        <SpinnerGapIcon size={13} className="shrink-0 animate-spin" />
+      ) : state === "success" ? (
+        <CheckCircleIcon size={13} weight="fill" className="shrink-0" />
+      ) : (
+        <XCircleIcon size={13} weight="fill" className="shrink-0" />
+      )}
+      <span>
+        {label}: {copy}
+      </span>
+      {details ? (
+        <details className="ml-1 max-w-full">
+          <summary className="cursor-pointer font-normal underline underline-offset-2">Inspect details</summary>
+          <pre className="absolute right-2 top-full z-40 mt-1 max-w-[320px] whitespace-pre-wrap break-words rounded-[7px] border border-border bg-card p-2 font-mono text-[10px] font-normal text-foreground shadow-lg">
+            {details}
+          </pre>
+        </details>
+      ) : null}
+    </output>
+  );
+}
+
 function textFromBuilderMessage(message: BuilderWebChatMessage): string {
-  return message.parts
+  const text = message.parts
     .filter((part) => part.type === "text")
     .map((part) => part.text)
     .join("\n")
     .trim();
+  return normalizeBuilderDisplayText(text) || (questionBatchAnswerFromBuilderMessage(message) ? "Submitted answers" : "");
+}
+
+function normalizeBuilderDisplayText(text: string): string {
+  if (!text.startsWith(BUILDER_MODE_SELECTION_MARKER)) return text;
+  const metadata = Object.values(automationExecutionModeMetadata).find((candidate) => text.includes(`(${candidate.label})`));
+  return metadata ? `${metadata.label} selected.` : "Execution mode selected.";
+}
+
+function modeSelectionFromBuilderMessages(messages: BuilderWebChatMessage[]): AutomationExecutionMode | null {
+  for (const message of [...messages].reverse()) {
+    if (message.role !== "user") continue;
+    const text = textFromBuilderMessage(message);
+    for (const mode of ["deterministic", "hybrid", "agent-led"] as const) {
+      if (text === `${automationExecutionModeMetadata[mode].label} selected.`) return mode;
+    }
+  }
+  return null;
 }
 
 function progressLinesFromBuilderMessage(message: BuilderWebChatMessage): string[] {
@@ -722,8 +1082,27 @@ function interruptionFromBuilderMessage(message: BuilderWebChatMessage): ChatThr
 }
 
 function questionFromBuilderMessage(message: BuilderWebChatMessage): WebChatQuestion | undefined {
-  const part = message.parts.find((candidate) => candidate.type === "data-question");
-  return part?.data;
+  for (let index = message.parts.length - 1; index >= 0; index -= 1) {
+    const part = message.parts[index];
+    if (part.type === "data-question") return part.data;
+  }
+  return undefined;
+}
+
+function questionBatchFromBuilderMessage(message: BuilderWebChatMessage): WebChatQuestionBatch | undefined {
+  for (let index = message.parts.length - 1; index >= 0; index -= 1) {
+    const part = message.parts[index];
+    if (part.type === "data-question-batch") return part.data;
+  }
+  return undefined;
+}
+
+function questionBatchAnswerFromBuilderMessage(message: BuilderWebChatMessage): WebChatQuestionBatchAnswer | undefined {
+  for (let index = message.parts.length - 1; index >= 0; index -= 1) {
+    const part = message.parts[index];
+    if (part.type === "data-question-batch-answer") return part.data;
+  }
+  return undefined;
 }
 
 function createdAtFromBuilderMessage(message: BuilderWebChatMessage): string | undefined {
@@ -733,7 +1112,7 @@ function createdAtFromBuilderMessage(message: BuilderWebChatMessage): string | u
   return message.metadata?.createdAt?.trim() || undefined;
 }
 
-function builderChatThreadMessages(messages: BuilderWebChatMessage[]): ChatThreadMessage[] {
+export function builderChatThreadMessages(messages: BuilderWebChatMessage[]): ChatThreadMessage[] {
   return messages.flatMap<ChatThreadMessage>((message) => {
     if (message.role !== "user" && message.role !== "assistant") return [];
     const text = textFromBuilderMessage(message);
@@ -741,8 +1120,9 @@ function builderChatThreadMessages(messages: BuilderWebChatMessage[]): ChatThrea
     const automations = automationsFromBuilderMessage(message);
     const interruption = interruptionFromBuilderMessage(message);
     const question = message.role === "assistant" ? questionFromBuilderMessage(message) : undefined;
+    const questionBatch = message.role === "assistant" ? questionBatchFromBuilderMessage(message) : undefined;
     const createdAt = createdAtFromBuilderMessage(message);
-    if (text || files.length > 0 || automations.length > 0 || interruption || question) {
+    if (text || files.length > 0 || automations.length > 0 || interruption || question || questionBatch) {
       return [
         {
           id: message.id,
@@ -752,6 +1132,7 @@ function builderChatThreadMessages(messages: BuilderWebChatMessage[]): ChatThrea
           files: files.length > 0 ? files : undefined,
           automations: automations.length > 0 ? automations : undefined,
           ...(question ? { question } : {}),
+          ...(questionBatch ? { questionBatch } : {}),
           interruption,
         },
       ];
@@ -773,7 +1154,8 @@ function hasPendingBuilderAssistantProgress(messages: BuilderWebChatMessage[]): 
     !interruptionFromBuilderMessage(latestMessage) &&
     filesFromBuilderMessage(latestMessage).length === 0 &&
     automationsFromBuilderMessage(latestMessage).length === 0 &&
-    !questionFromBuilderMessage(latestMessage)
+    !questionFromBuilderMessage(latestMessage) &&
+    !questionBatchFromBuilderMessage(latestMessage)
   );
 }
 
@@ -801,15 +1183,54 @@ function outgoingBuilderTextMessage(text: string, attachments: WebChatUploadedAt
   };
 }
 
-export function outgoingBuilderQuestionAnswerMessage(question: WebChatQuestion, option: WebChatQuestionOption) {
+export function outgoingBuilderQuestionAnswerMessage(
+  question: WebChatQuestion,
+  answer: WebChatQuestionOption | WebChatQuestionAnswer,
+) {
+  const payload: WebChatQuestionAnswer = "id" in answer ? { questionId: question.id, optionId: answer.id } : answer;
+  const text = "optionId" in payload
+    ? question.options.find((option) => option.id === payload.optionId)?.label ?? payload.optionId
+    : payload.customResponse;
   return {
     metadata: { createdAt: new Date().toISOString() },
     parts: [
-      { type: "text" as const, text: option.label },
+      { type: "text" as const, text },
       {
         type: "data-question-answer" as const,
         id: `question-answer-${question.id}`,
-        data: { questionId: question.id, optionId: option.id },
+        data: payload,
+      },
+    ],
+  };
+}
+
+export function outgoingBuilderQuestionBatchAnswerMessage(
+  batch: WebChatQuestionBatch,
+  answer: WebChatQuestionBatchAnswer | WebChatQuestionBatchAnswer["answers"],
+) {
+  const payload: WebChatQuestionBatchAnswer = Array.isArray(answer)
+    ? { batchId: batch.batchId, answers: answer }
+    : answer;
+  const orderedAnswers = batch.questions.flatMap((question) => {
+    const item = payload.answers.find((candidate) => candidate.questionId === question.id);
+    return item ? [item] : [];
+  });
+  const orderedPayload =
+    orderedAnswers.length === batch.questions.length ? { ...payload, answers: orderedAnswers } : payload;
+  const labels = orderedPayload.answers.map((item) => {
+    const question = batch.questions.find((candidate) => candidate.id === item.questionId);
+    return "optionId" in item
+      ? question?.options.find((option) => option.id === item.optionId)?.label ?? item.optionId
+      : item.customResponse;
+  });
+  return {
+    metadata: { createdAt: new Date().toISOString() },
+    parts: [
+      { type: "text" as const, text: labels.join(" · ") },
+      {
+        type: "data-question-batch-answer" as const,
+        id: `question-batch-answer-${orderedPayload.batchId}`,
+        data: orderedPayload,
       },
     ],
   };
@@ -862,7 +1283,7 @@ function conversationDisplayTitle(
   summary?: WebChatConversationSummary,
 ): string {
   const title = summary?.title.trim();
-  if (title) return title;
+  if (title) return normalizeBuilderDisplayText(title);
   return conversation.kinds.includes("web_chat") ? "Source chat" : "Automation chat";
 }
 
@@ -885,12 +1306,26 @@ function BuilderChatSidecar({
   taskId,
   title,
   queryKey,
+  executionMode,
+  executionModeRecommendation,
+  isSetupPlaceholder,
+  executionModeSelection,
+  onExecutionModeSelect,
+  onExecutionModeSelectionHandled,
+  questionPortalTarget,
   className,
 }: {
   requestedConversationId: string | null;
   taskId: string;
   title: string;
   queryKey: readonly unknown[];
+  executionMode: AutomationExecutionMode;
+  executionModeRecommendation: AutomationDefinition["executionModeRecommendation"];
+  isSetupPlaceholder: boolean;
+  executionModeSelection: ExecutionModeSelection | null;
+  onExecutionModeSelect: (mode: AutomationExecutionMode) => void;
+  onExecutionModeSelectionHandled: (selectionId: number) => void;
+  questionPortalTarget?: Element | null;
   className?: string;
 }) {
   const navigate = useNavigate();
@@ -909,7 +1344,12 @@ function BuilderChatSidecar({
     () => new Map((webChatConversationsQuery.data?.conversations ?? []).map((summary) => [summary.id, summary])),
     [webChatConversationsQuery.data],
   );
-  const selectedConversation = conversationsQuery.data?.conversations.find(
+  const visibleConversations = useMemo(() => {
+    const conversations = conversationsQuery.data?.conversations ?? [];
+    const builderConversations = conversations.filter((conversation) => conversation.kinds.includes("builder"));
+    return builderConversations.length > 0 ? builderConversations : conversations;
+  }, [conversationsQuery.data?.conversations]);
+  const selectedConversation = visibleConversations.find(
     (conversation) => conversation.conversationId === requestedConversationId,
   );
 
@@ -998,7 +1438,7 @@ function BuilderChatSidecar({
           <BuilderChatLoadingState />
         ) : !requestedConversationId ? (
           <BuilderChatListView
-            conversations={conversationsQuery.data.conversations}
+            conversations={visibleConversations}
             builderLock={conversationsQuery.data.builderLock}
             summaryById={webChatSummaryById}
             onSelect={(conversation) => {
@@ -1024,6 +1464,13 @@ function BuilderChatSidecar({
             title={title}
             queryKey={queryKey}
             conversationsQueryKey={conversationsQueryKey}
+            executionMode={executionMode}
+            executionModeRecommendation={executionModeRecommendation}
+            isSetupPlaceholder={isSetupPlaceholder}
+            executionModeSelection={executionModeSelection}
+            onExecutionModeSelect={onExecutionModeSelect}
+            onExecutionModeSelectionHandled={onExecutionModeSelectionHandled}
+            questionPortalTarget={questionPortalTarget}
             onBack={openChatList}
           />
         )}
@@ -1370,6 +1817,13 @@ function BuilderChatTranscript({
   title,
   queryKey,
   conversationsQueryKey,
+  executionMode,
+  executionModeRecommendation,
+  isSetupPlaceholder,
+  executionModeSelection,
+  onExecutionModeSelect,
+  onExecutionModeSelectionHandled,
+  questionPortalTarget,
   onBack,
 }: {
   conversationId: string;
@@ -1378,6 +1832,13 @@ function BuilderChatTranscript({
   title: string;
   queryKey: readonly unknown[];
   conversationsQueryKey: readonly unknown[];
+  executionMode: AutomationExecutionMode;
+  executionModeRecommendation: AutomationDefinition["executionModeRecommendation"];
+  isSetupPlaceholder: boolean;
+  executionModeSelection: ExecutionModeSelection | null;
+  onExecutionModeSelect: (mode: AutomationExecutionMode) => void;
+  onExecutionModeSelectionHandled: (selectionId: number) => void;
+  questionPortalTarget?: Element | null;
   onBack: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -1425,6 +1886,23 @@ function BuilderChatTranscript({
   const lockReady = lockStatus === "ready";
   const historyKey = `${conversationId}:${historyLoadAttempt}`;
   const historyReady = lockReady && loadedHistoryKey === historyKey;
+  const hasBackgroundRun = hasPendingBuilderAssistantProgress(chat.messages);
+  const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun || stoppingRun;
+  const threadMessages = builderChatThreadMessages(chat.messages);
+  const setupSelectedMode = isSetupPlaceholder
+    ? (executionModeSelection?.mode ?? modeSelectionFromBuilderMessages(chat.messages))
+    : executionMode;
+  const transcriptMessages = useMemo(
+    () =>
+      questionPortalTarget
+        ? threadMessages.map((message) =>
+            message.role === "assistant" && !message.text && (message.question || message.questionBatch)
+              ? { ...message, text: "I need one detail to finish this setup. Answer below the workflow." }
+              : message,
+          )
+        : threadMessages,
+    [questionPortalTarget, threadMessages],
+  );
   const latestMessage = chat.messages.at(-1);
   const threadScrollKey = latestMessage
     ? [
@@ -1435,13 +1913,21 @@ function BuilderChatTranscript({
         filesFromBuilderMessage(latestMessage).length,
         automationsFromBuilderMessage(latestMessage).length,
         questionFromBuilderMessage(latestMessage)?.id ?? "",
+        questionBatchFromBuilderMessage(latestMessage)
+          ? questionBatchSignature(questionBatchFromBuilderMessage(latestMessage) as WebChatQuestionBatch)
+          : "",
+        questionBatchAnswerFromBuilderMessage(latestMessage)?.batchId ?? "",
         chat.status,
       ].join(":")
     : "";
-  const hasBackgroundRun = hasPendingBuilderAssistantProgress(chat.messages);
-  const chatBusy = chat.status === "submitted" || chat.status === "streaming" || hasBackgroundRun || stoppingRun;
-  const threadMessages = builderChatThreadMessages(chat.messages);
   const showEmptyState = historyReady && !historyLoadError && threadMessages.length === 0 && !chatBusy && !chat.error;
+  useEffect(() => {
+    if (!executionModeSelection || !historyReady || chatBusy) return;
+    const { mode } = executionModeSelection;
+    const modeMessage = `${BUILDER_MODE_SELECTION_MARKER} I chose the "${mode}" execution mode (${automationExecutionModeMetadata[mode].label}) for this automation. Please continue by asking the next relevant automation questions.`;
+    void chat.sendMessage(outgoingBuilderTextMessage(modeMessage), outgoingBuilderRequestOptions(taskId, []));
+    onExecutionModeSelectionHandled(executionModeSelection.id);
+  }, [chat.sendMessage, chatBusy, executionModeSelection, historyReady, onExecutionModeSelectionHandled, taskId]);
   const sendBuilderMessage = useCallback(
     (value: string, attachments: WebChatUploadedAttachment[] = []) => {
       void chat.sendMessage(
@@ -1452,9 +1938,19 @@ function BuilderChatTranscript({
     [chat.sendMessage, taskId],
   );
   const selectBuilderQuestion = useCallback(
-    (question: WebChatQuestion, option: WebChatQuestionOption) => {
+    (question: WebChatQuestion, answer: WebChatQuestionOption | WebChatQuestionAnswer) => {
       void chat.sendMessage(
-        outgoingBuilderQuestionAnswerMessage(question, option),
+        outgoingBuilderQuestionAnswerMessage(question, answer),
+        outgoingBuilderRequestOptions(taskId, []),
+      );
+    },
+    [chat.sendMessage, taskId],
+  );
+
+  const submitBuilderQuestionBatch = useCallback(
+    (batch: WebChatQuestionBatch, answer: WebChatQuestionBatchAnswer) => {
+      void chat.sendMessage(
+        outgoingBuilderQuestionBatchAnswerMessage(batch, answer),
         outgoingBuilderRequestOptions(taskId, []),
       );
     },
@@ -1566,6 +2062,17 @@ function BuilderChatTranscript({
   return (
     <>
       <div ref={threadScrollRef} className="chat-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-4">
+        {historyReady && !historyLoadError ? (
+          <div className="mb-6">
+            <SketchMessage>
+              <AutomationSetupCard
+                mode={setupSelectedMode}
+                recommendation={isSetupPlaceholder && !setupSelectedMode ? undefined : executionModeRecommendation}
+                onSelect={onExecutionModeSelect}
+              />
+            </SketchMessage>
+          </div>
+        ) : null}
         {!historyReady ? (
           <BuilderChatLoadingState />
         ) : historyLoadError ? (
@@ -1592,12 +2099,14 @@ function BuilderChatTranscript({
           <BuilderChatEmptyState title={title} onPrompt={sendBuilderMessage} />
         ) : (
           <ChatThread
-            className="gap-4"
-            messages={threadMessages}
+            className="mt-4 gap-4"
+            messages={transcriptMessages}
             busy={chatBusy}
             error={chat.error?.message ?? null}
             conversationId={conversationId}
-            onSelectQuestion={selectBuilderQuestion}
+            onAnswerQuestion={selectBuilderQuestion}
+            onSubmitQuestionBatch={submitBuilderQuestionBatch}
+            questionPortalTarget={questionPortalTarget}
           />
         )}
       </div>
@@ -1791,7 +2300,7 @@ function inferredRunningStepId(
   steps: WorkflowStep[],
   edges: WorkflowEdge[],
   stepOutputs: Record<string, StepOutput>,
-  runStatus: "running" | "completed" | "failed" | undefined,
+  runStatus: string | undefined,
 ): string | null {
   if (runStatus !== "running") return null;
   return executionOrder(steps, edges).find((step) => !stepOutputs[step.id])?.id ?? null;
@@ -1960,14 +2469,16 @@ function AutomationCanvas({
   testingStepId,
   onSelectStep,
   onUpdateStepPositions,
+  onQuestionPortalTarget,
 }: {
   draft: DraftAutomation;
   selectedStepId: string | null;
   stepOutputs: Record<string, StepOutput>;
-  runStatus?: "running" | "completed" | "failed";
+  runStatus?: string;
   testingStepId: string | null;
   onSelectStep: (stepId: string | null) => void;
   onUpdateStepPositions: (positions: Record<string, { x: number; y: number }>) => void;
+  onQuestionPortalTarget: (target: Element | null) => void;
 }) {
   return (
     <ReactFlowProvider>
@@ -1979,6 +2490,7 @@ function AutomationCanvas({
         testingStepId={testingStepId}
         onSelectStep={onSelectStep}
         onUpdateStepPositions={onUpdateStepPositions}
+        onQuestionPortalTarget={onQuestionPortalTarget}
       />
     </ReactFlowProvider>
   );
@@ -1992,14 +2504,16 @@ function AutomationCanvasFlow({
   testingStepId,
   onSelectStep,
   onUpdateStepPositions,
+  onQuestionPortalTarget,
 }: {
   draft: DraftAutomation;
   selectedStepId: string | null;
   stepOutputs: Record<string, StepOutput>;
-  runStatus?: "running" | "completed" | "failed";
+  runStatus?: string;
   testingStepId: string | null;
   onSelectStep: (stepId: string | null) => void;
   onUpdateStepPositions: (positions: Record<string, { x: number; y: number }>) => void;
+  onQuestionPortalTarget: (target: Element | null) => void;
 }) {
   const { fitView } = useReactFlow<BuilderNode>();
   const nodesInitialized = useNodesInitialized();
@@ -2090,21 +2604,25 @@ function AutomationCanvasFlow({
 
   if (draft.steps.length === 0) {
     return (
-      <div
-        data-testid="automation-builder-empty-canvas"
-        className="flex size-full items-center justify-center bg-background px-6 text-center"
-      >
-        <div className="max-w-sm border-l border-brand-accent pl-4 text-left">
-          <p className="text-sm font-semibold text-foreground">Nothing to run yet</p>
-          <p className="mt-1 text-sm leading-5 text-muted-foreground">
-            Use chat to describe the automation you want to create.
-          </p>
+      <div className="relative size-full">
+        <div
+          data-testid="automation-builder-empty-canvas"
+          className="automation-builder-empty-state flex size-full items-center justify-center bg-background px-6 pb-36 text-center"
+        >
+          <div className="max-w-sm border-l border-brand-accent pl-4 text-left">
+            <p className="text-sm font-semibold text-foreground">Your automation is taking shape</p>
+            <p className="mt-1 text-sm leading-5 text-muted-foreground">
+              Answer the setup questions below and Sketch will build the workflow here.
+            </p>
+          </div>
         </div>
+        <QuestionDock onTarget={onQuestionPortalTarget} />
       </div>
     );
   }
 
   return (
+    <div className="relative size-full">
     <ReactFlow
       nodes={nodes}
       edges={initialEdges}
@@ -2144,6 +2662,18 @@ function AutomationCanvasFlow({
       <Background variant={BackgroundVariant.Dots} gap={18} size={1.1} color="var(--automation-builder-grid)" />
       <Controls showInteractive={false} position="bottom-left" className="automation-builder-controls" />
     </ReactFlow>
+    <QuestionDock onTarget={onQuestionPortalTarget} />
+    </div>
+  );
+}
+
+function QuestionDock({ onTarget }: { onTarget: (target: Element | null) => void }) {
+  return (
+    <div
+      data-testid="automation-builder-question-dock"
+      ref={onTarget}
+      className="automation-builder-question-dock pointer-events-auto absolute right-4 bottom-4 left-16 z-20 mx-auto max-w-[680px] empty:hidden"
+    />
   );
 }
 
@@ -2336,16 +2866,18 @@ function RunsMenu({
         {runs.length === 0 ? (
           <DropdownMenuItem disabled>No runs yet</DropdownMenuItem>
         ) : (
-          runs.map((run, index) => (
-            <DropdownMenuItem key={run.id} onSelect={() => onSelectRun(run.id)} className="gap-3">
-              <RunIcon status={run.status} />
-              <span className="min-w-0 flex-1 truncate text-xs">
-                {formatRunDate(run.startedAt)}
-                {index === 0 ? " · latest" : ""}
-              </span>
-              <span className="text-xs capitalize text-muted-foreground">{run.status}</span>
-            </DropdownMenuItem>
-          ))
+          runs.map((run) => {
+            const lifecycle = automationRunLifecycleState(run);
+            return (
+              <DropdownMenuItem key={run.id} onSelect={() => onSelectRun(run.id)} className="gap-3">
+                <RunIcon status={run.status} />
+                <span className="min-w-0 flex-1 truncate text-xs">{formatRunDate(run.startedAt)}</span>
+                <span className="text-xs capitalize text-muted-foreground">
+                  {lifecycle ? runStatusLabel(lifecycle) : run.status}
+                </span>
+              </DropdownMenuItem>
+            );
+          })
         )}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -2353,8 +2885,13 @@ function RunsMenu({
 }
 
 function RunIcon({ status }: { status: string }) {
-  if (status === "running") return <SpinnerGapIcon size={15} className="animate-spin text-muted-foreground" />;
-  if (status === "failed") return <XCircleIcon size={15} weight="fill" className="text-destructive" />;
+  const lifecycle = automationRunLifecycleState({ status });
+  if (lifecycle === "pending" || lifecycle === "running") {
+    return <SpinnerGapIcon size={15} className="animate-spin text-muted-foreground" />;
+  }
+  if (lifecycle === "failure") return <XCircleIcon size={15} weight="fill" className="text-destructive" />;
+  if (lifecycle === "aborted")
+    return <XCircleIcon size={15} weight="fill" className="text-amber-700 dark:text-amber-300" />;
   return <CheckCircleIcon size={15} weight="fill" className="text-emerald-700 dark:text-emerald-300" />;
 }
 
@@ -2385,7 +2922,7 @@ function NodeDrawer({
   draft: DraftAutomation;
   step: WorkflowStep | null;
   output?: StepOutput;
-  run: AutomationDefinition["latestRun"];
+  run: AutomationRunRecord | null;
   status: UiStatus;
   executionActivity: ExecutionActivity;
   onClose: () => void;
@@ -2405,7 +2942,7 @@ function NodeDrawer({
     <aside
       data-testid="automation-builder-drawer"
       aria-label={`${step.label} details`}
-      className="absolute inset-y-0 right-0 z-30 flex h-full max-h-full w-full max-w-[392px] min-w-0 flex-col overflow-hidden border-l border-border/80 bg-background text-foreground shadow-xl xl:relative xl:inset-auto xl:z-auto xl:w-[392px] xl:min-w-[350px] xl:max-w-[540px] xl:resize-x xl:shadow-none"
+      className="automation-builder-drawer-enter absolute inset-y-0 right-0 z-30 flex h-full max-h-full w-full max-w-[392px] min-w-0 flex-col overflow-hidden border-l border-border/80 bg-background text-foreground shadow-xl xl:relative xl:inset-auto xl:z-auto xl:w-[392px] xl:min-w-[350px] xl:max-w-[540px] xl:resize-x xl:shadow-none"
     >
       <div className="shrink-0 border-b border-border/80 px-4 pt-4 pb-3">
         <div className="flex items-start justify-between gap-3">
@@ -2527,7 +3064,7 @@ function NodeRunSummary({
   status,
   executionActivity,
 }: {
-  run: AutomationDefinition["latestRun"];
+  run: AutomationRunRecord | null;
   output?: StepOutput;
   status: UiStatus;
   executionActivity: ExecutionActivity;
@@ -2899,9 +3436,15 @@ function OutputPanel({
         </output>
       ) : null}
       {output.error ? (
-        <pre className="max-w-full overflow-x-hidden whitespace-pre-wrap break-words rounded-[8px] border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive [overflow-wrap:anywhere]">
-          {output.error.message}
-        </pre>
+        <details
+          data-testid="automation-builder-step-failure-details"
+          className="rounded-[8px] border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive"
+        >
+          <summary className="cursor-pointer font-medium">Inspect persisted failure details</summary>
+          <pre className="mt-2 max-w-full overflow-x-hidden whitespace-pre-wrap break-words font-mono [overflow-wrap:anywhere]">
+            {output.error.message}
+          </pre>
+        </details>
       ) : output.output == null || output.output === "" ? (
         <div className="rounded-[8px] border border-border bg-muted/20 p-4 text-sm text-muted-foreground">
           No output returned.

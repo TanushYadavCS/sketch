@@ -63,10 +63,121 @@ describe("ChatThread", () => {
       <ChatThread messages={[{ id: "question-1", role: "assistant", question }]} onSelectQuestion={onSelectQuestion} />,
     );
 
-    expect(screen.getByText(question.prompt)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Slack" }));
+    const questionCard = screen.getByTestId("question-card");
+    expect(questionCard).toBeInTheDocument();
+    expect(questionCard).toHaveClass("max-w-[640px]");
+    expect(screen.getByLabelText("Sketch").parentElement).toContainElement(questionCard);
+    expect(questionCard).toHaveAttribute("data-question-id", question.id);
+
+    const slackOption = screen.getByRole("button", { name: "Slack" });
+    expect(slackOption).toHaveAttribute("data-question-option-id", "slack");
+    fireEvent.click(slackOption);
     expect(onSelectQuestion).toHaveBeenCalledWith(question, question.options[0]);
-    expect(screen.getByRole("button", { name: /Email Send it to your inbox/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Email Send it to your inbox/ })).toBeDisabled();
+  });
+
+  it("walks batched questions progressively and submits their ordered answers", () => {
+    const onSubmitQuestionBatch = vi.fn();
+    const batch = {
+      batchId: "setup-1",
+      questions: [
+        {
+          id: "source",
+          prompt: "Where should I look?",
+          options: [
+            { id: "gmail", label: "Gmail" },
+            { id: "drive", label: "Google Drive" },
+          ],
+        },
+        {
+          id: "delivery",
+          prompt: "Where should I send it?",
+          options: [
+            { id: "slack", label: "Slack" },
+            { id: "email", label: "Email" },
+          ],
+        },
+      ],
+    };
+
+    render(
+      <ChatThread
+        messages={[{ id: "batch-message", role: "assistant", questionBatch: batch }]}
+        onSubmitQuestionBatch={onSubmitQuestionBatch}
+      />,
+    );
+
+    const card = screen.getByTestId("question-batch-card");
+    expect(card).toHaveAttribute("data-question-batch-id", "setup-1");
+    expect(screen.getByText("1 of 2")).toBeInTheDocument();
+    expect(screen.queryByText("Where should I send it?")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
+    expect(onSubmitQuestionBatch).not.toHaveBeenCalled();
+    expect(screen.getByText("2 of 2")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Slack" }));
+
+    expect(onSubmitQuestionBatch).toHaveBeenCalledWith(batch, {
+      batchId: "setup-1",
+      answers: [
+        { questionId: "source", optionId: "gmail" },
+        { questionId: "delivery", optionId: "slack" },
+      ],
+    });
+    expect(screen.getByRole("button", { name: "Slack" })).toBeDisabled();
+  });
+
+  it("only enables the latest single-or-batch question interaction", () => {
+    render(
+      <ChatThread
+        messages={[
+          {
+            id: "single-message",
+            role: "assistant",
+            question: {
+              id: "old-question",
+              prompt: "Old question",
+              options: [
+                { id: "yes", label: "Yes" },
+                { id: "no", label: "No" },
+              ],
+            },
+          },
+          {
+            id: "batch-message",
+            role: "assistant",
+            questionBatch: {
+              batchId: "latest-batch",
+              questions: [
+                {
+                  id: "one",
+                  prompt: "First",
+                  options: [
+                    { id: "a", label: "A" },
+                    { id: "b", label: "B" },
+                  ],
+                },
+                {
+                  id: "two",
+                  prompt: "Second",
+                  options: [
+                    { id: "c", label: "C" },
+                    { id: "d", label: "D" },
+                  ],
+                },
+              ],
+            },
+          },
+        ]}
+        onSelectQuestion={vi.fn()}
+        onSubmitQuestionBatch={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Yes" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "A" })).toBeEnabled();
   });
 
   it("renders interrupted runs as guidance instead of a Sketch message", () => {

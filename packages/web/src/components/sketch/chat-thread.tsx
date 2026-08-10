@@ -1,5 +1,12 @@
 import { AppIcon } from "@/components/connections/app-icon";
-import type { AutomationArtifact } from "@/lib/api";
+import type {
+  AutomationArtifact,
+  WebChatQuestion,
+  WebChatQuestionBatch,
+  WebChatQuestionBatchAnswer,
+  WebChatQuestionAnswer,
+  WebChatQuestionOption,
+} from "@/lib/api";
 import {
   BrainIcon,
   CaretDownIcon,
@@ -27,7 +34,6 @@ import {
   WarningCircleIcon,
   WrenchIcon,
 } from "@phosphor-icons/react";
-import type { WebChatQuestion, WebChatQuestionOption } from "@sketch/shared";
 import { cn } from "@sketch/ui/lib/utils";
 import { Collapsible as CollapsiblePrimitive } from "radix-ui";
 import {
@@ -41,10 +47,12 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AutomationArtifactCard } from "./automation-artifact-card";
 import { SketchMessage, UserMessage } from "./chat-message";
+import { QuestionFlowCard, type QuestionFlowAnswer, type QuestionFlowSubmission } from "./question-flow-card";
 
 export interface ChatThreadFile {
   name: string;
@@ -94,6 +102,32 @@ export interface ChatThreadInterruption {
 }
 
 export type ChatThreadQuestion = WebChatQuestion;
+export type ChatThreadQuestionBatch = WebChatQuestionBatch;
+export type ChatThreadQuestionBatchAnswer = WebChatQuestionBatchAnswer;
+export type ChatThreadQuestionAnswer = WebChatQuestionAnswer;
+
+export function questionBatchSignature(batch: ChatThreadQuestionBatch): string {
+  return `${batch.batchId}:${batch.questions
+    .map((question) => `${question.id}[${question.options.map((option) => option.id).join(",")}]`)
+    .join("|")}`;
+}
+
+function questionInteractionKey(message: ChatThreadMessage): string | null {
+  if (message.questionBatch) return `batch:${message.id}:${questionBatchSignature(message.questionBatch)}`;
+  if (message.question)
+    return `single:${message.id}:${message.question.id}:${message.question.options.map((option) => option.id).join(",")}`;
+  return null;
+}
+
+function pendingQuestionInteractionKey(messages: ChatThreadMessage[]): string | null {
+  let pending: string | null = null;
+  for (const message of messages) {
+    const interactionKey = questionInteractionKey(message);
+    if (interactionKey) pending = interactionKey;
+    else if (message.role === "user") pending = null;
+  }
+  return pending;
+}
 
 export type ChatThreadTimelineEntry =
   | { id?: string; type: "text"; text: string }
@@ -117,6 +151,7 @@ export interface ChatThreadMessage {
   progressLines?: string[];
   interruption?: ChatThreadInterruption;
   question?: ChatThreadQuestion;
+  questionBatch?: ChatThreadQuestionBatch;
 }
 
 export interface ChatThreadProps {
@@ -127,6 +162,9 @@ export interface ChatThreadProps {
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
   onSelectQuestion?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
+  onAnswerQuestion?: (question: ChatThreadQuestion, answer: ChatThreadQuestionAnswer) => void;
+  onSubmitQuestionBatch?: (batch: ChatThreadQuestionBatch, answer: ChatThreadQuestionBatchAnswer) => void;
+  questionPortalTarget?: Element | null;
   conversationId?: string;
 }
 
@@ -638,28 +676,75 @@ export function ChatThread({
   integrationConnectionStatuses = {},
   onConnectIntegration,
   onSelectQuestion,
+  onAnswerQuestion,
+  onSubmitQuestionBatch,
+  questionPortalTarget,
   conversationId,
 }: ChatThreadProps) {
-  if (messages.length === 0 && !busy && !error) return null;
   const showBusy = busy && messages.at(-1)?.role !== "assistant";
-  const activeQuestionMessageId = [...messages]
-    .reverse()
-    .find((message) => message.role === "assistant" && message.question)?.id;
+  const activeQuestionInteractionKey = pendingQuestionInteractionKey(messages);
+  const [answeredInteractionKey, setAnsweredInteractionKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAnsweredInteractionKey((current) => (current && current === activeQuestionInteractionKey ? current : null));
+  }, [activeQuestionInteractionKey]);
+
+  if (messages.length === 0 && !busy && !error) return null;
 
   return (
     <section aria-label="Chat thread" className={cn("flex flex-col gap-[24px]", className)}>
-      {messages.map((message, index) => (
-        <MessageRow
-          key={message.id}
-          message={message}
-          active={busy && index === messages.length - 1}
-          integrationConnectionStatuses={integrationConnectionStatuses}
-          onConnectIntegration={onConnectIntegration}
-          onSelectQuestion={onSelectQuestion}
-          questionAnswerable={message.id === activeQuestionMessageId && !busy}
-          conversationId={conversationId}
-        />
-      ))}
+      {messages.map((message, index) => {
+        const interactionKey = questionInteractionKey(message);
+        const questionAnswerable =
+          interactionKey !== null &&
+          interactionKey === activeQuestionInteractionKey &&
+          answeredInteractionKey !== interactionKey &&
+          !busy;
+        return (
+          <MessageRow
+            key={message.id}
+            message={message}
+            active={busy && index === messages.length - 1}
+            integrationConnectionStatuses={integrationConnectionStatuses}
+            onConnectIntegration={onConnectIntegration}
+            onSelectQuestion={onSelectQuestion}
+            onAnswerQuestion={onAnswerQuestion}
+            onSubmitQuestionBatch={onSubmitQuestionBatch}
+            onInteractionAnswered={() => setAnsweredInteractionKey(interactionKey)}
+            questionAnswerable={questionAnswerable}
+            conversationId={conversationId}
+            renderQuestions={!questionPortalTarget}
+          />
+        );
+      })}
+      {questionPortalTarget && activeQuestionInteractionKey ? (() => {
+        const message = [...messages].reverse().find((item) => questionInteractionKey(item) === activeQuestionInteractionKey);
+        if (!message) return null;
+        const canSubmit = message.questionBatch
+          ? Boolean(onSubmitQuestionBatch)
+          : Boolean(onAnswerQuestion || onSelectQuestion);
+        const disabled = answeredInteractionKey === activeQuestionInteractionKey || busy || !canSubmit;
+        return createPortal(
+          <QuestionFlowCard
+            key={activeQuestionInteractionKey}
+            question={message.question}
+            batch={message.questionBatch}
+            disabled={disabled}
+            onSubmit={(interaction, answer) => {
+              setAnsweredInteractionKey(activeQuestionInteractionKey);
+              if ("batchId" in interaction) {
+                onSubmitQuestionBatch?.(interaction, answer as ChatThreadQuestionBatchAnswer);
+              } else if (onAnswerQuestion) {
+                onAnswerQuestion(interaction, answer as QuestionFlowAnswer);
+              } else if ("optionId" in answer) {
+                const option = interaction.options.find((candidate) => candidate.id === answer.optionId);
+                if (option) onSelectQuestion?.(interaction, option);
+              }
+            }}
+          />,
+          questionPortalTarget,
+        );
+      })() : null}
 
       {showBusy ? (
         <SketchMessage streaming>
@@ -685,17 +770,36 @@ function MessageRow({
   integrationConnectionStatuses,
   onConnectIntegration,
   onSelectQuestion,
+  onAnswerQuestion,
+  onSubmitQuestionBatch,
+  onInteractionAnswered,
   questionAnswerable,
   conversationId,
+  renderQuestions,
 }: {
   message: ChatThreadMessage;
   active: boolean;
   integrationConnectionStatuses: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
   onSelectQuestion?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
+  onAnswerQuestion?: (question: ChatThreadQuestion, answer: ChatThreadQuestionAnswer) => void;
+  onSubmitQuestionBatch?: (batch: ChatThreadQuestionBatch, answer: ChatThreadQuestionBatchAnswer) => void;
+  onInteractionAnswered: () => void;
   questionAnswerable: boolean;
   conversationId?: string;
+  renderQuestions: boolean;
 }) {
+  const submitQuestion = (interaction: ChatThreadQuestion | ChatThreadQuestionBatch, answer: QuestionFlowSubmission) => {
+    onInteractionAnswered();
+    if ("batchId" in interaction) onSubmitQuestionBatch?.(interaction, answer as ChatThreadQuestionBatchAnswer);
+    else {
+      if (onAnswerQuestion) onAnswerQuestion(interaction, answer as ChatThreadQuestionAnswer);
+      else if ("optionId" in answer) {
+        const option = interaction.options.find((candidate) => candidate.id === answer.optionId);
+        if (option) onSelectQuestion?.(interaction, option);
+      }
+    }
+  };
   if (message.role === "user") {
     return (
       <UserMessage footer={<MessageTimestamp createdAt={message.createdAt} align="right" />}>
@@ -713,22 +817,22 @@ function MessageRow({
         onConnectIntegration={onConnectIntegration}
         conversationId={conversationId}
       />
-      {message.question ? (
-        <QuestionCard question={message.question} disabled={!questionAnswerable} onSelect={onSelectQuestion} />
-      ) : null}
+      {renderQuestions && (message.question || message.questionBatch) ? <QuestionFlowCard question={message.question} batch={message.questionBatch} disabled={!questionAnswerable} onSubmit={submitQuestion} /> : null}
     </SketchMessage>
   ) : message.text ||
     message.files?.length ||
     message.automations?.length ||
     message.integrationConnections?.length ||
-    message.question ? (
+    message.question ||
+    message.questionBatch ? (
     <SketchMessage streaming={active} footer={<AssistantMessageFooter message={message} active={active} />}>
       <MessageContent
         message={message}
         inProgress={active}
         integrationConnectionStatuses={integrationConnectionStatuses}
         onConnectIntegration={onConnectIntegration}
-        onSelectQuestion={onSelectQuestion}
+        renderQuestions={renderQuestions}
+        onQuestionSubmit={submitQuestion}
         questionAnswerable={questionAnswerable}
         conversationId={conversationId}
       />
@@ -815,7 +919,8 @@ function MessageContent({
   inProgress = false,
   integrationConnectionStatuses = {},
   onConnectIntegration,
-  onSelectQuestion,
+  renderQuestions,
+  onQuestionSubmit,
   questionAnswerable = false,
   conversationId,
 }: {
@@ -823,14 +928,15 @@ function MessageContent({
   inProgress?: boolean;
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
-  onSelectQuestion?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
+  renderQuestions?: boolean;
+  onQuestionSubmit?: (interaction: ChatThreadQuestion | ChatThreadQuestionBatch, answer: QuestionFlowSubmission) => void;
   questionAnswerable?: boolean;
   conversationId?: string;
 }) {
   const copyBlocks = message.role === "assistant";
   const hasConnections = Boolean(message.integrationConnections?.length);
   const hasAutomations = Boolean(message.automations?.length);
-  const hasQuestion = Boolean(message.question);
+  const hasQuestion = Boolean(message.question || message.questionBatch);
   if (!message.files?.length && !hasAutomations && !hasConnections && !hasQuestion) {
     return message.text ? (
       <MarkdownMessage text={message.text} inProgress={inProgress} copyBlocks={copyBlocks} />
@@ -851,50 +957,11 @@ function MessageContent({
           onConnect={onConnectIntegration}
         />
       ) : null}
-      {message.question ? (
-        <QuestionCard question={message.question} disabled={!questionAnswerable} onSelect={onSelectQuestion} />
-      ) : null}
+      {renderQuestions && (message.question || message.questionBatch) ? <QuestionFlowCard question={message.question} batch={message.questionBatch} disabled={!questionAnswerable} onSubmit={onQuestionSubmit} /> : null}
     </div>
   );
 }
 
-function QuestionCard({
-  question,
-  disabled,
-  onSelect,
-}: {
-  question: ChatThreadQuestion;
-  disabled: boolean;
-  onSelect?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
-}) {
-  return (
-    <fieldset
-      data-question-card
-      data-question-id={question.id}
-      disabled={disabled}
-      className="w-full max-w-[640px] rounded-[12px] border border-brand-accent/35 bg-brand-accent/[0.045] p-3"
-    >
-      <legend className="px-1 text-[13px] font-semibold leading-5 text-foreground">{question.prompt}</legend>
-      <div className="mt-2 grid gap-2">
-        {question.options.map((option) => (
-          <button
-            key={option.id}
-            type="button"
-            data-question-option-id={option.id}
-            className="rounded-[9px] border border-border/80 bg-background/70 px-3 py-2 text-left transition hover:border-brand-accent/60 hover:bg-brand-accent/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-accent/55 disabled:cursor-not-allowed disabled:opacity-55"
-            disabled={disabled || !onSelect}
-            onClick={() => onSelect?.(question, option)}
-          >
-            <span className="block text-[13px] font-medium text-foreground">{option.label}</span>
-            {option.description ? (
-              <span className="mt-0.5 block text-[12px] leading-4 text-muted-foreground">{option.description}</span>
-            ) : null}
-          </button>
-        ))}
-      </div>
-    </fieldset>
-  );
-}
 
 function AutomationArtifactCards({
   automations,

@@ -462,6 +462,31 @@ export const handlers = [
     return HttpResponse.json({ conversations: [] });
   }),
 
+  http.post("/api/scheduled-tasks/:taskId/runs", ({ params }) => {
+    return HttpResponse.json({ status: "triggered", runId: `run-${String(params.taskId)}` }, { status: 202 });
+  }),
+
+  http.get("/api/scheduled-tasks/:taskId/runs/:runId", ({ params }) => {
+    const taskId = String(params.taskId);
+    const runId = String(params.runId);
+    return HttpResponse.json({
+      run: {
+        id: runId,
+        task_id: taskId,
+        trigger_data: JSON.stringify({ type: "manual" }),
+        status: "completed",
+        step_outputs: JSON.stringify({}),
+        error_message: null,
+        started_at: "2026-01-01T00:00:00.000Z",
+        completed_at: "2026-01-01T00:00:01.000Z",
+      },
+    });
+  }),
+
+  http.get("/api/scheduled-tasks/:taskId/runs", () => {
+    return HttpResponse.json({ runs: [] });
+  }),
+
   http.get("/api/auth/session", () => {
     return HttpResponse.json({ authenticated: false });
   }),

@@ -24,6 +24,10 @@ import type {
   WebChatIntegrationConnectionData,
   WebChatQuestion,
   WebChatQuestionAnswer,
+  WebChatQuestionBatch,
+  WebChatQuestionBatchAnswer,
+  WebChatQuestionInteraction,
+  WebChatQuestionOption,
   WorkflowEdge,
   WorkflowStep,
 } from "@sketch/shared";
@@ -37,6 +41,12 @@ export type {
   AutomationStepContent,
   CanvasWebhookEndpoint,
   StepOutput,
+  WebChatQuestion,
+  WebChatQuestionAnswer,
+  WebChatQuestionBatch,
+  WebChatQuestionBatchAnswer,
+  WebChatQuestionInteraction,
+  WebChatQuestionOption,
   WorkflowEdge,
   WorkflowStep,
 };
@@ -211,11 +221,88 @@ export interface AutomationRunItem {
   id: string;
   task_id: string;
   trigger_data: string | null;
-  status: "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "aborted" | "cancelled" | "canceled";
   step_outputs: string | null;
   error_message: string | null;
   started_at: string;
   completed_at: string | null;
+}
+
+export type AutomationRunStatus =
+  | AutomationRun["status"]
+  | "pending"
+  | "queued"
+  | "starting"
+  | "in_progress"
+  | "aborted"
+  | "cancelled"
+  | "canceled";
+
+export interface AutomationRunRecord {
+  id: string;
+  taskId: string;
+  triggerData: unknown | null;
+  status: AutomationRunStatus;
+  stepOutputs: Record<string, StepOutput>;
+  errorMessage: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  type?: string;
+  runType?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function parseJsonValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> {
+  const parsed = parseJsonValue(value);
+  return isRecord(parsed) ? parsed : {};
+}
+
+export function normalizeAutomationRun(value: unknown, fallbackTaskId = ""): AutomationRunRecord {
+  const raw = isRecord(value) ? value : {};
+  const rawStepOutputs = parseJsonRecord(raw.stepOutputs ?? raw.step_outputs);
+  const stepOutputs = Object.fromEntries(
+    Object.entries(rawStepOutputs).flatMap(([stepId, output]) => {
+      if (!isRecord(output)) return [];
+      return [[stepId, output as unknown as StepOutput]];
+    }),
+  );
+  const status = typeof raw.status === "string" ? raw.status : "running";
+  return {
+    id: typeof raw.id === "string" ? raw.id : "",
+    taskId:
+      typeof raw.taskId === "string" ? raw.taskId : typeof raw.task_id === "string" ? raw.task_id : fallbackTaskId,
+    triggerData: parseJsonValue(raw.triggerData ?? raw.trigger_data ?? null) as unknown | null,
+    status: status as AutomationRunStatus,
+    stepOutputs,
+    errorMessage:
+      typeof raw.errorMessage === "string"
+        ? raw.errorMessage
+        : typeof raw.error_message === "string"
+          ? raw.error_message
+          : null,
+    startedAt:
+      typeof raw.startedAt === "string" ? raw.startedAt : typeof raw.started_at === "string" ? raw.started_at : "",
+    completedAt:
+      typeof raw.completedAt === "string"
+        ? raw.completedAt
+        : typeof raw.completed_at === "string"
+          ? raw.completed_at
+          : null,
+    ...(typeof raw.type === "string" ? { type: raw.type } : {}),
+    ...(typeof raw.runType === "string" ? { runType: raw.runType } : {}),
+  };
 }
 
 export interface AutomationStepContentItem {
@@ -1434,6 +1521,8 @@ export type WebChatMessagePart =
     }
   | { type: "data-automation"; id: string; data: AutomationArtifact }
   | { type: "data-automation-handoff"; id: string; data: AutomationDraftHandoff }
+  | { type: "data-question-batch"; id: string; data: WebChatQuestionBatch }
+  | { type: "data-question-batch-answer"; id: string; data: WebChatQuestionBatchAnswer }
   | {
       type: "data-integration-connection";
       id: string;
@@ -2328,8 +2417,10 @@ export const api = {
       return res.runs;
     },
     async getRun(taskId: string, runId: string) {
-      const res = await request<{ run: AutomationRunItem }>(`/api/scheduled-tasks/${taskId}/runs/${runId}`);
-      return res.run;
+      const res = await request<{ run: unknown }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}`,
+      );
+      return { run: normalizeAutomationRun(res.run, taskId) };
     },
     async get(taskId: string) {
       const res = await request<{ automation: AutomationDefinition }>(`/api/scheduled-tasks/${taskId}`);
@@ -2392,8 +2483,15 @@ export const api = {
       });
       return res.automation;
     },
+    async selectSetupExecutionMode(taskId: string, executionMode: "deterministic" | "hybrid" | "agent-led") {
+      const res = await request<{ automation: AutomationDefinition }>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/execution-mode`,
+        { method: "PATCH", body: JSON.stringify({ executionMode }) },
+      );
+      return res.automation;
+    },
     run(taskId: string) {
-      return request<{ status: string }>(`/api/scheduled-tasks/${taskId}/runs`, {
+      return request<{ status: "triggered"; runId: string }>(`/api/scheduled-tasks/${taskId}/runs`, {
         method: "POST",
       });
     },
