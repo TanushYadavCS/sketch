@@ -6,6 +6,8 @@ import { InProcessSocketFacade } from "./in-process-socket-facade";
 function createMockBot(onLogout?: () => Promise<void>) {
   const bot = {
     isConnected: true,
+    isPaired: vi.fn(async () => true),
+    reconnectPausedUntil: null,
     phoneNumber: "+15550001111",
     accountLid: "86702773280883@lid",
     socket: null,
@@ -90,6 +92,8 @@ describe("InProcessSocketFacade", () => {
     ]);
     await expect(facade.pairing.status()).resolves.toEqual({
       connected: true,
+      paired: true,
+      pausedUntil: null,
       phoneNumber: "+15550001111",
       lid: "86702773280883@lid",
     });

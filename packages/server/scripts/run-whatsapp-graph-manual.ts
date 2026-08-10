@@ -30,7 +30,6 @@ async function ensureWhatsAppConnector(db: Kysely<DB>, encryptionKey: string, ad
     connectorType: "whatsapp",
     authType: "system",
     credentials: JSON.stringify({ type: "system" }),
-    scopeConfig: JSON.stringify({ groupJids: ENABLED_GROUPS }),
     createdBy: adminUserId,
   });
   return created.id;

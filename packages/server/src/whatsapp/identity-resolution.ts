@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
 import { type Kysely, type Transaction, sql } from "kysely";
 import type { Logger } from "pino";
-import { normalizeContactPointValue } from "../db/repositories/entities";
 import { isUniqueConstraintError } from "../db/repositories/sub-entities";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
+import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../identity-normalization";
 import { sanitizeWhatsAppDisplayText } from "./privacy";
 import { phoneE164ToWhatsAppJid } from "./provider";
+
+export { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../identity-normalization";
 
 export type WhatsAppIdentityResolution =
   | { kind: "teammate"; userId: string; name: string }
@@ -63,24 +65,6 @@ interface BuildRosterSnapshotOptions {
 }
 
 const REF_ALPHABET = "abcdefghijklmnop";
-
-export function normalizeWhatsAppIdentityPhone(value: string | null | undefined): string | null {
-  if (!value) return null;
-  try {
-    return normalizeContactPointValue("whatsapp", value);
-  } catch {
-    return null;
-  }
-}
-
-export function normalizeWhatsAppIdentityLid(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const trimmed = value.trim().toLowerCase();
-  const withoutSuffix = trimmed.endsWith("@lid") ? trimmed.slice(0, -4) : trimmed;
-  const deviceSeparator = withoutSuffix.indexOf(":");
-  const bare = deviceSeparator === -1 ? withoutSuffix : withoutSuffix.slice(0, deviceSeparator);
-  return bare.length > 0 ? `${bare}@lid` : null;
-}
 
 type WhatsAppIdentityDb = Kysely<DB> | Transaction<DB>;
 

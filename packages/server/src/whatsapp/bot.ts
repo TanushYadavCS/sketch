@@ -44,7 +44,16 @@ const COMPOSING_TTL_MS = 3 * 60_000;
 const WATCHDOG_INTERVAL_MS = 60_000;
 const WATCHDOG_STALE_MS = 30 * 60_000;
 const RECONNECT_BASE_MS = 2000;
-const RECONNECT_MAX_MS = 30_000;
+/**
+ * Raised from 30s. The old ceiling settled at roughly two attempts a minute forever against a
+ * service that rate-limits: 8.5 hours of outage produced ~770 attempts, which deepens a block
+ * rather than escaping it.
+ */
+const RECONNECT_MAX_MS = 300_000;
+/** Consecutive failed reconnects before the curve is abandoned for one attempt an hour. */
+const QUARANTINE_FAILURE_THRESHOLD = 5;
+/** Self-resuming by design: nothing here ever needs a human to clear it. */
+const QUARANTINE_PAUSE_MS = 60 * 60_000;
 const RECONNECT_FACTOR = 1.8;
 const RECONNECT_JITTER = 0.25;
 const GROUP_META_TTL_MS = 5 * 60_000;
@@ -162,6 +171,18 @@ export class WhatsAppBot {
   private recentlySent = new Set<string>();
   private recentlyReceived = new Set<string>();
   private reconnectAttempt = 0;
+  /**
+   * Live socket state, tracked here rather than inferred from Baileys. `sock.user` is a getter over
+   * persisted credentials, so it reports a paired account as present throughout a total outage —
+   * the sensor that kept the 2026-07-29 incident silent for eight hours.
+   */
+  private socketLive = false;
+  /** Consecutive failed reconnects; reset by any successful open. */
+  private consecutiveFailures = 0;
+  /** Epoch ms until which reconnects are paused, or 0 when not quarantined. */
+  private pausedUntil = 0;
+  /** Generation whose close we caused ourselves, so a watchdog restart is not counted as a failure. */
+  private intentionalCloseGeneration: number | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private activeSocketGeneration = 0;
   private stopping = false;
@@ -264,6 +285,9 @@ export class WhatsAppBot {
         if (connection === "open") {
           this.logger.info("WhatsApp connected after pairing");
           this.reconnectAttempt = 0;
+          this.socketLive = true;
+          this.consecutiveFailures = 0;
+          this.pausedUntil = 0;
           this.registerMessageHandler();
           this.registerHistoryHandler();
           this.startWatchdog();
@@ -276,6 +300,8 @@ export class WhatsAppBot {
         if (connection === "close") {
           const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
           const errorMsg = lastDisconnect?.error?.message ?? "";
+          /** Pairing sockets close through here, not the reconnect handler, so liveness must drop here too. */
+          this.socketLive = false;
           if (!this.stopping) await this.onConnectionClose?.(statusCode, this.activeSocketGeneration);
 
           if (statusCode === DisconnectReason.restartRequired) {
@@ -330,6 +356,7 @@ export class WhatsAppBot {
   }
 
   cancelPairing(): void {
+    this.socketLive = false;
     try {
       this.sock?.ws?.close();
     } catch {
@@ -339,6 +366,7 @@ export class WhatsAppBot {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.socketLive = false;
     this.clearReconnectTimer();
     this.stopWatchdog();
     if (this.sock) {
@@ -349,6 +377,10 @@ export class WhatsAppBot {
 
   async disconnect(): Promise<void> {
     this.stopping = true;
+    this.socketLive = false;
+    /** A re-paired tenant must not inherit the dead session's pause. */
+    this.consecutiveFailures = 0;
+    this.pausedUntil = 0;
     this.clearReconnectTimer();
     this.stopWatchdog();
     if (this.sock) {
@@ -368,8 +400,25 @@ export class WhatsAppBot {
     return this.sock !== null;
   }
 
+  /** Whether the socket is up right now. Goes false the moment it drops, unlike `sock.user`. */
   get isConnected(): boolean {
-    return this.sock?.user !== undefined;
+    return this.socketLive;
+  }
+
+  /** ISO timestamp while reconnects are paused, else null — the card says "paused" rather than "reconnecting". */
+  get reconnectPausedUntil(): string | null {
+    return this.pausedUntil > Date.now() ? new Date(this.pausedUntil).toISOString() : null;
+  }
+
+  /**
+   * Whether a number is on file, independent of whether the socket is up.
+   *
+   * The channels card and the pairing gate need this rather than liveness: keying them to
+   * `isConnected` offered "Pair a number" to an already-paired tenant in the middle of an outage.
+   */
+  async isPaired(): Promise<boolean> {
+    const row = await this.db.selectFrom("whatsapp_creds").select("id").where("id", "=", "default").executeTakeFirst();
+    return row !== undefined;
   }
 
   get phoneNumber(): string | null {
@@ -531,8 +580,10 @@ export class WhatsAppBot {
 
       for (const [jid, meta] of Object.entries(groups)) {
         this.groupMetaCache.set(jid, { meta, expires: Date.now() + GROUP_META_TTL_MS });
-        await this.persistGroupMetadata(jid, meta, new Date().toISOString());
-        syncedCount += 1;
+        /** Counts writes that landed — a persist dropped for a stale socket is not a sync. */
+        if (await this.persistGroupMetadata(jid, meta, new Date().toISOString(), socketGeneration)) {
+          syncedCount += 1;
+        }
       }
 
       return syncedCount;
@@ -611,12 +662,19 @@ export class WhatsAppBot {
         this.clearReconnectTimer();
         this.logger.info({ socketGeneration }, "WhatsApp connected");
         this.reconnectAttempt = 0;
+        /** A working connection is the proof that whatever caused the pause is over. */
+        this.socketLive = true;
+        this.consecutiveFailures = 0;
+        this.pausedUntil = 0;
         await this.onConnectionOpen?.(socketGeneration);
         void this.syncAllGroups();
       }
 
       if (connection === "close") {
         const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        const intentional = this.intentionalCloseGeneration === socketGeneration;
+        this.intentionalCloseGeneration = null;
+        this.socketLive = false;
         if (!this.stopping) await this.onConnectionClose?.(statusCode, socketGeneration);
 
         if (statusCode === DisconnectReason.loggedOut) {
@@ -633,6 +691,26 @@ export class WhatsAppBot {
 
         if (this.stopping) {
           this.logger.info({ socketGeneration }, "WhatsApp socket closed during shutdown");
+          return;
+        }
+
+        /** A close we caused must not push a quiet but healthy tenant towards the pause. */
+        if (!intentional) this.consecutiveFailures += 1;
+
+        if (this.consecutiveFailures >= QUARANTINE_FAILURE_THRESHOLD) {
+          this.pausedUntil = Date.now() + QUARANTINE_PAUSE_MS;
+          this.logger.warn(
+            { socketGeneration, statusCode, consecutiveFailures: this.consecutiveFailures },
+            "WhatsApp reconnect paused for an hour after sustained failures — credentials preserved",
+          );
+          /** Otherwise it logs "forcing reconnect" every 30 minutes while reconnect is deliberately paused. */
+          this.stopWatchdog();
+          /**
+           * A shorter attempt already in flight would fire long before the hour is up, so the pause
+           * has to replace it rather than queue behind it.
+           */
+          this.clearReconnectTimer();
+          this.scheduleReconnect(QUARANTINE_PAUSE_MS, socketGeneration, this.reconnectAttempt + 1);
           return;
         }
 
@@ -952,7 +1030,7 @@ export class WhatsAppBot {
 
       for (const update of updates) {
         if (!update.id) continue;
-        await this.refreshGroupMetadata(update.id);
+        await this.refreshGroupMetadata(update.id, socketGeneration);
       }
     });
 
@@ -961,16 +1039,43 @@ export class WhatsAppBot {
         return;
       }
 
-      await this.refreshGroupMetadata(event.id);
+      await this.refreshGroupMetadata(event.id, socketGeneration);
+    });
+
+    /**
+     * Fires when this account joins a group. Without it a new group is only
+     * discovered on the next reconnect or the first message anyone sends, so
+     * a group added to a quiet chat on a long-lived socket stays invisible.
+     * The event already carries full metadata, so persist it directly rather
+     * than spending another groupMetadata query on what we were just handed.
+     */
+    socket.ev.on("groups.upsert", async (groups) => {
+      if (socketGeneration !== this.activeSocketGeneration || socket !== this.sock) {
+        return;
+      }
+
+      const seenAt = new Date().toISOString();
+      for (const meta of groups) {
+        if (!meta?.id) continue;
+        try {
+          this.groupMetaCache.set(meta.id, { meta, expires: Date.now() + GROUP_META_TTL_MS });
+          await this.persistGroupMetadata(meta.id, meta, seenAt, socketGeneration);
+        } catch (err) {
+          this.logger.warn({ err, groupJid: meta.id }, "Failed to persist newly joined WhatsApp group");
+        }
+      }
     });
   }
 
-  private async refreshGroupMetadata(groupJid: string): Promise<GroupMetadata | undefined> {
+  private async refreshGroupMetadata(
+    groupJid: string,
+    socketGeneration = this.activeSocketGeneration,
+  ): Promise<GroupMetadata | undefined> {
     try {
       const meta = await this.sock?.groupMetadata(groupJid);
       if (meta) {
         this.groupMetaCache.set(groupJid, { meta, expires: Date.now() + GROUP_META_TTL_MS });
-        await this.persistGroupMetadata(groupJid, meta, new Date().toISOString());
+        await this.persistGroupMetadata(groupJid, meta, new Date().toISOString(), socketGeneration);
       }
       return meta;
     } catch (err) {
@@ -995,20 +1100,48 @@ export class WhatsAppBot {
     };
   }
 
-  private async persistGroupMetadata(groupJid: string, meta: GroupMetadata, updatedAt: string): Promise<void> {
+  /**
+   * Resolving participants is async (LID lookups), so a reconnect can land
+   * between the caller's generation check and the write. `refreshParticipants`
+   * replaces the stored roster, and that roster feeds access decisions — so a
+   * late write from a dead socket would delete members a newer payload had
+   * already recorded. Re-check at the persistence boundary, which is the only
+   * point that is actually durable.
+   */
+  private async persistGroupMetadata(
+    groupJid: string,
+    meta: GroupMetadata,
+    updatedAt: string,
+    socketGeneration = this.activeSocketGeneration,
+  ): Promise<boolean> {
     const providerMetadata = await this.toProviderGroupMetadata(groupJid, meta);
+    if (socketGeneration !== this.activeSocketGeneration) {
+      this.logger.debug({ groupJid, socketGeneration }, "Dropped WhatsApp group metadata write from a stale socket");
+      return false;
+    }
     await this.groupMetadataStore?.upsert({
       jid: groupJid,
       name: providerMetadata.subject,
       description: providerMetadata.desc ?? null,
       updated_at: updatedAt,
     });
+    /**
+     * Checked again because the upsert above is awaited too. That one is
+     * additive — it only rewrites name and description — but
+     * refreshParticipants DELETES members missing from this payload, so it is
+     * the write that can actually lose data to a socket that died mid-call.
+     */
+    if (socketGeneration !== this.activeSocketGeneration) {
+      this.logger.debug({ groupJid, socketGeneration }, "Dropped WhatsApp participant refresh from a stale socket");
+      return false;
+    }
     await this.groupMetadataStore?.refreshParticipants?.(
       groupJid,
       toParticipantInputs(providerMetadata.participants),
       updatedAt,
       this.logger,
     );
+    return true;
   }
 
   /**
@@ -1045,6 +1178,8 @@ export class WhatsAppBot {
       if (Date.now() - this.lastMessageAt > WATCHDOG_STALE_MS) {
         this.logger.warn("WhatsApp watchdog — no messages in 30 minutes, forcing reconnect");
         if (this.sock) {
+          /** Self-inflicted, so the resulting close must not advance the failure counter. */
+          this.intentionalCloseGeneration = this.activeSocketGeneration;
           this.sock.end(undefined);
         }
       }

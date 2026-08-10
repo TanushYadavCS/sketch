@@ -20,9 +20,16 @@ import {
   type SyncStatus,
   normalizeAccessPrincipals,
 } from "../../connectors/types";
+import {
+  normalizeSlackIdentityUserId,
+  normalizeWhatsAppIdentityLid,
+  normalizeWhatsAppIdentityPhone,
+} from "../../identity-normalization";
 import { normalizeSourceTimestampForStorage } from "../../timestamps";
-import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../../whatsapp/identity-resolution";
 import type { DB } from "../schema";
+import { fileVisibilityRuleSql } from "./file-visibility-rule";
+
+export { accessPrincipalPredicateSql } from "./file-visibility-rule";
 
 /**
  * File-list viewer for RBAC. Admins bypass; others match by email.
@@ -41,35 +48,17 @@ export interface FileViewer {
 }
 
 export function viewerPrincipals(viewer: FileViewer): AccessPrincipal[] {
-  const principals: AccessPrincipal[] = [];
-  const emails = new Set([viewer.email, ...(viewer.emails ?? [])]);
-  for (const email of emails) {
-    const value = email?.trim().toLowerCase();
-    if (value) principals.push({ type: "email", value });
+  const principals: AccessPrincipalInput[] = [];
+  if (viewer.email !== null) principals.push(viewer.email);
+  principals.push(...(viewer.emails ?? []));
+  if (viewer.phone !== null && viewer.phone !== undefined) principals.push({ type: "phone", value: viewer.phone });
+  if (viewer.slackUserId !== null && viewer.slackUserId !== undefined) {
+    principals.push({ type: "slack_user", value: viewer.slackUserId });
   }
-  const phone = normalizeWhatsAppIdentityPhone(viewer.phone);
-  if (phone) principals.push({ type: "phone", value: phone });
-  const slackUserId = viewer.slackUserId?.trim();
-  if (slackUserId) principals.push({ type: "slack_user", value: slackUserId });
-  const whatsappLid = normalizeWhatsAppIdentityLid(viewer.whatsappLid);
-  if (whatsappLid) principals.push({ type: "whatsapp_lid", value: whatsappLid });
-  return [...new Map(principals.map((principal) => [`${principal.type}\u0000${principal.value}`, principal])).values()];
-}
-
-export function accessPrincipalPredicateSql(alias: string, principals: AccessPrincipal[]) {
-  if (principals.length === 0) return sql<boolean>`0 = 1`;
-  const column = sql.raw(alias);
-  return sql<boolean>`(${sql.join(
-    principals.map(
-      (principal) =>
-        sql`${column}.principal_type = ${principal.type} AND ${column}.principal_value = ${principal.value}`,
-    ),
-    sql` OR `,
-  )})`;
-}
-
-function emailValuesForPrincipals(principals: AccessPrincipal[]): string[] {
-  return principals.filter((principal) => principal.type === "email").map((principal) => principal.value);
+  if (viewer.whatsappLid !== null && viewer.whatsappLid !== undefined) {
+    principals.push({ type: "whatsapp_lid", value: viewer.whatsappLid });
+  }
+  return normalizeAccessPrincipals(principals);
 }
 
 type ResolvedPrincipal = { userId: string; userName: string | null; email: string | null };
@@ -82,7 +71,7 @@ function principalLookupKey(type: string, value: string): string {
         ? (normalizeWhatsAppIdentityPhone(value) ?? value.trim())
         : type === "whatsapp_lid"
           ? (normalizeWhatsAppIdentityLid(value) ?? value.trim())
-          : value.trim();
+          : (normalizeSlackIdentityUserId(value) ?? "");
   return `${type}\u0000${normalized}`;
 }
 
@@ -181,54 +170,12 @@ async function loadPrincipalResolution(
  * planner sees mutually-recursive EXISTS chains.
  */
 export function fileVisibilityPredicate(viewer: FileViewer, alias = "indexed_files") {
-  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(alias)) {
-    throw new Error(`fileVisibilityPredicate: invalid table alias "${alias}"`);
-  }
-  const t = sql.raw(alias);
-  const principals = viewerPrincipals(viewer);
-  const emailValues = emailValuesForPrincipals(principals);
-  const emailSql =
-    emailValues.length > 0
-      ? sql.join(
-          emailValues.map((email) => sql`${email}`),
-          sql`,`,
-        )
-      : null;
-  const accessDoor =
-    (viewer.slackEntitySyncEnabled ?? true)
-      ? sql`(${t}.source IS NULL OR ${t}.source NOT IN ('slack', 'whatsapp'))`
-      : sql`1 = 1`;
-  const scopeDoor = sql`EXISTS (SELECT 1 FROM access_scope_members asm
-               WHERE asm.access_scope_id = ${t}.access_scope_id
-                 AND ${accessPrincipalPredicateSql("asm", principals)})`;
-  const fileDoor = sql`EXISTS (SELECT 1 FROM file_access fa
-                   WHERE fa.indexed_file_id = ${t}.id
-                     AND ${accessPrincipalPredicateSql("fa", principals)})`;
-  const shareDoor = emailSql
-    ? sql`EXISTS (SELECT 1 FROM file_share_emails fse
-               WHERE fse.indexed_file_id = ${t}.id
-                 AND fse.email IN (${emailSql}))`
-    : sql`0 = 1`;
-  const entityShareDoor = sql`EXISTS (
-      SELECT 1 FROM entity_mentions em_shared
-      INNER JOIN entities ent_shared ON ent_shared.id = em_shared.entity_id
-      LEFT JOIN entity_share_emails ese
-        ON ese.entity_id = ent_shared.id ${emailSql ? sql`AND ese.email IN (${emailSql})` : sql``}
-      WHERE em_shared.indexed_file_id = ${t}.id
-        AND ent_shared.deleted_at IS NULL
-        AND ent_shared.merged_into_entity_id IS NULL
-        AND (ent_shared.share_with_everyone = 1 OR ${emailSql ? sql`ese.email IS NOT NULL` : sql`0 = 1`})
-    )`;
-  return sql<boolean>`(
-    (${accessDoor}
-      AND ${t}.access_scope_id IS NULL
-      AND NOT EXISTS (SELECT 1 FROM file_access fa WHERE fa.indexed_file_id = ${t}.id))
-    OR ${scopeDoor}
-    OR (${accessDoor} AND ${fileDoor})
-    OR ${shareDoor}
-    OR ${t}.share_with_everyone = 1
-    OR ${entityShareDoor}
-  )`;
+  return fileVisibilityRuleSql({
+    principals: viewerPrincipals(viewer),
+    slackEntitySyncEnabled: viewer.slackEntitySyncEnabled ?? true,
+    archived: "include",
+    alias,
+  });
 }
 
 function decodeConnectorConfigRow<T extends { credentials: string }>(row: T, encryptionKey?: string): T {

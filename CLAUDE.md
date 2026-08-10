@@ -19,7 +19,14 @@ TypeScript, Node.js 24, pnpm monorepo, Hono, Kysely, Biome, pino, zod, tsdown, t
 - `.node-version` specifies Node 24
 - Local dev (macOS): **nvm** — auto-switches via `.node-version`
 - EC2 server: **fnm** — auto-switches via `.node-version` (still on Node 22, pending upgrade)
-- Claude Code's shell does NOT auto-load nvm/fnm, so it defaults to `/opt/homebrew/bin/node`. Currently this is also Node 24, so no prefix needed. If versions ever diverge again, prefix commands with: `. /Users/rnijhara/.nvm/nvm.sh && nvm use > /dev/null 2>&1 &&`
+- Claude Code's shell does NOT auto-load nvm/fnm, so it falls back to `/opt/homebrew/bin/node`. **Assume that is the wrong version and always prefix.** It has drifted repeatedly — Node 22 in Aug 2026, Node 26 by 2026-08-10 — so never rely on a version recorded here:
+
+  ```bash
+  . ~/.nvm/nvm.sh && nvm use > /dev/null 2>&1 && <command>
+  ```
+
+- This matters most for `pnpm test` and `git push`. The husky **pre-push hook runs lint + typecheck + test + build** and inherits the invoking shell's PATH, so a push started on the wrong Node burns several minutes and then fails.
+- Symptom of the wrong runtime: `ERR_DLOPEN_FAILED` from `better-sqlite3` inside vitest. That is an ABI mismatch, **not** a broken test — do not "fix" the test, and never `--no-verify` past it.
 
 ## Project Structure
 

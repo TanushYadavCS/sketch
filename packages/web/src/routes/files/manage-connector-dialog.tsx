@@ -224,6 +224,7 @@ export function ManageConnectorDialog({
                 scopeConfig={connector.scopeConfig}
                 hierarchyLevels={connector.hierarchyLevels}
                 scopeConfigKey={definition.scopeConfigKey}
+                flatScopeShape={definition.flatScopeShape}
                 scopeLabel={definition.scopeLabel}
                 scopeEntries={scopeEntries}
                 allowEmptySelection={definition.allowEmptyScopeSelection === true}
@@ -437,6 +438,7 @@ function ScopeEditorDispatch({
   scopeConfig,
   hierarchyLevels,
   scopeConfigKey,
+  flatScopeShape,
   scopeLabel,
   scopeEntries,
   allowEmptySelection,
@@ -448,6 +450,7 @@ function ScopeEditorDispatch({
   scopeConfig: Record<string, unknown>;
   hierarchyLevels?: HierarchyLevel[] | null;
   scopeConfigKey?: string;
+  flatScopeShape?: IntegrationDefinition["flatScopeShape"];
   scopeLabel: string;
   scopeEntries: [string, unknown][];
   allowEmptySelection?: boolean;
@@ -501,6 +504,7 @@ function ScopeEditorDispatch({
         connectorId={connectorId}
         scopeConfig={scopeConfig}
         scopeConfigKey={scopeConfigKey}
+        flatScopeShape={flatScopeShape}
         noun={scopeLabel}
         allowEmptySelection={allowEmptySelection}
         onBrowsingChange={onBrowsingChange}
@@ -510,8 +514,11 @@ function ScopeEditorDispatch({
 }
 
 function selectedWhatsAppGroupJids(scopeConfig: Record<string, unknown>): string[] {
-  const value = scopeConfig.groupJids;
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  const value = scopeConfig.groupIndexing;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.entries(value as Record<string, unknown>)
+    .filter(([, enabled]) => enabled === true)
+    .map(([jid]) => jid);
 }
 
 type WhatsAppGroupMemberLabelDraft = WhatsAppGroupMemberLabel & { phoneE164?: string };
@@ -539,19 +546,17 @@ function WhatsAppMemberLabelsEditor({
   scopeConfig: Record<string, unknown>;
 }) {
   const queryClient = useQueryClient();
-  const groupJids = selectedWhatsAppGroupJids(scopeConfig);
+  const browseQuery = useQuery({
+    queryKey: ["generic-browse", connectorId],
+    queryFn: () => api.integrations.browseExisting(connectorId),
+  });
+  const groupJids = selectedWhatsAppGroupJids(browseQuery.data?.scopeConfig ?? scopeConfig);
   const [selectedGroupJid, setSelectedGroupJid] = useState(groupJids[0] ?? "");
   const [draftRows, setDraftRows] = useState<WhatsAppGroupMemberLabelDraft[]>([]);
   const [phone, setPhone] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
-
-  const browseQuery = useQuery({
-    queryKey: ["generic-browse", connectorId],
-    queryFn: () => api.integrations.browseExisting(connectorId),
-    enabled: groupJids.length > 0,
-  });
   const groupNameByJid = useMemo(() => {
     const map = new Map<string, string>();
     const data = browseQuery.data;

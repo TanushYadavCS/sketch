@@ -17,3 +17,7 @@ apps/macos/.dist/
 
 # Local feature-design artifacts
 docs/superpowers/specs/
+# Symlinks to private dev skills (content lives in the .planning submodule).
+# Created by ./.planning/dev-skills/link.sh — never commit these.
+.claude/skills/implement-story
+.claude/skills/remote-tenant-debugging
