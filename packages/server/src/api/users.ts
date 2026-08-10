@@ -21,6 +21,7 @@ import { ensureSlackConnectorConfig } from "../connectors/slack-provisioning";
 import type { createChannelRepository } from "../db/repositories/channels";
 import { createConnectorRepository } from "../db/repositories/connectors";
 import type { createSettingsRepository } from "../db/repositories/settings";
+import { isUniqueConstraintError } from "../db/repositories/sub-entities";
 import type { createUserRepository } from "../db/repositories/users";
 import type { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
@@ -502,7 +503,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         201,
       );
     } catch (err: unknown) {
-      if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
+      if (isUniqueConstraintError(err)) {
         return c.json(
           { error: { code: "CONFLICT", message: "This email or number is already linked to another member" } },
           409,
@@ -740,7 +741,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         ...(managedWhatsappMappingStatus ? { managedWhatsappMappingStatus } : {}),
       });
     } catch (err: unknown) {
-      if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
+      if (isUniqueConstraintError(err)) {
         return c.json(
           { error: { code: "CONFLICT", message: "This email or number is already linked to another member" } },
           409,

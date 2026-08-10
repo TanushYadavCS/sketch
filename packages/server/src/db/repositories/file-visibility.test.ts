@@ -11,10 +11,21 @@
 import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fileAccessFilterSql, filterAccessibleFileIds, getFileContent } from "../../connectors/search";
+import type { AccessPrincipalInput } from "../../connectors/types";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import { type FileViewer, createConnectorRepository } from "./connectors";
+import { type FileViewer, createConnectorRepository, fileVisibilityPredicate } from "./connectors";
 import { createEntityRepository } from "./entities";
+import {
+  type VisibilityRuleInput,
+  entityShareDoorSql,
+  entityShareGrantsSql,
+  fileOrgWideDoorSql,
+  manualShareDoorSql,
+  perFileAccessDoorSql,
+  scopeMembershipDoorSql,
+  unrestrictedDoorSql,
+} from "./file-visibility-rule";
 
 describe("file-visibility predicate (RBAC for file list/count)", () => {
   let db: Kysely<DB>;
@@ -98,6 +109,30 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
   const member = (email: string): FileViewer => ({ email, isAdmin: false });
   const adminViewer: FileViewer = { email: "admin@example.com", isAdmin: true };
   const nullEmail: FileViewer = { email: null, isAdmin: false };
+  const accessByEntryPoint = async (fileId: string, principalInput: AccessPrincipalInput[], viewer: FileViewer) => {
+    const slackEntitySyncEnabled = viewer.slackEntitySyncEnabled ?? true;
+    const predicateVisible = await db
+      .selectFrom("indexed_files")
+      .select("id")
+      .where(fileVisibilityPredicate(viewer))
+      .where("id", "=", fileId)
+      .executeTakeFirst();
+    const filterSqlVisible = await db
+      .selectFrom("indexed_files")
+      .select("id")
+      .where(fileAccessFilterSql(principalInput, slackEntitySyncEnabled))
+      .where("id", "=", fileId)
+      .executeTakeFirst();
+    const visibleByIds = await filterAccessibleFileIds(db, [fileId], principalInput, slackEntitySyncEnabled);
+    const visibleByContent = await getFileContent(db, fileId, principalInput, slackEntitySyncEnabled);
+
+    return {
+      fileVisibilityPredicate: predicateVisible !== undefined,
+      fileAccessFilterSql: filterSqlVisible !== undefined,
+      getFileContent: visibleByContent !== null,
+      filterAccessibleFileIds: visibleByIds.has(fileId),
+    };
+  };
 
   describe("listAllFiles", () => {
     it("admin sees every file", async () => {
@@ -325,73 +360,662 @@ describe("file-visibility predicate (RBAC for file list/count)", () => {
     ).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: "f-lid" })]));
   });
 
-  it("keeps entity share_with_everyone visible across every read gate without email", async () => {
+  it("denies another user's entity share without email while preserving org-wide entity shares", async () => {
     const now = new Date().toISOString();
+    await db.insertInto("users").values({ id: "u-admin", name: "Admin", email: "admin@example.com" }).execute();
     await db
       .insertInto("entities")
+      .values([
+        {
+          id: "ent-shared-individually",
+          name: "Individually Shared Entity",
+          source_type: "manual",
+          subtype: null,
+          aliases: null,
+          metadata: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+          share_with_everyone: 0,
+          deleted_at: null,
+          merged_into_entity_id: null,
+        },
+        {
+          id: "ent-shared-everyone",
+          name: "Shared Entity",
+          source_type: "manual",
+          subtype: null,
+          aliases: null,
+          metadata: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+          share_with_everyone: 1,
+          deleted_at: null,
+          merged_into_entity_id: null,
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values([
+        {
+          id: "f-entity-share-individual",
+          connector_config_id: "cfg",
+          provider_file_id: "entity-share-individual",
+          file_name: "entity-share-individual.txt",
+          file_type: "doc",
+          content_category: "document",
+          source: "google_drive",
+          content: "individually shared content",
+          content_hash: "entity-share-individual-hash",
+          synced_at: now,
+          access_scope_id: "scope-a",
+          is_archived: 0,
+          share_with_everyone: 0,
+        },
+        {
+          id: "f-entity-share-everyone",
+          connector_config_id: "cfg",
+          provider_file_id: "entity-share-everyone",
+          file_name: "entity-share-everyone.txt",
+          file_type: "doc",
+          content_category: "document",
+          source: "google_drive",
+          content: "shared content",
+          content_hash: "entity-share-everyone-hash",
+          synced_at: now,
+          access_scope_id: "scope-a",
+          is_archived: 0,
+          share_with_everyone: 0,
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("entity_mentions")
+      .values([
+        {
+          id: "mention-shared-individually",
+          entity_id: "ent-shared-individually",
+          indexed_file_id: "f-entity-share-individual",
+          chunk_index: null,
+          context_snippet: null,
+          confidence: "EXTRACTED",
+          source: "test",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "mention-shared-everyone",
+          entity_id: "ent-shared-everyone",
+          indexed_file_id: "f-entity-share-everyone",
+          chunk_index: null,
+          context_snippet: null,
+          confidence: "EXTRACTED",
+          source: "test",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("entity_share_emails")
       .values({
-        id: "ent-shared-everyone",
-        name: "Shared Entity",
-        source_type: "manual",
-        subtype: null,
-        aliases: null,
-        metadata: null,
-        source_ref_id: null,
-        status: "confirmed",
-        hotness: 0,
-        created_at: now,
-        updated_at: now,
-        share_with_everyone: 1,
+        entity_id: "ent-shared-individually",
+        email: "somebody-else@example.com",
+        granted_by_user_id: "u-admin",
+      })
+      .execute();
+
+    const slackOnly = [{ type: "slack_user" as const, value: "U-NO-EMAIL" }];
+    const nullEmailWebViewer: FileViewer = { email: null, slackUserId: "U-NO-EMAIL", isAdmin: false };
+
+    expect(await accessByEntryPoint("f-entity-share-individual", slackOnly, nullEmailWebViewer)).toEqual({
+      fileVisibilityPredicate: false,
+      fileAccessFilterSql: false,
+      getFileContent: false,
+      filterAccessibleFileIds: false,
+    });
+    expect(await accessByEntryPoint("f-entity-share-everyone", slackOnly, nullEmailWebViewer)).toEqual({
+      fileVisibilityPredicate: true,
+      fileAccessFilterSql: true,
+      getFileContent: true,
+      filterAccessibleFileIds: true,
+    });
+  });
+
+  it("keeps all four entry points aligned across every visibility door and chat scope shape", async () => {
+    const now = new Date().toISOString();
+    const viewerEmail = "rule-viewer@example.com";
+    const viewer = member(viewerEmail);
+    const principals = [viewerEmail];
+    const baseFile = {
+      connector_config_id: "cfg",
+      file_name: "rule fixture",
+      file_type: "doc",
+      content_category: "document" as const,
+      source: "google_drive",
+      content: "rule fixture content",
+      is_archived: 0 as const,
+      synced_at: now,
+      share_with_everyone: 0 as const,
+    };
+
+    await db
+      .insertInto("users")
+      .values({ id: "rule-admin", name: "Rule Admin", email: "rule-admin@example.com" })
+      .execute();
+    await db
+      .insertInto("access_scopes")
+      .values([
+        {
+          id: "scope-rule-member",
+          connector_config_id: "cfg",
+          scope_type: "drive",
+          provider_scope_id: "rule-member",
+        },
+        {
+          id: "scope-rule-nonmember",
+          connector_config_id: "cfg",
+          scope_type: "drive",
+          provider_scope_id: "rule-nonmember",
+        },
+        {
+          id: "scope-rule-chat",
+          connector_config_id: "cfg",
+          scope_type: "slack_channel",
+          provider_scope_id: "rule-chat",
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values([
+        { access_scope_id: "scope-rule-member", principal_type: "email", principal_value: viewerEmail },
+        { access_scope_id: "scope-rule-nonmember", principal_type: "email", principal_value: "other@example.com" },
+        { access_scope_id: "scope-rule-chat", principal_type: "email", principal_value: viewerEmail },
+      ])
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values([
+        {
+          id: "f-rule-unrestricted",
+          ...baseFile,
+          provider_file_id: "rule-unrestricted",
+          content_hash: "rule-unrestricted-hash",
+        },
+        {
+          id: "f-rule-scope-member",
+          ...baseFile,
+          provider_file_id: "rule-scope-member",
+          content_hash: "rule-scope-member-hash",
+          access_scope_id: "scope-rule-member",
+        },
+        {
+          id: "f-rule-scope-nonmember",
+          ...baseFile,
+          provider_file_id: "rule-scope-nonmember",
+          content_hash: "rule-scope-nonmember-hash",
+          access_scope_id: "scope-rule-nonmember",
+        },
+        {
+          id: "f-rule-per-file",
+          ...baseFile,
+          provider_file_id: "rule-per-file",
+          content_hash: "rule-per-file-hash",
+        },
+        {
+          id: "f-rule-manual",
+          ...baseFile,
+          provider_file_id: "rule-manual",
+          content_hash: "rule-manual-hash",
+          access_scope_id: "scope-rule-nonmember",
+        },
+        {
+          id: "f-rule-org-wide",
+          ...baseFile,
+          provider_file_id: "rule-org-wide",
+          content_hash: "rule-org-wide-hash",
+          access_scope_id: "scope-rule-nonmember",
+          share_with_everyone: 1,
+        },
+        {
+          id: "f-rule-entity-email",
+          ...baseFile,
+          provider_file_id: "rule-entity-email",
+          content_hash: "rule-entity-email-hash",
+          access_scope_id: "scope-rule-nonmember",
+        },
+        {
+          id: "f-rule-entity-org",
+          ...baseFile,
+          provider_file_id: "rule-entity-org",
+          content_hash: "rule-entity-org-hash",
+          access_scope_id: "scope-rule-nonmember",
+        },
+        {
+          id: "f-rule-chat-scope",
+          ...baseFile,
+          provider_file_id: "rule-chat-scope",
+          content_hash: "rule-chat-scope-hash",
+          source: "slack",
+          access_scope_id: "scope-rule-chat",
+        },
+        {
+          id: "f-rule-chat-no-scope",
+          ...baseFile,
+          provider_file_id: "rule-chat-no-scope",
+          content_hash: "rule-chat-no-scope-hash",
+          source: "slack",
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("file_access")
+      .values({ indexed_file_id: "f-rule-per-file", principal_type: "email", principal_value: viewerEmail })
+      .execute();
+    await db
+      .insertInto("file_share_emails")
+      .values({ indexed_file_id: "f-rule-manual", email: viewerEmail, granted_by_user_id: "rule-admin" })
+      .execute();
+    await db
+      .insertInto("entities")
+      .values([
+        {
+          id: "ent-rule-email",
+          name: "Rule Email Entity",
+          source_type: "manual",
+          subtype: null,
+          aliases: null,
+          metadata: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+          share_with_everyone: 0,
+          deleted_at: null,
+          merged_into_entity_id: null,
+        },
+        {
+          id: "ent-rule-org",
+          name: "Rule Org Entity",
+          source_type: "manual",
+          subtype: null,
+          aliases: null,
+          metadata: null,
+          source_ref_id: null,
+          status: "confirmed",
+          hotness: 0,
+          created_at: now,
+          updated_at: now,
+          share_with_everyone: 1,
+          deleted_at: null,
+          merged_into_entity_id: null,
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("entity_mentions")
+      .values([
+        {
+          id: "mention-rule-email",
+          entity_id: "ent-rule-email",
+          indexed_file_id: "f-rule-entity-email",
+          chunk_index: null,
+          context_snippet: null,
+          confidence: "EXTRACTED",
+          source: "test",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+        {
+          id: "mention-rule-org",
+          entity_id: "ent-rule-org",
+          indexed_file_id: "f-rule-entity-org",
+          chunk_index: null,
+          context_snippet: null,
+          confidence: "EXTRACTED",
+          source: "test",
+          relation: "mentioned",
+          mentioned_at: now,
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("entity_share_emails")
+      .values({ entity_id: "ent-rule-email", email: viewerEmail, granted_by_user_id: "rule-admin" })
+      .execute();
+
+    const fixtures = [
+      ["f-rule-unrestricted", true],
+      ["f-rule-scope-member", true],
+      ["f-rule-scope-nonmember", false],
+      ["f-rule-per-file", true],
+      ["f-rule-manual", true],
+      ["f-rule-org-wide", true],
+      ["f-rule-entity-email", true],
+      ["f-rule-entity-org", true],
+      ["f-rule-chat-scope", true],
+      ["f-rule-chat-no-scope", false],
+    ] as const;
+
+    for (const [fileId, expected] of fixtures) {
+      expect(await accessByEntryPoint(fileId, principals, viewer), fileId).toEqual({
+        fileVisibilityPredicate: expected,
+        fileAccessFilterSql: expected,
+        getFileContent: expected,
+        filterAccessibleFileIds: expected,
+      });
+    }
+
+    await expect(entityShareGrantsSql("f-rule-entity-email").execute(db)).resolves.toMatchObject({
+      rows: [{ entity_id: "ent-rule-email", grant_kind: "email" }],
+    });
+    await expect(entityShareGrantsSql("f-rule-entity-org").execute(db)).resolves.toMatchObject({
+      rows: [{ entity_id: "ent-rule-org", grant_kind: "org_wide" }],
+    });
+  });
+
+  it("preserves the archived divergence between SQL predicates and direct access paths", async () => {
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "f-rule-archived",
+        connector_config_id: "cfg",
+        provider_file_id: "rule-archived",
+        file_name: "archived",
+        file_type: "doc",
+        content_category: "document",
+        source: "google_drive",
+        content: "archived content",
+        content_hash: "rule-archived-hash",
+        is_archived: 1,
+        synced_at: new Date().toISOString(),
+      })
+      .execute();
+
+    expect(
+      await accessByEntryPoint("f-rule-archived", ["archive-viewer@example.com"], member("archive-viewer@example.com")),
+    ).toEqual({
+      fileVisibilityPredicate: true,
+      fileAccessFilterSql: true,
+      getFileContent: false,
+      filterAccessibleFileIds: false,
+    });
+  });
+
+  it("validates aliases in every independently exported visibility door", () => {
+    const input: VisibilityRuleInput = {
+      principals: [],
+      slackEntitySyncEnabled: true,
+      archived: "include",
+      alias: "indexed-files",
+    };
+    for (const door of [
+      unrestrictedDoorSql,
+      scopeMembershipDoorSql,
+      perFileAccessDoorSql,
+      manualShareDoorSql,
+      fileOrgWideDoorSql,
+      entityShareDoorSql,
+    ]) {
+      expect(() => door(input)).toThrow('invalid table alias "indexed-files"');
+    }
+  });
+
+  it("keeps an empty scope id scoped but unmatchable across all four entry points", async () => {
+    await db
+      .insertInto("access_scopes")
+      .values({ id: "", connector_config_id: "cfg", scope_type: "drive", provider_scope_id: "empty-scope" })
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({ access_scope_id: "", principal_type: "email", principal_value: "empty-scope@example.com" })
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "f-rule-empty-scope",
+        connector_config_id: "cfg",
+        provider_file_id: "rule-empty-scope",
+        file_name: "empty scope",
+        file_type: "doc",
+        content_category: "document",
+        source: "google_drive",
+        content: "empty scope content",
+        content_hash: "rule-empty-scope-hash",
+        is_archived: 0,
+        synced_at: new Date().toISOString(),
+        access_scope_id: "",
+      })
+      .execute();
+
+    await expect(
+      accessByEntryPoint("f-rule-empty-scope", ["empty-scope@example.com"], member("empty-scope@example.com")),
+    ).resolves.toEqual({
+      fileVisibilityPredicate: false,
+      fileAccessFilterSql: false,
+      getFileContent: false,
+      filterAccessibleFileIds: false,
+    });
+  });
+
+  it("preserves the empty-principal boundary divergence", async () => {
+    await expect(accessByEntryPoint("f-unrestricted", [], nullEmail)).resolves.toEqual({
+      fileVisibilityPredicate: true,
+      fileAccessFilterSql: true,
+      getFileContent: false,
+      filterAccessibleFileIds: false,
+    });
+  });
+
+  it("keeps Slack user and WhatsApp LID scope access aligned across all four entry points", async () => {
+    const now = new Date().toISOString();
+    const baseFile = {
+      connector_config_id: "cfg",
+      file_name: "typed scope fixture",
+      file_type: "doc",
+      content_category: "document" as const,
+      content: "typed scope content",
+      content_hash: "typed-scope-hash",
+      is_archived: 0 as const,
+      synced_at: now,
+    };
+    await db
+      .insertInto("access_scopes")
+      .values([
+        {
+          id: "scope-rule-slack-user",
+          connector_config_id: "cfg",
+          scope_type: "slack_channel",
+          provider_scope_id: "typed-slack",
+        },
+        {
+          id: "scope-rule-whatsapp-lid",
+          connector_config_id: "cfg",
+          scope_type: "whatsapp_group",
+          provider_scope_id: "typed-lid",
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values([
+        { access_scope_id: "scope-rule-slack-user", principal_type: "slack_user", principal_value: "U-RULE" },
+        {
+          access_scope_id: "scope-rule-whatsapp-lid",
+          principal_type: "whatsapp_lid",
+          principal_value: "98765@lid",
+        },
+      ])
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values([
+        {
+          id: "f-rule-slack-scoped",
+          ...baseFile,
+          provider_file_id: "rule-slack-scoped",
+          source: "slack",
+          access_scope_id: "scope-rule-slack-user",
+        },
+        {
+          id: "f-rule-whatsapp-scoped",
+          ...baseFile,
+          provider_file_id: "rule-whatsapp-scoped",
+          source: "whatsapp",
+          access_scope_id: "scope-rule-whatsapp-lid",
+        },
+        {
+          id: "f-rule-slack-unscoped",
+          ...baseFile,
+          provider_file_id: "rule-slack-unscoped",
+          source: "slack",
+        },
+      ])
+      .execute();
+
+    const slackMember = [{ type: "slack_user" as const, value: "U-RULE" }];
+    const slackNonmember = [{ type: "slack_user" as const, value: "U-OUTSIDER" }];
+    const slackMemberViewer: FileViewer = { email: null, slackUserId: "U-RULE", isAdmin: false };
+    const slackNonmemberViewer: FileViewer = { email: null, slackUserId: "U-OUTSIDER", isAdmin: false };
+    const lidMember = [{ type: "whatsapp_lid" as const, value: "98765@lid" }];
+    const lidNonmember = [{ type: "whatsapp_lid" as const, value: "11111@lid" }];
+    const lidMemberViewer: FileViewer = { email: null, whatsappLid: "98765@lid", isAdmin: false };
+    const lidNonmemberViewer: FileViewer = { email: null, whatsappLid: "11111@lid", isAdmin: false };
+    const verdict = (expected: boolean) => ({
+      fileVisibilityPredicate: expected,
+      fileAccessFilterSql: expected,
+      getFileContent: expected,
+      filterAccessibleFileIds: expected,
+    });
+
+    await expect(accessByEntryPoint("f-rule-slack-scoped", slackMember, slackMemberViewer)).resolves.toEqual(
+      verdict(true),
+    );
+    await expect(accessByEntryPoint("f-rule-slack-scoped", slackNonmember, slackNonmemberViewer)).resolves.toEqual(
+      verdict(false),
+    );
+    await expect(accessByEntryPoint("f-rule-whatsapp-scoped", lidMember, lidMemberViewer)).resolves.toEqual(
+      verdict(true),
+    );
+    await expect(accessByEntryPoint("f-rule-whatsapp-scoped", lidNonmember, lidNonmemberViewer)).resolves.toEqual(
+      verdict(false),
+    );
+    await expect(accessByEntryPoint("f-rule-slack-unscoped", slackMember, slackMemberViewer)).resolves.toEqual(
+      verdict(false),
+    );
+    await expect(accessByEntryPoint("f-rule-slack-unscoped", slackNonmember, slackNonmemberViewer)).resolves.toEqual(
+      verdict(false),
+    );
+  });
+
+  it("normalizes a raw phone consistently across all four entry points", async () => {
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-rule-raw-phone",
+        connector_config_id: "cfg",
+        scope_type: "whatsapp_group",
+        provider_scope_id: "raw-phone",
+      })
+      .execute();
+    await db
+      .insertInto("access_scope_members")
+      .values({
+        access_scope_id: "scope-rule-raw-phone",
+        principal_type: "phone",
+        principal_value: "+919101299347",
       })
       .execute();
     await db
       .insertInto("indexed_files")
       .values({
-        id: "f-entity-share-everyone",
+        id: "f-rule-raw-phone",
         connector_config_id: "cfg",
-        provider_file_id: "entity-share-everyone",
-        file_name: "entity-share-everyone.txt",
+        provider_file_id: "rule-raw-phone",
+        file_name: "raw phone",
         file_type: "doc",
         content_category: "document",
         source: "google_drive",
-        content: "shared content",
-        content_hash: "entity-share-everyone-hash",
-        synced_at: now,
-        access_scope_id: "scope-a",
+        content: "raw phone content",
+        content_hash: "rule-raw-phone-hash",
+        is_archived: 0,
+        synced_at: new Date().toISOString(),
+        access_scope_id: "scope-rule-raw-phone",
+      })
+      .execute();
+
+    const rawPhone = "+91 9101299347";
+    await expect(
+      accessByEntryPoint("f-rule-raw-phone", [{ type: "phone", value: rawPhone }], {
+        email: null,
+        phone: rawPhone,
+        isAdmin: false,
+      }),
+    ).resolves.toEqual({
+      fileVisibilityPredicate: true,
+      fileAccessFilterSql: true,
+      getFileContent: true,
+      filterAccessibleFileIds: true,
+    });
+  });
+
+  it("normalizes an untrimmed Slack user ID consistently across all four entry points", async () => {
+    await db
+      .insertInto("access_scopes")
+      .values({
+        id: "scope-rule-raw-slack-user",
+        connector_config_id: "cfg",
+        scope_type: "slack_channel",
+        provider_scope_id: "raw-slack-user",
       })
       .execute();
     await db
-      .insertInto("entity_mentions")
+      .insertInto("access_scope_members")
       .values({
-        id: "mention-shared-everyone",
-        entity_id: "ent-shared-everyone",
-        indexed_file_id: "f-entity-share-everyone",
-        chunk_index: null,
-        context_snippet: null,
-        confidence: "EXTRACTED",
-        source: "test",
-        relation: "mentioned",
-        mentioned_at: now,
+        access_scope_id: "scope-rule-raw-slack-user",
+        principal_type: "slack_user",
+        principal_value: "U-RAW",
+      })
+      .execute();
+    await db
+      .insertInto("indexed_files")
+      .values({
+        id: "f-rule-raw-slack-user",
+        connector_config_id: "cfg",
+        provider_file_id: "rule-raw-slack-user",
+        file_name: "raw Slack user",
+        file_type: "doc",
+        content_category: "document",
+        source: "google_drive",
+        content: "raw Slack user content",
+        content_hash: "rule-raw-slack-user-hash",
+        is_archived: 0,
+        synced_at: new Date().toISOString(),
+        access_scope_id: "scope-rule-raw-slack-user",
       })
       .execute();
 
-    const phoneOnly = [{ type: "phone" as const, value: "+15550000009" }];
-    const nullEmailWebViewer: FileViewer = { email: null, phone: "+15550000009", isAdmin: false };
-    const repo = createConnectorRepository(db);
-    const filterSqlVisible = await db
-      .selectFrom("indexed_files")
-      .select("id")
-      .where(fileAccessFilterSql(phoneOnly))
-      .where("id", "=", "f-entity-share-everyone")
-      .execute();
-    const visibleByList = await repo.listAllFiles({ limit: 50, offset: 0, viewer: nullEmailWebViewer });
-    const visibleByIds = await filterAccessibleFileIds(db, ["f-entity-share-everyone"], phoneOnly);
-    const visibleByContent = await getFileContent(db, "f-entity-share-everyone", phoneOnly);
-
-    expect(filterSqlVisible.map((file) => file.id)).toEqual(["f-entity-share-everyone"]);
-    expect(visibleByList.map((file) => file.id)).toContain("f-entity-share-everyone");
-    expect(visibleByIds).toEqual(new Set(["f-entity-share-everyone"]));
-    expect(visibleByContent?.id).toBe("f-entity-share-everyone");
+    const rawSlackUserId = "  U-RAW  ";
+    await expect(
+      accessByEntryPoint("f-rule-raw-slack-user", [{ type: "slack_user", value: rawSlackUserId }], {
+        email: null,
+        slackUserId: rawSlackUserId,
+        isAdmin: false,
+      }),
+    ).resolves.toEqual({
+      fileVisibilityPredicate: true,
+      fileAccessFilterSql: true,
+      getFileContent: true,
+      filterAccessibleFileIds: true,
+    });
   });
 
   it("deduplicates multiple principals that resolve to one user in access summaries", async () => {

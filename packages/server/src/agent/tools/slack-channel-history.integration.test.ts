@@ -4,6 +4,7 @@ import type { AccessPrincipalInput } from "../../connectors/types";
 import { createConnectorRepository } from "../../db/repositories/connectors";
 import { createConversationSlicesRepository } from "../../db/repositories/conversation-slices";
 import { createConversationRepository } from "../../db/repositories/conversations";
+import { createUserRepository } from "../../db/repositories/users";
 import type { DB } from "../../db/schema";
 import { createTestDb, createTestPgDb } from "../../test-utils";
 import { SLACK_CHANNEL_HISTORY_DENIED_TEXT, handleSlackChannelHistory } from "./slack-channel-history";
@@ -11,6 +12,15 @@ import type { SketchMcpDeps } from "./types";
 
 function depsFor(db: Kysely<DB>, principals: AccessPrincipalInput[]): SketchMcpDeps {
   return { db, publicMcp: { userPrincipals: principals } } as unknown as SketchMcpDeps;
+}
+
+function resolvedUserDeps(db: Kysely<DB>, userId: string): SketchMcpDeps {
+  return {
+    db,
+    currentUserId: userId,
+    userRepo: createUserRepository(db),
+    slackEntitySyncEnabled: true,
+  } as unknown as SketchMcpDeps;
 }
 
 function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -131,6 +141,22 @@ function runSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
       expect(payload.messages[0].text).toBe("root message");
       expect(payload.messages[1].text).toBe("reply mentioning @Roopak");
       expect(payload.messages[1].sender).toBe("Roopak");
+    });
+
+    it("returns scope-only channel history through the agent's resolved caller principals", async () => {
+      const fileGrants = await db
+        .selectFrom("file_access")
+        .select("indexed_file_id")
+        .where("indexed_file_id", "=", "file-1")
+        .execute();
+      expect(fileGrants).toEqual([]);
+
+      const result = await handleSlackChannelHistory({ sliceId }, resolvedUserDeps(db, "user-admin"));
+      const payload = JSON.parse(resultText(result));
+      expect(payload.messages.map((message: { text: string }) => message.text)).toEqual([
+        "root message",
+        "reply mentioning @Roopak",
+      ]);
     });
 
     it("includes messages whose delivery lagged days behind their Slack timestamp", async () => {

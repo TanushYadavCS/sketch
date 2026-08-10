@@ -347,7 +347,7 @@ describe("ManageConnectorDialog connector capabilities", () => {
       http.get("/api/connectors/:id/browse", () =>
         HttpResponse.json({
           type: "flat",
-          scopeConfig: { groupJids: ["deal@g.us"] },
+          scopeConfig: { groupIndexing: { "deal@g.us": true } },
           items: [{ id: "deal@g.us", name: "Deal Room" }],
         }),
       ),
@@ -357,7 +357,7 @@ describe("ManageConnectorDialog connector capabilities", () => {
           connector: {
             id: "whatsapp-conn",
             connectorType: "whatsapp",
-            scopeConfig: { groupJids: [] },
+            scopeConfig: {},
             syncStatus: "syncing",
           },
         });
@@ -371,7 +371,7 @@ describe("ManageConnectorDialog connector capabilities", () => {
           id: "whatsapp-conn",
           connectorType: "whatsapp",
           authType: "system",
-          scopeConfig: { groupJids: ["deal@g.us"] },
+          scopeConfig: {},
           fileCount: 0,
         })}
         open
@@ -385,7 +385,7 @@ describe("ManageConnectorDialog connector capabilities", () => {
     await user.click(screen.getByRole("button", { name: /Save & re-sync \(0 groups\)/i }));
 
     await waitFor(() => {
-      expect(patchedBody).toEqual({ scopeConfig: { groupJids: [] } });
+      expect(patchedBody).toEqual({ scopeConfig: { groupIndexing: { "deal@g.us": false } } });
     });
   });
 
@@ -396,7 +396,7 @@ describe("ManageConnectorDialog connector capabilities", () => {
       http.get("/api/connectors/:id/browse", () =>
         HttpResponse.json({
           type: "flat",
-          scopeConfig: { groupJids: ["deal@g.us"] },
+          scopeConfig: { groupIndexing: { "deal@g.us": true } },
           items: [{ id: "deal@g.us", name: "Deal Room" }],
         }),
       ),
@@ -440,7 +440,7 @@ describe("ManageConnectorDialog connector capabilities", () => {
           id: "whatsapp-conn",
           connectorType: "whatsapp",
           authType: "system",
-          scopeConfig: { groupJids: ["deal@g.us"] },
+          scopeConfig: {},
           fileCount: 0,
         })}
         open

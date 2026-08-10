@@ -110,7 +110,7 @@ async function main() {
     const admin = await db.selectFrom("users").select(["id"]).orderBy("created_at", "asc").executeTakeFirstOrThrow();
     const connector = await db
       .selectFrom("connector_configs")
-      .select(["id", "scope_config"])
+      .select("id")
       .where("connector_type", "=", "whatsapp")
       .executeTakeFirstOrThrow();
 
@@ -252,15 +252,6 @@ async function main() {
       "d3-after-disable",
     );
     await db.updateTable("whatsapp_groups").set({ index_enabled: 0 }).where("jid", "=", QUIET_GROUP_JID).execute();
-    const scope = JSON.parse(connector.scope_config ?? "{}") as { groupJids?: string[] };
-    const groupJids = new Set(scope.groupJids ?? []);
-    groupJids.delete(QUIET_GROUP_JID);
-    groupJids.add(STREAM_GROUP_JID);
-    await db
-      .updateTable("connector_configs")
-      .set({ scope_config: JSON.stringify({ ...scope, groupJids: [...groupJids] }) })
-      .where("id", "=", connector.id)
-      .execute();
 
     const quietSlicesBefore = await db
       .selectFrom("conversation_slices")

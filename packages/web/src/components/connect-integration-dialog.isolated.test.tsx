@@ -423,3 +423,80 @@ describe("ConnectIntegrationDialog Microsoft OAuth setup", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Connect with Microsoft" })).toBeInTheDocument());
   });
 });
+
+describe("ConnectIntegrationDialog WhatsApp scope", () => {
+  it("initializes and saves displayed WhatsApp groups as a map while allowing zero selected", async () => {
+    const user = userEvent.setup();
+    const connectBodies: unknown[] = [];
+    const scopeBodies: unknown[] = [];
+    const integration = INTEGRATIONS.find((item) => item.type === "whatsapp");
+    if (!integration) throw new Error("WhatsApp integration is missing");
+
+    server.use(
+      http.get("/api/connectors/credential-source", () =>
+        HttpResponse.json({
+          mode: "local",
+          canvasConfigured: false,
+          canvasCredentialImportConfigured: false,
+          publicKeyId: null,
+        }),
+      ),
+      http.post("/api/connectors", async ({ request }) => {
+        connectBodies.push(await request.json());
+        return HttpResponse.json({
+          connector: { id: "whatsapp-connector", connectorType: "whatsapp", syncStatus: "pending" },
+        });
+      }),
+      http.get("/api/connectors/whatsapp-connector/browse", () =>
+        HttpResponse.json({
+          type: "flat",
+          items: [
+            { id: "enabled@g.us", name: "Enabled" },
+            { id: "disabled@g.us", name: "Disabled" },
+          ],
+          scopeConfig: { groupIndexing: { "enabled@g.us": true, "disabled@g.us": false } },
+        }),
+      ),
+      http.patch("/api/connectors/whatsapp-connector/scope", async ({ request }) => {
+        scopeBodies.push(await request.json());
+        return HttpResponse.json({
+          connector: {
+            id: "whatsapp-connector",
+            connectorType: "whatsapp",
+            syncStatus: "pending",
+            scopeConfig: {},
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <ConnectIntegrationDialog integration={integration} open={true} onOpenChange={() => {}} onConnected={() => {}} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(await screen.findByRole("heading", { name: "Select groups" })).toBeInTheDocument();
+    expect(screen.getByText("1 of 2 groups selected")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Enabled/i }));
+    const save = screen.getByRole("button", { name: "Connect 0 groups" });
+    expect(save).toBeEnabled();
+    await user.click(save);
+
+    await waitFor(() => {
+      expect(connectBodies).toEqual([
+        {
+          connectorType: "whatsapp",
+          authType: "system",
+          credentials: {},
+          scopeConfig: { groupIndexing: {} },
+        },
+      ]);
+      expect(scopeBodies).toEqual([
+        {
+          scopeConfig: { groupIndexing: { "enabled@g.us": false, "disabled@g.us": false } },
+        },
+      ]);
+    });
+  });
+});

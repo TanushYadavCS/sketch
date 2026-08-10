@@ -97,7 +97,7 @@ export function createWhatsAppConnector(): Connector {
         throw new Error("WhatsApp connector requires database access");
       }
       const groups = await createWhatsAppGroupRepository(db).listIndexEnabled();
-      logger.debug({ groupCount: groups.length }, "Loaded opted-in WhatsApp groups for indexing");
+      logger.debug({ groupCount: groups.length }, "Loaded enabled WhatsApp groups for indexing");
       await chunkWhatsAppIndexingGroups({
         db,
         groups,

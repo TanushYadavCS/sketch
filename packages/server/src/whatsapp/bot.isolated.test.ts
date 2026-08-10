@@ -769,6 +769,59 @@ describe("WhatsAppBot group metadata persistence", () => {
     expect(stored?.description).toBe("Updated desc");
   });
 
+  it("persists a newly joined group from groups.upsert without an extra metadata query", async () => {
+    const handlers = new Map<string, (...args: unknown[]) => Promise<void>>();
+    const bot = new WhatsAppBot({
+      db,
+      logger: createTestLogger(),
+      groupMetadataStore: createWhatsAppGroupRepository(db),
+    });
+
+    const groupMetadata = vi.fn();
+    (
+      bot as unknown as {
+        sock: {
+          groupMetadata: typeof groupMetadata;
+          ev: { on: (event: string, handler: (...args: unknown[]) => Promise<void>) => void };
+        };
+      }
+    ).sock = {
+      groupMetadata,
+      ev: {
+        on: (event, handler) => {
+          handlers.set(event, handler);
+        },
+      },
+    };
+
+    (bot as unknown as { registerGroupEventHandlers: () => void }).registerGroupEventHandlers();
+    await handlers.get("groups.upsert")?.([
+      {
+        id: "joined@g.us",
+        subject: "Just Added",
+        desc: "New group",
+        participants: [{ id: "15551234567@s.whatsapp.net", admin: "admin" }],
+      },
+    ]);
+
+    const stored = await db
+      .selectFrom("whatsapp_groups")
+      .selectAll()
+      .where("jid", "=", "joined@g.us")
+      .executeTakeFirst();
+    expect(stored?.name).toBe("Just Added");
+    expect(stored?.index_enabled).toBe(1);
+    expect(groupMetadata).not.toHaveBeenCalled();
+
+    /** The roster lands too — it feeds the access checks in salience and chat-search. */
+    const participants = await db
+      .selectFrom("whatsapp_group_participants")
+      .select(["participant_jid", "admin_role"])
+      .where("group_jid", "=", "joined@g.us")
+      .execute();
+    expect(participants).toEqual([{ participant_jid: "15551234567@s.whatsapp.net", admin_role: "admin" }]);
+  });
+
   it("does not throw when group metadata refresh fails during event handling", async () => {
     const handlers = new Map<string, (...args: unknown[]) => Promise<void>>();
     const bot = new WhatsAppBot({

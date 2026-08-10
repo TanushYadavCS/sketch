@@ -120,6 +120,10 @@ export const whatsAppHistorySyncResponseSchema = z.object({ requestSessionId: z.
 
 export const whatsAppPairingStatusSchema = z.object({
   connected: z.boolean(),
+  /** A number is on file. Distinct from `connected`, which is whether the socket is up right now. */
+  paired: z.boolean().optional(),
+  /** Set while reconnects are deliberately paused, so the card can say so instead of "reconnecting". */
+  pausedUntil: z.string().nullable().optional(),
   phoneNumber: z.string().nullable(),
   lid: z.string().nullable().optional(),
 });
