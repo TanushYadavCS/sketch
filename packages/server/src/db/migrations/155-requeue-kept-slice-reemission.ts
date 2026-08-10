@@ -12,7 +12,7 @@
  * channel conversations and WhatsApp groups with indexing enabled. Slices of
  * index-disabled groups keep their link: emission never selects them, so
  * unlinking would strand both the link and the retained file. Their requeue
- * happens at enable time instead (setIndexEnabled/replaceIndexEnabledJids
+ * happens at enable time instead (setIndexEnabled/applyIndexSelection
  * clear kept-slice links when a group turns on). Down is a no-op: relinking
  * is the emitter's job either way.
  */

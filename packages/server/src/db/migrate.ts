@@ -166,7 +166,9 @@ import * as m163 from "./migrations/163-slack-file-access-backfill-cleanup";
 import * as m164 from "./migrations/164-outlook-calendar-provider-file-scope";
 import * as m165 from "./migrations/165-typed-access-principals";
 import * as m166 from "./migrations/166-scheduled-task-builder-locks";
-import * as m167 from "./migrations/167-scheduled-task-execution-mode";
+import * as m167 from "./migrations/167-normalize-whatsapp-numbers";
+import * as m168 from "./migrations/168-whatsapp-group-scope-authority";
+import * as m169 from "./migrations/169-scheduled-task-execution-mode";
 import type { DB } from "./schema";
 
 /**
@@ -342,7 +344,9 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "164-outlook-calendar-provider-file-scope": m164,
           "165-typed-access-principals": m165,
           "166-scheduled-task-builder-locks": m166,
-          "167-scheduled-task-execution-mode": m167,
+          "167-normalize-whatsapp-numbers": m167,
+          "168-whatsapp-group-scope-authority": m168,
+          "169-scheduled-task-execution-mode": m169,
         };
       },
     },

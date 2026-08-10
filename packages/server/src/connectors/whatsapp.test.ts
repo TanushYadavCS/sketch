@@ -71,6 +71,7 @@ describe("createWhatsAppConnector", () => {
       tool_progress: null,
       reasoning_text: null,
       updated_at: "2026-07-07T09:00:00.000Z",
+      index_enabled: 0,
     });
     await groups.upsert({
       jid: "enabled@g.us",
@@ -111,7 +112,7 @@ describe("createWhatsAppConnector", () => {
     }
 
     expect(seen).toEqual([]);
-    expect(debug).toHaveBeenCalledWith({ groupCount: 1 }, "Loaded opted-in WhatsApp groups for indexing");
+    expect(debug).toHaveBeenCalledWith({ groupCount: 1 }, "Loaded enabled WhatsApp groups for indexing");
     await expect(db.selectFrom("conversation_slices").selectAll().execute()).resolves.toHaveLength(1);
   });
 
@@ -123,6 +124,7 @@ describe("createWhatsAppConnector", () => {
       tool_progress: null,
       reasoning_text: null,
       updated_at: "2026-07-07T09:00:00.000Z",
+      index_enabled: 0,
     });
 
     const debug = vi.fn();
@@ -140,7 +142,7 @@ describe("createWhatsAppConnector", () => {
     }
 
     expect(seen).toEqual([]);
-    expect(debug).toHaveBeenCalledWith({ groupCount: 0 }, "Loaded opted-in WhatsApp groups for indexing");
+    expect(debug).toHaveBeenCalledWith({ groupCount: 0 }, "Loaded enabled WhatsApp groups for indexing");
   });
 
   it("admits terminal backfill history inside the scheduled connector sync sequence", async () => {

@@ -7,6 +7,7 @@ import { normalizeEntityMatchName } from "../../entities/match-normalize";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../../entities/profile-facts";
 import type { ProvenanceTier } from "../../entities/provenance";
 import { resolveLiveEntity, resolveLiveEntityId, resolveSourceRefToLiveEntityId } from "../../entities/redirect";
+import { normalizePhoneLike } from "../../identity-normalization";
 import { yieldToEventLoop } from "../../lib/event-loop";
 import { parseTimestampMs } from "../../timestamps";
 import { isPg } from "../dialect";
@@ -228,16 +229,6 @@ export interface CreateMentionData {
   confidence: EntityMentionConfidence;
   source: string;
   relation: EntityMentionRelation;
-}
-
-function normalizePhoneLike(value: string): string {
-  const trimmed = value.trim();
-  const compact = trimmed.replace(/[\s().-]/g, "");
-  const withPlus = compact.startsWith("00") ? `+${compact.slice(2)}` : compact;
-  if (!/^\+[1-9]\d{7,14}$/.test(withPlus)) {
-    throw new Error("Phone contact points must be E.164, for example +14155551234");
-  }
-  return withPlus;
 }
 
 function normalizeLinkedin(value: string): string {

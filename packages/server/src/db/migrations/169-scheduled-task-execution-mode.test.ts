@@ -1,7 +1,7 @@
 import SQLite from "better-sqlite3";
 import { Kysely, SqliteDialect, sql } from "kysely";
 import { afterEach, describe, expect, it } from "vitest";
-import { up } from "./167-scheduled-task-execution-mode";
+import { up } from "./169-scheduled-task-execution-mode";
 
 type MigrationDb = {
   scheduled_tasks: {
@@ -17,7 +17,7 @@ function createDb(): Kysely<MigrationDb> {
   });
 }
 
-describe("167-scheduled-task-execution-mode migration", () => {
+describe("169-scheduled-task-execution-mode migration", () => {
   const databases: Kysely<MigrationDb>[] = [];
 
   afterEach(async () => {
