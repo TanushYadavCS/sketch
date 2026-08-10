@@ -20,8 +20,8 @@ import { sql } from "kysely";
 import type { Logger } from "pino";
 import { isPg } from "../db/dialect";
 import { EMBEDDING_DIMENSIONS } from "../db/index";
-import { accessPrincipalPredicateSql } from "../db/repositories/connectors";
-import { createEntityRepository, whereLiveEntity } from "../db/repositories/entities";
+import { createEntityRepository } from "../db/repositories/entities";
+import { fileVisibilityRuleSql } from "../db/repositories/file-visibility-rule";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { DB } from "../db/schema";
 import { parseEmailAddrJson, parseEmailAddrListJson } from "./email/envelope-metadata";
@@ -62,56 +62,11 @@ export interface SearchOptions {
 }
 
 export function fileAccessFilterSql(principalInput: AccessPrincipalInput[], slackEntitySyncEnabled = true) {
-  const principalList = normalizeAccessPrincipals(principalInput);
-  const emailValues = principalList
-    .filter((principal) => principal.type === "email")
-    .map((principal) => principal.value);
-  const emailSql =
-    emailValues.length > 0
-      ? sql.join(
-          emailValues.map((email) => sql`${email}`),
-          sql`,`,
-        )
-      : null;
-  const accessDoor = slackEntitySyncEnabled
-    ? sql`(indexed_files.source IS NULL OR indexed_files.source NOT IN ('slack', 'whatsapp'))`
-    : sql`1 = 1`;
-  return sql<SqlBool>`(
-    (${accessDoor}
-      AND indexed_files.access_scope_id IS NULL
-      AND NOT EXISTS (SELECT 1 FROM file_access WHERE file_access.indexed_file_id = indexed_files.id))
-    OR EXISTS (
-      SELECT 1 FROM access_scope_members
-      WHERE access_scope_members.access_scope_id = indexed_files.access_scope_id
-      AND ${accessPrincipalPredicateSql("access_scope_members", principalList)}
-    )
-    OR (${accessDoor}
-      AND EXISTS (
-        SELECT 1 FROM file_access
-        WHERE file_access.indexed_file_id = indexed_files.id
-        AND ${accessPrincipalPredicateSql("file_access", principalList)}
-      ))
-    OR ${
-      emailSql
-        ? sql`EXISTS (
-      SELECT 1 FROM file_share_emails
-      WHERE file_share_emails.indexed_file_id = indexed_files.id
-      AND file_share_emails.email IN (${emailSql})
-    )`
-        : sql`0 = 1`
-    }
-    OR indexed_files.share_with_everyone = 1
-    OR EXISTS (
-      SELECT 1 FROM entity_mentions em_shared
-      INNER JOIN entities ent_shared ON ent_shared.id = em_shared.entity_id
-      LEFT JOIN entity_share_emails ese
-        ON ese.entity_id = ent_shared.id ${emailSql ? sql`AND ese.email IN (${emailSql})` : sql``}
-      WHERE em_shared.indexed_file_id = indexed_files.id
-        AND ent_shared.deleted_at IS NULL
-        AND ent_shared.merged_into_entity_id IS NULL
-        AND (ent_shared.share_with_everyone = 1 OR ${emailSql ? sql`ese.email IS NOT NULL` : sql`0 = 1`})
-    )
-  )`;
+  return fileVisibilityRuleSql({
+    principals: normalizeAccessPrincipals(principalInput),
+    slackEntitySyncEnabled,
+    archived: "include",
+  });
 }
 
 /**
@@ -231,7 +186,7 @@ export async function getFileContent(
   providerUrl: string | null;
   enrichmentStatus: string;
 } | null> {
-  const file = await db
+  let query = db
     .selectFrom("indexed_files")
     .select([
       "id",
@@ -245,104 +200,17 @@ export async function getFileContent(
       "context_note",
       "provider_url",
       "enrichment_status",
-      "access_scope_id",
-      "share_with_everyone",
-      "is_archived",
     ])
-    .where("id", "=", fileId)
-    .executeTakeFirst();
-
-  if (!file) return null;
+    .where("id", "=", fileId);
 
   if (userPrincipals !== undefined) {
     const principals = normalizeAccessPrincipals(userPrincipals);
     if (principals.length === 0) return null;
-    const emailValues = principals
-      .filter((principal) => principal.type === "email")
-      .map((principal) => principal.value);
-
-    /**
-     * Archived files are denied on the RBAC path: archival severs the scope
-     * and per-file grants, which would otherwise flip the file into the
-     * unrestricted no-scope tier below. Mirrors filterAccessibleFileIds.
-     */
-    if (file.is_archived === 1) return null;
-
-    if (file.share_with_everyone !== 1) {
-      const hasScope = file.access_scope_id != null;
-      const hasFileAccess = await db
-        .selectFrom("file_access")
-        .select(["principal_type", "principal_value"])
-        .where("indexed_file_id", "=", fileId)
-        .limit(1)
-        .execute();
-
-      const isChatSource = slackEntitySyncEnabled && (file.source === "slack" || file.source === "whatsapp");
-      if (isChatSource || hasScope || hasFileAccess.length > 0) {
-        let allowed = false;
-
-        // Tier 2: scope-level access
-        if (hasScope && file.access_scope_id) {
-          const scopeMatch = await db
-            .selectFrom("access_scope_members")
-            .select(["principal_type", "principal_value"])
-            .where("access_scope_id", "=", file.access_scope_id)
-            .where(accessPrincipalPredicateSql("access_scope_members", principals))
-            .limit(1)
-            .execute();
-          if (scopeMatch.length > 0) allowed = true;
-        }
-
-        // Tier 3: per-file access
-        if (!allowed && !isChatSource && hasFileAccess.length > 0) {
-          const fileMatch = await db
-            .selectFrom("file_access")
-            .select(["principal_type", "principal_value"])
-            .where("indexed_file_id", "=", fileId)
-            .where(accessPrincipalPredicateSql("file_access", principals))
-            .limit(1)
-            .execute();
-          if (fileMatch.length > 0) allowed = true;
-        }
-
-        // Tier 4: manual share
-        if (!allowed && emailValues.length > 0) {
-          const shareMatch = await db
-            .selectFrom("file_share_emails")
-            .select("email")
-            .where("indexed_file_id", "=", fileId)
-            .where("email", "in", emailValues)
-            .limit(1)
-            .execute();
-          if (shareMatch.length > 0) allowed = true;
-        }
-
-        // Tier 5: entity-share propagation — a shared entity mentioned in
-        // this file grants read access to the file (read-time, no file_access
-        // rows written).
-        if (!allowed) {
-          const entityMatch = await db
-            .selectFrom("entity_mentions")
-            .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
-            .leftJoin("entity_share_emails", (join) => {
-              const condition = join.onRef("entity_share_emails.entity_id", "=", "entities.id");
-              return emailValues.length > 0 ? condition.on("entity_share_emails.email", "in", emailValues) : condition;
-            })
-            .select("entities.id")
-            .where("entity_mentions.indexed_file_id", "=", fileId)
-            .where(whereLiveEntity())
-            .where((eb) =>
-              eb.or([eb("entities.share_with_everyone", "=", 1), eb("entity_share_emails.email", "is not", null)]),
-            )
-            .limit(1)
-            .execute();
-          if (entityMatch.length > 0) allowed = true;
-        }
-
-        if (!allowed) return null;
-      }
-    }
+    query = query.where(fileVisibilityRuleSql({ principals, slackEntitySyncEnabled, archived: "exclude" }));
   }
+
+  const file = await query.executeTakeFirst();
+  if (!file) return null;
 
   return {
     id: file.id,
@@ -382,132 +250,12 @@ export async function filterAccessibleFileIds(
 
   const files = await db
     .selectFrom("indexed_files")
-    .select(["id", "source", "access_scope_id", "share_with_everyone", "is_archived"])
+    .select("id")
     .where("id", "in", fileIds)
+    .where(fileVisibilityRuleSql({ principals, slackEntitySyncEnabled, archived: "exclude" }))
     .execute();
 
-  const emailValues = principals.filter((principal) => principal.type === "email").map((principal) => principal.value);
-  const [fileAccessRows, scopeMemberRows, shareRows, entityPropRows] = await Promise.all([
-    db
-      .selectFrom("file_access")
-      .select(["indexed_file_id", "principal_type", "principal_value"])
-      .where("indexed_file_id", "in", fileIds)
-      .execute(),
-    (async () => {
-      const scopeIds = files.map((f) => f.access_scope_id).filter((s): s is string => !!s);
-      if (scopeIds.length === 0) return [];
-      return db
-        .selectFrom("access_scope_members")
-        .select(["access_scope_id", "principal_type", "principal_value"])
-        .where("access_scope_id", "in", scopeIds)
-        .where(accessPrincipalPredicateSql("access_scope_members", principals))
-        .execute();
-    })(),
-    emailValues.length === 0
-      ? Promise.resolve([])
-      : db
-          .selectFrom("file_share_emails")
-          .select(["indexed_file_id", "email"])
-          .where("indexed_file_id", "in", fileIds)
-          .where("email", "in", emailValues)
-          .execute(),
-    // Entity-share propagation: a file is accessible if it mentions any entity
-    // that is shared with the viewer (or share_with_everyone). Read-time only.
-    db
-      .selectFrom("entity_mentions")
-      .innerJoin("entities", "entities.id", "entity_mentions.entity_id")
-      .leftJoin("entity_share_emails", (join) => {
-        const condition = join.onRef("entity_share_emails.entity_id", "=", "entities.id");
-        return emailValues.length > 0 ? condition.on("entity_share_emails.email", "in", emailValues) : condition;
-      })
-      .select(["entity_mentions.indexed_file_id"])
-      .where("entity_mentions.indexed_file_id", "in", fileIds)
-      .where(whereLiveEntity())
-      .where((eb) =>
-        eb.or([
-          eb("entities.share_with_everyone", "=", 1),
-          ...(emailValues.length > 0 ? [eb("entity_share_emails.email", "is not", null)] : []),
-        ]),
-      )
-      .execute(),
-  ]);
-
-  const principalSet = new Set(principals.map((principal) => `${principal.type}\0${principal.value}`));
-  const fileAccessByFile = new Map<string, Set<string>>();
-  for (const row of fileAccessRows) {
-    const set = fileAccessByFile.get(row.indexed_file_id) ?? new Set<string>();
-    set.add(`${row.principal_type}\0${row.principal_value}`);
-    fileAccessByFile.set(row.indexed_file_id, set);
-  }
-  const scopeMemberByScope = new Map<string, Set<string>>();
-  for (const row of scopeMemberRows) {
-    const set = scopeMemberByScope.get(row.access_scope_id) ?? new Set<string>();
-    set.add(`${row.principal_type}\0${row.principal_value}`);
-    scopeMemberByScope.set(row.access_scope_id, set);
-  }
-  const manualSharesByFile = new Set<string>();
-  for (const row of shareRows) {
-    manualSharesByFile.add(row.indexed_file_id);
-  }
-  const entityPropByFile = new Set<string>();
-  for (const row of entityPropRows) {
-    entityPropByFile.add(row.indexed_file_id);
-  }
-
-  const allowed = new Set<string>();
-  for (const file of files) {
-    /**
-     * Archived files are invisible regardless of tier. Archival severs the
-     * scope and per-file grants, which would otherwise flip the file into
-     * the unrestricted no-scope tier below — the opposite of the intent.
-     */
-    if (file.is_archived === 1) continue;
-
-    if (file.share_with_everyone === 1) {
-      allowed.add(file.id);
-      continue;
-    }
-
-    const perFile = fileAccessByFile.get(file.id);
-    const isChatSource = slackEntitySyncEnabled && (file.source === "slack" || file.source === "whatsapp");
-    const hasScope = file.access_scope_id != null;
-    const hasFileAccess = (perFile?.size ?? 0) > 0;
-
-    if (!isChatSource && !hasScope && !hasFileAccess) {
-      allowed.add(file.id);
-      continue;
-    }
-
-    if (hasScope && file.access_scope_id) {
-      const scopeMembers = scopeMemberByScope.get(file.access_scope_id);
-      if (scopeMembers && [...scopeMembers].some((principal) => principalSet.has(principal))) {
-        allowed.add(file.id);
-        continue;
-      }
-    }
-
-    if (!isChatSource && hasFileAccess && perFile) {
-      let matched = false;
-      for (const principal of principalSet) {
-        if (perFile.has(principal)) {
-          allowed.add(file.id);
-          matched = true;
-          break;
-        }
-      }
-      if (matched) continue;
-    }
-
-    if (manualSharesByFile.has(file.id)) {
-      allowed.add(file.id);
-      continue;
-    }
-
-    if (entityPropByFile.has(file.id)) {
-      allowed.add(file.id);
-    }
-  }
-  return allowed;
+  return new Set(files.map((file) => file.id));
 }
 
 /**

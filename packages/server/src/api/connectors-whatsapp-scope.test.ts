@@ -51,6 +51,25 @@ async function seedGroup(db: Kysely<DB>, jid: string, name: string) {
     tool_progress: null,
     reasoning_text: null,
     updated_at: "2026-07-07T09:00:00.000Z",
+    index_enabled: 0,
+  });
+}
+
+async function createWhatsAppConnector(db: Kysely<DB>, createdBy: string, scopeConfig = {}) {
+  return createConnectorRepository(db).createConfig({
+    connectorType: "whatsapp",
+    authType: "system",
+    credentials: JSON.stringify({ type: "system" }),
+    scopeConfig: JSON.stringify(scopeConfig),
+    createdBy,
+  });
+}
+
+function patchScope(app: ReturnType<typeof createApp>, cookie: string, id: string, scopeConfig: object) {
+  return app.request(`/api/connectors/${id}/scope`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Cookie: cookie },
+    body: JSON.stringify({ scopeConfig }),
   });
 }
 
@@ -78,26 +97,20 @@ describe("WhatsApp connector scope API", () => {
     } catch {}
   });
 
-  it("flips index_enabled through the generic connector scope endpoint idempotently", async () => {
+  it("applies group indexing deltas idempotently without persisting the request map", async () => {
     await seedGroup(db, "alpha@g.us", "Alpha");
     await seedGroup(db, "beta@g.us", "Beta");
     await seedGroup(db, "gamma@g.us", "Gamma");
-    const connector = await createConnectorRepository(db).createConfig({
-      connectorType: "whatsapp",
-      authType: "system",
-      credentials: JSON.stringify({ type: "system" }),
-      scopeConfig: JSON.stringify({ groupJids: [] }),
-      createdBy: adminId,
-    });
+    await createWhatsAppGroupRepository(db).setIndexEnabled("beta@g.us", true);
+    await createWhatsAppGroupRepository(db).setIndexEnabled("gamma@g.us", true);
+    const connector = await createWhatsAppConnector(db, adminId, { sliceGapMinutes: 15 });
 
-    const first = await app.request(`/api/connectors/${connector.id}/scope`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", Cookie: cookie },
-      body: JSON.stringify({ scopeConfig: { groupJids: ["alpha@g.us", "gamma@g.us", "missing@g.us"] } }),
+    const first = await patchScope(app, cookie, connector.id, {
+      groupIndexing: { "alpha@g.us": true, "beta@g.us": false },
     });
     expect(first.status).toBe(200);
     await expect(first.json()).resolves.toMatchObject({
-      connector: { scopeConfig: { groupJids: ["alpha@g.us", "gamma@g.us"] } },
+      connector: { scopeConfig: { sliceGapMinutes: 15 } },
     });
     await expect(indexFlags(db)).resolves.toEqual({
       "alpha@g.us": 1,
@@ -105,10 +118,8 @@ describe("WhatsApp connector scope API", () => {
       "gamma@g.us": 1,
     });
 
-    const second = await app.request(`/api/connectors/${connector.id}/scope`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", Cookie: cookie },
-      body: JSON.stringify({ scopeConfig: { groupJids: ["alpha@g.us", "gamma@g.us"] } }),
+    const second = await patchScope(app, cookie, connector.id, {
+      groupIndexing: { "alpha@g.us": true, "beta@g.us": false },
     });
     expect(second.status).toBe(200);
     await expect(indexFlags(db)).resolves.toEqual({
@@ -117,28 +128,70 @@ describe("WhatsApp connector scope API", () => {
       "gamma@g.us": 1,
     });
 
-    const third = await app.request(`/api/connectors/${connector.id}/scope`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", Cookie: cookie },
-      body: JSON.stringify({ scopeConfig: { groupJids: ["beta@g.us"] } }),
+    const third = await patchScope(app, cookie, connector.id, {
+      groupIndexing: { "alpha@g.us": false, "beta@g.us": true },
     });
     expect(third.status).toBe(200);
     await expect(indexFlags(db)).resolves.toEqual({
       "alpha@g.us": 0,
       "beta@g.us": 1,
-      "gamma@g.us": 0,
+      "gamma@g.us": 1,
     });
+    const stored = await createConnectorRepository(db).findConfigById(connector.id);
+    expect(stored?.scope_config).toBe(JSON.stringify({ sliceGapMinutes: 15 }));
+    expect((await patchScope(app, cookie, connector.id, { groupIndexing: {} })).status).toBe(200);
+    await expect(indexFlags(db)).resolves.toEqual({ "alpha@g.us": 0, "beta@g.us": 1, "gamma@g.us": 1 });
+    const created = await app.request("/api/connectors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        connectorType: "whatsapp",
+        authType: "system",
+        credentials: {},
+        scopeConfig: { groupIndexing: {}, sliceGapMinutes: 20 },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { connector: { id: string } };
+    const createdConfig = await createConnectorRepository(db).findConfigById(createdBody.connector.id);
+    expect(createdConfig?.scope_config).toBe(JSON.stringify({ sliceGapMinutes: 20 }));
+  });
+
+  it("refuses a non-empty group selection at create time instead of silently dropping it", async () => {
+    await seedGroup(db, "alpha@g.us", "Alpha");
+
+    for (const scopeConfig of [
+      { groupIndexing: { "alpha@g.us": true } },
+      { groupIndexing: ["alpha@g.us"] },
+      { groupJids: ["alpha@g.us"] },
+    ]) {
+      const res = await app.request("/api/connectors", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ connectorType: "whatsapp", authType: "system", credentials: {}, scopeConfig }),
+      });
+      expect(res.status).toBe(400);
+    }
+    await expect(indexFlags(db)).resolves.toEqual({ "alpha@g.us": 0 });
+  });
+
+  it("rejects unknown, malformed, and legacy WhatsApp group selections", async () => {
+    await seedGroup(db, "alpha@g.us", "Alpha");
+    const connector = await createWhatsAppConnector(db, adminId);
+    for (const scopeConfig of [
+      { groupIndexing: { "missing@g.us": true } },
+      { groupIndexing: ["alpha@g.us"] },
+      { groupIndexing: { "alpha@g.us": "yes" } },
+      { groupJids: ["alpha@g.us"] },
+    ]) {
+      expect((await patchScope(app, cookie, connector.id, scopeConfig)).status).toBe(400);
+    }
+    await expect(indexFlags(db)).resolves.toEqual({ "alpha@g.us": 0 });
   });
 
   it("requeues kept slices for groups newly enabled via the scope endpoint", async () => {
     await seedGroup(db, "delta@g.us", "Delta");
-    const connector = await createConnectorRepository(db).createConfig({
-      connectorType: "whatsapp",
-      authType: "system",
-      credentials: JSON.stringify({ type: "system" }),
-      scopeConfig: JSON.stringify({ groupJids: [] }),
-      createdBy: adminId,
-    });
+    const connector = await createWhatsAppConnector(db, adminId);
     const conversation = await db
       .insertInto("conversations")
       .values({ platform: "whatsapp", kind: "group", provider_conversation_id: "delta@g.us", display_name: "Delta" })
@@ -174,11 +227,7 @@ describe("WhatsApp connector scope API", () => {
       })
       .execute();
 
-    const res = await app.request(`/api/connectors/${connector.id}/scope`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", Cookie: cookie },
-      body: JSON.stringify({ scopeConfig: { groupJids: ["delta@g.us"] } }),
-    });
+    const res = await patchScope(app, cookie, connector.id, { groupIndexing: { "delta@g.us": true } });
     expect(res.status).toBe(200);
 
     const slice = await db
@@ -220,16 +269,51 @@ describe("WhatsApp connector scope API", () => {
     });
   });
 
-  it("rolls back WhatsApp group flags when connector scope persistence fails", async () => {
-    await seedGroup(db, "alpha@g.us", "Alpha");
-    await seedGroup(db, "beta@g.us", "Beta");
-    const connector = await createConnectorRepository(db).createConfig({
+  it("synthesizes WhatsApp selection from group rows without reading or writing browse_cache", async () => {
+    await seedGroup(db, "disabled@g.us", "Disabled");
+    await seedGroup(db, "enabled@g.us", "Enabled");
+    await createWhatsAppGroupRepository(db).setIndexEnabled("enabled@g.us", true);
+    const connectors = createConnectorRepository(db);
+    const connector = await connectors.createConfig({
       connectorType: "whatsapp",
       authType: "system",
       credentials: JSON.stringify({ type: "system" }),
-      scopeConfig: JSON.stringify({ groupJids: [] }),
+      scopeConfig: JSON.stringify({ sliceMaxMessages: 40 }),
       createdBy: adminId,
     });
+    await connectors.updateConfig(connector.id, {
+      browseCache: JSON.stringify({ type: "flat", items: [{ id: "stale@g.us", name: "Stale" }] }),
+    });
+
+    const res = await app.request(`/api/connectors/${connector.id}/browse`, {
+      headers: { Cookie: cookie },
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      type: string;
+      items: Array<{ id: string; name: string }>;
+      scopeConfig: Record<string, unknown>;
+    };
+    expect(body).toEqual({
+      type: "flat",
+      items: [
+        { id: "disabled@g.us", name: "Disabled" },
+        { id: "enabled@g.us", name: "Enabled" },
+      ],
+      scopeConfig: {
+        sliceMaxMessages: 40,
+        groupIndexing: { "disabled@g.us": false, "enabled@g.us": true },
+      },
+    });
+    const stored = await connectors.findConfigById(connector.id);
+    expect(stored?.browse_cache).toBe(JSON.stringify({ type: "flat", items: [{ id: "stale@g.us", name: "Stale" }] }));
+  });
+
+  it("rolls back WhatsApp group flags when connector scope persistence fails", async () => {
+    await seedGroup(db, "alpha@g.us", "Alpha");
+    await seedGroup(db, "beta@g.us", "Beta");
+    const connector = await createWhatsAppConnector(db, adminId, { sliceGapMinutes: 15 });
     await sql`
       CREATE TRIGGER fail_connector_scope_update
       BEFORE UPDATE OF scope_config ON connector_configs
@@ -241,11 +325,7 @@ describe("WhatsApp connector scope API", () => {
     let response: Response | undefined;
     let error: unknown;
     try {
-      response = await app.request(`/api/connectors/${connector.id}/scope`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", Cookie: cookie },
-        body: JSON.stringify({ scopeConfig: { groupJids: ["alpha@g.us"] } }),
-      });
+      response = await patchScope(app, cookie, connector.id, { groupIndexing: { "alpha@g.us": true } });
     } catch (err) {
       error = err;
     }
@@ -257,7 +337,7 @@ describe("WhatsApp connector scope API", () => {
       "beta@g.us": 0,
     });
     const stored = await createConnectorRepository(db).findConfigById(connector.id);
-    expect(stored?.scope_config).toBe(JSON.stringify({ groupJids: [] }));
+    expect(stored?.scope_config).toBe(JSON.stringify({ sliceGapMinutes: 15 }));
   });
 });
 

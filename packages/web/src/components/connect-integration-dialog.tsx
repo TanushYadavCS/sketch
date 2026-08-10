@@ -323,7 +323,9 @@ export function ConnectIntegrationDialog({
       }
 
       if (integration.authType === "system" && integration.scopeType === "flat") {
-        const scopeConfig = { [integration.scopeConfigKey ?? "rootPages"]: [] };
+        const scopeConfig = {
+          [integration.scopeConfigKey ?? "rootPages"]: integration.flatScopeShape === "map" ? {} : [],
+        };
         const result = await api.integrations.connect({
           connectorType: integration.type,
           authType: integration.authType,
@@ -336,7 +338,12 @@ export function ConnectIntegrationDialog({
           const scopedResult = browseResult as BrowseResultWithScope;
           setGenericBrowseData(browseResult);
           setSelectedGenericIds(
-            computeSelectedFromScope(scopedResult, scopedResult.scopeConfig ?? scopeConfig, integration.scopeConfigKey),
+            computeSelectedFromScope(
+              scopedResult,
+              scopedResult.scopeConfig ?? scopeConfig,
+              integration.scopeConfigKey,
+              integration.flatScopeShape,
+            ),
           );
           setStep("generic-scope");
           return { deferredScope: true };
@@ -421,7 +428,12 @@ export function ConnectIntegrationDialog({
   const connectWithGenericScopeMutation = useMutation({
     mutationFn: async () => {
       if (!integration || !genericBrowseData) throw new Error("No scope selection available");
-      const scopeConfig = buildScopeFromSelection(genericBrowseData, selectedGenericIds, integration.scopeConfigKey);
+      const scopeConfig = buildScopeFromSelection(
+        genericBrowseData,
+        selectedGenericIds,
+        integration.scopeConfigKey,
+        integration.flatScopeShape,
+      );
       if (useCanvasCredentialFlow || managedConnectorId) {
         if (!managedConnectorId) throw new Error("No managed connector selected");
         return api.integrations.updateScope(managedConnectorId, scopeConfig);
@@ -576,7 +588,12 @@ export function ConnectIntegrationDialog({
           const scopedResult = result as BrowseResultWithScope;
           setGenericBrowseData(result);
           setSelectedGenericIds(
-            computeSelectedFromScope(scopedResult, scopedResult.scopeConfig ?? {}, integration.scopeConfigKey),
+            computeSelectedFromScope(
+              scopedResult,
+              scopedResult.scopeConfig ?? {},
+              integration.scopeConfigKey,
+              integration.flatScopeShape,
+            ),
           );
           setStep("generic-scope");
           return;
@@ -1196,7 +1213,10 @@ export function ConnectIntegrationDialog({
               </Button>
               <Button
                 onClick={() => connectWithGenericScopeMutation.mutate()}
-                disabled={connectWithGenericScopeMutation.isPending || selectedGenericIds.size === 0}
+                disabled={
+                  connectWithGenericScopeMutation.isPending ||
+                  (integration.allowEmptyScopeSelection !== true && selectedGenericIds.size === 0)
+                }
               >
                 {connectWithGenericScopeMutation.isPending ? (
                   <>
