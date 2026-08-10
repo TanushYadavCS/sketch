@@ -54,6 +54,7 @@ export interface ViewerIdentity {
   phone: string | null;
   slackUserId: string | null;
   whatsappLid: string | null;
+  whatsappLids: string[];
 }
 
 interface AuthenticatedUser {
@@ -64,6 +65,7 @@ interface AuthenticatedUser {
   whatsappNumber?: string | null;
   slackUserId?: string | null;
   whatsappLid?: string | null;
+  whatsappLids?: string[];
 }
 
 export interface AuthMiddlewareOpts {
@@ -86,6 +88,7 @@ function identityForUser(user: AuthenticatedUser): ViewerIdentity {
     phone: user.whatsappNumber ?? null,
     slackUserId: user.slackUserId ?? null,
     whatsappLid: user.whatsappLid ?? null,
+    whatsappLids: user.whatsappLids ?? [],
   };
 }
 
@@ -246,6 +249,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
         phone: null,
         slackUserId: null,
         whatsappLid: null,
+        whatsappLids: [],
       });
     }
     c.set("adminCanReadAllFiles", adminCanReadAllFiles);

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { type Insertable, type Kysely, type Selectable, sql } from "kysely";
 import type {
   DB,
@@ -46,6 +47,19 @@ export interface WhatsAppGroupParticipantInput {
 
 export interface WhatsAppGroupParticipantRefreshLogger {
   warn: (context: { groupJid: string; storedCount: number; incomingCount: number }, message: string) => void;
+}
+
+export function whatsappParticipantObservationKey(phoneE164: string | null, lid: string | null): string {
+  return `phone:${phoneE164 ?? "-"}|lid:${lid ?? "-"}`;
+}
+
+function normalizedParticipant(participant: WhatsAppGroupParticipantInput) {
+  return {
+    participantJid: participant.participantJid,
+    phoneE164: participant.phoneE164 ? normalizeContactPointValue("whatsapp", participant.phoneE164) : null,
+    lid: participant.lid?.trim().toLowerCase() || null,
+    adminRole: participant.adminRole ?? null,
+  };
 }
 
 function toIndexingConfig(row: WhatsAppGroupRow): WhatsAppGroupIndexingConfig {
@@ -342,9 +356,7 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
       logger?: WhatsAppGroupParticipantRefreshLogger,
     ): Promise<WhatsAppGroupParticipantRow[]> {
       await db.transaction().execute(async (trx) => {
-        const participantJids = participants.map((participant) => participant.participantJid);
-
-        if (participantJids.length === 0) {
+        if (participants.length === 0) {
           const stored = await trx
             .selectFrom("whatsapp_group_participants")
             .select("participant_jid")
@@ -359,55 +371,111 @@ export function createWhatsAppGroupRepository(db: Kysely<DB>) {
           return;
         }
 
-        /**
-         * Rejects a payload older than what is already stored, inside the same
-         * transaction that does the delete — the only place the check is
-         * actually atomic with the write. A caller that resolved participants
-         * against a socket which then died can otherwise resume here and
-         * delete members a newer roster already committed. Checking in the
-         * caller narrows that window but cannot close it, and this roster
-         * feeds access decisions, so a lost member is a real access bug.
-         */
-        const newest = await trx
-          .selectFrom("whatsapp_group_participants")
-          .select((eb) => eb.fn.max("last_seen_at").as("last_seen_at"))
-          .where("group_jid", "=", groupJid)
-          .executeTakeFirst();
-        if (newest?.last_seen_at && newest.last_seen_at > lastSeenAt) {
-          logger?.warn(
-            { groupJid, storedCount: participantJids.length, incomingCount: participants.length },
-            "Skipped stale WhatsApp group participant refresh",
-          );
-          return;
-        }
+        for (const rawParticipant of participants) {
+          const participant = normalizedParticipant(rawParticipant);
+          const matches =
+            participant.phoneE164 || participant.lid
+              ? await trx
+                  .selectFrom("whatsapp_group_participants")
+                  .selectAll()
+                  .where("group_jid", "=", groupJid)
+                  .where((eb) => {
+                    const conditions = [];
+                    if (participant.phoneE164) conditions.push(eb("phone_e164", "=", participant.phoneE164));
+                    if (participant.lid) conditions.push(eb("lid", "=", participant.lid));
+                    return eb.or(conditions);
+                  })
+                  .execute()
+              : [];
 
-        await trx
-          .deleteFrom("whatsapp_group_participants")
-          .where("group_jid", "=", groupJid)
-          .where("participant_jid", "not in", participantJids)
-          .execute();
+          if (!participant.phoneE164 || !participant.lid) {
+            if (matches.length > 0) {
+              await trx
+                .updateTable("whatsapp_group_participants")
+                .set({
+                  participant_jid: participant.participantJid,
+                  admin_role: participant.adminRole,
+                  last_seen_at: lastSeenAt,
+                })
+                .where(
+                  "id",
+                  "in",
+                  matches.map((row) => row.id),
+                )
+                .where("last_seen_at", "<=", lastSeenAt)
+                .execute();
+              continue;
+            }
+          } else {
+            const exact = matches.find(
+              (row) => row.phone_e164 === participant.phoneE164 && row.lid === participant.lid,
+            );
+            if (exact) {
+              await trx
+                .updateTable("whatsapp_group_participants")
+                .set({
+                  participant_jid: participant.participantJid,
+                  admin_role: participant.adminRole,
+                  last_seen_at: lastSeenAt,
+                })
+                .where("id", "=", exact.id)
+                .where("last_seen_at", "<=", lastSeenAt)
+                .execute();
+              continue;
+            }
+            const phoneOnly = matches.filter((row) => row.phone_e164 === participant.phoneE164 && row.lid === null);
+            const lidOnly = matches.filter((row) => row.lid === participant.lid && row.phone_e164 === null);
+            if (matches.length === 2 && phoneOnly.length === 1 && lidOnly.length === 1) {
+              const freshest = phoneOnly[0].last_seen_at >= lidOnly[0].last_seen_at ? phoneOnly[0] : lidOnly[0];
+              const incomingIsFreshest = lastSeenAt >= freshest.last_seen_at;
+              const merged = await trx
+                .updateTable("whatsapp_group_participants")
+                .set({
+                  observation_key: whatsappParticipantObservationKey(participant.phoneE164, participant.lid),
+                  participant_jid: incomingIsFreshest ? participant.participantJid : freshest.participant_jid,
+                  lid: participant.lid,
+                  admin_role: incomingIsFreshest ? participant.adminRole : freshest.admin_role,
+                  last_seen_at: incomingIsFreshest ? lastSeenAt : freshest.last_seen_at,
+                })
+                .where("id", "=", phoneOnly[0].id)
+                .where("phone_e164", "=", participant.phoneE164)
+                .where("lid", "is", null)
+                .where("last_seen_at", "=", phoneOnly[0].last_seen_at)
+                .executeTakeFirst();
+              if (Number(merged.numUpdatedRows) === 1) {
+                await trx
+                  .deleteFrom("whatsapp_group_participants")
+                  .where("id", "=", lidOnly[0].id)
+                  .where("phone_e164", "is", null)
+                  .where("lid", "=", participant.lid)
+                  .where("last_seen_at", "=", lidOnly[0].last_seen_at)
+                  .execute();
+                continue;
+              }
+            }
+          }
 
-        await trx
-          .insertInto("whatsapp_group_participants")
-          .values(
-            participants.map((participant) => ({
+          await trx
+            .insertInto("whatsapp_group_participants")
+            .values({
+              id: randomUUID(),
               group_jid: groupJid,
+              observation_key: whatsappParticipantObservationKey(participant.phoneE164, participant.lid),
               participant_jid: participant.participantJid,
-              phone_e164: participant.phoneE164 ?? null,
-              lid: participant.lid ?? null,
-              admin_role: participant.adminRole ?? null,
+              phone_e164: participant.phoneE164,
+              lid: participant.lid,
+              admin_role: participant.adminRole,
               last_seen_at: lastSeenAt,
-            })),
-          )
-          .onConflict((oc) =>
-            oc.columns(["group_jid", "participant_jid"]).doUpdateSet({
-              phone_e164: sql`excluded.phone_e164`,
-              lid: sql`excluded.lid`,
-              admin_role: sql`excluded.admin_role`,
-              last_seen_at: lastSeenAt,
-            }),
-          )
-          .execute();
+            })
+            .onConflict((oc) =>
+              oc.columns(["group_jid", "observation_key"]).doUpdateSet({
+                participant_jid: sql`case when excluded.last_seen_at >= whatsapp_group_participants.last_seen_at then excluded.participant_jid else whatsapp_group_participants.participant_jid end`,
+                admin_role: sql`case when excluded.last_seen_at >= whatsapp_group_participants.last_seen_at then excluded.admin_role else whatsapp_group_participants.admin_role end`,
+                last_seen_at: sql`case when excluded.last_seen_at >= whatsapp_group_participants.last_seen_at then excluded.last_seen_at else whatsapp_group_participants.last_seen_at end`,
+              }),
+            )
+            .execute();
+        }
       });
 
       return db

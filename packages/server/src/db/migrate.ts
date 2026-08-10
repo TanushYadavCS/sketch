@@ -168,6 +168,7 @@ import * as m165 from "./migrations/165-typed-access-principals";
 import * as m166 from "./migrations/166-scheduled-task-builder-locks";
 import * as m167 from "./migrations/167-normalize-whatsapp-numbers";
 import * as m168 from "./migrations/168-whatsapp-group-scope-authority";
+import * as m169 from "./migrations/169-whatsapp-identity-observations";
 import type { DB } from "./schema";
 
 /**
@@ -345,6 +346,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "166-scheduled-task-builder-locks": m166,
           "167-normalize-whatsapp-numbers": m167,
           "168-whatsapp-group-scope-authority": m168,
+          "169-whatsapp-identity-observations": m169,
         };
       },
     },

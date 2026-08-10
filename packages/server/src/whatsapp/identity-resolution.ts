@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import { type Kysely, type Transaction, sql } from "kysely";
+import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
-import { isUniqueConstraintError } from "../db/repositories/sub-entities";
+import { createUserWhatsAppLidRepository } from "../db/repositories/user-whatsapp-lids";
 import { createUserRepository } from "../db/repositories/users";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../identity-normalization";
-import { sanitizeWhatsAppDisplayText } from "./privacy";
+import { safeWhatsAppErrorFields, sanitizeWhatsAppDisplayText } from "./privacy";
 import { phoneE164ToWhatsAppJid } from "./provider";
 
 export { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../identity-normalization";
@@ -20,6 +20,7 @@ export type WhatsAppIdentityResolution =
 export interface WhatsAppIdentityRosterParticipant {
   participantJid: string;
   phoneE164: string | null;
+  lid?: string | null;
 }
 
 export interface WhatsAppRosterParticipantSnapshot {
@@ -66,18 +67,8 @@ interface BuildRosterSnapshotOptions {
 
 const REF_ALPHABET = "abcdefghijklmnop";
 
-type WhatsAppIdentityDb = Kysely<DB> | Transaction<DB>;
-
-async function runIdentityMutation<T>(
-  db: WhatsAppIdentityDb,
-  callback: (trx: WhatsAppIdentityDb) => Promise<T>,
-): Promise<T> {
-  if (db.isTransaction) return callback(db);
-  return db.transaction().execute((trx) => callback(trx));
-}
-
 export async function captureWhatsAppLidForPhone(
-  db: WhatsAppIdentityDb,
+  db: Kysely<DB>,
   phoneE164: string | null | undefined,
   lid: string | null | undefined,
   logger?: Pick<Logger, "warn">,
@@ -87,33 +78,22 @@ export async function captureWhatsAppLidForPhone(
   if (!phone || !normalizedLid) return;
 
   try {
-    await runIdentityMutation(db, async (trx) => {
-      const user = await trx
-        .selectFrom("users")
-        .select(["id", "whatsapp_lid"])
-        .where("whatsapp_number", "=", phone)
-        .executeTakeFirst();
-      if (!user || user.whatsapp_lid === normalizedLid) return;
-
-      const conflictingUser = await trx
-        .selectFrom("users")
-        .select("id")
-        .where("whatsapp_lid", "=", normalizedLid)
-        .where("id", "!=", user.id)
-        .executeTakeFirst();
-      if (conflictingUser) {
-        logger?.warn(
-          { userId: user.id, conflictingUserId: conflictingUser.id },
-          "Skipped conflicting WhatsApp LID capture",
-        );
-        return;
-      }
-
-      await trx.updateTable("users").set({ whatsapp_lid: normalizedLid }).where("id", "=", user.id).execute();
-    });
+    const user = await db.selectFrom("users").select("id").where("whatsapp_number", "=", phone).executeTakeFirst();
+    if (!user) return;
+    const result = await createUserWhatsAppLidRepository(db).attachIfPhoneUnchanged(
+      user.id,
+      phone,
+      normalizedLid,
+      new Date().toISOString(),
+    );
+    if (result === "ownership-conflict") {
+      logger?.warn({ operation: "capture_whatsapp_lid", result }, "Skipped conflicting WhatsApp LID capture");
+    }
   } catch (error) {
-    if (!isUniqueConstraintError(error)) throw error;
-    logger?.warn({ phone }, "Skipped conflicting WhatsApp LID capture");
+    logger?.warn(
+      { operation: "capture_whatsapp_lid", ...safeWhatsAppErrorFields(error) },
+      "WhatsApp LID capture failed",
+    );
   }
 }
 
@@ -247,22 +227,52 @@ export function createWhatsAppIdentityResolutionService(db: Kysely<DB>) {
   ): Promise<Map<string, WhatsAppIdentityResolution>> {
     const resolutions = unresolvedMap(participants);
     const phones = uniqueNormalizedPhones(participants);
-    if (phones.length === 0) return resolutions;
+    const lids = [
+      ...new Set(
+        participants
+          .map((participant) => normalizeWhatsAppIdentityLid(participant.lid ?? participant.participantJid))
+          .filter((lid): lid is string => lid !== null),
+      ),
+    ];
+    if (phones.length === 0 && lids.length === 0) return resolutions;
 
     const teammateByPhone = await loadTeammatesByPhone(phones);
+    const teammateByLid = await loadTeammatesByLid(lids);
     const entityByPhone = await loadEntitiesByPhone(phones);
     const labelByPhone = await loadLabelsByPhone(groupJid, phones);
 
     for (const participant of participants) {
       const phone = normalizeWhatsAppIdentityPhone(participant.phoneE164);
-      if (!phone) continue;
+      const lid = normalizeWhatsAppIdentityLid(participant.lid ?? participant.participantJid);
       resolutions.set(
         participant.participantJid,
-        teammateByPhone.get(phone) ?? entityByPhone.get(phone) ?? labelByPhone.get(phone) ?? { kind: "unresolved" },
+        (phone ? teammateByPhone.get(phone) : undefined) ??
+          (lid ? teammateByLid.get(lid) : undefined) ??
+          (phone ? entityByPhone.get(phone) : undefined) ??
+          (phone ? labelByPhone.get(phone) : undefined) ?? { kind: "unresolved" },
       );
     }
 
     return resolutions;
+  }
+
+  async function loadTeammatesByLid(lids: string[]): Promise<Map<string, WhatsAppIdentityResolution>> {
+    if (lids.length === 0) return new Map();
+    const [rows, legacyRows] = await Promise.all([
+      db
+        .selectFrom("user_whatsapp_lids")
+        .innerJoin("users", "users.id", "user_whatsapp_lids.user_id")
+        .select(["user_whatsapp_lids.lid", "users.id", "users.name"])
+        .where("user_whatsapp_lids.lid", "in", lids)
+        .execute(),
+      db.selectFrom("users").select(["id", "name", "whatsapp_lid"]).where("whatsapp_lid", "in", lids).execute(),
+    ]);
+    return new Map([
+      ...legacyRows
+        .filter((row): row is typeof row & { whatsapp_lid: string } => row.whatsapp_lid !== null)
+        .map((row) => [row.whatsapp_lid, { kind: "teammate" as const, userId: row.id, name: row.name }] as const),
+      ...rows.map((row) => [row.lid, { kind: "teammate" as const, userId: row.id, name: row.name }] as const),
+    ]);
   }
 
   async function loadTeammatesByPhone(phones: string[]): Promise<Map<string, WhatsAppIdentityResolution>> {
@@ -425,6 +435,7 @@ export async function buildWhatsAppRosterSnapshot({
     participants.map((participant) => ({
       participantJid: participant.participant_jid,
       phoneE164: participant.phone_e164,
+      lid: participant.lid,
     })),
   );
   const pushNamesBySenderJid = await loadPushNamesBySenderJid(db, conversationId);

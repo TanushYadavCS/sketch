@@ -46,3 +46,15 @@ export function stripPersonalNumberTokens(value: string): string {
     .replace(/([(])\s+/gu, "$1")
     .trim();
 }
+
+function safeErrorToken(value: unknown): string | undefined {
+  if (typeof value !== "string" || !/^[a-z][a-z0-9_.:-]{0,63}$/iu.test(value)) return undefined;
+  return value;
+}
+
+export function safeWhatsAppErrorFields(error: unknown): { errorClass: string; errorCode?: string } {
+  const errorClass = safeErrorToken(error instanceof Error ? error.name : undefined) ?? "UnknownError";
+  if (!error || typeof error !== "object" || !("code" in error)) return { errorClass };
+  const errorCode = safeErrorToken((error as { code?: unknown }).code);
+  return errorCode ? { errorClass, errorCode } : { errorClass };
+}

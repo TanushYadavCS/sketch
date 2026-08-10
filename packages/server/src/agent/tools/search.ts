@@ -4,6 +4,7 @@ import { KIND_TO_RULES, filterAccessibleFileIds, getFileContent, search } from "
 import { type AccessPrincipal, normalizeAccessPrincipals } from "../../connectors/types";
 import { viewerPrincipals } from "../../db/repositories/connectors";
 import { createEntityRepository } from "../../db/repositories/entities";
+import { getWhatsAppLidsForUser } from "../../db/repositories/user-whatsapp-lids";
 import type { SketchMcpDeps, ToolResult } from "./types";
 
 export const searchToolDescription = `Search across all indexed knowledge — docs, tasks, meetings, conversations, and workspace files. Uses hybrid search (keyword + semantic) for best results. Automatically surfaces matching entities for context.
@@ -107,6 +108,7 @@ export async function resolveUserPrincipals(deps: SketchMcpDeps): Promise<Access
     phone: user.whatsapp_number,
     slackUserId: user.slack_user_id,
     whatsappLid: user.whatsapp_lid,
+    whatsappLids: deps.db ? await getWhatsAppLidsForUser(deps.db, user.id) : [],
     isAdmin: false,
     slackEntitySyncEnabled: deps.slackEntitySyncEnabled,
   });

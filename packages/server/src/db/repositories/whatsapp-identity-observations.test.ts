@@ -1,0 +1,144 @@
+import type { Kysely } from "kysely";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createTestDb } from "../../test-utils";
+import type { DB } from "../schema";
+import { createUserWhatsAppLidRepository } from "./user-whatsapp-lids";
+import { createUserRepository } from "./users";
+import { createWhatsAppGroupRepository } from "./whatsapp-groups";
+
+describe("WhatsApp identity observations", () => {
+  let db: Kysely<DB>;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  async function group() {
+    const repo = createWhatsAppGroupRepository(db);
+    await repo.upsert({
+      jid: "identity@g.us",
+      name: "Identity",
+      description: null,
+      updated_at: "2026-08-10T00:00:00Z",
+    });
+    return repo;
+  }
+
+  it("merges one complementary partial pair and keeps unrelated complete combinations", async () => {
+    const repo = await group();
+    await repo.refreshParticipants("identity@g.us", [
+      { participantJid: "phone@s.whatsapp.net", phoneE164: "+14155550100" },
+      { participantJid: "lid@lid", lid: "lid-a@lid" },
+    ]);
+    await repo.refreshParticipants("identity@g.us", [
+      { participantJid: "current@lid", phoneE164: "+14155550100", lid: "lid-a@lid" },
+    ]);
+    await repo.refreshParticipants("identity@g.us", [
+      { participantJid: "old@lid", phoneE164: "+14155550100", lid: "lid-old@lid" },
+    ]);
+
+    const rows = await repo.listParticipants("identity@g.us");
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ phone_e164: "+14155550100", lid: "lid-a@lid" }),
+        expect.objectContaining({ phone_e164: "+14155550100", lid: "lid-old@lid" }),
+      ]),
+    );
+  });
+
+  it("preserves known identifiers on partial refresh and never deletes absent observations", async () => {
+    const repo = await group();
+    await repo.refreshParticipants("identity@g.us", [
+      { participantJid: "complete@lid", phoneE164: "+14155550100", lid: "lid-a@lid" },
+      { participantJid: "absent@lid", phoneE164: "+14155550200", lid: "lid-b@lid" },
+    ]);
+    await repo.refreshParticipants("identity@g.us", [{ participantJid: "lid-a@lid", lid: "lid-a@lid" }]);
+
+    const rows = await repo.listParticipants("identity@g.us");
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ phone_e164: "+14155550100", lid: "lid-a@lid" }),
+        expect.objectContaining({ phone_e164: "+14155550200", lid: "lid-b@lid" }),
+      ]),
+    );
+  });
+
+  it("appends aliases, refreshes sightings, rejects conflicts, and guards stale phones", async () => {
+    const users = createUserRepository(db);
+    await users.create({ id: "one", name: "One", whatsappNumber: "+14155550100" });
+    await users.create({ id: "two", name: "Two", whatsappNumber: "+14155550200" });
+    const lids = createUserWhatsAppLidRepository(db);
+
+    await expect(lids.attachIfPhoneUnchanged("one", "+14155550100", "LID-A@LID", "2026-08-10T01:00:00Z")).resolves.toBe(
+      "attached",
+    );
+    await expect(lids.attachIfPhoneUnchanged("one", "+14155550100", "lid-a@lid", "2026-08-10T02:00:00Z")).resolves.toBe(
+      "already-owned",
+    );
+    await expect(lids.attachIfPhoneUnchanged("two", "+14155550200", "lid-a@lid", "2026-08-10T03:00:00Z")).resolves.toBe(
+      "ownership-conflict",
+    );
+    await expect(lids.attachIfPhoneUnchanged("one", "+14155550999", "lid-b@lid", "2026-08-10T03:00:00Z")).resolves.toBe(
+      "stale-phone",
+    );
+
+    await expect(lids.listForUser("one")).resolves.toEqual([
+      expect.objectContaining({ lid: "lid-a@lid", last_seen_at: "2026-08-10T02:00:00Z" }),
+    ]);
+  });
+
+  it("does not regress aliases, legacy latest identity, or refresh timestamps", async () => {
+    await createUserRepository(db).create({ id: "monotonic", name: "Monotonic", whatsappNumber: "+14155550300" });
+    const lids = createUserWhatsAppLidRepository(db);
+    await lids.attachIfPhoneUnchanged("monotonic", "+14155550300", "new@lid", "2026-08-10T05:00:00Z");
+    await lids.attachIfPhoneUnchanged("monotonic", "+14155550300", "old@lid", "2026-08-10T04:00:00Z");
+    await lids.attachIfPhoneUnchanged("monotonic", "+14155550300", "new@lid", "2026-08-10T03:00:00Z");
+    await lids.markAttempt("monotonic", "+14155550300", "2026-08-10T06:00:00Z", true);
+    await lids.markAttempt("monotonic", "+14155550300", "2026-08-10T02:00:00Z", true);
+
+    await expect(lids.listForUser("monotonic")).resolves.toEqual([
+      expect.objectContaining({ lid: "old@lid", last_seen_at: "2026-08-10T04:00:00Z" }),
+      expect.objectContaining({ lid: "new@lid", last_seen_at: "2026-08-10T05:00:00Z" }),
+    ]);
+    await expect(
+      db
+        .selectFrom("users")
+        .select(["whatsapp_lid", "whatsapp_lid_attempted_at", "whatsapp_lid_checked_at"])
+        .where("id", "=", "monotonic")
+        .executeTakeFirstOrThrow(),
+    ).resolves.toEqual({
+      whatsapp_lid: "new@lid",
+      whatsapp_lid_attempted_at: "2026-08-10T06:00:00Z",
+      whatsapp_lid_checked_at: "2026-08-10T06:00:00Z",
+    });
+  });
+
+  it("orders due refreshes portably with null checks first, then check and attempt age", async () => {
+    const users = createUserRepository(db);
+    for (const [index, id] of ["never", "old-check", "new-check"].entries()) {
+      await users.create({ id, name: id, whatsappNumber: `+1415555010${index}` });
+    }
+    await db
+      .updateTable("users")
+      .set({ whatsapp_lid_attempted_at: "2026-08-01T00:00:00Z" })
+      .where("id", "=", "old-check")
+      .execute();
+    await db
+      .updateTable("users")
+      .set({
+        whatsapp_lid_attempted_at: "2026-08-02T00:00:00Z",
+        whatsapp_lid_checked_at: "2026-07-01T00:00:00Z",
+      })
+      .where("id", "=", "new-check")
+      .execute();
+
+    const due = await createUserWhatsAppLidRepository(db).listDue("2026-08-03T00:00:00Z", 10);
+    expect(due.map((row) => row.id)).toEqual(["never", "old-check", "new-check"]);
+  });
+});

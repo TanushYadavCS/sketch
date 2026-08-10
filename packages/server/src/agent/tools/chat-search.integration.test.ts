@@ -7,7 +7,10 @@ import { createConversationSlicesRepository } from "../../db/repositories/conver
 import { createConversationRepository } from "../../db/repositories/conversations";
 import { createSlackChannelParticipantsRepository } from "../../db/repositories/slack-channel-participants";
 import { createUserRepository } from "../../db/repositories/users";
-import { createWhatsAppGroupRepository } from "../../db/repositories/whatsapp-groups";
+import {
+  createWhatsAppGroupRepository,
+  whatsappParticipantObservationKey,
+} from "../../db/repositories/whatsapp-groups";
 import type { DB } from "../../db/schema";
 import { createTestDb, createTestLogger, createTestPgDb, getSharedPgDb } from "../../test-utils";
 import { stableWhatsAppParticipantJidRef } from "../../whatsapp/identity-resolution";
@@ -25,6 +28,34 @@ interface SeededConversation {
   connectorConfigId: string;
   scopeId: string;
   fileId: string;
+}
+
+interface WhatsAppParticipantFixture {
+  group_jid: string;
+  participant_jid: string;
+  phone_e164: string | null;
+  lid: string | null;
+  admin_role: "admin" | "superadmin" | null;
+  last_seen_at: string;
+}
+
+async function insertWhatsAppParticipantFixtures(
+  db: Kysely<DB>,
+  fixtures: WhatsAppParticipantFixture[],
+): Promise<void> {
+  await db
+    .insertInto("whatsapp_group_participants")
+    .values(
+      fixtures.map((fixture) => {
+        const observationKey = whatsappParticipantObservationKey(fixture.phone_e164, fixture.lid);
+        return {
+          ...fixture,
+          id: `fixture:${fixture.group_jid}:${observationKey}`,
+          observation_key: observationKey,
+        };
+      }),
+    )
+    .execute();
 }
 
 async function seedUser(db: Kysely<DB>, options: { emailVerified?: boolean } = {}): Promise<void> {
@@ -184,6 +215,7 @@ async function seedWhatsAppGroup(
     displayName?: string;
     senderJid?: string;
     rosterSnapshot?: string;
+    seedCurrentUserParticipant?: boolean;
   },
 ): Promise<SeededConversation & { messageId: number; groupJid: string }> {
   const groupJid = `${randomUUID()}@g.us`;
@@ -195,18 +227,17 @@ async function seedWhatsAppGroup(
     updated_at: "2026-07-17T09:00:00.000Z",
   });
   await groups.setIndexEnabled(groupJid, options.indexEnabled ?? true);
-  if (options.members.includes(USER_EMAIL)) {
-    await db
-      .insertInto("whatsapp_group_participants")
-      .values({
+  if (options.members.includes(USER_EMAIL) && options.seedCurrentUserParticipant !== false) {
+    await insertWhatsAppParticipantFixtures(db, [
+      {
         group_jid: groupJid,
         participant_jid: "15550001234@s.whatsapp.net",
         phone_e164: USER_WHATSAPP_NUMBER,
         lid: null,
         admin_role: null,
         last_seen_at: "2026-07-17T09:00:00.000Z",
-      })
-      .execute();
+      },
+    ]);
   }
   const conversations = createConversationRepository(db);
   const conversation = await conversations.getOrCreate({
@@ -548,13 +579,23 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
-    it("authorizes a WhatsApp group through a stable persisted phone-to-LID mapping", async () => {
+    it("authorizes a WhatsApp group through a non-legacy user LID alias", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "stable lid mapping marker",
         members: ["other@example.com"],
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
+      await db.updateTable("users").set({ whatsapp_lid: "legacy-only@lid" }).where("id", "=", USER_ID).execute();
+      await db
+        .insertInto("user_whatsapp_lids")
+        .values({
+          user_id: USER_ID,
+          lid: "86702773280883@lid",
+          first_seen_at: "2026-07-17T09:00:00.000Z",
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        })
+        .execute();
       const mappingGroup = `${randomUUID()}@g.us`;
       await createWhatsAppGroupRepository(db).upsert({
         jid: mappingGroup,
@@ -562,27 +603,24 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         description: null,
         updated_at: "2026-07-17T09:00:00.000Z",
       });
-      await db
-        .insertInto("whatsapp_group_participants")
-        .values([
-          {
-            group_jid: mappingGroup,
-            participant_jid: "86702773280883@lid",
-            phone_e164: USER_WHATSAPP_NUMBER,
-            lid: "86702773280883@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-          {
-            group_jid: seeded.groupJid,
-            participant_jid: "86702773280883@lid",
-            phone_e164: null,
-            lid: "86702773280883@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-        ])
-        .execute();
+      await insertWhatsAppParticipantFixtures(db, [
+        {
+          group_jid: mappingGroup,
+          participant_jid: "86702773280883@lid",
+          phone_e164: USER_WHATSAPP_NUMBER,
+          lid: "86702773280883@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+        {
+          group_jid: seeded.groupJid,
+          participant_jid: "86702773280883@lid",
+          phone_e164: null,
+          lid: "86702773280883@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+      ]);
 
       const outcome = await handleAllChatsSearch({ query: "stable lid mapping" }, depsFor(db));
       expect(outcome.ok).toBe(true);
@@ -597,6 +635,15 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         connectorConfigId: whatsappConfigId,
         indexEnabled: false,
       });
+      await db
+        .insertInto("user_whatsapp_lids")
+        .values({
+          user_id: USER_ID,
+          lid: "86702773280883@lid",
+          first_seen_at: "2026-07-17T09:00:00.000Z",
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        })
+        .execute();
       const mappingGroup = `${randomUUID()}@g.us`;
       await createWhatsAppGroupRepository(db).upsert({
         jid: mappingGroup,
@@ -604,27 +651,24 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         description: null,
         updated_at: "2026-07-17T09:00:00.000Z",
       });
-      await db
-        .insertInto("whatsapp_group_participants")
-        .values([
-          {
-            group_jid: mappingGroup,
-            participant_jid: "15550001234@s.whatsapp.net",
-            phone_e164: null,
-            lid: "86702773280883@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-          {
-            group_jid: seeded.groupJid,
-            participant_jid: "86702773280883@lid",
-            phone_e164: null,
-            lid: "86702773280883@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-        ])
-        .execute();
+      await insertWhatsAppParticipantFixtures(db, [
+        {
+          group_jid: mappingGroup,
+          participant_jid: "15550001234@s.whatsapp.net",
+          phone_e164: null,
+          lid: "86702773280883@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+        {
+          group_jid: seeded.groupJid,
+          participant_jid: "86702773280883@lid",
+          phone_e164: null,
+          lid: "86702773280883@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+      ]);
 
       const outcome = await handleAllChatsSearch({ query: "phone jid lid mapping" }, depsFor(db));
       expect(outcome.ok).toBe(true);
@@ -646,35 +690,32 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         description: null,
         updated_at: "2026-07-17T09:00:00.000Z",
       });
-      await db
-        .insertInto("whatsapp_group_participants")
-        .values([
-          {
-            group_jid: mappingGroup,
-            participant_jid: "lid-one@lid",
-            phone_e164: USER_WHATSAPP_NUMBER,
-            lid: "lid-one@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-          {
-            group_jid: mappingGroup,
-            participant_jid: "lid-two@lid",
-            phone_e164: USER_WHATSAPP_NUMBER,
-            lid: "lid-two@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-          {
-            group_jid: seeded.groupJid,
-            participant_jid: "lid-one@lid",
-            phone_e164: null,
-            lid: "lid-one@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-        ])
-        .execute();
+      await insertWhatsAppParticipantFixtures(db, [
+        {
+          group_jid: mappingGroup,
+          participant_jid: "lid-one@lid",
+          phone_e164: USER_WHATSAPP_NUMBER,
+          lid: "lid-one@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+        {
+          group_jid: mappingGroup,
+          participant_jid: "lid-two@lid",
+          phone_e164: USER_WHATSAPP_NUMBER,
+          lid: "lid-two@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+        {
+          group_jid: seeded.groupJid,
+          participant_jid: "lid-one@lid",
+          phone_e164: null,
+          lid: "lid-one@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+      ]);
 
       const outcome = await handleAllChatsSearch({ query: "ambiguous lid mapping" }, depsFor(db));
       expect(outcome.ok).toBe(true);
@@ -700,35 +741,32 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
           updated_at: "2026-07-17T09:00:00.000Z",
         });
       }
-      await db
-        .insertInto("whatsapp_group_participants")
-        .values([
-          {
-            group_jid: firstMappingGroup,
-            participant_jid: "shared-lid@lid",
-            phone_e164: USER_WHATSAPP_NUMBER,
-            lid: "shared-lid@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-          {
-            group_jid: secondMappingGroup,
-            participant_jid: "shared-lid@lid",
-            phone_e164: "+15550009999",
-            lid: "shared-lid@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-          {
-            group_jid: seeded.groupJid,
-            participant_jid: "shared-lid@lid",
-            phone_e164: null,
-            lid: "shared-lid@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-        ])
-        .execute();
+      await insertWhatsAppParticipantFixtures(db, [
+        {
+          group_jid: firstMappingGroup,
+          participant_jid: "shared-lid@lid",
+          phone_e164: USER_WHATSAPP_NUMBER,
+          lid: "shared-lid@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+        {
+          group_jid: secondMappingGroup,
+          participant_jid: "shared-lid@lid",
+          phone_e164: "+15550009999",
+          lid: "shared-lid@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+        {
+          group_jid: seeded.groupJid,
+          participant_jid: "shared-lid@lid",
+          phone_e164: null,
+          lid: "shared-lid@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+      ]);
 
       const outcome = await handleAllChatsSearch({ query: "ambiguous reverse lid" }, depsFor(db));
       expect(outcome.ok).toBe(true);
@@ -750,27 +788,24 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         description: null,
         updated_at: "2026-07-17T09:00:00.000Z",
       });
-      await db
-        .insertInto("whatsapp_group_participants")
-        .values([
-          {
-            group_jid: mappingGroup,
-            participant_jid: "ambiguous-one@lid",
-            phone_e164: USER_WHATSAPP_NUMBER,
-            lid: "ambiguous-one@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-          {
-            group_jid: mappingGroup,
-            participant_jid: "ambiguous-two@lid",
-            phone_e164: USER_WHATSAPP_NUMBER,
-            lid: "ambiguous-two@lid",
-            admin_role: null,
-            last_seen_at: "2026-07-17T09:00:00.000Z",
-          },
-        ])
-        .execute();
+      await insertWhatsAppParticipantFixtures(db, [
+        {
+          group_jid: mappingGroup,
+          participant_jid: "ambiguous-one@lid",
+          phone_e164: USER_WHATSAPP_NUMBER,
+          lid: "ambiguous-one@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+        {
+          group_jid: mappingGroup,
+          participant_jid: "ambiguous-two@lid",
+          phone_e164: USER_WHATSAPP_NUMBER,
+          lid: "ambiguous-two@lid",
+          admin_role: null,
+          last_seen_at: "2026-07-17T09:00:00.000Z",
+        },
+      ]);
 
       const outcome = await handleAllChatsSearch({ query: "direct phone survives" }, depsFor(db));
       expect(outcome.ok).toBe(true);
@@ -1730,6 +1765,7 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         text: "disabled zero teammates",
         members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
+        seedCurrentUserParticipant: false,
       });
       const groups = createWhatsAppGroupRepository(db);
       await groups.refreshParticipants(seeded.groupJid, [
@@ -1758,6 +1794,7 @@ function runReconcileSuite(label: string, createDb: () => Promise<Kysely<DB>>) {
         text: "external only group",
         members: [USER_EMAIL],
         connectorConfigId: whatsappConfigId,
+        seedCurrentUserParticipant: false,
       });
       await createWhatsAppGroupRepository(db).refreshParticipants(seeded.groupJid, [
         { participantJid: "15559990000@s.whatsapp.net", phoneE164: "+15559990000", adminRole: null },

@@ -370,7 +370,15 @@ function createUserRepositoryWithContext(
       }
       if (data.passwordHash !== undefined) values.password_hash = data.passwordHash;
       if (data.authRole !== undefined) values.auth_role = data.authRole;
-      if (data.whatsappNumber !== undefined) values.whatsapp_number = storedWhatsAppNumber(data.whatsappNumber);
+      if (data.whatsappNumber !== undefined) {
+        const nextNumber = storedWhatsAppNumber(data.whatsappNumber);
+        const existing = await db.selectFrom("users").select("whatsapp_number").where("id", "=", id).executeTakeFirst();
+        values.whatsapp_number = nextNumber;
+        if (existing && existing.whatsapp_number !== nextNumber) {
+          values.whatsapp_lid_attempted_at = null;
+          values.whatsapp_lid_checked_at = null;
+        }
+      }
       if (data.slackUserId !== undefined) values.slack_user_id = data.slackUserId;
       if (data.description !== undefined) values.description = data.description;
       if (data.role !== undefined) values.role = data.role;

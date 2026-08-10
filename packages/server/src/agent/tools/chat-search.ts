@@ -5,7 +5,7 @@ import { parseSlackRosterSnapshot } from "../../slack/identity-resolution";
 import { SLACK_MEMBERSHIP_FRESHNESS_MS } from "../../slack/membership-reconciler";
 import { normalizeWhatsAppIdentityPhone } from "../../whatsapp/identity-resolution";
 import { sanitizeWhatsAppDisplayText } from "../../whatsapp/privacy";
-import { phoneE164ToWhatsAppJid, whatsappJidToPhoneE164 } from "../../whatsapp/provider";
+import { whatsappJidToPhoneE164 } from "../../whatsapp/provider";
 import { renderSlackChannelHistoryMessages } from "./slack-channel-history";
 import type { SketchMcpDeps } from "./types";
 import { parseWhatsAppGroupRosterSnapshot, renderWhatsAppGroupHistoryMessages } from "./whatsapp-group-history";
@@ -35,16 +35,21 @@ export type AllChatsSearchOutcome =
 export interface ChatHistoryAccessIdentity {
   slackUserId: string | null;
   whatsappPhone: string | null;
+  whatsappLids: string[];
 }
 
 export async function resolveChatHistoryAccessIdentity(deps: SketchMcpDeps): Promise<ChatHistoryAccessIdentity> {
   if (!deps.currentUserId || !deps.userRepo) {
-    return { slackUserId: null, whatsappPhone: null };
+    return { slackUserId: null, whatsappPhone: null, whatsappLids: [] };
   }
   const user = await deps.userRepo.findById(deps.currentUserId);
+  const lids = deps.db
+    ? await deps.db.selectFrom("user_whatsapp_lids").select("lid").where("user_id", "=", deps.currentUserId).execute()
+    : [];
   return {
     slackUserId: user?.slack_user_id?.trim() || null,
     whatsappPhone: normalizeWhatsAppIdentityPhone(user?.whatsapp_number ?? null),
+    whatsappLids: [...new Set([...(user?.whatsapp_lid ? [user.whatsapp_lid] : []), ...lids.map((row) => row.lid)])],
   };
 }
 
@@ -76,7 +81,7 @@ export class ChatHistoryAccessResolver {
 
   async hasUsableIdentity(): Promise<boolean> {
     const identity = await this.loadIdentity();
-    return Boolean(identity.slackUserId || identity.whatsappPhone);
+    return Boolean(identity.slackUserId || identity.whatsappPhone || identity.whatsappLids.length > 0);
   }
 
   async isConversationAuthorized(conversationId: number, _refresh = false): Promise<boolean> {
@@ -129,7 +134,7 @@ export class ChatHistoryAccessResolver {
       }
     }
 
-    if (identity.whatsappPhone && whatsappRows.length > 0) {
+    if ((identity.whatsappPhone || identity.whatsappLids.length > 0) && whatsappRows.length > 0) {
       const groupIds = whatsappRows.map((row) => row.providerConversationId);
       const participants = await this.deps.db
         .selectFrom("whatsapp_group_participants")
@@ -140,16 +145,20 @@ export class ChatHistoryAccessResolver {
         participants
           .filter(
             (row) =>
-              normalizeWhatsAppIdentityPhone(row.phone_e164) === identity.whatsappPhone ||
-              phoneFromParticipantJid(row.participant_jid) === identity.whatsappPhone,
+              identity.whatsappPhone !== null &&
+              (normalizeWhatsAppIdentityPhone(row.phone_e164) === identity.whatsappPhone ||
+                phoneFromParticipantJid(row.participant_jid) === identity.whatsappPhone),
           )
           .map((row) => row.group_jid),
       );
-      const trustedLid = await this.resolveTrustedWhatsAppLid(identity.whatsappPhone);
+      const aliases = new Set(identity.whatsappLids);
       const lidGroups = new Set(
-        trustedLid
-          ? participants.filter((row) => lidFromParticipantRow(row) === trustedLid).map((row) => row.group_jid)
-          : [],
+        participants
+          .filter((row) => {
+            const lid = lidFromParticipantRow(row);
+            return lid !== null && aliases.has(lid);
+          })
+          .map((row) => row.group_jid),
       );
       for (const row of whatsappRows) {
         if (directGroups.has(row.providerConversationId) || lidGroups.has(row.providerConversationId)) {
@@ -160,35 +169,8 @@ export class ChatHistoryAccessResolver {
     return authorized;
   }
 
-  private resolveTrustedWhatsAppLid(phone: string): Promise<string | null> {
-    return this.loadTrustedWhatsAppLid(phone);
-  }
-
   private loadIdentity(): Promise<ChatHistoryAccessIdentity> {
     return resolveChatHistoryAccessIdentity(this.deps);
-  }
-
-  private async loadTrustedWhatsAppLid(phone: string): Promise<string | null> {
-    if (!this.deps.db) return null;
-    const phoneRows = await this.deps.db
-      .selectFrom("whatsapp_group_participants")
-      .select(["participant_jid", "lid"])
-      .where((eb) => eb.or([eb("phone_e164", "=", phone), eb("participant_jid", "=", phoneE164ToWhatsAppJid(phone))]))
-      .execute();
-    const lids = new Set(phoneRows.map(lidFromParticipantRow).filter((lid): lid is string => lid !== null));
-    if (lids.size !== 1) return null;
-    const lid = [...lids][0];
-    const mappedRows = await this.deps.db
-      .selectFrom("whatsapp_group_participants")
-      .select(["participant_jid", "phone_e164", "lid"])
-      .where((eb) => eb.or([eb("lid", "=", lid), eb("participant_jid", "=", lid)]))
-      .execute();
-    const mappedPhones = new Set(
-      mappedRows
-        .map((row) => normalizeWhatsAppIdentityPhone(row.phone_e164) ?? phoneFromParticipantJid(row.participant_jid))
-        .filter((value): value is string => value !== null),
-    );
-    return mappedPhones.size === 1 && mappedPhones.has(phone) ? lid : null;
   }
 }
 

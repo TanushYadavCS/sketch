@@ -54,6 +54,7 @@ interface UserRoutesDeps {
   registerManagedMember?: (input: ManagedMemberRegistrationInput) => Promise<unknown>;
   syncManagedMemberMapping?: (input: ManagedMemberRegistrationInput) => Promise<ManagedMemberRegistrationResult>;
   removeManagedMember?: (input: ManagedMemberRemovalInput) => Promise<unknown>;
+  captureWhatsAppLid?: (userId: string, phoneE164: string) => void;
 }
 
 const allowedToolsSchema = z.array(z.string().refine(isKnownAgentToolName, "Unknown tool name")).nullable().optional();
@@ -453,6 +454,7 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         reportsTo: reportsTo ?? undefined,
         allowedTools: parsed.data.allowedTools ?? undefined,
       });
+      if (user.whatsapp_number) deps.captureWhatsAppLid?.(user.id, user.whatsapp_number);
       let managedWhatsappMappingStatus: ManagedMemberRegistrationResult["mappingStatus"] | "failed" | undefined;
       if (user.type === "human" && user.email && user.whatsapp_number) {
         await withManagedMemberSyncLock(user.id, async () => {
@@ -693,6 +695,9 @@ export function userRoutes(users: UserRepo, deps: UserRoutesDeps) {
         reportsTo: reportsToValue,
         allowedTools: parsed.data.allowedTools,
       });
+      if (user.whatsapp_number && user.whatsapp_number !== existing.whatsapp_number) {
+        deps.captureWhatsAppLid?.(user.id, user.whatsapp_number);
+      }
       const managedWhatsappMappingStatus =
         user.type === "human" && user.email && user.whatsapp_number
           ? await syncManagedMemberMapping(deps, {

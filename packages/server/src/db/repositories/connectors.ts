@@ -43,6 +43,7 @@ export interface FileViewer {
   phone?: string | null;
   slackUserId?: string | null;
   whatsappLid?: string | null;
+  whatsappLids?: string[];
   isAdmin: boolean;
   slackEntitySyncEnabled?: boolean;
 }
@@ -58,6 +59,7 @@ export function viewerPrincipals(viewer: FileViewer): AccessPrincipal[] {
   if (viewer.whatsappLid !== null && viewer.whatsappLid !== undefined) {
     principals.push({ type: "whatsapp_lid", value: viewer.whatsappLid });
   }
+  for (const lid of viewer.whatsappLids ?? []) principals.push({ type: "whatsapp_lid", value: lid });
   return normalizeAccessPrincipals(principals);
 }
 
@@ -123,6 +125,16 @@ async function loadPrincipalResolution(
       ]),
     )
     .execute();
+  const lidValues = valuesByType.get("whatsapp_lid") ?? [];
+  const lidAliases =
+    lidValues.length > 0
+      ? await db
+          .selectFrom("user_whatsapp_lids")
+          .innerJoin("users", "users.id", "user_whatsapp_lids.user_id")
+          .select(["user_whatsapp_lids.lid", "users.id", "users.name", "users.email"])
+          .where("user_whatsapp_lids.lid", "in", lidValues)
+          .execute()
+      : [];
   const resolved = new Map<string, ResolvedPrincipal>();
   const usersById = new Map(users.map((user) => [user.id, user]));
   for (const user of users) {
@@ -141,6 +153,13 @@ async function loadPrincipalResolution(
         email: user.email,
       });
     }
+  }
+  for (const alias of lidAliases) {
+    resolved.set(principalLookupKey("whatsapp_lid", alias.lid), {
+      userId: alias.id,
+      userName: alias.name,
+      email: alias.email,
+    });
   }
   return resolved;
 }

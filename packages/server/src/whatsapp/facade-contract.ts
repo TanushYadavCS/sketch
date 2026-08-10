@@ -3,7 +3,7 @@ import type { WhatsAppSendResult } from "./provider";
 
 export type { WhatsAppSendResult } from "./provider";
 
-export const WHATSAPP_FACADE_CONTRACT_VERSION = "1.2";
+export const WHATSAPP_FACADE_CONTRACT_VERSION = "1.3";
 
 export const whatsAppFacadeTargetSchema = z.string().min(1);
 
@@ -100,12 +100,22 @@ export const whatsAppGroupMetadataRequestSchema = z.object({
   opts: whatsAppGroupMetadataOptionsSchema,
 });
 export const whatsAppResolveLidRequestSchema = z.object({ jid: z.string().min(1) });
+export const whatsAppPhoneLidResolutionRequestSchema = z.object({
+  phoneE164: z.string().regex(/^\+[1-9]\d{7,14}$/u),
+});
+export const whatsAppPhoneLidResolutionSchema = z.object({
+  lid: z.string().regex(/^.+@lid$/u),
+  source: z.enum(["provider-current", "baileys-fallback"]),
+});
 export const whatsAppEmptyRequestSchema = z.object({});
 export const whatsAppOkResponseSchema = z.object({ ok: z.literal(true) });
 export const whatsAppReactionResponseSchema = z.object({ result: whatsAppReactionResultSchema });
 export const whatsAppMediaDownloadResponseSchema = z.object({ result: stagedMediaRefSchema.nullable() });
 export const whatsAppGroupMetadataResponseSchema = z.object({ result: normalizedGroupMetadataSchema.nullable() });
 export const whatsAppResolveLidResponseSchema = z.object({ phoneJid: z.string().nullable() });
+export const whatsAppPhoneLidResolutionResponseSchema = z.object({
+  result: whatsAppPhoneLidResolutionSchema.nullable(),
+});
 export const whatsAppHistoryMessageKeySchema = z.object({
   remoteJid: z.string().min(1),
   id: z.string().min(1),
@@ -236,6 +246,7 @@ export type WhatsAppHistorySyncRequest = z.infer<typeof whatsAppHistorySyncReque
 export type WhatsAppMessageEnvelope = z.infer<typeof whatsAppMessageEnvelopeSchema>;
 export type WhatsAppHistoryBatchEnvelope = z.infer<typeof whatsAppHistoryBatchEnvelopeSchema>;
 export type WhatsAppInboundEnvelope = z.infer<typeof whatsAppInboundEnvelopeSchema>;
+export type WhatsAppPhoneLidResolution = z.infer<typeof whatsAppPhoneLidResolutionSchema>;
 
 export interface WhatsAppSocketFacade {
   send(
@@ -249,6 +260,7 @@ export interface WhatsAppSocketFacade {
   groupMetadata(jid: string, opts: { refresh: boolean }): Promise<NormalizedGroupMetadata | null>;
   syncAllGroups(opts: { force: boolean }): Promise<WhatsAppGroupSyncSummary>;
   resolveLid(jid: string): Promise<string | null>;
+  resolvePhoneToLid?(phoneE164: string): Promise<WhatsAppPhoneLidResolution | null>;
   fetchMessageHistory(request: WhatsAppHistorySyncRequest): Promise<string>;
   pairing: {
     startQr(onEvent: (event: WhatsAppPairingEvent) => Promise<void>): Promise<void>;
