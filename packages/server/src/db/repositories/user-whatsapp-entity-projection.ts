@@ -39,14 +39,24 @@ async function upsertWhatsAppEntityPoint(
     })
     .onConflict((oc) =>
       oc.columns(["entity_id", "kind", "value"]).doUpdateSet({
-        display_value: sql`COALESCE(entity_contact_points.display_value, excluded.display_value)`,
+        display_value: sql`CASE
+          WHEN entity_contact_points.created_by_user_id = ${userId}
+            AND entity_contact_points.source IN ('sketch_user', 'whatsapp_identity')
+          THEN COALESCE(entity_contact_points.display_value, excluded.display_value)
+          ELSE entity_contact_points.display_value
+        END`,
         is_primary: sql`CASE
           WHEN entity_contact_points.created_by_user_id = ${userId}
             AND entity_contact_points.source IN ('sketch_user', 'whatsapp_identity')
           THEN ${point.primary ? 1 : 0}
           ELSE entity_contact_points.is_primary
         END`,
-        updated_at: now,
+        updated_at: sql`CASE
+          WHEN entity_contact_points.created_by_user_id = ${userId}
+            AND entity_contact_points.source IN ('sketch_user', 'whatsapp_identity')
+          THEN ${now}
+          ELSE entity_contact_points.updated_at
+        END`,
       }),
     )
     .execute();

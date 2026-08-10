@@ -4,6 +4,7 @@ import { storedWhatsAppNumber, whatsappNumberLookupValues } from "../../identity
 import type { DB, UsersTable } from "../schema";
 import { invalidateSettingsCache } from "./settings";
 import { ensureEntityForUser } from "./user-entity-linking";
+import { projectUserWhatsAppIdentityToEntity } from "./user-whatsapp-entity-projection";
 
 type UserDb = Kysely<DB> | Transaction<DB>;
 type UserRow = Selectable<UsersTable>;
@@ -401,8 +402,12 @@ function createUserRepositoryWithContext(
       }
 
       const user = await db.selectFrom("users").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
-      if (slackEntitySyncEnabled && user.type === "human" && identityChanged && !data.skipEntityLinking) {
-        await ensureEntityForUser(db, id);
+      if (user.type === "human" && identityChanged && !data.skipEntityLinking) {
+        if (slackEntitySyncEnabled) {
+          await ensureEntityForUser(db, id);
+        } else if (data.whatsappNumber !== undefined) {
+          await projectUserWhatsAppIdentityToEntity(db, id);
+        }
       }
       return user;
     },

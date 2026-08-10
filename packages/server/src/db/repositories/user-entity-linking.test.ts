@@ -242,6 +242,37 @@ describe("ensureUserEntityLinkForEntity", () => {
     ]);
   });
 
+  it("keeps a linked entity phone current when Slack entity sync is disabled", async () => {
+    const linkedUsers = createUserRepository(db);
+    await linkedUsers.create({ id: "sync-off-phone", name: "Sync Off Phone", whatsappNumber: "+14155550610" });
+    const link = await db
+      .selectFrom("user_entity_links")
+      .select("entity_id")
+      .where("user_id", "=", "sync-off-phone")
+      .executeTakeFirstOrThrow();
+    const syncOffUsers = createUserRepository(db, { slackEntitySyncEnabled: false });
+
+    await syncOffUsers.update("sync-off-phone", { whatsappNumber: "+14155550611" });
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select("value")
+        .where("entity_id", "=", link.entity_id)
+        .where("kind", "=", "phone")
+        .execute(),
+    ).resolves.toEqual([{ value: "+14155550611" }]);
+
+    await syncOffUsers.update("sync-off-phone", { whatsappNumber: null });
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select("value")
+        .where("entity_id", "=", link.entity_id)
+        .where("kind", "=", "phone")
+        .execute(),
+    ).resolves.toEqual([]);
+  });
+
   it("does not promote or delete a foreign contact point that matches the user's temporary phone", async () => {
     const users = createUserRepository(db);
     await users.create({ id: "foreign-phone-conflict", name: "Foreign Phone Conflict" });
@@ -260,6 +291,10 @@ describe("ensureUserEntityLinkForEntity", () => {
         is_primary: 0,
         source: "crm",
         created_by_user_id: "admin",
+        display_value: null,
+        verified_at: "2025-01-02T03:04:05.000Z",
+        created_at: "2025-01-01T00:00:00.000Z",
+        updated_at: "2025-01-01T00:00:00.000Z",
       })
       .execute();
 
@@ -269,7 +304,16 @@ describe("ensureUserEntityLinkForEntity", () => {
     await expect(
       db
         .selectFrom("entity_contact_points")
-        .select(["id", "source", "created_by_user_id", "is_primary"])
+        .select([
+          "id",
+          "source",
+          "created_by_user_id",
+          "is_primary",
+          "display_value",
+          "verified_at",
+          "created_at",
+          "updated_at",
+        ])
         .where("id", "=", "foreign-same-phone")
         .executeTakeFirstOrThrow(),
     ).resolves.toEqual({
@@ -277,6 +321,10 @@ describe("ensureUserEntityLinkForEntity", () => {
       source: "crm",
       created_by_user_id: "admin",
       is_primary: 0,
+      display_value: null,
+      verified_at: "2025-01-02T03:04:05.000Z",
+      created_at: "2025-01-01T00:00:00.000Z",
+      updated_at: "2025-01-01T00:00:00.000Z",
     });
   });
 
