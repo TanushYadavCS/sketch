@@ -28,7 +28,7 @@ export type ChatAutomationAuthoringResult =
       kind: "saved";
       task: ScheduledTask;
       artifact: {
-        steps: Array<AutomationBuilderSaveRequest["steps"][number] & { apps?: string[] }>;
+        steps: Array<AutomationBuilderSaveRequest["steps"][number] & { apps?: string[]; script?: string; agentPrompt?: string }>;
         scheduleType: string;
         scheduleValue: string;
         timezone: string;
@@ -44,8 +44,13 @@ export interface ChatAutomationAuthoring {
 function artifactFromDefinition(definition: AutomationBuilderSaveRequest) {
   return {
     steps: definition.steps.map((step) => {
-      const apps = definition.stepContent[step.id]?.apps;
-      return apps ? { ...step, apps } : step;
+      const content = definition.stepContent[step.id];
+      if (!content) return step;
+      return {
+        ...step,
+        ...(content.apps ? { apps: content.apps } : {}),
+        ...(content.contentType === "script" ? { script: content.content } : { agentPrompt: content.content }),
+      };
     }),
     scheduleType: definition.scheduleType,
     scheduleValue: definition.scheduleValue,

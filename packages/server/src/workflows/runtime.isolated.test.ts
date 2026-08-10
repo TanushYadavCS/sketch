@@ -767,6 +767,30 @@ describe("testAutomationStep", () => {
 });
 
 describe("executeAutomation action steps", () => {
+  it("uses a reserved run ID and sends one sanitized manual failure notification", async () => {
+    const params = makeParams({
+      runId: "reserved-run-1",
+      runMode: "manual",
+      task: makeActionTask([{ id: "act1", type: "action", label: "Fail", icon: "code", position: { x: 0, y: 100 } }]),
+      stepContentRepo: makeStepContent([{ stepId: "act1", content: 'throw new Error("secret provider detail");' }]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result).toMatchObject({ runId: "reserved-run-1", status: "failed" });
+    expect(params._runsRepo.create).not.toHaveBeenCalled();
+    expect(params._runsRepo.update).toHaveBeenCalledWith(
+      "reserved-run-1",
+      expect.objectContaining({ errorMessage: expect.stringContaining("secret provider detail") }),
+    );
+    expect(params.sendMessage).toHaveBeenCalledTimes(1);
+    expect(params.sendMessage).toHaveBeenCalledWith(
+      "Automation “Daily workflow planning summary” failed. View run: https://sketch.test/scheduled-tasks/task-1/edit?runId=reserved-run-1",
+    );
+    expect(params.sendMessage).not.toHaveBeenCalledWith(expect.stringContaining("secret provider detail"));
+  });
+
   it("records a failed run without executing a malformed persisted definition", async () => {
     const runAgent = vi.fn();
     const params = makeParams({
@@ -934,6 +958,38 @@ describe("executeAutomation action steps", () => {
     expect(result.stepOutputs.act1.error?.message).toContain("Message delivery requires");
     expect(params.sendMessage).toHaveBeenCalledWith(expect.stringContaining("Message delivery requires"));
     expect(params.sendMessage).not.toHaveBeenCalledWith(expect.stringContaining('"summary"'));
+  });
+
+  it("fails a test run when its final delivery output is structured", async () => {
+    const params = makeParams({
+      runMode: "test",
+      task: makeActionTask([{ id: "act1", type: "action", label: "Report", icon: "code", position: { x: 0, y: 100 } }]),
+      stepContentRepo: makeStepContent([
+        { stepId: "act1", content: 'return { message: "Reminder: message Vedant on Slack." };' },
+      ]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("Message delivery requires");
+    expect(params.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("suppresses target delivery for an explicit test run while retaining failure output", async () => {
+    const params = makeParams({
+      runMode: "test",
+      task: makeActionTask([{ id: "act1", type: "action", label: "Fail", icon: "code", position: { x: 0, y: 100 } }]),
+      stepContentRepo: makeStepContent([{ stepId: "act1", content: 'throw new Error("test failure");' }]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("test failure");
+    expect(params.sendMessage).not.toHaveBeenCalled();
   });
 
   it("executes action scripts in process with previous input and script context", async () => {
@@ -1277,3 +1333,18 @@ describe("executeAutomation action steps", () => {
     );
   });
 });
+
+function makePromptStepContent(rows: Array<{ stepId: string; content: string }>) {
+  return {
+    getByTask: vi.fn().mockResolvedValue(
+      rows.map((row) => ({
+        task_id: "task-1",
+        step_id: row.stepId,
+        content_type: "prompt",
+        content: row.content,
+        apps: null,
+        updated_at: "2026-04-27T09:00:00.000Z",
+      })),
+    ),
+  };
+}

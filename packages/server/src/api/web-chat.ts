@@ -8,12 +8,17 @@ import {
   type WebChatProgressData,
   type WebChatQuestion,
   type WebChatQuestionAnswer,
+  type WebChatQuestionBatch,
+  type WebChatQuestionBatchAnswer,
+  type WebChatQuestionInteraction,
   type WebProgressItem,
   type WorkflowEdge,
   type WorkflowStep,
   automationArtifactSchema,
   automationDraftHandoffSchema,
   webChatQuestionAnswerSchema,
+  webChatQuestionBatchAnswerSchema,
+  webChatQuestionBatchSchema,
   webChatQuestionSchema,
   workflowEdgeSchema,
   workflowStepSchema,
@@ -28,11 +33,18 @@ import {
   withActiveBuilderWebChatRun,
   withActiveWebChatRun,
 } from "../agent/active-runs";
-import { buildSketchContext } from "../agent/prompt";
-import type { McpServerConfig, ProgressEvent, RunAgentParams, RunAgentResult } from "../agent/runner";
+import { type BufferedMessage, buildSketchContext } from "../agent/prompt";
+import {
+  type McpServerConfig,
+  type ProgressEvent,
+  type RunAgentParams,
+  type RunAgentResult,
+  isCreateAutomationSkillName,
+} from "../agent/runner";
 import { archiveRuntimeSessions } from "../agent/sessions";
 import { createProgressRenderer, createWebProgressData } from "../agent/tool-progress";
 import { ensureWorkspace } from "../agent/workspace";
+import { isAutomationPlaceholderDraft } from "../automation/definition";
 import { type AutomationCreateContext, createAutomationDraft } from "../automation/persistence";
 import {
   type AutomationTaskConversationLockSummary,
@@ -41,9 +53,10 @@ import {
 } from "../automation/task-conversations";
 import { TOOL_PROGRESS_OPTIONS, type ToolProgressCommand } from "../commands";
 import type { Config } from "../config";
-import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
+import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import type { StepContentRow, createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
+import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import type { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
@@ -167,7 +180,9 @@ type WebChatTranscriptPart =
   | { type: "data-automation-handoff"; id: string; data: AutomationDraftHandoff }
   | { type: "data-integration-connection"; id: string; data: WebChatIntegrationConnectionData }
   | { type: "data-question"; id: string; data: WebChatQuestion }
+  | { type: "data-question-batch"; id: string; data: WebChatQuestionBatch }
   | { type: "data-question-answer"; id: string; data: WebChatQuestionAnswer }
+  | { type: "data-question-batch-answer"; id: string; data: WebChatQuestionBatchAnswer }
   | { type: "data-interruption"; id: string; data: WebChatInterruptionData };
 type WebChatProgressTranscriptPart = { type: "data-progress"; id: string; data: WebChatProgressData };
 type WebChatStoredPart = WebChatTranscriptPart | WebChatProgressTranscriptPart;
@@ -198,7 +213,7 @@ interface LatestUserMessage {
 
 interface ExtractedQuestionAnswer {
   present: boolean;
-  answer: WebChatQuestionAnswer | null;
+  answer: WebChatQuestionAnswer | WebChatQuestionBatchAnswer | null;
 }
 
 interface ParsedWebChatAttachment {
@@ -206,10 +221,24 @@ interface ParsedWebChatAttachment {
   file: WebChatFile;
 }
 
+type WebChatQuestionPart = { id: string; data: WebChatQuestion } | { id: string; data: WebChatQuestionBatch };
+
+function isQuestionBatch(value: WebChatQuestionInteraction): value is WebChatQuestionBatch {
+  return "batchId" in value;
+}
+
+function questionPartFromInteraction(interaction: WebChatQuestionInteraction): WebChatQuestionPart {
+  if (isQuestionBatch(interaction)) {
+    return { id: `question-${interaction.batchId}`, data: interaction };
+  }
+  return { id: `question-${interaction.id}`, data: interaction };
+}
+
 type AutomationBuilderContext = {
   task: ScheduledTask;
   stepContentRows: StepContentRow[];
   currentAutomation: CurrentAutomation;
+  isPlaceholderDraft: boolean;
 } | null;
 
 type WebChatUiChunk =
@@ -221,6 +250,7 @@ type WebChatUiChunk =
   | { type: "data-automation-handoff"; id: string; data: AutomationDraftHandoff }
   | { type: "data-integration-connection"; id: string; data: WebChatIntegrationConnectionData }
   | { type: "data-question"; id: string; data: WebChatQuestion }
+  | { type: "data-question-batch"; id: string; data: WebChatQuestionBatch }
   | { type: "data-interruption"; id: string; data: WebChatInterruptionData }
   | { type: "text-start"; id: string }
   | { type: "text-delta"; id: string; delta: string }
@@ -283,9 +313,15 @@ function extractQuestionAnswerFromMessage(message: unknown): ExtractedQuestionAn
   if (!isRecord(message) || !Array.isArray(message.parts)) return { present: false, answer: null };
   for (let index = message.parts.length - 1; index >= 0; index -= 1) {
     const part = message.parts[index];
-    if (!isRecord(part) || part.type !== "data-question-answer") continue;
-    const parsed = webChatQuestionAnswerSchema.safeParse(part.data);
-    return { present: true, answer: parsed.success ? parsed.data : null };
+    if (!isRecord(part)) continue;
+    if (part.type === "data-question-answer") {
+      const parsed = webChatQuestionAnswerSchema.safeParse(part.data);
+      return { present: true, answer: parsed.success ? parsed.data : null };
+    }
+    if (part.type === "data-question-batch-answer") {
+      const parsed = webChatQuestionBatchAnswerSchema.safeParse(part.data);
+      return { present: true, answer: parsed.success ? parsed.data : null };
+    }
   }
   return { present: false, answer: null };
 }
@@ -330,16 +366,73 @@ function extractAutomationTaskId(body: unknown): string | null {
   return /^[A-Za-z0-9_-]{1,120}$/.test(taskId) ? taskId : null;
 }
 
-const AUTOMATION_DRAFT_IMPERATIVE_PATTERN =
-  /^(?:please\s+)?(?:create|make|build|set\s+up|setup|draft|design|automate)\b[\s\S]{0,120}\b(?:an?\s+)?(?:automation|workflow|scheduled\s+task)\b/i;
-
-export function isAutomationDraftRequest(message: string): boolean {
-  return AUTOMATION_DRAFT_IMPERATIVE_PATTERN.test(message.trim());
-}
-
 function automationBuilderUrl(config: Config, taskId: string, conversationId: string): string {
   const base = config.BASE_URL?.replace(/\/$/, "") ?? `http://localhost:${config.PORT}`;
   return `${base}/scheduled-tasks/${encodeURIComponent(taskId)}/edit?conversationId=${encodeURIComponent(conversationId)}`;
+}
+
+async function createAutomationDraftHandoff(params: {
+  deps: WebChatRouteDeps;
+  currentUser: NonNullable<Awaited<ReturnType<UserRepo["findById"]>>>;
+  conversationId: string;
+  dmContext: { platform: "slack" | "whatsapp"; deliveryTarget: string } | null;
+}): Promise<{ id: string; data: AutomationDraftHandoff }> {
+  const builderConversationId = `builder-${randomUUID()}`;
+  const delivery = params.dmContext ?? {
+    platform: "slack" as const,
+    deliveryTarget: params.currentUser.slack_user_id ?? params.currentUser.id,
+  };
+  const context: AutomationCreateContext = {
+    platform: delivery.platform,
+    contextType: "dm",
+    deliveryTarget: delivery.deliveryTarget,
+    threadTs: null,
+    createdBy: params.currentUser.id,
+    originPlatform: "web",
+    originConversationId: params.conversationId,
+    originProviderThreadId: null,
+    originMessageId: null,
+  };
+  const result = await createAutomationDraft({
+    db: params.deps.db,
+    context,
+    timezone: params.currentUser.timezone ?? "UTC",
+    taskConversationAssociations: [
+      { conversationId: params.conversationId, transcriptUserId: params.currentUser.id, kind: "web_chat" },
+      { conversationId: builderConversationId, transcriptUserId: params.currentUser.id, kind: "builder" },
+    ],
+  });
+  for (const discarded of result.discardedBuilderConversations ?? []) {
+    try {
+      await rm(
+        webChatTranscriptPath(params.deps.config, discarded.transcriptUserId, discarded.conversationId),
+        { force: true },
+      );
+      await archiveRuntimeSessions(params.deps.db, discarded.transcriptUserId, discarded.conversationId);
+    } catch (error) {
+      params.deps.logger.warn(
+        { err: error, conversationId: discarded.conversationId, userId: discarded.transcriptUserId },
+        "Failed to clean up replaced automation setup conversation",
+      );
+    }
+  }
+  return {
+    id: "automation-handoff-0",
+    data: automationDraftHandoffSchema.parse({
+      kind: "automation-draft",
+      taskId: result.row.id,
+      sourceConversationId: params.conversationId,
+      builderConversationId,
+      builderUrl: automationBuilderUrl(params.deps.config, result.row.id, builderConversationId),
+      status: "paused",
+    }),
+  };
+}
+
+function hasSuccessfulCreateAutomationSkill(result: RunAgentResult): boolean {
+  return (result.rawUsage?.toolCalls ?? []).some(
+    (toolCall) => isCreateAutomationSkillName(toolCall.skillName) && toolCall.success === true,
+  );
 }
 
 async function resolveAutomationBuilderContext(params: {
@@ -372,6 +465,23 @@ async function resolveAutomationBuilderContext(params: {
         return [] as StepContentRow[];
       })
     : [];
+  const persistedTask = await createScheduledTaskRepository(params.deps.db)
+    .getById(accessibleTask.id)
+    .catch((err) => {
+      params.logger.warn({ err, taskId: accessibleTask.id }, "Failed to load automation builder task metadata");
+      return undefined;
+    });
+  const runRows = await (params.deps.automationRunsRepo ?? createAutomationRunsRepository(params.deps.db))
+    .list(accessibleTask.id)
+    .catch((err) => {
+      params.logger.warn({ err, taskId: accessibleTask.id }, "Failed to load automation builder run metadata");
+      return [];
+    });
+  const isPlaceholderDraft = Boolean(
+    params.deps.stepContentRepo &&
+      persistedTask &&
+      isAutomationPlaceholderDraft({ row: persistedTask, stepContentRows, runRows }),
+  );
   return {
     task: accessibleTask,
     stepContentRows,
@@ -380,6 +490,7 @@ async function resolveAutomationBuilderContext(params: {
       stepContentRows,
       builderConversationId: params.builderConversationId,
     }),
+    isPlaceholderDraft,
   };
 }
 
@@ -610,6 +721,8 @@ function automationBuilderContextLines(context: Exclude<AutomationBuilderContext
     `status: ${task.status}`,
     `schedule: ${task.scheduleType} ${builderContextText(task.scheduleValue, 160)} (${task.timezone})`,
     `delivery: ${builderDeliverySummary(task)}`,
+    "The originating chat context is authoritative for the user's requested automation. Reuse it before asking the user to repeat details; placeholder builder fields are not the user's request.",
+    "For bounded setup choices such as trigger, schedule, delivery, or execution mode, use AskUserQuestion with 2–4 concrete options, or AskUserQuestions when 2–4 independent choices are ready together. Stop after either question tool call and wait for the user's answer; do not repeat details already present in the originating chat.",
   ];
   const description = builderContextText(task.description, 500);
   if (description) lines.push(`description: ${description}`);
@@ -636,7 +749,128 @@ function webChatCurrentMessage(message: string, automationBuilderContext: Automa
   return [...lines, "", message].join("\n");
 }
 
+const MAX_AUTOMATION_BUILDER_HISTORY_MESSAGES = 12;
+const MAX_AUTOMATION_BUILDER_HISTORY_MESSAGE_LENGTH = 1200;
+
+function builderTranscriptPromptMessages(messages: WebChatTranscriptMessage[], userName: string): BufferedMessage[] {
+  const promptMessages = messages.flatMap<BufferedMessage>((message) => {
+    const text = textFromTranscriptMessage(message);
+    if (!text) return [];
+    return [
+      {
+        userName: message.role === "user" ? userName : "Sketch",
+        text: builderContextText(text, MAX_AUTOMATION_BUILDER_HISTORY_MESSAGE_LENGTH),
+        ts: message.createdAt ?? "",
+      },
+    ];
+  });
+  if (promptMessages.length <= MAX_AUTOMATION_BUILDER_HISTORY_MESSAGES) return promptMessages;
+
+  return [promptMessages[0], ...promptMessages.slice(-(MAX_AUTOMATION_BUILDER_HISTORY_MESSAGES - 1))];
+}
+
+async function automationBuilderHistoryForPrompt(params: {
+  context: Exclude<AutomationBuilderContext, null>;
+  builderConversationId: string;
+  config: Config;
+  workspaceDir: string;
+  userId: string;
+  userName: string;
+  logger: Logger;
+}): Promise<BufferedMessage[]> {
+  const conversationIds = new Set<string>([params.builderConversationId]);
+  if (params.context.task.originChat?.platform === "web") {
+    conversationIds.add(params.context.task.originChat.conversationId);
+  }
+
+  const transcripts = await Promise.all(
+    [...conversationIds].map((conversationId) =>
+      readWebChatTranscript(params.config, params.workspaceDir, params.userId, params.logger, conversationId),
+    ),
+  );
+  const promptMessages = transcripts.flatMap((messages) => builderTranscriptPromptMessages(messages, params.userName));
+  if (promptMessages.length <= MAX_AUTOMATION_BUILDER_HISTORY_MESSAGES) return promptMessages;
+  return [promptMessages[0], ...promptMessages.slice(-(MAX_AUTOMATION_BUILDER_HISTORY_MESSAGES - 1))];
+}
+
+function isExecutionModeSelectionMessage(message: string): boolean {
+  return /\bexecution mode\b/i.test(message) && /\b(?:deterministic|hybrid|agent-led)\b/i.test(message);
+}
+
+function builderQuestionIdSuffix(messageId: string): string {
+  const suffix = messageId.replace(/[^A-Za-z0-9._-]/g, "").slice(-32);
+  return suffix || "current";
+}
+
+function deterministicBuilderSetupQuestion(sourceText: string, messageId: string): WebChatQuestion {
+  const suffix = builderQuestionIdSuffix(messageId);
+  if (/\b(?:invoice|invoices|saas|billing|bill|receipt|receipts)\b/i.test(sourceText)) {
+    return {
+      id: `invoice-source-${suffix}`,
+      prompt: "Where do the SaaS invoices live that this automation should find and send?",
+      options: [
+        {
+          id: "gmail",
+          label: "Gmail",
+          description: "Search invoice emails or attachments, such as billing messages or an invoices label.",
+        },
+        {
+          id: "outlook",
+          label: "Outlook",
+          description: "Search Outlook invoice messages or attachments.",
+        },
+        {
+          id: "google-drive",
+          label: "Google Drive",
+          description: "Find invoice files in a specific Drive folder.",
+        },
+        {
+          id: "another-source",
+          label: "Another source",
+          description: "Use a different app or storage location; I will ask which one next.",
+        },
+      ],
+    };
+  }
+
+  return {
+    id: `automation-input-source-${suffix}`,
+    prompt: "Where should this automation get the information it needs?",
+    options: [
+      { id: "email", label: "Email", description: "Read messages or attachments from an email account." },
+      {
+        id: "cloud-files",
+        label: "Cloud files",
+        description: "Read files from Drive or another cloud storage location.",
+      },
+      {
+        id: "project-app",
+        label: "Project or CRM app",
+        description: "Read records, tasks, tickets, or contacts from a connected app.",
+      },
+      {
+        id: "another-source",
+        label: "Another source",
+        description: "Use a different source; I will ask which one next.",
+      },
+    ],
+  };
+}
+
 const AUTOMATION_CARD_INTRO_TEXT = "All set - here's the automation.";
+const AUTOMATION_BUILDER_FOLLOW_UP_TEXT =
+  "Let's continue configuring this automation. What should trigger it, and what should it do when it runs?";
+const EMPTY_WEB_CHAT_RESPONSE_TEXT = "I wasn't able to complete that request. Please try again.";
+const AUTOMATION_SETUP_MODE_SELECTION_MARKER = "[automation-setup-mode-selection]";
+
+function cleanAutomationSetupModeSelectionMessage(message: string): string {
+  if (!message.includes(AUTOMATION_SETUP_MODE_SELECTION_MARKER)) return message;
+  const normalized = message.toLowerCase();
+  if (/\b(?:deterministic|fixed recipe)\b/.test(normalized)) return "Fixed recipe selected.";
+  if (/\b(?:agent-led|agent led)\b/.test(normalized)) return "Agent-led selected.";
+  if (/\b(?:hybrid|recipe \+ ai)\b/.test(normalized)) return "Recipe + AI selected.";
+  return "Automation mode selected.";
+}
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -968,9 +1202,17 @@ function sanitizeTranscriptPart(part: unknown): WebChatStoredPart | null {
     const question = webChatQuestionSchema.safeParse(part.data);
     return question.success ? { type: "data-question", id: part.id, data: question.data } : null;
   }
+  if (part.type === "data-question-batch" && typeof part.id === "string") {
+    const batch = webChatQuestionBatchSchema.safeParse(part.data);
+    return batch.success ? { type: "data-question-batch", id: part.id, data: batch.data } : null;
+  }
   if (part.type === "data-question-answer" && typeof part.id === "string") {
     const answer = webChatQuestionAnswerSchema.safeParse(part.data);
     return answer.success ? { type: "data-question-answer", id: part.id, data: answer.data } : null;
+  }
+  if (part.type === "data-question-batch-answer" && typeof part.id === "string") {
+    const answer = webChatQuestionBatchAnswerSchema.safeParse(part.data);
+    return answer.success ? { type: "data-question-batch-answer", id: part.id, data: answer.data } : null;
   }
   if (part.type !== "data-file" || typeof part.id !== "string" || !isRecord(part.data)) return null;
 
@@ -1106,49 +1348,33 @@ async function readWebChatTranscript(
   }
 }
 
-function latestPendingWebChatQuestion(messages: WebChatTranscriptMessage[]): WebChatQuestion | null {
+function latestPendingWebChatInteraction(messages: WebChatTranscriptMessage[]): WebChatQuestionInteraction | null {
   const latest = messages.at(-1);
   if (!latest || latest.role !== "assistant") return null;
   for (let index = latest.parts.length - 1; index >= 0; index -= 1) {
     const part = latest.parts[index];
     if (part.type === "data-question") return part.data;
+    if (part.type === "data-question-batch") return part.data;
   }
   return null;
 }
 
-type WebChatQuestionAnswerValidation =
-  | { ok: true; selectedOption: WebChatQuestion["options"][number] }
-  | { ok: false; code: string; message: string; status: 400 | 409 };
-
-function validateWebChatQuestionAnswer(
-  messages: WebChatTranscriptMessage[],
-  answer: WebChatQuestionAnswer,
-): WebChatQuestionAnswerValidation {
-  const alreadyAnswered = messages.some((message) =>
-    message.parts.some((part) => part.type === "data-question-answer" && part.data.questionId === answer.questionId),
-  );
-  if (alreadyAnswered) {
-    return { ok: false, code: "QUESTION_STALE", message: "That question is no longer pending", status: 409 };
+function questionAnswerMatchesPendingInteraction(
+  answer: WebChatQuestionAnswer | WebChatQuestionBatchAnswer,
+  pending: WebChatQuestionInteraction | null,
+): boolean {
+  if (!pending) return false;
+  if ("batchId" in pending) {
+    if (!("answers" in answer) || answer.batchId !== pending.batchId || answer.answers.length !== pending.questions.length) {
+      return false;
+    }
+    return pending.questions.every((question) => {
+      const selected = answer.answers.find((candidate) => candidate.questionId === question.id);
+      return Boolean(selected && ("customResponse" in selected || question.options.some((option) => option.id === selected.optionId)));
+    });
   }
-
-  const pendingQuestion = latestPendingWebChatQuestion(messages);
-  if (!pendingQuestion) {
-    return { ok: false, code: "QUESTION_NOT_PENDING", message: "There is no pending question to answer", status: 409 };
-  }
-  if (answer.questionId !== pendingQuestion.id) {
-    return { ok: false, code: "QUESTION_STALE", message: "That question is no longer pending", status: 409 };
-  }
-
-  const selectedOption = pendingQuestion.options.find((option) => option.id === answer.optionId);
-  if (!selectedOption) {
-    return {
-      ok: false,
-      code: "QUESTION_OPTION_INVALID",
-      message: "That option is not available for the pending question",
-      status: 400,
-    };
-  }
-  return { ok: true, selectedOption };
+  if ("answers" in answer || answer.questionId !== pending.id) return false;
+  return "customResponse" in answer || pending.options.some((option) => option.id === answer.optionId);
 }
 
 async function readWebChatTranscriptUpdatedAt(
@@ -1183,10 +1409,16 @@ async function writeWebChatTranscript(
 function createUserTranscriptMessage(
   message: LatestUserMessage,
   files: Array<{ id: string; data: WebChatFile }> = [],
-  questionAnswer?: WebChatQuestionAnswer,
+  questionAnswer?: WebChatQuestionAnswer | WebChatQuestionBatchAnswer,
 ): WebChatTranscriptMessage {
   const parts: WebChatTranscriptPart[] = [{ type: "text", text: message.text }];
-  if (questionAnswer) {
+  if (questionAnswer && "batchId" in questionAnswer) {
+    parts.push({
+      type: "data-question-batch-answer",
+      id: `question-batch-answer-${questionAnswer.batchId}`,
+      data: questionAnswer,
+    });
+  } else if (questionAnswer) {
     parts.push({
       type: "data-question-answer",
       id: `question-answer-${questionAnswer.questionId}`,
@@ -1230,7 +1462,7 @@ function createAssistantTranscriptMessage(
   files: Array<{ id: string; data: WebChatFile }>,
   automations: Array<{ id: string; data: AutomationArtifact }> = [],
   integrationConnections: Array<{ id: string; data: WebChatIntegrationConnectionData }> = [],
-  question?: { id: string; data: WebChatQuestion },
+  question?: WebChatQuestionPart,
 ): WebChatTranscriptMessage | null {
   const parts: WebChatTranscriptPart[] = [];
   if (finalText) parts.push({ type: "text", text: finalText });
@@ -1243,7 +1475,13 @@ function createAssistantTranscriptMessage(
   for (const connection of integrationConnections) {
     parts.push({ type: "data-integration-connection", id: connection.id, data: connection.data });
   }
-  if (question) parts.push({ type: "data-question", id: question.id, data: question.data });
+  if (question) {
+    if (isQuestionBatch(question.data)) {
+      parts.push({ type: "data-question-batch", id: question.id, data: question.data });
+    } else {
+      parts.push({ type: "data-question", id: question.id, data: question.data });
+    }
+  }
   if (parts.length === 0) return null;
   return { id: `assistant-${randomUUID()}`, role: "assistant", createdAt: new Date().toISOString(), parts };
 }
@@ -1261,82 +1499,6 @@ function createAutomationDraftAssistantTranscriptMessage(
       { type: "data-automation-handoff" as const, id: handoff.id, data: handoff.data },
     ],
   };
-}
-
-async function createAutomationDraftHandoffResponse(params: {
-  deps: WebChatRouteDeps;
-  currentUser: NonNullable<Awaited<ReturnType<UserRepo["findById"]>>>;
-  workspaceDir: string;
-  conversationId: string;
-  latestUserMessage: LatestUserMessage;
-  transcriptUserFiles: Array<{ id: string; data: WebChatFile }>;
-  dmContext: { platform: "slack" | "whatsapp"; deliveryTarget: string } | null;
-}): Promise<Response> {
-  const delivery = params.dmContext ?? {
-    platform: "slack" as const,
-    deliveryTarget: params.currentUser.slack_user_id ?? params.currentUser.id,
-  };
-  const context: AutomationCreateContext = {
-    platform: delivery.platform,
-    contextType: "dm",
-    deliveryTarget: delivery.deliveryTarget,
-    threadTs: null,
-    createdBy: params.currentUser.id,
-    originPlatform: "web",
-    originConversationId: params.conversationId,
-    originProviderThreadId: null,
-    originMessageId: null,
-  };
-  const result = await createAutomationDraft({
-    db: params.deps.db,
-    context,
-    timezone: params.currentUser.timezone ?? "UTC",
-    taskConversationAssociation: {
-      conversationId: params.conversationId,
-      transcriptUserId: params.currentUser.id,
-      kind: "web_chat",
-    },
-  });
-  const handoff = automationDraftHandoffSchema.parse({
-    kind: "automation-draft",
-    taskId: result.row.id,
-    sourceConversationId: params.conversationId,
-    builderUrl: automationBuilderUrl(params.deps.config, result.row.id, params.conversationId),
-    status: "paused",
-  });
-  const transcriptUserMessage = createUserTranscriptMessage(params.latestUserMessage, params.transcriptUserFiles);
-  const progressMessageId = `assistant-progress-${transcriptUserMessage.id}`;
-  const handoffPart = { id: "automation-handoff-0", data: handoff };
-  const finalText = "I started a paused automation draft. Continue in the builder to configure and save it.";
-  await appendWebChatPendingTurn(
-    params.deps.config,
-    params.workspaceDir,
-    params.currentUser.id,
-    params.deps.logger,
-    params.conversationId,
-    transcriptUserMessage,
-    createProgressTranscriptMessage(progressMessageId),
-  );
-
-  return webChatUiStreamResponse(async (write) => {
-    write({ type: "start", messageMetadata: { createdAt: new Date().toISOString() } });
-    write({ type: "start-step" });
-    write({ type: "text-start", id: "text-0" });
-    write({ type: "text-delta", id: "text-0", delta: finalText });
-    write({ type: "text-end", id: "text-0" });
-    write({ type: "data-automation-handoff", id: handoffPart.id, data: handoffPart.data });
-    await completeWebChatProgressMessage(
-      params.deps.config,
-      params.workspaceDir,
-      params.currentUser.id,
-      params.deps.logger,
-      params.conversationId,
-      progressMessageId,
-      createAutomationDraftAssistantTranscriptMessage(finalText, handoffPart),
-    );
-    write({ type: "finish-step" });
-    write({ type: "finish" });
-  });
 }
 
 function createInterruptedAssistantTranscriptMessage(finalText: string): WebChatTranscriptMessage {
@@ -1391,58 +1553,25 @@ async function appendWebChatPendingTurn(
   conversationId: string,
   userMessage: WebChatTranscriptMessage,
   progressMessage: WebChatTranscriptMessage,
-): Promise<void> {
-  await withWebChatTranscriptLock(userId, conversationId, async () => {
-    const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
-    await writeWebChatTranscript(
-      config,
-      userId,
-      conversationId,
-      appendWebChatPendingTurnMessages(existing, userMessage, progressMessage),
-    );
-  });
-}
-
-function appendWebChatPendingTurnMessages(
-  existing: WebChatTranscriptMessage[],
-  userMessage: WebChatTranscriptMessage,
-  progressMessage: WebChatTranscriptMessage,
-): WebChatTranscriptMessage[] {
-  const next = [...existing];
-  if (!next.some((message) => message.id === userMessage.id)) {
-    next.push(userMessage);
-  }
-  const progressIndex = next.findIndex((message) => message.id === progressMessage.id);
-  if (progressIndex === -1) {
-    next.push(progressMessage);
-  } else {
-    next[progressIndex] = progressMessage;
-  }
-  return next;
-}
-
-async function consumeWebChatQuestionAnswer(
-  config: Config,
-  workspaceDir: string,
-  userId: string,
-  logger: Logger,
-  conversationId: string,
-  answer: WebChatQuestionAnswer,
-  userMessage: WebChatTranscriptMessage,
-  progressMessage: WebChatTranscriptMessage,
-): Promise<WebChatQuestionAnswerValidation> {
+  questionAnswer?: WebChatQuestionAnswer | WebChatQuestionBatchAnswer,
+): Promise<boolean> {
   return withWebChatTranscriptLock(userId, conversationId, async () => {
     const existing = await readWebChatTranscript(config, workspaceDir, userId, logger, conversationId);
-    const validation = validateWebChatQuestionAnswer(existing, answer);
-    if (!validation.ok) return validation;
-
-    await writeWebChatTranscript(
-      config,
-      userId,
-      conversationId,
-      appendWebChatPendingTurnMessages(existing, userMessage, progressMessage),
-    );
-    return validation;
+    if (questionAnswer && !questionAnswerMatchesPendingInteraction(questionAnswer, latestPendingWebChatInteraction(existing))) {
+      return false;
+    }
+    const next = [...existing];
+    if (!next.some((message) => message.id === userMessage.id)) {
+      next.push(userMessage);
+    }
+    const progressIndex = next.findIndex((message) => message.id === progressMessage.id);
+    if (progressIndex === -1) {
+      next.push(progressMessage);
+    } else {
+      next[progressIndex] = progressMessage;
+    }
+    await writeWebChatTranscript(config, userId, conversationId, next);
+    return true;
   });
 }
 
@@ -1550,7 +1679,7 @@ async function readWebChatConversationSummaries(
       const latestUserMessage = [...messages].reverse().find((message) => message.role === "user");
       if (!latestUserMessage) return [];
 
-      const title = textFromTranscriptMessage(latestUserMessage);
+      const title = cleanAutomationSetupModeSelectionMessage(textFromTranscriptMessage(latestUserMessage));
       const updatedAt = await readWebChatTranscriptUpdatedAt(config, workspaceDir, userId, logger, conversationId);
       if (!title || !updatedAt) return [];
 
@@ -1961,27 +2090,72 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
 
     const settingsRow = await deps.settings.get();
     const workspaceDir = await ensureWorkspace(deps.config, currentUser.id);
-    let questionAnswer: WebChatQuestionAnswer | undefined;
+    let questionAnswer: WebChatQuestionAnswer | WebChatQuestionBatchAnswer | undefined;
     if (incomingQuestionAnswer.present) {
       const incomingAnswer = incomingQuestionAnswer.answer;
       if (!incomingAnswer) {
         return c.json(badRequest("QUESTION_ANSWER_INVALID", "Question answer is invalid"), 400);
       }
-      const validation = await withWebChatTranscriptLock(currentUser.id, conversationId, async () => {
-        const existingTranscript = await readWebChatTranscript(
-          deps.config,
-          workspaceDir,
-          currentUser.id,
-          deps.logger,
-          conversationId,
-        );
-        return validateWebChatQuestionAnswer(existingTranscript, incomingAnswer);
-      });
-      if (!validation.ok) {
-        return c.json(badRequest(validation.code, validation.message), validation.status);
+      const existingTranscript = await withWebChatTranscriptLock(currentUser.id, conversationId, () =>
+        readWebChatTranscript(deps.config, workspaceDir, currentUser.id, deps.logger, conversationId),
+      );
+      const pendingInteraction = latestPendingWebChatInteraction(existingTranscript);
+      if (!pendingInteraction) {
+        return c.json(badRequest("QUESTION_NOT_PENDING", "There is no pending question to answer"), 409);
       }
-      questionAnswer = incomingAnswer;
-      latestUserMessage = { id: latestUserMessage?.id ?? null, text: validation.selectedOption.label };
+
+      if ("batchId" in pendingInteraction) {
+        const answer = incomingQuestionAnswer.answer;
+        if (!("answers" in answer) || answer.batchId !== pendingInteraction.batchId) {
+          return c.json(badRequest("QUESTION_STALE", "That question batch is no longer pending"), 409);
+        }
+        if (answer.answers.length !== pendingInteraction.questions.length) {
+          return c.json(badRequest("QUESTION_ANSWER_INVALID", "Every pending question needs one answer"), 400);
+        }
+        const selectedLabels: string[] = [];
+        for (const question of pendingInteraction.questions) {
+          const selected = answer.answers.find((candidate) => candidate.questionId === question.id);
+          if (!selected) {
+            return c.json(
+              badRequest("QUESTION_OPTION_INVALID", "That option is not available for the pending question batch"),
+              400,
+            );
+          }
+          if ("customResponse" in selected) {
+            selectedLabels.push(selected.customResponse);
+            continue;
+          }
+          const option = question.options.find((candidate) => candidate.id === selected.optionId);
+          if (!option) {
+            return c.json(
+              badRequest("QUESTION_OPTION_INVALID", "That option is not available for the pending question batch"),
+              400,
+            );
+          }
+          selectedLabels.push(option.label);
+        }
+        questionAnswer = answer;
+        latestUserMessage = { id: latestUserMessage?.id ?? null, text: selectedLabels.join(", ") };
+      } else {
+        const answer = incomingQuestionAnswer.answer;
+        if ("answers" in answer || answer.questionId !== pendingInteraction.id) {
+          return c.json(badRequest("QUESTION_STALE", "That question is no longer pending"), 409);
+        }
+        if ("customResponse" in answer) {
+          questionAnswer = answer;
+          latestUserMessage = { id: latestUserMessage?.id ?? null, text: answer.customResponse };
+        } else {
+          const selectedOption = pendingInteraction.options.find((option) => option.id === answer.optionId);
+          if (!selectedOption) {
+            return c.json(
+              badRequest("QUESTION_OPTION_INVALID", "That option is not available for the pending question"),
+              400,
+            );
+          }
+          questionAnswer = answer;
+          latestUserMessage = { id: latestUserMessage?.id ?? null, text: selectedOption.label };
+        }
+      }
     }
     if (!latestUserMessage) {
       return c.json(badRequest("VALIDATION_ERROR", "Message is required"), 400);
@@ -2050,22 +2224,6 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     }
     await migrateLegacyWebChatTranscripts(deps.config, workspaceDir, currentUser.id, deps.logger);
     const dmContext = await resolveWebChatDmContext(deps, currentUser, settingsRow);
-    if (
-      !incomingQuestionAnswer.present &&
-      !automationTaskId &&
-      !automationBuilderContext &&
-      isAutomationDraftRequest(message)
-    ) {
-      return createAutomationDraftHandoffResponse({
-        deps,
-        currentUser,
-        workspaceDir,
-        conversationId,
-        latestUserMessage,
-        transcriptUserFiles,
-        dmContext,
-      });
-    }
     const integrationMcpServers = deps.buildMcpServers ? await deps.buildMcpServers(currentUser.email) : {};
     const taskContext = automationBuilderContext
       ? automationBuilderTaskContext({
@@ -2092,6 +2250,17 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             },
           }
         : null;
+    const builderHistory = automationBuilderContext
+      ? await automationBuilderHistoryForPrompt({
+          context: automationBuilderContext,
+          builderConversationId: conversationId,
+          config: deps.config,
+          workspaceDir,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          logger: deps.logger,
+        })
+      : [];
     const deliveryPlatform = taskContext?.platform ?? "slack";
     const abortController = new AbortController();
     const baseProgressSettings = resolveProgressDisplaySettings(currentUser);
@@ -2101,37 +2270,28 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
     );
     const progressSettings = progressDisplaySettingsForWebChatMode(baseProgressSettings, progressMode);
     const progressRenderer = createProgressRenderer(progressSettings);
-    const transcriptUserMessage = createUserTranscriptMessage(latestUserMessage, transcriptUserFiles, questionAnswer);
+    const transcriptUserMessage = createUserTranscriptMessage(
+      { ...latestUserMessage, text: cleanAutomationSetupModeSelectionMessage(latestUserMessage.text) },
+      transcriptUserFiles,
+      questionAnswer,
+    );
     const progressMessageId = `assistant-progress-${transcriptUserMessage.id}`;
-    const progressMessage = createProgressTranscriptMessage(progressMessageId);
-    if (questionAnswer) {
-      const answerResult = await consumeWebChatQuestionAnswer(
-        deps.config,
-        workspaceDir,
-        currentUser.id,
-        deps.logger,
-        conversationId,
-        questionAnswer,
-        transcriptUserMessage,
-        progressMessage,
-      );
-      if (!answerResult.ok) {
-        return c.json(badRequest(answerResult.code, answerResult.message), answerResult.status);
-      }
-    } else {
-      await appendWebChatPendingTurn(
-        deps.config,
-        workspaceDir,
-        currentUser.id,
-        deps.logger,
-        conversationId,
-        transcriptUserMessage,
-        progressMessage,
-      );
+    const appended = await appendWebChatPendingTurn(
+      deps.config,
+      workspaceDir,
+      currentUser.id,
+      deps.logger,
+      conversationId,
+      transcriptUserMessage,
+      createProgressTranscriptMessage(progressMessageId),
+      questionAnswer,
+    );
+    if (!appended) {
+      return c.json(badRequest("QUESTION_STALE", "That question is no longer pending"), 409);
     }
 
     const userMessage = buildSketchContext({
-      messages: [],
+      messages: builderHistory,
       currentUserName: currentUser.name,
       currentMessage: webChatCurrentMessage(message, automationBuilderContext),
       currentUserEmail: currentUser.email,
@@ -2240,6 +2400,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             platform: deliveryPlatform,
             responseSurface: "web",
             contextType: "dm",
+            stopAfterCreateAutomationSkill: false,
             onProgressEvent: async (event) => {
               if (shouldBufferWebChatTextAfterProgress(event)) bufferTextDeltas = true;
               if (event.kind === "tool_use" && event.toolName === "ManageScheduledTasks") {
@@ -2340,6 +2501,28 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           ...deterministicIntegrationCards,
         ]);
         const automationArtifacts = result.trace.automationArtifacts ?? [];
+        if (hasSuccessfulCreateAutomationSkill(result) && !automationBuilderContext && automationArtifacts.length === 0) {
+          const handoff = await createAutomationDraftHandoff({
+            deps,
+            currentUser,
+            conversationId,
+            dmContext,
+          });
+          const handoffText = "Your automation setup is ready. Continue in the builder to configure and save it.";
+          closeTextPart();
+          writeFinalText(handoffText);
+          write({ type: "data-automation-handoff", id: handoff.id, data: handoff.data });
+          await completeWebChatProgressMessage(
+            deps.config,
+            workspaceDir,
+            currentUser.id,
+            deps.logger,
+            conversationId,
+            progressMessageId,
+            createAutomationDraftAssistantTranscriptMessage(handoffText, handoff),
+          );
+          return;
+        }
         const rawFinalText = result.trace.finalText?.trim()
           ? result.trace.finalText
           : sawAutomationTool
@@ -2347,15 +2530,44 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
             : bufferedTextDeltas;
         const automationText = normalizeAutomationAssistantText(rawFinalText, automationArtifacts);
         const finalText = sanitizeIntegrationConnectionText(automationText, integrationCards) ?? "";
-        const questionPart = result.pendingQuestion
-          ? { id: `question-${result.pendingQuestion.id}`, data: result.pendingQuestion }
-          : undefined;
+        const pendingInteraction = result.pendingInteraction ?? result.pendingQuestion;
+        const fallbackBuilderQuestion =
+          !pendingInteraction &&
+          automationBuilderContext &&
+          automationBuilderContext.isPlaceholderDraft &&
+          isExecutionModeSelectionMessage(message) &&
+          fileParts.length === 0 &&
+          automationArtifacts.length === 0 &&
+          integrationCards.length === 0
+            ? deterministicBuilderSetupQuestion(
+                builderHistory.map((historyMessage) => historyMessage.text).join("\n"),
+                transcriptUserMessage.id,
+              )
+            : undefined;
+        const questionPart: WebChatQuestionPart | undefined = pendingInteraction
+          ? questionPartFromInteraction(pendingInteraction)
+          : fallbackBuilderQuestion
+            ? { id: `question-${fallbackBuilderQuestion.id}`, data: fallbackBuilderQuestion }
+            : undefined;
+        const responseText =
+          (fallbackBuilderQuestion ? "Let's start by identifying the input source." : "") ||
+          (finalText.trim() ? finalText : "") ||
+          (automationBuilderContext &&
+          fileParts.length === 0 &&
+          automationArtifacts.length === 0 &&
+          integrationCards.length === 0 &&
+          !questionPart
+            ? AUTOMATION_BUILDER_FOLLOW_UP_TEXT
+            : "") ||
+          (fileParts.length === 0 && automationArtifacts.length === 0 && integrationCards.length === 0 && !questionPart
+            ? EMPTY_WEB_CHAT_RESPONSE_TEXT
+            : "");
         if (integrationCards.length === 0 && automationArtifacts.length === 0) {
           writeBufferedTextDeltas();
         } else {
           bufferedTextDeltas = "";
         }
-        writeFinalText(finalText);
+        writeFinalText(responseText);
 
         for (const file of fileParts) {
           write({ type: "data-file", id: file.id, data: file.data });
@@ -2370,7 +2582,14 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           write({ type: "data-automation", id, data: artifact });
           return { id, data: artifact };
         });
-        if (questionPart) write({ type: "data-question", id: questionPart.id, data: questionPart.data });
+        if (questionPart) {
+          const question = questionPart.data;
+          if (isQuestionBatch(question)) {
+            write({ type: "data-question-batch", id: questionPart.id, data: question });
+          } else {
+            write({ type: "data-question", id: questionPart.id, data: question });
+          }
+        }
         await completeWebChatProgressMessage(
           deps.config,
           workspaceDir,
@@ -2379,7 +2598,7 @@ export function webChatRoutes(deps: WebChatRouteDeps) {
           conversationId,
           progressMessageId,
           createAssistantTranscriptMessage(
-            finalText,
+            responseText,
             fileParts,
             automationParts,
             integrationConnectionParts,

@@ -120,6 +120,10 @@ export const automationExecutionModeSchema = z.enum(["deterministic", "hybrid", 
 
 export type AutomationExecutionMode = z.infer<typeof automationExecutionModeSchema>;
 
+export const automationRunModeSchema = z.enum(["production", "manual", "test"]);
+
+export type AutomationRunMode = z.infer<typeof automationRunModeSchema>;
+
 export const automationExecutionModeLabels = {
   deterministic: "Follow exact steps",
   hybrid: "Exact steps with smart help",
@@ -238,6 +242,7 @@ export const automationDefinitionSchema = z.object({
   nextRunAt: z.string().nullable(),
   lastRunAt: z.string().nullable(),
   status: z.enum(["active", "paused", "completed"]),
+  isPlaceholderDraft: z.boolean().optional(),
   createdBy: z.string().nullable(),
   createdByName: z.string().nullable(),
   createdAt: z.string(),
@@ -260,6 +265,7 @@ export type AutomationDefinition = z.infer<typeof automationDefinitionSchema>;
 
 export const automationArtifactSchema = z.object({
   taskId: z.string(),
+  requiresBuilder: z.boolean().default(true),
   kind: z.string().default("New automation"),
   title: z.string(),
   description: z.string(),

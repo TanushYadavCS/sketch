@@ -125,6 +125,57 @@ describe("Scheduled Tasks API", () => {
     }
   });
 
+  it("reserves a manual run before enqueueing and preserves its failure identity", async () => {
+    const admin = await seedAdmin(db);
+    const tasks = createScheduledTaskRepository(db);
+    await tasks.add({
+      id: "manual-task",
+      platform: "slack",
+      context_type: "dm",
+      delivery_target: "D123",
+      thread_ts: null,
+      prompt: "Run the brief",
+      schedule_type: "interval",
+      schedule_value: "3600",
+      timezone: "UTC",
+      session_mode: "fresh",
+      created_by: admin.id,
+      status: "active",
+      next_run_at: null,
+    });
+
+    const scheduler = {
+      pauseTask: vi.fn(),
+      resumeTask: vi.fn(),
+      removeTask: vi.fn(),
+      executeTaskById: vi.fn().mockRejectedValue(new Error("queue full")),
+    };
+    const app = createApp(db, config, { scheduler });
+    const cookie = await loginAdmin(app);
+    const response = await app.request("/api/scheduled-tasks/manual-task/runs", {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ status: "triggered", runId: expect.any(String) });
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("manual-task", {
+      preserveTaskState: true,
+      runMode: "manual",
+      runId: body.runId,
+    });
+
+    await vi.waitFor(async () => {
+      await expect(createAutomationRunsRepository(db).getById(body.runId)).resolves.toMatchObject({
+        id: body.runId,
+        task_id: "manual-task",
+        status: "failed",
+        error_message: "queue full",
+      });
+    });
+  });
+
   it("returns all tasks for admins with resolved labels", async () => {
     await seedAdmin(db);
     const users = createUserRepository(db);

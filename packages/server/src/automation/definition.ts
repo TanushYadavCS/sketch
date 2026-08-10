@@ -139,6 +139,85 @@ function parseApps(value: string | null): string[] | null {
   return parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
+function hasAutomationPlaceholderRowFields(row: ScheduledTaskRow): boolean {
+  return (
+    row.status === "paused" &&
+    row.context_type === "dm" &&
+    row.origin_platform === "web" &&
+    Boolean(row.origin_conversation_id) &&
+    row.origin_provider_thread_id === null &&
+    row.origin_message_id === null &&
+    row.title === "New automation" &&
+    row.prompt === "Describe the automation." &&
+    row.description === null &&
+    automationExecutionModeSchema.safeParse(row.execution_mode ?? "hybrid").success &&
+    row.schedule_type === "interval" &&
+    row.schedule_value === "3600" &&
+    row.next_run_at === null &&
+    row.last_run_at === null &&
+    row.session_mode === "fresh" &&
+    row.output_target === row.delivery_target &&
+    row.output_platform === row.platform &&
+    row.output_thread_ts === row.thread_ts &&
+    row.output_mode === "deliver" &&
+    row.created_by !== null &&
+    row.last_edited_by === row.created_by
+  );
+}
+
+function compatibilityPlaceholderSteps(row: ScheduledTaskRow): WorkflowStep[] {
+  return [
+    {
+      id: "trigger",
+      type: "trigger",
+      label: "Schedule",
+      icon: "clock",
+      position: { x: 0, y: 0 },
+      triggerConfig: {
+        type: "schedule",
+        scheduleType: "interval",
+        scheduleValue: row.schedule_value,
+        timezone: row.timezone,
+      },
+    },
+    {
+      id: "step1",
+      type: "agent",
+      label: "New automation",
+      icon: "sketch-ai",
+      position: { x: 260, y: 0 },
+      agentMode: "sketch",
+    },
+  ];
+}
+
+export function isStrictAutomationPlaceholderRow(row: ScheduledTaskRow): boolean {
+  return hasAutomationPlaceholderRowFields(row) && row.steps === null && row.edges === null && row.revision === 0;
+}
+
+export function isLegacyMaterializedAutomationPlaceholderRow(row: ScheduledTaskRow): boolean {
+  if (!hasAutomationPlaceholderRowFields(row) || row.revision !== 1 || !row.steps || !row.edges) return false;
+  const steps = workflowStepSchema.array().safeParse(parseJson<unknown>(row.steps, null));
+  const edges = workflowEdgeSchema.array().safeParse(parseJson<unknown>(row.edges, null));
+  if (!steps.success || !edges.success) return false;
+  const expectedSteps = compatibilityPlaceholderSteps(row);
+  const expectedEdges: WorkflowEdge[] = [{ id: "trigger-step1", from: "trigger", to: "step1" }];
+  return JSON.stringify(steps.data) === JSON.stringify(expectedSteps) && JSON.stringify(edges.data) === JSON.stringify(expectedEdges);
+}
+
+export function isAutomationPlaceholderDraft(params: {
+  row: ScheduledTaskRow;
+  stepContentRows: readonly StepContentRow[];
+  runRows?: readonly AutomationRunRow[];
+}): boolean {
+  const { row, stepContentRows, runRows = [] } = params;
+  return (
+    (isStrictAutomationPlaceholderRow(row) || isLegacyMaterializedAutomationPlaceholderRow(row)) &&
+    stepContentRows.length === 0 &&
+    runRows.length === 0
+  );
+}
+
 function contentFromRows(row: ScheduledTaskRow, steps: WorkflowStep[], rows: StepContentRow[]) {
   const byStepId: Record<string, AutomationStepContent> = {};
   for (const content of rows) {
@@ -210,6 +289,11 @@ export function buildAutomationDefinition(params: {
   const delivery = resolveWorkflowDelivery(params.row);
   const executionMode = resolveStoredAutomationExecutionMode(params.row.execution_mode);
   const recentRuns = params.runRows.map(parseRun);
+  const isPlaceholderDraft = isAutomationPlaceholderDraft({
+    row: params.row,
+    stepContentRows: params.stepContentRows,
+    runRows: params.runRows,
+  });
   return {
     id: params.row.id,
     platform: params.row.platform === "whatsapp" ? "whatsapp" : "slack",
@@ -235,6 +319,7 @@ export function buildAutomationDefinition(params: {
       params.row.status === "paused" || params.row.status === "completed" || params.row.status === "active"
         ? params.row.status
         : "paused",
+    isPlaceholderDraft,
     createdBy: params.row.created_by,
     createdByName: params.createdByName ?? null,
     createdAt: params.row.created_at,
@@ -432,13 +517,28 @@ export function validateAutomationBuilderSaveRequest(params: {
 }): void {
   const { request } = params;
   const issues = validateWorkflowGraph(request.steps, request.edges);
-  for (const issue of validateAutomationExecutionMode(request.executionMode, request.steps)) {
-    addIssue(issues, issue.code, issue.message, issue.path);
+  if (request.status !== "paused") {
+    for (const issue of validateAutomationExecutionMode(request.executionMode, request.steps)) {
+      addIssue(issues, issue.code, issue.message, issue.path);
+    }
   }
+
+  const terminalStepIds = new Set(request.steps.map((step) => step.id));
+  for (const edge of request.edges) terminalStepIds.delete(edge.from);
 
   for (const step of request.steps) {
     const content = request.stepContent[step.id];
-    if (step.type === "agent" && (!content || content.contentType !== "prompt" || !content.content.trim())) {
+    const isEmptyPausedAgentPlaceholder =
+      request.status === "paused" &&
+      step.type === "agent" &&
+      step.id === "step1" &&
+      step.label === (request.title ?? request.prompt) &&
+      !content;
+    if (
+      step.type === "agent" &&
+      !isEmptyPausedAgentPlaceholder &&
+      (!content || content.contentType !== "prompt" || !content.content.trim())
+    ) {
       addIssue(
         issues,
         "AGENT_PROMPT_REQUIRED",
@@ -456,6 +556,18 @@ export function validateAutomationBuilderSaveRequest(params: {
         );
       }
       if (content?.contentType === "script") {
+        if (
+          request.delivery.mode === "deliver" &&
+          terminalStepIds.has(step.id) &&
+          /\breturn\s*(?:\(\s*)?\{/.test(content.content)
+        ) {
+          addIssue(
+            issues,
+            "DELIVERY_MESSAGE_STRING_REQUIRED",
+            `Final delivery action step "${step.label}" must return a non-empty human-readable string, not an object`,
+            `stepContent.${step.id}`,
+          );
+        }
         if (hasInvalidAutomationSketchToolNamespace(content.content)) {
           addIssue(
             issues,
@@ -543,14 +655,14 @@ export function validateAutomationExecutionMode(
       addIssue(
         issues,
         "DETERMINISTIC_MODE_AGENT_STEP",
-        `Follow exact steps cannot include AI step "${step.label}"`,
+        `Fixed recipe mode cannot include agent step "${step.label}"`,
         `steps.${step.id}`,
       );
     } else if (mode === "agent-led" && step.type === "action") {
       addIssue(
         issues,
         "AGENT_LED_MODE_ACTION_STEP",
-        `Let Sketch handle the details cannot include code or action step "${step.label}"`,
+        `Agent-led mode cannot include code or action step "${step.label}"`,
         `steps.${step.id}`,
       );
     }

@@ -62,6 +62,19 @@ function requestForAction(
 }
 
 describe("automation action capability validation", () => {
+  it("rejects a final delivery action that returns an object", () => {
+    const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
+    request.status = "active";
+    request.delivery.mode = "deliver";
+    request.stepContent.action.content = 'return { message: "Reminder: message Vedant on Slack." };';
+
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ code: "DELIVERY_MESSAGE_STRING_REQUIRED" })]),
+      }),
+    );
+  });
+
   it("allows a read-only Sketch action without a broker", () => {
     expect(() =>
       validateAutomationBuilderSaveRequest({
@@ -138,8 +151,8 @@ describe("automation action capability validation", () => {
 });
 
 describe("automation execution mode validation", () => {
-  it("rejects agent steps in fixed recipe mode", () => {
-    const request = requestForAction();
+  it("allows a fixed recipe with deterministic action and existing agent steps", () => {
+    const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
     request.executionMode = "deterministic";
     request.steps.push({
       id: "agent",
@@ -157,6 +170,34 @@ describe("automation execution mode validation", () => {
       apps: null,
     };
 
+    expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: true })).not.toThrow();
+  });
+
+  it("still rejects a fixed recipe made only of agent steps", () => {
+    const request = requestForAction();
+    request.executionMode = "deterministic";
+    request.steps = [
+      request.steps[0],
+      {
+        id: "agent",
+        type: "agent",
+        label: "Summarize",
+        icon: "robot",
+        position: { x: 260, y: 0 },
+      },
+    ];
+    request.edges = [{ id: "trigger-agent", from: "trigger", to: "agent" }];
+    request.stepContent = {
+      agent: {
+        taskId: "task-1",
+        stepId: "agent",
+        contentType: "prompt",
+        content: "Summarize the result.",
+        apps: null,
+      },
+    };
+    request.status = "active";
+
     expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
       expect.objectContaining({
         issues: expect.arrayContaining([
@@ -169,6 +210,7 @@ describe("automation execution mode validation", () => {
   it("rejects action steps in agent-led mode", () => {
     const request = requestForAction({ sketchTools: ["searchEntities"], usesIntegrationActions: false });
     request.executionMode = "agent-led";
+    request.status = "active";
 
     expect(() => validateAutomationBuilderSaveRequest({ request, brokerCapable: false })).toThrowError(
       expect.objectContaining({

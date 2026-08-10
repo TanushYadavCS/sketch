@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WebChatQuestion } from "@sketch/shared";
+import type { WebChatQuestion, WebChatQuestionBatch } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,7 +17,6 @@ import { createUserRepository } from "../db/repositories/users";
 import type { DB } from "../db/schema";
 import { createApp } from "../http";
 import { createTestConfig, createTestDb, createTestLogger } from "../test-utils";
-import { isAutomationDraftRequest } from "./web-chat";
 
 function makeAgentResult(finalText = "Hello from Sketch", pendingUploads: string[] = []) {
   return {
@@ -221,29 +220,71 @@ describe("web chat API", () => {
     expect(call.taskContext).toBeUndefined();
   });
 
-  it("creates a paused automation draft and emits a typed builder handoff", async () => {
+  it("persists a recovery message when the agent returns no assistant content", async () => {
     const admin = await seedAdmin(db);
-    const runAgent = vi.fn().mockResolvedValue(makeAgentResult("The agent should not handle this handoff."));
-    const buildMcpServers = vi.fn().mockResolvedValue({});
+    const recoveryText = "I wasn't able to complete that request. Please try again.";
+    const runAgent = vi.fn().mockResolvedValue({
+      ...makeAgentResult(""),
+      messageSent: false,
+    });
     const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
       logger: createTestLogger(),
       runAgent,
-      buildMcpServers,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
     });
     const cookie = await login(app);
 
-    const res = await app.request("/api/web-chat?conversationId=chat-draft", {
+    const res = await app.request("/api/web-chat?conversationId=chat-empty-response", {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: [
+      body: JSON.stringify({ message: "Create a reminder" }),
+    });
+
+    expect(res.status).toBe(200);
+    const stream = await res.text();
+    expect(stream).toContain(recoveryText);
+
+    const transcript = JSON.parse(
+      await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-empty-response"), "utf-8"),
+    ) as { messages: Array<{ role: string; parts: unknown[] }> };
+    expect(transcript.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      parts: [{ type: "text", text: recoveryText }],
+    });
+  });
+
+  it("hands a create-automation skill invocation to the builder", async () => {
+    const admin = await seedAdmin(db);
+    const runAgent = vi.fn().mockResolvedValue({
+      ...makeAgentResult("I will create the automation here."),
+      rawUsage: {
+        toolCalls: [
           {
-            id: "draft-request-1",
-            role: "user",
-            parts: [{ type: "text", text: "Create an automation that sends me a daily brief" }],
+            toolName: "Skill",
+            skillName: "create-automation",
+            startedAt: 0,
+            endedAt: 1,
+            success: true,
           },
         ],
-      }),
+      },
+      trace: {
+        progressEvents: [{ kind: "tool_use", toolName: "Skill", input: { skill: "create-automation" } }],
+        finalText: "I will create the automation here.",
+        automationArtifacts: [],
+      },
+    });
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-skill-handoff", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Please make an automation for my daily brief" }),
     });
 
     expect(res.status).toBe(200);
@@ -252,39 +293,46 @@ describe("web chat API", () => {
       kind: string;
       taskId: string;
       sourceConversationId: string;
+      builderConversationId: string;
       builderUrl: string;
       status: string;
     };
     expect(handoff).toMatchObject({
       kind: "automation-draft",
-      sourceConversationId: "chat-draft",
+      sourceConversationId: "chat-skill-handoff",
       status: "paused",
     });
     expect(handoff.taskId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(handoff.builderUrl).toContain(`/scheduled-tasks/${handoff.taskId}/edit?conversationId=chat-draft`);
-    expect(runAgent).not.toHaveBeenCalled();
-    expect(buildMcpServers).not.toHaveBeenCalled();
+    expect(handoff.builderConversationId).toMatch(/^builder-[0-9a-f-]{36}$/);
+    expect(handoff.builderUrl).toContain(
+      `/scheduled-tasks/${handoff.taskId}/edit?conversationId=${handoff.builderConversationId}`,
+    );
 
     const task = await createScheduledTaskRepository(db).getById(handoff.taskId);
     expect(task).toMatchObject({
       status: "paused",
-      prompt: "Describe the automation.",
       title: "New automation",
-      steps: null,
-      edges: null,
+      prompt: "Describe the automation.",
       origin_platform: "web",
-      origin_conversation_id: "chat-draft",
+      origin_conversation_id: "chat-skill-handoff",
       created_by: admin.id,
+      thread_ts: null,
+      output_thread_ts: null,
     });
-    const associations = await createScheduledTaskConversationRepository(db).listByTaskConversationForTranscriptUser(
+    const associations = await createScheduledTaskConversationRepository(db).listByTaskAndTranscriptUser(
       handoff.taskId,
-      "chat-draft",
       admin.id,
     );
-    expect(associations).toHaveLength(1);
-    expect(associations[0]).toMatchObject({ kind: "web_chat" });
-
-    const transcript = JSON.parse(await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-draft"), "utf-8"));
+    expect(associations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ conversation_id: "chat-skill-handoff", kind: "web_chat" }),
+        expect.objectContaining({ conversation_id: handoff.builderConversationId, kind: "builder" }),
+      ]),
+    );
+    expect(stream).not.toContain('"type":"data-automation"');
+    const transcript = JSON.parse(
+      await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-skill-handoff"), "utf-8"),
+    );
     expect(transcript.messages.at(-1).parts).toContainEqual({
       type: "data-automation-handoff",
       id: "automation-handoff-0",
@@ -292,15 +340,74 @@ describe("web chat API", () => {
     });
   });
 
-  it.each([
-    ["How do I create an automation?", false],
-    ["What is a workflow?", false],
-    ["Should I build an automation?", false],
-    ["Do not create an automation for this.", false],
-    ["Create an automation for a daily brief.", true],
-    ["Set up a workflow for our weekly customer brief.", true],
-  ])("classifies %j as an automation draft request: %s", (message, expected) => {
-    expect(isAutomationDraftRequest(message)).toBe(expected);
+  it("emits the automation artifact after the agent creates a natural-language automation", async () => {
+    const admin = await seedAdmin(db);
+    const artifact = {
+      taskId: "task-natural-language",
+      requiresBuilder: true,
+      kind: "New automation",
+      title: "Weekday Morning Calendar Summary",
+      description: "Sends a quick summary of the day's calendar every weekday morning.",
+      tags: ["Scheduled", "Slack"],
+      scheduleLabel: "Cron: 0 9 * * 1-5 (Asia/Kolkata)",
+      deliveryLabel: "Slack DM",
+      builderUrl: "/scheduled-tasks/task-natural-language/edit?conversationId=chat-natural-language",
+      status: "active" as const,
+    };
+    const runAgent = vi.fn().mockImplementation(async (params: RunAgentParams) => {
+      await params.onProgressEvent({
+        kind: "tool_use",
+        toolName: "ManageScheduledTasks",
+        input: {
+          action: "add",
+          request: "Remind me every weekday morning with a quick summary of my calendar for the day.",
+        },
+      });
+      return {
+        ...makeAgentResult("Automation created."),
+        trace: {
+          progressEvents: [],
+          finalText: "Automation created.",
+          automationArtifacts: [artifact],
+        },
+      };
+    });
+    const buildMcpServers = vi.fn().mockResolvedValue({});
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers,
+    });
+    const cookie = await login(app);
+
+    const res = await app.request("/api/web-chat?conversationId=chat-natural-language", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "Remind me every weekday morning with a quick summary of my calendar for the day.",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const stream = await res.text();
+    const chunks = webChatStreamChunks(stream);
+    expect(runAgent).toHaveBeenCalledOnce();
+    expect(buildMcpServers).toHaveBeenCalledWith("karan@example.com");
+    expect(chunks.find((chunk) => chunk.type === "data-automation-handoff")).toBeUndefined();
+    expect(chunks.find((chunk) => chunk.type === "data-automation")).toMatchObject({
+      type: "data-automation",
+      data: artifact,
+    });
+    expect(stream).toContain("All set - here's the automation.");
+
+    const transcript = JSON.parse(
+      await readFile(webChatTranscriptPath(dataDir, admin.id, "chat-natural-language"), "utf-8"),
+    );
+    expect(transcript.messages.at(-1).parts).toContainEqual({
+      type: "data-automation",
+      id: "automation-0",
+      data: artifact,
+    });
   });
 
   it("streams assistant text deltas before the web chat agent run finishes", async () => {
@@ -592,6 +699,101 @@ describe("web chat API", () => {
     expect(transcript.messages.filter((message) => message.role === "user")).toHaveLength(2);
   });
 
+  it("streams and validates a bounded batch of pending choices", async () => {
+    const admin = await seedAdmin(db);
+    const batch: WebChatQuestionBatch = {
+      batchId: "automation-setup",
+      questions: [
+        {
+          id: "source",
+          prompt: "Where should this read from?",
+          options: [
+            { id: "gmail", label: "Gmail" },
+            { id: "drive", label: "Google Drive" },
+          ],
+        },
+        {
+          id: "cadence",
+          prompt: "How often should it run?",
+          options: [
+            { id: "daily", label: "Daily" },
+            { id: "weekly", label: "Weekly" },
+          ],
+        },
+      ],
+    };
+    const runAgent = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ...makeAgentResult(""),
+        pendingInteraction: batch,
+        trace: { progressEvents: [], finalText: null, automationArtifacts: [] },
+      })
+      .mockResolvedValueOnce(makeAgentResult("Configured."));
+    const app = createApp(db, createTestConfig({ DATA_DIR: dataDir }), {
+      logger: createTestLogger(),
+      runAgent,
+      buildMcpServers: vi.fn().mockResolvedValue({}),
+    });
+    const cookie = await login(app);
+
+    const firstResponse = await app.request("/api/web-chat?conversationId=batch-choice-chat", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Set up the automation" }),
+    });
+    expect(firstResponse.status).toBe(200);
+    expect(webChatStreamChunks(await firstResponse.text())).toContainEqual({
+      type: "data-question-batch",
+      id: "question-automation-setup",
+      data: batch,
+    });
+
+    const secondResponse = await app.request("/api/web-chat?conversationId=batch-choice-chat", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          id: "batch-answer-1",
+          role: "user",
+          parts: [
+            { type: "text", text: "Gmail, Daily" },
+            {
+              type: "data-question-batch-answer",
+              id: "question-batch-answer-automation-setup",
+              data: {
+                batchId: "automation-setup",
+                answers: [
+                  { questionId: "source", optionId: "gmail" },
+                  { questionId: "cadence", optionId: "daily" },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+    });
+    expect(secondResponse.status).toBe(200);
+    await secondResponse.text();
+
+    expect(runAgent).toHaveBeenCalledTimes(2);
+    expect(runAgent.mock.calls[1]?.[0].userMessage).toContain("Gmail, Daily");
+    const transcript = JSON.parse(
+      await readFile(webChatTranscriptPath(dataDir, admin.id, "batch-choice-chat"), "utf-8"),
+    ) as { messages: Array<{ role: string; parts: unknown[] }> };
+    expect(transcript.messages[2]?.parts).toContainEqual({
+      type: "data-question-batch-answer",
+      id: "question-batch-answer-automation-setup",
+      data: {
+        batchId: "automation-setup",
+        answers: [
+          { questionId: "source", optionId: "gmail" },
+          { questionId: "cadence", optionId: "daily" },
+        ],
+      },
+    });
+  });
+
   it("rejects a choice that is not part of the pending question", async () => {
     const admin = await seedAdmin(db);
     const question: WebChatQuestion = {
@@ -709,6 +911,7 @@ describe("web chat API", () => {
     });
     const artifact = {
       taskId: "task-123",
+      requiresBuilder: true,
       kind: "New automation",
       title: "Send weekly customer brief",
       description: "Summarizes customer updates every Monday.",

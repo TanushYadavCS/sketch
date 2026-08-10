@@ -575,6 +575,27 @@ async function refreshTaskAfterMutation(
   }
 }
 
+async function automaticAutomationTestRun(scheduler: TaskScheduler, taskId: string): Promise<string> {
+  try {
+    const result = await scheduler.executeTaskById(taskId, { preserveTaskState: true, runMode: "test" });
+    if (!result) {
+      return `Automatic test run for automation ${taskId} did not execute because the task is already complete.`;
+    }
+    const outcome = result.status === "failed" || result.aborted ? "failed" : "completed";
+    return [
+      `Automatic test run ${outcome} for automation ${taskId}:`,
+      JSON.stringify(result, null, 2),
+      "Inspect this result and repair the automation if the test exposed an issue before reporting completion.",
+    ].join("\n");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return [
+      `Automatic test run for automation ${taskId} could not be completed: ${message}`,
+      "Inspect the automation and repair the issue before reporting completion.",
+    ].join("\n");
+  }
+}
+
 function buildArtifactTags(params: {
   steps: Array<WorkflowStep & { apps?: string[] }>;
   scheduleType: string;
@@ -608,10 +629,69 @@ function buildArtifactScheduleLabel(params: {
   return `Cron: ${params.scheduleValue} (${params.timezone})`;
 }
 
+export function requiresAutomationBuilder(params: {
+  steps: Array<WorkflowStep & { apps?: string[]; script?: string; agentPrompt?: string }>;
+  scheduleType: string;
+}): boolean {
+  if (!isLocalScheduleType(params.scheduleType) || params.steps.length !== 2) return true;
+
+  const [trigger] = params.steps.filter((step) => step.type === "trigger");
+  const [executionStep] = params.steps.filter((step) => step.type !== "trigger");
+  if (!trigger || !executionStep || trigger.triggerConfig?.type !== "schedule") return true;
+
+  const triggerConfig = trigger.triggerConfig;
+  const allowedTriggerConfigKeys = new Set(["type", "scheduleType", "scheduleValue", "timezone"]);
+  if (Object.keys(triggerConfig).some((key) => !allowedTriggerConfigKeys.has(key))) return true;
+
+  const literalActionScript = executionStep.type === "action" ? executionStep.script?.trim() : undefined;
+  const literalActionMatch = literalActionScript
+    ? [
+        /^return\s+"((?:\\.|[^"\\])*)";?\s*$/,
+        /^return\s+'((?:\\.|[^'\\])*)';?\s*$/,
+        /^return\s+`((?:\\.|[^`\\$]|\$(?!\{))*)`;?\s*$/,
+      ]
+        .map((pattern) => pattern.exec(literalActionScript))
+        .find((match) => match !== null)
+    : undefined;
+  const isSimpleLiteralAction =
+    executionStep.type === "action" && Boolean(literalActionMatch?.[1]?.replace(/\\./g, "x").trim());
+  if (!isSimpleLiteralAction) return true;
+
+  for (const step of params.steps) {
+    if (
+      (step.type !== "action" && step.script !== undefined) ||
+      (step.apps?.length ?? 0) > 0 ||
+      (step.agentSkills?.length ?? 0) > 0 ||
+      step.agentModel !== undefined ||
+      (step.agentMcpServers?.length ?? 0) > 0 ||
+      step.actionCapabilities !== undefined ||
+      step.timeout !== undefined
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function withStepContent(
+  steps: WorkflowStep[],
+  stepContent: AutomationBuilderSaveRequest["stepContent"],
+): Array<WorkflowStep & { apps?: string[]; script?: string; agentPrompt?: string }> {
+  return steps.map((step) => {
+    const content = stepContent[step.id];
+    if (!content) return step;
+    return {
+      ...step,
+      ...(content.apps ? { apps: content.apps } : {}),
+      ...(content.contentType === "script" ? { script: content.content } : { agentPrompt: content.content }),
+    };
+  });
+}
+
 function collectAutomationArtifact(params: {
   deps: ManageScheduledTasksDeps;
   task: ScheduledTask;
-  steps: Array<WorkflowStep & { apps?: string[] }>;
+  steps: Array<WorkflowStep & { apps?: string[]; script?: string; agentPrompt?: string }>;
   scheduleType: string;
   scheduleValue: string;
   timezone: string;
@@ -627,6 +707,7 @@ function collectAutomationArtifact(params: {
 
   params.deps.automationArtifactCollector?.collect({
     taskId: params.task.id,
+    requiresBuilder: requiresAutomationBuilder(params),
     kind: "New automation",
     title: params.task.title ?? params.task.prompt,
     description: params.task.description ?? `${buildArtifactScheduleLabel(params)}. Delivery: ${deliveryLabel}.`,
@@ -723,7 +804,7 @@ async function handleConfiguredChatAuthoring(
   if (result.kind === "clarification") return text(result.message);
   if (result.kind === "error") return text(`Error: ${result.message}`);
 
-  if (params.action === "add") {
+  if (params.action === "add" || params.action === "update") {
     collectAutomationArtifact({
       deps,
       task: result.task,
@@ -734,7 +815,8 @@ async function handleConfiguredChatAuthoring(
     });
   }
   const verb = params.action === "add" ? "created" : "updated";
-  return text(`Automation ${verb}:\n${JSON.stringify(result.task, null, 2)}`);
+  const testRun = await automaticAutomationTestRun(deps.scheduler, result.task.id);
+  return text([`Automation ${verb}:`, JSON.stringify(result.task, null, 2), testRun].join("\n"));
 }
 
 export async function handleManageScheduledTasks(
@@ -1048,7 +1130,7 @@ export async function handleManageScheduledTasks(
       collectAutomationArtifact({
         deps,
         task: refreshedTask,
-        steps,
+        steps: withStepContent(stepsForDb, stepContentForDefinition("new-task", steps)),
         scheduleType,
         scheduleValue,
         timezone: resolvedTimezone,
@@ -1056,7 +1138,8 @@ export async function handleManageScheduledTasks(
 
       const response: Record<string, unknown> = { ...refreshedTask };
       if (webhookUrl) response.webhookUrl = webhookUrl;
-      return text(`Automation created:\n${JSON.stringify(response, null, 2)}`);
+      const testRun = await automaticAutomationTestRun(deps.scheduler, refreshedTask.id);
+      return text(["Automation created:", JSON.stringify(response, null, 2), testRun].join("\n"));
     }
 
     case "update": {
@@ -1118,7 +1201,16 @@ export async function handleManageScheduledTasks(
       const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
       if (refreshFailed || !updated)
         return text("Error: automation was saved, but its scheduler state could not be refreshed.");
-      return text(`Automation updated:\n${JSON.stringify(updated, null, 2)}`);
+      collectAutomationArtifact({
+        deps,
+        task: updated,
+        steps: withStepContent(saved.request.steps, saved.request.stepContent),
+        scheduleType: saved.request.scheduleType,
+        scheduleValue: saved.request.scheduleValue,
+        timezone: saved.request.timezone,
+      });
+      const testRun = await automaticAutomationTestRun(deps.scheduler, updated.id);
+      return text(["Automation updated:", JSON.stringify(updated, null, 2), testRun].join("\n"));
     }
 
     case "share": {
@@ -1201,10 +1293,10 @@ export async function handleManageScheduledTasks(
           getScheduledTaskQueueKey(guardedTask) === activeQueueKey
         ) {
           await deps.scheduler.enqueueTaskById(task_id);
-          return text(`Automation ${task_id} test run queued and will post back here shortly.`);
+          return text(`Automation ${task_id} manual run queued and will post back here shortly.`);
         }
 
-        const result = await deps.scheduler.executeTaskById(task_id);
+        const result = await deps.scheduler.executeTaskById(task_id, { runMode: "manual" });
         if (!result) {
           const latestRun = deps.automationRunsRepo ? await deps.automationRunsRepo.getLatest(task_id) : undefined;
           return text(

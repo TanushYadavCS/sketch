@@ -13,6 +13,7 @@ import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promi
 import { join, sep } from "node:path";
 import {
   type AutomationExecutionMode,
+  type AutomationRunMode,
   type AutomationSketchToolName,
   automationExecutionModeAllowsStep,
   automationExecutionModeSchema,
@@ -56,8 +57,12 @@ import type { RecordWorkflowStep, WorkflowStepUsage } from "../telemetry/agent-r
 import { requireWorkflowMessageText, resolveWorkflowDelivery } from "./delivery";
 import type { StepOutput, WorkflowEdge, WorkflowStep } from "./types";
 
+export type { AutomationRunMode } from "@sketch/shared";
+
 export interface ExecuteAutomationParams {
   task: ScheduledTaskRow;
+  runId?: string;
+  runMode?: AutomationRunMode;
   triggerData?: unknown;
   db: Kysely<DB>;
   logger: Logger;
@@ -135,19 +140,65 @@ export class AutomationRunAbortedError extends Error {
   }
 }
 
+export function automationRunDeepLink(
+  config: { BASE_URL?: string; PORT: number },
+  taskId: string,
+  runId: string,
+): string {
+  const baseUrl = config.BASE_URL?.trim() || `http://localhost:${config.PORT}`;
+  return `${baseUrl.replace(/\/$/, "")}/scheduled-tasks/${encodeURIComponent(taskId)}/edit?runId=${encodeURIComponent(runId)}`;
+}
+
+function automationTitle(task: Pick<ScheduledTaskRow, "title" | "prompt">): string {
+  return task.title ?? task.prompt;
+}
+
+export function automationManualFailureNotification(
+  config: { BASE_URL?: string; PORT: number },
+  task: Pick<ScheduledTaskRow, "id" | "title" | "prompt">,
+  runId: string,
+): string {
+  return `Automation “${automationTitle(task)}” failed. View run: ${automationRunDeepLink(config, task.id, runId)}`;
+}
+
+async function failAutomationRun(params: {
+  runtime: ExecuteAutomationParams;
+  runId: string;
+  errorMessage: string;
+  stepOutputs?: Record<string, StepOutput>;
+  aborted?: boolean;
+  productionNotification?: string;
+}): Promise<void> {
+  const { runtime, runId, errorMessage, stepOutputs, aborted = false } = params;
+  try {
+    await runtime.runsRepo.update(runId, {
+      status: "failed",
+      ...(stepOutputs === undefined ? {} : { stepOutputs }),
+      completedAt: new Date().toISOString(),
+      errorMessage,
+    });
+  } catch (err) {
+    runtime.logger.error({ err, taskId: runtime.task.id, runId }, "Automation: failed to persist run failure");
+  }
+
+  if (aborted || runtime.runMode === "test" || !runtime.sendMessage) return;
+
+  const notification =
+    runtime.runMode === "manual"
+      ? automationManualFailureNotification(runtime.config, runtime.task, runId)
+      : (params.productionNotification ?? `Automation '${automationTitle(runtime.task)}' failed: ${errorMessage}`);
+  try {
+    await runtime.sendMessage(notification);
+  } catch (err) {
+    runtime.logger.warn({ err, taskId: runtime.task.id, runId }, "Automation: failure notification delivery failed");
+  }
+}
+
 function resolveRuntimeExecutionMode(value: string | null | undefined): AutomationExecutionMode {
   if (value === null || value === undefined || value.trim() === "") return "hybrid";
   const parsed = automationExecutionModeSchema.safeParse(value);
   if (parsed.success) return parsed.data;
   throw new Error(`Automation has unsupported execution mode "${value}"`);
-}
-
-function persistedDefinitionErrorMessage(error: unknown): string {
-  if (error instanceof AutomationValidationError) {
-    return `${error.message}: ${error.issues.map((issue) => issue.message).join("; ")}`;
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  return `Automation definition could not be loaded: ${message}`;
 }
 
 export function validateRuntimeAutomationExecutionMode(
@@ -161,56 +212,103 @@ export function validateRuntimeAutomationExecutionMode(
 }
 
 export async function executeAutomation(params: ExecuteAutomationParams): Promise<AutomationExecutionResult> {
-  const { task, triggerData, logger, runsRepo, stepContentRepo, sendMessage, onEvent } = params;
+  const runId =
+    params.runId ?? (await params.runsRepo.create({ taskId: params.task.id, triggerData: params.triggerData }));
+  try {
+    return await executeAutomationInternal({ ...params, runId });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const aborted = error instanceof AutomationRunAbortedError;
+    await failAutomationRun({
+      runtime: params,
+      runId,
+      errorMessage: aborted ? "Automation run aborted" : detail,
+      aborted,
+    });
+    params.logger.error({ err: error, taskId: params.task.id, runId }, "Automation: unhandled execution failure");
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {}, ...(aborted ? { aborted: true } : {}) };
+  }
+}
 
-  // 1. Verify creator exists
+async function executeAutomationInternal(
+  params: ExecuteAutomationParams & { runId: string },
+): Promise<AutomationExecutionResult> {
+  const { task, triggerData, logger, runsRepo, stepContentRepo, onEvent } = params;
+  const sendMessage = params.runMode === "test" ? undefined : params.sendMessage;
+  const runId = params.runId;
+
   const creatorId = task.created_by;
   let creator: Awaited<ReturnType<NonNullable<RunAgentParams["userRepo"]>["findById"]>> | undefined;
   let creatorEmail: string | null = null;
-  if (creatorId) {
-    creator = await params.userRepo.findById(creatorId);
-    if (!creator) {
-      logger.error({ taskId: task.id, creatorId }, "Automation: creator no longer exists");
-      const runId = await runsRepo.create({ taskId: task.id, triggerData });
-      await runsRepo.update(runId, {
-        status: "failed",
-        errorMessage: "Creator no longer exists",
-        completedAt: new Date().toISOString(),
-      });
-      if (sendMessage) {
-        await sendMessage(`Automation '${task.title ?? task.prompt}' failed: Creator no longer exists`);
+  try {
+    if (creatorId) {
+      creator = await params.userRepo.findById(creatorId);
+      if (!creator) {
+        logger.error({ taskId: task.id, creatorId }, "Automation: creator no longer exists");
+        await failAutomationRun({
+          runtime: params,
+          runId,
+          errorMessage: "Creator no longer exists",
+          productionNotification: `Automation '${automationTitle(task)}' failed: Creator no longer exists`,
+        });
+        return { runId, status: "failed", finalOutput: null, stepOutputs: {} };
       }
-      return { runId, status: "failed", finalOutput: null, stepOutputs: {} };
+      creatorEmail = creator.email;
     }
-    creatorEmail = creator.email;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    logger.error({ err: error, taskId: task.id, runId }, "Automation: creator lookup failed");
+    const aborted = error instanceof AutomationRunAbortedError;
+    await failAutomationRun({
+      runtime: params,
+      runId,
+      errorMessage: aborted ? "Automation run aborted during creator lookup" : `Creator lookup failed: ${detail}`,
+      aborted,
+    });
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {}, ...(aborted ? { aborted: true } : {}) };
   }
-
-  const runId = await runsRepo.create({ taskId: task.id, triggerData });
   let persistedDefinition: ValidatedPersistedAutomationDefinition;
   let contentRows: StepContentRow[];
   try {
     contentRows = await stepContentRepo.getByTask(task.id);
     persistedDefinition = validatePersistedAutomationDefinition({ task, stepContentRows: contentRows });
   } catch (error) {
-    const definitionError = new Error(persistedDefinitionErrorMessage(error));
-    await runsRepo.update(runId, {
-      status: "failed",
-      stepOutputs: {},
-      completedAt: new Date().toISOString(),
+    const definitionError = new Error(
+      error instanceof AutomationValidationError
+        ? `${error.message}: ${error.issues.map((issue) => issue.message).join("; ")}`
+        : `Automation definition could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    const aborted = error instanceof AutomationRunAbortedError;
+    await failAutomationRun({
+      runtime: params,
+      runId,
       errorMessage: definitionError.message,
+      stepOutputs: {},
+      aborted,
+      productionNotification: `Automation '${automationTitle(task)}' failed: ${definitionError.message}`,
     });
     logger.error({ err: error, taskId: task.id, runId }, "Automation: persisted definition validation failed");
-    if (sendMessage) {
-      await sendMessage(`Automation '${task.title ?? task.prompt}' failed: ${definitionError.message}`);
-    }
-    return { runId, status: "failed", finalOutput: null, stepOutputs: {} };
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {}, ...(aborted ? { aborted: true } : {}) };
   }
 
   const { steps, edges } = persistedDefinition;
   const executionSteps = resolveExecutionOrder(steps, edges);
   const contentMap = new Map(contentRows.map((r) => [r.step_id, r]));
   const workspaceDir = resolveAutomationWorkspaceDir(params.config.DATA_DIR, task);
-  await mkdir(workspaceDir, { recursive: true });
+  try {
+    await mkdir(workspaceDir, { recursive: true });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const aborted = error instanceof AutomationRunAbortedError;
+    await failAutomationRun({
+      runtime: params,
+      runId,
+      errorMessage: `Automation workspace could not be prepared: ${detail}`,
+      aborted,
+    });
+    logger.error({ err: error, taskId: task.id, runId }, "Automation: workspace preparation failed");
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {}, ...(aborted ? { aborted: true } : {}) };
+  }
   const emitEvent = async (event: AutomationExecutionEvent) => {
     try {
       await onEvent?.(event);
@@ -233,16 +331,14 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   }
 
   if (executionModeError) {
-    await runsRepo.update(runId, {
-      status: "failed",
-      stepOutputs: {},
-      completedAt: new Date().toISOString(),
+    await failAutomationRun({
+      runtime: params,
+      runId,
       errorMessage: executionModeError.message,
+      stepOutputs: {},
+      productionNotification: `Automation '${automationTitle(task)}' failed: ${executionModeError.message}`,
     });
     logger.error({ err: executionModeError, taskId: task.id, runId }, "Automation: invalid execution mode");
-    if (sendMessage) {
-      await sendMessage(`Automation '${task.title ?? task.prompt}' failed: ${executionModeError.message}`);
-    }
     await emitEvent({
       type: "completed",
       runId,
@@ -273,8 +369,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   for (const step of executionSteps) {
     const content = contentMap.get(step.id);
     const startTime = Date.now();
-    const isMessageDeliveryStep =
-      Boolean(sendMessage) && task.output_mode !== "silent" && step.id === lastExecutionStepId;
+    const isMessageDeliveryStep = task.output_mode !== "silent" && step.id === lastExecutionStepId;
 
     logger.info(
       { taskId: task.id, runId, stepId: step.id, stepType: step.type, stepLabel: step.label },
@@ -335,14 +430,17 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
 
       markSkippedAfterFailure({ failedStepId: step.id, executionSteps, edges, stepOutputs });
 
-      await runsRepo.update(runId, {
-        status: "failed",
+      const runErrorMessage =
+        error instanceof AutomationRunAbortedError
+          ? `Automation run aborted by user at step "${step.label}"`
+          : `Step "${step.label}" failed: ${error.message}`;
+      await failAutomationRun({
+        runtime: params,
+        runId,
+        errorMessage: runErrorMessage,
         stepOutputs,
-        completedAt: new Date().toISOString(),
-        errorMessage:
-          error instanceof AutomationRunAbortedError
-            ? `Automation run aborted by user at step "${step.label}"`
-            : `Step "${step.label}" failed: ${error.message}`,
+        aborted: error instanceof AutomationRunAbortedError,
+        productionNotification: `Automation '${automationTitle(task)}' failed at step '${step.label}': ${error.message}`,
       });
 
       failed = true;
@@ -368,9 +466,6 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         error: { message: error.message },
       });
 
-      if (!(error instanceof AutomationRunAbortedError) && sendMessage) {
-        await sendMessage(`Automation '${task.title ?? task.prompt}' failed at step '${step.label}': ${error.message}`);
-      }
       break;
     }
   }
@@ -380,16 +475,33 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   const finalOutput = lastStep ? (stepOutputs[lastStep.id]?.output ?? null) : null;
 
   if (!failed) {
-    await runsRepo.update(runId, {
-      status: "completed",
-      stepOutputs,
-      completedAt: new Date().toISOString(),
-    });
+    try {
+      await runsRepo.update(runId, {
+        status: "completed",
+        stepOutputs,
+        completedAt: new Date().toISOString(),
+      });
 
-    logger.info({ taskId: task.id, runId }, "Automation: execution completed");
-
-    if (sendMessage && task.output_mode !== "silent") {
-      if (finalOutput != null) await sendMessage(requireWorkflowMessageText(finalOutput));
+      if (sendMessage && task.output_mode !== "silent" && finalOutput != null) {
+        await sendMessage(requireWorkflowMessageText(finalOutput));
+      }
+      logger.info({ taskId: task.id, runId }, "Automation: execution completed");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const completionAborted = error instanceof AutomationRunAbortedError;
+      failed = true;
+      aborted = completionAborted;
+      await failAutomationRun({
+        runtime: params,
+        runId,
+        errorMessage: completionAborted
+          ? "Automation run aborted during completion"
+          : `Automation completion failed: ${detail}`,
+        stepOutputs,
+        aborted: completionAborted,
+        productionNotification: `Automation '${automationTitle(task)}' failed: ${detail}`,
+      });
+      logger.error({ err: error, taskId: task.id, runId }, "Automation: completion failed");
     }
   }
 

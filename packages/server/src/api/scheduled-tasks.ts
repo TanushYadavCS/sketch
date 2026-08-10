@@ -1,13 +1,20 @@
-import { workflowStepUsesIntegrationActions } from "@sketch/shared";
+import { randomUUID } from "node:crypto";
+import { automationExecutionModeSchema, workflowStepUsesIntegrationActions } from "@sketch/shared";
 import { type Context, Hono } from "hono";
 import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
 import {
   AutomationValidationError,
   buildAutomationDefinition,
+  isAutomationPlaceholderDraft,
+  isStrictAutomationPlaceholderRow,
   parseAutomationBuilderSaveRequest,
 } from "../automation/definition";
-import { deleteAutomation, replaceAutomationDefinition } from "../automation/persistence";
+import {
+  deleteAutomation,
+  replaceAutomationDefinition,
+  selectAutomationSetupExecutionMode,
+} from "../automation/persistence";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
@@ -30,7 +37,10 @@ interface ScheduledTaskMutationDeps {
   resumeTask: (id: string) => Promise<void>;
   removeTask: (id: string) => Promise<boolean>;
   removeTaskRuntime?: (id: string) => Promise<boolean>;
-  executeTaskById: (id: string) => Promise<unknown>;
+  executeTaskById: (
+    id: string,
+    options?: { preserveTaskState?: boolean; runMode?: "production" | "manual" | "test"; runId?: string },
+  ) => Promise<unknown>;
   refreshTaskSchedule?: (id: string) => Promise<unknown>;
   executeStepById?: (
     id: string,
@@ -358,6 +368,55 @@ export function scheduledTaskRoutes(
   const repo = createScheduledTaskRepository(db);
   const users = createUserRepository(db);
   const logger = options.logger;
+  const runsRepo = createAutomationRunsRepository(db);
+
+  async function markReservedRunFailed(runId: string, error: unknown): Promise<void> {
+    const current = await runsRepo.getById(runId).catch(() => undefined);
+    if (!current || current.status !== "running") return;
+    await runsRepo.update(runId, {
+      status: "failed",
+      completedAt: new Date().toISOString(),
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  async function reserveManualRun(taskId: string): Promise<string | null> {
+    const runId = randomUUID();
+    try {
+      await runsRepo.create({ id: runId, taskId, triggerData: { type: "manual" } });
+      return runId;
+    } catch (error) {
+      logger?.error({ err: error, taskId, runId }, "scheduled-tasks: failed to reserve manual run");
+      return null;
+    }
+  }
+
+  async function enqueueReservedManualRun(taskId: string, runId: string): Promise<boolean> {
+    try {
+      const execution = scheduler.executeTaskById(taskId, {
+        preserveTaskState: true,
+        runMode: "manual",
+        runId,
+      });
+      void Promise.resolve(execution)
+        .then((run) => {
+          if (run === null) return markReservedRunFailed(runId, `Task ${taskId} is no longer runnable`);
+          if (typeof run === "object" && run !== null && "status" in run && run.status === "failed") {
+            return markReservedRunFailed(runId, "Automation run failed");
+          }
+          return undefined;
+        })
+        .catch((error) => markReservedRunFailed(runId, error))
+        .catch((error) =>
+          logger?.error({ err: error, taskId, runId }, "scheduled-tasks: failed to record run failure"),
+        );
+      return true;
+    } catch (error) {
+      await markReservedRunFailed(runId, error);
+      logger?.error({ err: error, taskId, runId }, "scheduled-tasks: failed to enqueue manual run");
+      return false;
+    }
+  }
 
   // sub can be a user UUID (managed SSO, local JWT) or an email (legacy local JWT).
   // Follows the precedent in api/users.ts:223-233.
@@ -434,6 +493,17 @@ export function scheduledTaskRoutes(
       rows = [];
     }
 
+    const stepContentRepo = createAutomationStepContentRepository(db);
+    rows = (
+      await Promise.all(
+        rows.map(async (row) => {
+          if (!isStrictAutomationPlaceholderRow(row)) return row;
+          const [stepContentRows, runRows] = await Promise.all([stepContentRepo.getByTask(row.id), runsRepo.list(row.id)]);
+          return isAutomationPlaceholderDraft({ row, stepContentRows, runRows }) ? null : row;
+        }),
+      )
+    ).filter((row): row is ScheduledTaskRow => row !== null);
+
     rows.sort(compareNewestFirst);
 
     return c.json({ tasks: await buildTaskListItems(db, rows) });
@@ -471,6 +541,42 @@ export function scheduledTaskRoutes(
     const result = await loadAccessibleTask(c, id);
     if ("response" in result) return result.response;
     return c.json({ automation: await loadFullDefinition(result.row) });
+  });
+
+  routes.patch("/:id/execution-mode", async (c) => {
+    const id = c.req.param("id");
+    const accessible = await loadAccessibleTask(c, id);
+    if ("response" in accessible) return accessible.response;
+    const body = await c.req.json().catch(() => null);
+    const executionMode =
+      body && typeof body === "object" && "executionMode" in body
+        ? automationExecutionModeSchema.safeParse((body as { executionMode: unknown }).executionMode)
+        : { success: false as const };
+    if (!executionMode.success) {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Execution mode is invalid" } }, 400);
+    }
+    const userId = await resolveUserId(c.get("sub"));
+    const saveResult = await selectAutomationSetupExecutionMode({
+      db,
+      taskId: id,
+      executionMode: executionMode.data,
+      actor: { userId, canManageAnyTask: c.get("role") === "admin" },
+    });
+    if (saveResult.kind === "not_found") {
+      return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);
+    }
+    if (saveResult.kind === "not_placeholder") {
+      return c.json(
+        {
+          error: {
+            code: "INVALID_STATE",
+            message: "Execution mode selection is only available during automation setup",
+          },
+        },
+        409,
+      );
+    }
+    return c.json({ automation: await loadFullDefinition(saveResult.row) });
   });
 
   routes.put("/:id", async (c) => {
@@ -546,8 +652,18 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
 
-    scheduler.executeTaskById(id).catch(() => {});
-    return c.json({ status: "triggered" });
+    const runId = await reserveManualRun(id);
+    if (!runId) {
+      return c.json(
+        { error: { code: "RUN_RESERVATION_FAILED", message: "Automation run could not be reserved" } },
+        503,
+      );
+    }
+    if (!(await enqueueReservedManualRun(id, runId))) {
+      return c.json({ error: { code: "RUN_ENQUEUE_FAILED", message: "Automation run could not be queued" } }, 503);
+    }
+
+    return c.json({ status: "triggered", runId });
   });
 
   routes.post("/:id/steps/:stepId/runs", async (c) => {
@@ -694,9 +810,18 @@ export function scheduledTaskRoutes(
       return c.json({ error: { code: "INVALID_STATE", message: "Only active automations can be triggered" } }, 400);
     }
 
-    // Fire and forget — enqueue execution
-    scheduler.executeTaskById(id).catch(() => {});
-    return c.json({ status: "triggered" });
+    const runId = await reserveManualRun(id);
+    if (!runId) {
+      return c.json(
+        { error: { code: "RUN_RESERVATION_FAILED", message: "Automation run could not be reserved" } },
+        503,
+      );
+    }
+    if (!(await enqueueReservedManualRun(id, runId))) {
+      return c.json({ error: { code: "RUN_ENQUEUE_FAILED", message: "Automation run could not be queued" } }, 503);
+    }
+
+    return c.json({ status: "triggered", runId });
   });
 
   return routes;
