@@ -580,8 +580,10 @@ export class WhatsAppBot {
 
       for (const [jid, meta] of Object.entries(groups)) {
         this.groupMetaCache.set(jid, { meta, expires: Date.now() + GROUP_META_TTL_MS });
-        await this.persistGroupMetadata(jid, meta, new Date().toISOString());
-        syncedCount += 1;
+        /** Counts writes that landed — a persist dropped for a stale socket is not a sync. */
+        if (await this.persistGroupMetadata(jid, meta, new Date().toISOString(), socketGeneration)) {
+          syncedCount += 1;
+        }
       }
 
       return syncedCount;
@@ -1028,7 +1030,7 @@ export class WhatsAppBot {
 
       for (const update of updates) {
         if (!update.id) continue;
-        await this.refreshGroupMetadata(update.id);
+        await this.refreshGroupMetadata(update.id, socketGeneration);
       }
     });
 
@@ -1037,16 +1039,43 @@ export class WhatsAppBot {
         return;
       }
 
-      await this.refreshGroupMetadata(event.id);
+      await this.refreshGroupMetadata(event.id, socketGeneration);
+    });
+
+    /**
+     * Fires when this account joins a group. Without it a new group is only
+     * discovered on the next reconnect or the first message anyone sends, so
+     * a group added to a quiet chat on a long-lived socket stays invisible.
+     * The event already carries full metadata, so persist it directly rather
+     * than spending another groupMetadata query on what we were just handed.
+     */
+    socket.ev.on("groups.upsert", async (groups) => {
+      if (socketGeneration !== this.activeSocketGeneration || socket !== this.sock) {
+        return;
+      }
+
+      const seenAt = new Date().toISOString();
+      for (const meta of groups) {
+        if (!meta?.id) continue;
+        try {
+          this.groupMetaCache.set(meta.id, { meta, expires: Date.now() + GROUP_META_TTL_MS });
+          await this.persistGroupMetadata(meta.id, meta, seenAt, socketGeneration);
+        } catch (err) {
+          this.logger.warn({ err, groupJid: meta.id }, "Failed to persist newly joined WhatsApp group");
+        }
+      }
     });
   }
 
-  private async refreshGroupMetadata(groupJid: string): Promise<GroupMetadata | undefined> {
+  private async refreshGroupMetadata(
+    groupJid: string,
+    socketGeneration = this.activeSocketGeneration,
+  ): Promise<GroupMetadata | undefined> {
     try {
       const meta = await this.sock?.groupMetadata(groupJid);
       if (meta) {
         this.groupMetaCache.set(groupJid, { meta, expires: Date.now() + GROUP_META_TTL_MS });
-        await this.persistGroupMetadata(groupJid, meta, new Date().toISOString());
+        await this.persistGroupMetadata(groupJid, meta, new Date().toISOString(), socketGeneration);
       }
       return meta;
     } catch (err) {
@@ -1071,20 +1100,48 @@ export class WhatsAppBot {
     };
   }
 
-  private async persistGroupMetadata(groupJid: string, meta: GroupMetadata, updatedAt: string): Promise<void> {
+  /**
+   * Resolving participants is async (LID lookups), so a reconnect can land
+   * between the caller's generation check and the write. `refreshParticipants`
+   * replaces the stored roster, and that roster feeds access decisions — so a
+   * late write from a dead socket would delete members a newer payload had
+   * already recorded. Re-check at the persistence boundary, which is the only
+   * point that is actually durable.
+   */
+  private async persistGroupMetadata(
+    groupJid: string,
+    meta: GroupMetadata,
+    updatedAt: string,
+    socketGeneration = this.activeSocketGeneration,
+  ): Promise<boolean> {
     const providerMetadata = await this.toProviderGroupMetadata(groupJid, meta);
+    if (socketGeneration !== this.activeSocketGeneration) {
+      this.logger.debug({ groupJid, socketGeneration }, "Dropped WhatsApp group metadata write from a stale socket");
+      return false;
+    }
     await this.groupMetadataStore?.upsert({
       jid: groupJid,
       name: providerMetadata.subject,
       description: providerMetadata.desc ?? null,
       updated_at: updatedAt,
     });
+    /**
+     * Checked again because the upsert above is awaited too. That one is
+     * additive — it only rewrites name and description — but
+     * refreshParticipants DELETES members missing from this payload, so it is
+     * the write that can actually lose data to a socket that died mid-call.
+     */
+    if (socketGeneration !== this.activeSocketGeneration) {
+      this.logger.debug({ groupJid, socketGeneration }, "Dropped WhatsApp participant refresh from a stale socket");
+      return false;
+    }
     await this.groupMetadataStore?.refreshParticipants?.(
       groupJid,
       toParticipantInputs(providerMetadata.participants),
       updatedAt,
       this.logger,
     );
+    return true;
   }
 
   /**

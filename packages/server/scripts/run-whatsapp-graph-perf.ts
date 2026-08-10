@@ -101,7 +101,6 @@ async function main() {
       connectorType: "whatsapp",
       authType: "system",
       credentials: JSON.stringify({ type: "system" }),
-      scopeConfig: JSON.stringify({ groupJids: [GROUP_JID] }),
       createdBy: adminId,
     });
 

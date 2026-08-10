@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import { createWhatsAppGroupRepository } from "./whatsapp-groups";
+import { applyIndexSelection, createWhatsAppGroupRepository } from "./whatsapp-groups";
 
 let db: Kysely<DB>;
 let repo: ReturnType<typeof createWhatsAppGroupRepository>;
@@ -35,6 +35,7 @@ describe("createWhatsAppGroupRepository", () => {
     expect(row.name).toBe("Founders");
     expect(row.description).toBe("Core team");
     expect(row.updated_at).toBe("2026-03-13T10:00:00.000Z");
+    expect(row.index_enabled).toBe(1);
   });
 
   it("updates an existing group row when the same jid is upserted again", async () => {
@@ -45,6 +46,7 @@ describe("createWhatsAppGroupRepository", () => {
       tool_progress: null,
       reasoning_text: null,
       updated_at: "2026-03-13T10:00:00.000Z",
+      index_enabled: 0,
     });
 
     const updated = await repo.upsert({
@@ -61,6 +63,7 @@ describe("createWhatsAppGroupRepository", () => {
     expect(updated.tool_progress).toBe("friendly");
     expect(updated.reasoning_text).toBe(1);
     expect(updated.updated_at).toBe("2026-03-14T10:00:00.000Z");
+    expect(updated.index_enabled).toBe(0);
   });
 
   it("updates only progress settings for an existing group", async () => {
@@ -88,6 +91,7 @@ describe("createWhatsAppGroupRepository", () => {
       tool_progress: null,
       reasoning_text: null,
       updated_at: "2026-03-13T10:00:00.000Z",
+      index_enabled: 0,
     });
 
     await expect(repo.listIndexEnabled()).resolves.toEqual([]);
@@ -115,6 +119,32 @@ describe("createWhatsAppGroupRepository", () => {
     await expect(repo.listIndexEnabled()).resolves.toEqual([]);
   });
 
+  it("changes only groups present in an indexing selection", async () => {
+    await db
+      .insertInto("whatsapp_groups")
+      .values([
+        { jid: "enable@g.us", name: "Enable", index_enabled: 0 },
+        { jid: "disable@g.us", name: "Disable", index_enabled: 1 },
+        { jid: "absent@g.us", name: "Absent", index_enabled: 1 },
+        { jid: "absent-off@g.us", name: "Absent off", index_enabled: 0 },
+      ])
+      .execute();
+
+    await applyIndexSelection(db, { "enable@g.us": true, "disable@g.us": false });
+
+    const rows = await db
+      .selectFrom("whatsapp_groups")
+      .select(["jid", "index_enabled"])
+      .orderBy("jid", "asc")
+      .execute();
+    expect(rows).toEqual([
+      { jid: "absent-off@g.us", index_enabled: 0 },
+      { jid: "absent@g.us", index_enabled: 1 },
+      { jid: "disable@g.us", index_enabled: 0 },
+      { jid: "enable@g.us", index_enabled: 1 },
+    ]);
+  });
+
   it("requeues kept linked slices when a group flips from disabled to enabled", async () => {
     const seedGroupWithLinkedSlice = async (jid: string, suffix: string) => {
       await repo.upsert({
@@ -124,6 +154,7 @@ describe("createWhatsAppGroupRepository", () => {
         tool_progress: null,
         reasoning_text: null,
         updated_at: "2026-03-13T10:00:00.000Z",
+        index_enabled: 0,
       });
       const conversation = await db
         .insertInto("conversations")
@@ -200,11 +231,11 @@ describe("createWhatsAppGroupRepository", () => {
       .executeTakeFirstOrThrow();
     expect(afterRepeat.indexed_file_id).toBe("file-on");
 
-    await repo.replaceIndexEnabledJids(["on@g.us", "off@g.us"]);
-    const afterReplace = await db.selectFrom("conversation_slices").select(["id", "indexed_file_id"]).execute();
-    const replaceById = new Map(afterReplace.map((row) => [row.id, row.indexed_file_id]));
-    expect(replaceById.get(untouchedSlice)).toBeNull();
-    expect(replaceById.get(enabledSlice)).toBe("file-on");
+    await applyIndexSelection(db, { "on@g.us": true, "off@g.us": true });
+    const afterDelta = await db.selectFrom("conversation_slices").select(["id", "indexed_file_id"]).execute();
+    const linkAfterDelta = new Map(afterDelta.map((row) => [row.id, row.indexed_file_id]));
+    expect(linkAfterDelta.get(untouchedSlice)).toBeNull();
+    expect(linkAfterDelta.get(enabledSlice)).toBe("file-on");
   });
 
   it("creates, updates, lists, and deletes manual member labels", async () => {
@@ -240,6 +271,46 @@ describe("createWhatsAppGroupRepository", () => {
     await expect(repo.listMemberLabels("123@g.us")).resolves.toHaveLength(1);
     await expect(repo.deleteMemberLabel("123@g.us", "+15551234567")).resolves.toBe(true);
     await expect(repo.getMemberLabel("123@g.us", "+15551234567")).resolves.toBeUndefined();
+  });
+
+  /**
+   * A caller whose socket died mid-resolution can resume after a newer roster
+   * has committed. Rejecting the older payload inside the transaction is the
+   * only guard that is atomic with the delete.
+   */
+  it("refuses a participant refresh older than the stored roster", async () => {
+    const groupJid = "123@g.us";
+    const logger = { warn: vi.fn() };
+    await repo.upsert({
+      jid: groupJid,
+      name: "Founders",
+      description: null,
+      updated_at: "2026-03-13T10:00:00.000Z",
+    });
+    await repo.refreshParticipants(
+      groupJid,
+      [
+        { participantJid: "15551234567@s.whatsapp.net", phoneE164: "+15551234567", adminRole: null },
+        { participantJid: "15557654321@s.whatsapp.net", phoneE164: "+15557654321", adminRole: null },
+      ],
+      "2026-03-13T12:00:00.000Z",
+    );
+
+    const stale = await repo.refreshParticipants(
+      groupJid,
+      [{ participantJid: "15551234567@s.whatsapp.net", phoneE164: "+15551234567", adminRole: null }],
+      "2026-03-13T11:00:00.000Z",
+      logger,
+    );
+
+    expect(stale.map((row) => row.participant_jid)).toEqual([
+      "15551234567@s.whatsapp.net",
+      "15557654321@s.whatsapp.net",
+    ]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ groupJid }),
+      "Skipped stale WhatsApp group participant refresh",
+    );
   });
 
   it("keeps an existing participant roster when an empty refresh arrives", async () => {

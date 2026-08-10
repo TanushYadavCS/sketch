@@ -102,6 +102,8 @@ export interface IntegrationDefinition {
   scopeItemNoun?: string;
   /** Scope config key for flat generic pickers. Defaults to rootPages. */
   scopeConfigKey?: string;
+  /** Scope-update shape for flat generic pickers. Defaults to list. */
+  flatScopeShape?: "list" | "map";
   /** Allows saving an explicitly empty scope selection. */
   allowEmptyScopeSelection?: boolean;
   /**
@@ -502,7 +504,7 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
   {
     type: "whatsapp",
     name: "WhatsApp Groups",
-    description: "Opt in captured group conversations for indexing",
+    description: "Choose which captured group conversations to index",
     category: "Communication",
     color: "#25D366",
     authType: "system",
@@ -510,7 +512,8 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     scopeLabel: "groups",
     scopeType: "flat",
     scopeItemNoun: "groups",
-    scopeConfigKey: "groupJids",
+    scopeConfigKey: "groupIndexing",
+    flatScopeShape: "map",
     allowEmptyScopeSelection: true,
     itemNoun: "slices",
     credentialUrl: "",

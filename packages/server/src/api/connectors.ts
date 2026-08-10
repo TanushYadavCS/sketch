@@ -59,7 +59,11 @@ import { createEntityReviewRepo } from "../db/repositories/entity-review";
 import { createFileSharesRepository } from "../db/repositories/file-shares";
 import { createSettingsRepository } from "../db/repositories/settings";
 import type { createUserRepository } from "../db/repositories/users";
-import { applyIndexEnabledSelection, createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
+import {
+  WHATSAPP_GROUP_INDEXING_KEY,
+  applyIndexSelection,
+  createWhatsAppGroupRepository,
+} from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
 import { HIDDEN_ENTITY_SOURCE_TYPES } from "../entities/profile-facts";
 import { createSettingsBackedSlackIndexingFacade } from "../slack/indexing-facade";
@@ -230,25 +234,45 @@ export async function pruneGoogleCalendarFilesOutsideScope(params: {
   return pruneCalendarFilesOutsideScope({ ...params, connectorType: "google_calendar" });
 }
 
+/** Applies only rendered WhatsApp groups and requeues newly enabled groups. */
 export async function applyWhatsAppGroupScope(params: {
   db: Kysely<DB>;
   scopeConfig: Record<string, unknown>;
 }): Promise<Record<string, unknown>> {
-  if (!hasOwn(params.scopeConfig, "groupJids")) return params.scopeConfig;
-  const repo = createWhatsAppGroupRepository(params.db);
-  const knownGroups = await repo.list();
-  const knownJids = new Set(knownGroups.map((group) => group.jid));
-  const selectedJids = [...new Set(stringArray(params.scopeConfig.groupJids))].filter((jid) => knownJids.has(jid));
-  /**
-   * Routed through applyIndexEnabledSelection instead of updating
-   * index_enabled directly so newly enabled groups get their kept slices
-   * requeued for re-emission — a direct flag flip would leave stale linked
-   * files that emission never refreshes (linked slices outside the 7-day
-   * window are skipped). The non-transactional variant is required: this
-   * runs inside the scope route's transaction.
-   */
-  await applyIndexEnabledSelection(params.db, selectedJids);
-  return { ...params.scopeConfig, groupJids: selectedJids };
+  if (hasOwn(params.scopeConfig, "groupJids")) {
+    throw new WhatsAppGroupScopeValidationError("groupJids is no longer supported");
+  }
+
+  const rawSelection = params.scopeConfig[WHATSAPP_GROUP_INDEXING_KEY];
+  const scopeConfig = withoutWhatsAppGroupSelection(params.scopeConfig);
+  if (!hasOwn(params.scopeConfig, WHATSAPP_GROUP_INDEXING_KEY)) return scopeConfig;
+  const parsed = z.record(z.string(), z.boolean()).safeParse(rawSelection);
+  if (!parsed.success) {
+    throw new WhatsAppGroupScopeValidationError("groupIndexing must be a map of group jids to booleans");
+  }
+
+  const requestedJids = Object.keys(parsed.data);
+  const knownRows =
+    requestedJids.length === 0
+      ? []
+      : await params.db.selectFrom("whatsapp_groups").select("jid").where("jid", "in", requestedJids).execute();
+  const knownJids = new Set(knownRows.map((group) => group.jid));
+  const unknownJids = requestedJids.filter((jid) => !knownJids.has(jid));
+  if (unknownJids.length > 0) {
+    throw new WhatsAppGroupScopeValidationError(`Unknown WhatsApp group jid: ${unknownJids[0]}`);
+  }
+
+  await applyIndexSelection(params.db, parsed.data);
+  return scopeConfig;
+}
+
+class WhatsAppGroupScopeValidationError extends Error {
+  override name = "WhatsAppGroupScopeValidationError";
+}
+
+function withoutWhatsAppGroupSelection(scopeConfig: Record<string, unknown>): Record<string, unknown> {
+  const { groupJids: _groupJids, groupIndexing: _groupIndexing, ...scope } = scopeConfig;
+  return scope;
 }
 
 const VALID_AUTH_TYPES = ["oauth", "api_key", "service_account", "system"] as const;
@@ -927,13 +951,44 @@ export function connectorRoutes(
     }
 
     const credentialHint = credentialHintForConnector(connectorType, credentials);
+    /**
+     * Group selection is never applied at create time — it goes through the
+     * validated PATCH. An empty map is what the connect dialog posts before
+     * the picker is shown, so it is dropped silently; anything non-empty is a
+     * caller expecting writes that will not happen, and gets told so rather
+     * than a 201 that did nothing.
+     */
+    if (connectorType === "whatsapp" && parsed.data.scopeConfig) {
+      const submitted = parsed.data.scopeConfig[WHATSAPP_GROUP_INDEXING_KEY];
+      const isEmptyMap =
+        submitted === undefined ||
+        (typeof submitted === "object" &&
+          submitted !== null &&
+          !Array.isArray(submitted) &&
+          Object.keys(submitted).length === 0);
+      if (hasOwn(parsed.data.scopeConfig, "groupJids") || !isEmptyMap) {
+        return c.json(
+          {
+            error: {
+              code: "VALIDATION_ERROR",
+              message: "Group indexing cannot be set when creating the connector — update the scope instead",
+            },
+          },
+          400,
+        );
+      }
+    }
+    const scopeConfig =
+      connectorType === "whatsapp" && parsed.data.scopeConfig
+        ? withoutWhatsAppGroupSelection(parsed.data.scopeConfig)
+        : parsed.data.scopeConfig;
 
     const config = await connectorRepo.createConfig({
       connectorType,
       authType: parsed.data.authType,
       credentials: serializeCredentials(credentials),
       credentialSource: "local",
-      scopeConfig: parsed.data.scopeConfig ? JSON.stringify(parsed.data.scopeConfig) : undefined,
+      scopeConfig: scopeConfig ? JSON.stringify(scopeConfig) : undefined,
       createdBy: sub,
       credentialHint,
     });
@@ -1510,8 +1565,10 @@ export function connectorRoutes(
     const currentScope = JSON.parse(config.scope_config) as Record<string, unknown>;
     const refresh = c.req.query("refresh") === "true";
 
+    const cacheable = config.connector_type !== "whatsapp";
+
     // Return cached browse data if available (unless explicit refresh requested)
-    if (!refresh && config.browse_cache) {
+    if (cacheable && !refresh && config.browse_cache) {
       try {
         const cached = JSON.parse(config.browse_cache);
         return c.json({ ...cached, scopeConfig: currentScope, cached: true });
@@ -1521,6 +1578,22 @@ export function connectorRoutes(
     }
 
     try {
+      if (config.connector_type === "whatsapp") {
+        const groups = await createWhatsAppGroupRepository(db).list();
+        return c.json({
+          type: "flat" as const,
+          items: groups
+            .map((group) => ({ id: group.jid, name: group.name }))
+            .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)),
+          scopeConfig: {
+            ...withoutWhatsAppGroupSelection(currentScope),
+            [WHATSAPP_GROUP_INDEXING_KEY]: Object.fromEntries(
+              groups.map((group) => [group.jid, group.index_enabled === 1]),
+            ),
+          },
+        });
+      }
+
       const resolved = await resolveStoredCredentials(config);
       let credentials = resolved.credentials;
       if (resolved.credentialSource === "local" && credentials.type === "oauth" && connector.refreshTokens) {
@@ -2278,24 +2351,34 @@ export function connectorRoutes(
       return c.json({ error: { code: "VALIDATION_ERROR", message } }, 400);
     }
 
-    const requestedScope = await db.transaction().execute(async (trx) => {
-      const txConnectorRepo = createConnectorRepository(trx, appConfig?.ENCRYPTION_KEY);
-      const scope =
-        config.connector_type === "whatsapp"
-          ? await applyWhatsAppGroupScope({ db: trx, scopeConfig: parsed.data.scopeConfig })
-          : parsed.data.scopeConfig;
-      const existingScope =
-        config.scope_config && typeof config.scope_config === "string"
-          ? (JSON.parse(config.scope_config) as Record<string, unknown>)
-          : {};
-      const mergedScope = { ...existingScope, ...scope };
-      await txConnectorRepo.updateConfig(config.id, {
-        scopeConfig: JSON.stringify(mergedScope),
-        syncCursor: null,
-        errorMessage: null,
+    let requestedScope: Record<string, unknown>;
+    try {
+      requestedScope = await db.transaction().execute(async (trx) => {
+        const txConnectorRepo = createConnectorRepository(trx, appConfig?.ENCRYPTION_KEY);
+        const scope =
+          config.connector_type === "whatsapp"
+            ? await applyWhatsAppGroupScope({ db: trx, scopeConfig: parsed.data.scopeConfig })
+            : parsed.data.scopeConfig;
+        const existingScope =
+          config.scope_config && typeof config.scope_config === "string"
+            ? (JSON.parse(config.scope_config) as Record<string, unknown>)
+            : {};
+        const combinedScope = { ...existingScope, ...scope };
+        const mergedScope =
+          config.connector_type === "whatsapp" ? withoutWhatsAppGroupSelection(combinedScope) : combinedScope;
+        await txConnectorRepo.updateConfig(config.id, {
+          scopeConfig: JSON.stringify(mergedScope),
+          syncCursor: null,
+          errorMessage: null,
+        });
+        return scope;
       });
-      return scope;
-    });
+    } catch (err) {
+      if (err instanceof WhatsAppGroupScopeValidationError) {
+        return c.json({ error: { code: "VALIDATION_ERROR", message: err.message } }, 400);
+      }
+      throw err;
+    }
 
     if (config.connector_type === "google_calendar" || config.connector_type === "outlook_calendar") {
       await pruneCalendarFilesOutsideScope({
