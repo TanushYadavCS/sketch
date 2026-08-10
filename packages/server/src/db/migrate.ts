@@ -167,6 +167,8 @@ import * as m164 from "./migrations/164-outlook-calendar-provider-file-scope";
 import * as m165 from "./migrations/165-typed-access-principals";
 import * as m166 from "./migrations/166-scheduled-task-builder-locks";
 import * as m167 from "./migrations/167-scheduled-task-execution-mode";
+import * as m168 from "./migrations/168-question-interactions";
+import * as m169 from "./migrations/169-question-interaction-active-keys";
 import type { DB } from "./schema";
 
 /**
@@ -343,6 +345,8 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "165-typed-access-principals": m165,
           "166-scheduled-task-builder-locks": m166,
           "167-scheduled-task-execution-mode": m167,
+          "168-question-interactions": m168,
+          "169-question-interaction-active-keys": m169,
         };
       },
     },

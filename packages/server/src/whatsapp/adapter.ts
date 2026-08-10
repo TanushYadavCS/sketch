@@ -6,6 +6,8 @@ import { basename } from "node:path";
 import { parseAllowedTools } from "@sketch/shared";
 import type { Kysely } from "kysely";
 import type { AuxLlmCall } from "../agent/aux-cost";
+import type { QuestionInteractionService } from "../agent/interactions/service";
+import { parseNumberedQuestionAnswer, renderNumberedQuestionStep } from "../agent/interactions/text";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
 import type { InboxMessageContext, QuotedMessageContext, SketchContextParams } from "../agent/prompt";
 import { buildSketchContext, getImageAttachmentPathsFromSketchContext } from "../agent/prompt";
@@ -52,6 +54,11 @@ import {
 import { stableWhatsAppParticipantJidRef } from "./identity-resolution";
 import { createWhatsAppMessageHandler } from "./message-handler";
 import { maskPersonalNumberIdentifier } from "./privacy";
+import {
+  createWhatsAppTextQuestionTransport,
+  parseWhatsAppTextQuestionSubmission,
+  WHATSAPP_TEXT_QUESTION_CAPABILITIES,
+} from "./question-interactions";
 import {
   type WhatsAppHistoryBatchMetadata,
   type WhatsAppHistorySyncResult,
@@ -174,6 +181,8 @@ export interface WhatsAppAdapterDeps {
     inboxMessageId?: string;
   }>;
   followupReviewHandler?: FollowupReviewCommandHandler;
+  questionInteractions?: QuestionInteractionService;
+  experimentalChannelQuestionInteractionsEnabled?: boolean;
 }
 
 function isConversationControlMessage(text: string): boolean {
@@ -266,6 +275,272 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
   const backfillCheckpoints = repos.conversationSlices ?? createConversationSlicesRepository(db);
   const handleFollowupReviewCommand = deps.followupReviewHandler ?? createFollowupReviewCommandHandler(db);
   const queuedCaptures = new WeakMap<WhatsAppInboundMessage, WhatsAppQueuedCapture>();
+
+  const questionConversationId = (message: WhatsAppInboundMessage) =>
+    message.kind === "dm" ? whatsappDeliveryTargetFromTarget(message.target) : message.target.groupId;
+
+  const findPendingQuestion = async (message: WhatsAppInboundMessage, responderPrincipalId: string | null) => {
+    if (
+      !deps.experimentalChannelQuestionInteractionsEnabled ||
+      !deps.questionInteractions ||
+      !responderPrincipalId
+    ) {
+      return { kind: "not_found" as const };
+    }
+    return deps.questionInteractions.findPendingForTarget({
+      platform: "whatsapp",
+      conversationId: questionConversationId(message),
+      threadId: null,
+      responderPrincipalId,
+    });
+  };
+
+  const appendNextPendingQuestion = async (
+    message: WhatsAppInboundMessage,
+    responderPrincipalId: string,
+    outcome: Awaited<ReturnType<QuestionInteractionService["submitAnswer"]>>,
+  ) => {
+    if (outcome.kind !== "accepted_pending") return outcome;
+    const next = await findPendingQuestion(message, responderPrincipalId);
+    return next.kind === "found" ? { ...outcome, nextQuestion: next } : outcome;
+  };
+
+  const claimQuestionReply = async (
+    message: WhatsAppInboundMessage,
+    responderPrincipalId: string | null,
+  ) => {
+    if (!deps.questionInteractions) return null;
+    const legacySubmission = parseWhatsAppTextQuestionSubmission(message.text);
+    if (legacySubmission.kind === "cancel") {
+      if (!responderPrincipalId) return { kind: "unauthorized" as const };
+      return deps.questionInteractions.cancelByCode({
+        platform: "whatsapp",
+        conversationId: questionConversationId(message),
+        threadId: null,
+        publicCode: legacySubmission.code,
+        responderPrincipalId,
+        inboundEventId: message.providerMessageId,
+      });
+    }
+    if (legacySubmission.kind === "answer") {
+      if (!deps.experimentalChannelQuestionInteractionsEnabled) return null;
+      if (!responderPrincipalId) return { kind: "unauthorized" as const };
+      const outcome = await deps.questionInteractions.submitTextAnswer({
+        platform: "whatsapp",
+        conversationId: questionConversationId(message),
+        threadId: null,
+        publicCode: legacySubmission.code,
+        questionId: legacySubmission.questionId,
+        ...("optionId" in legacySubmission
+          ? { optionId: legacySubmission.optionId }
+          : { customResponse: legacySubmission.customResponse }),
+        responderPrincipalId,
+        inboundEventId: message.providerMessageId,
+        receivedAt: message.providerTimestamp ?? new Date().toISOString(),
+      });
+      return outcome.kind === "accepted_pending"
+        ? appendNextPendingQuestion(message, responderPrincipalId, outcome)
+        : outcome;
+    }
+    if (message.text.trimStart().startsWith("/")) return null;
+    const pending = await findPendingQuestion(message, responderPrincipalId);
+    if (pending.kind !== "found" || !responderPrincipalId) return null;
+    const parsed = parseNumberedQuestionAnswer(message.text, pending.question);
+    if (parsed.kind === "invalid") return { kind: "invalid_number" as const, step: pending };
+    const outcome = await deps.questionInteractions.submitAnswer({
+      interactionId: pending.interaction.id,
+      ...parsed.answer,
+      responderPrincipalId,
+      inboundEventId: message.providerMessageId,
+      receivedAt: message.providerTimestamp ?? new Date().toISOString(),
+    });
+    return appendNextPendingQuestion(message, responderPrincipalId, outcome);
+  };
+
+  const deliverPendingQuestion = async (params: {
+    interaction: NonNullable<RunAgentResult["pendingInteraction"]>;
+    target: WhatsAppTarget;
+    quotedMessage: WhatsAppInboundMessage;
+    conversationId: string;
+    conversationKind: "dm" | "group";
+    requesterPrincipalId: string;
+    workspaceKey: string;
+    sessionId: string;
+    sourceConversationId: string;
+  }): Promise<boolean> => {
+    if (!deps.experimentalChannelQuestionInteractionsEnabled || !deps.questionInteractions) return false;
+    const pending = await deps.questionInteractions.createFromInteraction({
+      interaction: params.interaction,
+      target: {
+        platform: "whatsapp",
+        conversationKind: params.conversationKind,
+        conversationId: params.conversationId,
+        threadId: null,
+        requesterPrincipalId: params.requesterPrincipalId,
+        eligibleResponderPrincipalIds: [params.requesterPrincipalId],
+      },
+      resumeContext: {
+        sessionId: params.sessionId,
+        taskId: null,
+        agentRunId: null,
+        workspaceId: params.workspaceKey,
+        sourceConversationId: params.sourceConversationId,
+        requesterPrincipalId: params.requesterPrincipalId,
+        platform: "whatsapp",
+        conversationId: params.conversationId,
+        threadId: null,
+      },
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1_000).toISOString(),
+    });
+    if (!pending) {
+      await whatsapp.sendText(params.target, "I couldn't save that question. Please try again shortly.");
+      return true;
+    }
+    const receipt = await deps.questionInteractions.deliver({
+      interactionId: pending.id,
+      requestKey: `whatsapp-question-${pending.id}`,
+      transportName: "whatsapp-text",
+      capabilityName: "text-fallback",
+      capabilities: WHATSAPP_TEXT_QUESTION_CAPABILITIES,
+      transport: createWhatsAppTextQuestionTransport({
+        whatsapp,
+        target: params.target,
+        quotedMessage: params.quotedMessage,
+      }),
+    });
+    if (receipt.status === "failed") {
+      logger.warn({ interactionId: pending.id }, "WhatsApp question delivery failed");
+      await whatsapp.sendText(params.target, "I couldn't send that question. Please try again shortly.");
+      return true;
+    }
+    return true;
+  };
+
+  const acknowledgeQuestionReply = async (
+    target: WhatsAppTarget,
+    outcome: Awaited<ReturnType<typeof claimQuestionReply>>,
+  ) => {
+    if (!outcome) return false;
+    if (outcome.kind === "completed") return true;
+    const text =
+      outcome.kind === "invalid_number"
+        ? `That number isn't one of the options.\n\n${renderNumberedQuestionStep(outcome.step)}`
+        : outcome.kind === "accepted_pending" && "nextQuestion" in outcome
+          ? renderNumberedQuestionStep(outcome.nextQuestion)
+          : outcome.kind === "accepted_pending"
+            ? "Answer saved."
+            : outcome.kind === "cancelled"
+              ? "Question cancelled."
+              : outcome.kind === "not_found"
+                ? "That question is no longer available."
+                : outcome.kind === "unauthorized"
+                  ? "That answer cannot be accepted."
+                  : "That question has already been completed or cannot accept that answer.";
+    await whatsapp.sendText(target, text);
+    return true;
+  };
+
+  const resumeQuestionReply = async (params: {
+    outcome: Extract<NonNullable<Awaited<ReturnType<typeof claimQuestionReply>>>, { kind: "completed" }>;
+    target: WhatsAppTarget;
+    quotedMessage: WhatsAppInboundMessage;
+    user: NonNullable<Awaited<ReturnType<UserRepository["findById"]>>>;
+    workspaceDir: string;
+    agent: Awaited<ReturnType<UserRepository["findById"]>> | null;
+    claudeConfigDir: string | undefined;
+    settingsRow: Awaited<ReturnType<SettingsRepository["get"]>>;
+    activeQueueKey: string;
+    conversationKind: "dm" | "group";
+    contextType: "dm" | "channel_mention";
+  }): Promise<void> => {
+    const service = deps.questionInteractions;
+    if (!service) return;
+    await service.resumeQuestionInteraction(params.outcome.resumeWork, async (resumeWork) => {
+      const workspaceKey = resumeWork.context.workspaceId;
+      if (!workspaceKey) throw new Error("Question interaction is missing a workspace context");
+      const onFinalMessage = createWhatsAppMessageHandler(whatsapp, params.target, params.quotedMessage);
+      const result = await runAgent({
+        db,
+        workspaceKey,
+        userMessage: resumeWork.continuationText,
+        resumeSessionId: resumeWork.context.sessionId,
+        workspaceDir: params.workspaceDir,
+        claudeConfigDir: params.claudeConfigDir,
+        userName: params.user.name,
+        userEmail: params.user.email,
+        userPhone: params.user.whatsapp_number ?? null,
+        logger,
+        platform: "whatsapp",
+        ...(deps.experimentalChannelQuestionInteractionsEnabled
+          ? { questionInteractionCapabilities: WHATSAPP_TEXT_QUESTION_CAPABILITIES }
+          : {}),
+        onProgressEvent: async () => {},
+        orgName: params.settingsRow?.org_name,
+        orgDescription: parseOrgContext(params.settingsRow?.org_context)?.description ?? null,
+        botName: params.settingsRow?.bot_name,
+        visionConfig: resolveVisionConfigFromAppConfig(config, params.settingsRow),
+        integrationMcpServers: await buildMcpServers(params.user.email),
+        loadIntegrationProvider,
+        contextType: params.contextType,
+        taskContext: {
+          platform: "whatsapp" as const,
+          contextType: params.conversationKind,
+          deliveryTarget: resumeWork.context.conversationId,
+          createdBy: params.user.id,
+          canManageAnyTask: params.user.auth_role === "admin",
+          creatorTimezone: params.user.timezone,
+          origin: {
+            platform: "whatsapp" as const,
+            conversationId: resumeWork.context.sourceConversationId ?? resumeWork.context.conversationId,
+            providerThreadId: null,
+            currentMessageId: null,
+          },
+        },
+        scheduler,
+        stepContentRepo,
+        automationRunsRepo,
+        queueManager: queue,
+        activeQueueKey: params.activeQueueKey,
+        toolConfig,
+        inboxMessagesRepo,
+        userRepo: repos.users,
+        currentUserId: params.user.id,
+        sendDm,
+        agentInstructions: params.agent?.description ?? null,
+        agentAllowedTools: params.agent ? parseAllowedTools(params.agent.allowed_tools) : null,
+        conversationRepo: repos.conversations,
+      });
+      if (
+        result.pendingInteraction &&
+        (await deliverPendingQuestion({
+          interaction: result.pendingInteraction,
+          target: params.target,
+          quotedMessage: params.quotedMessage,
+          conversationId: resumeWork.context.conversationId,
+          conversationKind: params.conversationKind,
+          requesterPrincipalId: params.user.id,
+          workspaceKey,
+          sessionId: result.sessionId,
+          sourceConversationId: resumeWork.context.sourceConversationId ?? resumeWork.context.conversationId,
+        }))
+      ) {
+        return;
+      }
+      const finalText = appendIntegrationConnectionLinks(
+        appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
+        result.pendingIntegrationConnections,
+        "whatsapp",
+        toolConfig,
+      );
+      if (finalText) await onFinalMessage(finalText);
+      else {
+        await whatsapp.sendText(
+          params.target,
+          "Your answer was saved, but I couldn't continue right now. Please try again shortly.",
+        );
+      }
+    });
+  };
 
   const getOrCreateConversationForMessage = async (
     message: WhatsAppInboundMessage,
@@ -777,6 +1052,14 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         const dmWorkspaceKeyEarly = fallbackAgentEarly ? `agent-${fallbackAgentEarly.id}/${user.id}` : user.id;
         const dmConversation = await getOrCreateConversationForMessage(message, user.name);
         if (command === "new_session") {
+          await deps.questionInteractions?.cancelPendingForTarget({
+            target: {
+              platform: "whatsapp",
+              conversationId: whatsappDeliveryTargetFromTarget(replyTarget),
+              threadId: null,
+            },
+            requesterPrincipalId: user.id,
+          });
           await archiveRuntimeSessions(db, dmWorkspaceKeyEarly);
           await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
           await whatsapp.sendText(replyTarget, getNewSessionConfirmation());
@@ -795,6 +1078,25 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         const dmWorkspaceKey = dmWorkspaceKeyEarly;
         const deliveryTarget = message.target;
         const deliveryTargetId = whatsappDeliveryTargetFromTarget(deliveryTarget);
+        const questionReply = await claimQuestionReply(message, user.id);
+        if (questionReply?.kind === "completed") {
+          await acknowledgeQuestionReply(deliveryTarget, questionReply);
+          await resumeQuestionReply({
+            outcome: questionReply,
+            target: deliveryTarget,
+            quotedMessage: message,
+            user,
+            workspaceDir,
+            agent: fallbackAgent,
+            claudeConfigDir: fallbackAgent ? undefined : config.CLAUDE_CONFIG_DIR,
+            settingsRow,
+            activeQueueKey,
+            conversationKind: "dm",
+            contextType: "dm",
+          });
+          return;
+        }
+        if (await acknowledgeQuestionReply(deliveryTarget, questionReply)) return;
         const followupReview = await handleFollowupReviewCommand({
           text: message.text,
           userId: user.id,
@@ -930,6 +1232,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             userPhone: user.whatsapp_number ?? message.senderPhoneE164,
             logger,
             platform: "whatsapp",
+            ...(deps.experimentalChannelQuestionInteractionsEnabled
+              ? { questionInteractionCapabilities: WHATSAPP_TEXT_QUESTION_CAPABILITIES }
+              : {}),
             onProgressEvent,
             orgName: settingsRow?.org_name,
             orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
@@ -956,6 +1261,23 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
             conversationRepo: repos.conversations,
             conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
           });
+
+          if (
+            result.pendingInteraction &&
+            (await deliverPendingQuestion({
+              interaction: result.pendingInteraction,
+              target: deliveryTarget,
+              quotedMessage: message,
+              conversationId: deliveryTargetId,
+              conversationKind: "dm",
+              requesterPrincipalId: user.id,
+              workspaceKey: dmWorkspaceKey,
+              sessionId: result.sessionId,
+              sourceConversationId: String(capture.conversation.id),
+            }))
+          ) {
+            return;
+          }
 
           const finalText = appendIntegrationConnectionLinks(
             appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
@@ -1009,12 +1331,20 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
 
     // --- Group handler ---
 
-    if (!message.isMentioned) {
+    const user = message.senderPhoneE164 ? await repos.users.findByWhatsappNumber(message.senderPhoneE164) : undefined;
+    const questionSubmission = parseWhatsAppTextQuestionSubmission(message.text);
+    const pendingQuestionReply = message.isMentioned || message.text.trimStart().startsWith("/")
+      ? { kind: "not_found" as const }
+      : await findPendingQuestion(message, user?.id ?? null);
+    const isQuestionReply =
+      pendingQuestionReply.kind === "found" ||
+      (Boolean(deps.questionInteractions) &&
+        (questionSubmission.kind === "cancel" ||
+          (deps.experimentalChannelQuestionInteractionsEnabled && questionSubmission.kind === "answer")));
+
+    if (!message.isMentioned && !isQuestionReply) {
       await hooks?.onRunStart();
       const groupJid = message.target.groupId;
-      const user = message.senderPhoneE164
-        ? await repos.users.findByWhatsappNumber(message.senderPhoneE164)
-        : undefined;
       const existingGroup = await repos.whatsappGroups.getByJid(groupJid);
       const boundAgent = existingGroup?.agent_user_id ? await repos.users.findById(existingGroup.agent_user_id) : null;
       const workspaceDir = boundAgent
@@ -1049,7 +1379,6 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       return true;
     }
 
-    const user = message.senderPhoneE164 ? await repos.users.findByWhatsappNumber(message.senderPhoneE164) : undefined;
     const userName = user?.name ?? message.senderName;
 
     const groupTarget = message.target;
@@ -1075,6 +1404,12 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
         : `wa-group-${groupJid}`;
       const groupConversation = await getOrCreateConversationForMessage(message);
       if (command === "new_session") {
+        if (user) {
+          await deps.questionInteractions?.cancelPendingForTarget({
+            target: { platform: "whatsapp", conversationId: groupJid, threadId: null },
+            requesterPrincipalId: user.id,
+          });
+        }
         await archiveRuntimeSessions(db, groupWorkspaceKey);
         await repos.conversations.advanceWatermarkToCurrentMax(groupConversation.id);
         const onFinalMessage = createWhatsAppMessageHandler(whatsapp, groupTarget, message);
@@ -1094,6 +1429,26 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
       if (isWhatsAppProgressControlMessage(message.text, command)) {
         return;
       }
+
+      const questionReply = await claimQuestionReply(message, user?.id ?? null);
+      if (questionReply?.kind === "completed" && user) {
+        await acknowledgeQuestionReply(groupTarget, questionReply);
+        await resumeQuestionReply({
+          outcome: questionReply,
+          target: groupTarget,
+          quotedMessage: message,
+          user,
+          workspaceDir,
+          agent: boundAgent,
+          claudeConfigDir: config.CLAUDE_CONFIG_DIR,
+          settingsRow,
+          activeQueueKey,
+          conversationKind: "group",
+          contextType: "channel_mention",
+        });
+        return;
+      }
+      if (await acknowledgeQuestionReply(groupTarget, questionReply)) return;
 
       const capture = await captureUserMessage({
         message,
@@ -1210,6 +1565,9 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           userPhone: user?.whatsapp_number ?? null,
           logger,
           platform: "whatsapp",
+          ...(deps.experimentalChannelQuestionInteractionsEnabled
+            ? { questionInteractionCapabilities: WHATSAPP_TEXT_QUESTION_CAPABILITIES }
+            : {}),
           onProgressEvent,
           orgName: settingsRow?.org_name,
           orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
@@ -1249,6 +1607,24 @@ export function wireWhatsAppHandlers(whatsapp: WhatsAppRuntime, deps: WhatsAppAd
           conversationRepo: repos.conversations,
           conversationContext: { conversationId: capture.conversation.id, currentMessageId: capture.captured.id },
         });
+
+        if (
+          result.pendingInteraction &&
+          user &&
+          (await deliverPendingQuestion({
+            interaction: result.pendingInteraction,
+            target: groupTarget,
+            quotedMessage: message,
+            conversationId: groupJid,
+            conversationKind: "group",
+            requesterPrincipalId: user.id,
+            workspaceKey: groupWorkspaceKey,
+            sessionId: result.sessionId,
+            sourceConversationId: String(capture.conversation.id),
+          }))
+        ) {
+          return;
+        }
 
         const textWithAutomationLinks = user
           ? appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? [])

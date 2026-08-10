@@ -56,6 +56,10 @@ export const configSchema = z.object({
     .enum(["true", "false", "1", "0"])
     .default("false")
     .transform((v) => v === "true" || v === "1"),
+  EXPERIMENTAL_CHANNEL_QUESTION_INTERACTIONS: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
   VISION_MODEL: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   OPENROUTER_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
   OPENROUTER_PRICE_TTL_HOURS: z.coerce.number().min(1).default(12),

@@ -80,7 +80,7 @@ describe("AI SDK custom Sketch tool provider", () => {
     expect(tools.mcp__sketch__VisualAnalysis).toBeDefined();
   });
 
-  it("exposes the bounded question tool only on the web response surface", async () => {
+  it("keeps bounded question tools on web and gates channel exposure on an enabled registered capability", async () => {
     const effects = createAgentRuntimeCustomToolEffects();
     const provider = createDefaultAgentRuntimeCustomToolProvider({
       effects,
@@ -90,6 +90,20 @@ describe("AI SDK custom Sketch tool provider", () => {
     });
     const webTools = await provider.createTools(params({ responseSurface: "web" }));
     const slackTools = await provider.createTools(params({ responseSurface: "slack" }));
+    const enabledSlackTools = await provider.createTools(
+      params({
+        responseSurface: "slack",
+        experimentalChannelQuestionInteractionsEnabled: true,
+        questionInteractionCapabilities: {
+          available: true,
+          interactiveSingleSelect: false,
+          interactiveBatch: false,
+          nativeCustomResponse: false,
+          textFallback: true,
+          cancelControl: false,
+        },
+      }),
+    );
     const questionTool = webTools.mcp__sketch__AskUserQuestion as SmokeTool;
     const input = {
       questionId: "delivery-mode",
@@ -101,7 +115,10 @@ describe("AI SDK custom Sketch tool provider", () => {
     };
 
     expect(questionTool).toBeDefined();
+    expect(webTools.mcp__sketch__AskUserQuestions).toBeDefined();
     expect(slackTools.mcp__sketch__AskUserQuestion).toBeUndefined();
+    expect(enabledSlackTools.mcp__sketch__AskUserQuestion).toBeDefined();
+    expect(enabledSlackTools.mcp__sketch__AskUserQuestions).toBeDefined();
     await questionTool.execute?.(input, {} as never);
     expect(effects.drain(params({ responseSurface: "web" })).pendingQuestion).toEqual({
       id: "delivery-mode",

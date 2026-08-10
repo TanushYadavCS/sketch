@@ -1,6 +1,13 @@
-import type { AutomationArtifact, WebChatIntegrationConnectionData, WebChatQuestion } from "@sketch/shared";
+import type {
+  AutomationArtifact,
+  WebChatIntegrationConnectionData,
+  WebChatQuestion,
+  WebChatQuestionBatch,
+  WebChatQuestionInteraction,
+} from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import type { ChatAutomationAuthoring } from "../../automation/chat-authoring";
+import type { QuestionInteractionCapabilities } from "../interactions/types";
 import type { AccessPrincipalInput } from "../../connectors/types";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
@@ -87,21 +94,29 @@ export class AutomationArtifactCollector {
 }
 
 export class QuestionCollector {
-  private pending: WebChatQuestion | null = null;
+  private pending: WebChatQuestionInteraction | null = null;
 
   collect(question: WebChatQuestion): void {
-    if (this.pending) throw new Error("Only one pending question is allowed per agent run.");
-    this.pending = question;
+    this.collectInteraction(question);
+  }
+
+  collectBatch(batch: WebChatQuestionBatch): void {
+    this.collectInteraction(batch);
+  }
+
+  private collectInteraction(interaction: WebChatQuestionInteraction): void {
+    if (this.pending) throw new Error("Only one pending question interaction is allowed per agent run.");
+    this.pending = interaction;
   }
 
   hasPending(): boolean {
     return this.pending !== null;
   }
 
-  drain(): WebChatQuestion | null {
-    const question = this.pending;
+  drain(): WebChatQuestionInteraction | null {
+    const interaction = this.pending;
     this.pending = null;
-    return question;
+    return interaction;
   }
 }
 
@@ -110,6 +125,8 @@ export interface SketchMcpDeps {
   integrationConnectionCollector?: IntegrationConnectionCollector;
   automationArtifactCollector?: AutomationArtifactCollector;
   questionCollector?: QuestionCollector;
+  experimentalChannelQuestionInteractionsEnabled?: boolean;
+  questionInteractionCapabilities?: QuestionInteractionCapabilities;
   responseSurface?: "web" | "slack" | "whatsapp";
   workspaceDir: string;
   db?: Kysely<DB>;
