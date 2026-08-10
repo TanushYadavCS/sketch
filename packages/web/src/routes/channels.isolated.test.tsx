@@ -37,7 +37,12 @@ import { ChannelsPage } from "./channels";
 
 function channelsHandler(
   slack: { configured: boolean; connected: boolean | null },
-  whatsapp: { configured: boolean; connected: boolean | null; phoneNumber?: string },
+  whatsapp: {
+    configured: boolean;
+    connected: boolean | null;
+    phoneNumber?: string;
+    state?: "needs-pairing" | "connected" | "reconnecting" | "paused";
+  },
   email?: { configured: boolean; connected: boolean | null; fromAddress?: string },
 ) {
   server.use(
@@ -244,6 +249,40 @@ describe("ChannelsPage", () => {
       renderWithProviders(<ChannelsPage />);
 
       expect(await screen.findByText(/\+1234567890/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Pair" })).not.toBeInTheDocument();
+    });
+
+    /**
+     * A dropped socket recovers on its own, so the card must say so rather than implying the admin
+     * broke something — and it must never offer Pair, which would unlink a working number.
+     */
+    it("tells a reconnecting tenant that no action is needed", async () => {
+      channelsHandler(
+        { configured: false, connected: null },
+        { configured: true, connected: false, phoneNumber: "+1234567890", state: "reconnecting" },
+      );
+      renderWithProviders(<ChannelsPage />);
+
+      expect(await screen.findByText(/Reconnecting/)).toBeInTheDocument();
+      expect(screen.getByText(/no action needed/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Pair" })).not.toBeInTheDocument();
+    });
+
+    /**
+     * The paused card's whole job is to stop an admin re-scanning a QR they do not need to
+     * re-scan, so it has to name the number and say the credentials are still on file.
+     */
+    it("tells a paused tenant its connection details are still saved", async () => {
+      channelsHandler(
+        { configured: false, connected: null },
+        { configured: true, connected: false, phoneNumber: "+1234567890", state: "paused" },
+      );
+      renderWithProviders(<ChannelsPage />);
+
+      expect(await screen.findByText("Paused")).toBeInTheDocument();
+      expect(screen.getByText(/We couldn't connect to WhatsApp for \+1234567890/)).toBeInTheDocument();
+      expect(screen.getByText(/We'll try again automatically/)).toBeInTheDocument();
+      expect(screen.getByText(/still saved/)).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Pair" })).not.toBeInTheDocument();
     });
   });

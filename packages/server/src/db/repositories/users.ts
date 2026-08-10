@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type Kysely, type Selectable, type Transaction, sql } from "kysely";
+import { storedWhatsAppNumber, whatsappNumberLookupValues } from "../../identity-normalization";
 import type { DB, UsersTable } from "../schema";
 import { invalidateSettingsCache } from "./settings";
 import { ensureEntityForUser } from "./user-entity-linking";
@@ -123,7 +124,19 @@ function createUserRepositoryWithContext(
     },
 
     async findByWhatsappNumber(whatsappNumber: string) {
-      return db.selectFrom("users").selectAll().where("whatsapp_number", "=", whatsappNumber).executeTakeFirst();
+      /**
+       * Exact match wins before the normalised fallback. A single `in` over both
+       * spellings has no ordering, so with a canonical row and a legacy row both
+       * present it could return either — enough to reject an unrelated edit as a
+       * duplicate of a row the caller never named.
+       */
+      const asGiven = whatsappNumber.trim();
+      const exact = await db.selectFrom("users").selectAll().where("whatsapp_number", "=", asGiven).executeTakeFirst();
+      if (exact) return exact;
+
+      const fallbacks = whatsappNumberLookupValues(whatsappNumber).filter((value) => value !== asGiven);
+      if (fallbacks.length === 0) return undefined;
+      return db.selectFrom("users").selectAll().where("whatsapp_number", "in", fallbacks).executeTakeFirst();
     },
 
     async findByEmail(email: string) {
@@ -293,7 +306,7 @@ function createUserRepositoryWithContext(
           password_hash: data.passwordHash ?? null,
           auth_role: data.authRole ?? "member",
           slack_user_id: data.slackUserId ?? null,
-          whatsapp_number: data.whatsappNumber ?? null,
+          whatsapp_number: storedWhatsAppNumber(data.whatsappNumber),
           description: data.description ?? null,
           type: data.type ?? "human",
           role: data.role ?? null,
@@ -357,7 +370,7 @@ function createUserRepositoryWithContext(
       }
       if (data.passwordHash !== undefined) values.password_hash = data.passwordHash;
       if (data.authRole !== undefined) values.auth_role = data.authRole;
-      if (data.whatsappNumber !== undefined) values.whatsapp_number = data.whatsappNumber;
+      if (data.whatsappNumber !== undefined) values.whatsapp_number = storedWhatsAppNumber(data.whatsappNumber);
       if (data.slackUserId !== undefined) values.slack_user_id = data.slackUserId;
       if (data.description !== undefined) values.description = data.description;
       if (data.role !== undefined) values.role = data.role;

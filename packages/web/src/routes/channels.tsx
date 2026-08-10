@@ -309,13 +309,67 @@ function SlackCard({
   );
 }
 
+/**
+ * A dropped socket recovers on its own, so the card says so rather than implying the admin broke
+ * something — and a paused tenant is told its credentials are still on file, because the one thing
+ * it must not do is send someone off to re-scan a QR they do not need to re-scan.
+ */
+function WhatsAppChannelStatus({ channel }: { channel: ChannelStatus }) {
+  const state = channel.state ?? (channel.connected === true ? "connected" : "needs-pairing");
+  const number = channel.phoneNumber ? ` — ${channel.phoneNumber}` : "";
+
+  if (state === "connected") {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <CheckIcon size={14} className="text-success" />
+        <span>Connected{number}</span>
+      </div>
+    );
+  }
+
+  if (state === "reconnecting") {
+    return (
+      <>
+        <p className="text-sm text-muted-foreground">Reconnecting{number}</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          WhatsApp briefly dropped. Sketch is reconnecting automatically — no action needed.
+        </p>
+      </>
+    );
+  }
+
+  if (state === "paused") {
+    return (
+      <>
+        <p className="text-sm text-muted-foreground">Paused</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          We couldn't connect to WhatsApp{channel.phoneNumber ? ` for ${channel.phoneNumber}` : ""}. We'll try again
+          automatically. Your connection details are still saved.
+        </p>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <p className="text-sm text-muted-foreground">Not connected</p>
+      <p className="mt-1 text-xs text-muted-foreground">Pair a WhatsApp number to get started</p>
+    </>
+  );
+}
+
 function WhatsAppCard({ channel, canManage }: { channel: ChannelStatus; canManage: boolean }) {
   const queryClient = useQueryClient();
   const [showPairDialog, setShowPairDialog] = useState(false);
   const [showDisconnectDialog, setShowDisconnectDialog] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
 
-  const isConnected = channel.connected === true;
+  /**
+   * Pairing controls answer "is a number on file", not "is the socket up right now". Keying them
+   * to liveness offered Pair to an already-paired tenant mid-outage and hid Disconnect exactly
+   * when an admin needs it.
+   */
+  const isConnected = channel.configured;
 
   const handlePairConnected = () => {
     setShowPairDialog(false);
@@ -379,17 +433,7 @@ function WhatsAppCard({ channel, canManage }: { channel: ChannelStatus; canManag
         </div>
 
         <div className="ml-12 mt-2">
-          {isConnected ? (
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <CheckIcon size={14} className="text-success" />
-              <span>Connected{channel.phoneNumber ? ` — ${channel.phoneNumber}` : ""}</span>
-            </div>
-          ) : (
-            <>
-              <p className="text-sm text-muted-foreground">Not connected</p>
-              <p className="mt-1 text-xs text-muted-foreground">Pair a WhatsApp number to get started</p>
-            </>
-          )}
+          <WhatsAppChannelStatus channel={channel} />
         </div>
       </div>
 

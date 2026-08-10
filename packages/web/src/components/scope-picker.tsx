@@ -349,6 +349,7 @@ export function GenericScopeEditor({
   connectorId,
   scopeConfig,
   scopeConfigKey,
+  flatScopeShape = "list",
   noun = "items",
   allowEmptySelection = false,
   onBrowsingChange,
@@ -356,6 +357,7 @@ export function GenericScopeEditor({
   connectorId: string;
   scopeConfig: Record<string, unknown>;
   scopeConfigKey?: string;
+  flatScopeShape?: "list" | "map";
   noun?: string;
   allowEmptySelection?: boolean;
   onBrowsingChange?: (browsing: boolean) => void;
@@ -390,35 +392,51 @@ export function GenericScopeEditor({
   const initialSelectedIds = useCallback((): Set<string> => {
     if (!browseData || browseData.type === "async") return new Set();
     const stored = browseData.scopeConfig ?? scopeConfig;
-    return computeSelectedFromScope(browseData, stored, scopeConfigKey);
-  }, [browseData, scopeConfig, scopeConfigKey]);
+    return computeSelectedFromScope(browseData, stored, scopeConfigKey, flatScopeShape);
+  }, [browseData, scopeConfig, scopeConfigKey, flatScopeShape]);
 
-  const [selectedIds, setSelectedIds] = useState<Set<string> | null>(null);
-  const effectiveIds = selectedIds ?? initialSelectedIds();
+  /**
+   * Only the boxes the user actually clicked, and what they set them to.
+   * Everything else follows the live browse result rather than a snapshot
+   * taken when the picker opened — so an item that appears mid-edit shows its
+   * real state instead of a stale one, and never reaches the save payload.
+   * Holding a whole selection here instead would make an item that arrived
+   * after the last refresh look deliberately unticked.
+   */
+  const [overrides, setOverrides] = useState<Map<string, boolean>>(new Map());
+
+  const initIds = initialSelectedIds();
+  const effectiveIds = new Set(initIds);
+  for (const [id, enabled] of overrides) {
+    if (enabled) effectiveIds.add(id);
+    else effectiveIds.delete(id);
+  }
 
   const toggle = (id: string) => {
-    setSelectedIds((prev) => {
-      const base = prev ?? new Set(initialSelectedIds());
-      const next = new Set(base);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+    setOverrides((prev) => {
+      const next = new Map(prev);
+      next.set(id, !(prev.has(id) ? (prev.get(id) as boolean) : initIds.has(id)));
       return next;
     });
   };
 
-  const initIds = initialSelectedIds();
-  const hasChanges =
-    selectedIds !== null && (effectiveIds.size !== initIds.size || [...effectiveIds].some((id) => !initIds.has(id)));
+  const hasChanges = [...overrides].some(([id, enabled]) => initIds.has(id) !== enabled);
 
   const saveMutation = useMutation({
     mutationFn: () => {
       if (!browseData || browseData.type === "async") throw new Error("No browse data");
-      const newScope = buildScopeFromSelection(browseData, effectiveIds, scopeConfigKey);
+      const newScope = buildScopeFromSelection(
+        browseData,
+        effectiveIds,
+        scopeConfigKey,
+        flatScopeShape,
+        new Set(overrides.keys()),
+      );
       return api.integrations.updateScope(connectorId, newScope);
     },
     onSuccess: () => {
       toast.success("Scope updated. Re-sync started.");
-      setSelectedIds(null);
+      setOverrides(new Map());
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
       queryClient.invalidateQueries({ queryKey: ["sync-progress"] });
       queryClient.invalidateQueries({ queryKey: ["file-counts-by-source"] });
@@ -455,7 +473,10 @@ export function GenericScopeEditor({
   }
   const storedScope = browseData.scopeConfig ?? scopeConfig;
   const hasNoSavedSelection =
-    !!scopeConfigKey && Object.prototype.hasOwnProperty.call(storedScope, scopeConfigKey) && initIds.size === 0;
+    !allowEmptySelection &&
+    !!scopeConfigKey &&
+    Object.prototype.hasOwnProperty.call(storedScope, scopeConfigKey) &&
+    initIds.size === 0;
 
   return (
     <div className="space-y-4">
@@ -519,11 +540,20 @@ export function computeSelectedFromScope(
   data: BrowseResult,
   scope: Record<string, unknown>,
   flatScopeKey?: string,
+  flatScopeShape: "list" | "map" = "list",
 ): Set<string> {
   const ids = new Set<string>();
 
   if (data.type === "flat" && flatScopeKey && Object.prototype.hasOwnProperty.call(scope, flatScopeKey)) {
-    const scopedIds = new Set((Array.isArray(scope[flatScopeKey]) ? scope[flatScopeKey] : []).filter(isString));
+    const value = scope[flatScopeKey];
+    const scopedIds =
+      flatScopeShape === "map" && value && typeof value === "object" && !Array.isArray(value)
+        ? new Set(
+            Object.entries(value as Record<string, unknown>)
+              .filter(([, enabled]) => enabled === true)
+              .map(([id]) => id),
+          )
+        : new Set((Array.isArray(value) ? value : []).filter(isString));
     for (const id of getAllItemIds(data)) {
       if (scopedIds.has(id)) ids.add(id);
     }
@@ -559,17 +589,36 @@ function isString(value: unknown): value is string {
 }
 
 /**
- * Build scope config from selected IDs + browse result shape.
- * Preserves the key names expected by each connector's sync().
+ * Builds a scope-update payload from selected IDs and the browse result shape.
+ *
+ * `touchedIds` are the boxes the user actually clicked. For map-shaped scopes
+ * the payload is narrowed to exactly those, so a save cannot overwrite a
+ * decision someone else made while this picker sat open — the server leaves
+ * absent keys untouched. Deriving the payload by diffing against a baseline
+ * instead would be wrong: an item that appeared after the picker opened
+ * differs from the user's stale selection and would be sent as an unintended
+ * `false`. Omit it to send every displayed item, which is what the connect
+ * dialog wants — there is no prior state to preserve.
  */
 export function buildScopeFromSelection(
   data: BrowseResult,
   selectedIds: Set<string>,
   flatScopeKey = "rootPages",
+  flatScopeShape: "list" | "map" = "list",
+  touchedIds?: Set<string>,
 ): Record<string, unknown> {
   switch (data.type) {
     case "flat":
-      return { [flatScopeKey]: [...selectedIds] };
+      return {
+        [flatScopeKey]:
+          flatScopeShape === "map"
+            ? Object.fromEntries(
+                data.items
+                  .filter((item) => !touchedIds || touchedIds.has(item.id))
+                  .map((item) => [item.id, selectedIds.has(item.id)]),
+              )
+            : [...selectedIds],
+      };
     case "nested": {
       const groupIds = new Set<string>();
       const itemIds = new Set<string>();

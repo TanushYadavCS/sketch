@@ -9,6 +9,11 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
 import type { DB } from "../db/schema";
+import {
+  normalizeSlackIdentityUserId,
+  normalizeWhatsAppIdentityLid,
+  normalizeWhatsAppIdentityPhone,
+} from "../identity-normalization";
 import type { SlackIndexingFacade } from "../slack/indexing-facade";
 import type { GeminiGenerator } from "./gemini-generate";
 
@@ -49,26 +54,28 @@ export interface AccessPrincipal {
 export type AccessPrincipalInput = AccessPrincipal | string;
 
 export function normalizeAccessPrincipals(principals: AccessPrincipalInput[]): AccessPrincipal[] {
-  const normalized = principals.map((principal) =>
-    typeof principal === "string"
-      ? { type: "email" as const, value: principal.trim().toLowerCase() }
-      : principal.type === "email"
-        ? { ...principal, value: principal.value.trim().toLowerCase() }
-        : principal,
-  );
-  return [
-    ...new Map(
-      normalized
-        .filter((principal) => principal.value)
-        .map((principal) => [`${principal.type}\0${principal.value}`, principal]),
-    ).values(),
-  ];
+  const normalized = principals.flatMap((principal): AccessPrincipal[] => {
+    if (typeof principal === "string") {
+      const value = principal.trim().toLowerCase();
+      return value ? [{ type: "email", value }] : [];
+    }
+    const value =
+      principal.type === "email"
+        ? principal.value.trim().toLowerCase()
+        : principal.type === "phone"
+          ? normalizeWhatsAppIdentityPhone(principal.value)
+          : principal.type === "slack_user"
+            ? normalizeSlackIdentityUserId(principal.value)
+            : normalizeWhatsAppIdentityLid(principal.value);
+    return value ? [{ type: principal.type, value }] : [];
+  });
+  return [...new Map(normalized.map((principal) => [`${principal.type}\0${principal.value}`, principal])).values()];
 }
 
 export function toEmailPrincipals(emails: string[]): AccessPrincipal[] {
-  return [...new Set(emails.map((email) => email.trim().toLowerCase()).filter((email) => email.length > 0))]
-    .sort()
-    .map((value) => ({ type: "email", value }));
+  return normalizeAccessPrincipals(emails).sort((left, right) =>
+    left.value < right.value ? -1 : left.value > right.value ? 1 : 0,
+  );
 }
 
 export type HierarchyTarget = "team" | "project" | "sprint" | "ignore";

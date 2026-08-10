@@ -3,6 +3,7 @@ import { type Kysely, type Selectable, sql } from "kysely";
 import { normalizeName } from "../../connectors/name-normalize";
 import { fileAccessFilterSql } from "../../connectors/search";
 import type { AccessPrincipalInput } from "../../connectors/types";
+import { whatsappNumberLookupValues } from "../../identity-normalization";
 import type { DB, EntitiesTable, TasksTable } from "../schema";
 import type { AgentKnowledgeRefs, AgentOutputItemInput } from "./agent-outputs";
 import type { FileViewer } from "./connectors";
@@ -1289,7 +1290,7 @@ async function findEligibleUserIdsByProviderIds(
         .selectFrom("users")
         .select("id")
         .where("type", "!=", "external")
-        .where("whatsapp_number", "=", whatsappNumber)
+        .where("whatsapp_number", "in", whatsappNumberLookupValues(whatsappNumber))
         .execute()),
     );
   }
