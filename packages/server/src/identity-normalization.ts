@@ -30,3 +30,30 @@ export function normalizeSlackIdentityUserId(value: string | null | undefined): 
   const trimmed = value?.trim();
   return trimmed || null;
 }
+
+/**
+ * The value to persist in `users.whatsapp_number`.
+ *
+ * Normalises to E.164 so one number has one spelling in the database. A value
+ * that cannot be normalised is kept as given: refusing it here would turn a
+ * previously accepted save into an error, and dropping it would lose the only
+ * contact detail we hold for that person.
+ */
+export function storedWhatsAppNumber(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  return normalizeWhatsAppIdentityPhone(trimmed) ?? trimmed;
+}
+
+/**
+ * The values a `users.whatsapp_number` lookup must consider.
+ *
+ * Migration 167 normalises existing rows, but a number it could not parse stays
+ * in its original spelling, so a lookup still has to try both forms.
+ */
+export function whatsappNumberLookupValues(value: string): string[] {
+  const trimmed = value.trim();
+  const normalized = normalizeWhatsAppIdentityPhone(trimmed);
+  return normalized === null || normalized === trimmed ? [trimmed] : [normalized, trimmed];
+}
