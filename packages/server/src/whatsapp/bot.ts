@@ -14,6 +14,8 @@ import {
   DisconnectReason,
   type GroupMetadata,
   type MiscMessageGenerationOptions,
+  USyncQuery,
+  USyncUser,
   type WAMessage,
   type WASocket,
   type WAVersion,
@@ -30,11 +32,13 @@ import type {
   WhatsAppGroupParticipantRefreshLogger,
 } from "../db/repositories/whatsapp-groups";
 import type { DB } from "../db/schema";
+import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../identity-normalization";
 import type { Logger } from "../logger";
 import { createDbAuthState } from "./auth-store";
 import { WHATSAPP_TEXT_LIMIT, chunkText } from "./chunking";
 import { collectWhatsAppGroupParticipants, toParticipantInputs } from "./group-participants";
 import { captureWhatsAppLidForPhone } from "./identity-resolution";
+import { safeWhatsAppErrorFields } from "./privacy";
 import type { WhatsAppGroupMetadata as ProviderWhatsAppGroupMetadata } from "./provider";
 
 const ECHO_TTL_MS = 60_000;
@@ -67,6 +71,38 @@ async function getWaVersion(): Promise<WAVersion | undefined> {
   const { version } = await fetchLatestBaileysVersion();
   cachedVersion = version as WAVersion;
   return version;
+}
+
+export async function resolvePhoneToLidWithSocket(
+  socket: Pick<WASocket, "executeUSyncQuery" | "signalRepository">,
+  phoneE164: string,
+  logger: Logger,
+): Promise<{ lid: string; source: "provider-current" | "baileys-fallback" } | null> {
+  const phone = normalizeWhatsAppIdentityPhone(phoneE164);
+  if (!phone) throw new Error("WhatsApp phone-to-LID resolution requires canonical E.164");
+  const phoneJid = `${phone.slice(1)}@s.whatsapp.net`;
+  try {
+    const result = await socket.executeUSyncQuery(
+      new USyncQuery().withUser(new USyncUser().withId(phoneJid)).withLIDProtocol(),
+    );
+    const lid = normalizeWhatsAppIdentityLid(result?.list.find((entry) => entry.id === phoneJid)?.lid as string | null);
+    if (lid) return { lid, source: "provider-current" };
+  } catch (error) {
+    logger.warn(
+      { operation: "phone_to_lid_provider_query", ...safeWhatsAppErrorFields(error) },
+      "WhatsApp phone-to-LID provider query failed",
+    );
+  }
+  try {
+    const lid = normalizeWhatsAppIdentityLid(await socket.signalRepository.lidMapping.getLIDForPN(phoneJid));
+    return lid ? { lid, source: "baileys-fallback" } : null;
+  } catch (error) {
+    logger.warn(
+      { operation: "phone_to_lid_mapping_fallback", ...safeWhatsAppErrorFields(error) },
+      "WhatsApp phone-to-LID fallback failed",
+    );
+    return null;
+  }
 }
 
 interface WhatsAppBaseMessage {
@@ -605,6 +641,14 @@ export class WhatsAppBot {
     return null;
   }
 
+  async resolvePhoneToLid(
+    phoneE164: string,
+  ): Promise<{ lid: string; source: "provider-current" | "baileys-fallback" } | null> {
+    const socket = this.sock;
+    if (!socket) return null;
+    return resolvePhoneToLidWithSocket(socket, phoneE164, this.logger);
+  }
+
   // --- Internal ---
 
   private async createSocket(): Promise<void> {
@@ -874,7 +918,10 @@ export class WhatsAppBot {
     } else {
       phoneNumber = await this.resolveLidToPhone(jid);
       if (!phoneNumber) {
-        this.logger.warn({ lid: jid }, "Could not resolve LID to phone number — dropping message");
+        this.logger.warn(
+          { operation: "resolve_inbound_lid_to_phone" },
+          "Could not resolve LID to phone number — dropping message",
+        );
         return;
       }
       await captureWhatsAppLidForPhone(this.db, phoneNumber, jid, this.logger);
@@ -1154,8 +1201,11 @@ export class WhatsAppBot {
       if (pnJid) {
         return jidToPhoneNumber(pnJid);
       }
-    } catch (err) {
-      this.logger.debug({ lid: lidJid, err }, "LID mapping lookup failed");
+    } catch (error) {
+      this.logger.debug(
+        { operation: "resolve_lid_to_phone_mapping", ...safeWhatsAppErrorFields(error) },
+        "LID mapping lookup failed",
+      );
     }
     return null;
   }

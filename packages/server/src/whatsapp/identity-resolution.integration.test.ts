@@ -129,7 +129,7 @@ function runIdentityIntegrationSuite(label: string, createDb: DbFactory) {
       });
     });
 
-    it("refreshes group participants by inserting, updating, bumping last_seen_at, and pruning stale rows", async () => {
+    it("refreshes group participants while retaining observations absent from newer payloads", async () => {
       const { groupJid, repo } = await seedGroup();
 
       const first = await repo.refreshParticipants(
@@ -156,6 +156,12 @@ function runIdentityIntegrationSuite(label: string, createDb: DbFactory) {
           phone_e164: "+15554000001",
           admin_role: "superadmin",
           last_seen_at: "2026-07-07T10:00:00.000Z",
+        }),
+        expect.objectContaining({
+          participant_jid: "15554000002@s.whatsapp.net",
+          phone_e164: "+15554000002",
+          admin_role: "admin",
+          last_seen_at: "2026-07-07T09:00:00.000Z",
         }),
         expect.objectContaining({
           participant_jid: "15554000003@s.whatsapp.net",

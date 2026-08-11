@@ -6,6 +6,7 @@ import {
   type WhatsAppMediaDownloadRef,
   type WhatsAppPairingEvent,
   type WhatsAppPairingStatus,
+  type WhatsAppPhoneLidResolution,
   type WhatsAppQuotedRef,
   type WhatsAppReactionResult,
   type WhatsAppSendContent,
@@ -18,6 +19,7 @@ import {
   whatsAppOkResponseSchema,
   whatsAppPairingEventSchema,
   whatsAppPairingStatusSchema,
+  whatsAppPhoneLidResolutionResponseSchema,
   whatsAppReactionResponseSchema,
   whatsAppResolveLidResponseSchema,
   whatsAppSendResponseSchema,
@@ -188,6 +190,15 @@ export class GatewayClientFacade implements WhatsAppSocketFacade {
       whatsAppResolveLidResponseSchema,
     );
     return response.phoneJid;
+  }
+
+  async resolvePhoneToLid(phoneE164: string): Promise<WhatsAppPhoneLidResolution | null> {
+    const response = await this.request(
+      "/phone-lid-resolutions",
+      { method: "POST", body: JSON.stringify({ phoneE164 }) },
+      whatsAppPhoneLidResolutionResponseSchema,
+    );
+    return response.result;
   }
 
   async fetchMessageHistory(request: WhatsAppHistorySyncRequest): Promise<string> {

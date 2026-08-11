@@ -95,23 +95,51 @@ function expectNoRawPrivateIdentifiers(serializedSnapshot: string): void {
 }
 
 describe("WhatsApp identity resolution", () => {
+  it("resolves a roster teammate through a non-legacy LID alias", async () => {
+    await seedUser("alias-teammate", "Alias Teammate", null);
+    await db.updateTable("users").set({ whatsapp_lid: "old-alias@lid" }).where("id", "=", "alias-teammate").execute();
+    await db
+      .insertInto("user_whatsapp_lids")
+      .values({
+        user_id: "alias-teammate",
+        lid: "new-alias@lid",
+        first_seen_at: "2026-07-07T09:00:00.000Z",
+        last_seen_at: "2026-07-07T09:00:00.000Z",
+      })
+      .execute();
+
+    const result = await createWhatsAppIdentityResolutionService(db).resolveRoster("group@g.us", [
+      { participantJid: "new-alias@lid", phoneE164: null, lid: "new-alias@lid" },
+    ]);
+
+    expect(result.get("new-alias@lid")).toEqual({
+      kind: "teammate",
+      userId: "alias-teammate",
+      name: "Alias Teammate",
+    });
+  });
   it("normalizes LIDs by removing device suffixes", () => {
     expect(normalizeWhatsAppIdentityLid("12345:7@lid")).toBe("12345@lid");
     expect(normalizeWhatsAppIdentityLid("12345@LID")).toBe("12345@lid");
   });
 
-  it("captures a LID for its phone user and skips conflicts", async () => {
+  it("appends LID aliases, dual-writes the latest legacy value, and skips ownership conflicts", async () => {
     await seedUser("lid-owner", "LID Owner", "+15550000011");
     await seedUser("lid-other", "Other", "+15550000012");
+    const warn = vi.fn();
 
-    await captureWhatsAppLidForPhone(db, "+1 (555) 000-0011", "12345:7@lid");
+    await captureWhatsAppLidForPhone(db, "+1 (555) 000-0011", "12345:7@lid", { warn });
+    await captureWhatsAppLidForPhone(db, "+15550000011", "67890@lid", { warn });
+    expect(warn).not.toHaveBeenCalled();
     await expect(
       db.selectFrom("users").select("whatsapp_lid").where("id", "=", "lid-owner").executeTakeFirstOrThrow(),
     ).resolves.toEqual({
-      whatsapp_lid: "12345@lid",
+      whatsapp_lid: "67890@lid",
     });
+    await expect(
+      db.selectFrom("user_whatsapp_lids").select("lid").where("user_id", "=", "lid-owner").orderBy("lid").execute(),
+    ).resolves.toEqual([{ lid: "12345@lid" }, { lid: "67890@lid" }]);
 
-    const warn = vi.fn();
     await captureWhatsAppLidForPhone(db, "+15550000012", "12345@lid", { warn });
     await expect(
       db.selectFrom("users").select("whatsapp_lid").where("id", "=", "lid-other").executeTakeFirstOrThrow(),
@@ -119,9 +147,12 @@ describe("WhatsApp identity resolution", () => {
       whatsapp_lid: null,
     });
     expect(warn).toHaveBeenCalledWith(
-      { userId: "lid-other", conflictingUserId: "lid-owner" },
+      { operation: "capture_whatsapp_lid", result: "ownership-conflict" },
       "Skipped conflicting WhatsApp LID capture",
     );
+    await expect(
+      db.selectFrom("user_whatsapp_lids").select("lid").where("user_id", "=", "lid-other").execute(),
+    ).resolves.toEqual([]);
   });
 
   it("treats a concurrent LID capture race as a benign conflict", async () => {
@@ -137,9 +168,9 @@ describe("WhatsApp identity resolution", () => {
     ).resolves.toEqual([undefined, undefined]);
 
     const owners = await db
-      .selectFrom("users")
-      .select(["id", "whatsapp_lid"])
-      .where("whatsapp_lid", "=", "race@lid")
+      .selectFrom("user_whatsapp_lids")
+      .select(["user_id", "lid"])
+      .where("lid", "=", "race@lid")
       .execute();
     expect(owners).toHaveLength(1);
     expect(warn).toHaveBeenCalledWith(expect.any(Object), "Skipped conflicting WhatsApp LID capture");

@@ -11,6 +11,8 @@ export interface UsersTable {
   slack_user_id: string | null;
   whatsapp_number: string | null;
   whatsapp_lid: Generated<string | null>;
+  whatsapp_lid_attempted_at: Generated<string | null>;
+  whatsapp_lid_checked_at: Generated<string | null>;
   description: string | null;
   type: Generated<string>;
   role: string | null;
@@ -655,11 +657,20 @@ export interface WhatsAppGroupMemberLabelsTable {
 }
 
 export interface WhatsAppGroupParticipantsTable {
+  id: Generated<string>;
   group_jid: string;
+  observation_key: Generated<string>;
   participant_jid: string;
   phone_e164: string | null;
   lid: string | null;
   admin_role: string | null;
+  last_seen_at: Generated<string>;
+}
+
+export interface UserWhatsAppLidsTable {
+  user_id: string;
+  lid: string;
+  first_seen_at: Generated<string>;
   last_seen_at: Generated<string>;
 }
 
@@ -1621,6 +1632,7 @@ export interface DB {
   whatsapp_identity_candidates: WhatsAppIdentityCandidatesTable;
   whatsapp_group_member_labels: WhatsAppGroupMemberLabelsTable;
   whatsapp_group_participants: WhatsAppGroupParticipantsTable;
+  user_whatsapp_lids: UserWhatsAppLidsTable;
   slack_channel_participants: SlackChannelParticipantsTable;
   whatsapp_backfill_checkpoints: WhatsAppBackfillCheckpointsTable;
   whatsapp_backfill_ranges: WhatsAppBackfillRangesTable;

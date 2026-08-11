@@ -10,6 +10,7 @@ import {
   type WhatsAppHistorySyncRequest,
   type WhatsAppMediaDownloadRef,
   type WhatsAppPairingEvent,
+  type WhatsAppPhoneLidResolution,
   type WhatsAppQuotedRef,
   type WhatsAppReactionResult,
   type WhatsAppSendContent,
@@ -165,6 +166,10 @@ export class InProcessSocketFacade implements WhatsAppSocketFacade, InProcessMes
   async resolveLid(jid: string): Promise<string | null> {
     const phoneE164 = await this.bot.resolveJidToPhone(jid);
     return phoneE164 ? phoneE164ToWhatsAppJid(phoneE164) : null;
+  }
+
+  resolvePhoneToLid(phoneE164: string): Promise<WhatsAppPhoneLidResolution | null> {
+    return this.bot.resolvePhoneToLid(phoneE164);
   }
 
   fetchMessageHistory(request: WhatsAppHistorySyncRequest): Promise<string> {

@@ -12,6 +12,7 @@ function facade(overrides: Partial<WhatsAppSocketFacade> = {}): WhatsAppSocketFa
     groupMetadata: async () => null,
     syncAllGroups: async () => ({ synced: 0 }),
     resolveLid: async () => null,
+    resolvePhoneToLid: async () => null,
     fetchMessageHistory: async () => "request-session-1",
     pairing: {
       startQr: async (onEvent) => onEvent({ type: "qr", qr: "qr-data" }),
@@ -98,5 +99,22 @@ describe("WhatsApp gateway HTTP facade", () => {
       body: JSON.stringify(input),
     });
     expect(unauthorized.status).toBe(401);
+  });
+
+  it("serves one authenticated phone-to-LID resolution", async () => {
+    const resolvePhoneToLid = vi.fn(async () => ({ lid: "12345@lid", source: "provider-current" as const }));
+    const app = createWhatsAppGatewayHttpApp({
+      token: "secret",
+      facade: facade({ resolvePhoneToLid }),
+      logger: createTestLogger(),
+    });
+    const response = await app.request("/phone-lid-resolutions", {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ phoneE164: "+14155551234" }),
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ result: { lid: "12345@lid", source: "provider-current" } });
+    expect(resolvePhoneToLid).toHaveBeenCalledWith("+14155551234");
   });
 });

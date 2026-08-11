@@ -18,6 +18,8 @@ import {
   whatsAppOkResponseSchema,
   whatsAppPairingEventSchema,
   whatsAppPairingStatusSchema,
+  whatsAppPhoneLidResolutionRequestSchema,
+  whatsAppPhoneLidResolutionResponseSchema,
   whatsAppReactionRequestSchema,
   whatsAppReactionResponseSchema,
   whatsAppResolveLidRequestSchema,
@@ -95,6 +97,12 @@ export function createWhatsAppGatewayHttpApp(deps: {
     const input = await parseBody(context.req.raw, whatsAppResolveLidRequestSchema);
     const phoneJid = await deps.facade.resolveLid(input.jid);
     return context.json(whatsAppResolveLidResponseSchema.parse({ phoneJid }));
+  });
+
+  app.post("/phone-lid-resolutions", async (context) => {
+    const input = await parseBody(context.req.raw, whatsAppPhoneLidResolutionRequestSchema);
+    const result = (await deps.facade.resolvePhoneToLid?.(input.phoneE164)) ?? null;
+    return context.json(whatsAppPhoneLidResolutionResponseSchema.parse({ result }));
   });
 
   app.post("/history-sync-requests", async (context) => {

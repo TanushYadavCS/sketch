@@ -273,12 +273,7 @@ describe("createWhatsAppGroupRepository", () => {
     await expect(repo.getMemberLabel("123@g.us", "+15551234567")).resolves.toBeUndefined();
   });
 
-  /**
-   * A caller whose socket died mid-resolution can resume after a newer roster
-   * has committed. Rejecting the older payload inside the transaction is the
-   * only guard that is atomic with the delete.
-   */
-  it("refuses a participant refresh older than the stored roster", async () => {
+  it("appends unseen evidence from an older refresh without regressing an existing observation", async () => {
     const groupJid = "123@g.us";
     const logger = { warn: vi.fn() };
     await repo.upsert({
@@ -290,27 +285,53 @@ describe("createWhatsAppGroupRepository", () => {
     await repo.refreshParticipants(
       groupJid,
       [
-        { participantJid: "15551234567@s.whatsapp.net", phoneE164: "+15551234567", adminRole: null },
-        { participantJid: "15557654321@s.whatsapp.net", phoneE164: "+15557654321", adminRole: null },
+        {
+          participantJid: "current-identity@lid",
+          phoneE164: "+15551234567",
+          lid: "current-identity@lid",
+          adminRole: "superadmin",
+        },
       ],
       "2026-03-13T12:00:00.000Z",
     );
 
     const stale = await repo.refreshParticipants(
       groupJid,
-      [{ participantJid: "15551234567@s.whatsapp.net", phoneE164: "+15551234567", adminRole: null }],
+      [
+        {
+          participantJid: "older-provider-jid@s.whatsapp.net",
+          phoneE164: "+15551234567",
+          lid: "current-identity@lid",
+          adminRole: null,
+        },
+        { participantJid: "15557654321@s.whatsapp.net", phoneE164: "+15557654321", adminRole: "admin" },
+      ],
       "2026-03-13T11:00:00.000Z",
       logger,
     );
-
-    expect(stale.map((row) => row.participant_jid)).toEqual([
-      "15551234567@s.whatsapp.net",
-      "15557654321@s.whatsapp.net",
-    ]);
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ groupJid }),
-      "Skipped stale WhatsApp group participant refresh",
+    const retried = await repo.refreshParticipants(
+      groupJid,
+      [{ participantJid: "15557654321@s.whatsapp.net", phoneE164: "+15557654321", adminRole: "admin" }],
+      "2026-03-13T11:00:00.000Z",
     );
+
+    expect(stale).toEqual([
+      expect.objectContaining({
+        participant_jid: "15557654321@s.whatsapp.net",
+        phone_e164: "+15557654321",
+        admin_role: "admin",
+        last_seen_at: "2026-03-13T11:00:00.000Z",
+      }),
+      expect.objectContaining({
+        participant_jid: "current-identity@lid",
+        phone_e164: "+15551234567",
+        lid: "current-identity@lid",
+        admin_role: "superadmin",
+        last_seen_at: "2026-03-13T12:00:00.000Z",
+      }),
+    ]);
+    expect(retried).toEqual(stale);
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it("keeps an existing participant roster when an empty refresh arrives", async () => {
@@ -353,7 +374,7 @@ describe("createWhatsAppGroupRepository", () => {
     );
   });
 
-  it("prunes participants missing from a non-empty refresh", async () => {
+  it("retains participants missing from a non-empty refresh", async () => {
     const groupJid = "123@g.us";
     await repo.upsert({
       jid: groupJid,
@@ -377,6 +398,12 @@ describe("createWhatsAppGroupRepository", () => {
     );
 
     expect(refreshed).toEqual([
+      expect.objectContaining({
+        participant_jid: "15551234567@s.whatsapp.net",
+        phone_e164: "+15551234567",
+        admin_role: "admin",
+        last_seen_at: "2026-03-13T10:00:00.000Z",
+      }),
       expect.objectContaining({
         participant_jid: "15557654321@s.whatsapp.net",
         phone_e164: "+15557654321",

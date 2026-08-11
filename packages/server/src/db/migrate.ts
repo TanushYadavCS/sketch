@@ -171,6 +171,7 @@ import * as m168 from "./migrations/168-whatsapp-group-scope-authority";
 import * as m169 from "./migrations/169-scheduled-task-execution-mode";
 import * as m170 from "./migrations/170-question-interactions";
 import * as m171 from "./migrations/171-question-interaction-active-keys";
+import * as m172 from "./migrations/172-whatsapp-identity-observations";
 import type { DB } from "./schema";
 
 /**
@@ -351,6 +352,7 @@ export function createMigrator(db: Kysely<DB>): Migrator {
           "169-scheduled-task-execution-mode": m169,
           "170-question-interactions": m170,
           "171-question-interaction-active-keys": m171,
+          "172-whatsapp-identity-observations": m172,
         };
       },
     },

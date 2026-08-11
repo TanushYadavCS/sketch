@@ -49,6 +49,7 @@ import { createQuestionInteractionsRepository } from "./db/repositories/question
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createSlackChannelParticipantsRepository } from "./db/repositories/slack-channel-participants";
 import { createUserEntityLinkSweepService } from "./db/repositories/user-entity-link-sweep";
+import { createUserWhatsAppLidRepository } from "./db/repositories/user-whatsapp-lids";
 import { createUserRepository } from "./db/repositories/users";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
 import { createWhatsAppInboundEventsRepository } from "./db/repositories/whatsapp-inbound-events";
@@ -94,6 +95,7 @@ import { GatewayClientFacade } from "./whatsapp/gateway-client-facade";
 import { InProcessWhatsAppLease, WhatsAppGatewaySupervisor } from "./whatsapp/gateway/supervisor";
 import { InProcessSocketFacade } from "./whatsapp/in-process-socket-facade";
 import { WhatsAppInboundConsumer } from "./whatsapp/inbound-consumer";
+import { safeWhatsAppErrorFields } from "./whatsapp/privacy";
 import { WORKFLOW_OUTPUT_INBOX_KIND, deliverProactiveDm } from "./whatsapp/proactive-delivery";
 import { whatsappDeliveryTargetFromTarget } from "./whatsapp/provider";
 import { createBaileysWhatsAppProviders } from "./whatsapp/providers/baileys";
@@ -102,6 +104,7 @@ import { WHATSAPP_WATI_PROVIDER_ID, createWatiWhatsAppProvider } from "./whatsap
 import { startWhatsAppInboundRetention } from "./whatsapp/retention";
 import { createWhatsAppRuntime } from "./whatsapp/runtime";
 import type { WhatsAppTemplateRequest } from "./whatsapp/templates";
+import { WhatsAppUserLidRefresh } from "./whatsapp/user-lid-refresh";
 import { startWhatsAppWindowKeepAliveJob } from "./whatsapp/window-keepalive";
 
 export interface ServerHandle {
@@ -227,6 +230,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
 
   // 3. Repositories
   const users = createUserRepository(db, { slackEntitySyncEnabled: config.SLACK_ENTITY_SYNC });
+  const userWhatsAppLids = createUserWhatsAppLidRepository(db);
   const channels = createChannelRepository(db);
   const settingsRepo = createSettingsRepository(db, config.ENCRYPTION_KEY);
   const operationalAlertsRepo = createOperationalAlertsRepository(db);
@@ -539,6 +543,11 @@ export async function createServer(config: Config, options?: CreateServerOptions
       ...(watiWhatsApp ? [watiWhatsApp.inboundProvider] : []),
       ...(managedWhatsApp ? [managedWhatsApp.inboundProvider] : []),
     ],
+    logger,
+  });
+  const whatsappUserLidRefresh = new WhatsAppUserLidRefresh({
+    whatsapp,
+    store: userWhatsAppLids,
     logger,
   });
   const operationalAlertWorker =
@@ -1051,6 +1060,14 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const app = createApp(db, config, {
     whatsapp,
     whatsappRuntime,
+    captureWhatsAppLid: (userId, phoneE164) => {
+      void whatsappUserLidRefresh.capture(userId, phoneE164).catch((error) => {
+        logger.warn(
+          { operation: "capture_whatsapp_lid_after_user_update", ...safeWhatsAppErrorFields(error) },
+          "Detached WhatsApp LID capture failed",
+        );
+      });
+    },
     watiWebhook: watiWhatsApp ?? undefined,
     managedWhatsapp: managedWhatsApp ?? undefined,
     getSlack: () => slack,
@@ -1178,6 +1195,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
       logger.info("WhatsApp not paired — use GET /api/channels/whatsapp/pair to connect");
     }
 
+    if (backgroundWork && usesBaileys) whatsappUserLidRefresh.start();
+
     if (!slack && !whatsappConnected) {
       logger.info("No channels active — pair WhatsApp via GET /api/channels/whatsapp/pair or configure Slack tokens");
     }
@@ -1187,6 +1206,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   async function shutdown() {
     logger.info("Shutting down...");
     managedMemberReconciliationShuttingDown = true;
+    whatsappUserLidRefresh.stop();
     if (managedMemberReconciliationTimer) clearInterval(managedMemberReconciliationTimer);
     if (questionInteractionExpiryTimer) clearInterval(questionInteractionExpiryTimer);
     await operationalAlertWorker?.stop();
