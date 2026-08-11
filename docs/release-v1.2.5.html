@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sketch v1.2.5 — release briefing</title>
+<link rel="icon" href="data:," />
+<style>
+  :root {
+    --ink:#14130e; --body:#33322a; --muted:#6f6e64; --faint:#8a8880;
+    --line:#e4e2da; --card:#faf9f6; --code:#f4f3ee; --page:#fff;
+    --bad:#8c2f1d; --ok:#2f5d3a;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family:"Inter",system-ui,sans-serif; background:var(--page); color:var(--body);
+    line-height:1.6; -webkit-font-smoothing:antialiased;
+    max-width:880px; margin:0 auto; padding:56px 28px 120px;
+  }
+  h1 { font-size:30px; font-weight:700; color:var(--ink); letter-spacing:-.02em; line-height:1.2; }
+  .sub { color:var(--muted); font-size:16px; margin-top:10px; }
+  .meta { font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--faint); margin-top:14px; }
+  h2 { font-size:20px; font-weight:700; color:var(--ink); margin:52px 0 6px; letter-spacing:-.01em; }
+  h2 .n { font-family:"JetBrains Mono",monospace; font-size:14px; color:var(--faint); margin-right:10px; }
+  h3 { font-size:14px; font-weight:600; color:var(--ink); margin:22px 0 8px; }
+  p { margin:10px 0; font-size:15.5px; }
+  hr { border:0; border-top:1px solid var(--line); margin:0; }
+  .where { font-family:"JetBrains Mono",monospace; font-size:12.5px; color:var(--muted);
+           background:var(--code); border-radius:5px; padding:3px 8px; display:inline-block; margin-top:4px; }
+  .diagram { margin:36px 0 8px; border:1px solid var(--line); border-radius:12px; padding:26px 22px; background:var(--card); }
+  .blk { border:1px solid var(--line); background:var(--page); border-radius:9px; padding:13px 16px; display:flex; gap:14px; align-items:baseline; }
+  .blk .bn { font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--faint); flex:0 0 18px; }
+  .blk .bt { font-weight:600; color:var(--ink); font-size:15px; flex:0 0 190px; }
+  .blk .bd { font-size:13.5px; color:var(--muted); }
+  .arrow { text-align:center; color:var(--faint); font-size:15px; line-height:1; margin:5px 0; }
+  .arrow small { font-family:"JetBrains Mono",monospace; font-size:10.5px; letter-spacing:.06em; margin-left:8px; color:var(--faint); }
+  .gap { height:14px; }
+  .lane { font-family:"JetBrains Mono",monospace; font-size:10.5px; letter-spacing:.11em;
+          text-transform:uppercase; color:var(--faint); margin:16px 0 8px; }
+  pre { background:var(--code); border:1px solid var(--line); border-radius:8px; padding:15px 17px;
+        overflow-x:auto; font-family:"JetBrains Mono",monospace; font-size:12.5px; line-height:1.65;
+        color:var(--ink); margin:12px 0; white-space:pre; }
+  code { font-family:"JetBrains Mono",monospace; font-size:13px; background:var(--code);
+         padding:1px 5px; border-radius:4px; color:var(--ink); }
+  .note { border-left:3px solid var(--ink); background:var(--card); padding:12px 16px;
+          border-radius:0 8px 8px 0; margin:16px 0; font-size:14.5px; }
+  .note b { color:var(--ink); }
+  .note.bad { border-left-color:var(--bad); }
+  .note.ok  { border-left-color:var(--ok); }
+  ul { margin:10px 0 10px 20px; }
+  li { margin:5px 0; font-size:15px; }
+  table { border-collapse:collapse; width:100%; margin:14px 0; font-size:14px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); font-weight:600; }
+  td.k { font-family:"JetBrains Mono",monospace; font-size:12.5px; color:var(--ink); white-space:nowrap; }
+  td.z { font-family:"JetBrains Mono",monospace; font-size:12.5px; color:var(--bad); font-weight:500; }
+  .table-wrap { overflow-x:auto; }
+  .pr { border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin:12px 0; background:var(--card); }
+  .pr .t { font-weight:700; color:var(--ink); font-size:15.5px; }
+  .pr .s { font-family:"JetBrains Mono",monospace; font-size:11px; color:var(--faint);
+           text-transform:uppercase; letter-spacing:.08em; margin-bottom:4px; }
+  a { color:inherit; }
+  @media (max-width:640px) {
+    body { padding:36px 18px 80px; }
+    .blk { display:block; }
+    .blk .bn, .blk .bt { display:block; }
+    .blk .bt { margin:3px 0; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Next Sketch release: choose the pin</h1>
+<p class="sub">A decision memo for selecting the release commit after v1.2.4. The current <code>origin/main</code> tip is an inventory upper bound, not the automatic target.</p>
+<p class="meta">canvasxai/sketch · docs/release-v1.2.5.html · candidate range v1.2.4..origin/main · snapshot 2026-08-11</p>
+
+<div class="diagram">
+  <div class="lane">Release decision</div>
+  <div class="blk"><span class="bn">1</span><span class="bt">Start at v1.2.4</span><span class="bd">The last release points to <code>8dcccd2c</code>.</span></div>
+  <div class="arrow">↓ <small>38 PRs · 139 commits · 341 files to review</small></div>
+  <div class="blk"><span class="bn">2</span><span class="bt">Inventory main history</span><span class="bd"><code>5973495b</code> is the current upper bound, not a decision.</span></div>
+  <div class="arrow">↓ <small>choose an ancestor</small></div>
+  <div class="blk"><span class="bn">3</span><span class="bt">Select the release pin</span><span class="bd">The team chooses a coherent first-parent checkpoint and its included PRs.</span></div>
+  <div class="arrow">↓</div>
+  <div class="blk"><span class="bn">4</span><span class="bt">Align the release workflow</span><span class="bd">Only then create the version commit and tag from the selected pin.</span></div>
+</div>
+<p style="font-size:14px;color:var(--muted)">This document records the decision to make. It does not authorize tagging the remote main tip.</p>
+
+<hr style="margin-top:40px" />
+
+<h2><span class="n">01</span>The release pin is still undecided</h2>
+<p><b>No release pin is selected yet.</b> Do not pin the release automatically to <code>5973495b99ba310c61b1b9e31137aeac6bfbb3e1</code>. That commit is only the current remote upper bound. The release pin should be a reviewed ancestor that defines exactly which PRs ship.</p>
+<p><span class="where">git · v1.2.4..origin/main · candidate inventory</span> <span class="where">origin/main · 5973495b · upper bound only</span></p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Item</th><th>Measured value</th><th>Meaning</th></tr>
+  <tr><td>Last release</td><td class="k">v1.2.4</td><td>Released on 2026-07-30. Its tag points to <code>8dcccd2c55104eaadc9ee490a2ea6f6b0eef39fc</code>.</td></tr>
+  <tr><td>Candidate range</td><td class="k">v1.2.4..origin/main</td><td>38 merged PR records are available for review. They are not all committed to the next release by default.</td></tr>
+  <tr><td>Current upper bound</td><td class="k">5973495b</td><td>PR #489 is the latest remote main landing. It is an option, not the answer.</td></tr>
+  <tr><td>Selected release pin</td><td class="z">pending</td><td>Choose one reviewed ancestor from the checkpoints below, or name another ancestor explicitly.</td></tr>
+  <tr><td>Current checked-out branch</td><td class="k">fa2924a8</td><td>A feature branch with uncommitted changes. It is not a release candidate.</td></tr>
+</table>
+</div>
+
+<h3>Review checkpoints</h3>
+<p>These are coherent first-parent landing points. They are decision checkpoints, not an exhaustive list of every possible ancestor.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Pin</th><th>Landed through</th><th>Scope from v1.2.4</th><th>What it leaves out</th></tr>
+  <tr><td class="k"><a href="https://github.com/canvasxai/sketch/commit/f1649730c5e47cc091f6d59bd5b5bb46267e509f">f1649730</a></td><td>PR #464 · Microsoft Calendar</td><td class="k">12 landings · 215 files · +26,381 / −2,673</td><td>Typed access and everything after #464.</td></tr>
+  <tr><td class="k"><a href="https://github.com/canvasxai/sketch/commit/e52271370d68fb85c954b8c7d386e163d185b000">e5227137</a></td><td>PR #469 · typed access principals</td><td class="k">13 landings · 255 files · +28,341 / −3,201</td><td>File visibility, WhatsApp hardening, and the later automation stack.</td></tr>
+  <tr><td class="k"><a href="https://github.com/canvasxai/sketch/commit/78b6e81065bd355662c76e94e7d0f7d238cfa22d">78b6e810</a></td><td>PR #484 · WhatsApp reconnect quarantine</td><td class="k">17 landings · 276 files · +31,922 / −3,556</td><td>Private skill loading, WhatsApp number/group changes, and the final automation stack.</td></tr>
+  <tr><td class="k"><a href="https://github.com/canvasxai/sketch/commit/30cfbee1272ed60a5070a45d5bcb9b144f2e4b75">30cfbee1</a></td><td>PR #487 · WhatsApp group indexing</td><td class="k">20 landings · 297 files · +33,211 / −3,748</td><td>PR #467 and the stacked #477–#489 automation sequence.</td></tr>
+  <tr><td class="k"><a href="https://github.com/canvasxai/sketch/commit/5973495b99ba310c61b1b9e31137aeac6bfbb3e1">5973495b</a></td><td>PR #489 · current main tip</td><td class="k">21 landings · 341 files · +45,472 / −4,075</td><td>Nothing in the current post-v1.2.4 range.</td></tr>
+</table>
+</div>
+
+<div class="note bad"><b>The pin must be decided before the release commit is created.</b> The current main tip is useful for seeing the full scope. It is not proof that every PR in that scope is ready to ship together.</div>
+<p><span class="where">git · first-parent history · v1.2.4..origin/main</span> <span class="where">.github/workflows/release-cut.yml:44-54 · current main-only guard</span></p>
+
+<h2><span class="n">02</span>What is different from v1.2.4</h2>
+<p><b>The upper-bound inventory is a large feature set, even though the workflow defaults to a patch bump.</b> v1.2.4 has one changelog bullet about conversation context. The full range to current main changes 341 files, adds 45,472 lines, removes 4,075 lines, and adds 14 numbered migrations from 158 through 171. A selected pin will include only the portion before that pin.</p>
+<p><span class="where">CHANGELOG.md:5-7 · v1.2.4</span> <span class="where">packages/server/src/db/migrate.ts:160-173 · migrations 158-171</span></p>
+
+<div class="pr">
+  <div class="s">Largest product change · 19 PR titles mention automation or its builder/runtime</div>
+  <div class="t">Automations now have typed capabilities, webhooks, execution modes, and durable questions.</div>
+  <p style="margin:6px 0 0">The builder can hand off to chat, preserve task-scoped conversation context, refresh after mutations, serialize edits, and show execution feedback. The server validates canonical definitions and bounds capability output before an action runs.</p>
+  <p><span class="where">packages/server/src/automation/capabilities.ts:20-31 · capability limits</span> <span class="where">packages/server/src/agent/interactions/service.ts:123-127 · question interaction service</span> <span class="where">packages/server/src/api/webhooks.ts:17-84 · webhook routes</span> <span class="where">packages/web/src/routes/automation-builder.tsx:131-186 · builder state</span></p>
+</div>
+
+<div class="pr">
+  <div class="s">Identity and access</div>
+  <div class="t">Slack identity is now tracked as a lifecycle, and file access uses typed principals.</div>
+  <p style="margin:6px 0 0">The change adds Slack backfill and repair sweeps, user-entity links, typed email/phone/Slack/WhatsApp identities, and a single file-visibility rule path. Admin automation access and deletion also become explicit.</p>
+  <p><span class="where">packages/server/src/slack/entity-sync.ts:13-31 · lifecycle run states</span> <span class="where">packages/server/src/db/repositories/file-visibility-rule.ts:27-69 · principal doors</span></p>
+</div>
+
+<div class="pr">
+  <div class="s">Connectors and channels</div>
+  <div class="t">Microsoft Calendar becomes a Canvas-OAuth connector, while WhatsApp and Slack get operational fixes.</div>
+  <p style="margin:6px 0 0">Outlook Calendar has paged Graph sync, scope selection, provider file scope, and cursor handling. WhatsApp adds reconnect quarantine, normalized phone numbers, group indexing, and typing indicators. Slack can stop an active agent run.</p>
+  <p><span class="where">packages/server/src/connectors/outlook-calendar.ts:17-26 · Microsoft Calendar bounds</span> <span class="where">packages/server/src/whatsapp/bot.ts:46-56 · reconnect quarantine</span></p>
+</div>
+
+<div class="pr">
+  <div class="s">Runtime and operator safety</div>
+  <div class="t">The default agent runtime and failure boundaries are clearer.</div>
+  <p style="margin:6px 0 0">The AI SDK runtime becomes the default, model requests get deadlines, chat history no longer depends on indexing, and private development skills can load automatically. The release also adds a technical-explainer skill and expands tests around the new paths.</p>
+  <p><span class="where">packages/server/src/agent/runtime/provider.ts · provider deadline path</span> <span class="where">packages/server/src/agent/tools/chat-history.ts · history access</span> <span class="where">.claude/skills/technical-explainer/SKILL.md · packaged skill</span></p>
+</div>
+
+<div class="note ok"><b>The main tree gives the team a complete upper-bound inventory.</b> It does not answer which changes belong in the release. The team still needs to select the pin and decide whether the version should remain the workflow's default patch bump or be intentionally promoted to a minor release.</div>
+
+<h2><span class="n">03</span>PR owners</h2>
+<p>Owner means the GitHub PR author. The snapshot contains 38 merged PR records: 21 whose base was main and 17 stacked PRs that landed through a later stack merge.</p>
+<p><span class="where">GitHub merged PR query · after 2026-07-30T14:03:45Z · through #489</span></p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>UTC date</th><th>PR</th><th>Owner</th><th>Change</th><th>Landing</th></tr>
+  <tr><td class="k">2026-08-03</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/428">#428</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-321: Share automation URLs with role-scoped access</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-03</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/420">#420</a></td><td class="k"><a href="https://github.com/rnijhara">@rnijhara</a></td><td>Decouple chat history access from indexing</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-04</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/434">#434</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Add Wati WhatsApp typing indicators</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-06</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/435">#435</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-330: Bind current automation context and canonicalize mutations</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-06</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/446">#446</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-347: Automation hardening stack and deploy ordering</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-06</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/436">#436</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-331: Persist task-scoped automation chat provenance</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-06</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/437">#437</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-302: Admins should be able to access all automations</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-06</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/438">#438</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-332: Add durable automation chat navigation</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-06</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/439">#439</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-333: Polish automation chats, graph, and execution feedback</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-06</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/459">#459</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>Keep WhatsApp backfill tests within history lookback</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-06</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/460">#460</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-333: Polish automation chats, graph, and execution feedback</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/461">#461</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-358: Prefer deterministic action steps for fixed automations</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/444">#444</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Slack entity identity core, stack 1/5</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/442">#442</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Slack entity backfill on connect, stack 2/5</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/443">#443</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Slack entity live events and repair sweep, stack 3/5</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/441">#441</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Slack entity access grandfathering and hardening, stack 4/5</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/462">#462</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>User-entity linking, stored 1:1 identity bridge, stack 5/5</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/465">#465</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Bound each model HTTP request with a deadline</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/466">#466</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Default AGENT_RUNTIME to AI SDK</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/468">#468</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Stop a running Slack agent with stop, kill, or cancel</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/464">#464</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-365: Support Microsoft Calendar through Canvas OAuth</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-07</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/469">#469</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Typed access principals: email, phone, Slack, and WhatsApp LID</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-08</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/471">#471</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-362: Allow admins to delete any automation</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-08</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/472">#472</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-373: Serialize automation builder chats with a per-automation lock</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-08</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/473">#473</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-371: Clarify polling versus event intent and reject unsupported triggers</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-08</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/474">#474</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-372: Refresh automation views and builder state automatically</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-08</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/476">#476</a></td><td class="k"><a href="https://github.com/hkalra16">@hkalra16</a></td><td>Add technical-explainer skill</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-08</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/482">#482</a></td><td class="k"><a href="https://github.com/hkalra16">@hkalra16</a></td><td>Consolidate file visibility and close two access bugs</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-08</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/484">#484</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Slow the WhatsApp reconnect loop and explain it in the Channels card</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-10</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/486">#486</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Auto-load private development skills through gitignored symlinks</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-10</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/488">#488</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Backfill WhatsApp numbers to E.164</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-10</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/487">#487</a></td><td class="k"><a href="https://github.com/vedant-apperture">@vedant-apperture</a></td><td>Index WhatsApp groups by default on discovery</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-11</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/467">#467</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-364: Expose creator-scoped Sketch capabilities to automation action steps</td><td class="k">main</td></tr>
+  <tr><td class="k">2026-08-11</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/477">#477</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-375: Add native and Canvas webhook trigger support</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-11</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/478">#478</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-376: Add user-selected automation execution modes</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-11</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/479">#479</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-377: Add interactive questions and builder handoff</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-11</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/480">#480</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-378: Validate and harden automation tooling</td><td class="k">stacked</td></tr>
+  <tr><td class="k">2026-08-11</td><td class="k"><a href="https://github.com/canvasxai/sketch/pull/489">#489</a></td><td class="k"><a href="https://github.com/TanushYadavCS">@TanushYadavCS</a></td><td>SKE-387: Overhaul automation setup and cross-channel question UX</td><td class="k">stacked</td></tr>
+</table>
+</div>
+
+<div class="note"><b>Stacked PRs are not duplicate rows.</b> GitHub records each reviewed PR, but several share the later stack merge commit. The ledger keeps them visible because they are separate ownership and review units.</div>
+
+<h2><span class="n">04</span>How the pin and workflow fit</h2>
+<p><b>The current release workflow assumes that the release pin is the tip of <code>main</code>.</b> It rejects other refs, collects changes through <code>HEAD</code>, creates the release commit there, and pushes <code>HEAD:main</code>. That is safe only after the team has chosen the current main tip as the pin.</p>
+<p><span class="where">.github/workflows/release-cut.yml:44-54 · main-only guard</span> <span class="where">.github/workflows/release-cut.yml:112-202 · tag-to-HEAD collection</span> <span class="where">.github/workflows/release-cut.yml:389-391 · main and tag push</span></p>
+<pre>if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+  exit 1
+fi
+
+range="${LATEST_TAG}..HEAD"
+git commit -m "chore: release ${TAG}"
+git tag -a "$TAG" -m "$TAG"
+git push --atomic origin HEAD:main "refs/tags/$TAG"</pre>
+<p>This means an older ancestor cannot be selected by changing a field in the existing workflow. If the team chooses an ancestor while newer commits remain on main, the workflow needs an explicit pin/ref design first. Do not reset or force-push main as a workaround.</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Decision</th><th>Effect</th><th>Next step</th></tr>
+  <tr><td>Pin equals current main HEAD</td><td class="k">workflow-compatible</td><td>Run a dry run, review the generated changelog, then cut from main.</td></tr>
+  <tr><td>Pin is an older main ancestor</td><td class="z">workflow mismatch</td><td>Either cut before main advances or update the workflow to accept the chosen pin.</td></tr>
+  <tr><td>Version bump</td><td class="k">v1.2.5 by default</td><td>Choose patch or minor separately from the commit pin.</td></tr>
+  <tr><td>Release mutation</td><td class="k">not started</td><td>Only create the version commit and tag after the pin is approved.</td></tr>
+</table>
+</div>
+
+<h2><span class="n">05</span>Decision still needed</h2>
+<p><b>No release commit should be created until the devs select one checkpoint.</b> The PR ledger and candidate table are the review material. They are not a release instruction.</p>
+<ul>
+  <li>Baseline: <code>v1.2.4</code> at <code>8dcccd2c</code>.</li>
+  <li>Upper bound for review: <code>5973495b</code>, the current <code>origin/main</code> tip.</li>
+  <li>Candidate pin: pending team decision.</li>
+  <li>Version: <code>v1.2.5</code> follows the workflow default; a minor bump remains a separate decision.</li>
+  <li>Release commit and tag: not created.</li>
+  <li>Unverified in this document: full Biome, typecheck, test, build, browser QA, and deployment verification.</li>
+</ul>
+
+<div class="note bad"><b>Correction to the earlier version of this document.</b> It called <code>5973495b</code> the release base. That was wrong for a pinning decision. It is only the upper-bound inventory; the selected release pin may be any reviewed ancestor.</div>
+
+<p class="meta" style="margin-top:38px">Full detail: .github/workflows/release-cut.yml · CHANGELOG.md · candidate range v1.2.4..origin/main · GitHub PR links in the ledger</p>
+
+</body>
+</html>
