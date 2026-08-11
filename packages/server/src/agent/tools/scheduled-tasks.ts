@@ -11,18 +11,23 @@ import type { Kysely } from "kysely";
 import { z } from "zod/v4";
 import { AutomationAuthoringValidationError } from "../../automation/authoring/service";
 import type { ChatAutomationAuthoring, ChatAutomationAuthoringResult } from "../../automation/chat-authoring";
-import { AutomationValidationError } from "../../automation/definition";
+import {
+  AutomationValidationError,
+  WEBHOOK_AUTH_GUIDANCE,
+  addWebhookEndpointMetadata,
+} from "../../automation/definition";
 import {
   type AutomationDefinitionPatch,
+  WebhookCredentialUnavailableError,
   createAutomationDefinition,
   deleteAutomation,
   getAutomationDefinition,
   updateAutomationDefinition,
 } from "../../automation/persistence";
 import { webChatTaskConversationAssociation } from "../../automation/task-conversations";
-import { buildAutomationWebhookUrl } from "../../automation/webhook";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
+import { createWebhookEndpointRepository } from "../../db/repositories/webhook-endpoints";
 import type { DB } from "../../db/schema";
 import type { IntegrationProvider } from "../../integrations/types";
 import { parseOnceSchedule } from "../../scheduler/parse-once";
@@ -295,7 +300,7 @@ export interface ManageScheduledTasksDeps {
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
   activeQueueKey?: string;
-  config?: { BASE_URL?: string; PORT: number };
+  config?: { BASE_URL?: string; PORT: number; ENCRYPTION_KEY?: string };
   automationArtifactCollector?: AutomationArtifactCollector;
   chatAuthoring?: ChatAutomationAuthoring;
   currentAutomation?: CurrentAutomation;
@@ -506,6 +511,16 @@ async function taskPermissionError(
   return `Error: You can't ${guardedActionLabel(action)} "${taskDisplayName(task)}" because it was created by ${ownerName}.`;
 }
 
+function automationPersistenceError(error: unknown): string | null {
+  if (error instanceof AutomationValidationError) {
+    return `Error: automation definition is invalid:\n${error.issues.map((issue) => `- ${issue.code}: ${issue.message}`).join("\n")}`;
+  }
+  if (error instanceof WebhookCredentialUnavailableError) {
+    return "Error: native webhook credentials are unavailable until ENCRYPTION_KEY is configured.";
+  }
+  return null;
+}
+
 function buildDeliveryFields(params: ManageScheduledTasksParams, ctx: TaskContext) {
   const delivery = params.delivery;
   let outputPlatform = delivery?.platform ?? params.output_platform;
@@ -555,6 +570,26 @@ function buildBuilderUrl(taskId: string, config: ManageScheduledTasksDeps["confi
     ? `?conversationId=${encodeURIComponent(conversationId.trim())}`
     : "";
   return `${base}${path}${conversationQuery}`;
+}
+
+async function webhookResponseMetadata(
+  deps: ManageScheduledTasksDeps,
+  taskId: string,
+  triggerConfig: WorkflowStep["triggerConfig"] | undefined,
+): Promise<Record<string, unknown> | null> {
+  if (triggerConfig?.type !== "webhook") return null;
+  const endpoint = deps.db
+    ? await createWebhookEndpointRepository(deps.db, deps.config?.ENCRYPTION_KEY).getByTaskId(taskId)
+    : undefined;
+  const metadata = addWebhookEndpointMetadata(triggerConfig, taskId, {
+    endpoint,
+    baseUrl: deps.config?.BASE_URL,
+    port: deps.config?.PORT,
+  });
+  return {
+    ...metadata,
+    webhookAuthGuidance: WEBHOOK_AUTH_GUIDANCE,
+  };
 }
 
 /**
@@ -815,8 +850,11 @@ async function handleConfiguredChatAuthoring(
     });
   }
   const verb = params.action === "add" ? "created" : "updated";
+  const triggerConfig = result.artifact.steps.find((step) => step.type === "trigger")?.triggerConfig;
+  const webhookMetadata = await webhookResponseMetadata(deps, result.task.id, triggerConfig);
+  const response = { ...result.task, ...(webhookMetadata ?? {}) };
   const testRun = await automaticAutomationTestRun(deps.scheduler, result.task.id);
-  return text([`Automation ${verb}:`, JSON.stringify(result.task, null, 2), testRun].join("\n"));
+  return text([`Automation ${verb}:`, JSON.stringify(response, null, 2), testRun].join("\n"));
 }
 
 export async function handleManageScheduledTasks(
@@ -1098,14 +1136,12 @@ export async function handleManageScheduledTasks(
             originMessageId: ctx.origin?.currentMessageId ?? null,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
+          encryptionKey: deps.config?.ENCRYPTION_KEY,
           ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
         });
       } catch (error) {
-        if (error instanceof AutomationValidationError) {
-          return text(
-            `Error: automation definition is invalid:\n${error.issues.map((issue) => `- ${issue.code}: ${issue.message}`).join("\n")}`,
-          );
-        }
+        const message = automationPersistenceError(error);
+        if (message) return text(message);
         throw error;
       }
 
@@ -1117,15 +1153,8 @@ export async function handleManageScheduledTasks(
         return text("Error: automation was saved, but its scheduler state could not be refreshed.");
       }
 
-      // Build webhook URL for webhook triggers
       const triggerStep = steps.find((s) => s.triggerConfig?.type === "webhook");
-      let webhookUrl: string | undefined;
-      if (triggerStep && deps.config) {
-        webhookUrl = buildAutomationWebhookUrl(refreshedTask.id, {
-          baseUrl: deps.config.BASE_URL,
-          port: deps.config.PORT,
-        });
-      }
+      const webhookMetadata = await webhookResponseMetadata(deps, refreshedTask.id, triggerStep?.triggerConfig);
 
       collectAutomationArtifact({
         deps,
@@ -1136,8 +1165,10 @@ export async function handleManageScheduledTasks(
         timezone: resolvedTimezone,
       });
 
-      const response: Record<string, unknown> = { ...refreshedTask };
-      if (webhookUrl) response.webhookUrl = webhookUrl;
+      const response: Record<string, unknown> = {
+        ...refreshedTask,
+        ...(webhookMetadata ?? {}),
+      };
       const testRun = await automaticAutomationTestRun(deps.scheduler, refreshedTask.id);
       return text(["Automation created:", JSON.stringify(response, null, 2), testRun].join("\n"));
     }
@@ -1180,14 +1211,12 @@ export async function handleManageScheduledTasks(
             canManageAnyTask: ctx.canManageAnyTask ?? false,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
+          encryptionKey: deps.config?.ENCRYPTION_KEY,
           ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
         });
       } catch (error) {
-        if (error instanceof AutomationValidationError) {
-          return text(
-            `Error: automation definition is invalid:\n${error.issues.map((issue) => `- ${issue.code}: ${issue.message}`).join("\n")}`,
-          );
-        }
+        const message = automationPersistenceError(error);
+        if (message) return text(message);
         throw error;
       }
       if (saved.kind === "not_found") return text(`Error: task ${task_id} not found.`);
@@ -1209,8 +1238,11 @@ export async function handleManageScheduledTasks(
         scheduleValue: saved.request.scheduleValue,
         timezone: saved.request.timezone,
       });
+      const updatedTrigger = saved.request.steps.find((step) => step.type === "trigger")?.triggerConfig;
+      const webhookMetadata = await webhookResponseMetadata(deps, updated.id, updatedTrigger);
+      const response = { ...updated, ...(webhookMetadata ?? {}) };
       const testRun = await automaticAutomationTestRun(deps.scheduler, updated.id);
-      return text(["Automation updated:", JSON.stringify(updated, null, 2), testRun].join("\n"));
+      return text(["Automation updated:", JSON.stringify(response, null, 2), testRun].join("\n"));
     }
 
     case "share": {
@@ -1233,9 +1265,15 @@ export async function handleManageScheduledTasks(
         taskId: task_id,
         webhookBaseUrl: deps.config?.BASE_URL,
         webhookPort: deps.config?.PORT,
+        encryptionKey: deps.config?.ENCRYPTION_KEY,
       });
       if (!definition) return text(`Error: task ${task_id} not found.`);
-      return text(JSON.stringify(definition, null, 2));
+      const triggerConfig = definition.steps.find((step) => step.type === "trigger")?.triggerConfig;
+      const response =
+        triggerConfig?.type === "webhook" && triggerConfig.webhookEndpointId
+          ? { ...definition, webhookAuthGuidance: WEBHOOK_AUTH_GUIDANCE }
+          : definition;
+      return text(JSON.stringify(response, null, 2));
     }
 
     case "remove": {
@@ -1253,6 +1291,7 @@ export async function handleManageScheduledTasks(
           canManageAnyTask: ctx.canManageAnyTask ?? false,
         },
         scheduler: { removeTaskRuntime: (id) => deps.scheduler.removeTaskRuntime(id) },
+        encryptionKey: deps.config?.ENCRYPTION_KEY,
       });
       if (deletion.kind === "not_found") return text(`Error: task ${task_id} not found.`);
       if (deletion.kind === "access_denied")
@@ -1339,7 +1378,11 @@ export async function handleManageScheduledTasks(
         return text("Error: canonical automation persistence is not available in this context. No changes were saved.");
       }
 
-      const currentDefinition = await getAutomationDefinition({ db: deps.db, taskId: task_id });
+      const currentDefinition = await getAutomationDefinition({
+        db: deps.db,
+        taskId: task_id,
+        encryptionKey: deps.config?.ENCRYPTION_KEY,
+      });
       const step = currentDefinition?.steps.find((candidate) => candidate.id === params.step_id);
       const existing = currentDefinition?.stepContent[params.step_id];
       if (!currentDefinition || !step || step.type === "trigger" || !existing) {
@@ -1370,14 +1413,12 @@ export async function handleManageScheduledTasks(
             canManageAnyTask: ctx.canManageAnyTask ?? false,
           },
           brokerCapable: await getBrokerCapabilitySnapshot(),
+          encryptionKey: deps.config?.ENCRYPTION_KEY,
           ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
         });
       } catch (error) {
-        if (error instanceof AutomationValidationError) {
-          return text(
-            `Error: automation definition is invalid:\n${error.issues.map((issue) => `- ${issue.code}: ${issue.message}`).join("\n")}`,
-          );
-        }
+        const message = automationPersistenceError(error);
+        if (message) return text(message);
         throw error;
       }
       if (saved.kind === "not_found") return text(`Error: task ${task_id} not found.`);

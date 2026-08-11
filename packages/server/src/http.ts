@@ -116,7 +116,7 @@ interface AppDeps {
   onLlmSettingsUpdated?: () => Promise<void>;
   onSmtpUpdated?: () => Promise<void>;
   scheduler?: Pick<TaskScheduler, "pauseTask" | "resumeTask" | "removeTask" | "executeTaskById"> &
-    Partial<Pick<TaskScheduler, "enqueueTaskById">> &
+    Partial<Pick<TaskScheduler, "enqueueTaskById" | "enqueueWebhookDelivery">> &
     Partial<Pick<TaskScheduler, "removeTaskRuntime">> &
     Partial<Pick<TaskScheduler, "refreshTaskSchedule" | "executeStepById" | "getTaskById">>;
   runAgent?: (params: RunAgentParams) => Promise<RunAgentResult>;
@@ -319,13 +319,14 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
     app.route("/whatsapp/wati", watiWebhookRoutes(deps.watiWebhook, deps.queueManager, logger));
   }
 
-  if (deps?.scheduler?.enqueueTaskById) {
+  if (deps?.scheduler?.enqueueWebhookDelivery) {
     app.route(
       "/api/webhooks",
       automationWebhookRoutes({
         db,
+        encryptionKey: config.ENCRYPTION_KEY,
         logger,
-        scheduler: { enqueueTaskById: deps.scheduler.enqueueTaskById },
+        scheduler: { enqueueWebhookDelivery: deps.scheduler.enqueueWebhookDelivery.bind(deps.scheduler) },
       }),
     );
   }
@@ -575,6 +576,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
         loadIntegrationProvider: deps.loadIntegrationProvider,
         baseUrl: config.BASE_URL,
         port: config.PORT,
+        encryptionKey: config.ENCRYPTION_KEY,
       }),
     );
   }

@@ -5,22 +5,33 @@ import type { Kysely, Selectable } from "kysely";
 import type { Logger } from "pino";
 import {
   AutomationValidationError,
+  WEBHOOK_AUTH_GUIDANCE,
+  addWebhookEndpointMetadata,
   buildAutomationDefinition,
   isAutomationPlaceholderDraft,
   isStrictAutomationPlaceholderRow,
   parseAutomationBuilderSaveRequest,
 } from "../automation/definition";
 import {
+  WebhookCredentialUnavailableError,
   deleteAutomation,
   replaceAutomationDefinition,
   selectAutomationSetupExecutionMode,
 } from "../automation/persistence";
+import { parseAutomationTriggerConfig } from "../automation/webhook";
+import {
+  WEBHOOK_BODY_LIMIT_BYTES,
+  WEBHOOK_IDEMPOTENCY_KEY_HEADER,
+  WEBHOOK_SIGNATURE_HEADER,
+} from "../automation/webhook-auth";
+import { buildNativeWebhookUrl } from "../automation/webhook-endpoints";
 import { createAutomationRunsRepository } from "../db/repositories/automation-runs";
 import { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import { createChannelRepository } from "../db/repositories/channels";
 import { type StoredConversationMessage, createConversationRepository } from "../db/repositories/conversations";
 import { createScheduledTaskRepository } from "../db/repositories/scheduled-tasks";
 import { createUserRepository } from "../db/repositories/users";
+import { type WebhookEndpointRow, createWebhookEndpointRepository } from "../db/repositories/webhook-endpoints";
 import { createWhatsAppGroupRepository } from "../db/repositories/whatsapp-groups";
 import type { DB, ScheduledTasksTable } from "../db/schema";
 import type { IntegrationProvider } from "../integrations/types";
@@ -31,6 +42,24 @@ import type { WorkflowStep } from "../workflows/types";
 
 type ScheduledTaskRow = Selectable<ScheduledTasksTable>;
 type WorkflowTriggerConfig = NonNullable<WorkflowStep["triggerConfig"]>;
+
+const webhookCredentialLocks = new Map<string, Promise<void>>();
+
+async function withWebhookCredentialLock<T>(taskId: string, work: () => Promise<T>): Promise<T> {
+  const previous = webhookCredentialLocks.get(taskId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  webhookCredentialLocks.set(taskId, current);
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+    if (webhookCredentialLocks.get(taskId) === current) webhookCredentialLocks.delete(taskId);
+  }
+}
 
 interface ScheduledTaskMutationDeps {
   pauseTask: (id: string) => Promise<void>;
@@ -54,6 +83,7 @@ interface ScheduledTaskRouteOptions {
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;
   baseUrl?: string | null;
   port?: number;
+  encryptionKey?: string;
 }
 
 interface ScheduledTaskListItem {
@@ -137,6 +167,7 @@ function formatCanvasTriggerLabel(triggerConfig: WorkflowTriggerConfig | null): 
 }
 
 function formatScheduleLabel(row: ScheduledTaskRow, triggerConfig: WorkflowTriggerConfig | null): string {
+  if (triggerConfig?.type === "webhook") return "Sketch webhook";
   if (row.schedule_type === "external") {
     if (row.schedule_value === "canvas") return formatCanvasTriggerLabel(triggerConfig);
     return "External trigger";
@@ -153,20 +184,36 @@ function formatScheduleLabel(row: ScheduledTaskRow, triggerConfig: WorkflowTrigg
   return `Cron: ${row.schedule_value} (${row.timezone})`;
 }
 
-function parseTriggerConfig(stepsValue: string | null): WorkflowTriggerConfig | null {
-  if (!stepsValue) return null;
-  try {
-    const steps = JSON.parse(stepsValue) as WorkflowStep[];
-    if (!Array.isArray(steps)) return null;
-    const triggerStep = steps.find((step) => step?.type === "trigger" && step.triggerConfig);
-    return triggerStep?.triggerConfig ?? null;
-  } catch {
-    return null;
-  }
+function parseTriggerConfig(
+  stepsValue: string | null,
+  fallback: { scheduleType: string; scheduleValue: string },
+): WorkflowTriggerConfig | null {
+  return parseAutomationTriggerConfig(stepsValue, fallback) ?? null;
 }
 
 function isLocalScheduleType(value: string): value is "cron" | "interval" | "once" {
   return value === "cron" || value === "interval" || value === "once";
+}
+
+function webhookEndpointResponse(
+  endpoint: WebhookEndpointRow,
+  options: Pick<ScheduledTaskRouteOptions, "baseUrl" | "port">,
+  secret?: string,
+): Record<string, unknown> {
+  return {
+    endpointId: endpoint.id,
+    taskId: endpoint.task_id,
+    webhookUrl: buildNativeWebhookUrl(endpoint.id, options),
+    webhookMethod: "POST",
+    webhookContentType: "application/json",
+    webhookAuthentication: "bearer_or_hmac_sha256",
+    webhookPayloadLimitBytes: WEBHOOK_BODY_LIMIT_BYTES,
+    webhookStatus: endpoint.status === "revoked" ? "revoked" : "active",
+    webhookSignatureHeader: WEBHOOK_SIGNATURE_HEADER,
+    webhookIdempotencyHeader: WEBHOOK_IDEMPOTENCY_KEY_HEADER,
+    webhookAuthGuidance: WEBHOOK_AUTH_GUIDANCE,
+    ...(secret === undefined ? {} : { secret }),
+  };
 }
 
 function getTargetKindLabel(row: ScheduledTaskRow): ScheduledTaskListItem["targetKindLabel"] {
@@ -187,11 +234,20 @@ function toOriginChatMessage(message: StoredConversationMessage): ScheduledTaskO
   };
 }
 
-async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Promise<ScheduledTaskListItem[]> {
+async function buildTaskListItems(
+  db: Kysely<DB>,
+  rows: ScheduledTaskRow[],
+  options: Pick<ScheduledTaskRouteOptions, "baseUrl" | "port" | "encryptionKey"> = {},
+): Promise<ScheduledTaskListItem[]> {
   const users = createUserRepository(db);
   const channels = createChannelRepository(db);
   const whatsappGroups = createWhatsAppGroupRepository(db);
   const runsRepo = createAutomationRunsRepository(db);
+  const webhookEndpoints = createWebhookEndpointRepository(db, options.encryptionKey);
+  const endpointEntries = await Promise.all(
+    rows.map(async (row) => [row.id, await webhookEndpoints.getByTaskId(row.id)] as const),
+  );
+  const endpointByTaskId = new Map(endpointEntries);
 
   const userIds = [...new Set(rows.map((row) => row.created_by).filter((id): id is string => Boolean(id)))];
   const slackChannelIds = [
@@ -292,7 +348,18 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
         stepCount = JSON.parse(normalizedSteps).length;
       } catch {}
     }
-    const triggerConfig = parseTriggerConfig(normalizedSteps ?? null);
+    const endpoint = endpointByTaskId.get(row.id);
+    const triggerConfig = parseTriggerConfig(normalizedSteps ?? null, {
+      scheduleType: row.schedule_type,
+      scheduleValue: row.schedule_value,
+    });
+    const metadataTriggerConfig = triggerConfig
+      ? addWebhookEndpointMetadata(triggerConfig, row.id, {
+          endpoint,
+          baseUrl: options.baseUrl,
+          port: options.port,
+        })
+      : triggerConfig;
 
     const rd = runData.get(row.id);
     const delivery = resolveWorkflowDelivery(row);
@@ -347,7 +414,7 @@ async function buildTaskListItems(db: Kysely<DB>, rows: ScheduledTaskRow[]): Pro
           : null,
       steps: normalizedSteps ?? null,
       stepCount,
-      triggerConfig,
+      triggerConfig: metadataTriggerConfig,
       outputTarget: row.output_target,
       outputPlatform: row.output_platform,
       outputThreadTs: row.output_thread_ts,
@@ -457,11 +524,12 @@ export function scheduledTaskRoutes(
   async function loadFullDefinition(row: ScheduledTaskRow) {
     const stepContentRepo = createAutomationStepContentRepository(db);
     const runsRepo = createAutomationRunsRepository(db);
-    const [stepContentRows, runRows, owner, editor] = await Promise.all([
+    const [stepContentRows, runRows, owner, editor, webhookEndpoint] = await Promise.all([
       stepContentRepo.getByTask(row.id),
       runsRepo.list(row.id),
       row.created_by ? users.findById(row.created_by) : Promise.resolve(undefined),
       row.last_edited_by ? users.findById(row.last_edited_by) : Promise.resolve(undefined),
+      createWebhookEndpointRepository(db, options.encryptionKey).getByTaskId(row.id),
     ]);
     return buildAutomationDefinition({
       row,
@@ -471,6 +539,7 @@ export function scheduledTaskRoutes(
       lastEditedByName: editor?.name ?? null,
       webhookBaseUrl: options.baseUrl,
       webhookPort: options.port,
+      webhookEndpoint,
     });
   }
 
@@ -509,7 +578,13 @@ export function scheduledTaskRoutes(
 
     rows.sort(compareNewestFirst);
 
-    return c.json({ tasks: await buildTaskListItems(db, rows) });
+    return c.json({
+      tasks: await buildTaskListItems(db, rows, {
+        baseUrl: options.baseUrl,
+        port: options.port,
+        encryptionKey: options.encryptionKey,
+      }),
+    });
   });
 
   routes.get("/:id/origin-chat/messages", async (c) => {
@@ -544,6 +619,84 @@ export function scheduledTaskRoutes(
     const result = await loadAccessibleTask(c, id);
     if ("response" in result) return result.response;
     return c.json({ automation: await loadFullDefinition(result.row) });
+  });
+
+  routes.post("/:id/webhook/credentials", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    const trigger = parseTriggerConfig(result.row.steps, {
+      scheduleType: result.row.schedule_type,
+      scheduleValue: result.row.schedule_value,
+    });
+    if (trigger?.type !== "webhook") {
+      return c.json(
+        { error: { code: "INVALID_STATE", message: "Webhook credentials require a native webhook trigger" } },
+        409,
+      );
+    }
+
+    if (!options.encryptionKey) {
+      return c.json(
+        { error: { code: "WEBHOOK_CREDENTIAL_UNAVAILABLE", message: "Webhook encryption is not configured" } },
+        503,
+      );
+    }
+
+    return withWebhookCredentialLock(id, async () => {
+      const endpointRepository = createWebhookEndpointRepository(db, options.encryptionKey);
+      const existing = await endpointRepository.getByTaskId(id);
+      let lifecycle = existing
+        ? await endpointRepository.rotateForTask(id)
+        : await endpointRepository.ensureForTask(id);
+      if (!lifecycle || lifecycle.secret === null) {
+        lifecycle = await endpointRepository.rotateForTask(id);
+      }
+      if (!lifecycle || lifecycle.secret === null) {
+        return c.json(
+          {
+            error: {
+              code: "WEBHOOK_CREDENTIAL_UNAVAILABLE",
+              message: "Webhook credentials could not be provisioned",
+            },
+          },
+          503,
+        );
+      }
+      return c.json(
+        { webhook: webhookEndpointResponse(lifecycle.endpoint, options), secret: lifecycle.secret },
+        existing ? 200 : 201,
+      );
+    });
+  });
+
+  routes.delete("/:id/webhook/credentials", async (c) => {
+    const id = c.req.param("id");
+    const result = await loadAccessibleTask(c, id);
+    if ("response" in result) return result.response;
+    const trigger = parseTriggerConfig(result.row.steps, {
+      scheduleType: result.row.schedule_type,
+      scheduleValue: result.row.schedule_value,
+    });
+    if (trigger?.type !== "webhook") {
+      return c.json(
+        { error: { code: "INVALID_STATE", message: "Webhook credentials require a native webhook trigger" } },
+        409,
+      );
+    }
+
+    return withWebhookCredentialLock(id, async () => {
+      const endpointRepository = createWebhookEndpointRepository(db, options.encryptionKey);
+      const existing = await endpointRepository.getByTaskId(id);
+      if (!existing) {
+        return c.json({ error: { code: "NOT_FOUND", message: "Webhook credentials not found" } }, 404);
+      }
+      const revoked = await endpointRepository.revokeForTask(id);
+      if (!revoked) {
+        return c.json({ error: { code: "NOT_FOUND", message: "Webhook credentials not found" } }, 404);
+      }
+      return c.json({ success: true, webhook: webhookEndpointResponse(revoked, options) });
+    });
   });
 
   routes.patch("/:id/execution-mode", async (c) => {
@@ -610,6 +763,7 @@ export function scheduledTaskRoutes(
         request,
         actor: { userId, canManageAnyTask: c.get("role") === "admin" },
         brokerCapable,
+        encryptionKey: options.encryptionKey,
       });
     } catch (err) {
       if (err instanceof AutomationValidationError) {
@@ -620,6 +774,12 @@ export function scheduledTaskRoutes(
         return c.json(
           { error: { code: "VALIDATION_ERROR", message: "Automation definition is invalid", issues: err.issues } },
           400,
+        );
+      }
+      if (err instanceof WebhookCredentialUnavailableError) {
+        return c.json(
+          { error: { code: "WEBHOOK_CREDENTIAL_UNAVAILABLE", message: "Webhook encryption is not configured" } },
+          503,
         );
       }
       throw err;
@@ -709,7 +869,15 @@ export function scheduledTaskRoutes(
     }
 
     const updated = await repo.getById(id);
-    return c.json({ task: (await buildTaskListItems(db, [updated ?? result.row]))[0] });
+    return c.json({
+      task: (
+        await buildTaskListItems(db, [updated ?? result.row], {
+          baseUrl: options.baseUrl,
+          port: options.port,
+          encryptionKey: options.encryptionKey,
+        })
+      )[0],
+    });
   });
 
   routes.post("/:id/resume", async (c) => {
@@ -726,7 +894,15 @@ export function scheduledTaskRoutes(
     }
 
     const updated = await repo.getById(id);
-    return c.json({ task: (await buildTaskListItems(db, [updated ?? result.row]))[0] });
+    return c.json({
+      task: (
+        await buildTaskListItems(db, [updated ?? result.row], {
+          baseUrl: options.baseUrl,
+          port: options.port,
+          encryptionKey: options.encryptionKey,
+        })
+      )[0],
+    });
   });
 
   routes.delete("/:id", async (c) => {
@@ -746,6 +922,7 @@ export function scheduledTaskRoutes(
       taskId: id,
       actor: { userId, canManageAnyTask: c.get("role") === "admin" },
       scheduler: { removeTaskRuntime: removeTaskRuntime.bind(scheduler) },
+      encryptionKey: options.encryptionKey,
     });
     if (deletion.kind === "not_found" || deletion.kind === "access_denied") {
       return c.json({ error: { code: "NOT_FOUND", message: "Scheduled task not found" } }, 404);

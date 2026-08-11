@@ -24,6 +24,7 @@ import { createAutomationAuthoringService } from "./automation/authoring/service
 import { createAutomationAuthoringTelemetry } from "./automation/authoring/telemetry";
 import { createAutomationCapabilityRegistry } from "./automation/capabilities";
 import { createChatAutomationAuthoring } from "./automation/chat-authoring";
+import { isAutomationWebhookTrigger, parseAutomationTriggerConfig } from "./automation/webhook";
 import type { Config } from "./config";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
 import { ensureSlackConnectorConfig } from "./connectors/slack-provisioning";
@@ -50,6 +51,7 @@ import { createSettingsRepository } from "./db/repositories/settings";
 import { createSlackChannelParticipantsRepository } from "./db/repositories/slack-channel-participants";
 import { createUserEntityLinkSweepService } from "./db/repositories/user-entity-link-sweep";
 import { createUserRepository } from "./db/repositories/users";
+import { createWebhookEndpointRepository } from "./db/repositories/webhook-endpoints";
 import { createWhatsAppGroupRepository } from "./db/repositories/whatsapp-groups";
 import { createWhatsAppInboundEventsRepository } from "./db/repositories/whatsapp-inbound-events";
 import { createWhatsAppProviderEventRepository } from "./db/repositories/whatsapp-provider-events";
@@ -711,6 +713,34 @@ export async function createServer(config: Config, options?: CreateServerOptions
     return status.kind === "ok" ? status.provider : null;
   };
 
+  if (config.ENCRYPTION_KEY) {
+    const webhookEndpoints = createWebhookEndpointRepository(db, config.ENCRYPTION_KEY);
+    const batchSize = 500;
+    let lastTaskId: string | undefined;
+    for (;;) {
+      let query = db
+        .selectFrom("scheduled_tasks")
+        .select(["id", "steps", "schedule_type", "schedule_value"])
+        .where("schedule_type", "=", "external")
+        .orderBy("id", "asc")
+        .limit(batchSize);
+      if (lastTaskId) query = query.where("id", ">", lastTaskId);
+      const nativeWebhookTasks = await query.execute();
+      if (nativeWebhookTasks.length === 0) break;
+      for (const task of nativeWebhookTasks) {
+        const trigger = parseAutomationTriggerConfig(task.steps, {
+          scheduleType: task.schedule_type,
+          scheduleValue: task.schedule_value,
+        });
+        if (isAutomationWebhookTrigger(trigger)) await webhookEndpoints.ensureForTask(task.id);
+      }
+      lastTaskId = nativeWebhookTasks[nativeWebhookTasks.length - 1]?.id;
+      if (nativeWebhookTasks.length < batchSize) break;
+    }
+  } else {
+    logger.warn("Native webhook credentials require ENCRYPTION_KEY; webhook provisioning is unavailable");
+  }
+
   // 8.5. Task scheduler — getSlack is a lazy getter so the live slack reference is captured correctly
   const automationCapabilityRegistry = createAutomationCapabilityRegistry();
   const scheduler = new TaskScheduler({
@@ -759,6 +789,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       authoring,
       scheduler,
       loadIntegrationProvider,
+      encryptionKey: config.ENCRYPTION_KEY,
     });
   }
   if (backgroundWork) await scheduler.start();

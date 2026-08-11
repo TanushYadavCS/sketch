@@ -196,6 +196,9 @@ export interface ScheduledTaskConversationsResponse {
   transcriptAccess: "viewer";
 }
 
+export type WebhookAuthentication = "bearer_or_hmac_sha256";
+export type WebhookStatus = "active" | "revoked" | "unavailable";
+
 export interface WorkflowTriggerConfig {
   type: "webhook" | "schedule" | "canvas" | "slack_channel_message";
   channelId?: string;
@@ -206,8 +209,14 @@ export interface WorkflowTriggerConfig {
   eventDescription?: string;
   componentKey?: string;
   webhookUrl?: string;
+  webhookEndpointId?: string;
   webhookMethod?: "POST";
   webhookContentType?: "application/json";
+  webhookAuthentication?: WebhookAuthentication;
+  webhookSignatureHeader?: "X-Sketch-Webhook-Signature";
+  webhookIdempotencyHeader?: "Idempotency-Key";
+  webhookPayloadLimitBytes?: number;
+  webhookStatus?: WebhookStatus;
   canvasEndpoint?: CanvasWebhookEndpoint;
   configuredProps?: Record<string, unknown>;
   status?: "pending_canvas_setup" | "active" | "error";
@@ -215,6 +224,31 @@ export interface WorkflowTriggerConfig {
   canvasTriggerNodeId?: string;
   canvasActionNodeId?: string;
   errorMessage?: string;
+}
+
+export interface ScheduledTaskWebhookMetadata {
+  webhookUrl?: string;
+  url?: string;
+  webhookEndpointId?: string;
+  endpointId?: string;
+  webhookMethod?: "POST";
+  method?: "POST";
+  webhookContentType?: "application/json";
+  contentType?: "application/json";
+  webhookAuthentication?: WebhookAuthentication;
+  authentication?: WebhookAuthentication;
+  webhookSignatureHeader?: "X-Sketch-Webhook-Signature";
+  webhookIdempotencyHeader?: "Idempotency-Key";
+  webhookPayloadLimitBytes?: number;
+  payloadLimitBytes?: number;
+  webhookStatus?: WebhookStatus;
+  status?: WebhookStatus;
+}
+
+export interface ScheduledTaskWebhookCredentialsResponse {
+  webhook: ScheduledTaskWebhookMetadata;
+  secret?: { webhookSecret?: string; value?: string; secret?: string } | string;
+  webhookSecret?: string;
 }
 
 export interface AutomationRunItem {
@@ -2484,6 +2518,17 @@ export const api = {
         body: JSON.stringify(body),
       });
       return res.automation;
+    },
+    rotateWebhookCredentials(taskId: string) {
+      return request<ScheduledTaskWebhookCredentialsResponse>(
+        `/api/scheduled-tasks/${encodeURIComponent(taskId)}/webhook/credentials`,
+        { method: "POST" },
+      );
+    },
+    revokeWebhookCredentials(taskId: string) {
+      return request<{ success: boolean }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}/webhook/credentials`, {
+        method: "DELETE",
+      });
     },
     async selectSetupExecutionMode(taskId: string, executionMode: "deterministic" | "hybrid" | "agent-led") {
       const res = await request<{ automation: AutomationDefinition }>(

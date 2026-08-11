@@ -19,6 +19,8 @@ import {
   type ScheduledTaskConversationLock,
   type ScheduledTaskConversationSummary,
   type ScheduledTaskConversationsResponse,
+  type ScheduledTaskWebhookCredentialsResponse,
+  type ScheduledTaskWebhookMetadata,
   type StepOutput,
   type WebChatConversationSummary,
   type WebChatQuestion,
@@ -938,6 +940,7 @@ export function AutomationBuilderPage() {
 
       <NodeDrawer
         key={selectedStep?.id ?? "closed"}
+        taskId={taskId}
         draft={builderDraft}
         step={selectedStep}
         output={selectedOutput}
@@ -2923,6 +2926,7 @@ function formatRunDate(value: string): string {
 }
 
 function NodeDrawer({
+  taskId,
   draft,
   step,
   output,
@@ -2935,6 +2939,7 @@ function NodeDrawer({
   onUpdateAgentPrompt,
   savingPromptStepId,
 }: {
+  taskId: string;
   draft: DraftAutomation;
   step: WorkflowStep | null;
   output?: StepOutput;
@@ -3008,6 +3013,7 @@ function NodeDrawer({
       <div className="chat-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
         {tab === "input" ? (
           <NodeInputPanel
+            taskId={taskId}
             draft={draft}
             step={step}
             content={content}
@@ -3116,12 +3122,14 @@ function formatDuration(ms: number): string {
 }
 
 function NodeInputPanel({
+  taskId,
   draft,
   step,
   content,
   onUpdateAgentPrompt,
   savingPrompt,
 }: {
+  taskId: string;
   draft: DraftAutomation;
   step: WorkflowStep;
   content?: AutomationStepContent;
@@ -3140,7 +3148,7 @@ function NodeInputPanel({
         <Input value={step.label} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
       </Field>
 
-      {step.type === "trigger" ? <TriggerFields draft={draft} /> : null}
+      {step.type === "trigger" ? <TriggerFields draft={draft} taskId={taskId} /> : null}
 
       {step.type === "agent" ? (
         <>
@@ -3205,9 +3213,9 @@ function NodeInputPanel({
   );
 }
 
-function TriggerFields({ draft }: { draft: DraftAutomation }) {
+function TriggerFields({ draft, taskId }: { draft: DraftAutomation; taskId: string }) {
   const triggerStep = draft.steps.find((step) => step.type === "trigger");
-  const config = triggerStep?.triggerConfig ?? { type: "schedule" as const };
+  const config = (triggerStep?.triggerConfig as WorkflowTriggerConfig | undefined) ?? { type: "schedule" as const };
   const canvasConfig = config.type === "canvas" ? config : undefined;
   const triggerLabel = canvasConfig
     ? canvasConfig.componentKey === "webhook-trigger"
@@ -3226,6 +3234,7 @@ function TriggerFields({ draft }: { draft: DraftAutomation }) {
           <Input value={config.channelId ?? ""} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
         </Field>
       ) : null}
+      {config.type === "webhook" ? <NativeWebhookFields config={config} taskId={taskId} /> : null}
       {canvasConfig ? (
         <CanvasWebhookFields
           endpoint={canvasConfig.canvasEndpoint}
@@ -3252,6 +3261,380 @@ function TriggerFields({ draft }: { draft: DraftAutomation }) {
         </>
       ) : null}
     </>
+  );
+}
+
+type NativeWebhookMetadata = {
+  webhookUrl?: string;
+  webhookEndpointId?: string;
+  webhookMethod?: "POST";
+  webhookContentType?: "application/json";
+  webhookAuthentication?: "bearer_or_hmac_sha256";
+  webhookSignatureHeader?: "X-Sketch-Webhook-Signature";
+  webhookIdempotencyHeader?: "Idempotency-Key";
+  webhookPayloadLimitBytes?: number;
+  webhookStatus?: "active" | "revoked" | "unavailable";
+};
+
+function nativeWebhookMetadataFromConfig(config: WorkflowTriggerConfig): NativeWebhookMetadata {
+  return {
+    webhookUrl: config.webhookUrl,
+    webhookEndpointId: config.webhookEndpointId,
+    webhookMethod: config.webhookMethod,
+    webhookContentType: config.webhookContentType,
+    webhookAuthentication: config.webhookAuthentication,
+    webhookSignatureHeader: config.webhookSignatureHeader,
+    webhookIdempotencyHeader: config.webhookIdempotencyHeader,
+    webhookPayloadLimitBytes: config.webhookPayloadLimitBytes,
+    webhookStatus: config.webhookStatus,
+  };
+}
+
+function nativeWebhookMetadataFromResponse(
+  current: NativeWebhookMetadata,
+  response: ScheduledTaskWebhookMetadata,
+): NativeWebhookMetadata {
+  return {
+    ...current,
+    webhookUrl: response.webhookUrl ?? response.url ?? current.webhookUrl,
+    webhookEndpointId: response.webhookEndpointId ?? response.endpointId ?? current.webhookEndpointId,
+    webhookMethod: response.webhookMethod ?? response.method ?? current.webhookMethod,
+    webhookContentType: response.webhookContentType ?? response.contentType ?? current.webhookContentType,
+    webhookAuthentication: response.webhookAuthentication ?? response.authentication ?? current.webhookAuthentication,
+    webhookSignatureHeader: response.webhookSignatureHeader ?? current.webhookSignatureHeader,
+    webhookIdempotencyHeader: response.webhookIdempotencyHeader ?? current.webhookIdempotencyHeader,
+    webhookPayloadLimitBytes:
+      response.webhookPayloadLimitBytes ?? response.payloadLimitBytes ?? current.webhookPayloadLimitBytes,
+    webhookStatus: response.webhookStatus ?? response.status ?? current.webhookStatus,
+  };
+}
+
+function webhookSecretFromResponse(response: ScheduledTaskWebhookCredentialsResponse): string | null {
+  if (typeof response.webhookSecret === "string" && response.webhookSecret.length > 0) return response.webhookSecret;
+  if (typeof response.secret === "string" && response.secret.length > 0) return response.secret;
+  if (response.secret && typeof response.secret === "object") {
+    if (typeof response.secret.webhookSecret === "string" && response.secret.webhookSecret.length > 0) {
+      return response.secret.webhookSecret;
+    }
+    if (typeof response.secret.value === "string" && response.secret.value.length > 0) return response.secret.value;
+    if (typeof response.secret.secret === "string" && response.secret.secret.length > 0) return response.secret.secret;
+  }
+  return null;
+}
+
+function nativeWebhookStatusDetails(metadata: NativeWebhookMetadata): {
+  label: string;
+  guidance: string;
+  isError: boolean;
+  toneClass: string;
+} {
+  if (metadata.webhookStatus === "revoked") {
+    return {
+      label: "Revoked",
+      guidance: "This webhook endpoint is revoked. Generate a new secret to reactivate it before sending requests.",
+      isError: true,
+      toneClass: "border-destructive/30 bg-destructive/10 text-destructive",
+    };
+  }
+  if (!metadata.webhookUrl) {
+    return {
+      label: "Endpoint unavailable",
+      guidance:
+        "Sketch has not provided a canonical webhook URL yet. Refresh this automation before configuring a sender.",
+      isError: true,
+      toneClass: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+    };
+  }
+  return {
+    label: "Active",
+    guidance:
+      "Send POST requests with JSON to the canonical URL. Authenticate each request with Bearer or HMAC-SHA256.",
+    isError: false,
+    toneClass: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  };
+}
+
+function NativeWebhookFields({ config, taskId }: { config: WorkflowTriggerConfig; taskId?: string }) {
+  const [metadata, setMetadata] = useState(() => nativeWebhookMetadataFromConfig(config));
+  const [secret, setSecret] = useState<string | null>(null);
+  const [secretRevealed, setSecretRevealed] = useState(false);
+  const [credentialState, setCredentialState] = useState<"idle" | "pending">("idle");
+  const [revocationState, setRevocationState] = useState<"idle" | "pending">("idle");
+  const [credentialError, setCredentialError] = useState<string | null>(null);
+  const {
+    webhookAuthentication,
+    webhookContentType,
+    webhookEndpointId,
+    webhookSignatureHeader,
+    webhookIdempotencyHeader,
+    webhookMethod,
+    webhookPayloadLimitBytes,
+    webhookStatus,
+    webhookUrl,
+  } = config;
+  const statusDetails = nativeWebhookStatusDetails(metadata);
+  const payloadLimitBytes = metadata.webhookPayloadLimitBytes ?? 1_000_000;
+  const payloadLimitLabel = `${new Intl.NumberFormat("en-US").format(payloadLimitBytes)} bytes (${(payloadLimitBytes / 1_000_000).toFixed(1)} MB)`;
+
+  useEffect(() => {
+    setMetadata({
+      webhookAuthentication,
+      webhookContentType,
+      webhookEndpointId,
+      webhookSignatureHeader,
+      webhookIdempotencyHeader,
+      webhookMethod,
+      webhookPayloadLimitBytes,
+      webhookStatus,
+      webhookUrl,
+    });
+    setSecret(null);
+    setSecretRevealed(false);
+    setCredentialError(null);
+  }, [
+    webhookAuthentication,
+    webhookContentType,
+    webhookEndpointId,
+    webhookSignatureHeader,
+    webhookIdempotencyHeader,
+    webhookMethod,
+    webhookPayloadLimitBytes,
+    webhookStatus,
+    webhookUrl,
+  ]);
+
+  useEffect(() => {
+    if (metadata.webhookStatus === "revoked") {
+      setSecret(null);
+      setSecretRevealed(false);
+    }
+  }, [metadata.webhookStatus]);
+
+  const handleCopy = async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`${label} copied`);
+    } catch {
+      toast.error(`Unable to copy ${label.toLowerCase()}`);
+    }
+  };
+
+  const handleRotate = async () => {
+    if (!taskId) return;
+    setCredentialState("pending");
+    setCredentialError(null);
+    try {
+      const response = await api.scheduledTasks.rotateWebhookCredentials(taskId);
+      const nextSecret = webhookSecretFromResponse(response);
+      if (!nextSecret) throw new Error("Sketch did not return the new webhook secret. Try again.");
+      const responseMetadata = response.webhook ?? response;
+      setMetadata((current) => nativeWebhookMetadataFromResponse(current, responseMetadata));
+      setSecret(nextSecret);
+      setSecretRevealed(false);
+      toast.success("Webhook secret generated");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not generate the webhook secret";
+      setCredentialError(message);
+      toast.error(message);
+    } finally {
+      setCredentialState("idle");
+    }
+  };
+
+  const handleRevoke = async () => {
+    if (!taskId || !window.confirm("Revoke this webhook endpoint? Existing senders will stop working.")) return;
+    setRevocationState("pending");
+    setCredentialError(null);
+    try {
+      await api.scheduledTasks.revokeWebhookCredentials(taskId);
+      setMetadata((current) => ({ ...current, webhookStatus: "revoked" }));
+      setSecret(null);
+      setSecretRevealed(false);
+      toast.success("Webhook endpoint revoked");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not revoke the webhook endpoint";
+      setCredentialError(message);
+      toast.error(message);
+    } finally {
+      setRevocationState("idle");
+    }
+  };
+
+  return (
+    <div
+      data-testid="native-webhook-details"
+      className="space-y-3 rounded-[8px] border border-cyan-300/35 bg-cyan-50/45 p-3 dark:border-cyan-300/20 dark:bg-cyan-950/20"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <p className="text-[12px] font-medium text-foreground">Sketch webhook trigger</p>
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            Use this endpoint to start the automation from any HTTP-capable service.
+          </p>
+        </div>
+        <Badge
+          className={cn(
+            "shrink-0 rounded-[5px] border px-1.5 py-0.5 text-[10px] font-semibold",
+            statusDetails.toneClass,
+          )}
+        >
+          {statusDetails.label}
+        </Badge>
+      </div>
+      <div
+        data-testid="native-webhook-guidance"
+        role={credentialError || statusDetails.isError ? "alert" : "status"}
+        className={cn(
+          "rounded-[6px] border px-2.5 py-2 text-[11px] leading-4",
+          credentialError || statusDetails.isError
+            ? "border-destructive/25 bg-destructive/10 text-destructive"
+            : "border-border/70 bg-background/55 text-muted-foreground",
+        )}
+      >
+        <p>{statusDetails.guidance}</p>
+        <p className="mt-1">Payloads are limited to {payloadLimitLabel}.</p>
+        {credentialError ? <p className="mt-1">Credential error: {credentialError}</p> : null}
+      </div>
+      <Field label="Canonical URL">
+        <div className="flex gap-2">
+          <Input
+            value={metadata.webhookUrl ?? "Webhook endpoint is not available yet"}
+            className={cn(builderReadOnlyInputClass, "min-w-0 flex-1")}
+            readOnly
+            aria-readonly="true"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="size-10 shrink-0 rounded-[8px]"
+            aria-label="Copy canonical Sketch webhook URL"
+            disabled={!metadata.webhookUrl}
+            onClick={() =>
+              metadata.webhookUrl ? void handleCopy(metadata.webhookUrl, "Sketch webhook URL") : undefined
+            }
+          >
+            <CopySimpleIcon size={15} />
+          </Button>
+        </div>
+      </Field>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Field label="Method">
+          <Input
+            value={metadata.webhookMethod ?? "POST"}
+            className={builderReadOnlyInputClass}
+            readOnly
+            aria-readonly="true"
+          />
+        </Field>
+        <Field label="Content type">
+          <Input
+            value={metadata.webhookContentType ?? "application/json"}
+            className={builderReadOnlyInputClass}
+            readOnly
+            aria-readonly="true"
+          />
+        </Field>
+      </div>
+      <Field label="Authentication">
+        <div className="space-y-2 rounded-[7px] border border-border/70 bg-background/55 p-2.5 text-[11px] leading-4">
+          <div>
+            <p className="font-semibold text-foreground">Bearer</p>
+            <code className="mt-1 block break-all rounded bg-muted/70 px-2 py-1 font-mono text-[10px] text-foreground/80">
+              Authorization: Bearer &lt;webhook secret&gt;
+            </code>
+            <p className="mt-1 text-muted-foreground">Send the generated secret as a Bearer token.</p>
+          </div>
+          <div>
+            <p className="font-semibold text-foreground">HMAC-SHA256</p>
+            <code className="mt-1 block break-all rounded bg-muted/70 px-2 py-1 font-mono text-[10px] text-foreground/80">
+              X-Sketch-Webhook-Signature: t=&lt;unix-seconds&gt;,v1=&lt;hmac-sha256 hex&gt;
+            </code>
+            <p className="mt-1 text-muted-foreground">
+              Sign &lt;unix-seconds&gt;.&lt;exact request body&gt; with HMAC-SHA256 using the generated secret;
+              timestamps expire after 5 minutes.
+            </p>
+          </div>
+        </div>
+      </Field>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Field label="Payload limit">
+          <Input value={payloadLimitLabel} className={builderReadOnlyInputClass} readOnly aria-readonly="true" />
+        </Field>
+        <Field label="Retries">
+          <p className="min-h-10 rounded-[8px] border border-border/70 bg-muted/35 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+            For retry-safe deduplication, include a unique{" "}
+            <code className="font-mono text-foreground">Idempotency-Key</code> and reuse it when retrying.
+          </p>
+        </Field>
+      </div>
+      <div className="rounded-[6px] border border-amber-500/35 bg-amber-500/10 px-2.5 py-2 text-[11px] leading-4 text-amber-800 dark:text-amber-200">
+        Rotating this secret immediately invalidates the previous secret. Update the sender before retrying requests.
+      </div>
+      {taskId ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            className="h-8 rounded-[7px] text-[11px]"
+            disabled={credentialState === "pending" || revocationState === "pending"}
+            onClick={() => void handleRotate()}
+          >
+            {credentialState === "pending" ? "Generating…" : secret ? "Rotate secret" : "Generate secret"}
+          </Button>
+          {metadata.webhookStatus !== "revoked" ? (
+            <Button
+              type="button"
+              variant="ghost"
+              className="h-8 rounded-[7px] text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+              disabled={credentialState === "pending" || revocationState === "pending"}
+              onClick={() => void handleRevoke()}
+            >
+              {revocationState === "pending" ? "Revoking…" : "Revoke endpoint"}
+            </Button>
+          ) : null}
+          {secret ? <span className="text-[10px] text-muted-foreground">Shown once in this setup panel.</span> : null}
+        </div>
+      ) : null}
+      {secret ? (
+        <div className="space-y-2 rounded-[7px] border border-brand-accent/35 bg-brand-accent/5 p-2.5">
+          <Field label="New webhook secret">
+            <div className="flex gap-2">
+              <Input
+                type={secretRevealed ? "text" : "password"}
+                value={secret}
+                className={cn(builderReadOnlyInputClass, "min-w-0 flex-1 font-mono")}
+                readOnly
+                aria-readonly="true"
+                aria-label="Webhook secret"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                className="h-10 shrink-0 rounded-[8px] px-2.5 text-[11px]"
+                aria-label={secretRevealed ? "Hide webhook secret" : "Reveal webhook secret"}
+                onClick={() => setSecretRevealed((current) => !current)}
+              >
+                {secretRevealed ? "Hide" : "Reveal"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="size-10 shrink-0 rounded-[8px]"
+                aria-label="Copy webhook secret"
+                onClick={() => void handleCopy(secret, "Webhook secret")}
+              >
+                <CopySimpleIcon size={15} />
+              </Button>
+            </div>
+          </Field>
+          <p className="text-[10px] leading-4 text-muted-foreground">
+            Save this secret securely. It will not be returned by later requests.
+          </p>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

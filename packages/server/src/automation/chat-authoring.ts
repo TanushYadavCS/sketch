@@ -10,7 +10,11 @@ import type { TaskScheduler } from "../scheduler/service";
 import type { CurrentAutomation, ScheduledTask, TaskContext } from "../scheduler/types";
 import { AUTOMATION_AUTHORING_TRIGGER_TYPES, type AutomationAuthoringService } from "./authoring/service";
 import { AutomationValidationError, buildAutomationDefinition } from "./definition";
-import { createAutomationDefinition, replaceAutomationDefinition } from "./persistence";
+import {
+  WebhookCredentialUnavailableError,
+  createAutomationDefinition,
+  replaceAutomationDefinition,
+} from "./persistence";
 import { webChatTaskConversationAssociation } from "./task-conversations";
 
 type AuthoringScheduler = Pick<TaskScheduler, "getTaskById" | "refreshTaskSchedule">;
@@ -82,6 +86,7 @@ export function createChatAutomationAuthoring(deps: {
   authoring: AutomationAuthoringService;
   scheduler: AuthoringScheduler;
   loadIntegrationProvider: () => Promise<Pick<IntegrationProvider, "isBrokerCapable"> | null>;
+  encryptionKey?: string;
   createId?: () => string;
   now?: () => Date;
 }): ChatAutomationAuthoring {
@@ -159,11 +164,18 @@ export function createChatAutomationAuthoring(deps: {
         },
         brokerCapable: canUseBroker,
         supportedTriggerTypes: AUTOMATION_AUTHORING_TRIGGER_TYPES,
+        encryptionKey: deps.encryptionKey,
         ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
       });
     } catch (error) {
       if (error instanceof AutomationValidationError) {
         return { kind: "error", message: persistenceValidationMessage(error) };
+      }
+      if (error instanceof WebhookCredentialUnavailableError) {
+        return {
+          kind: "error",
+          message: "Native webhook credentials are unavailable until ENCRYPTION_KEY is configured.",
+        };
       }
       throw error;
     }
@@ -215,11 +227,18 @@ export function createChatAutomationAuthoring(deps: {
         },
         brokerCapable: canUseBroker,
         supportedTriggerTypes: AUTOMATION_AUTHORING_TRIGGER_TYPES,
+        encryptionKey: deps.encryptionKey,
         ...(taskConversationAssociation ? { taskConversationAssociation } : {}),
       });
     } catch (error) {
       if (error instanceof AutomationValidationError) {
         return { kind: "error", message: persistenceValidationMessage(error) };
+      }
+      if (error instanceof WebhookCredentialUnavailableError) {
+        return {
+          kind: "error",
+          message: "Native webhook credentials are unavailable until ENCRYPTION_KEY is configured.",
+        };
       }
       throw error;
     }

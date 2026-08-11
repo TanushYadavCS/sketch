@@ -14,6 +14,8 @@ import {
   updateAutomationDefinition,
 } from "./persistence";
 
+const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 function makeDefinition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
   return {
     title: "Daily account brief",
@@ -190,6 +192,7 @@ describe("automation persistence", () => {
       }),
       context: createContext("automation-webhook"),
       brokerCapable: true,
+      encryptionKey: ENCRYPTION_KEY,
     });
 
     await expect(
@@ -197,16 +200,21 @@ describe("automation persistence", () => {
         db,
         taskId: "automation-webhook",
         webhookBaseUrl: "https://sketch.example/",
+        encryptionKey: ENCRYPTION_KEY,
       }),
     ).resolves.toMatchObject({
       steps: expect.arrayContaining([
         expect.objectContaining({
-          triggerConfig: {
+          triggerConfig: expect.objectContaining({
             type: "webhook",
-            webhookUrl: "https://sketch.example/api/webhooks/wf/automation-webhook",
+            webhookUrl: expect.stringMatching(/^https:\/\/sketch\.example\/api\/webhooks\/v1\//),
+            webhookEndpointId: expect.any(String),
             webhookMethod: "POST",
             webhookContentType: "application/json",
-          },
+            webhookAuthentication: "bearer_or_hmac_sha256",
+            webhookPayloadLimitBytes: 1_000_000,
+            webhookStatus: "active",
+          }),
         }),
       ]),
     });
