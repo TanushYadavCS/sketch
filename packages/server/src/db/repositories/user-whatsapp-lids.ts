@@ -1,4 +1,4 @@
-import { type Kysely, type Selectable, sql } from "kysely";
+import { type Kysely, type Selectable, type Transaction, sql } from "kysely";
 import type { DB, UserWhatsAppLidsTable, UsersTable } from "../schema";
 import { projectUserWhatsAppIdentityToEntity } from "./user-whatsapp-entity-projection";
 
@@ -16,7 +16,65 @@ export async function getWhatsAppLidsForUser(db: Kysely<DB>, userId: string): Pr
 
 class WhatsAppLidOwnershipConflict extends Error {}
 
-export function createUserWhatsAppLidRepository(db: Kysely<DB>) {
+type WhatsAppLidDb = Kysely<DB> | Transaction<DB>;
+
+async function attachWhatsAppLidInTransaction(
+  trx: WhatsAppLidDb,
+  userId: string,
+  phoneE164: string,
+  normalizedLid: string,
+  observedAt: string,
+): Promise<AttachWhatsAppLidResult> {
+  const guarded = await trx
+    .updateTable("users")
+    .set({ whatsapp_lid_attempted_at: sql`whatsapp_lid_attempted_at` })
+    .where("id", "=", userId)
+    .where("whatsapp_number", "=", phoneE164)
+    .executeTakeFirst();
+  if (Number(guarded.numUpdatedRows) === 0) return "stale-phone";
+  const previousOwner = await trx
+    .selectFrom("user_whatsapp_lids")
+    .select("user_id")
+    .where("lid", "=", normalizedLid)
+    .executeTakeFirst();
+  if (previousOwner && previousOwner.user_id !== userId) throw new WhatsAppLidOwnershipConflict();
+  await trx
+    .insertInto("user_whatsapp_lids")
+    .values({ user_id: userId, lid: normalizedLid, first_seen_at: observedAt, last_seen_at: observedAt })
+    .onConflict((oc) =>
+      oc.column("lid").doUpdateSet({
+        last_seen_at: sql`CASE
+          WHEN user_whatsapp_lids.user_id = ${userId}
+            AND excluded.last_seen_at >= user_whatsapp_lids.last_seen_at
+          THEN excluded.last_seen_at
+          ELSE user_whatsapp_lids.last_seen_at
+        END`,
+      }),
+    )
+    .execute();
+  const owner = await trx
+    .selectFrom("user_whatsapp_lids")
+    .select("user_id")
+    .where("lid", "=", normalizedLid)
+    .executeTakeFirstOrThrow();
+  if (owner.user_id !== userId) throw new WhatsAppLidOwnershipConflict();
+  await trx
+    .updateTable("users")
+    .set({
+      whatsapp_lid: sql`CASE
+        WHEN ${observedAt} >= (
+          SELECT MAX(last_seen_at) FROM user_whatsapp_lids WHERE user_id = ${userId}
+        ) THEN ${normalizedLid}
+        ELSE whatsapp_lid
+      END`,
+    })
+    .where("id", "=", userId)
+    .execute();
+  await projectUserWhatsAppIdentityToEntity(trx, userId);
+  return previousOwner ? "already-owned" : "attached";
+}
+
+export function createUserWhatsAppLidRepository(db: WhatsAppLidDb) {
   return {
     listForUser(userId: string): Promise<UserWhatsAppLidRow[]> {
       return db
@@ -44,52 +102,12 @@ export function createUserWhatsAppLidRepository(db: Kysely<DB>) {
     ): Promise<AttachWhatsAppLidResult> {
       const normalizedLid = lid.trim().toLowerCase();
       try {
-        return await db.transaction().execute(async (trx) => {
-          const guarded = await trx
-            .updateTable("users")
-            .set({ whatsapp_lid_attempted_at: sql`whatsapp_lid_attempted_at` })
-            .where("id", "=", userId)
-            .where("whatsapp_number", "=", phoneE164)
-            .executeTakeFirst();
-          if (Number(guarded.numUpdatedRows) === 0) return "stale-phone";
-          const previousOwner = await trx
-            .selectFrom("user_whatsapp_lids")
-            .select("user_id")
-            .where("lid", "=", normalizedLid)
-            .executeTakeFirst();
-          await trx
-            .insertInto("user_whatsapp_lids")
-            .values({ user_id: userId, lid: normalizedLid, first_seen_at: observedAt, last_seen_at: observedAt })
-            .onConflict((oc) =>
-              oc.column("lid").doUpdateSet({
-                last_seen_at: sql`CASE
-                  WHEN excluded.last_seen_at >= user_whatsapp_lids.last_seen_at THEN excluded.last_seen_at
-                  ELSE user_whatsapp_lids.last_seen_at
-                END`,
-              }),
-            )
-            .execute();
-          const owner = await trx
-            .selectFrom("user_whatsapp_lids")
-            .select("user_id")
-            .where("lid", "=", normalizedLid)
-            .executeTakeFirstOrThrow();
-          if (owner.user_id !== userId) throw new WhatsAppLidOwnershipConflict();
-          await trx
-            .updateTable("users")
-            .set({
-              whatsapp_lid: sql`CASE
-                WHEN ${observedAt} >= (
-                  SELECT MAX(last_seen_at) FROM user_whatsapp_lids WHERE user_id = ${userId}
-                ) THEN ${normalizedLid}
-                ELSE whatsapp_lid
-              END`,
-            })
-            .where("id", "=", userId)
-            .execute();
-          await projectUserWhatsAppIdentityToEntity(trx, userId);
-          return previousOwner ? "already-owned" : "attached";
-        });
+        if (db.isTransaction) {
+          return await attachWhatsAppLidInTransaction(db, userId, phoneE164, normalizedLid, observedAt);
+        }
+        return await db
+          .transaction()
+          .execute((trx) => attachWhatsAppLidInTransaction(trx, userId, phoneE164, normalizedLid, observedAt));
       } catch (error) {
         if (error instanceof WhatsAppLidOwnershipConflict) return "ownership-conflict";
         throw error;

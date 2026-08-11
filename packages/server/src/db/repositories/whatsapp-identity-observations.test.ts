@@ -121,6 +121,94 @@ describe("WhatsApp identity observations", () => {
     ]);
   });
 
+  it("projects a complete group phone and LID observation onto its linked user entity", async () => {
+    const users = createUserRepository(db);
+    await users.create({ id: "group-projected", name: "Group Projected", whatsappNumber: "+14155550410" });
+    const repo = await group();
+
+    await repo.refreshParticipants(
+      "identity@g.us",
+      [{ participantJid: "group-projected@lid", phoneE164: "+14155550410", lid: "group-projected@lid" }],
+      "2026-08-10T03:00:00Z",
+    );
+
+    await expect(createUserWhatsAppLidRepository(db).listForUser("group-projected")).resolves.toEqual([
+      expect.objectContaining({ lid: "group-projected@lid", last_seen_at: "2026-08-10T03:00:00Z" }),
+    ]);
+    const link = await db
+      .selectFrom("user_entity_links")
+      .select("entity_id")
+      .where("user_id", "=", "group-projected")
+      .executeTakeFirstOrThrow();
+    await expect(
+      db
+        .selectFrom("entity_contact_points")
+        .select(["kind", "value"])
+        .where("entity_id", "=", link.entity_id)
+        .where("kind", "in", ["phone", "whatsapp_lid"])
+        .orderBy("kind")
+        .execute(),
+    ).resolves.toEqual([
+      { kind: "phone", value: "+14155550410" },
+      { kind: "whatsapp_lid", value: "group-projected@lid" },
+    ]);
+  });
+
+  it("does not project a delayed older LID observation from another group over a fresher phone identity", async () => {
+    await createUserRepository(db).create({
+      id: "stale-group-projection",
+      name: "Stale Group Projection",
+      whatsappNumber: "+14155550411",
+    });
+    const repo = await group();
+
+    await repo.refreshParticipants(
+      "identity@g.us",
+      [{ participantJid: "current@lid", phoneE164: "+14155550411", lid: "current@lid" }],
+      "2026-08-10T04:00:00Z",
+    );
+    await repo.upsert({
+      jid: "identity-other@g.us",
+      name: "Identity Other",
+      description: null,
+      updated_at: "2026-08-10T00:00:00Z",
+    });
+    await repo.refreshParticipants(
+      "identity-other@g.us",
+      [{ participantJid: "delayed@lid", phoneE164: "+14155550411", lid: "delayed@lid" }],
+      "2026-08-10T03:00:00Z",
+    );
+
+    await expect(createUserWhatsAppLidRepository(db).listForUser("stale-group-projection")).resolves.toEqual([
+      expect.objectContaining({ lid: "current@lid", last_seen_at: "2026-08-10T04:00:00Z" }),
+    ]);
+  });
+
+  it("does not refresh another user's LID when group propagation finds an ownership conflict", async () => {
+    const users = createUserRepository(db);
+    await users.create({ id: "group-phone-owner", name: "Phone Owner", whatsappNumber: "+14155550412" });
+    await users.create({
+      id: "unlinked-lid-owner",
+      name: "LID Owner",
+      whatsappNumber: "+14155550413",
+      skipEntityLinking: true,
+    });
+    const lids = createUserWhatsAppLidRepository(db);
+    await lids.attachIfPhoneUnchanged("unlinked-lid-owner", "+14155550413", "owned@lid", "2026-08-10T01:00:00Z");
+    const repo = await group();
+
+    await repo.refreshParticipants(
+      "identity@g.us",
+      [{ participantJid: "owned@lid", phoneE164: "+14155550412", lid: "owned@lid" }],
+      "2026-08-10T05:00:00Z",
+    );
+
+    await expect(lids.listForUser("unlinked-lid-owner")).resolves.toEqual([
+      expect.objectContaining({ lid: "owned@lid", last_seen_at: "2026-08-10T01:00:00Z" }),
+    ]);
+    await expect(lids.listForUser("group-phone-owner")).resolves.toEqual([]);
+  });
+
   it("does not regress aliases, legacy latest identity, or refresh timestamps", async () => {
     await createUserRepository(db).create({ id: "monotonic", name: "Monotonic", whatsappNumber: "+14155550300" });
     const lids = createUserWhatsAppLidRepository(db);

@@ -3,6 +3,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb, createTestPgDb } from "../../test-utils";
 import type { DB } from "../schema";
+import { createUserRepository } from "./users";
 import { createWhatsAppGroupRepository } from "./whatsapp-groups";
 
 type DbFactory = () => Promise<Kysely<DB>>;
@@ -100,6 +101,43 @@ function observationSuite(label: string, createDb: DbFactory) {
       await expect(repo.listParticipants(retainedGroup)).resolves.toEqual([
         expect.objectContaining({ phone_e164: "+14155550400", lid: "new@lid" }),
         expect.objectContaining({ phone_e164: "+14155550400", lid: "old@lid" }),
+      ]);
+    }, 30_000);
+
+    it("projects a complete participant identity to the linked user and entity", async () => {
+      const userId = `participant-${randomUUID()}`;
+      const phone = "+14155550991";
+      await createUserRepository(db).create({ id: userId, name: "Group Participant", whatsappNumber: phone });
+      const repo = createWhatsAppGroupRepository(db);
+      const groupJid = `projection-${randomUUID()}@g.us`;
+      const lid = `${randomUUID()}@lid`;
+      await repo.upsert({ jid: groupJid, name: "Projection", description: null, updated_at: "2026-08-10T00:00:00Z" });
+
+      await repo.refreshParticipants(
+        groupJid,
+        [{ participantJid: lid, phoneE164: phone, lid }],
+        "2026-08-10T03:00:00Z",
+      );
+
+      const link = await db
+        .selectFrom("user_entity_links")
+        .select("entity_id")
+        .where("user_id", "=", userId)
+        .executeTakeFirstOrThrow();
+      await expect(
+        db.selectFrom("user_whatsapp_lids").select("lid").where("user_id", "=", userId).execute(),
+      ).resolves.toEqual([{ lid }]);
+      await expect(
+        db
+          .selectFrom("entity_contact_points")
+          .select(["kind", "value"])
+          .where("entity_id", "=", link.entity_id)
+          .where("kind", "in", ["phone", "whatsapp_lid"])
+          .orderBy("kind")
+          .execute(),
+      ).resolves.toEqual([
+        { kind: "phone", value: phone },
+        { kind: "whatsapp_lid", value: lid },
       ]);
     }, 30_000);
   });
