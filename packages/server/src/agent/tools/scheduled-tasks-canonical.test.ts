@@ -8,7 +8,7 @@ import { createScheduledTaskConversationRepository } from "../../db/repositories
 import { createScheduledTaskRepository } from "../../db/repositories/scheduled-tasks";
 import type { TaskScheduler } from "../../scheduler/service";
 import { createTestDb } from "../../test-utils";
-import { handleManageScheduledTasks } from "./scheduled-tasks";
+import { handleManageScheduledTasks, requiresAutomationBuilder } from "./scheduled-tasks";
 import { AutomationArtifactCollector } from "./types";
 
 function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): AutomationBuilderSaveRequest {
@@ -16,6 +16,7 @@ function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): Auto
     title: "Daily account brief",
     description: "Summarize account activity.",
     prompt: "Summarize account activity.",
+    executionMode: "hybrid",
     scheduleType: "interval",
     scheduleValue: "120",
     timezone: "UTC",
@@ -233,6 +234,12 @@ function schedulerFor(taskId: string, createdBy = "owner-1") {
   return {
     getTaskById: vi.fn().mockResolvedValue(task),
     refreshTaskSchedule: vi.fn().mockImplementation(async (id: string) => ({ ...task, id })),
+    executeTaskById: vi.fn().mockResolvedValue({
+      runId: `automatic-${taskId}`,
+      status: "completed",
+      finalOutput: "Verified",
+      stepOutputs: {},
+    }),
     removeTask: vi.fn(),
     removeTaskRuntime: vi.fn().mockResolvedValue(true),
     addTask: vi.fn(),
@@ -248,6 +255,134 @@ function schedulerWithoutRefresh(taskId: string, createdBy = "owner-1") {
     updateTask: vi.fn(),
   } as never;
 }
+
+describe("automation artifact presentation policy", () => {
+  it("requires setup for an unbounded scheduled agent instruction", () => {
+    expect(
+      requiresAutomationBuilder({
+        scheduleType: "interval",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Every two minutes",
+            icon: "clock",
+            position: { x: 0, y: 0 },
+            triggerConfig: { type: "schedule", scheduleType: "interval", scheduleValue: "120", timezone: "UTC" },
+          },
+          {
+            id: "reminder",
+            type: "agent",
+            label: "Send reminder",
+            icon: "sketch-ai",
+            position: { x: 260, y: 0 },
+            agentMode: "sketch",
+          },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps a single literal reminder action in chat", () => {
+    expect(
+      requiresAutomationBuilder({
+        scheduleType: "once",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "At reminder time",
+            icon: "clock",
+            position: { x: 0, y: 0 },
+            triggerConfig: {
+              type: "schedule",
+              scheduleType: "once",
+              scheduleValue: "2026-08-11T09:00:00Z",
+              timezone: "UTC",
+            },
+          },
+          {
+            id: "reminder",
+            type: "action",
+            label: "Send reminder",
+            icon: "code",
+            position: { x: 260, y: 0 },
+            script: 'return "Reminder: message Vedant on Slack.";',
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("requires the builder for a dynamic action even when it has one scheduled step", () => {
+    const trigger = {
+      id: "trigger",
+      type: "trigger" as const,
+      label: "At reminder time",
+      icon: "clock",
+      position: { x: 0, y: 0 },
+      triggerConfig: {
+        type: "schedule" as const,
+        scheduleType: "once" as const,
+        scheduleValue: "2026-08-11T09:00:00Z",
+        timezone: "UTC",
+      },
+    };
+    const dynamicScripts = ["return `Reminder: ${input.name}`;", 'return "Reminder: " + input.name;'];
+
+    for (const script of dynamicScripts) {
+      expect(
+        requiresAutomationBuilder({
+          scheduleType: "once",
+          steps: [
+            trigger,
+            {
+              id: "reminder",
+              type: "action",
+              label: "Send reminder",
+              icon: "code",
+              position: { x: 260, y: 0 },
+              script,
+            },
+          ],
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it("requires the builder for integration-backed or multi-step automations", () => {
+    expect(
+      requiresAutomationBuilder({
+        scheduleType: "cron",
+        steps: [
+          {
+            id: "trigger",
+            type: "trigger",
+            label: "Daily",
+            icon: "clock",
+            position: { x: 0, y: 0 },
+            triggerConfig: { type: "schedule", scheduleType: "cron", scheduleValue: "0 9 * * *", timezone: "UTC" },
+          },
+          {
+            id: "first",
+            type: "agent",
+            label: "Fetch updates",
+            icon: "sketch-ai",
+            position: { x: 260, y: 0 },
+            apps: ["slack"],
+          },
+          {
+            id: "second",
+            type: "agent",
+            label: "Summarize updates",
+            icon: "sketch-ai",
+            position: { x: 520, y: 0 },
+          },
+        ],
+      }),
+    ).toBe(true);
+  });
+});
 
 describe("ManageScheduledTasks canonical structured mutations", () => {
   let db: Awaited<ReturnType<typeof createTestDb>>;
@@ -648,6 +783,33 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
       last_edited_by: "owner-1",
       revision: 1,
     });
+  });
+
+  it("automatically verifies the full automation after a structured update", async () => {
+    await createAutomationDefinition({
+      db,
+      request: definition(),
+      context: context("automatic-structured-update"),
+      brokerCapable: true,
+    });
+    const scheduler = schedulerFor("automatic-structured-update");
+
+    const result = await handleManageScheduledTasks(
+      {
+        action: "update",
+        task_id: "automatic-structured-update",
+        prompt: "A verified account brief.",
+        expected_revision: 0,
+      },
+      { db, scheduler, taskContext: taskContextFor("automatic-structured-update") },
+    );
+
+    expect((scheduler as { executeTaskById: ReturnType<typeof vi.fn> }).executeTaskById).toHaveBeenCalledWith(
+      "automatic-structured-update",
+      { preserveTaskState: true, runMode: "test" },
+    );
+    expect(result.content[0].text).toContain("Automatic test run completed for automation automatic-structured-update");
+    expect(result.content[0].text).toContain('"runId": "automatic-automatic-structured-update"');
   });
 
   it("reconciles inherited schedule metadata on a title-only edit while preserving a custom trigger label", async () => {
@@ -1121,6 +1283,7 @@ describe("ManageScheduledTasks canonical structured mutations", () => {
     expect(collectArtifact).toHaveBeenCalledWith(
       expect.objectContaining({
         taskId: task.id,
+        requiresBuilder: true,
         builderUrl: `https://sketch.example/scheduled-tasks/${task.id}/edit?conversationId=normal-chat-1`,
       }),
     );

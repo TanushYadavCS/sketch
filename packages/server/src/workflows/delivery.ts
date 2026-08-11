@@ -12,6 +12,41 @@ export interface WorkflowDelivery {
   mode: DeliveryMode;
 }
 
+export class WorkflowMessageDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkflowMessageDeliveryError";
+  }
+}
+
+function isSerializedJsonDocument(value: string): boolean {
+  let candidate = value.trim();
+  const fenced = candidate.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenced) candidate = fenced[1].trim();
+  if (!candidate.startsWith("{") && !candidate.startsWith("[")) return false;
+  try {
+    const parsed = JSON.parse(candidate) as unknown;
+    return parsed !== null && typeof parsed === "object";
+  } catch {
+    return false;
+  }
+}
+
+export function requireWorkflowMessageText(output: unknown): string {
+  if (typeof output !== "string" || output.trim().length === 0) {
+    throw new WorkflowMessageDeliveryError(
+      "Message delivery requires the final workflow step to return a non-empty human-readable string",
+    );
+  }
+  const message = output.trim();
+  if (isSerializedJsonDocument(message)) {
+    throw new WorkflowMessageDeliveryError(
+      "Message delivery cannot contain serialized JSON; return a human-readable message string instead",
+    );
+  }
+  return message;
+}
+
 export function isSlackUserId(value: string): boolean {
   return value.startsWith("U") || value.startsWith("W");
 }

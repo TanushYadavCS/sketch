@@ -185,7 +185,15 @@ describe("ManageScheduledTasks tool contract", () => {
 
 describe("handleManageScheduledTasks — configured chat authoring", () => {
   it("routes natural-language creation through the authorer and collects the saved artifact", async () => {
-    const scheduler = makeMockScheduler();
+    const automaticTestRun = {
+      runId: "automatic-run-1",
+      status: "completed",
+      finalOutput: "Daily brief sent",
+      stepOutputs: {},
+    };
+    const scheduler = makeMockScheduler({
+      executeTaskById: vi.fn().mockResolvedValue(automaticTestRun),
+    });
     const savedTask = makeTask({ id: "authored-task", title: "Daily brief", prompt: "Daily brief" });
     const chatAuthoring = {
       author: vi.fn().mockResolvedValue({
@@ -238,9 +246,14 @@ describe("handleManageScheduledTasks — configured chat authoring", () => {
       taskContext: { ...dmContext, creatorTimezone: "Asia/Kolkata" },
     });
     expect(scheduler.addTask).not.toHaveBeenCalled();
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("authored-task", {
+      preserveTaskState: true,
+      runMode: "test",
+    });
     expect(result.content[0].text).toContain("Automation created:");
+    expect(result.content[0].text).toContain('"runId": "automatic-run-1"');
     expect(automationArtifactCollector.collect).toHaveBeenCalledWith(
-      expect.objectContaining({ taskId: "authored-task", title: "Daily brief" }),
+      expect.objectContaining({ taskId: "authored-task", title: "Daily brief", requiresBuilder: true }),
     );
   });
 
@@ -666,6 +679,50 @@ describe("handleManageScheduledTasks — update", () => {
     expect(result.content[0].text).toBe("Error: task not found.");
     expect(scheduler.updateTask).not.toHaveBeenCalled();
   });
+
+  it("automatically verifies every script after a natural-language automation edit", async () => {
+    const automaticTestRun = {
+      runId: "automatic-edit-run-1",
+      status: "completed",
+      finalOutput: "Verified",
+      stepOutputs: {
+        action_one: { status: "completed" },
+        action_two: { status: "completed" },
+      },
+    };
+    const scheduler = makeMockScheduler({
+      executeTaskById: vi.fn().mockResolvedValue(automaticTestRun),
+    });
+    const chatAuthoring = {
+      author: vi.fn().mockResolvedValue({
+        kind: "saved",
+        task: makeTask({ id: "edited-task", title: "Verified automation" }),
+        artifact: {
+          steps: [
+            { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
+            { id: "action_one", type: "action", label: "First script", icon: "code", position: { x: 0, y: 100 } },
+            { id: "action_two", type: "action", label: "Second script", icon: "code", position: { x: 0, y: 200 } },
+          ],
+          scheduleType: "cron",
+          scheduleValue: "0 9 * * 1-5",
+          timezone: "UTC",
+        },
+      }),
+    };
+
+    const result = await handleManageScheduledTasks(
+      { action: "update", task_id: "edited-task", request: "Finish configuring the automation" },
+      { scheduler, taskContext: dmContext, chatAuthoring },
+    );
+
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("edited-task", {
+      preserveTaskState: true,
+      runMode: "test",
+    });
+    expect(result.content[0].text).toContain("Automatic test run completed for automation edited-task");
+    expect(result.content[0].text).toContain('"action_one"');
+    expect(result.content[0].text).toContain('"action_two"');
+  });
 });
 
 describe("handleManageScheduledTasks — updateStepContent", () => {
@@ -774,7 +831,7 @@ describe("handleManageScheduledTasks — run", () => {
       { scheduler, stepContentRepo, taskContext: dmContext },
     );
 
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1");
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", { runMode: "manual" });
     expect(result.content[0].text).toContain("Automation task-1 completed");
     expect(result.content[0].text).toContain('"runId": "run-1"');
     expect(result.content[0].text).toContain('"ok": true');
@@ -811,7 +868,7 @@ describe("handleManageScheduledTasks — run", () => {
       },
     );
 
-    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1");
+    expect(scheduler.executeTaskById).toHaveBeenCalledWith("task-1", { runMode: "manual" });
     expect(scheduler.enqueueTaskById).not.toHaveBeenCalled();
     expect(result.content[0].text).toContain("Automation task-1 completed");
   });

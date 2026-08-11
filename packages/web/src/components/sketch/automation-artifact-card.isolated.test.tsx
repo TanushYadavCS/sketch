@@ -15,6 +15,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 
 const artifact: AutomationArtifact = {
   taskId: "task-123",
+  requiresBuilder: true,
   kind: "New automation",
   title: "Daily account brief",
   description: "Summarizes account updates and posts the highlights.",
@@ -43,6 +44,7 @@ describe("AutomationArtifactCard", () => {
       to: "/scheduled-tasks/$taskId/edit",
       params: { taskId: "task-123" },
       search: { conversationId: "chat-alpha" },
+      viewTransition: true,
     });
 
     await user.click(screen.getByRole("button", { name: "Save as-is" }));
@@ -63,6 +65,7 @@ describe("AutomationArtifactCard", () => {
       to: "/scheduled-tasks/$taskId/edit",
       params: { taskId: "task-123" },
       search: { conversationId: "source-chat" },
+      viewTransition: true,
     });
   });
 });

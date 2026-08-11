@@ -20,12 +20,19 @@ import {
   type ChatThreadProgressIconType,
   type ChatThreadProgressItem,
   type ChatThreadTimelineEntry,
+  questionBatchSignature,
 } from "@/components/sketch/chat-thread";
 import { DEFAULT_TILES, type TileDef } from "@/components/sketch/tile-grid";
 import { useWebChatReconciliation } from "@/hooks/use-web-chat-reconciliation";
 import {
   type AutomationArtifact,
+  type AutomationDraftHandoff,
   type WebChatMessagesResponse,
+  type WebChatQuestion,
+  type WebChatQuestionAnswer,
+  type WebChatQuestionBatch,
+  type WebChatQuestionBatchAnswer,
+  type WebChatQuestionOption,
   type WebChatToolProgress,
   type WebChatUploadedAttachment,
   type WorkspaceSummary,
@@ -45,7 +52,7 @@ import type { IntegrationApp, IntegrationConnection } from "@sketch/shared";
 import { TabContentContainer } from "@sketch/ui/components/tab-content-container";
 import { type QueryClient, isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRoute, useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { DefaultChatTransport, type UIMessage } from "ai";
+import { type CreateUIMessage, DefaultChatTransport, type UIMessage } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { dashboardRoute } from "./dashboard";
@@ -68,6 +75,11 @@ type WebChatDataParts = {
     sizeBytes?: number;
   };
   automation: AutomationArtifact;
+  "automation-handoff": AutomationDraftHandoff;
+  question: WebChatQuestion;
+  "question-batch": WebChatQuestionBatch;
+  "question-answer": WebChatQuestionAnswer;
+  "question-batch-answer": WebChatQuestionBatchAnswer;
   "integration-connection": {
     requestId: string;
     appId: string;
@@ -222,7 +234,12 @@ function latestFileIndex(parts: WebChatPart[]): number {
 }
 
 function latestAutomationIndex(parts: WebChatPart[]): number {
-  return findLastPartIndex(parts, (part) => part.type === "data-automation" && part.data.taskId.trim().length > 0);
+  return findLastPartIndex(
+    parts,
+    (part) =>
+      (part.type === "data-automation" || part.type === "data-automation-handoff") &&
+      part.data.taskId.trim().length > 0,
+  );
 }
 
 function latestInterruptionIndex(parts: WebChatPart[]): number {
@@ -231,6 +248,10 @@ function latestInterruptionIndex(parts: WebChatPart[]): number {
     (part) =>
       part.type === "data-interruption" && typeof part.data.label === "string" && part.data.label.trim().length > 0,
   );
+}
+
+function latestQuestionIndex(parts: WebChatPart[]): number {
+  return findLastPartIndex(parts, (part) => part.type === "data-question" || part.type === "data-question-batch");
 }
 
 const progressIconTypes = new Set<ChatThreadProgressIconType>(["tool", "skill", "canvas", "generic"]);
@@ -311,6 +332,7 @@ function latestProgressWins(message: WebChatMessage): boolean {
       latestTextIndex(parts),
       latestFileIndex(parts),
       latestAutomationIndex(parts),
+      latestQuestionIndex(parts),
       latestInterruptionIndex(parts),
     )
   );
@@ -340,14 +362,80 @@ function filesFromMessage(message: WebChatMessage): ChatThreadFile[] {
 }
 
 function automationsFromParts(parts: WebChatPart[]): AutomationArtifact[] {
-  return parts
-    .filter((part) => part.type === "data-automation")
-    .map((part) => part.data)
-    .filter((artifact) => artifact.taskId.trim().length > 0 && artifact.title.trim().length > 0);
+  return parts.flatMap((part) => {
+    if (part.type === "data-automation") {
+      return part.data.taskId.trim().length > 0 && part.data.title.trim().length > 0 ? [part.data] : [];
+    }
+    if (part.type !== "data-automation-handoff") return [];
+    return [automationArtifactFromDraftHandoff(part.data)];
+  });
+}
+
+export function automationArtifactFromDraftHandoff(handoff: AutomationDraftHandoff): AutomationArtifact {
+  const builderConversationId = handoff.builderConversationId ?? handoff.sourceConversationId;
+  const builderUrl = automationBuilderUrlWithConversationId(handoff.builderUrl, builderConversationId);
+  return {
+    taskId: handoff.taskId,
+    requiresBuilder: true,
+    kind: "Automation setup",
+    title: "Set up automation",
+    description: "Continue configuring this automation in the automation builder.",
+    tags: ["Setup"],
+    scheduleLabel: "Not configured",
+    deliveryLabel: "Not configured",
+    builderUrl,
+    status: handoff.status,
+  };
+}
+
+function automationBuilderUrlWithConversationId(builderUrl: string, conversationId: string): string {
+  try {
+    const url = new URL(builderUrl, "http://sketch.local");
+    url.searchParams.set("conversationId", conversationId);
+    return builderUrl.startsWith("/") ? `${url.pathname}${url.search}${url.hash}` : url.toString();
+  } catch {
+    return `${builderUrl}${builderUrl.includes("?") ? "&" : "?"}conversationId=${encodeURIComponent(conversationId)}`;
+  }
 }
 
 function automationsFromMessage(message: WebChatMessage): AutomationArtifact[] {
   return automationsFromParts(visibleMessageParts(message));
+}
+
+export const AUTOMATION_BUILDER_NAVIGATION_DELAY_MS = 3_000;
+
+type AutomationBuilderNavigation = {
+  key: string;
+  taskId: string;
+  conversationId?: string;
+  createConversation: boolean;
+};
+
+function automationBuilderNavigationFromMessage(
+  message: WebChatMessage | undefined,
+): AutomationBuilderNavigation | null {
+  if (!message || message.role !== "assistant") return null;
+  const parts = visibleMessageParts(message);
+  const handoffIndex = findLastPartIndex(parts, (part) => part.type === "data-automation-handoff");
+  const handoffPart = handoffIndex === -1 ? undefined : parts[handoffIndex];
+  if (handoffPart?.type === "data-automation-handoff") {
+    const conversationId = handoffPart.data.builderConversationId ?? handoffPart.data.sourceConversationId;
+    return {
+      key: `${message.id}:${handoffPart.data.taskId}:${conversationId}`,
+      taskId: handoffPart.data.taskId,
+      conversationId,
+      createConversation: false,
+    };
+  }
+
+  const automationIndex = findLastPartIndex(parts, (part) => part.type === "data-automation");
+  const automationPart = automationIndex === -1 ? undefined : parts[automationIndex];
+  if (automationPart?.type !== "data-automation" || automationPart.data.requiresBuilder === false) return null;
+  return {
+    key: `${message.id}:${automationPart.data.taskId}`,
+    taskId: automationPart.data.taskId,
+    createConversation: true,
+  };
 }
 
 function integrationConnectionsFromParts(parts: WebChatPart[]): ChatThreadIntegrationConnection[] {
@@ -381,6 +469,36 @@ function interruptionFromParts(parts: WebChatPart[]): ChatThreadMessage["interru
 
 function interruptionFromMessage(message: WebChatMessage): ChatThreadMessage["interruption"] | undefined {
   return interruptionFromParts(visibleMessageParts(message));
+}
+
+function questionFromParts(parts: WebChatPart[]): WebChatQuestion | undefined {
+  const index = findLastPartIndex(parts, (part) => part.type === "data-question");
+  const part = index === -1 ? undefined : parts[index];
+  return part?.type === "data-question" ? part.data : undefined;
+}
+
+function questionBatchFromParts(parts: WebChatPart[]): WebChatQuestionBatch | undefined {
+  const index = findLastPartIndex(parts, (part) => part.type === "data-question-batch");
+  const part = index === -1 ? undefined : parts[index];
+  return part?.type === "data-question-batch" ? part.data : undefined;
+}
+
+function questionBatchAnswerFromParts(parts: WebChatPart[]): WebChatQuestionBatchAnswer | undefined {
+  const index = findLastPartIndex(parts, (part) => part.type === "data-question-batch-answer");
+  const part = index === -1 ? undefined : parts[index];
+  return part?.type === "data-question-batch-answer" ? part.data : undefined;
+}
+
+function questionFromMessage(message: WebChatMessage): WebChatQuestion | undefined {
+  return questionFromParts(visibleMessageParts(message));
+}
+
+function questionBatchFromMessage(message: WebChatMessage): WebChatQuestionBatch | undefined {
+  return questionBatchFromParts(visibleMessageParts(message));
+}
+
+function questionBatchAnswerFromMessage(message: WebChatMessage): WebChatQuestionBatchAnswer | undefined {
+  return questionBatchAnswerFromParts(visibleMessageParts(message));
 }
 
 function appendTimelineText(entries: ChatThreadTimelineEntry[], id: string | undefined, text: string): void {
@@ -718,6 +836,62 @@ export function outgoingRequestOptions(attachments: WebChatUploadedAttachment[])
   return attachments.length > 0 ? { body: { attachments } } : undefined;
 }
 
+export function outgoingQuestionAnswerMessage(
+  question: WebChatQuestion,
+  answer: WebChatQuestionAnswer | WebChatQuestionOption,
+): CreateUIMessage<WebChatMessage> {
+  const structuredAnswer: WebChatQuestionAnswer =
+    "label" in answer ? { questionId: question.id, optionId: answer.id } : answer;
+  const text =
+    "customResponse" in structuredAnswer
+      ? structuredAnswer.customResponse
+      : (question.options.find((option) => option.id === structuredAnswer.optionId)?.label ??
+        structuredAnswer.optionId);
+  return {
+    metadata: { createdAt: new Date().toISOString() },
+    parts: [
+      { type: "text" as const, text },
+      {
+        type: "data-question-answer" as const,
+        id: `question-answer-${question.id}`,
+        data: structuredAnswer,
+      },
+    ],
+  };
+}
+
+export function outgoingQuestionBatchAnswerMessage(
+  batch: WebChatQuestionBatch,
+  answer: WebChatQuestionBatchAnswer | WebChatQuestionBatchAnswer["answers"],
+): CreateUIMessage<WebChatMessage> {
+  const payload: WebChatQuestionBatchAnswer = Array.isArray(answer)
+    ? { batchId: batch.batchId, answers: answer }
+    : answer;
+  const orderedAnswers = batch.questions.flatMap((question) => {
+    const item = payload.answers.find((candidate) => candidate.questionId === question.id);
+    return item ? [item] : [];
+  });
+  const orderedPayload =
+    orderedAnswers.length === batch.questions.length ? { ...payload, answers: orderedAnswers } : payload;
+  const labels = orderedPayload.answers.map((item) => {
+    const question = batch.questions.find((candidate) => candidate.id === item.questionId);
+    return "customResponse" in item
+      ? item.customResponse
+      : (question?.options.find((option) => option.id === item.optionId)?.label ?? item.optionId);
+  });
+  return {
+    metadata: { createdAt: new Date().toISOString() },
+    parts: [
+      { type: "text" as const, text: labels.join(" · ") },
+      {
+        type: "data-question-batch-answer" as const,
+        id: `question-batch-answer-${orderedPayload.batchId}`,
+        data: orderedPayload,
+      },
+    ],
+  };
+}
+
 export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadMessage[] {
   return messages.flatMap<ChatThreadMessage>((message) => {
     if (message.role !== "user" && message.role !== "assistant") return [];
@@ -725,6 +899,8 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
     if (message.role === "assistant") {
       const timeline = assistantTimelineFromMessage(message);
       const interruption = interruptionFromMessage(message);
+      const question = questionFromMessage(message);
+      const questionBatch = questionBatchFromMessage(message);
       if (hasTimelineProgress(timeline)) {
         const files = filesFromMessage(message);
         const automations = automationsFromMessage(message);
@@ -738,17 +914,30 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
             files: files.length > 0 ? files : undefined,
             automations: automations.length > 0 ? automations : undefined,
             integrationConnections: integrationConnections.length > 0 ? integrationConnections : undefined,
+            ...(question ? { question } : {}),
+            ...(questionBatch ? { questionBatch } : {}),
             ...(interruption ? { interruption } : {}),
           },
         ];
       }
     }
-    const text = textFromMessage(message);
+    const batchAnswer = message.role === "user" ? questionBatchAnswerFromMessage(message) : undefined;
+    const text = textFromMessage(message) || (batchAnswer ? "Submitted answers" : "");
     const files = filesFromMessage(message);
     const automations = message.role === "assistant" ? automationsFromMessage(message) : [];
     const integrationConnections = message.role === "assistant" ? integrationConnectionsFromMessage(message) : [];
     const interruption = message.role === "assistant" ? interruptionFromMessage(message) : undefined;
-    if (text || files.length > 0 || automations.length > 0 || integrationConnections.length > 0 || interruption) {
+    const question = message.role === "assistant" ? questionFromMessage(message) : undefined;
+    const questionBatch = message.role === "assistant" ? questionBatchFromMessage(message) : undefined;
+    if (
+      text ||
+      files.length > 0 ||
+      automations.length > 0 ||
+      integrationConnections.length > 0 ||
+      interruption ||
+      question ||
+      questionBatch
+    ) {
       return [
         {
           id: message.id,
@@ -758,6 +947,8 @@ export function buildChatThreadMessages(messages: WebChatMessage[]): ChatThreadM
           files: files.length > 0 ? files : undefined,
           automations: automations.length > 0 ? automations : undefined,
           integrationConnections: integrationConnections.length > 0 ? integrationConnections : undefined,
+          ...(question ? { question } : {}),
+          ...(questionBatch ? { questionBatch } : {}),
           ...(interruption ? { interruption } : {}),
         },
       ];
@@ -903,6 +1094,46 @@ export function ChatPage() {
     lastAutomationRefreshKey.current = latestAutomationRefresh.key;
     void invalidateAutomationQueries(queryClient, latestAutomationRefresh.taskIds);
   }, [historyReady, latestAutomationRefresh, queryClient]);
+  const latestAutomationNavigation = useMemo(
+    () => automationBuilderNavigationFromMessage(chat.messages.at(-1)),
+    [chat.messages],
+  );
+  const automationNavigationBaselineConversationId = useRef<string | null>(null);
+  const lastAutomationNavigationKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (!historyReady || automationNavigationBaselineConversationId.current === conversationId) return;
+    automationNavigationBaselineConversationId.current = conversationId;
+    lastAutomationNavigationKey.current = latestAutomationNavigation?.key ?? "";
+  }, [conversationId, historyReady, latestAutomationNavigation]);
+  useEffect(() => {
+    if (!historyReady || !latestAutomationNavigation) return;
+    if (lastAutomationNavigationKey.current === latestAutomationNavigation.key) return;
+    lastAutomationNavigationKey.current = latestAutomationNavigation.key;
+    let cancelled = false;
+    const openBuilder = (builderConversationId: string) => {
+      if (cancelled) return;
+      void navigate({
+        to: "/scheduled-tasks/$taskId/edit",
+        params: { taskId: latestAutomationNavigation.taskId },
+        search: { conversationId: builderConversationId },
+        viewTransition: shouldUseChatViewTransition(),
+      });
+    };
+    const timeoutId = window.setTimeout(() => {
+      if (!latestAutomationNavigation.createConversation && latestAutomationNavigation.conversationId) {
+        openBuilder(latestAutomationNavigation.conversationId);
+        return;
+      }
+      void api.scheduledTasks
+        .createConversation(latestAutomationNavigation.taskId, { createNew: true })
+        .then(({ conversation }) => openBuilder(conversation.conversationId))
+        .catch(() => toast.error("Could not open automation setup"));
+    }, AUTOMATION_BUILDER_NAVIGATION_DELAY_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [historyReady, latestAutomationNavigation, navigate]);
   const rawThreadMessages = useMemo(() => buildChatThreadMessages(chat.messages), [chat.messages]);
   const threadMessages = useSmoothedChatThreadMessages(rawThreadMessages, chatBusy, conversationId);
   const integrationConnectionCards = useMemo(
@@ -984,6 +1215,10 @@ export function ChatPage() {
         latestThreadMessage.progressLines?.join("\n").length ?? 0,
         latestThreadMessage.files?.length ?? 0,
         latestThreadMessage.integrationConnections?.length ?? 0,
+        latestThreadMessage.question
+          ? `${latestThreadMessage.question.id}:${latestThreadMessage.question.options.map((option) => option.id).join(",")}`
+          : "",
+        latestThreadMessage.questionBatch ? questionBatchSignature(latestThreadMessage.questionBatch) : "",
         chat.status,
       ].join(":")
     : "";
@@ -1029,6 +1264,36 @@ export function ChatPage() {
       .catch(() => undefined)
       .finally(() => setStoppingRun(false));
   }, [conversationId, stoppingRun]);
+
+  const handleAnswerQuestion = useCallback(
+    (question: WebChatQuestion, answer: WebChatQuestionAnswer) => {
+      queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
+      void Promise.resolve(chat.sendMessage(outgoingQuestionAnswerMessage(question, answer))).then(() =>
+        queryClient.invalidateQueries({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }),
+      );
+    },
+    [chat.sendMessage, conversationId, queryClient],
+  );
+
+  const handleSelectQuestion = useCallback(
+    (question: WebChatQuestion, option: WebChatQuestionOption) => {
+      queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
+      void Promise.resolve(chat.sendMessage(outgoingQuestionAnswerMessage(question, option))).then(() =>
+        queryClient.invalidateQueries({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }),
+      );
+    },
+    [chat.sendMessage, conversationId, queryClient],
+  );
+
+  const handleSubmitQuestionBatch = useCallback(
+    (batch: WebChatQuestionBatch, answer: WebChatQuestionBatchAnswer) => {
+      queryClient.removeQueries({ queryKey: webChatMessagesQueryKey(conversationId), exact: true });
+      void Promise.resolve(chat.sendMessage(outgoingQuestionBatchAnswerMessage(batch, answer))).then(() =>
+        queryClient.invalidateQueries({ queryKey: WEB_CHAT_CONVERSATIONS_QUERY_KEY }),
+      );
+    },
+    [chat.sendMessage, conversationId, queryClient],
+  );
 
   const handleIntegrationConnectionStatusChange = useCallback(
     (requestId: string, status: ChatThreadIntegrationConnectionStatus) => {
@@ -1195,6 +1460,9 @@ export function ChatPage() {
               error={recovery.suppressError ? null : (chat.error?.message ?? null)}
               integrationConnectionStatuses={integrationConnectionStatuses}
               onConnectIntegration={handleConnectIntegration}
+              onAnswerQuestion={handleAnswerQuestion}
+              onSelectQuestion={handleSelectQuestion}
+              onSubmitQuestionBatch={handleSubmitQuestionBatch}
               conversationId={conversationId}
             />
           ) : historyLoadFailed ? (

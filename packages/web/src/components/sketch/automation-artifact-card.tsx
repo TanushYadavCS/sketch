@@ -1,4 +1,5 @@
 import type { AutomationArtifact } from "@/lib/api";
+import { shouldUseChatViewTransition } from "@/lib/chat-target";
 import { CalendarDotsIcon } from "@phosphor-icons/react";
 import { Button } from "@sketch/ui/components/button";
 import { cn } from "@sketch/ui/lib/utils";
@@ -31,6 +32,7 @@ export function AutomationArtifactCard({
       to: "/scheduled-tasks/$taskId/edit",
       params: { taskId: artifact.taskId },
       search: continuationConversationId ? { conversationId: continuationConversationId } : {},
+      viewTransition: shouldUseChatViewTransition(),
     });
   };
 

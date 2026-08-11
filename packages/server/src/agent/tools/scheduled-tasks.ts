@@ -1,5 +1,12 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
-import type { AutomationBuilderSaveRequest } from "@sketch/shared";
+import {
+  type AutomationBuilderSaveRequest,
+  type AutomationExecutionMode,
+  automationActionCapabilitiesSchema,
+  automationExecutionModeSchema,
+  canvasWebhookEndpointSchema,
+  workflowStepUsesIntegrationActions,
+} from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { z } from "zod/v4";
 import { AutomationAuthoringValidationError } from "../../automation/authoring/service";
@@ -13,6 +20,7 @@ import {
   updateAutomationDefinition,
 } from "../../automation/persistence";
 import { webChatTaskConversationAssociation } from "../../automation/task-conversations";
+import { buildAutomationWebhookUrl } from "../../automation/webhook";
 import type { createAutomationRunsRepository } from "../../db/repositories/automation-runs";
 import type { createAutomationStepContentRepository } from "../../db/repositories/automation-step-content";
 import type { DB } from "../../db/schema";
@@ -59,6 +67,9 @@ const workflowStepSchema = z.object({
     .array(z.string())
     .optional()
     .describe("MCP servers available to an agent step. Not used by action steps."),
+  actionCapabilities: automationActionCapabilitiesSchema
+    .describe("Capabilities available to action scripts. Sketch tools are creator-scoped and read-only.")
+    .optional(),
   timeout: z.number().optional().describe("Step timeout in seconds. Default: 1800 (30 min)."),
   triggerConfig: z
     .object({
@@ -75,6 +86,7 @@ const workflowStepSchema = z.object({
       canvasWorkflowId: z.string().optional(),
       canvasTriggerNodeId: z.string().optional(),
       canvasActionNodeId: z.string().optional(),
+      canvasEndpoint: canvasWebhookEndpointSchema.optional(),
       errorMessage: z.string().optional(),
     })
     .describe(
@@ -113,6 +125,11 @@ const manageScheduledTasksSchema = {
     .optional()
     .describe(
       "Legacy/simple automation prompt. When used without steps, Sketch expands it to one Sketch-mode agent step. Keep it for agent-driven or legacy automations; for deterministic work, pass an explicit steps array with action script content.",
+    ),
+  execution_mode: automationExecutionModeSchema
+    .optional()
+    .describe(
+      "How the automation runs: 'Follow exact steps' (deterministic) allows action steps but no agent steps; 'Exact steps with smart help' (hybrid) allows both; 'Let Sketch handle the details' (agent-led) allows agent steps but no code or action steps. This is a user choice, not a forced recommendation.",
     ),
   schedule_type: z
     .enum(["cron", "interval", "once"])
@@ -239,6 +256,7 @@ type ManageScheduledTasksParams = {
     | "updateStepContent";
   request?: string;
   prompt?: string;
+  execution_mode?: AutomationExecutionMode;
   schedule_type?: "cron" | "interval" | "once" | "external";
   schedule_value?: string;
   timezone?: string;
@@ -353,6 +371,7 @@ function stepContentPatchForSteps(steps: WorkflowStepInput[]): AutomationDefinit
 function definitionPatchFromParams(params: ManageScheduledTasksParams, ctx: TaskContext): AutomationDefinitionPatch {
   const patch: AutomationDefinitionPatch = {};
   if (params.prompt !== undefined) patch.prompt = params.prompt;
+  if (params.execution_mode !== undefined) patch.executionMode = params.execution_mode;
   if (params.schedule_type !== undefined) patch.scheduleType = params.schedule_type;
   if (params.schedule_value !== undefined) patch.scheduleValue = params.schedule_value;
   if (params.timezone !== undefined) patch.timezone = params.timezone;
@@ -556,6 +575,27 @@ async function refreshTaskAfterMutation(
   }
 }
 
+async function automaticAutomationTestRun(scheduler: TaskScheduler, taskId: string): Promise<string> {
+  try {
+    const result = await scheduler.executeTaskById(taskId, { preserveTaskState: true, runMode: "test" });
+    if (!result) {
+      return `Automatic test run for automation ${taskId} did not execute because the task is already complete.`;
+    }
+    const outcome = result.status === "failed" || result.aborted ? "failed" : "completed";
+    return [
+      `Automatic test run ${outcome} for automation ${taskId}:`,
+      JSON.stringify(result, null, 2),
+      "Inspect this result and repair the automation if the test exposed an issue before reporting completion.",
+    ].join("\n");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return [
+      `Automatic test run for automation ${taskId} could not be completed: ${message}`,
+      "Inspect the automation and repair the issue before reporting completion.",
+    ].join("\n");
+  }
+}
+
 function buildArtifactTags(params: {
   steps: Array<WorkflowStep & { apps?: string[] }>;
   scheduleType: string;
@@ -589,10 +629,69 @@ function buildArtifactScheduleLabel(params: {
   return `Cron: ${params.scheduleValue} (${params.timezone})`;
 }
 
+export function requiresAutomationBuilder(params: {
+  steps: Array<WorkflowStep & { apps?: string[]; script?: string; agentPrompt?: string }>;
+  scheduleType: string;
+}): boolean {
+  if (!isLocalScheduleType(params.scheduleType) || params.steps.length !== 2) return true;
+
+  const [trigger] = params.steps.filter((step) => step.type === "trigger");
+  const [executionStep] = params.steps.filter((step) => step.type !== "trigger");
+  if (!trigger || !executionStep || trigger.triggerConfig?.type !== "schedule") return true;
+
+  const triggerConfig = trigger.triggerConfig;
+  const allowedTriggerConfigKeys = new Set(["type", "scheduleType", "scheduleValue", "timezone"]);
+  if (Object.keys(triggerConfig).some((key) => !allowedTriggerConfigKeys.has(key))) return true;
+
+  const literalActionScript = executionStep.type === "action" ? executionStep.script?.trim() : undefined;
+  const literalActionMatch = literalActionScript
+    ? [
+        /^return\s+"((?:\\.|[^"\\])*)";?\s*$/,
+        /^return\s+'((?:\\.|[^'\\])*)';?\s*$/,
+        /^return\s+`((?:\\.|[^`\\$]|\$(?!\{))*)`;?\s*$/,
+      ]
+        .map((pattern) => pattern.exec(literalActionScript))
+        .find((match) => match !== null)
+    : undefined;
+  const isSimpleLiteralAction =
+    executionStep.type === "action" && Boolean(literalActionMatch?.[1]?.replace(/\\./g, "x").trim());
+  if (!isSimpleLiteralAction) return true;
+
+  for (const step of params.steps) {
+    if (
+      (step.type !== "action" && step.script !== undefined) ||
+      (step.apps?.length ?? 0) > 0 ||
+      (step.agentSkills?.length ?? 0) > 0 ||
+      step.agentModel !== undefined ||
+      (step.agentMcpServers?.length ?? 0) > 0 ||
+      step.actionCapabilities !== undefined ||
+      step.timeout !== undefined
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function withStepContent(
+  steps: WorkflowStep[],
+  stepContent: AutomationBuilderSaveRequest["stepContent"],
+): Array<WorkflowStep & { apps?: string[]; script?: string; agentPrompt?: string }> {
+  return steps.map((step) => {
+    const content = stepContent[step.id];
+    if (!content) return step;
+    return {
+      ...step,
+      ...(content.apps ? { apps: content.apps } : {}),
+      ...(content.contentType === "script" ? { script: content.content } : { agentPrompt: content.content }),
+    };
+  });
+}
+
 function collectAutomationArtifact(params: {
   deps: ManageScheduledTasksDeps;
   task: ScheduledTask;
-  steps: Array<WorkflowStep & { apps?: string[] }>;
+  steps: Array<WorkflowStep & { apps?: string[]; script?: string; agentPrompt?: string }>;
   scheduleType: string;
   scheduleValue: string;
   timezone: string;
@@ -608,6 +707,7 @@ function collectAutomationArtifact(params: {
 
   params.deps.automationArtifactCollector?.collect({
     taskId: params.task.id,
+    requiresBuilder: requiresAutomationBuilder(params),
     kind: "New automation",
     title: params.task.title ?? params.task.prompt,
     description: params.task.description ?? `${buildArtifactScheduleLabel(params)}. Delivery: ${deliveryLabel}.`,
@@ -626,6 +726,7 @@ function collectAutomationArtifact(params: {
 
 const LEGACY_AUTHORING_FIELDS = [
   "prompt",
+  "execution_mode",
   "schedule_type",
   "schedule_value",
   "timezone",
@@ -703,7 +804,7 @@ async function handleConfiguredChatAuthoring(
   if (result.kind === "clarification") return text(result.message);
   if (result.kind === "error") return text(`Error: ${result.message}`);
 
-  if (params.action === "add") {
+  if (params.action === "add" || params.action === "update") {
     collectAutomationArtifact({
       deps,
       task: result.task,
@@ -714,7 +815,8 @@ async function handleConfiguredChatAuthoring(
     });
   }
   const verb = params.action === "add" ? "created" : "updated";
-  return text(`Automation ${verb}:\n${JSON.stringify(result.task, null, 2)}`);
+  const testRun = await automaticAutomationTestRun(deps.scheduler, result.task.id);
+  return text([`Automation ${verb}:`, JSON.stringify(result.task, null, 2), testRun].join("\n"));
 }
 
 export async function handleManageScheduledTasks(
@@ -732,7 +834,7 @@ export async function handleManageScheduledTasks(
   const text = (msg: string) => ({ content: [{ type: "text" as const, text: msg }] });
 
   const BROKER_REQUIRED_MSG =
-    "Error: Action steps require a broker-capable integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use agent-only automations.";
+    "Error: Integration-backed action steps require a broker-capable integration provider (e.g. Canvas MCP in skill mode). Configure one in Settings → Integrations, or use a read-only Sketch tool action.";
   const FRESH_SESSION_ONLY_MSG =
     "Error: scheduled automations currently support only 'fresh' session_mode. Omit session_mode or set it to 'fresh'.";
 
@@ -748,13 +850,11 @@ export async function handleManageScheduledTasks(
     return brokerCapabilitySnapshot;
   };
 
-  /** Returns an error response if any action step is present but no broker-capable
-   *  provider is configured. Returns null when validation passes (no action steps,
-   *  or a broker-capable provider exists). */
+  /** Returns an error response when an integration-backed action lacks a broker-capable provider. */
   const ensureBrokerForActionSteps = async (
     candidateSteps: WorkflowStepInput[] | undefined,
   ): Promise<ReturnType<typeof text> | null> => {
-    if (!candidateSteps?.some((s) => s.type === "action")) return null;
+    if (!candidateSteps?.some((s) => workflowStepUsesIntegrationActions(s))) return null;
     if (!(await getBrokerCapabilitySnapshot())) return text(BROKER_REQUIRED_MSG);
     return null;
   };
@@ -964,6 +1064,7 @@ export async function handleManageScheduledTasks(
             title,
             description: params.description ?? null,
             prompt,
+            executionMode: params.execution_mode ?? "hybrid",
             scheduleType: scheduleType as "cron" | "interval" | "once" | "external",
             scheduleValue,
             timezone: resolvedTimezone,
@@ -1020,14 +1121,16 @@ export async function handleManageScheduledTasks(
       const triggerStep = steps.find((s) => s.triggerConfig?.type === "webhook");
       let webhookUrl: string | undefined;
       if (triggerStep && deps.config) {
-        const baseUrl = deps.config.BASE_URL ?? `http://localhost:${deps.config.PORT}`;
-        webhookUrl = `${baseUrl}/api/webhooks/wf/${refreshedTask.id}`;
+        webhookUrl = buildAutomationWebhookUrl(refreshedTask.id, {
+          baseUrl: deps.config.BASE_URL,
+          port: deps.config.PORT,
+        });
       }
 
       collectAutomationArtifact({
         deps,
         task: refreshedTask,
-        steps,
+        steps: withStepContent(stepsForDb, stepContentForDefinition("new-task", steps)),
         scheduleType,
         scheduleValue,
         timezone: resolvedTimezone,
@@ -1035,7 +1138,8 @@ export async function handleManageScheduledTasks(
 
       const response: Record<string, unknown> = { ...refreshedTask };
       if (webhookUrl) response.webhookUrl = webhookUrl;
-      return text(`Automation created:\n${JSON.stringify(response, null, 2)}`);
+      const testRun = await automaticAutomationTestRun(deps.scheduler, refreshedTask.id);
+      return text(["Automation created:", JSON.stringify(response, null, 2), testRun].join("\n"));
     }
 
     case "update": {
@@ -1097,7 +1201,16 @@ export async function handleManageScheduledTasks(
       const { task: updated, failed: refreshFailed } = await refreshTaskAfterMutation(deps.scheduler, saved.row.id);
       if (refreshFailed || !updated)
         return text("Error: automation was saved, but its scheduler state could not be refreshed.");
-      return text(`Automation updated:\n${JSON.stringify(updated, null, 2)}`);
+      collectAutomationArtifact({
+        deps,
+        task: updated,
+        steps: withStepContent(saved.request.steps, saved.request.stepContent),
+        scheduleType: saved.request.scheduleType,
+        scheduleValue: saved.request.scheduleValue,
+        timezone: saved.request.timezone,
+      });
+      const testRun = await automaticAutomationTestRun(deps.scheduler, updated.id);
+      return text(["Automation updated:", JSON.stringify(updated, null, 2), testRun].join("\n"));
     }
 
     case "share": {
@@ -1115,7 +1228,12 @@ export async function handleManageScheduledTasks(
       if (!deps.db) {
         return text("Error: canonical automation persistence is not available in this context.");
       }
-      const definition = await getAutomationDefinition({ db: deps.db, taskId: task_id });
+      const definition = await getAutomationDefinition({
+        db: deps.db,
+        taskId: task_id,
+        webhookBaseUrl: deps.config?.BASE_URL,
+        webhookPort: deps.config?.PORT,
+      });
       if (!definition) return text(`Error: task ${task_id} not found.`);
       return text(JSON.stringify(definition, null, 2));
     }
@@ -1175,10 +1293,10 @@ export async function handleManageScheduledTasks(
           getScheduledTaskQueueKey(guardedTask) === activeQueueKey
         ) {
           await deps.scheduler.enqueueTaskById(task_id);
-          return text(`Automation ${task_id} test run queued and will post back here shortly.`);
+          return text(`Automation ${task_id} manual run queued and will post back here shortly.`);
         }
 
-        const result = await deps.scheduler.executeTaskById(task_id);
+        const result = await deps.scheduler.executeTaskById(task_id, { runMode: "manual" });
         if (!result) {
           const latestRun = deps.automationRunsRepo ? await deps.automationRunsRepo.getLatest(task_id) : undefined;
           return text(

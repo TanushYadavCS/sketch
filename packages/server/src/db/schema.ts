@@ -1,3 +1,4 @@
+import type { AutomationExecutionMode } from "@sketch/shared";
 import type { Generated } from "kysely";
 
 export interface UsersTable {
@@ -793,6 +794,7 @@ export interface ScheduledTasksTable {
   delivery_target: string;
   thread_ts: string | null;
   prompt: string;
+  execution_mode: Generated<AutomationExecutionMode>;
   schedule_type: string;
   schedule_value: string;
   timezone: Generated<string>;
@@ -1506,7 +1508,74 @@ export interface SubEntityEvidenceTable {
   ref_id: string;
 }
 
+export interface QuestionInteractionsTable {
+  id: string;
+  public_code: string;
+  active_scope_key: string | null;
+  active_task_key: string | null;
+  state: string;
+  platform: string;
+  conversation_kind: string;
+  conversation_id: string;
+  thread_id: string | null;
+  requester_principal_id: string;
+  eligible_responder_principal_ids_json: string;
+  session_id: string;
+  task_id: string | null;
+  agent_run_id: string | null;
+  resume_context_json: string;
+  expires_at: string;
+  answered_at: string | null;
+  cancelled_at: string | null;
+  expired_at: string | null;
+  delivery_ref: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface QuestionInteractionItemsTable {
+  interaction_id: string;
+  ordinal: number;
+  question_id: string;
+  prompt: string;
+  options_json: string;
+  allows_custom_response: number;
+  selected_option_id: string | null;
+  custom_response: string | null;
+  answered_by_principal_id: string | null;
+  answered_at: string | null;
+}
+
+export interface QuestionInteractionEventsTable {
+  id: string;
+  interaction_id: string;
+  event_type: string;
+  inbound_event_id: string | null;
+  event_key: string;
+  actor_principal_id: string;
+  payload_json: string;
+  created_at: Generated<string>;
+}
+
+export interface QuestionInteractionDeliveriesTable {
+  id: string;
+  interaction_id: string;
+  attempt: number;
+  transport: string;
+  capability: string;
+  status: string;
+  provider_message_ref: string | null;
+  request_key: string;
+  error_code: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface DB {
+  question_interactions: QuestionInteractionsTable;
+  question_interaction_items: QuestionInteractionItemsTable;
+  question_interaction_events: QuestionInteractionEventsTable;
+  question_interaction_deliveries: QuestionInteractionDeliveriesTable;
   users: UsersTable;
   channels: ChannelsTable;
   whatsapp_creds: WhatsAppCredsTable;

@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb } from "../../test-utils";
 import type { DB } from "../schema";
-import * as migration from "./169-whatsapp-identity-observations";
+import * as migration from "./172-whatsapp-identity-observations";
 
 describe("169 WhatsApp identity observations on SQLite", () => {
   let db: Kysely<DB>;

@@ -24,6 +24,7 @@ import type { Kysely } from "kysely";
 import { getActiveRunContext } from "../agent/active-runs";
 import type { McpServerConfig, runAgent } from "../agent/runner";
 import { resolveAgentRuntimeProviderConfigFromSettings } from "../agent/runtime/provider";
+import type { AutomationCapabilityCallEvent, AutomationCapabilityRegistry } from "../automation/capabilities";
 import type { Config } from "../config";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
@@ -46,6 +47,8 @@ import type { WhatsAppRuntime } from "../whatsapp/runtime";
 import { isSlackDmChannelId, isSlackUserId, resolveWorkflowDelivery } from "../workflows/delivery";
 import {
   type AutomationExecutionResult,
+  type AutomationRunMode,
+  automationManualFailureNotification,
   executeAutomation,
   resolveAutomationWorkspaceDir,
   testAutomationStep,
@@ -214,6 +217,8 @@ export interface TaskSchedulerDeps {
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   limitScheduledAgentExecution: <T>(work: () => Promise<T>) => Promise<T>;
+  automationCapabilityRegistry?: AutomationCapabilityRegistry;
+  recordAutomationCapabilityCall?: (event: AutomationCapabilityCallEvent) => void | Promise<void>;
 }
 
 export class TaskScheduler {
@@ -353,17 +358,22 @@ export class TaskScheduler {
     executionQueue: AgentExecutionQueue,
     trigger?: { provided: boolean; data: unknown; localFileRoot?: string },
     parentAbortSignal?: AbortSignal,
+    preserveTaskState = false,
+    runMode: AutomationRunMode = "production",
+    runId?: string,
   ): Promise<AutomationExecutionResult> {
     const { config, logger, loadIntegrationProvider } = this.deps;
     const delivery = resolveWorkflowDelivery(task);
-    const sendMessage = this.getSendMessage(task);
+    const sendMessage = runMode === "test" ? null : this.getSendMessage(task);
 
-    if (!sendMessage && delivery.mode !== "silent") {
+    if (runMode !== "test" && !sendMessage && delivery.mode !== "silent") {
       throw new Error(`Delivery target for task ${task.id} is unavailable`);
     }
 
     const result = await executeAutomation({
       task,
+      ...(runId ? { runId } : {}),
+      ...(runMode !== "production" ? { runMode } : {}),
       triggerData: trigger?.provided ? trigger.data : { scheduledAt: new Date().toISOString(), taskId: task.id },
       db: this.deps.db,
       logger,
@@ -387,9 +397,11 @@ export class TaskScheduler {
       loadAgentRuntimeProviderConfig: async () =>
         resolveAgentRuntimeProviderConfigFromSettings(await this.deps.settingsRepo.get()),
       trustedLocalFileRoot: trigger?.localFileRoot,
+      automationCapabilityRegistry: this.deps.automationCapabilityRegistry,
+      recordAutomationCapabilityCall: this.deps.recordAutomationCapabilityCall,
     });
 
-    if (!result.aborted) {
+    if (!result.aborted && !preserveTaskState) {
       const now = new Date().toISOString();
       const cron = this.cronInstances.get(task.id);
       const nextRun = task.schedule_type === "once" ? null : (cron?.nextRun()?.toISOString() ?? null);
@@ -412,6 +424,9 @@ export class TaskScheduler {
     executionQueue: AgentExecutionQueue,
     trigger?: { provided: boolean; data: unknown; localFileRoot?: string },
     parentAbortSignal?: AbortSignal,
+    preserveTaskState = false,
+    runMode: AutomationRunMode = "production",
+    runId?: string,
   ): Promise<AutomationExecutionResult | null> {
     const queueKey = this.getQueueKey(task);
     return new Promise<AutomationExecutionResult | null>((resolve, reject) => {
@@ -419,16 +434,48 @@ export class TaskScheduler {
         try {
           const current = await getTask();
           if (!current) {
+            if (runId) await this.failReservedManualRun(task, runId, `Task ${task.id} is no longer runnable`);
             resolve(null);
             return;
           }
-          resolve(await this.executeTaskNow(current, executionQueue, trigger, parentAbortSignal));
+          const result = await this.executeTaskNow(
+            current,
+            executionQueue,
+            trigger,
+            parentAbortSignal,
+            preserveTaskState,
+            runMode,
+            runId,
+          );
+          if (runId && result?.status === "failed") {
+            if (runMode === "manual" && !result.aborted) {
+              await this.failReservedManualRun(task, runId, "Automation run failed");
+            } else {
+              await this.markReservedRunFailed(
+                runId,
+                result.aborted ? "Automation run aborted" : "Automation run failed",
+              );
+            }
+          }
+          resolve(result);
         } catch (err) {
+          if (runId) {
+            await this.failReservedManualRun(task, runId, err instanceof Error ? err.message : String(err)).catch(
+              () => {},
+            );
+          }
           reject(err);
         }
       });
       if (!accepted) {
-        reject(new Error(`Task ${task.id} run shed: queue ${queueKey} backlog is full`));
+        const error = new Error(`Task ${task.id} run shed: queue ${queueKey} backlog is full`);
+        if (runId) {
+          void this.failReservedManualRun(task, runId, error.message)
+            .catch(() => {})
+            .finally(() => reject(error));
+        } else {
+          reject(error);
+        }
       }
     });
   }
@@ -605,18 +652,55 @@ export class TaskScheduler {
     return this.toScheduledTask(updated ?? row);
   }
 
-  async executeTaskById(id: string): Promise<AutomationExecutionResult | null> {
+  async executeTaskById(
+    id: string,
+    options: { preserveTaskState?: boolean; runMode?: AutomationRunMode; runId?: string } = {},
+  ): Promise<AutomationExecutionResult | null> {
     const row = await this.repo.getById(id);
     if (!row) throw new Error(`Task ${id} not found`);
-    if (row.status === "completed" && row.schedule_type === "once") return null;
-    if (row.status !== "active") throw new Error(`Task ${id} is not active`);
+    if (row.status === "completed" && row.schedule_type === "once") {
+      if (options.runId) await this.failReservedManualRun(row, options.runId, `Task ${id} is no longer runnable`);
+      return null;
+    }
+    if (row.status !== "active") {
+      if (options.runId) await this.failReservedManualRun(row, options.runId, `Task ${id} is not active`);
+      throw new Error(`Task ${id} is not active`);
+    }
     return this.enqueueTaskRun(
       row,
       () => this.getRunnableTask(id, true),
       "interactive",
       undefined,
       getSlackParentAbortSignal(),
+      options.preserveTaskState === true || options.runMode === "manual" || options.runMode === "test",
+      options.runMode,
+      options.runId,
     );
+  }
+
+  private async markReservedRunFailed(runId: string, errorMessage: string): Promise<boolean> {
+    const run = await this.deps.automationRunsRepo.getById(runId).catch(() => undefined);
+    if (!run || run.status !== "running") return false;
+    await this.deps.automationRunsRepo.update(runId, {
+      status: "failed",
+      completedAt: new Date().toISOString(),
+      errorMessage,
+    });
+    return true;
+  }
+
+  private async failReservedManualRun(task: ScheduledTaskRow, runId: string, errorMessage: string): Promise<void> {
+    if (!(await this.markReservedRunFailed(runId, errorMessage))) return;
+    const sendMessage = this.getSendMessage(task);
+    if (!sendMessage) return;
+    try {
+      await sendMessage(automationManualFailureNotification(this.deps.config, task, runId));
+    } catch (error) {
+      this.deps.logger.warn(
+        { err: error, taskId: task.id, runId },
+        "TaskScheduler: manual failure notification failed",
+      );
+    }
   }
 
   async enqueueTaskById(id: string, ...triggerData: [] | [unknown] | [unknown, EnqueueTaskOptions]): Promise<void> {
@@ -815,6 +899,8 @@ export class TaskScheduler {
       stepId,
       input: options.input,
       useLatestUpstreamOutput: options.useLatestUpstreamOutput,
+      automationCapabilityRegistry: this.deps.automationCapabilityRegistry,
+      recordAutomationCapabilityCall: this.deps.recordAutomationCapabilityCall,
     });
   }
 

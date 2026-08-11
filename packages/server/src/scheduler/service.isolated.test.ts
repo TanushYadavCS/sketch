@@ -33,6 +33,9 @@ const mockCronInstances: MockCronInstance[] = [];
 let lastExecuteAutomationParams: ExecuteAutomationParams | null = null;
 
 vi.mock("../workflows/runtime", () => ({
+  automationManualFailureNotification: vi.fn(
+    (_config: unknown, task: { id: string }, runId: string) => `manual failure ${task.id}/${runId}`,
+  ),
   executeAutomation: vi.fn().mockImplementation(async (params: ExecuteAutomationParams) => {
     lastExecuteAutomationParams = params;
     return { runId: "mock-run-1", status: "completed", finalOutput: null, stepOutputs: {} };
@@ -1381,6 +1384,90 @@ describe("executeTaskById() queueing", () => {
       steps: row.steps,
     });
   });
+
+  it("marks a reserved manual run failed and sends a deep-link notification when execution rejects", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
+    const executeAutomationMock = vi.mocked(executeAutomation);
+    executeAutomationMock.mockRejectedValue(new Error("queue failure"));
+    const deps = buildDeps(db);
+    deps.automationRunsRepo.getById.mockResolvedValue({ status: "running" });
+    const scheduler = new TaskScheduler(deps as never);
+    const row = await repo.add({ ...baseTaskFields, platform: "slack", delivery_target: "D123" });
+
+    await expect(
+      scheduler.executeTaskById(row.id, { preserveTaskState: true, runMode: "manual", runId: "reserved-run-1" }),
+    ).rejects.toThrow("queue failure");
+
+    await vi.waitFor(() =>
+      expect(deps.automationRunsRepo.update).toHaveBeenCalledWith(
+        "reserved-run-1",
+        expect.objectContaining({ status: "failed", errorMessage: "queue failure" }),
+      ),
+    );
+    expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).toHaveBeenCalledWith(
+      "D123",
+      `manual failure ${row.id}/reserved-run-1`,
+    );
+  });
+
+  it("preserves the automation lifecycle during an automatic test run", async () => {
+    const { executeAutomation } = await import("../workflows/runtime");
+    vi.mocked(executeAutomation).mockResolvedValue({
+      runId: "automatic-test-run",
+      status: "completed",
+      finalOutput: null,
+      stepOutputs: {},
+    });
+    const scheduler = new TaskScheduler(buildDeps(db) as never);
+    const row = await repo.add({
+      ...baseTaskFields,
+      schedule_type: "once",
+      schedule_value: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+
+    await expect(scheduler.executeTaskById(row.id, { preserveTaskState: true })).resolves.toMatchObject({
+      runId: "automatic-test-run",
+    });
+
+    await expect(repo.getById(row.id)).resolves.toMatchObject({
+      status: "active",
+      last_run_at: null,
+      next_run_at: null,
+    });
+  });
+
+  it.each(["slack", "whatsapp"] as const)(
+    "does not invoke %s delivery during an explicit test run",
+    async (platform) => {
+      const { executeAutomation } = await import("../workflows/runtime");
+      const executeAutomationMock = vi.mocked(executeAutomation);
+      executeAutomationMock.mockImplementation(async (params: ExecuteAutomationParams) => {
+        lastExecuteAutomationParams = params;
+        return {
+          runId: "automatic-failed-test-run",
+          status: "failed",
+          finalOutput: null,
+          stepOutputs: { step1: { output: null, status: "failed", duration_ms: 1 } },
+        };
+      });
+      const deps = buildDeps(db);
+      const scheduler = new TaskScheduler(deps as never);
+      const row = await repo.add({
+        ...baseTaskFields,
+        platform,
+        delivery_target: platform === "whatsapp" ? "5511999999999@s.whatsapp.net" : "D123",
+      });
+
+      await scheduler.executeTaskById(row.id, { preserveTaskState: true, runMode: "test" });
+
+      expect(lastExecuteAutomationParams?.runMode).toBe("test");
+      expect(lastExecuteAutomationParams?.sendMessage).toBeUndefined();
+      expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postMessage).not.toHaveBeenCalled();
+      expect((deps._slack as ReturnType<typeof buildMockSlack>)?.postThreadReply).not.toHaveBeenCalled();
+      expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendText).not.toHaveBeenCalled();
+      expect((deps._whatsapp as ReturnType<typeof buildMockWhatsApp>).sendTemplate).not.toHaveBeenCalled();
+    },
+  );
 
   it("serializes manual runs through the scheduler queue", async () => {
     const { executeAutomation } = await import("../workflows/runtime");

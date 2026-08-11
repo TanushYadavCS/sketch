@@ -22,14 +22,14 @@ export type AutomationRunRow = {
 
 export function createAutomationRunsRepository(db: Kysely<DB>) {
   return {
-    async create(data: { taskId: string; triggerData?: unknown }): Promise<string> {
-      const id = randomUUID();
+    async create(data: { id?: string; taskId: string; triggerData?: unknown }): Promise<string> {
+      const id = data.id ?? randomUUID();
       await db
         .insertInto("automation_runs")
         .values({
           id,
           task_id: data.taskId,
-          trigger_data: data.triggerData ? JSON.stringify(data.triggerData) : null,
+          trigger_data: data.triggerData === undefined ? null : JSON.stringify(data.triggerData),
           status: "running",
           step_outputs: "{}",
           started_at: new Date().toISOString(),

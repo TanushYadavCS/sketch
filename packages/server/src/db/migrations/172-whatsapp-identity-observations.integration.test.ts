@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestPgDb } from "../../test-utils";
 import { createUserWhatsAppLidRepository } from "../repositories/user-whatsapp-lids";
 import type { DB } from "../schema";
-import * as migration from "./169-whatsapp-identity-observations";
+import * as migration from "./172-whatsapp-identity-observations";
 
 describe("169 WhatsApp identity observations on Postgres", () => {
   let db: Kysely<DB>;

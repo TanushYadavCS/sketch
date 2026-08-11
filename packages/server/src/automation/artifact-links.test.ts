@@ -4,6 +4,7 @@ import { appendAutomationBuilderLinks } from "./artifact-links";
 
 const artifact: AutomationArtifact = {
   taskId: "task-123",
+  requiresBuilder: true,
   kind: "New automation",
   title: "Daily account brief",
   description: "Summarizes customer updates.",

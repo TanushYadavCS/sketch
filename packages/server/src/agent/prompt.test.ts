@@ -1,10 +1,27 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAutomationMessageDeliveryLines,
   buildSketchContext,
   buildSystemContext,
   formatTimeAgo,
   getImageAttachmentPathsFromSketchContext,
 } from "./prompt";
+
+describe("buildAutomationMessageDeliveryLines", () => {
+  it("provides Slack-safe human-readable delivery rules", () => {
+    const result = buildAutomationMessageDeliveryLines("slack").join("\n");
+
+    expect(result).toContain("human-readable message body as plain text");
+    expect(result).toContain("JSON.stringify output");
+    expect(result).toContain("short headings and bullet lists");
+    expect(result).toContain("relevant time window");
+    expect(result).toContain("Slack mrkdwn");
+  });
+
+  it("provides WhatsApp-safe link rules", () => {
+    expect(buildAutomationMessageDeliveryLines("whatsapp").join("\n")).toContain("write URLs inline");
+  });
+});
 
 describe("buildSystemContext", () => {
   describe("agent instructions overlay", () => {
@@ -360,6 +377,12 @@ describe("buildSystemContext", () => {
       expect(result).toContain("GitHub-flavored Markdown");
       expect(result).toContain("[descriptive link text](url)");
       expect(result).toContain("fenced code blocks");
+    });
+
+    it("teaches web agents to ask bounded choice questions", () => {
+      const result = buildSystemContext({ platform: "web" });
+      expect(result).toContain("use AskUserQuestion with two to four concrete options");
+      expect(result).toContain("stop after the tool call");
     });
 
     it("tells the agent to resolve integration status without UI-render side effects", () => {

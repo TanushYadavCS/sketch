@@ -204,6 +204,170 @@ describe("agent runtime core", () => {
     expect(model.doStreamCalls).toHaveLength(1);
   });
 
+  it("ends the run immediately after a pending-question tool call", async () => {
+    const model = new MockLanguageModelV4({
+      provider: "mock-anthropic",
+      modelId: "claude-sonnet-4-6",
+      doStream: [
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: "tool-call", toolCallId: "question-1", toolName: "AskUserQuestion", input: "{}" },
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: undefined },
+                usage: usage(10, 1),
+              },
+            ],
+          }),
+        },
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: "text-start", id: "text-2" },
+              { type: "text-delta", id: "text-2", delta: "should not run" },
+              {
+                type: "finish",
+                finishReason: { unified: "stop", raw: undefined },
+                usage: usage(10, 1),
+              },
+            ],
+          }),
+        },
+      ],
+    });
+
+    const result = await runAgentRuntimeCore({
+      provider: mockProvider(model),
+      prompt: "ask the user",
+      systemPrompt: "system",
+      maxTurns: 5,
+      stopAfterToolNames: ["AskUserQuestion"],
+      persistSession: false,
+      tools: {
+        AskUserQuestion: tool({
+          inputSchema: z.object({}),
+          execute: async () => ({ pending: true }),
+        }),
+      },
+    });
+
+    expect(result.stopReason).toBe("tool_use");
+    expect(result.finalText).toBe("");
+    expect(model.doStreamCalls).toHaveLength(1);
+  });
+
+  it("continues after a stop-after tool call has invalid input", async () => {
+    const model = new MockLanguageModelV4({
+      provider: "mock-anthropic",
+      modelId: "claude-sonnet-4-6",
+      doStream: [
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: "tool-call", toolCallId: "question-1", toolName: "AskUserQuestion", input: "{}" },
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: undefined },
+                usage: usage(10, 1),
+              },
+            ],
+          }),
+        },
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: "text-start", id: "text-2" },
+              { type: "text-delta", id: "text-2", delta: "Please provide the missing details." },
+              {
+                type: "finish",
+                finishReason: { unified: "stop", raw: undefined },
+                usage: usage(10, 5),
+              },
+            ],
+          }),
+        },
+      ],
+    });
+
+    const result = await runAgentRuntimeCore({
+      provider: mockProvider(model),
+      prompt: "ask the user",
+      systemPrompt: "system",
+      maxTurns: 5,
+      stopAfterToolNames: ["AskUserQuestion"],
+      persistSession: false,
+      tools: {
+        AskUserQuestion: tool({
+          inputSchema: z.object({ prompt: z.string() }),
+          execute: async () => ({ pending: true }),
+        }),
+      },
+    });
+
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.finalText).toBe("Please provide the missing details.");
+    expect(model.doStreamCalls).toHaveLength(2);
+  });
+
+  it("stops after a matching successful tool result", async () => {
+    const model = new MockLanguageModelV4({
+      provider: "mock-anthropic",
+      modelId: "claude-sonnet-4-6",
+      doStream: [
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: "tool-call", toolCallId: "skill-1", toolName: "Skill", input: '{"skill":"create-automation"}' },
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: undefined },
+                usage: usage(10, 1),
+              },
+            ],
+          }),
+        },
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: "text-start", id: "text-2" },
+              { type: "text-delta", id: "text-2", delta: "should not run" },
+              {
+                type: "finish",
+                finishReason: { unified: "stop", raw: undefined },
+                usage: usage(10, 3),
+              },
+            ],
+          }),
+        },
+      ],
+    });
+
+    const result = await runAgentRuntimeCore({
+      provider: mockProvider(model),
+      prompt: "create an automation",
+      systemPrompt: "system",
+      maxTurns: 5,
+      stopAfterToolCall: ({ name, input }) =>
+        name === "Skill" &&
+        typeof input === "object" &&
+        input !== null &&
+        "skill" in input &&
+        input.skill === "create-automation",
+      persistSession: false,
+      tools: {
+        Skill: tool({
+          inputSchema: z.object({ skill: z.string() }),
+          execute: async () => "skill instructions",
+        }),
+      },
+    });
+
+    expect(result.stopReason).toBe("tool_use");
+    expect(result.finalText).toBe("");
+    expect(model.doStreamCalls).toHaveLength(1);
+  });
+
   it("wraps provider failures in a typed runtime provider error", async () => {
     const model = new MockLanguageModelV4({
       provider: "mock-anthropic",

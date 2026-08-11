@@ -80,6 +80,52 @@ describe("AI SDK custom Sketch tool provider", () => {
     expect(tools.mcp__sketch__VisualAnalysis).toBeDefined();
   });
 
+  it("keeps bounded question tools on web and exposes channels with a registered capability", async () => {
+    const effects = createAgentRuntimeCustomToolEffects();
+    const provider = createDefaultAgentRuntimeCustomToolProvider({
+      effects,
+      transcriptionEnabled: false,
+      visionAnalysisEnabled: false,
+      visionConfig: null,
+    });
+    const webTools = await provider.createTools(params({ responseSurface: "web" }));
+    const slackTools = await provider.createTools(params({ responseSurface: "slack" }));
+    const enabledSlackTools = await provider.createTools(
+      params({
+        responseSurface: "slack",
+        questionInteractionCapabilities: {
+          available: true,
+          interactiveSingleSelect: false,
+          interactiveBatch: false,
+          nativeCustomResponse: false,
+          textFallback: true,
+          cancelControl: false,
+        },
+      }),
+    );
+    const questionTool = webTools.mcp__sketch__AskUserQuestion as SmokeTool;
+    const input = {
+      questionId: "delivery-mode",
+      question: "Where should the result go?",
+      options: [
+        { id: "slack", label: "Slack" },
+        { id: "email", label: "Email" },
+      ],
+    };
+
+    expect(questionTool).toBeDefined();
+    expect(webTools.mcp__sketch__AskUserQuestions).toBeDefined();
+    expect(slackTools.mcp__sketch__AskUserQuestion).toBeUndefined();
+    expect(enabledSlackTools.mcp__sketch__AskUserQuestion).toBeDefined();
+    expect(enabledSlackTools.mcp__sketch__AskUserQuestions).toBeDefined();
+    await questionTool.execute?.(input, {} as never);
+    expect(effects.drain(params({ responseSurface: "web" })).pendingQuestion).toEqual({
+      id: "delivery-mode",
+      prompt: "Where should the result go?",
+      options: input.options,
+    });
+  });
+
   it("passes malformed agent output calls to the handler for rejection tracking", async () => {
     const effects = createAgentRuntimeCustomToolEffects();
     const provider = createDefaultAgentRuntimeCustomToolProvider({

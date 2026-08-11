@@ -33,6 +33,8 @@ export interface RunAgentRuntimeCoreParams {
   systemPrompt: string;
   tools?: ToolSet;
   maxTurns: number;
+  stopAfterToolNames?: readonly string[];
+  stopAfterToolCall?: (tool: { name: string; input: unknown; output: unknown }) => boolean;
   abortSignal?: AbortSignal;
   events?: AgentRuntimeEvents;
   sessionId?: string;
@@ -65,6 +67,19 @@ function mapFinishReason(reason: FinishReason | undefined): AgentRuntimeStopReas
 
 function objectInput(input: unknown): Record<string, unknown> {
   return input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+}
+
+function matchesSuccessfulToolResult(predicate: (tool: { name: string; input: unknown; output: unknown }) => boolean) {
+  return ({ steps }: { steps: Array<StepResult<ToolSet>> }) =>
+    steps.at(-1)?.toolResults.some((toolResult) => {
+      const result = toolResult as { type?: string; toolName: string; input: unknown; output: unknown };
+      if (result.type === "tool-error") return false;
+      return predicate({ name: result.toolName, input: result.input, output: result.output });
+    }) ?? false;
+}
+
+function hasSuccessfulToolResult(toolNames: readonly string[]) {
+  return matchesSuccessfulToolResult(({ name }) => toolNames.includes(name));
 }
 
 function errorMessage(error: unknown): string {
@@ -242,7 +257,11 @@ export async function runAgentRuntimeCore(params: RunAgentRuntimeCoreParams): Pr
     model: params.provider.model,
     tools: params.tools ?? {},
     instructions: preparedPrompt.instructions,
-    stopWhen: stepCountIs(params.maxTurns),
+    stopWhen: [
+      stepCountIs(params.maxTurns),
+      ...(params.stopAfterToolNames?.length ? [hasSuccessfulToolResult(params.stopAfterToolNames)] : []),
+      ...(params.stopAfterToolCall ? [matchesSuccessfulToolResult(params.stopAfterToolCall)] : []),
+    ],
     onToolExecutionStart: async (event) => {
       await params.events?.onToolStart?.({
         name: event.toolCall.toolName,
