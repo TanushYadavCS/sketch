@@ -1,9 +1,9 @@
 import type { Expression, Kysely } from "kysely";
 import { type CrossConversationSearchMessage, createConversationRepository } from "../../db/repositories/conversations";
 import type { DB } from "../../db/schema";
+import { normalizeWhatsAppIdentityLid, normalizeWhatsAppIdentityPhone } from "../../identity-normalization";
 import { parseSlackRosterSnapshot } from "../../slack/identity-resolution";
 import { SLACK_MEMBERSHIP_FRESHNESS_MS } from "../../slack/membership-reconciler";
-import { normalizeWhatsAppIdentityPhone } from "../../whatsapp/identity-resolution";
 import { sanitizeWhatsAppDisplayText } from "../../whatsapp/privacy";
 import { whatsappJidToPhoneE164 } from "../../whatsapp/provider";
 import { renderSlackChannelHistoryMessages } from "./slack-channel-history";
@@ -49,7 +49,13 @@ export async function resolveChatHistoryAccessIdentity(deps: SketchMcpDeps): Pro
   return {
     slackUserId: user?.slack_user_id?.trim() || null,
     whatsappPhone: normalizeWhatsAppIdentityPhone(user?.whatsapp_number ?? null),
-    whatsappLids: [...new Set([...(user?.whatsapp_lid ? [user.whatsapp_lid] : []), ...lids.map((row) => row.lid)])],
+    whatsappLids: [
+      ...new Set(
+        [...(user?.whatsapp_lid ? [user.whatsapp_lid] : []), ...lids.map((row) => row.lid)]
+          .map((lid) => normalizeWhatsAppIdentityLid(lid))
+          .filter((lid): lid is string => lid !== null),
+      ),
+    ],
   };
 }
 
@@ -73,7 +79,7 @@ function phoneFromParticipantJid(jid: string): string | null {
 }
 
 function lidFromParticipantRow(row: { participant_jid: string; lid: string | null }): string | null {
-  return row.lid ?? (row.participant_jid.endsWith("@lid") ? row.participant_jid : null);
+  return normalizeWhatsAppIdentityLid(row.lid ?? (row.participant_jid.endsWith("@lid") ? row.participant_jid : null));
 }
 
 export class ChatHistoryAccessResolver {

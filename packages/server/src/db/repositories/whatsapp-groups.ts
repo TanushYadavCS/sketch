@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type Insertable, type Kysely, type Selectable, type Transaction, sql } from "kysely";
+import { normalizeWhatsAppIdentityLid } from "../../identity-normalization";
 import type {
   DB,
   WhatsAppGroupMemberLabelsTable,
@@ -58,7 +59,7 @@ function normalizedParticipant(participant: WhatsAppGroupParticipantInput) {
   return {
     participantJid: participant.participantJid,
     phoneE164: participant.phoneE164 ? normalizeContactPointValue("whatsapp", participant.phoneE164) : null,
-    lid: participant.lid?.trim().toLowerCase() || null,
+    lid: normalizeWhatsAppIdentityLid(participant.lid),
     adminRole: participant.adminRole ?? null,
   };
 }

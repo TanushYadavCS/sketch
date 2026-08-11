@@ -579,7 +579,7 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
       expect(after.ok && after.body.messages).toHaveLength(0);
     });
 
-    it("authorizes a WhatsApp group through a non-legacy user LID alias", async () => {
+    it("authorizes a device-qualified group LID through a canonical non-legacy user alias", async () => {
       const seeded = await seedWhatsAppGroup(db, {
         text: "stable lid mapping marker",
         members: ["other@example.com"],
@@ -614,9 +614,9 @@ function runSuite(label: string, getDb: () => Promise<Kysely<DB>>, opts: { share
         },
         {
           group_jid: seeded.groupJid,
-          participant_jid: "86702773280883@lid",
+          participant_jid: "86702773280883:7@lid",
           phone_e164: null,
-          lid: "86702773280883@lid",
+          lid: "86702773280883:7@lid",
           admin_role: null,
           last_seen_at: "2026-07-17T09:00:00.000Z",
         },

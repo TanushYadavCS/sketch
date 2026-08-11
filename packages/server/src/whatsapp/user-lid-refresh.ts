@@ -41,6 +41,8 @@ const DEFAULT_INTER_REQUEST_JITTER_MS = 1_000;
 export class WhatsAppUserLidRefresh {
   private timer: NodeJS.Timeout | null = null;
   private running: Promise<void> | null = null;
+  private captureQueue: Promise<void> = Promise.resolve();
+  private hasCaptured = false;
   private readonly now: () => Date;
 
   constructor(private readonly options: WhatsAppUserLidRefreshOptions) {
@@ -73,10 +75,28 @@ export class WhatsAppUserLidRefresh {
 
   async capture(userId: string, phoneE164: string): Promise<void> {
     if (!this.options.whatsapp.resolvePhoneToLid) return;
+    const capture = this.captureQueue.then(async () => {
+      await this.captureNow(userId, phoneE164);
+    });
+    this.captureQueue = capture.catch(() => undefined);
+    return capture;
+  }
+
+  private async captureNow(userId: string, phoneE164: string): Promise<void> {
+    const health = await this.options.whatsapp.health().catch((error) => {
+      this.options.logger.warn(
+        { operation: "check_whatsapp_lid_capture_health", ...safeWhatsAppErrorFields(error) },
+        "WhatsApp LID capture health check failed",
+      );
+      return null;
+    });
+    if (health?.socketState !== "connected") return;
+    if (this.hasCaptured) await this.sleepBeforeNextRequest();
+    this.hasCaptured = true;
     const observedAt = this.now().toISOString();
     let providerCurrent = false;
     try {
-      const resolution = await this.options.whatsapp.resolvePhoneToLid(phoneE164);
+      const resolution = await this.options.whatsapp.resolvePhoneToLid?.(phoneE164);
       providerCurrent = resolution?.source === "provider-current";
       if (resolution) {
         const attached = await this.options.store.attachIfPhoneUnchanged(userId, phoneE164, resolution.lid, observedAt);
@@ -118,8 +138,7 @@ export class WhatsAppUserLidRefresh {
       (candidate): candidate is WhatsAppLidRefreshCandidate & { whatsapp_number: string } =>
         candidate.whatsapp_number !== null,
     );
-    for (const [index, candidate] of refreshable.entries()) {
-      if (index > 0) await this.sleepBeforeNextRequest();
+    for (const candidate of refreshable) {
       await this.capture(candidate.id, candidate.whatsapp_number);
     }
   }

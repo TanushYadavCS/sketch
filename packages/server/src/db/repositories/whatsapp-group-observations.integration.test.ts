@@ -58,6 +58,12 @@ function observationSuite(label: string, createDb: DbFactory) {
         }),
       ]);
 
+      const deviceQualifiedGroup = await seedGroup("device-qualified");
+      await repo.refreshParticipants(deviceQualifiedGroup, [{ participantJid: "12345:7@lid", lid: "12345:7@lid" }]);
+      await expect(repo.listParticipants(deviceQualifiedGroup)).resolves.toEqual([
+        expect.objectContaining({ participant_jid: "12345:7@lid", lid: "12345@lid" }),
+      ]);
+
       const mergeGroup = await seedGroup("merge");
       await repo.refreshParticipants(mergeGroup, [
         { participantJid: "phone@s.whatsapp.net", phoneE164: "+14155550200" },

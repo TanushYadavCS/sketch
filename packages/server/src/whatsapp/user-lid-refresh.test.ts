@@ -35,13 +35,15 @@ describe("WhatsAppUserLidRefresh", () => {
       .mockResolvedValueOnce({ lid: "54321@lid", source: "baileys-fallback" })
       .mockResolvedValueOnce(null);
     const refresh = new WhatsAppUserLidRefresh({
-      whatsapp: { health: vi.fn() as never, resolvePhoneToLid },
+      whatsapp: { health: vi.fn(async () => ({ socketState: "connected" }) as never), resolvePhoneToLid },
       store: {
         listDue: vi.fn(async () => []),
         attachIfPhoneUnchanged: vi.fn(async () => "attached" as const),
         markAttempt,
       },
       logger: createTestLogger(),
+      interRequestDelayMs: 0,
+      interRequestJitterMs: 0,
       now: () => new Date("2026-08-10T10:00:00.000Z"),
     });
 
@@ -140,6 +142,68 @@ describe("WhatsAppUserLidRefresh", () => {
     await refresh.wake();
 
     expect(events).toEqual(["resolve:+14155551234", "sleep:1500", "resolve:+14155550000"]);
+  });
+
+  it("serializes and paces concurrent immediate captures", async () => {
+    const active = { count: 0, max: 0 };
+    const sleep = vi.fn(async () => undefined);
+    const whatsapp = {
+      health: vi.fn(async () => ({ socketState: "connected" }) as never),
+      resolvePhoneToLid: vi.fn(async function (this: unknown) {
+        expect(this).toBe(whatsapp);
+        active.count += 1;
+        active.max = Math.max(active.max, active.count);
+        await Promise.resolve();
+        active.count -= 1;
+        return null;
+      }),
+    };
+    const refresh = new WhatsAppUserLidRefresh({
+      whatsapp,
+      store: {
+        listDue: vi.fn(async () => []),
+        attachIfPhoneUnchanged: vi.fn(async () => "attached" as const),
+        markAttempt: vi.fn(async () => true),
+      },
+      logger: createTestLogger(),
+      interRequestDelayMs: 1_000,
+      interRequestJitterMs: 1_000,
+      random: () => 0.5,
+      sleep,
+    });
+
+    await Promise.all([
+      refresh.capture("user-1", "+14155551234"),
+      refresh.capture("user-2", "+14155550000"),
+      refresh.capture("user-3", "+14155550111"),
+    ]);
+
+    expect(active.max).toBe(1);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenNthCalledWith(1, 1_500);
+    expect(sleep).toHaveBeenNthCalledWith(2, 1_500);
+  });
+
+  it("does not consume the daily attempt while WhatsApp is disconnected", async () => {
+    const resolvePhoneToLid = vi.fn(async () => null);
+    const markAttempt = vi.fn(async () => true);
+    const refresh = new WhatsAppUserLidRefresh({
+      whatsapp: {
+        health: vi.fn(async () => ({ socketState: "disconnected" }) as never),
+        resolvePhoneToLid,
+      },
+      store: {
+        listDue: vi.fn(async () => []),
+        attachIfPhoneUnchanged: vi.fn(async () => "attached" as const),
+        markAttempt,
+      },
+      logger: createTestLogger(),
+    });
+
+    await refresh.capture("user-1", "+14155551234");
+
+    expect(resolvePhoneToLid).not.toHaveBeenCalled();
+    expect(markAttempt).not.toHaveBeenCalled();
   });
 
   it("contains and sanitizes detached list and attempt timestamp failures", async () => {
