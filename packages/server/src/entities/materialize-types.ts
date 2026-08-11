@@ -62,7 +62,12 @@ export const ENTITY_INDEX_COLUMNS = [
  */
 export type IndexEntityRow = Pick<EntityRow, (typeof ENTITY_INDEX_COLUMNS)[number]>;
 
+export const lookupIndexScopeBrand: unique symbol = Symbol("lookupIndexScope");
+
+export type LookupIndexScope = { kind: "full" } | { kind: "scoped"; types: ReadonlySet<ProposeEntityType> };
+
 export interface LookupIndex {
+  readonly [lookupIndexScopeBrand]: LookupIndexScope;
   entitiesByType: Map<ProposeEntityType, IndexEntityRow[]>;
   byNormalizedName: Map<string, IndexEntityRow[]>;
   byNormalizedAlias: Map<string, IndexEntityRow[]>;
