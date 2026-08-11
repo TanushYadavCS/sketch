@@ -1,4 +1,4 @@
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import type { Logger } from "pino";
 import type { StageOutcome } from "../connectors/enrichment-stage-report";
 import { createEntityDomainsRepository } from "../db/repositories/entity-domains";
@@ -83,6 +83,7 @@ interface FactTypeFilter {
   factType?: string;
   factTypesIn?: readonly string[];
   factTypesNotIn?: readonly string[];
+  indexedFileIds?: readonly string[];
 }
 
 /**
@@ -151,6 +152,12 @@ export function buildOpenFactCandidateQuery(
   if (filter.factType) query = query.where("fact_type", "=", filter.factType);
   if (filter.factTypesIn) query = query.where("fact_type", "in", [...filter.factTypesIn]);
   if (filter.factTypesNotIn) query = query.where("fact_type", "not in", [...filter.factTypesNotIn]);
+  if (filter.indexedFileIds) {
+    query =
+      filter.indexedFileIds.length === 0
+        ? query.where(sql<boolean>`1 = 0`)
+        : query.where("indexed_file_id", "in", [...filter.indexedFileIds]);
+  }
   return query;
 }
 
@@ -383,6 +390,34 @@ async function materializeUnmaterializedFactsInner(
     deferredBelowThreshold: 0,
   };
 
+  const factTypesFilter = opts.factTypes && opts.factTypes.length > 0 ? opts.factTypes : null;
+  const indexedFileIdsFilter = opts.indexedFileIds ? [...new Set(opts.indexedFileIds.filter(Boolean))] : null;
+
+  let countQuery = db
+    .selectFrom("indexed_file_facts")
+    .select((eb) => eb.fn.countAll().as("count"))
+    .where("deleted_at", "is", null)
+    .where("materialized_at", "is", null)
+    .where("materialization_attempts", "<", MAX_MATERIALIZATION_ATTEMPTS);
+  if (factTypesFilter) {
+    countQuery = countQuery.where("fact_type", "in", factTypesFilter);
+  }
+  if (indexedFileIdsFilter) {
+    countQuery =
+      indexedFileIdsFilter.length === 0
+        ? countQuery.where(sql<boolean>`1 = 0`)
+        : countQuery.where("indexed_file_id", "in", indexedFileIdsFilter);
+  }
+  const total = Number((await countQuery.executeTakeFirst())?.count ?? 0);
+  let completed = 0;
+  opts.onProgress?.({ phase: "materialize", completed: 0, total });
+
+  if (total === 0) {
+    await cleanupEmptyRelationships(db);
+    logger.info({ summary, ...heapStats(startHeapMb) }, "Source-fact materialization complete");
+    return summary;
+  }
+
   const deps = await buildMaterializeDeps(db, {
     llmPromotionThreshold: opts.llmPromotionThreshold,
     llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
@@ -394,20 +429,6 @@ async function materializeUnmaterializedFactsInner(
     birthGateDryRun: opts.birthGateDryRun,
     embeddingProvider: opts.embeddingProvider,
   });
-  const factTypesFilter = opts.factTypes && opts.factTypes.length > 0 ? opts.factTypes : null;
-
-  let countQuery = db
-    .selectFrom("indexed_file_facts")
-    .select((eb) => eb.fn.countAll().as("count"))
-    .where("deleted_at", "is", null)
-    .where("materialized_at", "is", null)
-    .where("materialization_attempts", "<", MAX_MATERIALIZATION_ATTEMPTS);
-  if (factTypesFilter) {
-    countQuery = countQuery.where("fact_type", "in", factTypesFilter);
-  }
-  const total = Number((await countQuery.executeTakeFirst())?.count ?? 0);
-  let completed = 0;
-  opts.onProgress?.({ phase: "materialize", completed: 0, total });
 
   const processFact = async (fact: IndexedFileFactRow): Promise<void> => {
     if (opts.shouldCancel?.()) throw new Error("Re-enrich stopped");
@@ -490,9 +511,14 @@ async function materializeUnmaterializedFactsInner(
    * open set; until then every open candidate passes, so this bounds retained raw
    * rows to one page but does not reduce total payload reads.
    */
+  const scopedFilter = (filter: FactTypeFilter): FactTypeFilter => ({
+    ...filter,
+    ...(indexedFileIdsFilter ? { indexedFileIds: indexedFileIdsFilter } : {}),
+  });
+
   const sweepFactType = (filter: FactTypeFilter) =>
     forEachFactCandidatePage(
-      (cursor, limit) => fetchOpenFactCandidateBatch(db, cursor, limit, filter),
+      (cursor, limit) => fetchOpenFactCandidateBatch(db, cursor, limit, scopedFilter(filter)),
       (ids) => fetchOpenFactRowsByIds(db, ids),
       async (facts) => {
         for (const fact of facts) await processFact(fact);

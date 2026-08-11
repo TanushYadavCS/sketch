@@ -16,6 +16,7 @@ import {
   cleanupRelationshipEvidenceForFacts,
   materializeUnmaterializedFacts,
 } from "./materialize";
+import { indexedFileIdsForMaterializeScope } from "./materialize-types";
 import { type RecreateSummary, recreateEntityGraph } from "./recreate";
 import { beginRecreateLock, endRecreateLock } from "./recreate-state";
 
@@ -563,6 +564,7 @@ export async function runReenrichJob(deps: ReenrichDeps): Promise<ReenrichSummar
           llmPromotionThreshold: deps.llmPromotionThreshold,
           featureAutoMintThreshold: deps.featureAutoMintThreshold,
           factTypes: ["llm_relation"],
+          indexedFileIds: indexedFileIdsForMaterializeScope(deps.fileIds),
           shouldCancel: deps.shouldCancel,
         });
       }

@@ -1862,6 +1862,7 @@ async function reconcileLlmExtractionFacts(
     await materializeUnmaterializedFacts(db, deps.logger, {
       embeddingProvider: deps.embeddingProvider,
       factTypes: ["llm_extracted", "llm_relation", "feature"],
+      indexedFileIds: [file.id],
     });
     deps.stageReport?.({
       stage: "reconcileFacts",

@@ -854,7 +854,7 @@ describe("smartEnrichFile — LLM extraction facts", () => {
     expect(await readLearnedFacts(entity.id)).toEqual(firstFacts);
   });
 
-  it("persists LLM facts on first sighting, defers materialization, and promotes once threshold reached", async () => {
+  it("persists LLM facts on first sighting and materializes only the current file once threshold is reached", async () => {
     const firstFileId = randomUUID();
     const secondFileId = randomUUID();
     await seedFile(db, firstFileId, { content: "Jane Doe discussed the launch plan.", contentHash: "hash-1" });
@@ -909,16 +909,19 @@ describe("smartEnrichFile — LLM extraction facts", () => {
 
     const factsAfter = await db
       .selectFrom("indexed_file_facts")
-      .selectAll()
+      .select(["indexed_file_id", "materialized_at"])
       .where("fact_type", "=", "llm_extracted")
       .execute();
-    expect(factsAfter.every((f) => f.materialized_at !== null)).toBe(true);
+    const materializedAtByFile = new Map(factsAfter.map((fact) => [fact.indexed_file_id, fact.materialized_at]));
+    expect(materializedAtByFile.get(firstFileId)).toBeNull();
+    expect(materializedAtByFile.get(secondFileId)).toEqual(expect.any(String));
 
     const mentions = await db
       .selectFrom("entity_mentions")
       .select(["source", "confidence", "relation", "indexed_file_id"])
       .execute();
-    expect(mentions.length).toBeGreaterThanOrEqual(2);
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0].indexed_file_id).toBe(secondFileId);
     expect(mentions.every((m) => m.source === "llm_extraction" && m.confidence === "INFERRED")).toBe(true);
   });
 

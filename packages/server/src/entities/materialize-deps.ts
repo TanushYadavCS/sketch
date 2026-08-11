@@ -183,7 +183,6 @@ export async function buildLookupIndex(
     }
   }
   const dedupPoolsByType = new Map<ProposeEntityType, ReturnType<typeof buildCandidatePool>>();
-  for (const t of indexedTypes) dedupPoolsByType.set(t, buildCandidatePool(dedupEntriesByType.get(t) ?? []));
   const personScopeKeysByEntityId = includePersonScopeKeys
     ? await buildPersonScopeKeys(
         db,
@@ -195,11 +194,32 @@ export async function buildLookupIndex(
     entitiesByType,
     byNormalizedName,
     byNormalizedAlias,
+    dedupEntriesByType,
     dedupPoolsByType,
     bySourceRef,
     companyIdsByDomain,
     personScopeKeysByEntityId,
   };
+}
+
+function candidatePoolEntriesForEntity(entity: IndexEntityRow): CandidatePoolEntry[] {
+  return [
+    { entityId: entity.id, valueKind: "name", value: entity.name },
+    ...parseAliasesString(entity.aliases).map((value) => ({
+      entityId: entity.id,
+      valueKind: "alias" as const,
+      value,
+    })),
+  ];
+}
+
+function getOrBuildCandidatePool(index: LookupIndex, entityType: ProposeEntityType) {
+  assertLookupIndexIncludesType(index, entityType);
+  const existing = index.dedupPoolsByType.get(entityType);
+  if (existing) return existing;
+  const pool = buildCandidatePool(index.dedupEntriesByType.get(entityType) ?? []);
+  index.dedupPoolsByType.set(entityType, pool);
+  return pool;
 }
 
 async function buildPersonScopeKeys(db: Kysely<DB>, persons: IndexEntityRow[]): Promise<Map<string, string[]>> {
@@ -372,17 +392,10 @@ export function registerEntity(index: LookupIndex, entity: IndexEntityRow): void
       index.byNormalizedAlias.set(aliasKey, [entity]);
     }
   }
+  const dedupEntries = candidatePoolEntriesForEntity(entity);
+  index.dedupEntriesByType.get(entityType)?.push(...dedupEntries);
   const pool = index.dedupPoolsByType.get(entityType);
-  if (pool) {
-    addToCandidatePool(pool, [
-      { entityId: entity.id, valueKind: "name", value: entity.name },
-      ...parseAliasesString(entity.aliases).map((value) => ({
-        entityId: entity.id,
-        valueKind: "alias" as const,
-        value,
-      })),
-    ]);
-  }
+  if (pool) addToCandidatePool(pool, dedupEntries);
   if (entityType === "person" && existingPersonScopeKeys) {
     index.personScopeKeysByEntityId.set(entity.id, existingPersonScopeKeys);
   }
@@ -403,6 +416,10 @@ function unregisterEntity(index: LookupIndex, entityId: string): void {
   }
   removeEntityFromMapBuckets(index.byNormalizedName, entityId);
   removeEntityFromMapBuckets(index.byNormalizedAlias, entityId);
+  for (const [type, entries] of index.dedupEntriesByType) {
+    const filtered = entries.filter((entry) => entry.entityId !== entityId);
+    if (filtered.length !== entries.length) index.dedupEntriesByType.set(type, filtered);
+  }
   for (const pool of index.dedupPoolsByType.values()) {
     removeFromCandidatePool(pool, entityId);
   }
@@ -543,8 +560,7 @@ export function createEntityLookupFromIndex(opts: {
     },
     findNameDedupCandidates: (entityType, name) => {
       assertLookupIndexIncludesType(index, entityType);
-      const pool = index.dedupPoolsByType.get(entityType);
-      if (!pool) return [];
+      const pool = getOrBuildCandidatePool(index, entityType);
       const entitiesById = new Map((index.entitiesByType.get(entityType) ?? []).map((entity) => [entity.id, entity]));
       const strict = findStrictMatches(name, pool);
       const strictEntityIds = new Set(strict.map((match) => match.entityId));

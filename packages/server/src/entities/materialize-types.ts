@@ -9,7 +9,7 @@ import type { EntitySuppressionRepository } from "../db/repositories/entity-supp
 import type { IndexedFileFactType } from "../db/repositories/indexed-file-facts";
 import type { DB, EntitiesTable, IndexedFileFactsTable } from "../db/schema";
 import type { MentionType } from "./graph";
-import type { CandidatePool } from "./name-dedup";
+import type { CandidatePool, CandidatePoolEntry } from "./name-dedup";
 import type { Entity, EntityLookup, ProposeEntityType } from "./propose";
 
 export interface ReplayFactsSummary {
@@ -71,6 +71,7 @@ export interface LookupIndex {
   entitiesByType: Map<ProposeEntityType, IndexEntityRow[]>;
   byNormalizedName: Map<string, IndexEntityRow[]>;
   byNormalizedAlias: Map<string, IndexEntityRow[]>;
+  dedupEntriesByType: Map<ProposeEntityType, CandidatePoolEntry[]>;
   dedupPoolsByType: Map<ProposeEntityType, CandidatePool>;
   bySourceRef: Map<string, IndexEntityRow>;
   companyIdsByDomain: Map<string, string[]>;
@@ -174,6 +175,7 @@ export interface MaterializeUnmaterializedOptions {
   birthGateDryRun?: boolean;
   embeddingProvider?: EmbeddingProvider | null;
   factTypes?: IndexedFileFactType[];
+  indexedFileIds?: string[];
   /**
    * Rows fetched per keyset page. Bounds peak heap: only one page of facts
    * (including their `raw` payloads) is held at a time. Defaults to
@@ -188,4 +190,12 @@ export interface MaterializeUnmaterializedOptions {
   onProgress?: (progress: MaterializeProgress) => void;
   shouldCancel?: () => boolean;
   stageReport?: StageReporter;
+}
+
+export const MAX_MATERIALIZE_INDEXED_FILE_ID_FILTER = 1000;
+
+export function indexedFileIdsForMaterializeScope(fileIds: readonly string[]): string[] | undefined {
+  const unique = [...new Set(fileIds.filter(Boolean))];
+  if (unique.length > MAX_MATERIALIZE_INDEXED_FILE_ID_FILTER) return undefined;
+  return unique;
 }

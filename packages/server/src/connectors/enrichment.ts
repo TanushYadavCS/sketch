@@ -244,18 +244,12 @@ async function emitAndMaterializeDocumentFactsFromStoredFile(
   generator: GeminiGenerator | null,
 ): Promise<void> {
   const context = await buildStoredDocumentFactContext(deps.db, file);
-  const result = await emitDocumentDerivedFacts(deps.db, context, {
+  await emitDocumentDerivedFacts(deps.db, context, {
     contentChanged: true,
     generator: generator ?? undefined,
     dumpDir: deps.debugDumpDir,
     logger: deps.logger,
   });
-  if (result.changed) {
-    await materializeUnmaterializedFacts(deps.db, deps.logger, {
-      embeddingProvider: deps.embeddingProvider,
-      factTypes: ["llm_task"],
-    });
-  }
 }
 
 async function buildStoredDocumentFactContext(
@@ -658,6 +652,7 @@ async function runEnrichmentInner(deps: EnrichmentDeps): Promise<EnrichmentResul
                   embeddingProvider: deps.embeddingProvider,
                   factTypes: ["llm_relation"],
                   stageReport: deps.stageReport,
+                  indexedFileIds: [file.id],
                 });
               }
               await resetSummaryRetry(db, file.id, fileVersion);
@@ -968,6 +963,7 @@ async function enrichTextDocument(
           embeddingProvider,
           factTypes: ["llm_relation"],
           stageReport: deps.stageReport,
+          indexedFileIds: [file.id],
         });
       }
       await resetSummaryRetry(db, file.id, fileVersion);

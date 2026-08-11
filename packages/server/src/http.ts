@@ -157,6 +157,7 @@ interface AppDeps {
   /** Injected so the dev trace route, and its tests, can drive a specific model. */
   enrichmentGenerator?: GeminiGenerator;
   taskMintingGenerator?: GeminiGenerator;
+  enrichmentGenerator?: GeminiGenerator;
 }
 
 /**
@@ -642,6 +643,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
       connectorRoutes(connectors, db, deps.logger, users, config, {
         enrichmentGenerator: deps.enrichmentGenerator,
         taskMintingGenerator: deps.taskMintingGenerator,
+        enrichmentGenerator: deps.enrichmentGenerator,
       }),
     );
   }
