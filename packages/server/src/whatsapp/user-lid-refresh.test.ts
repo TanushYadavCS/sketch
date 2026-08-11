@@ -76,6 +76,8 @@ describe("WhatsAppUserLidRefresh", () => {
       logger: createTestLogger(),
       batchSize: 2,
       retryAfterMs: 60_000,
+      interRequestDelayMs: 0,
+      interRequestJitterMs: 0,
       now: () => new Date("2026-08-10T10:00:00.000Z"),
     });
 
@@ -84,6 +86,60 @@ describe("WhatsAppUserLidRefresh", () => {
     expect(listDue).toHaveBeenCalledWith("2026-08-10T09:59:00.000Z", 2);
     expect(resolvePhoneToLid).toHaveBeenCalledTimes(2);
     expect(active.max).toBe(1);
+  });
+
+  it("refreshes each user no more than once every 24 hours by default", async () => {
+    const listDue = vi.fn(async () => []);
+    const refresh = new WhatsAppUserLidRefresh({
+      whatsapp: {
+        health: vi.fn(async () => ({ socketState: "connected" }) as never),
+        resolvePhoneToLid: vi.fn(async () => null),
+      },
+      store: {
+        listDue,
+        attachIfPhoneUnchanged: vi.fn(async () => "attached" as const),
+        markAttempt: vi.fn(async () => true),
+      },
+      logger: createTestLogger(),
+      now: () => new Date("2026-08-10T10:00:00.000Z"),
+    });
+
+    await refresh.wake();
+
+    expect(listDue).toHaveBeenCalledWith("2026-08-09T10:00:00.000Z", 25);
+  });
+
+  it("adds jittered spacing between provider requests", async () => {
+    const events: string[] = [];
+    const refresh = new WhatsAppUserLidRefresh({
+      whatsapp: {
+        health: vi.fn(async () => ({ socketState: "connected" }) as never),
+        resolvePhoneToLid: vi.fn(async (phone) => {
+          events.push(`resolve:${phone}`);
+          return null;
+        }),
+      },
+      store: {
+        listDue: vi.fn(async () => [
+          { id: "user-1", whatsapp_number: "+14155551234" },
+          { id: "user-2", whatsapp_number: null },
+          { id: "user-3", whatsapp_number: "+14155550000" },
+        ]),
+        attachIfPhoneUnchanged: vi.fn(async () => "attached" as const),
+        markAttempt: vi.fn(async () => true),
+      },
+      logger: createTestLogger(),
+      interRequestDelayMs: 1_000,
+      interRequestJitterMs: 1_000,
+      random: () => 0.5,
+      sleep: async (ms) => {
+        events.push(`sleep:${ms}`);
+      },
+    });
+
+    await refresh.wake();
+
+    expect(events).toEqual(["resolve:+14155551234", "sleep:1500", "resolve:+14155550000"]);
   });
 
   it("contains and sanitizes detached list and attempt timestamp failures", async () => {

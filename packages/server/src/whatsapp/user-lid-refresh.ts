@@ -25,12 +25,18 @@ export interface WhatsAppUserLidRefreshOptions {
   intervalMs?: number;
   retryAfterMs?: number;
   batchSize?: number;
+  interRequestDelayMs?: number;
+  interRequestJitterMs?: number;
+  random?: () => number;
+  sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
 }
 
 const DEFAULT_INTERVAL_MS = 15 * 60_000;
-const DEFAULT_RETRY_AFTER_MS = 6 * 60 * 60_000;
+const DEFAULT_RETRY_AFTER_MS = 24 * 60 * 60_000;
 const DEFAULT_BATCH_SIZE = 25;
+const DEFAULT_INTER_REQUEST_DELAY_MS = 1_000;
+const DEFAULT_INTER_REQUEST_JITTER_MS = 1_000;
 
 export class WhatsAppUserLidRefresh {
   private timer: NodeJS.Timeout | null = null;
@@ -108,9 +114,23 @@ export class WhatsAppUserLidRefresh {
       this.now().getTime() - (this.options.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS),
     ).toISOString();
     const candidates = await this.options.store.listDue(attemptedBefore, this.options.batchSize ?? DEFAULT_BATCH_SIZE);
-    for (const candidate of candidates) {
-      if (candidate.whatsapp_number) await this.capture(candidate.id, candidate.whatsapp_number);
+    const refreshable = candidates.filter(
+      (candidate): candidate is WhatsAppLidRefreshCandidate & { whatsapp_number: string } =>
+        candidate.whatsapp_number !== null,
+    );
+    for (const [index, candidate] of refreshable.entries()) {
+      if (index > 0) await this.sleepBeforeNextRequest();
+      await this.capture(candidate.id, candidate.whatsapp_number);
     }
+  }
+
+  private async sleepBeforeNextRequest(): Promise<void> {
+    const baseMs = this.options.interRequestDelayMs ?? DEFAULT_INTER_REQUEST_DELAY_MS;
+    const jitterMs = this.options.interRequestJitterMs ?? DEFAULT_INTER_REQUEST_JITTER_MS;
+    const random = this.options.random ?? Math.random;
+    const delayMs = Math.max(0, baseMs) + Math.floor(random() * Math.max(0, jitterMs));
+    const sleep = this.options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+    await sleep(delayMs);
   }
 
   private runDetached(operation: string): void {
