@@ -6,13 +6,13 @@ import { createTestLogger, createTestPgDb } from "../test-utils";
 import { materializeUnmaterializedFacts } from "./materialize";
 import type { ProposeEntityType } from "./propose";
 
-const USER_ID = "feature-queue-user";
-const CONNECTOR_ID = "feature-queue-connector";
+const USER_ID = "project-queue-user";
+const CONNECTOR_ID = "project-queue-connector";
 const BIRTH_GATE_TYPES = new Set<ProposeEntityType>(["project", "product", "team"]);
 const LIVE_TYPES = new Set<ProposeEntityType>(["product", "project"]);
 const STRUCTURAL_AUTO_BIRTH_TYPES = new Set<ProposeEntityType>(["project"]);
 
-describe("feature lifecycle queue policy postgres", () => {
+describe("project lifecycle queue policy postgres", () => {
   let db: Kysely<DB> | undefined;
 
   afterEach(async () => {
@@ -68,7 +68,7 @@ describe("feature lifecycle queue policy postgres", () => {
 async function seedBase(db: Kysely<DB>): Promise<void> {
   await db
     .insertInto("users")
-    .values({ id: USER_ID, name: "Feature Queue User", email: "feature-queue@example.com" })
+    .values({ id: USER_ID, name: "Project Queue User", email: "project-queue@example.com" })
     .execute();
   await db
     .insertInto("connector_configs")

@@ -15,7 +15,6 @@ import { materializeCommitment } from "./materialize-commitment";
 import { materializeContactPointFact } from "./materialize-contact-points";
 import { materializeDecision } from "./materialize-decision";
 import { buildMaterializeDeps } from "./materialize-deps";
-import { materializeFeature } from "./materialize-feature";
 import { readJsonObject } from "./materialize-json";
 import { materializeLlmExtractedFact } from "./materialize-llm-mentions";
 import { materializeMilestone } from "./materialize-milestone";
@@ -228,7 +227,7 @@ export async function materializeFromFact(deps: MaterializeDeps, fact: IndexedFi
     return materializeCommitment(deps, fact);
   }
   if (fact.fact_type === "feature") {
-    return materializeFeature(deps, fact);
+    return { kind: "skipped", reason: "feature_disabled" };
   }
   if (fact.fact_type === "decision") {
     return materializeDecision(deps, fact);
@@ -276,10 +275,6 @@ function accumulate(summary: ReplayFactsSummary, result: MaterializeResult): voi
     if ("materialized" in summary) (summary as MaterializeFactsSummary).materialized++;
     return;
   }
-  if (result.kind === "feature_materialized") {
-    if ("materialized" in summary) (summary as MaterializeFactsSummary).materialized++;
-    return;
-  }
   if (result.kind === "decision_materialized") {
     if ("materialized" in summary) (summary as MaterializeFactsSummary).materialized++;
     return;
@@ -315,7 +310,6 @@ export async function replaySourceFacts(
   const deps = await buildMaterializeDeps(db, {
     llmPromotionThreshold: opts.llmPromotionThreshold,
     llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
-    featureAutoMintThreshold: opts.featureAutoMintThreshold,
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateLiveTypes: opts.birthGateLiveTypes,
@@ -421,7 +415,6 @@ async function materializeUnmaterializedFactsInner(
   const deps = await buildMaterializeDeps(db, {
     llmPromotionThreshold: opts.llmPromotionThreshold,
     llmTaskCorroborationThreshold: opts.llmTaskCorroborationThreshold,
-    featureAutoMintThreshold: opts.featureAutoMintThreshold,
     logger,
     birthGateTypes: opts.birthGateTypes,
     birthGateLiveTypes: opts.birthGateLiveTypes,
@@ -455,7 +448,6 @@ async function materializeUnmaterializedFactsInner(
         if (
           result.kind !== "task_materialized" &&
           result.kind !== "commitment_materialized" &&
-          result.kind !== "feature_materialized" &&
           result.kind !== "decision_materialized" &&
           result.kind !== "milestone_materialized"
         )
@@ -581,7 +573,6 @@ export function shouldMarkMaterialized(result: MaterializeResult): boolean {
     result.kind === "relationship_materialized" ||
     result.kind === "task_materialized" ||
     result.kind === "commitment_materialized" ||
-    result.kind === "feature_materialized" ||
     result.kind === "decision_materialized" ||
     result.kind === "milestone_materialized" ||
     result.kind === "structural"

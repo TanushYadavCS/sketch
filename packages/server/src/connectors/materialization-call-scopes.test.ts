@@ -22,10 +22,10 @@ describe("routine materialization call scopes", () => {
     expect(calls[1]).toContain('factTypes: ["llm_relation"]');
   });
 
-  it("scopes smart enrichment to its three emitted fact families", () => {
+  it("scopes smart enrichment to its two emitted fact families", () => {
     const calls = materializeCalls(source(join(connectorsDir, "smart-enrichment.ts")));
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain('factTypes: ["llm_extracted", "llm_relation", "feature"]');
+    expect(calls[0]).toContain('factTypes: ["llm_extracted", "llm_relation"]');
   });
 
   it("scopes domain floor retry and re-enrich post-floor materialization to llm_relation", () => {

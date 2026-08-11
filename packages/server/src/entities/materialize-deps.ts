@@ -42,10 +42,8 @@ export { normalizeEntityMatchName } from "./match-normalize";
 
 const DEFAULT_LLM_PROMOTION_THRESHOLD = 2;
 const DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD = 2;
-const DEFAULT_FEATURE_AUTO_MINT_THRESHOLD = 1;
 let configuredLlmPromotionThreshold = DEFAULT_LLM_PROMOTION_THRESHOLD;
 let configuredLlmTaskCorroborationThreshold = DEFAULT_LLM_TASK_CORROBORATION_THRESHOLD;
-let configuredFeatureAutoMintThreshold = DEFAULT_FEATURE_AUTO_MINT_THRESHOLD;
 let configuredBirthGateTypes = new Set<ProposeEntityType>();
 let configuredBirthGateLiveTypes = new Set<ProposeEntityType>();
 let configuredStructuralAutoBirthTypes = new Set<ProposeEntityType>();
@@ -60,7 +58,6 @@ let configuredBirthGateDryRun = true;
 export function configureMaterializeDefaults(opts: {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
-  featureAutoMintThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
@@ -71,9 +68,6 @@ export function configureMaterializeDefaults(opts: {
   }
   if (typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1) {
     configuredLlmTaskCorroborationThreshold = Math.floor(opts.llmTaskCorroborationThreshold);
-  }
-  if (typeof opts.featureAutoMintThreshold === "number" && opts.featureAutoMintThreshold >= 1) {
-    configuredFeatureAutoMintThreshold = Math.floor(opts.featureAutoMintThreshold);
   }
   if (opts.birthGateTypes) configuredBirthGateTypes = new Set(opts.birthGateTypes);
   if (opts.birthGateLiveTypes) configuredBirthGateLiveTypes = new Set(opts.birthGateLiveTypes);
@@ -534,7 +528,6 @@ export async function refreshResolvedEntityIndex(
 export interface BuildMaterializeDepsOptions {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
-  featureAutoMintThreshold?: number;
   logger?: Logger;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
@@ -649,10 +642,6 @@ export async function buildMaterializeDeps(
     typeof opts.llmTaskCorroborationThreshold === "number" && opts.llmTaskCorroborationThreshold >= 1
       ? Math.floor(opts.llmTaskCorroborationThreshold)
       : configuredLlmTaskCorroborationThreshold;
-  const featureAutoMintThreshold =
-    typeof opts.featureAutoMintThreshold === "number" && opts.featureAutoMintThreshold >= 1
-      ? Math.floor(opts.featureAutoMintThreshold)
-      : configuredFeatureAutoMintThreshold;
   const birthGateTypes = new Set(opts.birthGateTypes ?? configuredBirthGateTypes);
   const birthGateLiveTypes = new Set(opts.birthGateLiveTypes ?? configuredBirthGateLiveTypes);
   const structuralAutoBirthTypes = new Set(opts.structuralAutoBirthTypes ?? configuredStructuralAutoBirthTypes);
@@ -687,7 +676,6 @@ export async function buildMaterializeDeps(
     index,
     llmPromotionThreshold,
     llmTaskCorroborationThreshold,
-    featureAutoMintThreshold,
     birthGateTypes,
     birthGateLiveTypes,
     structuralAutoBirthTypes,

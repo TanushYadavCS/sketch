@@ -10,7 +10,6 @@ import type { DB } from "../db/schema";
 import { createTestDb, getSharedPgDb } from "../test-utils";
 import { normalizeEntityMatchName } from "./match-normalize";
 import { buildMaterializeDeps } from "./materialize-deps";
-import { reconcileFeatureSubEntity } from "./materialize-feature";
 import { projectLlmExtractedNormalization } from "./normalization-projection";
 
 async function seedFile(db: Kysely<DB>, id: string, sourceUpdatedAt: string | null = null): Promise<void> {
@@ -54,25 +53,6 @@ async function seedFile(db: Kysely<DB>, id: string, sourceUpdatedAt: string | nu
       source_updated_at: sourceUpdatedAt,
     } as never)
     .execute();
-}
-
-function featureFact(fileId: string, key: string, featureName = "Insights Dashboard"): UpsertIndexedFileFactInput {
-  return {
-    indexedFileId: fileId,
-    connectorConfigId: `cfg-${fileId}`,
-    source: "llm_extraction",
-    factType: "feature",
-    relation: "builds",
-    subjectName: featureName,
-    raw: {
-      featureId: `${fileId}-feat`,
-      featureName,
-      status: "proposed",
-      corroborationKey: key,
-      parentProductName: "Atlas",
-      evidence: { fileIds: [fileId], entityIds: [] },
-    },
-  };
 }
 
 function llmFact(
@@ -326,50 +306,7 @@ function runSuite(name: string, getDb: () => Promise<Kysely<DB>>, shared: boolea
       expect(after.materialization_input_hash).not.toBe(before.materialization_input_hash);
       expect(after.materialized_at).toBeNull();
     });
-
-    it("feature corroboration support matches across paths, including tombstone invalidation", async () => {
-      const repo = createIndexedFileFactRepository(db);
-      await seedFile(db, "g1");
-      await seedFile(db, "g2");
-      await seedFile(db, "g3");
-      const key = "prod:atlas|feature:insights-dashboard";
-      await repo.upsertFact(featureFact("g1", key));
-      await repo.upsertFact(featureFact("g2", key));
-      await repo.upsertFact(featureFact("g3", "other-key"));
-
-      await setBackfill(db, "pending");
-      const legacy = await buildMaterializeDeps(db);
-      const legacyResult = await reconcileFeatureSubEntity(legacy, key);
-      await setBackfill(db, "complete");
-      const indexed = await buildMaterializeDeps(db);
-      const indexedResult = await reconcileFeatureSubEntity(indexed, key);
-
-      expect(indexedResult.support).toBe(legacyResult.support);
-      expect(indexedResult.reason).toBe(legacyResult.reason);
-      expect(indexedResult.support).toBe(2);
-
-      // Tombstoning one supporting file invalidates it on both paths.
-      await db
-        .updateTable("indexed_file_facts")
-        .set({ deleted_at: "2026-05-01T00:00:00.000Z" })
-        .where("indexed_file_id", "=", "g2")
-        .where("fact_type", "=", "feature")
-        .execute();
-      const legacyAfter = await reconcileFeatureSubEntity(await buildMaterializeDepsPending(db), key);
-      const indexedAfter = await reconcileFeatureSubEntity(await buildMaterializeDeps(db), key);
-      expect(indexedAfter.support).toBe(1);
-      expect(legacyAfter.support).toBe(1);
-    });
   });
 }
-
-/** Builds deps with the backfill marker forced pending, exercising the legacy scan path. */
-async function buildMaterializeDepsPending(db: Kysely<DB>) {
-  await setBackfill(db, "pending");
-  const deps = await buildMaterializeDeps(db);
-  await setBackfill(db, "complete");
-  return deps;
-}
-
 runSuite("indexed corroboration (sqlite)", async () => createTestDb(), false);
 runSuite("indexed corroboration (pglite)", getSharedPgDb, true);

@@ -8,7 +8,7 @@ import {
 import type { DB } from "../db/schema";
 import { DEFAULT_FACT_BATCH_SIZE } from "./fact-batches";
 import { readJsonObject } from "./materialize-json";
-import { projectFeatureCorroborationKey, projectLlmExtractedNormalization } from "./normalization-projection";
+import { projectLlmExtractedNormalization } from "./normalization-projection";
 
 const STATE_ID = "v1";
 
@@ -30,6 +30,12 @@ interface BackfillRow {
   created_by_user_id: string | null;
   last_seen_sync_run_id: string | null;
   content_hash: string | null;
+}
+
+function projectFeatureCorroborationKey(source: string, raw: Record<string, unknown>): string | null {
+  if (source !== "llm_extraction" && source !== "llm") return null;
+  const key = raw.corroborationKey;
+  return typeof key === "string" && key.length > 0 ? key : null;
 }
 
 interface ProjectionUpdate {

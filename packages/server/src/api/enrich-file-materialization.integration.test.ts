@@ -72,6 +72,32 @@ function generator(): GeminiGenerator {
   };
 }
 
+function featureMentionGenerator(): GeminiGenerator {
+  return {
+    async generate() {
+      return "Northstar Systems and CRM Analytics appear in the document.";
+    },
+    async generateJSON<T>(_prompt: string, opts?: Omit<GenerateOptions, "responseMimeType">) {
+      if (opts?.label?.startsWith("extractEntities:")) {
+        return {
+          mentions: [
+            { mention: "Northstar Systems", type: "company", variations: [], confidence: 0.94 },
+            {
+              mention: "CRM Analytics",
+              type: "feature",
+              parentProduct: "Canvas CRM",
+              variations: ["Analytics tab"],
+              confidence: 0.91,
+            },
+          ],
+          relations: [],
+        } as T;
+      }
+      return {} as T;
+    },
+  };
+}
+
 async function seedHarness(db: Kysely<DB>) {
   const users = createUserRepository(db);
   const settings = createSettingsRepository(db);
@@ -217,5 +243,64 @@ describe("POST /api/connectors/files/:fileId/enrichments materialization scope",
       },
       { timeout: 20_000, interval: 25 },
     );
+  });
+
+  it("drops extracted feature mentions without writing feature facts or generic extraction rows", async () => {
+    db = await createTestPgDb();
+    const { fileAId } = await seedHarness(db);
+    await db
+      .updateTable("indexed_files")
+      .set({
+        content: `${longDocument("feature-route")} Northstar Systems is evaluating CRM Analytics in Canvas CRM.`,
+        content_hash: "hash-feature-route",
+      })
+      .where("id", "=", fileAId)
+      .execute();
+    const app = createApp(db, createTestConfig({ DB_TYPE: "postgres" }), {
+      logger: createTestLogger(),
+      enrichmentGenerator: featureMentionGenerator(),
+    });
+    const cookie = await login(app);
+
+    const enrich = await app.request(`/api/connectors/files/${fileAId}/enrichments`, {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+    expect(enrich.status).toBe(200);
+
+    await vi.waitFor(
+      async () => {
+        const row = await db
+          ?.selectFrom("indexed_file_facts")
+          .select(({ fn }) => fn.countAll<number>().as("count"))
+          .where("indexed_file_id", "=", fileAId)
+          .where("fact_type", "=", "llm_extracted")
+          .where("subject_name", "=", "Northstar Systems")
+          .where("deleted_at", "is", null)
+          .executeTakeFirstOrThrow();
+        expect(Number(row?.count ?? 0)).toBe(1);
+      },
+      { timeout: 20_000, interval: 25 },
+    );
+
+    const featureFacts = await db
+      .selectFrom("indexed_file_facts")
+      .select(({ fn }) => fn.countAll<number>().as("count"))
+      .where("indexed_file_id", "=", fileAId)
+      .where("fact_type", "=", "feature")
+      .where("deleted_at", "is", null)
+      .executeTakeFirstOrThrow();
+    expect(Number(featureFacts.count)).toBe(0);
+
+    const genericFeatureRows = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("indexed_file_id", "=", fileAId)
+      .where("fact_type", "=", "llm_extracted")
+      .where("deleted_at", "is", null)
+      .execute();
+    expect(
+      genericFeatureRows.map((row) => JSON.parse(row.raw ?? "{}")).filter((raw) => raw.type === "feature"),
+    ).toEqual([]);
   });
 });

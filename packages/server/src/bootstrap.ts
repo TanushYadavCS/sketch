@@ -201,7 +201,6 @@ export async function createServer(config: Config, options?: CreateServerOptions
   configureMaterializeDefaults({
     llmPromotionThreshold: config.LLM_PROMOTION_THRESHOLD,
     llmTaskCorroborationThreshold: config.LLM_TASK_CORROBORATION_THRESHOLD,
-    featureAutoMintThreshold: config.FEATURE_AUTO_MINT_THRESHOLD,
     birthGateTypes: new Set<ProposeEntityType>(["project", "product", "team"]),
     birthGateLiveTypes: new Set<ProposeEntityType>(["product", "project"]),
     structuralAutoBirthTypes: new Set<ProposeEntityType>(["project"]),

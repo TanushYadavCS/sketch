@@ -97,7 +97,6 @@ export interface MaterializeDeps {
   } | null>;
   llmPromotionThreshold: number;
   llmTaskCorroborationThreshold: number;
-  featureAutoMintThreshold: number;
   birthGateTypes: Set<ProposeEntityType>;
   birthGateLiveTypes: Set<ProposeEntityType>;
   structuralAutoBirthTypes: Set<ProposeEntityType>;
@@ -134,7 +133,6 @@ export type MaterializeResult =
     }
   | { kind: "task_materialized"; taskId: string; created: boolean }
   | { kind: "commitment_materialized" }
-  | { kind: "feature_materialized" }
   | { kind: "decision_materialized" }
   | { kind: "milestone_materialized" }
   | { kind: "structural"; entity: IndexEntityRow }
@@ -145,7 +143,6 @@ export type MaterializeResult =
 export interface ReplaySourceFactsOptions {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
-  featureAutoMintThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;
@@ -168,7 +165,6 @@ export interface MaterializeProgress {
 export interface MaterializeUnmaterializedOptions {
   llmPromotionThreshold?: number;
   llmTaskCorroborationThreshold?: number;
-  featureAutoMintThreshold?: number;
   birthGateTypes?: Set<ProposeEntityType>;
   birthGateLiveTypes?: Set<ProposeEntityType>;
   structuralAutoBirthTypes?: Set<ProposeEntityType>;

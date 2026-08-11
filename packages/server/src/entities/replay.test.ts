@@ -204,6 +204,59 @@ describe("replaySourceFacts", () => {
     ]);
   });
 
+  it("stamps pre-existing open feature facts as disabled without creating graph rows", async () => {
+    await createIndexedFileFactRepository(db).upsertFact({
+      indexedFileId: ATTENDED_FILE_ID,
+      connectorConfigId: CONNECTOR_ID,
+      createdByUserId: TEST_USER_ID,
+      contentHash: "hash-1",
+      source: "llm_extraction",
+      factType: "feature",
+      relation: "mentioned",
+      subjectName: "CRM Analytics",
+      subjectSource: "llm_extraction",
+      subjectSourceId: "file-1:hash-1:llm-extraction-v13:CRM Analytics",
+      raw: {
+        contentHash: "hash-1",
+        promptVersion: "llm-extraction-v13",
+        model: "gemini",
+        featureId: "llm-feature:file-1:crm-analytics",
+        featureName: "CRM Analytics",
+        parentProductName: "Canvas CRM",
+        corroborationKey: "crm-analytics-canvas-crm",
+        status: "proposed",
+        evidence: { fileIds: [ATTENDED_FILE_ID], entityIds: [] },
+        confidence: 0.91,
+      } as never,
+    });
+    const fact = await db
+      .selectFrom("indexed_file_facts")
+      .selectAll()
+      .where("fact_type", "=", "feature")
+      .executeTakeFirstOrThrow();
+
+    await expect(materializeFromFact(await buildMaterializeDeps(db), fact)).resolves.toEqual({
+      kind: "skipped",
+      reason: "feature_disabled",
+    });
+
+    await materializeUnmaterializedFacts(db, createTestLogger(), { factTypes: ["feature"] });
+
+    const stored = await db
+      .selectFrom("indexed_file_facts")
+      .select(["materialized_at", "materialization_attempts"])
+      .where("id", "=", fact.id)
+      .executeTakeFirstOrThrow();
+    expect(stored.materialized_at).not.toBeNull();
+    expect(stored.materialization_attempts).toBe(0);
+    await expect(db.selectFrom("sub_entities").selectAll().where("kind", "=", "feature").execute()).resolves.toEqual(
+      [],
+    );
+    await expect(db.selectFrom("entities").selectAll().where("source_type", "=", "feature").execute()).resolves.toEqual(
+      [],
+    );
+  });
+
   it("upgrades existing INFERRED mentions when a durable fact replays", async () => {
     const entity = await createEntityRepository(db).upsertPersonEntity({
       name: "Saurabh CanvasX",

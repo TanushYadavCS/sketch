@@ -26,12 +26,12 @@ describe("validateLlmMention", () => {
     ).toEqual({ ok: false, reason: "short_token_no_boundary" });
   });
 
-  it("accepts feature LLM entity types", () => {
+  it("accepts project LLM entity types", () => {
     expect(
       validateLlmMention({
-        displayName: "Aviation Edge scraper",
-        entityType: "feature",
-        fileContent: "Aviation Edge scraper was discussed.",
+        displayName: "Aviation Edge Migration",
+        entityType: "project",
+        fileContent: "Aviation Edge Migration was discussed.",
         source: "llm_extraction",
       }),
     ).toEqual({ ok: true });

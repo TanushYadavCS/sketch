@@ -2460,31 +2460,31 @@ describe("Entity drawer routes", () => {
     expect(includeBody.total).toBe(3);
   });
 
-  it("GET /api/entities hides archived features by default, including explicit type filters and relation lists", async () => {
+  it("GET /api/entities hides archived rows by default, including explicit type filters and relation lists", async () => {
     await seedEntity("person-arch", "Alice", "person");
-    await seedEntity("feature-live", "Access Control Integration", "feature");
-    await seedEntity("feature-arch", "Backend Work", "feature");
-    await db.updateTable("entities").set({ status: "archived" }).where("id", "=", "feature-arch").execute();
-    await seedRelation("rel-live", "person-arch", "feature-live", "contributes_to", "EXTRACTED", 0.95);
-    await seedRelation("rel-arch", "person-arch", "feature-arch", "contributes_to", "EXTRACTED", 0.95);
+    await seedEntity("project-live", "Access Control Integration", "project");
+    await seedEntity("project-arch", "Backend Work", "project");
+    await db.updateTable("entities").set({ status: "archived" }).where("id", "=", "project-arch").execute();
+    await seedRelation("rel-live", "person-arch", "project-live", "contributes_to", "EXTRACTED", 0.95);
+    await seedRelation("rel-arch", "person-arch", "project-arch", "contributes_to", "EXTRACTED", 0.95);
 
     const defaultRes = await app.request("/api/entities", { headers: { Cookie: adminCookie } });
     const defaultBody = (await defaultRes.json()) as { entities: Array<{ id: string }>; total: number };
-    expect(defaultBody.entities.map((entity) => entity.id).sort()).toEqual(["feature-live", "person-arch"]);
+    expect(defaultBody.entities.map((entity) => entity.id).sort()).toEqual(["person-arch", "project-live"]);
 
-    const explicitRes = await app.request("/api/entities?type=feature", { headers: { Cookie: adminCookie } });
+    const explicitRes = await app.request("/api/entities?type=project", { headers: { Cookie: adminCookie } });
     const explicitBody = (await explicitRes.json()) as { entities: Array<{ id: string }>; total: number };
-    expect(explicitBody.entities.map((entity) => entity.id)).toEqual(["feature-live"]);
+    expect(explicitBody.entities.map((entity) => entity.id)).toEqual(["project-live"]);
 
-    const includeRes = await app.request("/api/entities?type=feature&includeArchived=true", {
+    const includeRes = await app.request("/api/entities?type=project&includeArchived=true", {
       headers: { Cookie: adminCookie },
     });
     const includeBody = (await includeRes.json()) as { entities: Array<{ id: string }>; total: number };
-    expect(includeBody.entities.map((entity) => entity.id).sort()).toEqual(["feature-arch", "feature-live"]);
+    expect(includeBody.entities.map((entity) => entity.id).sort()).toEqual(["project-arch", "project-live"]);
 
     const relationsRes = await app.request("/api/entities/person-arch/relations", { headers: { Cookie: adminCookie } });
     const relationsBody = (await relationsRes.json()) as { outgoing: Array<{ other: { id: string } }> };
-    expect(relationsBody.outgoing.map((relation) => relation.other.id)).toEqual(["feature-live"]);
+    expect(relationsBody.outgoing.map((relation) => relation.other.id)).toEqual(["project-live"]);
   });
 
   it("GET /api/entities/:id/timeline applies file RBAC, collapses per-file mentions, groups by month", async () => {
