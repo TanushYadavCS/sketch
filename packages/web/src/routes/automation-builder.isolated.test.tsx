@@ -1,4 +1,9 @@
-import type { AutomationDefinition } from "@/lib/api";
+import type {
+  AutomationDefinition,
+  WebChatQuestion,
+  WebChatQuestionBatch,
+  WebChatQuestionBatchAnswer,
+} from "@/lib/api";
 import { ApiRequestError } from "@/lib/api";
 import { AUTOMATION_REFRESH_INTERVAL_MS } from "@/lib/automation-refresh";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -6,7 +11,14 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AutomationBuilderPage } from "./automation-builder";
+import {
+  AutomationBuilderPage,
+  automationRunLifecycleState,
+  builderChatThreadMessages,
+  outgoingBuilderQuestionAnswerMessage,
+  outgoingBuilderQuestionBatchAnswerMessage,
+  validateAutomationBuilderSearch,
+} from "./automation-builder";
 
 const mocks = vi.hoisted(() => ({
   getAutomation: vi.fn(),
@@ -21,7 +33,10 @@ const mocks = vi.hoisted(() => ({
   interruptChat: vi.fn(),
   clearError: vi.fn(),
   runTask: vi.fn(),
+  getRun: vi.fn(),
   saveAutomation: vi.fn(),
+  selectSetupExecutionMode: vi.fn(),
+  removeAutomation: vi.fn(),
   testStep: vi.fn(),
   sendMessage: vi.fn(),
   setMessages: vi.fn(),
@@ -47,7 +62,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
         archiveConversation: mocks.archiveConversation,
         originChatMessages: mocks.originChatMessages,
         run: mocks.runTask,
+        getRun: mocks.getRun,
         save: mocks.saveAutomation,
+        selectSetupExecutionMode: mocks.selectSetupExecutionMode,
+        remove: mocks.removeAutomation,
         testStep: mocks.testStep,
       },
       webChat: {
@@ -189,6 +207,11 @@ const automation: AutomationDefinition = {
   deliveryTarget: "D123",
   threadTs: null,
   prompt: "Daily account brief",
+  executionMode: "hybrid",
+  executionModeRecommendation: {
+    mode: "agent-led",
+    reason: "Best when the work needs AI judgment from start to finish.",
+  },
   scheduleType: "cron",
   scheduleValue: "0 9 * * *",
   timezone: "UTC",
@@ -300,6 +323,27 @@ function renderBuilder() {
 }
 
 describe("AutomationBuilderPage", () => {
+  it("validates run search independently and ignores unsafe run IDs", () => {
+    expect(validateAutomationBuilderSearch({ conversationId: " chat-alpha ", runId: "run-old_1" })).toEqual({
+      conversationId: "chat-alpha",
+      runId: "run-old_1",
+    });
+    expect(validateAutomationBuilderSearch({ conversationId: "chat-alpha", runId: "../other-run" })).toEqual({
+      conversationId: "chat-alpha",
+    });
+    expect(validateAutomationBuilderSearch({ runId: "run-only" })).toEqual({ runId: "run-only" });
+  });
+
+  it.each([
+    ["pending", "pending", undefined],
+    ["running", "running", undefined],
+    ["completed", "success", undefined],
+    ["failed", "failure", undefined],
+    ["failed", "aborted", "Run aborted by the user"],
+  ] as const)("maps persisted %s runs to the %s lifecycle state", (status, expected, errorMessage) => {
+    expect(automationRunLifecycleState({ status, errorMessage })).toBe(expected);
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -384,9 +428,19 @@ describe("AutomationBuilderPage", () => {
     mocks.clearError.mockClear();
     mocks.chatError = undefined;
     mocks.navigate.mockClear();
-    mocks.runTask.mockResolvedValue({ status: "queued" });
+    mocks.runTask.mockResolvedValue({ status: "triggered", runId: "run-test" });
+    mocks.getRun.mockClear();
+    mocks.getRun.mockResolvedValue({ run: null });
     mocks.saveAutomation.mockClear();
-    mocks.saveAutomation.mockResolvedValue({ ...automation, revision: automation.revision + 1 });
+    mocks.saveAutomation.mockImplementation(async (_taskId, request) => ({
+      ...automation,
+      revision: automation.revision + 1,
+      executionMode: request.executionMode,
+    }));
+    mocks.selectSetupExecutionMode.mockClear();
+    mocks.selectSetupExecutionMode.mockResolvedValue({ ...automation, isPlaceholderDraft: true });
+    mocks.removeAutomation.mockClear();
+    mocks.removeAutomation.mockResolvedValue(undefined);
     mocks.testStep.mockResolvedValue({ run: null });
     mocks.sendMessage.mockClear();
     mocks.setMessages.mockClear();
@@ -394,6 +448,182 @@ describe("AutomationBuilderPage", () => {
     mocks.search = { conversationId: "chat-alpha" };
     mocks.chatStatus = "ready";
     mocks.chatMessages = [];
+  });
+
+  it("keeps a strict placeholder empty and leaves its compatibility mode unanswered until selection", async () => {
+    const user = userEvent.setup();
+    const placeholder = { ...automation, isPlaceholderDraft: true };
+    const updatedPlaceholder = { ...placeholder, executionMode: "deterministic" as const };
+    mocks.getAutomation.mockReset().mockResolvedValue(placeholder);
+    mocks.selectSetupExecutionMode.mockImplementation(async () => {
+      mocks.getAutomation.mockResolvedValue(updatedPlaceholder);
+      return updatedPlaceholder;
+    });
+
+    renderBuilder();
+
+    expect(await screen.findByTestId("automation-builder-empty-canvas")).toBeInTheDocument();
+    expect(await screen.findByTestId("automation-setup-card")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Check rating" })).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Exact steps with smart help" })).not.toBeChecked();
+
+    await user.click(screen.getByRole("radio", { name: "Follow exact steps" }));
+    await waitFor(() => expect(mocks.selectSetupExecutionMode).toHaveBeenCalledWith("task-123", "deterministic"));
+    expect(mocks.saveAutomation).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Check rating" })).not.toBeInTheDocument();
+  });
+
+  it("discards an untouched setup only after deletion succeeds", async () => {
+    mocks.getAutomation.mockResolvedValue({ ...automation, isPlaceholderDraft: true });
+    renderBuilder();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Discard setup" }));
+    await waitFor(() => expect(mocks.removeAutomation).toHaveBeenCalledWith("task-123"));
+    await waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith({ to: "/scheduled-tasks" }));
+  });
+
+  it("keeps an untouched setup open when discard fails and never deletes a non-placeholder", async () => {
+    mocks.getAutomation.mockResolvedValue({ ...automation, isPlaceholderDraft: true });
+    mocks.removeAutomation.mockRejectedValue(new Error("Delete failed"));
+    renderBuilder();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Discard setup" }));
+    await waitFor(() => expect(mocks.removeAutomation).toHaveBeenCalledWith("task-123"));
+    expect(mocks.navigate).not.toHaveBeenCalled();
+
+    mocks.getAutomation.mockResolvedValue({ ...automation, isPlaceholderDraft: false });
+    renderBuilder();
+    await user.click(await screen.findByRole("button", { name: "Close" }));
+    expect(mocks.removeAutomation).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves an old run by exact ID without falling back to latest", async () => {
+    const latestRun = automationWithStepOutput("latest output").latestRun;
+    const oldRun = automationWithStepOutput("old exact output").latestRun;
+    mocks.search = { conversationId: "chat-alpha", runId: "run-old-exact" };
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      latestRun,
+      recentRuns: [latestRun].filter((run): run is NonNullable<typeof run> => Boolean(run)),
+    });
+    mocks.getRun.mockResolvedValue({
+      run: {
+        ...oldRun,
+        id: "run-old-exact",
+        stepOutputs: { check: { output: "old exact output", status: "completed", duration_ms: 12 } },
+      },
+    });
+
+    renderBuilder();
+
+    await waitFor(() => expect(mocks.getRun).toHaveBeenCalledWith("task-123", "run-old-exact"));
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Check rating" }));
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Output" }));
+    expect(await screen.findByText(/old exact output/)).toBeInTheDocument();
+    expect(screen.queryByText("latest output")).not.toBeInTheDocument();
+  });
+
+  it("shows a prominent unavailable state for a stale run without breaking the builder", async () => {
+    mocks.search = { conversationId: "chat-alpha", runId: "run-stale" };
+    mocks.getRun.mockRejectedValue(new ApiRequestError("Run not found", 404, "NOT_FOUND"));
+
+    renderBuilder();
+
+    expect(await screen.findByTestId("automation-run-unavailable")).toHaveTextContent("Run unavailable");
+    expect(screen.getByTestId("automation-builder-canvas")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check rating" })).toBeInTheDocument();
+  });
+
+  it("navigates to and polls one exact manual run while preventing duplicates", async () => {
+    const user = userEvent.setup();
+    const runningRun = {
+      ...automationWithStepOutput("running output").latestRun,
+      id: "run-test",
+      status: "running" as const,
+      completedAt: null,
+    };
+    mocks.getRun.mockResolvedValue({ run: runningRun });
+
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Run" }));
+    await waitFor(() => expect(mocks.runTask).toHaveBeenCalledTimes(1));
+    expect(mocks.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        search: { conversationId: "chat-alpha", runId: "run-test" },
+      }),
+    );
+    await waitFor(() => expect(mocks.getRun).toHaveBeenCalledWith("task-123", "run-test"));
+    expect(await screen.findByTestId("automation-run-state")).toHaveTextContent("Running");
+
+    await user.click(screen.getByRole("button", { name: "Running" }));
+    expect(mocks.runTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the three execution modes and leaves the recommendation advisory", async () => {
+    const user = userEvent.setup();
+
+    renderBuilder();
+
+    expect(await screen.findByTestId("automation-setup-card")).toBeInTheDocument();
+    expect(screen.getByTestId("automation-mode-deterministic")).toHaveTextContent("Follow exact steps");
+    expect(screen.getByTestId("automation-mode-hybrid")).toHaveTextContent("Exact steps with smart help");
+    expect(screen.getByTestId("automation-mode-agent-led")).toHaveTextContent("Let Sketch handle the details");
+    expect(screen.getByText(/Sketch recommended Let Sketch handle the details/)).toBeVisible();
+
+    await user.click(screen.getByTestId("automation-mode-deterministic"));
+
+    await waitFor(() =>
+      expect(mocks.saveAutomation).toHaveBeenCalledWith(
+        "task-123",
+        expect.objectContaining({ executionMode: "deterministic" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(mocks.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: '[automation-setup-mode-selection] I chose the "deterministic" execution mode (Follow exact steps) for this automation. Please continue by asking the next relevant automation questions.',
+        }),
+        { body: { automationTaskId: "task-123" } },
+      ),
+    );
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["hybrid", "Exact steps with smart help"],
+    ["agent-led", "Let Sketch handle the details"],
+  ] as const)("saves and sends the %s execution mode choice", async (mode, label) => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({ ...automation, executionMode: "deterministic" });
+
+    renderBuilder();
+
+    await user.click(await screen.findByRole("radio", { name: label }));
+
+    await waitFor(() =>
+      expect(mocks.saveAutomation).toHaveBeenCalledWith("task-123", expect.objectContaining({ executionMode: mode })),
+    );
+    await waitFor(() =>
+      expect(mocks.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: `[automation-setup-mode-selection] I chose the "${mode}" execution mode (${label}) for this automation. Please continue by asking the next relevant automation questions.`,
+        }),
+        { body: { automationTaskId: "task-123" } },
+      ),
+    );
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("only asks for an execution mode after a builder chat is open", async () => {
+    mocks.search = {};
+
+    renderBuilder();
+
+    expect(await screen.findByText("Chats")).toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "Let Sketch handle the details" })).not.toBeInTheDocument();
+    expect(mocks.saveAutomation).not.toHaveBeenCalled();
+    expect(mocks.sendMessage).not.toHaveBeenCalled();
   });
 
   it("renders a Slack channel message trigger and its channel", async () => {
@@ -419,6 +649,124 @@ describe("AutomationBuilderPage", () => {
     await waitFor(() => expect(screen.getByText("Trigger type")).toBeInTheDocument());
     expect(screen.getAllByDisplayValue("Slack channel message").length).toBeGreaterThan(0);
     expect(screen.getAllByDisplayValue("C123").length).toBeGreaterThan(0);
+  });
+
+  it("renders the Canvas-managed webhook contract and active setup guidance", async () => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      scheduleType: "external",
+      scheduleValue: "canvas",
+      steps: [
+        {
+          ...automation.steps[0],
+          label: "Canvas webhook trigger",
+          icon: "webhooks",
+          triggerConfig: {
+            type: "canvas",
+            app: "Canvas",
+            eventDescription: "webhook received",
+            componentKey: "webhook-trigger",
+            status: "active",
+            canvasEndpoint: {
+              url: "https://sketch.example/api/webhooks/wf/task-123",
+              method: "POST",
+              authentication: "none",
+              contentType: "application/json",
+              payload: "JSON object",
+            },
+          },
+        },
+        ...automation.steps.slice(1),
+      ],
+    });
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Canvas webhook trigger" }));
+
+    expect(await screen.findByTestId("canvas-trigger-details")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("https://sketch.example/api/webhooks/wf/task-123")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("POST")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("None required")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("application/json")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("JSON object")).toBeInTheDocument();
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.getByTestId("canvas-trigger-setup-guidance")).toHaveTextContent(
+      "Canvas setup is complete. Send POST requests with JSON to the canonical URL above; no authentication is required.",
+    );
+  });
+
+  it.each([
+    [
+      "pending_canvas_setup",
+      "Setup pending",
+      "Canvas is still setting up this trigger. Complete setup in Canvas before sending requests.",
+    ],
+    [
+      "error",
+      "Setup error",
+      "Canvas could not finish setting up this trigger. Fix the trigger in Canvas and retry setup.",
+    ],
+  ] as const)("shows explicit Canvas %s guidance", async (status, statusLabel, guidance) => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      scheduleType: "external",
+      scheduleValue: "canvas",
+      steps: [
+        {
+          ...automation.steps[0],
+          label: "Canvas trigger",
+          icon: "webhooks",
+          triggerConfig: {
+            type: "canvas",
+            componentKey: "webhook-trigger",
+            status,
+            ...(status === "error" ? { errorMessage: "Canvas setup failed" } : {}),
+          },
+        },
+        ...automation.steps.slice(1),
+      ],
+    });
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Canvas trigger" }));
+
+    expect(await screen.findByText(statusLabel)).toBeInTheDocument();
+    const guidanceRegion = screen.getByTestId("canvas-trigger-setup-guidance");
+    expect(guidanceRegion).toHaveTextContent(guidance);
+    if (status === "error") {
+      expect(guidanceRegion).toHaveAttribute("role", "alert");
+      expect(guidanceRegion).toHaveTextContent("Canvas error: Canvas setup failed");
+    }
+  });
+
+  it("keeps the native Sketch webhook trigger out of the Canvas setup panel", async () => {
+    const user = userEvent.setup();
+    mocks.getAutomation.mockResolvedValue({
+      ...automation,
+      scheduleType: "external",
+      scheduleValue: "webhook",
+      steps: [
+        {
+          ...automation.steps[0],
+          label: "Sketch webhook",
+          triggerConfig: {
+            type: "webhook",
+            webhookUrl: "https://sketch.example/api/webhooks/wf/task-123",
+            webhookMethod: "POST",
+            webhookContentType: "application/json",
+          },
+        },
+        ...automation.steps.slice(1),
+      ],
+    });
+    renderBuilder();
+
+    await user.click(await screen.findByRole("button", { name: "Sketch webhook" }));
+
+    expect(await screen.findByDisplayValue("webhook")).toBeInTheDocument();
+    expect(screen.queryByTestId("canvas-trigger-details")).not.toBeInTheDocument();
   });
 
   it("opens the selected associated chat and sends the active automation id", async () => {
@@ -746,6 +1094,93 @@ describe("AutomationBuilderPage", () => {
     expect(mocks.loadMessages).not.toHaveBeenCalledWith(expect.stringMatching(/^builder-task-123-/));
   });
 
+  it("hydrates batched builder questions and preserves the ordered outgoing answer", () => {
+    const batch: WebChatQuestionBatch = {
+      batchId: "builder-batch",
+      questions: [
+        {
+          id: "source",
+          prompt: "Where should I look?",
+          options: [
+            { id: "gmail", label: "Gmail" },
+            { id: "drive", label: "Google Drive" },
+          ],
+        },
+        {
+          id: "delivery",
+          prompt: "Where should I send it?",
+          options: [
+            { id: "slack", label: "Slack" },
+            { id: "email", label: "Email" },
+          ],
+        },
+      ],
+    };
+    const answer: WebChatQuestionBatchAnswer = {
+      batchId: "builder-batch",
+      answers: [
+        { questionId: "source", optionId: "drive" },
+        { questionId: "delivery", optionId: "slack" },
+      ],
+    };
+
+    const messages = builderChatThreadMessages([
+      {
+        id: "assistant-builder-batch",
+        role: "assistant",
+        parts: [{ type: "data-question-batch", id: "batch-part", data: batch }],
+      },
+      {
+        id: "user-builder-answer",
+        role: "user",
+        parts: [{ type: "data-question-batch-answer", id: "answer-part", data: answer }],
+      },
+    ]);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({ id: "assistant-builder-batch", questionBatch: batch });
+    expect(messages[1]).toMatchObject({ id: "user-builder-answer", role: "user", text: "Submitted answers" });
+
+    expect(outgoingBuilderQuestionBatchAnswerMessage(batch, answer)).toMatchObject({
+      parts: [
+        { type: "text", text: "Google Drive · Slack" },
+        { type: "data-question-batch-answer", data: answer },
+      ],
+    });
+  });
+
+  it("uses custom responses as outgoing answer text and normalizes legacy setup continuations", () => {
+    const question: WebChatQuestion = {
+      id: "goal",
+      prompt: "What should this automate?",
+      options: [
+        { id: "brief", label: "Daily brief" },
+        { id: "alerts", label: "Alerts" },
+      ],
+    };
+    expect(
+      outgoingBuilderQuestionAnswerMessage(question, { questionId: "goal", customResponse: "A weekly scorecard" }),
+    ).toMatchObject({
+      parts: [
+        { type: "text", text: "A weekly scorecard" },
+        { type: "data-question-answer", data: { questionId: "goal", customResponse: "A weekly scorecard" } },
+      ],
+    });
+    expect(
+      builderChatThreadMessages([
+        {
+          id: "mode-selection",
+          role: "user",
+          parts: [
+            {
+              type: "text",
+              text: '[automation-setup-mode-selection] I chose the "hybrid" execution mode (Recipe + AI).',
+            },
+          ],
+        },
+      ]),
+    ).toMatchObject([{ role: "user", text: "Exact steps with smart help selected." }]);
+  });
+
   it("auto-arranges generated vertical workflow positions", async () => {
     mocks.getAutomation.mockResolvedValue({
       ...automation,
@@ -782,7 +1217,7 @@ describe("AutomationBuilderPage", () => {
     );
   });
 
-  it("uses viewer-scoped transcript summaries for source and builder chat labels", async () => {
+  it("uses viewer-scoped transcript summaries for builder chat labels and hides source chats", async () => {
     mocks.search = {};
     mocks.listConversations.mockResolvedValue({
       taskId: "task-123",
@@ -827,14 +1262,12 @@ describe("AutomationBuilderPage", () => {
 
     renderBuilder();
 
-    expect(await screen.findByText("Review the source thread")).toBeInTheDocument();
-    expect(screen.getByText("Continue the builder plan")).toBeInTheDocument();
+    expect(await screen.findByText("Continue the builder plan")).toBeInTheDocument();
+    expect(screen.queryByText("Review the source thread")).not.toBeInTheDocument();
     expect(screen.queryByText("chat-source")).not.toBeInTheDocument();
     expect(screen.queryByText("chat-builder")).not.toBeInTheDocument();
-    expect(screen.getAllByText("Source").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Automation").length).toBeGreaterThan(0);
-    expect(screen.getByText("Jun 3")).toBeInTheDocument();
-    expect(screen.getByText("Jun 4")).toBeInTheDocument();
+    expect(screen.getByText(/(?:Jun 4|4 Jun)/)).toBeInTheDocument();
   });
 
   it("uses a generic title and subdued diagnostic ID when a transcript summary is missing", async () => {

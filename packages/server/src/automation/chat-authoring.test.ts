@@ -14,6 +14,7 @@ function definition(overrides: Partial<AutomationBuilderSaveRequest> = {}): Auto
     title: "Daily brief",
     description: "Summarize updates",
     prompt: "Summarize updates",
+    executionMode: "hybrid",
     scheduleType: "interval",
     scheduleValue: "120",
     timezone: "Asia/Kolkata",

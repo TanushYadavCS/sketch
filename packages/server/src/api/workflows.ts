@@ -71,15 +71,15 @@ interface WorkflowRouteDeps {
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
-  queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => void } };
+  queueManager?: { getQueue: (key: string) => { enqueue: (fn: () => Promise<void>) => boolean } };
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 class WorkflowApiError extends Error {
   code: string;
-  status: 400 | 404;
+  status: 400 | 404 | 429;
 
-  constructor(code: string, message: string, status: 400 | 404 = 400) {
+  constructor(code: string, message: string, status: 400 | 404 | 429 = 400) {
     super(message);
     this.code = code;
     this.status = status;
@@ -342,13 +342,16 @@ async function executeWorkflowRun(params: ExecuteWorkflowRunParams) {
 function enqueueWorkflowRun<T>(deps: WorkflowRouteDeps, workflowId: string, run: () => Promise<T>): Promise<T> {
   if (!deps.queueManager) return run();
   return new Promise<T>((resolve, reject) => {
-    deps.queueManager?.getQueue(`workflow-${workflowId}`).enqueue(async () => {
+    const accepted = deps.queueManager?.getQueue(`workflow-${workflowId}`).enqueue(async () => {
       try {
         resolve(await run());
       } catch (err) {
         reject(err);
       }
     });
+    if (accepted === false) {
+      reject(new WorkflowApiError("QUEUE_SATURATED", "Workflow queue is full; try again later.", 429));
+    }
   });
 }
 

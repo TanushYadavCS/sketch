@@ -90,10 +90,10 @@ export const getFileContentToolSchema = {
   fileId: z.string().describe("The indexed file ID from a Search result."),
 };
 
-type SearchArgs = z.infer<z.ZodObject<typeof searchToolSchema>>;
-type SearchEntitiesArgs = z.infer<z.ZodObject<typeof searchEntitiesToolSchema>>;
-type GetEntityContextArgs = z.infer<z.ZodObject<typeof getEntityContextToolSchema>>;
-type GetFileContentArgs = z.infer<z.ZodObject<typeof getFileContentToolSchema>>;
+export type SearchArgs = z.infer<z.ZodObject<typeof searchToolSchema>>;
+export type SearchEntitiesArgs = z.infer<z.ZodObject<typeof searchEntitiesToolSchema>>;
+export type GetEntityContextArgs = z.infer<z.ZodObject<typeof getEntityContextToolSchema>>;
+export type GetFileContentArgs = z.infer<z.ZodObject<typeof getFileContentToolSchema>>;
 
 export async function resolveUserPrincipals(deps: SketchMcpDeps): Promise<AccessPrincipal[]> {
   if (deps.publicMcp?.userPrincipals) return normalizeAccessPrincipals(deps.publicMcp.userPrincipals);

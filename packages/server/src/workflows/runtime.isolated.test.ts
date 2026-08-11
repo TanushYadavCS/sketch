@@ -1,10 +1,13 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
 import { withActiveRun } from "../agent/active-runs";
 import { runAgentRuntimeCore } from "../agent/runtime/core";
 import { DEFAULT_AGENT_RUNTIME_COST_TABLE } from "../agent/runtime/pricing";
-import { executeAutomation, testAutomationStep } from "./runtime";
+import { MAX_AUTOMATION_OUTPUT_BYTES } from "../automation/capabilities";
+import { executeAutomation, testAutomationStep, validateRuntimeAutomationExecutionMode } from "./runtime";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -169,8 +172,9 @@ function makeBrokerProvider(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function makeActionTask(steps: Array<Record<string, unknown>>) {
+function makeActionTask(steps: Array<Record<string, unknown>>, overrides: Record<string, unknown> = {}) {
   return makeTask({
+    ...overrides,
     steps: JSON.stringify([
       { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
       ...steps,
@@ -178,13 +182,40 @@ function makeActionTask(steps: Array<Record<string, unknown>>) {
   });
 }
 
-function makeStepContent(rows: Array<{ stepId: string; content: string }>) {
+describe("automation execution mode runtime guard", () => {
+  it("blocks agent steps in fixed recipe mode", () => {
+    expect(() =>
+      validateRuntimeAutomationExecutionMode("deterministic", [
+        { id: "agent", type: "agent", label: "Summarize", icon: "robot", position: { x: 0, y: 0 } },
+      ]),
+    ).toThrow('cannot run agent step "Summarize"');
+  });
+
+  it("blocks action steps in agent-led mode", () => {
+    expect(() =>
+      validateRuntimeAutomationExecutionMode("agent-led", [
+        { id: "action", type: "action", label: "Send update", icon: "code", position: { x: 0, y: 0 } },
+      ]),
+    ).toThrow('cannot run code or action step "Send update"');
+  });
+
+  it("allows a mixed recipe in hybrid mode", () => {
+    expect(() =>
+      validateRuntimeAutomationExecutionMode("hybrid", [
+        { id: "action", type: "action", label: "Normalize", icon: "code", position: { x: 0, y: 0 } },
+        { id: "agent", type: "agent", label: "Summarize", icon: "robot", position: { x: 0, y: 100 } },
+      ]),
+    ).not.toThrow();
+  });
+});
+
+function makeStepContent(rows: Array<{ stepId: string; content: string; contentType?: "prompt" | "script" }>) {
   return {
     getByTask: vi.fn().mockResolvedValue(
       rows.map((row) => ({
         task_id: "task-1",
         step_id: row.stepId,
-        content_type: "script",
+        content_type: row.contentType ?? "script",
         content: row.content,
         apps: null,
         updated_at: "2026-04-27T09:00:00.000Z",
@@ -229,8 +260,8 @@ describe("executeAutomation stopped Sketch agent steps", () => {
         { id: "later", type: "action", label: "Send ticket", icon: "code", position: { x: 0, y: 200 } },
       ]),
       stepContentRepo: makeStepContent([
-        { stepId: "agent1", content: "Research the issue." },
-        { stepId: "later", content: "return { sent: true };" },
+        { stepId: "agent1", content: "Research the issue.", contentType: "prompt" },
+        { stepId: "later", content: 'return "sent";' },
       ]),
     });
 
@@ -736,6 +767,239 @@ describe("testAutomationStep", () => {
 });
 
 describe("executeAutomation action steps", () => {
+  it("uses a reserved run ID and sends one sanitized manual failure notification", async () => {
+    const params = makeParams({
+      runId: "reserved-run-1",
+      runMode: "manual",
+      task: makeActionTask([{ id: "act1", type: "action", label: "Fail", icon: "code", position: { x: 0, y: 100 } }]),
+      stepContentRepo: makeStepContent([{ stepId: "act1", content: 'throw new Error("secret provider detail");' }]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result).toMatchObject({ runId: "reserved-run-1", status: "failed" });
+    expect(params._runsRepo.create).not.toHaveBeenCalled();
+    expect(params._runsRepo.update).toHaveBeenCalledWith(
+      "reserved-run-1",
+      expect.objectContaining({ errorMessage: expect.stringContaining("secret provider detail") }),
+    );
+    expect(params.sendMessage).toHaveBeenCalledTimes(1);
+    expect(params.sendMessage).toHaveBeenCalledWith(
+      "Automation “Daily workflow planning summary” failed. View run: https://sketch.test/scheduled-tasks/task-1/edit?runId=reserved-run-1",
+    );
+    expect(params.sendMessage).not.toHaveBeenCalledWith(expect.stringContaining("secret provider detail"));
+  });
+
+  it("records a failed run without executing a malformed persisted definition", async () => {
+    const runAgent = vi.fn();
+    const params = makeParams({
+      runAgent,
+      task: makeTask({ steps: "not-json" }),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.finalOutput).toBeNull();
+    expect(result.stepOutputs).toEqual({});
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(params._runsRepo.update).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({
+        status: "failed",
+        errorMessage: expect.stringContaining("Automation definition is invalid"),
+      }),
+    );
+  });
+
+  it("runs a read-only Sketch tool action without a Canvas broker", async () => {
+    const searchEntities = vi.fn().mockResolvedValue([{ id: "entity-acme", name: "Acme" }]);
+    const automationCapabilityRegistry = {
+      createTools: vi.fn().mockReturnValue({ searchEntities }),
+    };
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(null);
+    const params = makeParams({
+      task: makeActionTask(
+        [
+          {
+            id: "act1",
+            type: "action",
+            label: "Find Acme",
+            icon: "magnifying-glass",
+            position: { x: 0, y: 100 },
+            actionCapabilities: { sketchTools: ["searchEntities"], usesIntegrationActions: false },
+          },
+        ],
+        { output_mode: "silent" },
+      ),
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: `
+            const entities = await ctx.tools.searchEntities({ queries: ["Acme"] });
+            return { entities, hasCanvasCli: Boolean(ctx.env.CANVAS_CLI) };
+          `,
+        },
+      ]),
+      loadIntegrationProvider,
+      automationCapabilityRegistry,
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(result.finalOutput).toEqual({
+      entities: [{ id: "entity-acme", name: "Acme" }],
+      hasCanvasCli: false,
+    });
+    expect(searchEntities).toHaveBeenCalledWith({ queries: ["Acme"] });
+    expect(loadIntegrationProvider).not.toHaveBeenCalled();
+    expect(automationCapabilityRegistry.createTools).toHaveBeenCalledWith(
+      expect.objectContaining({ allowedTools: ["searchEntities"] }),
+    );
+  });
+
+  it("fails action steps that use the legacy Sketch tool namespace", async () => {
+    const automationCapabilityRegistry = { createTools: vi.fn() };
+    const loadIntegrationProvider = vi.fn().mockResolvedValue(null);
+    const params = makeParams({
+      task: makeActionTask(
+        [
+          {
+            id: "act1",
+            type: "action",
+            label: "Find Acme",
+            icon: "magnifying-glass",
+            position: { x: 0, y: 100 },
+            actionCapabilities: { sketchTools: ["search"], usesIntegrationActions: false },
+          },
+        ],
+        { output_mode: "silent" },
+      ),
+      stepContentRepo: makeStepContent([
+        { stepId: "act1", content: "return await ctx.sketch.search({ query: 'Acme' });" },
+      ]),
+      loadIntegrationProvider,
+      automationCapabilityRegistry,
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs).toEqual({});
+    expect(params._runsRepo.update).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({
+        status: "failed",
+        errorMessage: expect.stringContaining("must call Sketch tools through ctx.tools"),
+      }),
+    );
+    expect(automationCapabilityRegistry.createTools).not.toHaveBeenCalled();
+    expect(loadIntegrationProvider).not.toHaveBeenCalled();
+  });
+
+  it("fails a run when a Sketch capability fails even if the script catches it", async () => {
+    const search = vi.fn().mockRejectedValue(new Error("search backend unavailable"));
+    const createTools = vi.fn((options: { context: { onFailure?: (capability: string, error: unknown) => void } }) => ({
+      search: async (args: unknown) => {
+        try {
+          return await search(args);
+        } catch (error) {
+          options.context.onFailure?.("search", error);
+          throw error;
+        }
+      },
+    }));
+    const params = makeParams({
+      task: makeActionTask([
+        {
+          id: "act1",
+          type: "action",
+          label: "Find Acme",
+          icon: "magnifying-glass",
+          position: { x: 0, y: 100 },
+          actionCapabilities: { sketchTools: ["search"], usesIntegrationActions: false },
+        },
+      ]),
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: `
+            try {
+              await ctx.tools.search({ query: "Acme" });
+            } catch {
+              return "No items";
+            }
+          `,
+        },
+      ]),
+      automationCapabilityRegistry: { createTools },
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain(
+      'Sketch capability "search" failed: search backend unavailable',
+    );
+    expect(params.sendMessage).toHaveBeenCalledWith(
+      expect.stringContaining('Sketch capability "search" failed: search backend unavailable'),
+    );
+  });
+
+  it("fails message delivery instead of JSON-stringifying structured final output", async () => {
+    const params = makeParams({
+      task: makeActionTask([{ id: "act1", type: "action", label: "Report", icon: "code", position: { x: 0, y: 100 } }]),
+      stepContentRepo: makeStepContent([
+        { stepId: "act1", content: 'const result = { summary: "done" }; return result;' },
+      ]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("Message delivery requires");
+    expect(params.sendMessage).toHaveBeenCalledWith(expect.stringContaining("Message delivery requires"));
+    expect(params.sendMessage).not.toHaveBeenCalledWith(expect.stringContaining('"summary"'));
+  });
+
+  it("fails a test run when its final delivery output is structured", async () => {
+    const params = makeParams({
+      runMode: "test",
+      task: makeActionTask([{ id: "act1", type: "action", label: "Report", icon: "code", position: { x: 0, y: 100 } }]),
+      stepContentRepo: makeStepContent([
+        {
+          stepId: "act1",
+          content: 'const result = { message: "Reminder: message Vedant on Slack." }; return result;',
+        },
+      ]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("Message delivery requires");
+    expect(params.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("suppresses target delivery for an explicit test run while retaining failure output", async () => {
+    const params = makeParams({
+      runMode: "test",
+      task: makeActionTask([{ id: "act1", type: "action", label: "Fail", icon: "code", position: { x: 0, y: 100 } }]),
+      stepContentRepo: makeStepContent([{ stepId: "act1", content: 'throw new Error("test failure");' }]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain("test failure");
+    expect(params.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("executes action scripts in process with previous input and script context", async () => {
     const logger = { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() };
     const childLogger = { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -776,7 +1040,7 @@ describe("executeAutomation action steps", () => {
           content: `
             export default async function action(input, ctx, signal) {
             if (input.prepared !== 42) throw new Error("previous output missing");
-            return { done: true, previousEnv: input.envValue, workspaceDir: input.workspaceDir };
+            return "Done: previous environment value was " + input.envValue + "; workspace is " + input.workspaceDir;
             }
           `,
         },
@@ -788,11 +1052,9 @@ describe("executeAutomation action steps", () => {
     const result = await executeAutomation(params as never);
 
     expect(result.status).toBe("completed");
-    expect(result.finalOutput).toEqual({
-      done: true,
-      previousEnv: "safe-value",
-      workspaceDir: "/tmp/sketch-runtime-test/workspaces/user-1",
-    });
+    expect(result.finalOutput).toBe(
+      "Done: previous environment value was safe-value; workspace is /tmp/sketch-runtime-test/workspaces/user-1",
+    );
     expect(result.stepOutputs.act1.output).toEqual({
       prepared: 42,
       envValue: "safe-value",
@@ -801,11 +1063,7 @@ describe("executeAutomation action steps", () => {
     expect(logger.child).toHaveBeenCalledWith({ taskId: "task-1", runId: "run-1", stepId: "act1" });
     expect(childLogger.info).toHaveBeenCalledWith({ ok: true }, "action script log");
     expect(params.sendMessage).toHaveBeenCalledWith(
-      JSON.stringify(
-        { done: true, previousEnv: "safe-value", workspaceDir: "/tmp/sketch-runtime-test/workspaces/user-1" },
-        null,
-        2,
-      ),
+      "Done: previous environment value was safe-value; workspace is /tmp/sketch-runtime-test/workspaces/user-1",
     );
     expect(spawn).not.toHaveBeenCalled();
     expect(listAgentEnvForRuntime).toHaveBeenCalledWith({
@@ -826,9 +1084,10 @@ describe("executeAutomation action steps", () => {
     await writeFile(filePath, "jpeg-bytes");
     const executeAction = vi.fn().mockResolvedValue({ id: "clickup-task-1" });
     const params = makeParams({
-      task: makeActionTask([
-        { id: "act1", type: "action", label: "Create ClickUp task", icon: "code", position: { x: 0, y: 100 } },
-      ]),
+      task: makeActionTask(
+        [{ id: "act1", type: "action", label: "Create ClickUp task", icon: "code", position: { x: 0, y: 100 } }],
+        { output_mode: "silent" },
+      ),
       triggerData: { filePath },
       trustedLocalFileRoot,
       stepContentRepo: makeStepContent([
@@ -992,7 +1251,7 @@ describe("executeAutomation action steps", () => {
   it("fails action steps that time out before completing", async () => {
     const params = makeParams({
       task: makeActionTask([
-        { id: "act1", type: "action", label: "Hang", icon: "code", position: { x: 0, y: 100 }, timeout: 0.001 },
+        { id: "act1", type: "action", label: "Hang", icon: "code", position: { x: 0, y: 100 }, timeout: 1 },
         { id: "act2", type: "action", label: "Skip", icon: "code", position: { x: 0, y: 200 } },
       ]),
       stepContentRepo: makeStepContent([
@@ -1016,7 +1275,9 @@ describe("executeAutomation action steps", () => {
       task: makeActionTask([
         { id: "act1", type: "action", label: "Bad output", icon: "code", position: { x: 0, y: 100 } },
       ]),
-      stepContentRepo: makeStepContent([{ stepId: "act1", content: "return { value: BigInt(1) };" }]),
+      stepContentRepo: makeStepContent([
+        { stepId: "act1", content: "const result = { value: BigInt(1) }; return result;" },
+      ]),
       loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
     });
 
@@ -1026,4 +1287,74 @@ describe("executeAutomation action steps", () => {
     expect(result.stepOutputs.act1.error?.message).toContain("not JSON-serializable");
     expect(onEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: "step.completed", stepId: "act1" }));
   });
+
+  it("bounds action output before it is persisted or passed downstream", async () => {
+    const onEvent = vi.fn();
+    const params = makeParams({
+      onEvent,
+      task: makeActionTask(
+        [{ id: "act1", type: "action", label: "Large output", icon: "code", position: { x: 0, y: 100 } }],
+        { output_mode: "silent" },
+      ),
+      stepContentRepo: makeStepContent([
+        { stepId: "act1", content: `return "x".repeat(${MAX_AUTOMATION_OUTPUT_BYTES + 1});` },
+      ]),
+      loadIntegrationProvider: vi.fn().mockResolvedValue(makeBrokerProvider()),
+    });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("failed");
+    expect(result.stepOutputs.act1.error?.message).toContain(
+      `Workflow step output exceeds ${MAX_AUTOMATION_OUTPUT_BYTES} bytes`,
+    );
+    expect(onEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: "step.completed", stepId: "act1" }));
+  });
+
+  it("keeps a successful run successful when context maintenance fails", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "sketch-runtime-context-"));
+    const logger = { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const params = makeParams({
+      logger,
+      config: {
+        DATA_DIR: dataDir,
+        CLAUDE_CONFIG_DIR: join(dataDir, ".claude"),
+        BASE_URL: "https://sketch.test",
+        PORT: 3000,
+        AGENT_RUNTIME: "sdk",
+      },
+      task: makeTask({ id: "context-task", output_mode: "silent" }),
+      runAgent: vi.fn().mockResolvedValue({
+        pendingUploads: [],
+        trace: { finalText: "successful result" },
+        rawUsage: { toolCalls: [] },
+      }),
+    });
+    const contextFilePath = join(dataDir, "workspaces", "user-1", ".workflow-context", "context-task-run-1.md");
+    await mkdir(contextFilePath, { recursive: true });
+
+    const result = await executeAutomation(params as never);
+
+    expect(result.status).toBe("completed");
+    expect(result.finalOutput).toBe("successful result");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ contextDir: expect.stringContaining(".workflow-context") }),
+      "Automation: context maintenance failed",
+    );
+  });
 });
+
+function makePromptStepContent(rows: Array<{ stepId: string; content: string }>) {
+  return {
+    getByTask: vi.fn().mockResolvedValue(
+      rows.map((row) => ({
+        task_id: "task-1",
+        step_id: row.stepId,
+        content_type: "prompt",
+        content: row.content,
+        apps: null,
+        updated_at: "2026-04-27T09:00:00.000Z",
+      })),
+    ),
+  };
+}

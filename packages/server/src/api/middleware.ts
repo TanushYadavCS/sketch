@@ -47,6 +47,10 @@ const PUBLIC_SETUP_PATHS = new Set(["/api/setup/status", "/api/setup/account"]);
 const ONBOARDING_PATHS_PREFIX = "/api/channels/whatsapp";
 const PLATFORM_COOKIE = "sketch_platform_session";
 
+function isPublicWebhookPath(path: string): boolean {
+  return /^\/api\/webhooks\/wf\/[^/]+$/.test(path);
+}
+
 type SettingsRepo = ReturnType<typeof createSettingsRepository>;
 
 export interface ViewerIdentity {
@@ -121,7 +125,7 @@ export function createAuthMiddleware(settings: SettingsRepo, opts?: AuthMiddlewa
     }
 
     const isSetupPath = path.startsWith(SETUP_PATHS_PREFIX);
-    const isPublicPath = PUBLIC_PATHS.has(path);
+    const isPublicPath = PUBLIC_PATHS.has(path) || isPublicWebhookPath(path);
     const isPublicSetupPath = PUBLIC_SETUP_PATHS.has(path);
 
     // Setup bootstrap paths are always accessible.

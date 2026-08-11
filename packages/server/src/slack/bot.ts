@@ -96,6 +96,18 @@ export interface HomeActionEvent {
 
 export type HomeActionHandler = (event: HomeActionEvent) => Promise<void>;
 
+export interface SlackQuestionActionEvent {
+  slackUserId: string;
+  channelId: string;
+  threadTs: string | null;
+  triggerId?: string;
+  actionId: string;
+  value: string;
+  eventId: string;
+}
+
+export type SlackQuestionActionHandler = (event: SlackQuestionActionEvent) => Promise<void>;
+
 export interface SlackChannelMembershipEvent {
   channelId: string;
   slackUserId: string;
@@ -159,6 +171,7 @@ export class SlackBot {
   private userChangeHandler: SlackUserLifecycleHandler | null = null;
   private appHomeOpenedHandler: AppHomeOpenedHandler | null = null;
   private homeActionHandler: HomeActionHandler | null = null;
+  private questionActionHandler: SlackQuestionActionHandler | null = null;
   private botUserId: string | null = null;
   private botId: string | null = null;
   private teamId: string | null = null;
@@ -254,6 +267,10 @@ export class SlackBot {
 
   onHomeAction(handler: HomeActionHandler): void {
     this.homeActionHandler = handler;
+  }
+
+  onQuestionAction(handler: SlackQuestionActionHandler): void {
+    this.questionActionHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -544,6 +561,35 @@ export class SlackBot {
       }
     });
 
+    this.app.action(/^question_option$/, async ({ body, action, ack }) => {
+      await ack();
+      if (!this.questionActionHandler) return;
+      const payload = body as {
+        user?: { id?: string };
+        container?: { channel_id?: string; thread_ts?: string; message_ts?: string };
+        trigger_id?: string;
+      };
+      const slackUserId = payload.user?.id;
+      const channelId = payload.container?.channel_id;
+      const actionId = (action as { action_id?: string }).action_id;
+      const value = (action as { value?: string }).value;
+      const actionTs = (action as { action_ts?: string }).action_ts;
+      if (!slackUserId || !channelId || !actionId || !value || !actionTs) return;
+      try {
+        await this.questionActionHandler({
+          slackUserId,
+          channelId,
+          threadTs: payload.container?.thread_ts ?? payload.container?.message_ts ?? null,
+          ...(payload.trigger_id ? { triggerId: payload.trigger_id } : {}),
+          actionId,
+          value,
+          eventId: `slack-action:${actionTs}:${slackUserId}:${actionId}`,
+        });
+      } catch (err) {
+        this.logger.warn({ err, slackUserId, channelId, actionId }, "question action handler failed");
+      }
+    });
+
     if (this.mode === "socket") {
       await this.app.start();
       this.logger.info("Slack bot connected (Socket Mode)");
@@ -623,6 +669,26 @@ export class SlackBot {
       text,
     });
     return result.ts ?? "";
+  }
+
+  async postInteractiveMessage(input: {
+    channelId: string;
+    threadTs: string | null;
+    text: string;
+  }): Promise<string> {
+    const result = await this.app.client.chat.postMessage({
+      channel: input.channelId,
+      text: input.text,
+      ...(input.threadTs ? { thread_ts: input.threadTs } : {}),
+    });
+    return result.ts ?? "";
+  }
+
+  async openModal(triggerId: string, view: Record<string, unknown>): Promise<void> {
+    await this.app.client.views.open({
+      trigger_id: triggerId,
+      view: view as unknown as Parameters<typeof this.app.client.views.open>[0]["view"],
+    });
   }
 
   async updateMessage(channelId: string, ts: string, text: string): Promise<void> {

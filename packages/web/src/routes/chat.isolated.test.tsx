@@ -8,12 +8,15 @@ import userEvent from "@testing-library/user-event";
 import { type ComponentType, type ReactNode, StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AUTOMATION_BUILDER_NAVIGATION_DELAY_MS,
   ChatPage,
   SMOOTH_TEXT_STREAM_DELAY_MS,
   buildChatThreadMessages,
   chatIndexRoute,
   hasPendingAssistantProgress,
   nextSmoothedAssistantText,
+  outgoingQuestionAnswerMessage,
+  outgoingQuestionBatchAnswerMessage,
   outgoingRequestOptions,
   outgoingTextMessage,
   releaseReadySmoothedAssistantText,
@@ -48,6 +51,11 @@ const mocks = vi.hoisted(() => ({
   createConnectionIntent: vi.fn().mockResolvedValue({
     app: { id: "github", name: "GitHub", description: "Code hosting" },
     redirectUrl: "https://canvas.example/connect",
+  }),
+  createScheduledTaskConversation: vi.fn().mockResolvedValue({
+    conversation: { conversationId: "builder-new" },
+    created: true,
+    builderLock: { state: "unlocked" },
   }),
   workspaceSummary: vi.fn().mockResolvedValue({
     automations: { running: 0, total: 0, nextRunAt: null },
@@ -117,6 +125,9 @@ vi.mock("@/lib/api", () => ({
       createConnection: mocks.createConnection,
       createConnectionIntent: mocks.createConnectionIntent,
     },
+    scheduledTasks: {
+      createConversation: mocks.createScheduledTaskConversation,
+    },
   },
 }));
 
@@ -182,6 +193,12 @@ describe("chat route", () => {
     mocks.createConnectionIntent.mockResolvedValue({
       app: { id: "github", name: "GitHub", description: "Code hosting" },
       redirectUrl: "https://canvas.example/connect",
+    });
+    mocks.createScheduledTaskConversation.mockReset();
+    mocks.createScheduledTaskConversation.mockResolvedValue({
+      conversation: { conversationId: "builder-new" },
+      created: true,
+      builderLock: { state: "unlocked" },
     });
     mocks.workspaceSummary.mockClear();
     mocks.conversations.mockClear();
@@ -305,6 +322,7 @@ describe("chat route", () => {
   it("extracts automation cards from assistant data parts", () => {
     const artifact = {
       taskId: "task-123",
+      requiresBuilder: true,
       kind: "New automation",
       title: "Send weekly customer brief",
       description: "Summarizes customer updates every Monday.",
@@ -337,6 +355,284 @@ describe("chat route", () => {
     ]);
   });
 
+  it("parses batched assistant questions and append-only batch answers", () => {
+    const batch = {
+      batchId: "setup-batch",
+      questions: [
+        {
+          id: "source",
+          prompt: "Where should I look?",
+          options: [
+            { id: "gmail", label: "Gmail" },
+            { id: "drive", label: "Google Drive" },
+          ],
+        },
+        {
+          id: "delivery",
+          prompt: "Where should I send it?",
+          options: [
+            { id: "slack", label: "Slack" },
+            { id: "email", label: "Email" },
+          ],
+        },
+      ],
+    };
+    const answer = {
+      batchId: "setup-batch",
+      answers: [
+        { questionId: "source", optionId: "drive" },
+        { questionId: "delivery", optionId: "slack" },
+      ],
+    };
+
+    expect(
+      buildChatThreadMessages([
+        {
+          id: "assistant-batch",
+          role: "assistant",
+          parts: [{ type: "data-question-batch", id: "batch-part", data: batch }],
+        },
+        {
+          id: "user-batch-answer",
+          role: "user",
+          parts: [{ type: "data-question-batch-answer", id: "answer-part", data: answer }],
+        },
+      ]),
+    ).toEqual([
+      { id: "assistant-batch", role: "assistant", questionBatch: batch },
+      { id: "user-batch-answer", role: "user", text: "Submitted answers" },
+    ]);
+
+    expect(outgoingQuestionBatchAnswerMessage(batch, answer)).toMatchObject({
+      parts: [
+        { type: "text", text: "Google Drive · Slack" },
+        { type: "data-question-batch-answer", data: answer },
+      ],
+    });
+
+    const customAnswer = {
+      batchId: "setup-batch",
+      answers: [
+        { questionId: "source", customResponse: "Shared drive" },
+        { questionId: "delivery", optionId: "slack" },
+      ],
+    };
+    expect(outgoingQuestionBatchAnswerMessage(batch, customAnswer)).toMatchObject({
+      parts: [
+        { type: "text", text: "Shared drive · Slack" },
+        { type: "data-question-batch-answer", data: customAnswer },
+      ],
+    });
+
+    expect(
+      outgoingQuestionAnswerMessage(batch.questions[0], { questionId: "source", customResponse: "Folder A" }),
+    ).toMatchObject({
+      parts: [
+        { type: "text", text: "Folder A" },
+        { type: "data-question-answer", data: { questionId: "source", customResponse: "Folder A" } },
+      ],
+    });
+  });
+
+  it("navigates to the builder when a created automation artifact arrives", async () => {
+    mocks.navigate.mockClear();
+    mocks.search = { new: true };
+    const userMessage = { id: "u-automation", role: "user", parts: [{ type: "text", text: "Send me a daily brief" }] };
+    const assistantMessage = {
+      id: "a-automation",
+      role: "assistant",
+      parts: [
+        {
+          type: "data-automation",
+          id: "automation-0",
+          data: {
+            taskId: "task-123",
+            requiresBuilder: true,
+            kind: "New automation",
+            title: "Daily brief",
+            description: "Sends a daily brief.",
+            tags: ["Scheduled"],
+            scheduleLabel: "Daily at 9:00 AM",
+            deliveryLabel: "Slack DM",
+            builderUrl: "/scheduled-tasks/task-123/edit?conversationId=chat-alpha",
+            status: "active",
+          },
+        },
+      ],
+    };
+    mockChatMessages = [userMessage];
+
+    const { rerender } = renderWithProviders(<ChatPage />);
+    mockChatMessages = [userMessage, assistantMessage];
+    rerender(<ChatPage />);
+
+    await waitFor(
+      () =>
+        expect(mocks.navigate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            to: "/scheduled-tasks/$taskId/edit",
+            params: { taskId: "task-123" },
+            search: { conversationId: "builder-new" },
+          }),
+        ),
+      { timeout: AUTOMATION_BUILDER_NAVIGATION_DELAY_MS + 1000 },
+    );
+    expect(mocks.createScheduledTaskConversation).toHaveBeenCalledWith("task-123", { createNew: true });
+  });
+
+  it("keeps a completed simple automation card in chat without opening the builder", async () => {
+    mocks.navigate.mockClear();
+    mocks.search = { new: true };
+    const userMessage = { id: "u-simple", role: "user", parts: [{ type: "text", text: "Send the report" }] };
+    const assistantMessage = {
+      id: "a-simple",
+      role: "assistant",
+      parts: [
+        {
+          type: "data-automation",
+          id: "automation-0",
+          data: {
+            taskId: "task-simple",
+            requiresBuilder: false,
+            kind: "Completed automation",
+            title: "Report sent",
+            description: "The report was sent.",
+            tags: ["Completed"],
+            scheduleLabel: "One time",
+            deliveryLabel: "Slack DM",
+            builderUrl: "/scheduled-tasks/task-simple/edit",
+            status: "completed",
+          },
+        },
+      ],
+    };
+    mockChatMessages = [userMessage];
+
+    const { rerender } = renderWithProviders(<ChatPage />);
+    mockChatMessages = [userMessage, assistantMessage];
+    rerender(<ChatPage />);
+
+    await new Promise((resolve) => window.setTimeout(resolve, AUTOMATION_BUILDER_NAVIGATION_DELAY_MS + 50));
+    expect(mocks.createScheduledTaskConversation).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalledWith(expect.objectContaining({ to: "/scheduled-tasks/$taskId/edit" }));
+    expect(screen.getByText("Report sent")).toBeInTheDocument();
+  });
+
+  it("does not open the builder with the source chat when builder conversation creation fails", async () => {
+    mocks.navigate.mockClear();
+    mocks.search = { new: true };
+    mocks.createScheduledTaskConversation.mockRejectedValue(new Error("unavailable"));
+    const userMessage = { id: "u-complex", role: "user", parts: [{ type: "text", text: "Create an automation" }] };
+    const assistantMessage = {
+      id: "a-complex",
+      role: "assistant",
+      parts: [
+        {
+          type: "data-automation",
+          id: "automation-0",
+          data: {
+            taskId: "task-complex",
+            kind: "New automation",
+            title: "Daily brief",
+            description: "Sends a daily brief.",
+            tags: ["Scheduled"],
+            scheduleLabel: "Daily",
+            deliveryLabel: "Slack DM",
+            builderUrl: "/scheduled-tasks/task-complex/edit?conversationId=chat-alpha",
+            status: "active",
+          },
+        },
+      ],
+    };
+    mockChatMessages = [userMessage];
+
+    const { rerender } = renderWithProviders(<ChatPage />);
+    mockChatMessages = [userMessage, assistantMessage];
+    rerender(<ChatPage />);
+
+    await waitFor(
+      () => expect(mocks.createScheduledTaskConversation).toHaveBeenCalledWith("task-complex", { createNew: true }),
+      {
+        timeout: AUTOMATION_BUILDER_NAVIGATION_DELAY_MS + 1000,
+      },
+    );
+    expect(mocks.navigate).not.toHaveBeenCalledWith(
+      expect.objectContaining({ search: { conversationId: "chat-alpha" } }),
+    );
+  });
+
+  it("turns a typed automation handoff into a builder continuation card", () => {
+    const messages = buildChatThreadMessages([
+      {
+        id: "a-draft",
+        role: "assistant",
+        parts: [
+          { type: "text", text: "I started a draft." },
+          {
+            type: "data-automation-handoff",
+            id: "automation-handoff-0",
+            data: {
+              kind: "automation-draft",
+              taskId: "task-draft-1",
+              sourceConversationId: "chat-source-1",
+              builderConversationId: "chat-builder-1",
+              builderUrl: "/scheduled-tasks/task-draft-1/edit",
+              status: "paused",
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: "a-draft",
+        role: "assistant",
+        text: "I started a draft.",
+        automations: [
+          {
+            taskId: "task-draft-1",
+            requiresBuilder: true,
+            kind: "Automation setup",
+            title: "Set up automation",
+            description: "Continue configuring this automation in the automation builder.",
+            tags: ["Setup"],
+            scheduleLabel: "Not configured",
+            deliveryLabel: "Not configured",
+            builderUrl: "/scheduled-tasks/task-draft-1/edit?conversationId=chat-builder-1",
+            status: "paused",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("uses the source conversation as the fallback for older automation handoffs", () => {
+    const messages = buildChatThreadMessages([
+      {
+        id: "a-legacy-handoff",
+        role: "assistant",
+        parts: [
+          {
+            type: "data-automation-handoff",
+            id: "automation-handoff-legacy",
+            data: {
+              kind: "automation-draft",
+              taskId: "task-legacy-1",
+              sourceConversationId: "chat-source-legacy",
+              builderUrl: "/scheduled-tasks/task-legacy-1/edit?conversationId=outdated",
+              status: "paused",
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(messages[0]?.automations?.[0]?.builderUrl).toBe(
+      "/scheduled-tasks/task-legacy-1/edit?conversationId=chat-source-legacy",
+    );
+  });
+
   it("invalidates automation caches when a streamed automation card arrives", async () => {
     const queryClient = new QueryClient({
       defaultOptions: {
@@ -357,6 +653,7 @@ describe("chat route", () => {
             id: "automation-0",
             data: {
               taskId: "task-123",
+              requiresBuilder: true,
               kind: "Updated automation",
               title: "Daily account brief",
               description: "Summarizes account updates.",

@@ -518,6 +518,184 @@
   }
 }
 
+@keyframes sketch-route-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.995);
+  }
+}
+
+@keyframes sketch-route-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.997);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+::view-transition-old(root) {
+  animation: sketch-route-out 150ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+::view-transition-new(root) {
+  animation: sketch-route-in 280ms cubic-bezier(0.16, 1, 0.3, 1) 35ms both;
+}
+
+@keyframes sketch-question-card-in {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+    transform: translateY(16px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes sketch-question-step-in {
+  from {
+    opacity: 0;
+    transform: translateY(9px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sketch-question-option-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.question-flow-card {
+  transform-origin: 50% 100%;
+  animation: sketch-question-card-in 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+[data-question-flow-step][data-transition="idle"] {
+  animation: sketch-question-step-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+[data-question-flow-step][data-transition="idle"] [data-question-option-id] {
+  animation: sketch-question-option-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+[data-question-flow-step][data-transition="idle"] [data-question-option-id]:nth-child(2) {
+  animation-delay: 35ms;
+}
+
+[data-question-flow-step][data-transition="idle"] [data-question-option-id]:nth-child(3) {
+  animation-delay: 70ms;
+}
+
+[data-question-flow-step][data-transition="idle"] [data-question-option-id]:nth-child(4) {
+  animation-delay: 105ms;
+}
+
+@keyframes automation-builder-sidecar-in {
+  from {
+    opacity: 0;
+    transform: translateX(-14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes automation-builder-canvas-in {
+  from {
+    opacity: 0;
+    transform: scale(0.997);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes automation-builder-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes automation-builder-drop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes automation-builder-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.automation-builder-loading {
+  animation: sketch-route-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.automation-builder-sidecar-enter {
+  animation: automation-builder-sidecar-in 320ms cubic-bezier(0.16, 1, 0.3, 1) 25ms both;
+}
+
+.automation-builder-canvas-enter {
+  transform-origin: 50% 50%;
+  animation: automation-builder-canvas-in 360ms cubic-bezier(0.16, 1, 0.3, 1) 55ms both;
+}
+
+.automation-builder-toolbar-enter {
+  animation: automation-builder-drop-in 260ms cubic-bezier(0.16, 1, 0.3, 1) 150ms both;
+}
+
+.automation-builder-empty-state > div {
+  animation: automation-builder-rise-in 300ms cubic-bezier(0.16, 1, 0.3, 1) 180ms both;
+}
+
+.automation-builder-question-dock:has([data-question-flow-card]) {
+  animation: automation-builder-rise-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.automation-builder-drawer-enter {
+  animation: automation-builder-drawer-in 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.automation-builder-enter .automation-node-shell {
+  animation: automation-builder-rise-in 260ms cubic-bezier(0.16, 1, 0.3, 1) 160ms both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sketch-timeline-window,
   .sketch-timeline-window-track,
@@ -525,8 +703,24 @@
   .sketch-collapsible-timeline-content,
   .automation-builder-flow .react-flow__edge.animated .react-flow__edge-path,
   .automation-node-shell.automation-node-running::after,
-  .automation-builder-flow .animate-spin {
+  .automation-builder-flow .animate-spin,
+  .question-flow-card,
+  [data-question-flow-step],
+  [data-question-option-id],
+  .automation-builder-loading,
+  .automation-builder-sidecar-enter,
+  .automation-builder-canvas-enter,
+  .automation-builder-toolbar-enter,
+  .automation-builder-empty-state > div,
+  .automation-builder-question-dock,
+  .automation-builder-drawer-enter,
+  .automation-builder-enter .automation-node-shell {
     animation: none !important;
     transition: none;
+  }
+
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none !important;
   }
 }

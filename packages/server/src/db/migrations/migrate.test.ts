@@ -28,7 +28,7 @@ import * as slackEntityLifecycleMigration from "./160-slack-entity-lifecycle-syn
 import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as outlookCalendarProviderFileScopeMigration from "./164-outlook-calendar-provider-file-scope";
 
-const EXPECTED_MIGRATION_COUNT = 164;
+const EXPECTED_MIGRATION_COUNT = 167;
 
 function createBlankDb(): Kysely<DB> {
   return new Kysely<DB>({
@@ -236,6 +236,9 @@ describe("runMigrations — full sequence", () => {
     expect(names[161]).toBe("166-scheduled-task-builder-locks");
     expect(names[162]).toBe("167-normalize-whatsapp-numbers");
     expect(names[163]).toBe("168-whatsapp-group-scope-authority");
+    expect(names[164]).toBe("169-scheduled-task-execution-mode");
+    expect(names[165]).toBe("170-question-interactions");
+    expect(names[166]).toBe("171-question-interaction-active-keys");
   });
 
   it("backfills only exact web origin task conversations", async () => {

@@ -10,6 +10,9 @@ import type { Kysely } from "kysely";
 import { abortActiveRuns, withActiveRun } from "../agent/active-runs";
 import type { AuxLlmCall } from "../agent/aux-cost";
 import { PROMPT_TOO_LONG_SHARED_RECOVERY_MESSAGE, agentFailureMessage } from "../agent/errors";
+import type { QuestionInteractionService } from "../agent/interactions/service";
+import { parseNumberedQuestionAnswer, renderNumberedQuestionStep } from "../agent/interactions/text";
+import type { QuestionInteractionAnswerOutcome, QuestionInteractionCapabilities } from "../agent/interactions/types";
 import {
   type BufferedMessage,
   type InboxMessageContext,
@@ -77,9 +80,19 @@ import { SlackBot, type SlackFile, type SlackMessage, type SlackMessageHandler }
 import type { SlackEntitySyncService } from "./entity-sync";
 import { HOME_ACTION_REASONING_TEXT, HOME_ACTION_TOOL_PROGRESS, buildHomeView } from "./home";
 import { createSlackMessageHandler } from "./message-handler";
+import { createSlackQuestionTransport, decodeSlackQuestionActionValue } from "./question-interactions";
 import { SlackExternalUserError, SlackIdentityConflictError, resolveSlackUser } from "./resolve-user";
 import { isSlackStopCommand } from "./stop";
 import type { UserCache } from "./user-cache";
+
+const SLACK_TEXT_QUESTION_CAPABILITIES: QuestionInteractionCapabilities = {
+  available: true,
+  interactiveSingleSelect: false,
+  interactiveBatch: false,
+  nativeCustomResponse: true,
+  textFallback: true,
+  cancelControl: false,
+};
 
 type UserRepository = ReturnType<typeof createUserRepository>;
 type ChannelRepository = ReturnType<typeof createChannelRepository>;
@@ -192,6 +205,7 @@ export interface SlackAdapterDeps {
     messageRef: string;
   }>;
   followupReviewHandler?: FollowupReviewCommandHandler;
+  questionInteractions?: QuestionInteractionService;
 }
 
 export async function validateSlackTokens(botToken: string, appToken?: string): Promise<{ teamId: string }> {
@@ -420,6 +434,360 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
           : isInternalSlackUser(db, id, userInfo.email, userInfo),
       logger,
     });
+
+  if (deps.questionInteractions) {
+    slackBot.onQuestionAction(async (event) => {
+      const service = deps.questionInteractions;
+      if (!service) return;
+      const value = decodeSlackQuestionActionValue(event.value);
+      if (!value) return;
+      let user: Awaited<ReturnType<typeof resolveUser>>;
+      try {
+        user = await resolveUser(event.slackUserId);
+      } catch (err) {
+        logger.warn({ err, slackUserId: event.slackUserId }, "Ignoring question action from unresolved Slack user");
+        return;
+      }
+      const pending = await service.getPending(value.interactionId);
+      if (pending.kind !== "found") return;
+      const interaction = pending.interaction;
+      if (
+        interaction.target.platform !== "slack" ||
+        interaction.target.conversationId !== event.channelId ||
+        interaction.target.threadId !== event.threadTs
+      ) {
+        return;
+      }
+      if (!interaction.target.eligibleResponderPrincipalIds.includes(user.id)) {
+        await slackBot.postInteractiveMessage({
+          channelId: event.channelId,
+          threadTs: event.threadTs,
+          text: "That question is no longer available.",
+        });
+        return;
+      }
+      if (event.actionId !== "question_option" || !value.questionId || !value.optionId) return;
+      const interactionId = value.interactionId;
+      const questionId = value.questionId;
+      const optionId = value.optionId;
+      const activeQueueKey =
+        interaction.target.conversationKind === "dm" ? user.id : `${event.channelId}:${event.threadTs ?? ""}`;
+      queue.getQueue(activeQueueKey).enqueue(async () => {
+        const outcome = await service.submitAnswer({
+          interactionId,
+          questionId,
+          optionId,
+          responderPrincipalId: user.id,
+          inboundEventId: event.eventId,
+          receivedAt: new Date().toISOString(),
+        });
+        if (outcome.kind === "accepted_pending") {
+          const next = await service.findPendingForTarget({
+            platform: "slack",
+            conversationId: event.channelId,
+            threadId: event.threadTs,
+            responderPrincipalId: user.id,
+          });
+          await slackBot.postInteractiveMessage({
+            channelId: event.channelId,
+            threadTs: event.threadTs,
+            text:
+              next.kind === "found"
+                ? renderNumberedQuestionStep(next)
+                : "Your answer was saved, but I couldn't load the next question. Please try again.",
+          });
+        } else if (outcome.kind === "completed") {
+          await service.resumeQuestionInteraction(outcome.resumeWork, async (claimedResumeWork) => {
+            await executeSlackQuestionResume(claimedResumeWork);
+          });
+        } else if (outcome.kind !== "duplicate") {
+          await slackBot.postInteractiveMessage({
+            channelId: event.channelId,
+            threadTs: event.threadTs,
+            text: "That response could not be accepted. Please use the current question.",
+          });
+        }
+      });
+    });
+  }
+
+  const processSlackTextQuestionAnswer = async (
+    message: SlackMessage,
+    user: Awaited<ReturnType<typeof resolveUser>>,
+  ): Promise<boolean> => {
+    const service = deps.questionInteractions;
+    if (
+      !service ||
+      (message.type !== "dm" && message.type !== "channel_mention") ||
+      isConversationControlMessage(message.text) ||
+      isSlackStopCommand(message.text) ||
+      message.text.trim().startsWith("/")
+    ) {
+      return false;
+    }
+    const threadId = message.type === "dm" ? (message.threadTs ?? null) : (message.threadTs ?? message.ts);
+    const currentStep = await service.findPendingForTarget({
+      platform: "slack",
+      conversationId: message.channelId,
+      threadId,
+      responderPrincipalId: user.id,
+    });
+    if (currentStep.kind !== "found") return false;
+    const parsed = parseNumberedQuestionAnswer(message.text, currentStep.question);
+    if (parsed.kind === "invalid") {
+      await slackBot.postInteractiveMessage({
+        channelId: message.channelId,
+        threadTs: threadId,
+        text: renderNumberedQuestionStep(currentStep),
+      });
+      return true;
+    }
+    const outcome = await service.submitAnswer({
+      interactionId: currentStep.interaction.id,
+      ...parsed.answer,
+      responderPrincipalId: user.id,
+      inboundEventId: `slack-message:${message.ts}`,
+      receivedAt: new Date().toISOString(),
+    });
+    if (outcome.kind === "accepted_pending") {
+      const next = await service.findPendingForTarget({
+        platform: "slack",
+        conversationId: message.channelId,
+        threadId,
+        responderPrincipalId: user.id,
+      });
+      await slackBot.postInteractiveMessage({
+        channelId: message.channelId,
+        threadTs: threadId,
+        text:
+          next.kind === "found"
+            ? renderNumberedQuestionStep(next)
+            : "Your answer was saved, but I couldn't load the next question. Please try again.",
+      });
+    } else if (outcome.kind === "completed") {
+      const shimmer = createShimmer(
+        slackBot,
+        message.channelId,
+        message.threadTs ?? message.ts,
+        resolveProgressDisplaySettings(user),
+      );
+      try {
+        await service.resumeQuestionInteraction(outcome.resumeWork, async (claimedResumeWork) => {
+          await executeSlackQuestionResume(claimedResumeWork, shimmer.onProgressEvent);
+        });
+      } finally {
+        await shimmer.clear();
+      }
+    } else if (outcome.kind !== "duplicate") {
+      const current = await service.findPendingForTarget({
+        platform: "slack",
+        conversationId: message.channelId,
+        threadId,
+        responderPrincipalId: user.id,
+      });
+      await slackBot.postInteractiveMessage({
+        channelId: message.channelId,
+        threadTs: threadId,
+        text: current.kind === "found" ? renderNumberedQuestionStep(current) : "That question is no longer available.",
+      });
+    }
+    return true;
+  };
+
+  const claimSlackTextQuestionAnswer = async (
+    message: SlackMessage,
+    user: Awaited<ReturnType<typeof resolveUser>>,
+  ): Promise<boolean> => {
+    const service = deps.questionInteractions;
+    if (
+      !service ||
+      (message.type !== "dm" && message.type !== "channel_mention") ||
+      isConversationControlMessage(message.text) ||
+      isSlackStopCommand(message.text) ||
+      message.text.trim().startsWith("/")
+    ) {
+      return false;
+    }
+    const threadId = message.type === "dm" ? (message.threadTs ?? null) : (message.threadTs ?? message.ts);
+    const pending = await service.findPendingForTarget({
+      platform: "slack",
+      conversationId: message.channelId,
+      threadId,
+      responderPrincipalId: user.id,
+    });
+    if (pending.kind !== "found") return false;
+    const activeQueueKey = message.type === "dm" ? user.id : `${message.channelId}:${threadId ?? ""}`;
+    queue.getQueue(activeQueueKey).enqueue(async () => {
+      await processSlackTextQuestionAnswer(message, user);
+    });
+    return true;
+  };
+
+  const deliverSlackPendingInteraction = async (input: {
+    result: RunAgentResult;
+    userId: string;
+    channelId: string;
+    threadId: string | null;
+    conversationKind: "dm" | "channel";
+    workspaceKey: string;
+    sourceConversationId: string;
+    requestKey: string;
+  }): Promise<boolean> => {
+    const interaction = input.result.pendingInteraction;
+    const service = deps.questionInteractions;
+    if (!interaction) return false;
+    const reportDeliveryFailure = async () => {
+      await slackBot.postInteractiveMessage({
+        channelId: input.channelId,
+        threadTs: input.threadId,
+        text: "I couldn't ask the next question right now. Please try again.",
+      });
+    };
+    if (!service) {
+      await reportDeliveryFailure();
+      return true;
+    }
+    try {
+      const pending = await service.createFromInteraction({
+        interaction,
+        target: {
+          platform: "slack",
+          conversationKind: input.conversationKind,
+          conversationId: input.channelId,
+          threadId: input.threadId,
+          requesterPrincipalId: input.userId,
+          eligibleResponderPrincipalIds: [input.userId],
+        },
+        resumeContext: {
+          sessionId: input.result.sessionId,
+          taskId: null,
+          agentRunId: null,
+          workspaceId: input.workspaceKey,
+          sourceConversationId: input.sourceConversationId,
+          requesterPrincipalId: input.userId,
+          platform: "slack",
+          conversationId: input.channelId,
+          threadId: input.threadId,
+        },
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      });
+      if (!pending) {
+        await reportDeliveryFailure();
+        return true;
+      }
+      const receipt = await service.deliver({
+        interactionId: pending.id,
+        requestKey: input.requestKey,
+        transportName: "slack",
+        capabilityName: "plain_text",
+        capabilities: SLACK_TEXT_QUESTION_CAPABILITIES,
+        transport: createSlackQuestionTransport({ post: (message) => slackBot.postInteractiveMessage(message) }),
+      });
+      if (receipt.status !== "sent" && receipt.status !== "already_sent") await reportDeliveryFailure();
+      return true;
+    } catch (err) {
+      logger.warn({ err, channelId: input.channelId }, "Failed to deliver Slack question interaction");
+      await reportDeliveryFailure();
+      return true;
+    }
+  };
+
+  const executeSlackQuestionResume = async (
+    resumeWork: Extract<QuestionInteractionAnswerOutcome, { kind: "completed" }>["resumeWork"],
+    onProgressEvent: RunAgentParams["onProgressEvent"] = async () => {},
+  ): Promise<void> => {
+    const requester = await repos.users.findById(resumeWork.context.requesterPrincipalId);
+    if (!requester) throw new Error("Question interaction requester is unavailable");
+    const isDm =
+      resumeWork.context.conversationKind === "dm" ||
+      (resumeWork.context.conversationKind === undefined && resumeWork.context.threadId === null);
+    const channel = isDm ? null : await ensureChannelRow(resumeWork.context.conversationId);
+    const boundAgent = channel?.agent_user_id ? await repos.users.findById(channel.agent_user_id) : null;
+    const workspaceKey =
+      resumeWork.context.workspaceId ?? (isDm ? requester.id : `channel-${resumeWork.context.conversationId}`);
+    const workspaceDir = isDm
+      ? await ensureWorkspace(config, workspaceKey)
+      : boundAgent
+        ? await ensureAgentSubWorkspace(config, boundAgent.id, `channel-${resumeWork.context.conversationId}`)
+        : await ensureChannelWorkspace(config, resumeWork.context.conversationId);
+    const settingsRow = await repos.settings.get();
+    const threadTs = resumeWork.context.threadId ?? undefined;
+    const onFinalMessage = createSlackMessageHandler(slackBot, resumeWork.context.conversationId, threadTs);
+    const result = await runAgent({
+      db,
+      workspaceKey,
+      workspaceDir,
+      claudeConfigDir: config.CLAUDE_CONFIG_DIR,
+      userName: requester.name,
+      userEmail: requester.email,
+      logger,
+      platform: "slack",
+      responseSurface: "slack",
+      questionInteractionCapabilities: deps.questionInteractions ? SLACK_TEXT_QUESTION_CAPABILITIES : undefined,
+      userMessage: resumeWork.continuationText,
+      resumeSessionId: resumeWork.context.sessionId,
+      onProgressEvent,
+      getSlack: () => slackBot,
+      ...(threadTs ? { threadTs } : {}),
+      orgName: settingsRow?.org_name,
+      orgDescription: parseOrgContext(settingsRow?.org_context)?.description ?? null,
+      botName: settingsRow?.bot_name,
+      integrationMcpServers: await buildMcpServers(requester.email),
+      loadIntegrationProvider,
+      contextType: isDm ? "dm" : "channel_mention",
+      currentUserId: requester.id,
+      ...(boundAgent?.description ? { agentInstructions: boundAgent.description } : {}),
+      ...(boundAgent ? { agentAllowedTools: parseAllowedTools(boundAgent.allowed_tools) } : {}),
+      taskContext: {
+        platform: "slack",
+        contextType: isDm ? "dm" : "channel",
+        deliveryTarget: resumeWork.context.conversationId,
+        createdBy: requester.id,
+        canManageAnyTask: requester.auth_role === "admin",
+        creatorTimezone: requester.timezone,
+        ...(threadTs ? { threadTs } : {}),
+        origin: {
+          platform: "slack",
+          conversationId: resumeWork.context.sourceConversationId ?? resumeWork.context.conversationId,
+          providerThreadId: threadTs ?? null,
+          currentMessageId: null,
+        },
+      },
+      scheduler,
+      stepContentRepo,
+      automationRunsRepo,
+      queueManager: queue,
+      activeQueueKey: isDm ? requester.id : `${resumeWork.context.conversationId}:${threadTs ?? ""}`,
+      toolConfig,
+      inboxMessagesRepo,
+      userRepo: repos.users,
+      sendDm,
+    });
+    const deliveredQuestion = await deliverSlackPendingInteraction({
+      result,
+      userId: requester.id,
+      channelId: resumeWork.context.conversationId,
+      threadId: resumeWork.context.threadId,
+      conversationKind: isDm ? "dm" : "channel",
+      workspaceKey,
+      sourceConversationId: resumeWork.context.sourceConversationId ?? resumeWork.context.conversationId,
+      requestKey: `slack-resume:${resumeWork.interactionId}:${result.sessionId}`,
+    });
+    if (deliveredQuestion) return;
+    const finalText = appendIntegrationConnectionLinks(
+      appendAutomationBuilderLinks(result.trace.finalText, result.trace.automationArtifacts ?? []),
+      result.pendingIntegrationConnections,
+      "slack",
+      toolConfig,
+    );
+    if (finalText) await onFinalMessage(finalText);
+    else
+      await slackBot.postInteractiveMessage({
+        channelId: resumeWork.context.conversationId,
+        threadTs: resumeWork.context.threadId,
+        text: "Your answer was saved, but I could not continue right now. Please try again shortly.",
+      });
+  };
 
   const resolveCommandToolProgress = (command: ReturnType<typeof parseSketchCommand>): ToolProgressCommand | null => {
     if (!command?.startsWith("tool_progress_") || command === "tool_progress_query") return null;
@@ -670,6 +1038,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
       }
       throw err;
     }
+    if (await claimSlackTextQuestionAnswer(message, user)) return;
     const activeQueueKey = user.id;
     if (!isBotAuthoredSlackMessage(message) && isSlackStopCommand(message.text)) {
       abortSlackRunsForScope(message.channelId, null, true);
@@ -713,6 +1082,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             return;
           }
           if (command === "new_session") {
+            await deps.questionInteractions?.cancelPendingForTarget({
+              target: { platform: "slack", conversationId: message.channelId, threadId: null },
+              requesterPrincipalId: user.id,
+            });
             await archiveRuntimeSessions(db, user.id);
             await repos.conversations.advanceWatermarkToCurrentMax(dmConversation.id);
             await replyToUser(getNewSessionConfirmation());
@@ -756,6 +1129,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             await replyToUser(getReasoningTextConfirmation(enabled));
             return;
           }
+
+          if (await processSlackTextQuestionAnswer(message, user)) return;
 
           try {
             const workspaceDir = await ensureWorkspace(config, user.id);
@@ -851,6 +1226,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               userEmail: user.email,
               logger,
               platform: "slack",
+              questionInteractionCapabilities: deps.questionInteractions ? SLACK_TEXT_QUESTION_CAPABILITIES : undefined,
               getSlack: () => slackBot,
               onProgressEvent,
               ...(assistantThreadTs ? { threadTs: assistantThreadTs } : {}),
@@ -904,6 +1280,16 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               "slack",
               toolConfig,
             );
+            const deliveredQuestion = await deliverSlackPendingInteraction({
+              result,
+              userId: user.id,
+              channelId: message.channelId,
+              threadId: assistantThreadTs ?? null,
+              conversationKind: "dm",
+              workspaceKey: user.id,
+              sourceConversationId: String(capture.conversation.id),
+              requestKey: `slack:${message.channelId}:${assistantThreadTs ?? "root"}:${result.sessionId}`,
+            });
             if (finalText) {
               const sent = await onFinalMessage(finalText);
               await captureSlackBotReplies({
@@ -930,7 +1316,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             if (result.messageSent || result.pendingUploads.length > 0) {
               await repos.conversations.updateWatermark(capture.conversation.id, capture.captured.id);
             }
-            if (!finalText) {
+            if (!finalText && !deliveredQuestion) {
               await replyToUser("_No response_");
             }
           } catch (err) {
@@ -1107,6 +1493,8 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
             await participantObservation;
             user = await resolveUser(userId);
 
+            if (await processSlackTextQuestionAnswer(message, user)) return;
+
             let channel = await ensureChannelRow(message.channelId);
 
             const boundAgent = channel.agent_user_id ? await repos.users.findById(channel.agent_user_id) : null;
@@ -1149,6 +1537,10 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               return;
             }
             if (command === "new_session") {
+              await deps.questionInteractions?.cancelPendingForTarget({
+                target: { platform: "slack", conversationId: message.channelId, threadId: threadTs },
+                requesterPrincipalId: user.id,
+              });
               await archiveRuntimeSessions(db, channelWorkspaceKey, threadTs);
               await repos.conversations.advanceCursorToCurrentMax({
                 conversationId: channelConversation.id,
@@ -1346,6 +1738,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               userEmail: activeUser.email,
               logger,
               platform: "slack",
+              questionInteractionCapabilities: deps.questionInteractions ? SLACK_TEXT_QUESTION_CAPABILITIES : undefined,
               getSlack: () => slackBot,
               onProgressEvent,
               threadTs,
@@ -1414,6 +1807,16 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
               "slack",
               toolConfig,
             );
+            const deliveredQuestion = await deliverSlackPendingInteraction({
+              result,
+              userId: activeUser.id,
+              channelId: message.channelId,
+              threadId: threadTs,
+              conversationKind: "channel",
+              workspaceKey: channelWorkspaceKey,
+              sourceConversationId: String(capture.conversation.id),
+              requestKey: `slack:${message.channelId}:${threadTs}:${result.sessionId}`,
+            });
             if (finalText) {
               const sent = await onFinalMessage(finalText);
               await captureSlackBotReplies({
@@ -1442,7 +1845,7 @@ export function createConfiguredSlackBot(tokens: { botToken: string; appToken?: 
                 messageId: capture.captured.id,
               });
             }
-            if (!finalText) {
+            if (!finalText && !deliveredQuestion) {
               await slackBot.postThreadReply(message.channelId, threadTs, "_No response_");
             }
           } catch (err) {

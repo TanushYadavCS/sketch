@@ -23,7 +23,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
 import * as typedAccessPrincipalsMigration from "./165-typed-access-principals";
 
-const EXPECTED_MIGRATION_COUNT = 164;
+const EXPECTED_MIGRATION_COUNT = 167;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -202,6 +202,9 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[161]).toBe("166-scheduled-task-builder-locks");
     expect(names[162]).toBe("167-normalize-whatsapp-numbers");
     expect(names[163]).toBe("168-whatsapp-group-scope-authority");
+    expect(names[164]).toBe("169-scheduled-task-execution-mode");
+    expect(names[165]).toBe("170-question-interactions");
+    expect(names[166]).toBe("171-question-interaction-active-keys");
   });
 
   it("upgrades existing email access rows on Postgres", async () => {

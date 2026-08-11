@@ -7,6 +7,7 @@ import type { UsersTable } from "../db/schema";
 import { createTestDb } from "../test-utils";
 import {
   AutomationArtifactCollector,
+  QuestionCollector,
   UploadCollector,
   createSketchMcpServer,
   handleGetTeamDirectory,
@@ -106,6 +107,49 @@ describe("createSketchMcpServer", () => {
     expect(server.type).toBe("sdk");
     expect(server.name).toBe("sketch");
     expect(server.instance).toBeDefined();
+  });
+
+  it("keeps questions available in web chat and exposes them to capable channels only when enabled", () => {
+    const questionCollector = new QuestionCollector();
+    const capabilities = {
+      available: true,
+      interactiveSingleSelect: false,
+      interactiveBatch: false,
+      nativeCustomResponse: false,
+      textFallback: true,
+      cancelControl: false,
+    };
+    const registeredTools = (deps: Parameters<typeof createSketchMcpServer>[0]) =>
+      (createSketchMcpServer(deps).instance as unknown as { _registeredTools: Record<string, unknown> })
+        ._registeredTools;
+
+    const webTools = registeredTools({
+      uploadCollector: new UploadCollector(),
+      questionCollector,
+      responseSurface: "web",
+      workspaceDir: tmpDir,
+    });
+    const slackTools = registeredTools({
+      uploadCollector: new UploadCollector(),
+      questionCollector: new QuestionCollector(),
+      responseSurface: "slack",
+      questionInteractionCapabilities: capabilities,
+      workspaceDir: tmpDir,
+    });
+    const unavailableWhatsAppTools = registeredTools({
+      uploadCollector: new UploadCollector(),
+      questionCollector: new QuestionCollector(),
+      responseSurface: "whatsapp",
+      questionInteractionCapabilities: { ...capabilities, available: false },
+      workspaceDir: tmpDir,
+    });
+
+    expect(webTools.AskUserQuestion).toBeDefined();
+    expect(webTools.AskUserQuestions).toBeDefined();
+    expect(slackTools.AskUserQuestion).toBeDefined();
+    expect(slackTools.AskUserQuestions).toBeDefined();
+    expect(unavailableWhatsAppTools.AskUserQuestion).toBeUndefined();
+    expect(unavailableWhatsAppTools.AskUserQuestions).toBeUndefined();
   });
 
   it("exposes chat history read and search tools", () => {

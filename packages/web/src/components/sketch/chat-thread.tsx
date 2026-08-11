@@ -1,5 +1,12 @@
 import { AppIcon } from "@/components/connections/app-icon";
-import type { AutomationArtifact } from "@/lib/api";
+import type {
+  AutomationArtifact,
+  WebChatQuestion,
+  WebChatQuestionAnswer,
+  WebChatQuestionBatch,
+  WebChatQuestionBatchAnswer,
+  WebChatQuestionOption,
+} from "@/lib/api";
 import {
   BrainIcon,
   CaretDownIcon,
@@ -40,10 +47,12 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AutomationArtifactCard } from "./automation-artifact-card";
 import { SketchMessage, UserMessage } from "./chat-message";
+import { type QuestionFlowAnswer, QuestionFlowCard, type QuestionFlowSubmission } from "./question-flow-card";
 
 export interface ChatThreadFile {
   name: string;
@@ -92,6 +101,34 @@ export interface ChatThreadInterruption {
   detail?: string;
 }
 
+export type ChatThreadQuestion = WebChatQuestion;
+export type ChatThreadQuestionBatch = WebChatQuestionBatch;
+export type ChatThreadQuestionBatchAnswer = WebChatQuestionBatchAnswer;
+export type ChatThreadQuestionAnswer = WebChatQuestionAnswer;
+
+export function questionBatchSignature(batch: ChatThreadQuestionBatch): string {
+  return `${batch.batchId}:${batch.questions
+    .map((question) => `${question.id}[${question.options.map((option) => option.id).join(",")}]`)
+    .join("|")}`;
+}
+
+function questionInteractionKey(message: ChatThreadMessage): string | null {
+  if (message.questionBatch) return `batch:${message.id}:${questionBatchSignature(message.questionBatch)}`;
+  if (message.question)
+    return `single:${message.id}:${message.question.id}:${message.question.options.map((option) => option.id).join(",")}`;
+  return null;
+}
+
+function pendingQuestionInteractionKey(messages: ChatThreadMessage[]): string | null {
+  let pending: string | null = null;
+  for (const message of messages) {
+    const interactionKey = questionInteractionKey(message);
+    if (interactionKey) pending = interactionKey;
+    else if (message.role === "user") pending = null;
+  }
+  return pending;
+}
+
 export type ChatThreadTimelineEntry =
   | { id?: string; type: "text"; text: string }
   | {
@@ -113,6 +150,8 @@ export interface ChatThreadMessage {
   progressItems?: ChatThreadProgressItem[];
   progressLines?: string[];
   interruption?: ChatThreadInterruption;
+  question?: ChatThreadQuestion;
+  questionBatch?: ChatThreadQuestionBatch;
 }
 
 export interface ChatThreadProps {
@@ -122,6 +161,10 @@ export interface ChatThreadProps {
   className?: string;
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  onSelectQuestion?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
+  onAnswerQuestion?: (question: ChatThreadQuestion, answer: ChatThreadQuestionAnswer) => void;
+  onSubmitQuestionBatch?: (batch: ChatThreadQuestionBatch, answer: ChatThreadQuestionBatchAnswer) => void;
+  questionPortalTarget?: Element | null;
   conversationId?: string;
 }
 
@@ -632,23 +675,80 @@ export function ChatThread({
   className,
   integrationConnectionStatuses = {},
   onConnectIntegration,
+  onSelectQuestion,
+  onAnswerQuestion,
+  onSubmitQuestionBatch,
+  questionPortalTarget,
   conversationId,
 }: ChatThreadProps) {
-  if (messages.length === 0 && !busy && !error) return null;
   const showBusy = busy && messages.at(-1)?.role !== "assistant";
+  const activeQuestionInteractionKey = pendingQuestionInteractionKey(messages);
+  const [answeredInteractionKey, setAnsweredInteractionKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAnsweredInteractionKey((current) => (current && current === activeQuestionInteractionKey ? current : null));
+  }, [activeQuestionInteractionKey]);
+
+  if (messages.length === 0 && !busy && !error) return null;
 
   return (
     <section aria-label="Chat thread" className={cn("flex flex-col gap-[24px]", className)}>
-      {messages.map((message, index) => (
-        <MessageRow
-          key={message.id}
-          message={message}
-          active={busy && index === messages.length - 1}
-          integrationConnectionStatuses={integrationConnectionStatuses}
-          onConnectIntegration={onConnectIntegration}
-          conversationId={conversationId}
-        />
-      ))}
+      {messages.map((message, index) => {
+        const interactionKey = questionInteractionKey(message);
+        const questionAnswerable =
+          interactionKey !== null &&
+          interactionKey === activeQuestionInteractionKey &&
+          answeredInteractionKey !== interactionKey &&
+          !busy;
+        return (
+          <MessageRow
+            key={message.id}
+            message={message}
+            active={busy && index === messages.length - 1}
+            integrationConnectionStatuses={integrationConnectionStatuses}
+            onConnectIntegration={onConnectIntegration}
+            onSelectQuestion={onSelectQuestion}
+            onAnswerQuestion={onAnswerQuestion}
+            onSubmitQuestionBatch={onSubmitQuestionBatch}
+            onInteractionAnswered={() => setAnsweredInteractionKey(interactionKey)}
+            questionAnswerable={questionAnswerable}
+            conversationId={conversationId}
+            renderQuestions={!questionPortalTarget}
+          />
+        );
+      })}
+      {questionPortalTarget && activeQuestionInteractionKey
+        ? (() => {
+            const message = [...messages]
+              .reverse()
+              .find((item) => questionInteractionKey(item) === activeQuestionInteractionKey);
+            if (!message) return null;
+            const canSubmit = message.questionBatch
+              ? Boolean(onSubmitQuestionBatch)
+              : Boolean(onAnswerQuestion || onSelectQuestion);
+            const disabled = answeredInteractionKey === activeQuestionInteractionKey || busy || !canSubmit;
+            return createPortal(
+              <QuestionFlowCard
+                key={activeQuestionInteractionKey}
+                question={message.question}
+                batch={message.questionBatch}
+                disabled={disabled}
+                onSubmit={(interaction, answer) => {
+                  setAnsweredInteractionKey(activeQuestionInteractionKey);
+                  if ("batchId" in interaction) {
+                    onSubmitQuestionBatch?.(interaction, answer as ChatThreadQuestionBatchAnswer);
+                  } else if (onAnswerQuestion) {
+                    onAnswerQuestion(interaction, answer as QuestionFlowAnswer);
+                  } else if ("optionId" in answer) {
+                    const option = interaction.options.find((candidate) => candidate.id === answer.optionId);
+                    if (option) onSelectQuestion?.(interaction, option);
+                  }
+                }}
+              />,
+              questionPortalTarget,
+            );
+          })()
+        : null}
 
       {showBusy ? (
         <SketchMessage streaming>
@@ -673,14 +773,40 @@ function MessageRow({
   active,
   integrationConnectionStatuses,
   onConnectIntegration,
+  onSelectQuestion,
+  onAnswerQuestion,
+  onSubmitQuestionBatch,
+  onInteractionAnswered,
+  questionAnswerable,
   conversationId,
+  renderQuestions,
 }: {
   message: ChatThreadMessage;
   active: boolean;
   integrationConnectionStatuses: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  onSelectQuestion?: (question: ChatThreadQuestion, option: WebChatQuestionOption) => void;
+  onAnswerQuestion?: (question: ChatThreadQuestion, answer: ChatThreadQuestionAnswer) => void;
+  onSubmitQuestionBatch?: (batch: ChatThreadQuestionBatch, answer: ChatThreadQuestionBatchAnswer) => void;
+  onInteractionAnswered: () => void;
+  questionAnswerable: boolean;
   conversationId?: string;
+  renderQuestions: boolean;
 }) {
+  const submitQuestion = (
+    interaction: ChatThreadQuestion | ChatThreadQuestionBatch,
+    answer: QuestionFlowSubmission,
+  ) => {
+    onInteractionAnswered();
+    if ("batchId" in interaction) onSubmitQuestionBatch?.(interaction, answer as ChatThreadQuestionBatchAnswer);
+    else {
+      if (onAnswerQuestion) onAnswerQuestion(interaction, answer as ChatThreadQuestionAnswer);
+      else if ("optionId" in answer) {
+        const option = interaction.options.find((candidate) => candidate.id === answer.optionId);
+        if (option) onSelectQuestion?.(interaction, option);
+      }
+    }
+  };
   if (message.role === "user") {
     return (
       <UserMessage footer={<MessageTimestamp createdAt={message.createdAt} align="right" />}>
@@ -698,14 +824,31 @@ function MessageRow({
         onConnectIntegration={onConnectIntegration}
         conversationId={conversationId}
       />
+      {renderQuestions && (message.question || message.questionBatch) ? (
+        <QuestionFlowCard
+          key={message.questionBatch?.batchId ?? message.question?.id}
+          question={message.question}
+          batch={message.questionBatch}
+          disabled={!questionAnswerable}
+          onSubmit={submitQuestion}
+        />
+      ) : null}
     </SketchMessage>
-  ) : message.text || message.files?.length || message.automations?.length || message.integrationConnections?.length ? (
+  ) : message.text ||
+    message.files?.length ||
+    message.automations?.length ||
+    message.integrationConnections?.length ||
+    message.question ||
+    message.questionBatch ? (
     <SketchMessage streaming={active} footer={<AssistantMessageFooter message={message} active={active} />}>
       <MessageContent
         message={message}
         inProgress={active}
         integrationConnectionStatuses={integrationConnectionStatuses}
         onConnectIntegration={onConnectIntegration}
+        renderQuestions={renderQuestions}
+        onQuestionSubmit={submitQuestion}
+        questionAnswerable={questionAnswerable}
         conversationId={conversationId}
       />
     </SketchMessage>
@@ -791,18 +934,28 @@ function MessageContent({
   inProgress = false,
   integrationConnectionStatuses = {},
   onConnectIntegration,
+  renderQuestions,
+  onQuestionSubmit,
+  questionAnswerable = false,
   conversationId,
 }: {
   message: ChatThreadMessage;
   inProgress?: boolean;
   integrationConnectionStatuses?: Record<string, ChatThreadIntegrationConnectionStatus>;
   onConnectIntegration?: (connection: ChatThreadIntegrationConnection) => void;
+  renderQuestions?: boolean;
+  onQuestionSubmit?: (
+    interaction: ChatThreadQuestion | ChatThreadQuestionBatch,
+    answer: QuestionFlowSubmission,
+  ) => void;
+  questionAnswerable?: boolean;
   conversationId?: string;
 }) {
   const copyBlocks = message.role === "assistant";
   const hasConnections = Boolean(message.integrationConnections?.length);
   const hasAutomations = Boolean(message.automations?.length);
-  if (!message.files?.length && !hasAutomations && !hasConnections) {
+  const hasQuestion = Boolean(message.question || message.questionBatch);
+  if (!message.files?.length && !hasAutomations && !hasConnections && !hasQuestion) {
     return message.text ? (
       <MarkdownMessage text={message.text} inProgress={inProgress} copyBlocks={copyBlocks} />
     ) : null;
@@ -820,6 +973,15 @@ function MessageContent({
           connections={message.integrationConnections}
           statuses={integrationConnectionStatuses}
           onConnect={onConnectIntegration}
+        />
+      ) : null}
+      {renderQuestions && (message.question || message.questionBatch) ? (
+        <QuestionFlowCard
+          key={message.questionBatch?.batchId ?? message.question?.id}
+          question={message.question}
+          batch={message.questionBatch}
+          disabled={!questionAnswerable}
+          onSubmit={onQuestionSubmit}
         />
       ) : null}
     </div>

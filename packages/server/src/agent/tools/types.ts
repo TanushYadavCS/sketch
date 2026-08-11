@@ -1,4 +1,10 @@
-import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
+import type {
+  AutomationArtifact,
+  WebChatIntegrationConnectionData,
+  WebChatQuestion,
+  WebChatQuestionBatch,
+  WebChatQuestionInteraction,
+} from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import type { ChatAutomationAuthoring } from "../../automation/chat-authoring";
 import type { AccessPrincipalInput } from "../../connectors/types";
@@ -19,6 +25,7 @@ import type { TranscriptionSettings } from "../../transcription/service";
 import type { VisionConfig } from "../../vision/service";
 import type { WhatsAppTemplateRequest } from "../../whatsapp/templates";
 import type { AuxCostCollector } from "../aux-cost";
+import type { QuestionInteractionCapabilities } from "../interactions/types";
 import type { AgentOutputWriter } from "./agent-output";
 
 export type SelectableUser = Selectable<UsersTable>;
@@ -86,10 +93,40 @@ export class AutomationArtifactCollector {
   }
 }
 
+export class QuestionCollector {
+  private pending: WebChatQuestionInteraction | null = null;
+
+  collect(question: WebChatQuestion): void {
+    this.collectInteraction(question);
+  }
+
+  collectBatch(batch: WebChatQuestionBatch): void {
+    this.collectInteraction(batch);
+  }
+
+  private collectInteraction(interaction: WebChatQuestionInteraction): void {
+    if (this.pending) throw new Error("Only one pending question interaction is allowed per agent run.");
+    this.pending = interaction;
+  }
+
+  hasPending(): boolean {
+    return this.pending !== null;
+  }
+
+  drain(): WebChatQuestionInteraction | null {
+    const interaction = this.pending;
+    this.pending = null;
+    return interaction;
+  }
+}
+
 export interface SketchMcpDeps {
   uploadCollector: UploadCollector;
   integrationConnectionCollector?: IntegrationConnectionCollector;
   automationArtifactCollector?: AutomationArtifactCollector;
+  questionCollector?: QuestionCollector;
+  questionInteractionCapabilities?: QuestionInteractionCapabilities;
+  responseSurface?: "web" | "slack" | "whatsapp";
   workspaceDir: string;
   db?: Kysely<DB>;
   loadIntegrationProvider?: () => Promise<IntegrationProvider | null>;

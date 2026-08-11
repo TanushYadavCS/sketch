@@ -10,6 +10,7 @@ import { DisconnectReason } from "@whiskeysockets/baileys";
 import type { Kysely } from "kysely";
 import { type AgentRunAdmissionOptions, createAgentRunLimiter } from "./agent/concurrency-limiter";
 import { disableSdkAttributionHeader, removeReservedAgentEnv } from "./agent/environment";
+import { createQuestionInteractionServiceFromRepository } from "./agent/interactions/service";
 import { applyLlmEnvFromSettings } from "./agent/llm-env";
 import { type RunAgentResult, runAgent } from "./agent/runner";
 import type { McpServerConfig, RunAgentParams } from "./agent/runner";
@@ -21,6 +22,7 @@ import { createAiSdkAutomationAuthoringGenerator } from "./automation/authoring/
 import { createAutomationAuthoringProviderLoader } from "./automation/authoring/provider";
 import { createAutomationAuthoringService } from "./automation/authoring/service";
 import { createAutomationAuthoringTelemetry } from "./automation/authoring/telemetry";
+import { createAutomationCapabilityRegistry } from "./automation/capabilities";
 import { createChatAutomationAuthoring } from "./automation/chat-authoring";
 import type { Config } from "./config";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
@@ -43,6 +45,7 @@ import { createLocalClaudeSessionRepository } from "./db/repositories/local-clau
 import { createLocalDeviceRepository } from "./db/repositories/local-devices";
 import { createMcpServerRepository } from "./db/repositories/mcp-servers";
 import { createOperationalAlertsRepository } from "./db/repositories/operational-alerts";
+import { createQuestionInteractionsRepository } from "./db/repositories/question-interactions";
 import { createSettingsRepository } from "./db/repositories/settings";
 import { createSlackChannelParticipantsRepository } from "./db/repositories/slack-channel-participants";
 import { createUserEntityLinkSweepService } from "./db/repositories/user-entity-link-sweep";
@@ -239,6 +242,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
   const slackChannelParticipantsRepo = createSlackChannelParticipantsRepository(db);
   const whatsappProviderEventsRepo = createWhatsAppProviderEventRepository(db);
   const whatsappTemplateMappingsRepo = createWhatsAppTemplateMappingRepository(db);
+  const questionInteractionsRepo = createQuestionInteractionsRepository(db);
+  const questionInteractions = createQuestionInteractionServiceFromRepository(questionInteractionsRepo);
   const automationRunsRepo = createAutomationRunsRepository(db);
   const stepContentRepo = createAutomationStepContentRepository(db);
   const staleCount = await automationRunsRepo.markRunningAsFailed("Interrupted by server restart");
@@ -707,6 +712,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
   };
 
   // 8.5. Task scheduler — getSlack is a lazy getter so the live slack reference is captured correctly
+  const automationCapabilityRegistry = createAutomationCapabilityRegistry();
   const scheduler = new TaskScheduler({
     db,
     config,
@@ -728,6 +734,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     recordWorkflowStep,
     limitAgentExecution,
     limitScheduledAgentExecution,
+    automationCapabilityRegistry,
   });
   if (config.AUTOMATION_AUTHORING_MODEL) {
     const loadAuthoringProvider = createAutomationAuthoringProviderLoader({
@@ -862,6 +869,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
       slackChannelParticipants: slackChannelParticipantsRepo,
     },
     queue: queueManager,
+    questionInteractions,
     slack: { userCache },
     runAgent: trackedRunAgent,
     buildMcpServers,
@@ -950,12 +958,13 @@ export async function createServer(config: Config, options?: CreateServerOptions
     },
   });
 
-  const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, {
+  const whatsappAdapterDeps = {
     db,
     config,
     logger,
     repos: { users, settings: settingsRepo, whatsappGroups: whatsappGroupsRepo, conversations: conversationsRepo },
     queue: queueManager,
+    questionInteractions,
     runAgent: trackedRunAgent,
     buildMcpServers,
     loadIntegrationProvider,
@@ -964,7 +973,8 @@ export async function createServer(config: Config, options?: CreateServerOptions
     automationRunsRepo,
     inboxMessagesRepo,
     sendDm: sendDirectMessage,
-  });
+  };
+  const whatsappHandlers = wireWhatsAppHandlers(whatsappRuntime, whatsappAdapterDeps);
   const whatsappInboundConsumerRef: { current: WhatsAppInboundConsumer | null } = { current: null };
   const whatsappBackfillWorker =
     whatsapp instanceof GatewayClientFacade
@@ -1139,6 +1149,22 @@ export async function createServer(config: Config, options?: CreateServerOptions
     : null;
   managedMemberReconciliationTimer?.unref();
   if (managedMemberReconciliationEnabled) startManagedMemberReconciliation();
+  const questionInteractionExpiryTimer = backgroundWork
+    ? setInterval(
+        () => {
+          void questionInteractionsRepo.expireDue().catch((err) => {
+            logger.warn({ err }, "Question interaction expiry sweep failed");
+          });
+        },
+        5 * 60 * 1000,
+      )
+    : null;
+  questionInteractionExpiryTimer?.unref();
+  if (backgroundWork) {
+    void questionInteractionsRepo.expireDue().catch((err) => {
+      logger.warn({ err }, "Question interaction expiry sweep failed");
+    });
+  }
 
   // 10. Start platforms
   if (connect) {
@@ -1162,6 +1188,7 @@ export async function createServer(config: Config, options?: CreateServerOptions
     logger.info("Shutting down...");
     managedMemberReconciliationShuttingDown = true;
     if (managedMemberReconciliationTimer) clearInterval(managedMemberReconciliationTimer);
+    if (questionInteractionExpiryTimer) clearInterval(questionInteractionExpiryTimer);
     await operationalAlertWorker?.stop();
     if (backgroundWork) {
       await whatsappBackfillWorker?.stop();

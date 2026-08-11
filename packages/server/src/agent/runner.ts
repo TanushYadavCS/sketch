@@ -10,7 +10,13 @@
 import { resolve } from "node:path";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import { AGENT_BUILT_IN_TOOL_NAMES, VISUAL_ANALYSIS_AGENT_TOOL_NAME } from "@sketch/shared";
-import type { AutomationArtifact, WebChatIntegrationConnectionData } from "@sketch/shared";
+import type {
+  AutomationArtifact,
+  AutomationRunMode,
+  WebChatIntegrationConnectionData,
+  WebChatQuestion,
+  WebChatQuestionInteraction,
+} from "@sketch/shared";
 import type { Kysely, Selectable } from "kysely";
 import type { ChatAutomationAuthoring } from "../automation/chat-authoring";
 import { listIndexedSourcesForPrompt } from "../connectors/search";
@@ -45,6 +51,7 @@ import type { VisionConfig } from "../vision/service";
 import { resolveVisionConfig } from "../vision/service";
 import type { WhatsAppTemplateRequest } from "../whatsapp/templates";
 import { AuxCostCollector, type AuxLlmCall, sumAuxCost } from "./aux-cost";
+import type { QuestionInteractionCapabilities } from "./interactions/types";
 import { createCanUseTool } from "./permissions";
 import { type ResponseSurface, buildSystemContext } from "./prompt";
 import { createDefaultAgentRuntimeCompactionProvider } from "./runtime/compaction";
@@ -80,13 +87,15 @@ import {
   saveSessionId,
   saveSessionIdForRuntime,
 } from "./sessions";
+import { createSketchMcpServer } from "./sketch-tools";
+import { type AgentOutputWriter, recordRejectedWriteAgentOutputCall } from "./tools/agent-output";
+import { ASK_USER_QUESTIONS_TOOL_NAME, ASK_USER_QUESTION_TOOL_NAME } from "./tools/questions";
 import {
   AutomationArtifactCollector,
   IntegrationConnectionCollector,
+  QuestionCollector,
   UploadCollector,
-  createSketchMcpServer,
-} from "./sketch-tools";
-import { type AgentOutputWriter, recordRejectedWriteAgentOutputCall } from "./tools/agent-output";
+} from "./tools/types";
 
 /**
  * A single tool invocation with timing. `startedAt`/`endedAt` are epoch ms:
@@ -111,6 +120,24 @@ export interface ToolUseProgressEvent {
   kind: "tool_use";
   toolName: string;
   input: Record<string, unknown>;
+}
+
+function isSkillToolName(toolName: string): boolean {
+  return toolName === "Skill" || toolName === "mcp__sketch__Skill";
+}
+
+export function isCreateAutomationSkillName(value: unknown): boolean {
+  return typeof value === "string" && value.trim() === "create-automation";
+}
+
+export function isCreateAutomationSkillInvocation(toolName: string, input: unknown): boolean {
+  if (!isSkillToolName(toolName) || !input || typeof input !== "object" || Array.isArray(input)) return false;
+  return isCreateAutomationSkillName((input as { skill?: unknown }).skill);
+}
+
+function skillNameFromToolCall(toolName: string, input: Record<string, unknown>): string | null {
+  if (!isSkillToolName(toolName) || typeof input.skill !== "string") return null;
+  return input.skill;
 }
 
 export function recordSdkAgentOutputToolStarts(
@@ -226,6 +253,8 @@ export interface AgentResult {
   auxCostUsd: number;
   pendingUploads: string[];
   pendingIntegrationConnections?: WebChatIntegrationConnectionData[];
+  pendingInteraction?: WebChatQuestionInteraction;
+  pendingQuestion?: WebChatQuestion;
   trace: RunTrace;
 }
 
@@ -263,6 +292,8 @@ export interface RawRunUsage {
 /** Business result plus the raw usage payload for the telemetry/pricing boundary. */
 export type RunAgentResult = AgentResult & { rawUsage: RawRunUsage };
 
+export type { AutomationRunMode };
+
 export interface McpServerConfig {
   type: "http";
   url: string;
@@ -290,6 +321,7 @@ export interface RunAgentParams {
   logger: Logger;
   platform: "slack" | "whatsapp";
   responseSurface?: ResponseSurface;
+  questionInteractionCapabilities?: QuestionInteractionCapabilities;
   onProgressEvent: (event: ProgressEvent) => Promise<void>;
   onTextDelta?: (delta: string) => Promise<void>;
   onSessionId?: (sessionId: string) => Promise<void>;
@@ -379,6 +411,7 @@ export interface RunAgentParams {
     isThreadReply?: boolean;
   };
   agentRuntime?: AgentRuntimeKind;
+  stopAfterCreateAutomationSkill?: boolean;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
   agentRuntimeProvider?: AgentRuntimeProvider;
   agentRuntimeExtensions?: AgentRuntimeHarnessExtensions;
@@ -596,7 +629,7 @@ export function applySdkStreamMessageMapping(
           const toolBlock = block as { id?: unknown; name: string; input?: Record<string, unknown> };
           const name = toolBlock.name;
           const input = toolBlock.input ?? {};
-          const skillName = name === "Skill" && typeof input?.skill === "string" ? input.skill : null;
+          const skillName = skillNameFromToolCall(name, input);
           const toolUseId = typeof toolBlock.id === "string" ? toolBlock.id : null;
           const tc: ToolCallRecord = {
             toolName: name,
@@ -894,11 +927,18 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
         visionConfig,
       });
     const customTools = await customToolsProvider.createTools(params);
+    const questionToolNames = [
+      `mcp__sketch__${ASK_USER_QUESTION_TOOL_NAME}`,
+      `mcp__sketch__${ASK_USER_QUESTIONS_TOOL_NAME}`,
+    ];
     const mcpToolsProvider = params.agentRuntimeExtensions?.mcpTools ?? createDefaultAgentRuntimeMcpToolProvider();
     const mcpTools = await mcpToolsProvider.createTools(params);
     const skillsProvider = params.agentRuntimeExtensions?.skills ?? createDefaultAgentRuntimeSkillsProvider();
     const skillTools = await skillsProvider.createSkillTool(params);
     const tools = { ...workspaceTools, ...customTools, ...mcpTools, ...skillTools };
+    const shouldStopAfterCreateAutomationSkill =
+      params.stopAfterCreateAutomationSkill ??
+      (params.responseSurface === "web" && params.taskContext?.conversationKind !== "builder");
     const baseSessionStore = createDbAgentRuntimeSessionStore(params.db);
     const sessionStore = {
       ...baseSessionStore,
@@ -960,6 +1000,10 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
           systemPrompt: systemAppend,
           tools,
           maxTurns: params.maxTurns ?? 100,
+          stopAfterToolNames: questionToolNames.filter((name) => customTools[name]),
+          stopAfterToolCall: shouldStopAfterCreateAutomationSkill
+            ? ({ name, input }) => isCreateAutomationSkillInvocation(name, input)
+            : undefined,
           persistSession: persistTranscript,
           sessionId,
           sessionStore,
@@ -987,7 +1031,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
               const startedAt = Date.now();
               const toolCall: ToolCallRecord = {
                 toolName: event.name,
-                skillName: event.name === "Skill" && typeof event.input.skill === "string" ? event.input.skill : null,
+                skillName: skillNameFromToolCall(event.name, event.input),
                 startedAt,
                 endedAt: 0,
               };
@@ -1050,6 +1094,7 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
         pendingUploads: drainedToolEffects.pendingUploads.length,
         pendingIntegrationConnections: drainedToolEffects.pendingIntegrationConnections.length,
         automationArtifacts: drainedToolEffects.automationArtifacts.length,
+        pendingQuestion: drainedToolEffects.pendingInteraction !== null,
         runtime: "aisdk",
         ...heapStats(startHeapMb),
       },
@@ -1060,12 +1105,15 @@ async function runAgentWithAiSdk(params: RunAgentParams): Promise<RunAgentResult
       messageSent:
         finalText !== null ||
         drainedToolEffects.pendingIntegrationConnections.length > 0 ||
-        drainedToolEffects.automationArtifacts.length > 0,
+        drainedToolEffects.automationArtifacts.length > 0 ||
+        drainedToolEffects.pendingInteraction !== null,
       sessionId,
       costUsd: runtimeResult.cost.totalUsd,
       auxCostUsd,
       pendingUploads: drainedToolEffects.pendingUploads,
       pendingIntegrationConnections: drainedToolEffects.pendingIntegrationConnections,
+      ...(drainedToolEffects.pendingInteraction ? { pendingInteraction: drainedToolEffects.pendingInteraction } : {}),
+      ...(drainedToolEffects.pendingQuestion ? { pendingQuestion: drainedToolEffects.pendingQuestion } : {}),
       trace: {
         progressEvents,
         finalText,
@@ -1199,11 +1247,18 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
   const uploadCollector = new UploadCollector();
   const integrationConnectionCollector = new IntegrationConnectionCollector();
   const automationArtifactCollector = new AutomationArtifactCollector();
+  const questionCollector = new QuestionCollector();
+  const shouldStopAfterCreateAutomationSkill =
+    params.stopAfterCreateAutomationSkill ??
+    (params.responseSurface === "web" && params.taskContext?.conversationKind !== "builder");
   const auxCostCollector = new AuxCostCollector();
   const sketchServer = createSketchMcpServer({
     uploadCollector,
     integrationConnectionCollector,
     automationArtifactCollector,
+    questionCollector,
+    responseSurface: params.responseSurface ?? params.platform,
+    questionInteractionCapabilities: params.questionInteractionCapabilities,
     auxCostCollector,
     workspaceDir: absWorkspace,
     db: params.db,
@@ -1363,6 +1418,13 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
           logger.warn({ err }, "Failed to deliver agent progress event");
         }
       }
+
+      const completedCreateAutomationSkill =
+        shouldStopAfterCreateAutomationSkill &&
+        effects.toolEnds.some(
+          (toolEnd) => !toolEnd.isError && isCreateAutomationSkillInvocation(toolEnd.toolName, toolEnd.input),
+        );
+      if (completedCreateAutomationSkill || questionCollector.hasPending()) break;
     }
   };
 
@@ -1444,6 +1506,8 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
       ? drainedIntegrationConnections
       : drainedIntegrationConnections.filter((card) => (card.state ?? "connect") === "connect");
   const automationArtifacts = automationArtifactCollector.drain();
+  const pendingInteraction = questionCollector.drain();
+  const pendingQuestion = pendingInteraction && !("batchId" in pendingInteraction) ? pendingInteraction : null;
   const auxLlmCalls = [...(params.seedAuxCalls ?? []), ...auxCostCollector.drain()];
   const auxCostUsd = sumAuxCost(auxLlmCalls);
   logger.info(
@@ -1455,6 +1519,7 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
       pendingUploads: pendingUploads.length,
       pendingIntegrationConnections: pendingIntegrationConnections.length,
       automationArtifacts: automationArtifacts.length,
+      pendingQuestion: pendingQuestion !== null,
       ...heapStats(startHeapMb),
     },
     "Agent run completed",
@@ -1462,12 +1527,18 @@ async function runAgentWithClaudeSdk(params: RunAgentParams): Promise<RunAgentRe
   const finalText = getSdkStreamFinalText(sdkStreamState);
 
   return {
-    messageSent: finalText !== null || pendingIntegrationConnections.length > 0 || automationArtifacts.length > 0,
+    messageSent:
+      finalText !== null ||
+      pendingIntegrationConnections.length > 0 ||
+      automationArtifacts.length > 0 ||
+      pendingInteraction !== null,
     sessionId,
     costUsd: sdkStreamState.sdkCostUsd,
     auxCostUsd,
     pendingUploads,
     pendingIntegrationConnections,
+    ...(pendingInteraction && { pendingInteraction }),
+    ...(pendingQuestion && { pendingQuestion }),
     trace: {
       progressEvents,
       finalText,

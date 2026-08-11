@@ -51,9 +51,28 @@ vi.mock("./sketch-tools", () => {
       return [];
     }
   }
+  class MockQuestionCollector {
+    private pending: unknown | null = null;
+
+    collect(question: unknown) {
+      if (this.pending) throw new Error("Only one pending question is allowed per agent run.");
+      this.pending = question;
+    }
+
+    hasPending() {
+      return this.pending !== null;
+    }
+
+    drain() {
+      const question = this.pending;
+      this.pending = null;
+      return question;
+    }
+  }
   return {
     AutomationArtifactCollector: MockAutomationArtifactCollector,
     IntegrationConnectionCollector: MockIntegrationConnectionCollector,
+    QuestionCollector: MockQuestionCollector,
     UploadCollector: MockUploadCollector,
     createSketchMcpToolDefinitions: vi.fn().mockReturnValue([]),
     createSketchMcpServer: vi.fn().mockReturnValue({}),

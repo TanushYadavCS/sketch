@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { WebChatQuestion, WebChatQuestionInteraction } from "@sketch/shared";
 import { type JSONValue, type Tool, type ToolSet, jsonSchema, tool } from "ai";
 import { z } from "zod/v4";
 import {
@@ -8,13 +9,14 @@ import {
 } from "../../integrations/cards";
 import { AuxCostCollector, sumAuxCost } from "../aux-cost";
 import type { RunAgentParams } from "../runner";
+import { createSketchMcpToolDefinitions } from "../sketch-tools";
+import { WRITE_AGENT_OUTPUT_TOOL_NAME } from "../tools/agent-output";
 import {
   AutomationArtifactCollector,
   IntegrationConnectionCollector,
+  QuestionCollector,
   UploadCollector,
-  createSketchMcpToolDefinitions,
-} from "../sketch-tools";
-import { WRITE_AGENT_OUTPUT_TOOL_NAME } from "../tools/agent-output";
+} from "../tools/types";
 import type { SketchMcpDeps } from "../tools/types";
 import type { AgentRuntimeCustomToolProvider, AgentRuntimeToolEnd, AgentRuntimeToolStart } from "./contracts";
 
@@ -33,6 +35,7 @@ export interface AgentRuntimeCustomToolEffects {
   uploadCollector: UploadCollector;
   integrationConnectionCollector: IntegrationConnectionCollector;
   automationArtifactCollector: AutomationArtifactCollector;
+  questionCollector: QuestionCollector;
   auxCostCollector: AuxCostCollector;
   integrationProgressEvents: IntegrationProgressEventLike[];
   onToolStart(event: AgentRuntimeToolStart): void;
@@ -42,6 +45,8 @@ export interface AgentRuntimeCustomToolEffects {
     pendingUploads: string[];
     pendingIntegrationConnections: ReturnType<IntegrationConnectionCollector["drain"]>;
     automationArtifacts: ReturnType<AutomationArtifactCollector["drain"]>;
+    pendingInteraction: WebChatQuestionInteraction | null;
+    pendingQuestion: WebChatQuestion | null;
     auxLlmCalls: ReturnType<AuxCostCollector["drain"]>;
     auxCostUsd: number;
   };
@@ -112,6 +117,7 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
   const uploadCollector = new UploadCollector();
   const integrationConnectionCollector = new IntegrationConnectionCollector();
   const automationArtifactCollector = new AutomationArtifactCollector();
+  const questionCollector = new QuestionCollector();
   const auxCostCollector = new AuxCostCollector();
   const integrationProgressEvents: IntegrationProgressEventLike[] = [];
 
@@ -119,6 +125,7 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
     uploadCollector,
     integrationConnectionCollector,
     automationArtifactCollector,
+    questionCollector,
     auxCostCollector,
     integrationProgressEvents,
     onToolStart(event) {
@@ -152,11 +159,15 @@ export function createAgentRuntimeCustomToolEffects(): AgentRuntimeCustomToolEff
           ? drainedIntegrationConnections
           : drainedIntegrationConnections.filter((card) => (card.state ?? "connect") === "connect");
       const automationArtifacts = automationArtifactCollector.drain();
+      const pendingInteraction = questionCollector.drain();
+      const pendingQuestion = pendingInteraction && !("batchId" in pendingInteraction) ? pendingInteraction : null;
       const auxLlmCalls = auxCostCollector.drain();
       return {
         pendingUploads,
         pendingIntegrationConnections,
         automationArtifacts,
+        pendingInteraction,
+        pendingQuestion,
         auxLlmCalls,
         auxCostUsd: sumAuxCost(auxLlmCalls),
       };
@@ -169,6 +180,9 @@ function buildSketchMcpDeps(params: RunAgentParams, deps: AgentRuntimeCustomTool
     uploadCollector: deps.effects.uploadCollector,
     integrationConnectionCollector: deps.effects.integrationConnectionCollector,
     automationArtifactCollector: deps.effects.automationArtifactCollector,
+    questionCollector: deps.effects.questionCollector,
+    responseSurface: params.responseSurface ?? params.platform,
+    questionInteractionCapabilities: params.questionInteractionCapabilities,
     auxCostCollector: deps.effects.auxCostCollector,
     workspaceDir: resolve(params.workspaceDir),
     db: params.db,

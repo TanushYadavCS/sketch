@@ -11,19 +11,42 @@
  */
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
+import {
+  type AutomationExecutionMode,
+  type AutomationRunMode,
+  type AutomationSketchToolName,
+  automationExecutionModeAllowsStep,
+  automationExecutionModeSchema,
+  workflowEdgeSchema,
+  workflowStepSchema,
+  workflowStepUsesIntegrationActions,
+} from "@sketch/shared";
 import type { Kysely } from "kysely";
 import { createChildAbortController } from "../agent/active-runs";
 import { removeReservedAgentEnv } from "../agent/environment";
-import { buildPlatformFormattingLines, buildSketchContext } from "../agent/prompt";
+import { buildAutomationMessageDeliveryLines, buildSketchContext } from "../agent/prompt";
 import type { McpServerConfig, RunAgentParams, runAgent } from "../agent/runner";
 import type { AgentRuntimeProviderFactoryConfig } from "../agent/runtime/contracts";
 import { runAgentRuntimeCore } from "../agent/runtime/core";
 import { createAgentRuntimeWorkspaceToolScopePolicy } from "../agent/runtime/path-guard";
 import { createAgentRuntimeProvider } from "../agent/runtime/provider";
 import { createAgentRuntimeWorkspaceTools } from "../agent/runtime/workspace-tools";
+import { hasInvalidAutomationSketchToolNamespace, undeclaredAutomationSketchTools } from "../automation/action-script";
+import {
+  type AutomationCapabilityCallEvent,
+  type AutomationCapabilityRegistry,
+  type AutomationSketchTools,
+  MAX_AUTOMATION_OUTPUT_BYTES,
+  createAutomationCapabilityRegistry,
+} from "../automation/capabilities";
+import {
+  AutomationValidationError,
+  type ValidatedPersistedAutomationDefinition,
+  validatePersistedAutomationDefinition,
+} from "../automation/definition";
 import type { AgentEnvironmentRuntimeContext } from "../db/repositories/agent-environment-variables";
 import type { createAutomationRunsRepository } from "../db/repositories/automation-runs";
-import type { createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
+import type { StepContentRow, createAutomationStepContentRepository } from "../db/repositories/automation-step-content";
 import type { createInboxMessagesRepository } from "../db/repositories/inbox-messages";
 import type { ScheduledTaskRow } from "../db/repositories/scheduled-tasks";
 import type { DB } from "../db/schema";
@@ -31,11 +54,15 @@ import type { IntegrationProvider } from "../integrations/types";
 import { cleanupIntegrationAccess, startIntegrationAccess } from "../integrations/wrapper";
 import type { Logger } from "../logger";
 import type { RecordWorkflowStep, WorkflowStepUsage } from "../telemetry/agent-run-telemetry";
-import { resolveWorkflowDelivery } from "./delivery";
+import { requireWorkflowMessageText, resolveWorkflowDelivery } from "./delivery";
 import type { StepOutput, WorkflowEdge, WorkflowStep } from "./types";
+
+export type { AutomationRunMode } from "@sketch/shared";
 
 export interface ExecuteAutomationParams {
   task: ScheduledTaskRow;
+  runId?: string;
+  runMode?: AutomationRunMode;
   triggerData?: unknown;
   db: Kysely<DB>;
   logger: Logger;
@@ -62,6 +89,8 @@ export interface ExecuteAutomationParams {
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
   trustedLocalFileRoot?: string;
+  automationCapabilityRegistry?: AutomationCapabilityRegistry;
+  recordAutomationCapabilityCall?: (event: AutomationCapabilityCallEvent) => void | Promise<void>;
   propagateParentAbort?: boolean;
   parentAbortSignal?: AbortSignal;
 }
@@ -111,43 +140,175 @@ export class AutomationRunAbortedError extends Error {
   }
 }
 
-export async function executeAutomation(params: ExecuteAutomationParams): Promise<AutomationExecutionResult> {
-  const { task, triggerData, logger, runsRepo, stepContentRepo, sendMessage, onEvent } = params;
+export function automationRunDeepLink(
+  config: { BASE_URL?: string; PORT: number },
+  taskId: string,
+  runId: string,
+): string {
+  const baseUrl = config.BASE_URL?.trim() || `http://localhost:${config.PORT}`;
+  return `${baseUrl.replace(/\/$/, "")}/scheduled-tasks/${encodeURIComponent(taskId)}/edit?runId=${encodeURIComponent(runId)}`;
+}
 
-  // 1. Verify creator exists
+function automationTitle(task: Pick<ScheduledTaskRow, "title" | "prompt">): string {
+  return task.title ?? task.prompt;
+}
+
+export function automationManualFailureNotification(
+  config: { BASE_URL?: string; PORT: number },
+  task: Pick<ScheduledTaskRow, "id" | "title" | "prompt">,
+  runId: string,
+): string {
+  return `Automation “${automationTitle(task)}” failed. View run: ${automationRunDeepLink(config, task.id, runId)}`;
+}
+
+async function failAutomationRun(params: {
+  runtime: ExecuteAutomationParams;
+  runId: string;
+  errorMessage: string;
+  stepOutputs?: Record<string, StepOutput>;
+  aborted?: boolean;
+  productionNotification?: string;
+}): Promise<void> {
+  const { runtime, runId, errorMessage, stepOutputs, aborted = false } = params;
+  try {
+    await runtime.runsRepo.update(runId, {
+      status: "failed",
+      ...(stepOutputs === undefined ? {} : { stepOutputs }),
+      completedAt: new Date().toISOString(),
+      errorMessage,
+    });
+  } catch (err) {
+    runtime.logger.error({ err, taskId: runtime.task.id, runId }, "Automation: failed to persist run failure");
+  }
+
+  if (aborted || runtime.runMode === "test" || !runtime.sendMessage) return;
+
+  const notification =
+    runtime.runMode === "manual"
+      ? automationManualFailureNotification(runtime.config, runtime.task, runId)
+      : (params.productionNotification ?? `Automation '${automationTitle(runtime.task)}' failed: ${errorMessage}`);
+  try {
+    await runtime.sendMessage(notification);
+  } catch (err) {
+    runtime.logger.warn({ err, taskId: runtime.task.id, runId }, "Automation: failure notification delivery failed");
+  }
+}
+
+function resolveRuntimeExecutionMode(value: string | null | undefined): AutomationExecutionMode {
+  if (value === null || value === undefined || value.trim() === "") return "hybrid";
+  const parsed = automationExecutionModeSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new Error(`Automation has unsupported execution mode "${value}"`);
+}
+
+export function validateRuntimeAutomationExecutionMode(
+  mode: AutomationExecutionMode,
+  steps: readonly WorkflowStep[],
+): void {
+  const invalidStep = steps.find((step) => !automationExecutionModeAllowsStep(mode, step.type));
+  if (!invalidStep) return;
+  const restriction = mode === "deterministic" ? "agent" : "code or action";
+  throw new Error(`Automation mode "${mode}" cannot run ${restriction} step "${invalidStep.label}"`);
+}
+
+export async function executeAutomation(params: ExecuteAutomationParams): Promise<AutomationExecutionResult> {
+  const runId =
+    params.runId ?? (await params.runsRepo.create({ taskId: params.task.id, triggerData: params.triggerData }));
+  try {
+    return await executeAutomationInternal({ ...params, runId });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const aborted = error instanceof AutomationRunAbortedError;
+    await failAutomationRun({
+      runtime: params,
+      runId,
+      errorMessage: aborted ? "Automation run aborted" : detail,
+      aborted,
+    });
+    params.logger.error({ err: error, taskId: params.task.id, runId }, "Automation: unhandled execution failure");
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {}, ...(aborted ? { aborted: true } : {}) };
+  }
+}
+
+async function executeAutomationInternal(
+  params: ExecuteAutomationParams & { runId: string },
+): Promise<AutomationExecutionResult> {
+  const { task, triggerData, logger, runsRepo, stepContentRepo, onEvent } = params;
+  const sendMessage = params.runMode === "test" ? undefined : params.sendMessage;
+  const runId = params.runId;
+
   const creatorId = task.created_by;
   let creator: Awaited<ReturnType<NonNullable<RunAgentParams["userRepo"]>["findById"]>> | undefined;
   let creatorEmail: string | null = null;
-  if (creatorId) {
-    creator = await params.userRepo.findById(creatorId);
-    if (!creator) {
-      logger.error({ taskId: task.id, creatorId }, "Automation: creator no longer exists");
-      const runId = await runsRepo.create({ taskId: task.id, triggerData });
-      await runsRepo.update(runId, {
-        status: "failed",
-        errorMessage: "Creator no longer exists",
-        completedAt: new Date().toISOString(),
-      });
-      if (sendMessage) {
-        await sendMessage(`Automation '${task.title ?? task.prompt}' failed: Creator no longer exists`);
+  try {
+    if (creatorId) {
+      creator = await params.userRepo.findById(creatorId);
+      if (!creator) {
+        logger.error({ taskId: task.id, creatorId }, "Automation: creator no longer exists");
+        await failAutomationRun({
+          runtime: params,
+          runId,
+          errorMessage: "Creator no longer exists",
+          productionNotification: `Automation '${automationTitle(task)}' failed: Creator no longer exists`,
+        });
+        return { runId, status: "failed", finalOutput: null, stepOutputs: {} };
       }
-      return { runId, status: "failed", finalOutput: null, stepOutputs: {} };
+      creatorEmail = creator.email;
     }
-    creatorEmail = creator.email;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    logger.error({ err: error, taskId: task.id, runId }, "Automation: creator lookup failed");
+    const aborted = error instanceof AutomationRunAbortedError;
+    await failAutomationRun({
+      runtime: params,
+      runId,
+      errorMessage: aborted ? "Automation run aborted during creator lookup" : `Creator lookup failed: ${detail}`,
+      aborted,
+    });
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {}, ...(aborted ? { aborted: true } : {}) };
+  }
+  let persistedDefinition: ValidatedPersistedAutomationDefinition;
+  let contentRows: StepContentRow[];
+  try {
+    contentRows = await stepContentRepo.getByTask(task.id);
+    persistedDefinition = validatePersistedAutomationDefinition({ task, stepContentRows: contentRows });
+  } catch (error) {
+    const definitionError = new Error(
+      error instanceof AutomationValidationError
+        ? `${error.message}: ${error.issues.map((issue) => issue.message).join("; ")}`
+        : `Automation definition could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    const aborted = error instanceof AutomationRunAbortedError;
+    await failAutomationRun({
+      runtime: params,
+      runId,
+      errorMessage: definitionError.message,
+      stepOutputs: {},
+      aborted,
+      productionNotification: `Automation '${automationTitle(task)}' failed: ${definitionError.message}`,
+    });
+    logger.error({ err: error, taskId: task.id, runId }, "Automation: persisted definition validation failed");
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {}, ...(aborted ? { aborted: true } : {}) };
   }
 
-  const steps = parseWorkflowSteps(task);
-  const edges = parseWorkflowEdges(task);
+  const { steps, edges } = persistedDefinition;
   const executionSteps = resolveExecutionOrder(steps, edges);
-
-  // 3. Load step content
-  const contentRows = await stepContentRepo.getByTask(task.id);
   const contentMap = new Map(contentRows.map((r) => [r.step_id, r]));
-
-  // 4. Create run record
-  const runId = await runsRepo.create({ taskId: task.id, triggerData });
   const workspaceDir = resolveAutomationWorkspaceDir(params.config.DATA_DIR, task);
-  await mkdir(workspaceDir, { recursive: true });
+  try {
+    await mkdir(workspaceDir, { recursive: true });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const aborted = error instanceof AutomationRunAbortedError;
+    await failAutomationRun({
+      runtime: params,
+      runId,
+      errorMessage: `Automation workspace could not be prepared: ${detail}`,
+      aborted,
+    });
+    logger.error({ err: error, taskId: task.id, runId }, "Automation: workspace preparation failed");
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {}, ...(aborted ? { aborted: true } : {}) };
+  }
   const emitEvent = async (event: AutomationExecutionEvent) => {
     try {
       await onEvent?.(event);
@@ -159,6 +320,35 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     }
   };
   await emitEvent({ type: "run.started", runId, workflowId: task.id });
+
+  let executionMode: AutomationExecutionMode = "hybrid";
+  let executionModeError: Error | undefined;
+  try {
+    executionMode = resolveRuntimeExecutionMode(task.execution_mode);
+    validateRuntimeAutomationExecutionMode(executionMode, steps);
+  } catch (error) {
+    executionModeError = error instanceof Error ? error : new Error(String(error));
+  }
+
+  if (executionModeError) {
+    await failAutomationRun({
+      runtime: params,
+      runId,
+      errorMessage: executionModeError.message,
+      stepOutputs: {},
+      productionNotification: `Automation '${automationTitle(task)}' failed: ${executionModeError.message}`,
+    });
+    logger.error({ err: executionModeError, taskId: task.id, runId }, "Automation: invalid execution mode");
+    await emitEvent({
+      type: "completed",
+      runId,
+      workflowId: task.id,
+      status: "failed",
+      finalOutput: null,
+      stepOutputs: {},
+    });
+    return { runId, status: "failed", finalOutput: null, stepOutputs: {} };
+  }
 
   logger.info(
     {
@@ -173,11 +363,13 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   const stepOutputs: Record<string, StepOutput> = {};
   let previousOutput: unknown = triggerData ?? null;
   let failed = false;
+  const lastExecutionStepId = executionSteps[executionSteps.length - 1]?.id;
   let aborted = false;
 
   for (const step of executionSteps) {
     const content = contentMap.get(step.id);
     const startTime = Date.now();
+    const isMessageDeliveryStep = task.output_mode !== "silent" && step.id === lastExecutionStepId;
 
     logger.info(
       { taskId: task.id, runId, stepId: step.id, stepType: step.type, stepLabel: step.label },
@@ -193,6 +385,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
     });
 
     try {
+      validateRuntimeAutomationExecutionMode(executionMode, [step]);
       const output = await executeWorkflowStep({
         params,
         step,
@@ -204,12 +397,14 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         creator,
         creatorId,
         creatorEmail,
+        isMessageDeliveryStep,
       });
 
       const normalizedOutput = normalizeStepOutput(output);
+      const outputForStep = isMessageDeliveryStep ? requireWorkflowMessageText(normalizedOutput) : normalizedOutput;
       const durationMs = Date.now() - startTime;
-      stepOutputs[step.id] = { output: normalizedOutput, status: "completed", duration_ms: durationMs };
-      previousOutput = normalizedOutput;
+      stepOutputs[step.id] = { output: outputForStep, status: "completed", duration_ms: durationMs };
+      previousOutput = outputForStep;
 
       logger.info({ taskId: task.id, runId, stepId: step.id, durationMs }, "Automation: step completed");
 
@@ -221,7 +416,7 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         stepId: step.id,
         status: "completed",
         durationMs,
-        outputSummary: summarizeOutput(normalizedOutput),
+        outputSummary: summarizeOutput(outputForStep),
       });
     } catch (err) {
       const durationMs = Date.now() - startTime;
@@ -235,14 +430,17 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
 
       markSkippedAfterFailure({ failedStepId: step.id, executionSteps, edges, stepOutputs });
 
-      await runsRepo.update(runId, {
-        status: "failed",
+      const runErrorMessage =
+        error instanceof AutomationRunAbortedError
+          ? `Automation run aborted by user at step "${step.label}"`
+          : `Step "${step.label}" failed: ${error.message}`;
+      await failAutomationRun({
+        runtime: params,
+        runId,
+        errorMessage: runErrorMessage,
         stepOutputs,
-        completedAt: new Date().toISOString(),
-        errorMessage:
-          error instanceof AutomationRunAbortedError
-            ? `Automation run aborted by user at step "${step.label}"`
-            : `Step "${step.label}" failed: ${error.message}`,
+        aborted: error instanceof AutomationRunAbortedError,
+        productionNotification: `Automation '${automationTitle(task)}' failed at step '${step.label}': ${error.message}`,
       });
 
       failed = true;
@@ -268,9 +466,6 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
         error: { message: error.message },
       });
 
-      if (!(error instanceof AutomationRunAbortedError) && sendMessage) {
-        await sendMessage(`Automation '${task.title ?? task.prompt}' failed at step '${step.label}': ${error.message}`);
-      }
       break;
     }
   }
@@ -280,19 +475,33 @@ export async function executeAutomation(params: ExecuteAutomationParams): Promis
   const finalOutput = lastStep ? (stepOutputs[lastStep.id]?.output ?? null) : null;
 
   if (!failed) {
-    await runsRepo.update(runId, {
-      status: "completed",
-      stepOutputs,
-      completedAt: new Date().toISOString(),
-    });
+    try {
+      await runsRepo.update(runId, {
+        status: "completed",
+        stepOutputs,
+        completedAt: new Date().toISOString(),
+      });
 
-    logger.info({ taskId: task.id, runId }, "Automation: execution completed");
-
-    if (sendMessage && task.output_mode !== "silent") {
-      if (finalOutput != null) {
-        const message = typeof finalOutput === "string" ? finalOutput : JSON.stringify(finalOutput, null, 2);
-        await sendMessage(message);
+      if (sendMessage && task.output_mode !== "silent" && finalOutput != null) {
+        await sendMessage(requireWorkflowMessageText(finalOutput));
       }
+      logger.info({ taskId: task.id, runId }, "Automation: execution completed");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const completionAborted = error instanceof AutomationRunAbortedError;
+      failed = true;
+      aborted = completionAborted;
+      await failAutomationRun({
+        runtime: params,
+        runId,
+        errorMessage: completionAborted
+          ? "Automation run aborted during completion"
+          : `Automation completion failed: ${detail}`,
+        stepOutputs,
+        aborted: completionAborted,
+        productionNotification: `Automation '${automationTitle(task)}' failed: ${detail}`,
+      });
+      logger.error({ err: error, taskId: task.id, runId }, "Automation: completion failed");
     }
   }
 
@@ -369,6 +578,25 @@ export async function testAutomationStep(
   const workspaceDir = resolveAutomationWorkspaceDir(params.config.DATA_DIR, task);
   await mkdir(workspaceDir, { recursive: true });
 
+  let executionMode: AutomationExecutionMode = "hybrid";
+  try {
+    executionMode = resolveRuntimeExecutionMode(task.execution_mode);
+    validateRuntimeAutomationExecutionMode(executionMode, steps);
+  } catch (error) {
+    const modeError = error instanceof Error ? error : new Error(String(error));
+    await runsRepo.update(runId, {
+      status: "failed",
+      stepOutputs,
+      completedAt: new Date().toISOString(),
+      errorMessage: modeError.message,
+    });
+    logger.error(
+      { err: modeError, taskId: task.id, runId, stepId },
+      "Automation: invalid execution mode for step test",
+    );
+    return { runId, status: "failed", finalOutput: null, stepOutputs };
+  }
+
   if (step.type === "trigger") {
     const output = buildTriggerSamplePayload(task, step);
     stepOutputs[step.id] = { output, status: "completed", duration_ms: 0 };
@@ -386,6 +614,7 @@ export async function testAutomationStep(
   const startTime = Date.now();
 
   try {
+    validateRuntimeAutomationExecutionMode(executionMode, [step]);
     const input = params.useLatestUpstreamOutput
       ? await resolveLatestUpstreamOutput({ params, stepId, edges, currentRunId: runId })
       : (params.input ?? null);
@@ -443,6 +672,7 @@ async function executeWorkflowStep(params: {
   creator: Awaited<ReturnType<NonNullable<RunAgentParams["userRepo"]>["findById"]>> | undefined;
   creatorId: string | null;
   creatorEmail: string | null;
+  isMessageDeliveryStep?: boolean;
 }): Promise<unknown> {
   const { step, content, input, task, runId, workspaceDir, creator, creatorId, creatorEmail } = params;
   const runtimeParams = params.params;
@@ -466,6 +696,10 @@ async function executeWorkflowStep(params: {
       loadIntegrationProvider: runtimeParams.loadIntegrationProvider,
       listAgentEnvForRuntime: runtimeParams.listAgentEnvForRuntime,
       trustedLocalFileRoot: runtimeParams.trustedLocalFileRoot,
+      db: runtimeParams.db,
+      userRepo: runtimeParams.userRepo,
+      automationCapabilityRegistry: runtimeParams.automationCapabilityRegistry,
+      recordAutomationCapabilityCall: runtimeParams.recordAutomationCapabilityCall,
     });
   }
 
@@ -493,6 +727,7 @@ async function executeWorkflowStep(params: {
       inboxMessagesRepo: runtimeParams.inboxMessagesRepo,
       sendDm: runtimeParams.sendDm,
       outputPlatform: resolveWorkflowDelivery(task).platform,
+      isMessageDeliveryStep: params.isMessageDeliveryStep ?? false,
       recordWorkflowStep: runtimeParams.recordWorkflowStep,
       limitAgentExecution: runtimeParams.limitAgentExecution,
       loadAgentRuntimeProviderConfig: runtimeParams.loadAgentRuntimeProviderConfig,
@@ -505,7 +740,11 @@ async function executeWorkflowStep(params: {
 }
 
 function parseWorkflowSteps(task: ScheduledTaskRow): WorkflowStep[] {
-  if (task.steps) return JSON.parse(task.steps) as WorkflowStep[];
+  if (task.steps) {
+    const parsed = workflowStepSchema.array().safeParse(JSON.parse(task.steps) as unknown);
+    if (!parsed.success) throw new Error("Stored automation steps are invalid");
+    return parsed.data;
+  }
   return [
     { id: "trigger", type: "trigger", label: "Schedule", icon: "clock", position: { x: 0, y: 0 } },
     {
@@ -522,7 +761,9 @@ function parseWorkflowSteps(task: ScheduledTaskRow): WorkflowStep[] {
 function parseWorkflowEdges(task: ScheduledTaskRow): WorkflowEdge[] {
   if (!task.edges) return [];
   const parsed = JSON.parse(task.edges) as unknown;
-  return Array.isArray(parsed) ? (parsed as WorkflowEdge[]) : [];
+  const result = workflowEdgeSchema.array().safeParse(parsed);
+  if (!result.success) throw new Error("Stored automation edges are invalid");
+  return result.data;
 }
 
 function resolveExecutionOrder(steps: WorkflowStep[], edges: WorkflowEdge[]): WorkflowStep[] {
@@ -711,6 +952,12 @@ type AsyncFunctionConstructor = (
   ...args: string[]
 ) => (input: unknown, ctx: ScriptContext, signal: AbortSignal) => Promise<unknown>;
 
+/**
+ * Action scripts currently execute in the server's Node.js realm. The exposed context is capability-scoped,
+ * but AsyncFunction is not a security sandbox: a script can potentially reach process globals, built-in modules,
+ * or network APIs. This slice keeps the existing first-party-authored-script trust boundary; isolating scripts in
+ * a worker or subprocess with an explicit IPC protocol is a separate hardening project.
+ */
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as AsyncFunctionConstructor;
 
 export interface ScriptIntegrationFile {
@@ -728,6 +975,7 @@ export interface ScriptContext {
   log: Logger;
   env: Readonly<Record<string, string>>;
   workspaceDir: string;
+  tools: Readonly<AutomationSketchTools>;
   integrations: {
     executeAction(request: ScriptIntegrationActionRequest, signal?: AbortSignal): Promise<unknown>;
   };
@@ -748,31 +996,50 @@ interface ActionStepParams {
   loadIntegrationProvider: () => Promise<IntegrationProvider | null>;
   listAgentEnvForRuntime?: (context: AgentEnvironmentRuntimeContext) => Promise<Record<string, string>>;
   trustedLocalFileRoot?: string;
+  db: Kysely<DB>;
+  userRepo: NonNullable<RunAgentParams["userRepo"]>;
+  automationCapabilityRegistry?: AutomationCapabilityRegistry;
+  recordAutomationCapabilityCall?: (event: AutomationCapabilityCallEvent) => void | Promise<void>;
 }
 
 async function executeActionStep(params: ActionStepParams): Promise<unknown> {
-  const { script, step, input, runId, logger, creatorEmail, workspaceDir, loadIntegrationProvider } = params;
-  const integrationProvider = await loadIntegrationProvider();
-  const integrationAccess = await startIntegrationAccess({
-    userEmail: creatorEmail,
-    claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
-    workspaceDir,
-    loadIntegrationProvider: async () => integrationProvider,
-    logger,
-  });
-
-  if (!integrationAccess.envVars.CANVAS_CLI && !integrationProvider?.executeAction) {
-    await cleanupIntegrationAccess(integrationAccess);
+  const { script, step, input, runId, logger, creatorId, creatorEmail, workspaceDir, loadIntegrationProvider } = params;
+  const usesIntegrationActions = workflowStepUsesIntegrationActions(step);
+  const sketchTools = step.actionCapabilities?.sketchTools ?? [];
+  if (hasInvalidAutomationSketchToolNamespace(script)) {
+    throw new Error(`Action step ${step.id} uses an invalid Sketch tool namespace; use ctx.tools.<capability>`);
+  }
+  const undeclaredSketchTools = undeclaredAutomationSketchTools(script, sketchTools as AutomationSketchToolName[]);
+  if (undeclaredSketchTools.length > 0) {
     throw new Error(
-      `Action step ${step.id} requires a broker-capable integration provider; none is currently configured. Reconfigure the integration in Settings → Integrations.`,
+      `Action step ${step.id} calls undeclared Sketch tool(s): ${undeclaredSketchTools.map((tool) => `ctx.tools.${tool}`).join(", ")}`,
     );
   }
+  if (sketchTools.length > 0 && !creatorId) {
+    throw new Error(`Action step ${step.id} requires an automation creator to use Sketch tools`);
+  }
+  const integrationProvider = usesIntegrationActions ? await loadIntegrationProvider() : null;
+  const integrationAccess = usesIntegrationActions
+    ? await startIntegrationAccess({
+        userEmail: creatorEmail,
+        claudeConfigDir: params.config.CLAUDE_CONFIG_DIR,
+        workspaceDir,
+        loadIntegrationProvider: async () => integrationProvider,
+        logger,
+      })
+    : null;
 
   try {
+    if (usesIntegrationActions && !integrationAccess?.envVars.CANVAS_CLI && !integrationProvider?.executeAction) {
+      throw new Error(
+        `Action step ${step.id} requires a broker-capable integration provider; none is currently configured. Reconfigure the integration in Settings → Integrations.`,
+      );
+    }
+
     const env = await buildScriptEnv({
       runtimeContext: buildAgentEnvironmentRuntimeContext(params.task),
       listAgentEnvForRuntime: params.listAgentEnvForRuntime,
-      integrationEnv: integrationAccess.envVars,
+      integrationEnv: integrationAccess?.envVars ?? {},
     });
 
     const timeoutMs = (step.timeout ?? 1800) * 1000;
@@ -785,6 +1052,7 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
         { once: true },
       );
     });
+    let capabilityFailure: Error | null = null;
 
     const ctx = buildScriptContext({
       taskId: params.taskId,
@@ -793,8 +1061,32 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
       logger,
       env,
       workspaceDir,
+      tools:
+        sketchTools.length > 0
+          ? (params.automationCapabilityRegistry ?? createAutomationCapabilityRegistry()).createTools({
+              context: {
+                taskId: params.taskId,
+                runId,
+                stepId: step.id,
+                creatorId: creatorId as string,
+                creatorEmail,
+                workspaceDir,
+                db: params.db,
+                userRepo: params.userRepo,
+                logger,
+                signal: controller.signal,
+                recordCall: params.recordAutomationCapabilityCall,
+                onFailure: (capability, error) => {
+                  if (capabilityFailure) return;
+                  const detail = error instanceof Error ? error.message : String(error);
+                  capabilityFailure = new Error(`Sketch capability "${capability}" failed: ${detail}`);
+                },
+              },
+              allowedTools: sketchTools as AutomationSketchToolName[],
+            })
+          : Object.freeze({}),
       executeIntegrationAction: async (request) => {
-        if (!integrationProvider?.executeAction || !creatorEmail) {
+        if (!usesIntegrationActions || !integrationProvider?.executeAction || !creatorEmail) {
           throw new Error("The configured integration provider cannot execute server-owned actions");
         }
         const configuredProps = await materializeIntegrationActionFiles({
@@ -814,13 +1106,14 @@ async function executeActionStep(params: ActionStepParams): Promise<unknown> {
     try {
       const fn = AsyncFunction("input", "ctx", "signal", wrapActionScript(script));
       const output = await Promise.race([fn(input ?? null, ctx, controller.signal), timeoutPromise]);
+      if (capabilityFailure) throw capabilityFailure;
       logger.info({ runId, stepId: step.id, timeoutMs }, "Automation action: script completed");
       return output ?? null;
     } finally {
       clearTimeout(timeout);
     }
   } finally {
-    await cleanupIntegrationAccess(integrationAccess);
+    if (integrationAccess) await cleanupIntegrationAccess(integrationAccess);
   }
 }
 
@@ -898,6 +1191,7 @@ function buildScriptContext(params: {
   logger: Logger;
   env: Readonly<Record<string, string>>;
   workspaceDir: string;
+  tools: Readonly<AutomationSketchTools>;
   executeIntegrationAction: (request: ScriptIntegrationActionRequest, signal?: AbortSignal) => Promise<unknown>;
 }): ScriptContext {
   const log =
@@ -906,21 +1200,31 @@ function buildScriptContext(params: {
     log,
     env: params.env,
     workspaceDir: params.workspaceDir,
+    tools: params.tools,
     integrations: Object.freeze({ executeAction: params.executeIntegrationAction }),
   });
 }
 
 function normalizeStepOutput(output: unknown): unknown {
   if (output === undefined) return null;
+  let serialized: string;
   try {
-    const serialized = JSON.stringify(output);
+    serialized = JSON.stringify(output);
     if (serialized === undefined) {
-      throw new Error("Action output is not JSON-serializable");
+      throw new Error("Workflow step output is not JSON-serializable");
     }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Workflow step output is not JSON-serializable: ${message}`);
+  }
+  if (Buffer.byteLength(serialized, "utf8") > MAX_AUTOMATION_OUTPUT_BYTES) {
+    throw new Error(`Workflow step output exceeds ${MAX_AUTOMATION_OUTPUT_BYTES} bytes`);
+  }
+  try {
     return JSON.parse(serialized);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Action output is not JSON-serializable: ${message}`);
+    throw new Error(`Workflow step output is not JSON-serializable: ${message}`);
   }
 }
 
@@ -955,6 +1259,7 @@ interface AgentStepParams {
   inboxMessagesRepo?: ReturnType<typeof createInboxMessagesRepository>;
   sendDm?: RunAgentParams["sendDm"];
   outputPlatform: "slack" | "whatsapp";
+  isMessageDeliveryStep: boolean;
   recordWorkflowStep?: RecordWorkflowStep;
   limitAgentExecution?: <T>(work: () => Promise<T>) => Promise<T>;
   loadAgentRuntimeProviderConfig?: () => Promise<AgentRuntimeProviderFactoryConfig | null>;
@@ -994,17 +1299,16 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
   // Anthropic-format model ID here breaks every non-Anthropic backend.
   const modelOverride = step.agentModel;
 
-  // System prompt: generic workflow-step directive + channel-native formatting
-  // rules so the final step of an automation renders correctly wherever the
-  // output is delivered (Slack mrkdwn vs WhatsApp conventions). Uses the same
-  // helper the main chat agent uses via buildSystemContext — any tweaks to
-  // platform formatting rules land in both paths at once.
   const systemPromptLines = [
     "You are a workflow step in an automation. Complete the task described below and return a concise result. Do not ask questions — work with what you have.",
     "",
-    "The text you return is delivered directly to the user's chat channel. Format it for that channel:",
-    "",
-    ...buildPlatformFormattingLines(outputPlatform),
+    ...(params.isMessageDeliveryStep
+      ? [
+          "This is the final message delivery. Return only text that can be sent directly to the user's chat channel:",
+          "",
+          ...buildAutomationMessageDeliveryLines(outputPlatform),
+        ]
+      : ["This result is passed to a later workflow step. Structured JSON is allowed when useful."]),
   ];
 
   const limitAgentExecution = params.limitAgentExecution ?? (<T>(work: () => Promise<T>) => work());
@@ -1078,10 +1382,6 @@ async function executeAgentStep(params: AgentStepParams): Promise<unknown> {
     "Automation agent: step completed",
   );
 
-  // Return the raw assistant text, not a wrapper object. The delivery path
-  // (executeAutomation) sends strings as-is and stringifies objects — so the
-  // raw string both renders cleanly in Slack/WhatsApp and makes the run log
-  // readable (no `{ "response": "..." }` wrapper in stored step_outputs).
   return lastText;
 }
 
@@ -1096,9 +1396,13 @@ async function executeAiSdkLightAgentStep(params: AgentStepParams): Promise<unkn
   const systemPromptLines = [
     "You are a workflow step in an automation. Complete the task described below and return a concise result. Do not ask questions — work with what you have.",
     "",
-    "The text you return is delivered directly to the user's chat channel. Format it for that channel:",
-    "",
-    ...buildPlatformFormattingLines(outputPlatform),
+    ...(params.isMessageDeliveryStep
+      ? [
+          "This is the final message delivery. Return only text that can be sent directly to the user's chat channel:",
+          "",
+          ...buildAutomationMessageDeliveryLines(outputPlatform),
+        ]
+      : ["This result is passed to a later workflow step. Structured JSON is allowed when useful."]),
   ];
   const provider = createAgentRuntimeProvider({
     ...providerConfig,
@@ -1182,7 +1486,12 @@ async function executeSketchAgentStep(params: AgentStepParams): Promise<unknown>
     currentMessage: [
       "You are executing one step of a scheduled workflow.",
       "Complete the step using the provided input and available tools.",
-      "Do not ask follow-up questions. Return the result for the next workflow step or final delivery.",
+      ...(params.isMessageDeliveryStep
+        ? [
+            "This is the final Slack or WhatsApp message delivery. Return only a concise, human-readable message body.",
+            ...buildAutomationMessageDeliveryLines(outputPlatform),
+          ]
+        : ["Do not ask follow-up questions. Return the result for the next workflow step or final delivery."]),
       "",
       `Step: ${step.label}`,
       "",
@@ -1271,39 +1580,37 @@ async function writeAutomationContext(params: {
   const contextDir = join(params.workspaceDir, ".workflow-context");
   try {
     await mkdir(contextDir, { recursive: true });
-  } catch {
-    params.logger.warn({ contextDir }, "Automation: could not create context directory");
-    return;
-  }
+    const statusIcon = (s: string) => (s === "completed" ? "\u2713" : s === "failed" ? "\u2717" : "\u2014");
 
-  const statusIcon = (s: string) => (s === "completed" ? "\u2713" : s === "failed" ? "\u2717" : "\u2014");
+    const lines = [
+      `# Automation: ${params.title}`,
+      `**Run:** ${new Date().toISOString()}`,
+      `**Trigger:** ${params.triggerSummary}`,
+      "",
+      "## Steps Executed",
+    ];
 
-  const lines = [
-    `# Automation: ${params.title}`,
-    `**Run:** ${new Date().toISOString()}`,
-    `**Trigger:** ${params.triggerSummary}`,
-    "",
-    "## Steps Executed",
-  ];
-
-  for (let i = 0; i < params.steps.length; i++) {
-    const step = params.steps[i];
-    const duration = (step.duration_ms / 1000).toFixed(1);
-    lines.push(`${i + 1}. ${statusIcon(step.status)} ${step.label} (${duration}s)`);
-    if (step.outputSummary) {
-      lines.push(`   ${step.outputSummary}`);
+    for (let i = 0; i < params.steps.length; i++) {
+      const step = params.steps[i];
+      const duration = (step.duration_ms / 1000).toFixed(1);
+      lines.push(`${i + 1}. ${statusIcon(step.status)} ${step.label} (${duration}s)`);
+      if (step.outputSummary) {
+        lines.push(`   ${step.outputSummary}`);
+      }
     }
-  }
 
-  const fileName = `${params.taskId}-${params.runId}.md`;
-  await writeFile(join(contextDir, fileName), lines.join("\n"), "utf-8");
+    const fileName = `${params.taskId}-${params.runId}.md`;
+    await writeFile(join(contextDir, fileName), lines.join("\n"), "utf-8");
 
-  const files = await readdir(contextDir);
-  const taskFiles = files.filter((f) => f.startsWith(params.taskId)).sort();
-  if (taskFiles.length > 5) {
-    const toDelete = taskFiles.slice(0, taskFiles.length - 5);
-    for (const file of toDelete) {
-      await rm(join(contextDir, file), { force: true }).catch(() => {});
+    const files = await readdir(contextDir);
+    const taskFiles = files.filter((f) => f.startsWith(params.taskId)).sort();
+    if (taskFiles.length > 5) {
+      const toDelete = taskFiles.slice(0, taskFiles.length - 5);
+      for (const file of toDelete) {
+        await rm(join(contextDir, file), { force: true }).catch(() => {});
+      }
     }
+  } catch (err) {
+    params.logger.warn({ err, contextDir }, "Automation: context maintenance failed");
   }
 }
