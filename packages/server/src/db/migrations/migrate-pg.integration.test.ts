@@ -23,7 +23,7 @@ import * as slackRosterEvidenceMigration from "./161-slack-roster-evidence";
 import * as slackFileAccessBackfillCleanupMigration from "./163-slack-file-access-backfill-cleanup";
 import * as typedAccessPrincipalsMigration from "./165-typed-access-principals";
 
-const EXPECTED_MIGRATION_COUNT = 178;
+const EXPECTED_MIGRATION_COUNT = 179;
 
 describe("runMigrations on Postgres — full sequence", () => {
   let db!: Kysely<DB>;
@@ -216,6 +216,7 @@ describe("runMigrations on Postgres — full sequence", () => {
     expect(names[175]).toBe("180-whatsapp-chunk-conversion-state");
     expect(names[176]).toBe("181-project-minting-verdicts");
     expect(names[177]).toBe("182-project-minting-states");
+    expect(names[178]).toBe("183-graph-pass-runs");
   });
 
   it("upgrades existing email access rows on Postgres", async () => {

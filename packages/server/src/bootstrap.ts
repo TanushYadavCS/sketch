@@ -27,6 +27,7 @@ import { createChatAutomationAuthoring } from "./automation/chat-authoring";
 import { isAutomationWebhookTrigger, parseAutomationTriggerConfig } from "./automation/webhook";
 import type { Config } from "./config";
 import { migrateManagedConnectorCredentialsToCanvas } from "./connectors/managed-credential-migration";
+import { getPostSyncCoordinator } from "./connectors/post-sync-coordinator";
 import { ensureSlackConnectorConfig } from "./connectors/slack-provisioning";
 import { archiveAllSlackChannelFiles } from "./connectors/slack-salience";
 import { startSyncScheduler } from "./connectors/sync";
@@ -206,6 +207,17 @@ export async function createServer(config: Config, options?: CreateServerOptions
     structuralAutoBirthTypes: new Set<ProposeEntityType>(["project"]),
     birthGateDryRun: config.BIRTH_GATE_DRY_RUN,
   });
+
+  try {
+    await getPostSyncCoordinator(db).restoreUnfinished({
+      db,
+      logger,
+      coMentionContributesToThreshold: config.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+      floorRetryMaxFilesPerDomain: config.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
+    });
+  } catch (err) {
+    logger.error({ err }, "Failed to restore unfinished post-sync graph passes");
+  }
 
   // Migration 039 backfills the legacy admin-owned Fireflies row to a real user id.
   // If no users exist yet, the row stays owned by 'admin' and never becomes editable

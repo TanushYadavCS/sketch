@@ -22,6 +22,7 @@ import { channelRoutes } from "./api/channels";
 import { connectorRoutes } from "./api/connectors";
 import { devEnrichmentRoutes } from "./api/dev-enrichment";
 import { entityRoutes } from "./api/entities";
+import { graphPassRoutes } from "./api/graph-passes";
 import { healthRoutes } from "./api/health";
 import { localClaudeSessionEventRoutes } from "./api/local-claude-sessions";
 import { localDeviceRoutes } from "./api/local-devices";
@@ -484,6 +485,7 @@ export function createApp(db: Kysely<DB>, config: Config, deps?: AppDeps) {
   if (config.DEV_TOOLS_ENABLED) {
     app.route("/api/dev", devEnrichmentRoutes(db, logger, config, { enrichmentGenerator: deps?.enrichmentGenerator }));
   }
+  app.route("/api/graph-passes", graphPassRoutes(db, logger));
   app.route("/api/skills", skillsRoutes(config));
   app.route(
     "/api/users",

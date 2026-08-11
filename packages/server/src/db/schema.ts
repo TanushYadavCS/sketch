@@ -914,6 +914,15 @@ export interface ScheduledTaskBuilderLocksTable {
   expires_at: number;
 }
 
+export interface GraphPassRunsTable {
+  id: string;
+  status: string;
+  started_at: Generated<string>;
+  finished_at: string | null;
+  error_message: string | null;
+  input_snapshot_json: string;
+}
+
 export interface ProjectMintingVerdictsTable {
   id: string;
   company_entity_id: string;
@@ -1755,6 +1764,7 @@ export interface DB {
   automation_step_content: AutomationStepContentTable;
   scheduled_task_conversations: ScheduledTaskConversationsTable;
   scheduled_task_builder_locks: ScheduledTaskBuilderLocksTable;
+  graph_pass_runs: GraphPassRunsTable;
   project_minting_verdicts: ProjectMintingVerdictsTable;
   company_relationship_declarations: CompanyRelationshipDeclarationsTable;
   agent_outputs: AgentOutputsTable;

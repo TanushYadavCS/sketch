@@ -38,11 +38,7 @@ import {
 } from "./enrichment-providers";
 import { createGeminiGenerator } from "./gemini-generate";
 import { applyMicrosoftOAuthConfig, resolveMicrosoftOAuthConfig } from "./microsoft-graph";
-import {
-  type PostSyncGraphInputCollector,
-  createPostSyncGraphInputCollector,
-  runPostSyncGraphPipeline,
-} from "./post-sync";
+import { type PostSyncGraphInputCollector, createPostSyncGraphInputCollector } from "./post-sync";
 import { getPostSyncCoordinator } from "./post-sync-coordinator";
 import { getConnector } from "./registry";
 import { emitFactsForSyncedItem } from "./sync-facts";
@@ -501,15 +497,19 @@ export async function runConnectorSync(
     }
 
     if (options.postSyncMode !== "deferred") {
-      await runPostSyncGraphPipeline({
-        db,
-        syncLogger,
-        affectedIndexedFileIds: [...affectedIndexedFileIds],
-        sources: [connectorType],
-        workCycleReconciles: syncReconciled ? [{ connectorConfigId: config.id, syncRunId }] : [],
-        coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
-        floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
-      });
+      await getPostSyncCoordinator(db).enqueue(
+        {
+          affectedIndexedFileIds: [...affectedIndexedFileIds],
+          sources: [connectorType],
+          workCycleReconciles: syncReconciled ? [{ connectorConfigId: config.id, syncRunId }] : [],
+        },
+        {
+          db,
+          logger: syncLogger,
+          coMentionContributesToThreshold: appConfig?.CO_MENTION_CONTRIBUTES_TO_THRESHOLD,
+          floorRetryMaxFilesPerDomain: appConfig?.FLOOR_RETRY_MAX_FILES_PER_DOMAIN,
+        },
+      );
     }
 
     if (connectorType === "zoho_crm") {

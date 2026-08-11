@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import type { Logger } from "pino";
+import { createGraphPassRunRepository } from "../db/repositories/graph-pass-runs";
 import type { DB } from "../db/schema";
 import {
   type PostSyncGraphInputs,
@@ -16,24 +17,32 @@ export interface ScheduledPostSyncContext {
 }
 
 type PostSyncPipelineRunner = (params: PostSyncGraphPipelineParams) => Promise<void>;
+type GraphPassRunRepository = ReturnType<typeof createGraphPassRunRepository>;
 
 export interface PostSyncCoordinator {
   enqueue(inputs: PostSyncGraphInputs, context: ScheduledPostSyncContext): Promise<void>;
   drain(context: ScheduledPostSyncContext): Promise<void>;
+  restoreUnfinished(context: ScheduledPostSyncContext): Promise<void>;
 }
 
 /**
  * Coalesces scheduled cohorts without attaching any input to two successful drains.
  * Failed snapshots restore their union without replacing reconcile inputs from newer cohorts.
  */
-export function createPostSyncCoordinator(runPipeline: PostSyncPipelineRunner): PostSyncCoordinator {
+export function createPostSyncCoordinator(
+  runPipeline: PostSyncPipelineRunner,
+  runs?: GraphPassRunRepository,
+): PostSyncCoordinator {
   const pending = createPostSyncGraphInputCollector();
+  const restoredRunIds: string[] = [];
   let dirty = false;
   let queue: Promise<void> = Promise.resolve();
 
   async function drainDirty(context: ScheduledPostSyncContext): Promise<void> {
     while (dirty && pending.hasInputs()) {
       const snapshot = pending.take();
+      const restoredRunId = restoredRunIds.shift();
+      const runId = runs ? await runs.start(snapshot, restoredRunId) : null;
       dirty = false;
       try {
         await runPipeline({
@@ -43,9 +52,14 @@ export function createPostSyncCoordinator(runPipeline: PostSyncPipelineRunner): 
           coMentionContributesToThreshold: context.coMentionContributesToThreshold,
           floorRetryMaxFilesPerDomain: context.floorRetryMaxFilesPerDomain,
         });
+        if (runId) await runs?.complete(runId);
       } catch (err) {
         pending.restore(snapshot);
         dirty = true;
+        if (runId) {
+          const message = err instanceof Error ? err.message : String(err);
+          await runs?.fail(runId, message);
+        }
         throw err;
       }
     }
@@ -69,6 +83,18 @@ export function createPostSyncCoordinator(runPipeline: PostSyncPipelineRunner): 
     drain(context) {
       return scheduleDrain(context);
     },
+    async restoreUnfinished(context) {
+      if (!runs) return;
+      const unfinished = await runs.listUnfinished();
+      for (const run of unfinished) {
+        pending.restore(run.inputSnapshot);
+        restoredRunIds.push(run.id);
+        dirty = true;
+      }
+      if (unfinished.length > 0) {
+        await scheduleDrain(context);
+      }
+    },
   };
 }
 
@@ -77,7 +103,7 @@ const coordinators = new WeakMap<Kysely<DB>, PostSyncCoordinator>();
 export function getPostSyncCoordinator(db: Kysely<DB>): PostSyncCoordinator {
   const existing = coordinators.get(db);
   if (existing) return existing;
-  const coordinator = createPostSyncCoordinator(runPostSyncGraphPipeline);
+  const coordinator = createPostSyncCoordinator(runPostSyncGraphPipeline, createGraphPassRunRepository(db));
   coordinators.set(db, coordinator);
   return coordinator;
 }
